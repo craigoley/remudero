@@ -3,15 +3,15 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runEscalationReconcile, type EscalationReconcileCandidate } from "../src/lib/sweep.js";
+import { runEscalationReconcile, type EscalationReconcileCandidate } from "#src/lib/sweep.js";
 import {
   buildEscalationReconcileCandidates,
   renderEscalationReconcileSummary,
   sweepEscalationReconcile,
   type EscalationIntake,
   type SweepEscalationReconcileSummary,
-} from "../src/run-task.js";
-import type { Plan } from "../src/lib/plan.js";
+} from "#src/run-task.js";
+import type { Plan } from "#src/lib/plan.js";
 
 /**
  * `sweep.escalation_reconcile.summary` logged `total` = `candidates.length`, counted AFTER the open

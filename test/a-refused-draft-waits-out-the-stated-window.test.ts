@@ -23,9 +23,9 @@ import {
   deferralFromOutcomes,
   parseDraftDeferralCache,
   type DraftRungOutcome,
-} from "../src/lib/inbox.js";
-import { buildInboxDraftHook } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/lib/inbox.js";
+import { buildInboxDraftHook } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 const RESET = Date.parse("2026-09-01T11:50:00.000Z"); // the real captured refusal's stated reset
 const MATCHED = "You've hit your session limit";

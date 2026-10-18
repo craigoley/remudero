@@ -5,12 +5,12 @@ import { syncBuiltinESMExports } from "node:module";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
-import * as reservation from "../src/lib/task-id-reservation.js";
-import * as runTask from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
+import * as reservation from "#src/lib/task-id-reservation.js";
+import * as runTask from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // @source-text-subject: the production construction census enforces which factory each lane uses.
 const NOW = Date.parse("2026-10-06T12:00:00.000Z");

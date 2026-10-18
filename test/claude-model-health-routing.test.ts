@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,15 +13,15 @@ import {
   readClaudeModelHealth,
   resolveClaudeModelHealth,
   type ClaudeModelHealthReading,
-} from "../src/lib/claude-model-health.js";
-import { loadMounts, MountsError, mountsPath, type CapabilityLadder } from "../src/lib/mounts.js";
-import { ProviderCapacityBlockedError, type ProviderCapacity } from "../src/lib/worker-provider.js";
-import { readProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
-import { createClaudeExecutableCache, spawnWorker, workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/claude-model-health.js";
+import { loadMounts, MountsError, mountsPath, type CapabilityLadder } from "#src/lib/mounts.js";
+import { ProviderCapacityBlockedError, type ProviderCapacity } from "#src/lib/worker-provider.js";
+import { readProviderRoutingStatus } from "#src/lib/provider-routing-status.js";
+import { createClaudeExecutableCache, spawnWorker, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
-const STATUS_FIXTURE = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "anthropic-status-2026-09-03.json"), "utf8"));
+const REPO_ROOT = repoRoot();
+const STATUS_FIXTURE = JSON.parse(readFileSync(join(repoRoot(), "test/fixtures/anthropic-status-2026-09-03.json"), "utf8"));
 const NOW = Date.parse("2026-09-03T14:00:00.000Z");
 
 /** A worker-home fixture must honour the same placement invariant production enforces. The fleet

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { derivedFixCommit } from "../src/run-task.js";
+import { derivedFixCommit } from "#src/run-task.js";
 
 test("W1-T7680: fix-lane-commit-refused-no-anchored-commit-message-line-in-the-report clears without a person", () => {
   const d = derivedFixCommit("Add Widget Tests", "https://github.com/o/r/pull/42");

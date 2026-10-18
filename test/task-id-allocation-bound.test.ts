@@ -8,9 +8,9 @@ import {
   MAX_ALLOCATABLE_TASK_ID,
   isAllocatableTaskId,
   mintNextTaskId,
-} from "../src/lib/task-id.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { lintPlan } from "../src/lib/task-linter.js";
+} from "#src/lib/task-id.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { lintPlan } from "#src/lib/task-linter.js";
 
 // W1-T1039: THE ALLOCATOR HAD NO UPPER SANITY BOUND, SO ONE BURNED ID BECAME THE PERMANENT CEILING.
 // `maxSeen` is a `Math.max` across four surfaces, and the module's own invariant is one-directional
@@ -177,7 +177,7 @@ test("W1-T1039: an id above the bound in plan history no longer raises the ceili
   // invisible at the verb: MEASURED with the library bound alone in place, `rmd next-task-id`
   // reported a correctly-bounded `shards` term beside an unbounded history term and still answered
   // out of range.
-  const { mintNextTaskIdWithHistory } = await import("../src/run-task.js");
+  const { mintNextTaskIdWithHistory } = await import("#src/run-task.js");
   const root = planRoot();
   const planPath = writePlan(root, [SANE]);
 

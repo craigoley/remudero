@@ -8,8 +8,8 @@ import {
   deriveThreadId,
   readThread,
   type ThreadIdentity,
-} from "../src/lib/inbox-thread.js";
-import { escalate, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
+} from "#src/lib/inbox-thread.js";
+import { escalate, type Escalation, type IssueGateway } from "#src/lib/escalate.js";
 
 // W1-T2494: an escalation and the human's answer to it are two unrelated records today —
 // nothing in src/ joins them (SURFACE 2: thread/message/read-state identifiers = 0). This suite

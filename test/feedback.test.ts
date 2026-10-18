@@ -26,10 +26,10 @@ import {
   validateFeedbackExpansion,
   type FeedbackExpanderDeps,
   type FeedbackExpansion,
-} from "../src/lib/feedback.js";
-import type { Mount, Mounts } from "../src/lib/mounts.js";
-import { validateMounts } from "../src/lib/mounts.js";
-import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/feedback.js";
+import type { Mount, Mounts } from "#src/lib/mounts.js";
+import { validateMounts } from "#src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "#src/lib/worker.js";
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), "rmd-feedback-"));

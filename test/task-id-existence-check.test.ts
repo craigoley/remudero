@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -29,8 +30,7 @@ import { test } from "node:test";
 // is exercised here only via its CLI surface, never imported -- same convention as
 // test/claims-check.test.ts / test/no-hand-rolled-fetch-check.test.ts.)
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "task-id-existence-check.mjs");
 
 const GIT_ENV = {
@@ -414,7 +414,7 @@ test("task-id-existence: the refusal NAMES the placeholder form, so an example a
 
 test("the placeholder forms are inert against BOTH readers, driven rather than reasoned about", async () => {
   // The mint's mention scan.
-  const { mentionedTaskIds } = await import("../src/lib/task-id.js");
+  const { mentionedTaskIds } = await import("#src/lib/task-id.js");
   for (const safe of ["W1-T<n>", "W1-T<id>", "W1-TNNNN", "W1-Txxxx", "W1-T…", "W1-T88003x"]) {
     assert.deepEqual(mentionedTaskIds(`dispatchClaimRef("${safe}")`), [], `${safe} must extract nothing`);
   }

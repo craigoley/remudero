@@ -2,17 +2,17 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
-import { projectHumanGates, type HumanGateObservation, type HumanGateSource } from "../src/lib/human-gate.js";
-import { NOW_DECISIONS_CAP } from "../src/lib/now-decisions.js";
-import { createNowView, type NowViewData } from "../src/lib/now-view.js";
-import type { Plan } from "../src/lib/plan.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { resolve, violations } from "./helpers/openapi-strict.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import { projectHumanGates, type HumanGateObservation, type HumanGateSource } from "#src/lib/human-gate.js";
+import { NOW_DECISIONS_CAP } from "#src/lib/now-decisions.js";
+import { createNowView, type NowViewData } from "#src/lib/now-view.js";
+import type { Plan } from "#src/lib/plan.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import type { GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { resolve, violations } from "#test/helpers/openapi-strict.js";
 
 const ASKED = "2026-10-02T12:00:00.000Z";
 

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { inboxDraftExampleFragmentYaml, MAX_DRAFT_LINT_ATTEMPTS, runDraftRung, type Proposal } from "../src/lib/inbox.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { spawnEscalatedInboxDraft } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+import { inboxDraftExampleFragmentYaml, MAX_DRAFT_LINT_ATTEMPTS, runDraftRung, type Proposal } from "#src/lib/inbox.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { spawnEscalatedInboxDraft } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 const proposal: Proposal = { id: "P9", summary: "a proposal", evidenceAnchors: [] };
 const stamp = "- P9 (a proposal) — RATIFIED 2026-01-01 -> NEW-1.";

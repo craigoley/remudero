@@ -13,14 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixWorkerReceipt, harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
-import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
-import { ledgerPathFor } from "../src/lib/ledger-path.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
+import { fixWorkerReceipt, harnessCommitForShellLessWorker, runFixRung } from "#test/helpers/run-task-test.js";
+import { benchmarkNonDispatchSpawn } from "#src/lib/benchmark-run.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "high", maxTurns: 20, contextBudget: 120000 };
 

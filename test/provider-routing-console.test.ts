@@ -1,24 +1,25 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { acquireDrainLock } from "../src/lib/drain-lock.js";
-import type { DaemonSummary } from "../src/lib/daemon.js";
+import { acquireDrainLock } from "#src/lib/drain-lock.js";
+import type { DaemonSummary } from "#src/lib/daemon.js";
 import {
   MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES,
   PROVIDER_ROUTING_STATUS_VERSION,
   providerRoutingStatusPath,
   readProviderRoutingStatus,
   writeProviderRoutingStatus,
-} from "../src/lib/provider-routing-status.js";
-import { ProviderCapacityBlockedError, type ProviderCapacity } from "../src/lib/worker-provider.js";
-import { createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
-import { buildProviderRoutingRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
-import { daemonCommand } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+} from "#src/lib/provider-routing-status.js";
+import { ProviderCapacityBlockedError, type ProviderCapacity } from "#src/lib/worker-provider.js";
+import { createClaudeExecutableCache, spawnWorker } from "#src/lib/worker.js";
+import { buildProviderRoutingRoute, buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
+import { daemonCommand } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const NOW = Date.parse("2026-09-02T12:00:00.000Z");
 
@@ -91,7 +92,7 @@ test("the provider snapshot writes through a temp file + rename and the reader p
     [76, 25],
   );
   assert.equal(read.providers?.find((p) => p.provider === "claude")?.windows[0]?.usedPercent, 72);
-  const source = readFileSync(fileURLToPath(new URL("../src/lib/provider-routing-status.ts", import.meta.url)), "utf8");
+  const source = readFileSync(join(repoRoot(), "src/lib/provider-routing-status.ts"), "utf8");
   assert.match(source, /writeFileSync\(temporary[\s\S]+renameSync\(temporary, target\)/);
 });
 
@@ -388,10 +389,10 @@ function clientSlice(html: string, start: string, end: string): string {
 
 
 test("serve is a projection only: no provider probes or credentials/config mount cross into the console", () => {
-  const serve = readFileSync(fileURLToPath(new URL("../src/lib/serve.ts", import.meta.url)), "utf8");
+  const serve = readFileSync(join(repoRoot(), "src/lib/serve.ts"), "utf8");
   assert.match(serve, /readProviderRoutingStatus/);
   assert.doesNotMatch(serve, /readCodexCapacity|readClaudeProviderCapacity/);
-  const hostUpdate = readFileSync(fileURLToPath(new URL("../deploy/host-update.sh", import.meta.url)), "utf8");
+  const hostUpdate = readFileSync(join(repoRoot(), "deploy/host-update.sh"), "utf8");
   const consoleBlock = hostUpdate.slice(hostUpdate.indexOf("docker run -d --name remudero-serve"), hostUpdate.indexOf("./bin/rmd serve") + "./bin/rmd serve".length);
   assert.doesNotMatch(consoleBlock, /CODEX_MOUNT|CRED_MOUNT|CONTAINER_CONFIG_MOUNT|\.codex|\.claude|\.config\/remudero/);
 });

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, operatorVerdictEvidence, type OpenPrView } from "../src/lib/sweep.js";
-import { buildFixRungDispatchArgs } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, operatorVerdictEvidence, type OpenPrView } from "#src/lib/sweep.js";
+import { buildFixRungDispatchArgs } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
 
 // ── W1-T435: "operator judgment on a run still evaporates" — the one-tap verdict
 // (POST /v1/drain/feedback, W1-T141) plus a steering note, and a console-answered

@@ -13,10 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildSweepHook, buildSweepLightHook } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { buildSweepHook, buildSweepLightHook } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const TASK_ID = "W1-T9001";
 const DEP_ID = "W1-T9002";

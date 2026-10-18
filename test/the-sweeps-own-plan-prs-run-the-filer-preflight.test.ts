@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { REFUSAL_AMENDMENT_STEP, extractRefusal } from "../src/lib/refusal-amendment.js";
+import type { Config } from "#src/lib/config.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { PlanPrPreflightResult } from "#src/lib/plan-pr-emitter.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { REFUSAL_AMENDMENT_STEP, extractRefusal } from "#src/lib/refusal-amendment.js";
 import {
   PLAN_REPAIR_DISPATCH_STEP,
   buildSweepEffects,
@@ -19,9 +19,9 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
+} from "#test/helpers/sweep-test.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
 
 // W1-T5405 — W1-T5348 (#8795) runs the filer preflight before three machine lanes open a plan PR; the sweep's
 // two plan-PR rungs (the W1-T4838 refusal amendment and the W1-T3390 stale-proof flag) still pushed and opened

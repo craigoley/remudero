@@ -10,10 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
 
-import { recordBranchUpdate } from "../src/lib/branch-update.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { recordBranchUpdate } from "#src/lib/branch-update.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   DEFAULT_SWEEP_POLICY,
   ciTimeoutRefreshDecision,
@@ -22,11 +22,11 @@ import {
   type OpenPrView,
   type SweepDeps,
   type UpdateBranchOutcome,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 // run-task.ts re-exports the classifier from src/lib/fix-rung-classify.ts (W1-T2891).
-import { classifyUpdateBranchFailure, ghUpdateBranch as fixRungUpdateBranch, updateBranchViaGh } from "../src/run-task.js";
-import { ghUpdateBranch as armUpdateBranch } from "../src/lib/arm-auto-merge.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { classifyUpdateBranchFailure, ghUpdateBranch as fixRungUpdateBranch, updateBranchViaGh } from "#src/run-task.js";
+import { ghUpdateBranch as armUpdateBranch } from "#src/lib/arm-auto-merge.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // The three 422 bodies GitHub returns for this endpoint, as `gh api` prints them on stderr.
 const CONFLICT_422 = "gh: merge conflict between base and head (HTTP 422)";

@@ -14,9 +14,9 @@ import {
   ratificationShardFiles,
   relintRatificationFragment,
   writeRatificationShards,
-} from "../src/lib/inbox.js";
-import { lintTask } from "../src/lib/task-linter.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
+} from "#src/lib/inbox.js";
+import { lintTask } from "#src/lib/task-linter.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
 
 /** The DAEMON-1790001204828 shape: a recon task at risk:low naming another concern's test plus one src file. */
 function draft(title: string, files: string[], risk = "low"): string {

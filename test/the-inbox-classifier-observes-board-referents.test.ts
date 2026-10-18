@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { classifyAllProposalsMemo, classifyAllProposalsSliced, inboxClassificationEvidence, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import type { PrRef, StatusProjection } from "../src/lib/status.js";
+import { classifyAllProposalsMemo, classifyAllProposalsSliced, inboxClassificationEvidence, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import type { PrRef, StatusProjection } from "#src/lib/status.js";
 
 function standaloneFixture(t: { after(fn: () => void): void }, ids = ["board-review:stale:#11968"]) {
   const root = makeTempDir("rmd-inbox-standalone"); t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -109,7 +109,7 @@ test("an Inbox referent absent from observed repository evidence stays unverifie
 });
 
 test("board referent evidence refuses unavailable conflicting and unobserved states", async () => {
-  const { inboxBoardReferents } = await import("../src/lib/inbox-board-referents.js");
+  const { inboxBoardReferents } = await import("#src/lib/inbox-board-referents.js");
   const row = (prNumber: number | undefined, extra: Partial<StatusProjection> = {}): StatusProjection => ({
     taskId: "fixture", status: "running", source: "pr-field", merged: false, prNumber, prState: "OPEN", ...extra,
   });

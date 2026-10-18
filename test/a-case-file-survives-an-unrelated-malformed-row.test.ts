@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import type { LedgerUnionStreamIO } from "../src/lib/ledger-union.js";
-import type { Task } from "../src/lib/plan.js";
-import { caseFileCommand, MAX_CASE_FILE_BATCH_TASKS } from "../src/lib/report-commands.js";
-import type { StatusProjection } from "../src/lib/status.js";
-import { buildTaskCaseFile, readTaskCaseLedger, readTaskCaseLedgers } from "../src/lib/task-case-file.js";
+import type { LedgerUnionStreamIO } from "#src/lib/ledger-union.js";
+import type { Task } from "#src/lib/plan.js";
+import { caseFileCommand, MAX_CASE_FILE_BATCH_TASKS } from "#src/lib/report-commands.js";
+import type { StatusProjection } from "#src/lib/status.js";
+import { buildTaskCaseFile, readTaskCaseLedger, readTaskCaseLedgers } from "#src/lib/task-case-file.js";
 
 const asOf = "2026-09-27T14:00:00.000Z";
 const archive = "ledger.2026-09-22T16-27-20-296Z.ndjson.gz";

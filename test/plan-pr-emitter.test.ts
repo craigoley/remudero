@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -12,9 +13,9 @@ import {
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   renderAcceptanceBlock,
-} from "../src/lib/plan-pr-emitter.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
+} from "#src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
 
 // ── W1-T136: the shared plan-PR gate-contract module ────────────────────────────────────────
 //
@@ -25,8 +26,7 @@ import { parseAcceptanceBlock } from "../src/lib/review.js";
 // convention). #287/#387/#394 are the three already-merged incidents this module exists to
 // make structurally impossible; each has a named falsifier below.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 const GENERATE_PLAN_INDEX_SCRIPT = join(REPO_ROOT, "scripts", "generate-plan-index.mjs");
 

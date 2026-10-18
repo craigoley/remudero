@@ -3,10 +3,10 @@ import test, { type TestContext } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Config } from "../src/lib/config.js";
-import { baseReproductionFiles } from "../src/lib/base-reproduction.js";
-import { buildBaseReproductionProbe } from "../src/run-task.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import { baseReproductionFiles } from "#src/lib/base-reproduction.js";
+import { buildBaseReproductionProbe } from "#src/run-task.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
 
 const MAIN = "b".repeat(40);
 const NEXT = "c".repeat(40);

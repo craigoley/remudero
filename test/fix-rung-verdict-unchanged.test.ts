@@ -29,13 +29,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 
-import { runFixRung, detectCiLogVerdictUnchanged } from "./helpers/run-task-test.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { runFixRung, detectCiLogVerdictUnchanged } from "#test/helpers/run-task-test.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 // ── shared fixtures (mirror test/fix-rung-unchanged-tree-stand-down.test.ts's own conventions) ──
 

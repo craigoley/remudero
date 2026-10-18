@@ -5,12 +5,12 @@ import { test } from "node:test";
 import {
   anchorFingerprint, approveProposal, classifyProposal, deriveTaskReferent,
   type DraftedCandidate, type Proposal, type ReadinessContext,
-} from "../src/lib/inbox.js";
-import { loadPlanFromYaml, RETIREMENT_REASONS } from "../src/lib/plan.js";
-import { approveCommand } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { inboxSemanticDigest, inboxProposalRevision, inboxRetirementFor, proofDebtPopulationPermit, stampMechanicalAsk, writeInboxGardenerStore, readInboxGardenerStore } from "../src/lib/inbox-retirement.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/inbox.js";
+import { loadPlanFromYaml, RETIREMENT_REASONS } from "#src/lib/plan.js";
+import { approveCommand } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { inboxSemanticDigest, inboxProposalRevision, inboxRetirementFor, proofDebtPopulationPermit, stampMechanicalAsk, writeInboxGardenerStore, readInboxGardenerStore } from "#src/lib/inbox-retirement.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const proof = "test/a-retired-tasks-proposal-cannot-be-ratified.test.ts";
 const subject = "W1-T900001";

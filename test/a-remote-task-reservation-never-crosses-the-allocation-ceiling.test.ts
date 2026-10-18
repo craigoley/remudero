@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MAX_ALLOCATABLE_TASK_ID } from "../src/lib/task-id.js";
+import { MAX_ALLOCATABLE_TASK_ID } from "#src/lib/task-id.js";
 import {
   nextPrefixedTaskIdStart,
   gitRemoteRefReserver,
@@ -8,8 +8,8 @@ import {
   reserveTaskIdRemote,
   TaskIdReservationError,
   type RemoteRefReserver,
-} from "../src/lib/task-id-reservation.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/task-id-reservation.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function exhausted(error: unknown): boolean {
   assert.ok(error instanceof TaskIdReservationError);

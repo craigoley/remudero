@@ -23,18 +23,19 @@
  * --base-is-untouched claim (comparing `--base HEAD` against `--all --base HEAD` for byte-identical
  * output — the cheapest possible proof that --all has ZERO effect once --base is given).
  */
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { loadPlan, type Task } from "../src/lib/plan.js";
-import { execWhitelistedProof, parseWhitelistedProof } from "../src/lib/review.js";
-import { lintPlanCommand } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { loadPlan, type Task } from "#src/lib/plan.js";
+import { execWhitelistedProof, parseWhitelistedProof } from "#src/lib/review.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = testRepoRoot();
 const SHIPPED_PLAN_PATH = join(REPO_ROOT, "plan", "tasks.yaml");
 
 /** Load the shipped plan ONCE per test file — every test below reads from this, never a copy. */

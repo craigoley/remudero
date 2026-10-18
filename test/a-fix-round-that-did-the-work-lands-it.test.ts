@@ -13,14 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { COMMIT_LINE_RESUME_PROMPT, commitWorkerEdits, harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
-import { REGENERABLE_ARTIFACT_GENERATORS } from "../src/lib/sweep.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { COMMIT_LINE_RESUME_PROMPT, commitWorkerEdits, harnessCommitForShellLessWorker, runFixRung } from "#test/helpers/run-task-test.js";
+import { REGENERABLE_ARTIFACT_GENERATORS } from "#src/lib/sweep.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
 const BASELINE = "scripts/comment-load-baseline.json";

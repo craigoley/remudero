@@ -4,8 +4,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { DaemonSummary } from "../src/lib/daemon.js";
+import type { Config } from "#src/lib/config.js";
+import type { DaemonSummary } from "#src/lib/daemon.js";
 import {
   MAX_PROVIDER_POLICY_OVERRIDE_MS,
   ProviderRoutingPolicyError,
@@ -15,16 +15,16 @@ import {
   selectWorkerProviderForPolicy,
   writeProviderRoutingPolicyOverride,
   type ProviderRoutingPolicyOverrideInput,
-} from "../src/lib/provider-routing-policy.js";
+} from "#src/lib/provider-routing-policy.js";
 import {
   readProviderRoutingStatus,
   writeProviderRoutingStatus,
-} from "../src/lib/provider-routing-status.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { ProviderCapacityBlockedError, type ProviderCapacity } from "../src/lib/worker-provider.js";
-import { createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
-import { buildClearProviderRoutingPolicyRoute, buildServeRoutes, buildServeServer, buildSetProviderRoutingPolicyRoute, type ServeDeps } from "../src/lib/serve.js";
-import { daemonCommand } from "../src/run-task.js";
+} from "#src/lib/provider-routing-status.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { ProviderCapacityBlockedError, type ProviderCapacity } from "#src/lib/worker-provider.js";
+import { createClaudeExecutableCache, spawnWorker } from "#src/lib/worker.js";
+import { buildClearProviderRoutingPolicyRoute, buildServeRoutes, buildServeServer, buildSetProviderRoutingPolicyRoute, type ServeDeps } from "#src/lib/serve.js";
+import { daemonCommand } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-09-02T15:00:00.000Z");
 const READ_TOKEN = "provider-policy-read-token";

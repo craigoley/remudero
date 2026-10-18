@@ -15,8 +15,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import * as emitter from "../src/lib/plan-pr-emitter.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as emitter from "#src/lib/plan-pr-emitter.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const { planPrPreflight, planPrPreflightAsync } = emitter;
 

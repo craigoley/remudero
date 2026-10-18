@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PLAN_RECONCILE_REVIEW_FILE_CEILING, renderPlanReconcile } from "../src/run-task.js";
+import { PLAN_RECONCILE_REVIEW_FILE_CEILING, renderPlanReconcile } from "#src/run-task.js";
 
 const skipped = {
   "not-credited-merged": 0,

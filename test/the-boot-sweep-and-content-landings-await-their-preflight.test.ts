@@ -12,15 +12,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { daemonBoot } from "../src/lib/daemon.js";
-import { daemonEvidenceCoverageInput } from "../src/lib/evidence-coverage-gardener.js";
-import { feedbackEntryPath, feedbackEntryRepoPath } from "../src/lib/feedback.js";
-import * as landing from "../src/lib/feedback-landing.js";
-import { queuedFeedbackDir, queuedFeedbackLandings, type LandFeedbackResult } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { buildPlanReconcileCadenceInput, planReconcileCadence } from "../src/lib/measurement-cadence.js";
-import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { daemonBoot } from "#src/lib/daemon.js";
+import { daemonEvidenceCoverageInput } from "#src/lib/evidence-coverage-gardener.js";
+import { feedbackEntryPath, feedbackEntryRepoPath } from "#src/lib/feedback.js";
+import * as landing from "#src/lib/feedback-landing.js";
+import { queuedFeedbackDir, queuedFeedbackLandings, type LandFeedbackResult } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { buildPlanReconcileCadenceInput, planReconcileCadence } from "#src/lib/measurement-cadence.js";
+import type { PlanPrPreflightResult } from "#src/lib/plan-pr-emitter.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // Namespace reads, so this file still loads at the base (where these forms do not exist) and reds per subtest.
 type Rungs = { atBoot: () => Promise<LandFeedbackResult> | LandFeedbackResult };

@@ -1,7 +1,7 @@
 // Proof path: test/action-reconciliation-drift.test.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { reconcileExternalEffect } from "../src/lib/action-reconciliation.js";
+import { reconcileExternalEffect } from "#src/lib/action-reconciliation.js";
 
 test("observed external drift never renders as successful completion and names the reconciliation state", async () => {
   const result = await reconcileExternalEffect({

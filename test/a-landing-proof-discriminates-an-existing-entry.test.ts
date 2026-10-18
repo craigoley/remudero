@@ -3,10 +3,10 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { LANDING_BRANCH, landFeedback } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { LANDING_BRANCH, landFeedback } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const id = "fb-landing-proof";
 const rel = `plan/feedback/${id}.yaml`;

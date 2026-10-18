@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -12,7 +13,7 @@ import {
   redQualityGateNames,
   type OpenPrView,
   type RollupCheckEntry,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 /**
  * W1-T2504 — `checksStateFromRollup` answers "what gates the merge" (branch protection's own
@@ -33,8 +34,7 @@ import {
  * member of the `checksState` union.
  */
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SWEEP_SOURCE = readFileSync(join(__dirname, "..", "src", "lib", "sweep.ts"), "utf8");
+const SWEEP_SOURCE = readFileSync(join(repoRoot(), "src/lib/sweep.ts"), "utf8");
 
 const NOW = Date.parse("2026-08-30T14:00:00Z");
 const RECENT = "2026-08-30T13:58:00Z";

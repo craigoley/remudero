@@ -34,8 +34,8 @@ import {
   observedBlockerState,
   renderClarificationQuestion,
   type OpenPrView,
-} from "../src/lib/sweep.js";
-import { ghRequiredStatusCheckContexts, readRequiredStatusCheckContexts } from "../src/lib/status.js";
+} from "#src/lib/sweep.js";
+import { ghRequiredStatusCheckContexts, readRequiredStatusCheckContexts } from "#src/lib/status.js";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

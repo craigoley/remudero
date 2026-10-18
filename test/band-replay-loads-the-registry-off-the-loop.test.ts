@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as turn } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { triageFleetLaneAsync, writeClassificationSnapshot, type FleetLaneDeps } from "../src/lib/fleet-lane.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { triageFleetLaneAsync, writeClassificationSnapshot, type FleetLaneDeps } from "#src/lib/fleet-lane.js";
 import { createBandMeaningReplayRegistryReader, replayBandMeaningRefusals, replayBandMeaningRefusalsAsync,
-  BAND_MEANING_REPLAY_STORE, type BandMeaningReplayInput } from "../src/lib/inbox-replay.js";
-import { loadPlan } from "../src/lib/plan.js";
+  BAND_MEANING_REPLAY_STORE, type BandMeaningReplayInput } from "#src/lib/inbox-replay.js";
+import { loadPlan } from "#src/lib/plan.js";
 
 const ID = "followup:W1-T9699:pending";
 const SEED = "2026-10-15T00:00:00.000Z";

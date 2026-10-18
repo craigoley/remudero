@@ -5,9 +5,9 @@ import {
   experimentTaskIdentity,
   ROUTING_EXPERIMENTS,
   routingExperimentFor,
-} from "../src/lib/routing-experiments.js";
-import { auctionDrawSeed, workerSelectionAssignment, type SpawnWorkerArgs } from "../src/lib/worker.js";
-import type { ProviderCapacity } from "../src/lib/worker-provider.js";
+} from "#src/lib/routing-experiments.js";
+import { auctionDrawSeed, workerSelectionAssignment, type SpawnWorkerArgs } from "#src/lib/worker.js";
+import type { ProviderCapacity } from "#src/lib/worker-provider.js";
 
 const old = ROUTING_EXPERIMENTS.find((item) => item.id === "sol-vs-sonnet")!;
 const next = ROUTING_EXPERIMENTS.find((item) => item.id === "sol-vs-sonnet55")!;

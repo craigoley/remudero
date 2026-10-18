@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml, parse as parseYaml } from "yaml";
-import { renderIssueBody, type Escalation, type OpenIssue } from "../src/lib/escalate.js";
+import { renderIssueBody, type Escalation, type OpenIssue } from "#src/lib/escalate.js";
 import {
   ghEscalationAnswerGateway,
   grilledFeedbackId,
@@ -21,13 +21,13 @@ import {
   readEscalationAnswers,
   type EscalationAnswerGateway,
   type EscalationIssueComment,
-} from "../src/lib/escalation-answers.js";
-import { listFeedback, type FeedbackEntry } from "../src/lib/feedback.js";
-import { overlayQueuedFeedbackEntries } from "../src/lib/feedback-landing.js";
-import { feedbackHasAnswer } from "../src/lib/human-gate.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/escalation-answers.js";
+import { listFeedback, type FeedbackEntry } from "#src/lib/feedback.js";
+import { overlayQueuedFeedbackEntries } from "#src/lib/feedback-landing.js";
+import { feedbackHasAnswer } from "#src/lib/human-gate.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const FB_ID = "fb-1789382125003-abdb87";
 

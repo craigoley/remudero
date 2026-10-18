@@ -12,7 +12,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
@@ -21,7 +21,7 @@ import {
   renderIssueBody,
   type Escalation,
   type IssueGateway,
-} from "../src/lib/escalate.js";
+} from "#src/lib/escalate.js";
 
 // W1-T1103 — "the escalation rung opens issues it can never retire": three defects, one
 // lifecycle guarantee. (i) sweep.ts must not escalate on a required check that has merely NOT

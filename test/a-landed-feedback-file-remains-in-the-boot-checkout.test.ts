@@ -9,8 +9,8 @@ import {
   landFeedback,
   sweepFeedbackLanding,
   type LandFeedbackOpts,
-} from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+} from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 const GIT_ENV = {
   ...process.env,

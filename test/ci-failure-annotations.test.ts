@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fetchCiFailures, defaultCiAnnotationFetch, type CiAnnotationFetch, type CiJobLogFetch } from "../src/run-task.js";
-import { describeCiLogUnavailable, diffCoverageReport, type CiFailure } from "../src/lib/sweep.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { fetchCiFailures, defaultCiAnnotationFetch, type CiAnnotationFetch, type CiJobLogFetch } from "#src/run-task.js";
+import { describeCiLogUnavailable, diffCoverageReport, type CiFailure } from "#src/lib/sweep.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // ── W1-T2298 — the coverage failure detail is published and nothing reads it. Two halves: a SECOND
 // SOURCE for `logTail` when the log blob cannot be read, and a REPORTER for the diff-scoped coverage
@@ -107,7 +107,7 @@ test("the AGGREGATE ratchet's wording is not the diff-scoped one, which is why i
 });
 
 test("the diff-scoped coverage recogniser reports and dispatches no fix worker", async () => {
-  const sweep = await import("../src/lib/sweep.js");
+  const sweep = await import("#src/lib/sweep.js");
   const classes = sweep.DEFAULT_FIX_CLASSES as ReadonlyArray<{ id: string }>;
   assert.ok(
     !classes.some((c) => c.id.includes("diff-coverage")),

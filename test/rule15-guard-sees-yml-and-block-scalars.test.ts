@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import type { Task } from "../src/lib/plan.js";
-import { checkSatisfiedByGuard, judgeReview } from "../src/lib/review.js";
-import { rule15FilingViolation } from "../src/lib/task-linter.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import type { Task } from "#src/lib/plan.js";
+import { checkSatisfiedByGuard, judgeReview } from "#src/lib/review.js";
+import { rule15FilingViolation } from "#src/lib/task-linter.js";
 
 /**
  * docs/audits/recon-2026-09-05.md, R-14 and R-16 — the Rule 15 tamper guard was blind to two

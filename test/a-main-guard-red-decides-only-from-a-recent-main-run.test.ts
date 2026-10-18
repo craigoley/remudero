@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildMainHealthRung } from "../src/lib/main-health-rung.js";
-import { failedMainGuardRuns, MAIN_HEALTH_FALLBACK_WINDOW_COMMITS } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildMainHealthRung } from "#src/lib/main-health-rung.js";
+import { failedMainGuardRuns, MAIN_HEALTH_FALLBACK_WINDOW_COMMITS } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HEAD = "a".repeat(40);
 const PARENT = "b".repeat(40);

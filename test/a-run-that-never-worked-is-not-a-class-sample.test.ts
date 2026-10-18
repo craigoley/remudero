@@ -1,4 +1,3 @@
-// test/a-run-that-never-worked-is-not-a-class-sample.test.ts
 //
 // W1-T4711 — a run that threw, was refused at dispatch, or was backfilled by the operator ends on a
 // verdict `isNeverWorkedVerdict` names (a stage in THROWN_RUN_VERDICT_STAGES, or `backfilled: true`).
@@ -7,6 +6,7 @@
 // calibration, the mount-headroom class sweep, and the config gardener's budget recalibration —
 // skip such runs and report how many they skipped. An ordinary `failed` run still counts.
 
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -18,20 +18,19 @@ import {
   BUDGET_MIN_SAMPLES,
   type ConfigInventory,
   type QueuedBudget,
-} from "../src/lib/config-gardener.js";
-import { isNeverWorkedVerdict as costAnomalyIsNeverWorked } from "../src/lib/cost-anomaly.js";
-import { isNeverWorkedVerdict } from "../src/lib/never-worked.js";
+} from "#src/lib/config-gardener.js";
+import { isNeverWorkedVerdict as costAnomalyIsNeverWorked } from "#src/lib/cost-anomaly.js";
+import { isNeverWorkedVerdict } from "#src/lib/never-worked.js";
 import {
   aggregateByClass,
   gatherRuns,
   mineOverrunClasses,
   mineOverrunClassesCounted,
   type LedgerRecord,
-} from "../src/lib/retro.js";
-import { REFUSED_RUN_VERDICT_STAGE_LIST, THROWN_RUN_VERDICT_STAGES } from "../src/lib/status.js";
+} from "#src/lib/retro.js";
+import { REFUSED_RUN_VERDICT_STAGE_LIST, THROWN_RUN_VERDICT_STAGES } from "#src/lib/status.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCRIPT = join(__dirname, "..", "scripts", "mount-headroom-sweep.mjs");
+const SCRIPT = join(repoRoot(), "scripts/mount-headroom-sweep.mjs");
 const sweep = (await import(pathToFileURL(SCRIPT).href)) as {
   computeClassSweep: (runs: unknown[]) => Array<{
     taskClass: string;

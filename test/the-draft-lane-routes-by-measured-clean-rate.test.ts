@@ -3,16 +3,16 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { chooseDraftDeployment, createDraftStatsSession, draftStatsFromRows, readDraftStats, recordDraftRouting } from "../src/lib/draft-routing.js";
-import { seededRandom } from "../src/lib/knowledge-value.js";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
-import { inboxDraftExampleFragmentYaml } from "../src/lib/inbox.js";
-import { spawnWorker, type WorkerResult } from "../src/lib/worker.js";
-import { selectOpenWeightModel, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { buildInboxDraftSpawnArgs } from "../src/run-task.js";
-import { withTempDir } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { chooseDraftDeployment, createDraftStatsSession, draftStatsFromRows, readDraftStats, recordDraftRouting } from "#src/lib/draft-routing.js";
+import { seededRandom } from "#src/lib/knowledge-value.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { inboxDraftExampleFragmentYaml } from "#src/lib/inbox.js";
+import { spawnWorker, type WorkerResult } from "#src/lib/worker.js";
+import { selectOpenWeightModel, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { buildInboxDraftSpawnArgs } from "#src/run-task.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 const arms = [{ deployment: "gpt-5-nano", estimatedCostUsd: 0.01 },
   { deployment: "gpt-oss-120b", estimatedCostUsd: 0.01 }];

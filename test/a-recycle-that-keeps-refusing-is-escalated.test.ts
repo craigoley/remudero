@@ -11,12 +11,12 @@ import {
   runDeployCycle,
   type DeployDeps,
   type RefusalStreak,
-} from "../src/lib/deployer.js";
-import { escalatePersistingRefusal, refusalEscalationFor, refusalEscalationOrNone } from "../src/lib/deploy-refusal-escalation.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { escalationSpoolDir, escalationSpoolDrain } from "../src/lib/host-escalation-spool.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/deployer.js";
+import { escalatePersistingRefusal, refusalEscalationFor, refusalEscalationOrNone } from "#src/lib/deploy-refusal-escalation.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { escalationSpoolDir, escalationSpoolDrain } from "#src/lib/host-escalation-spool.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // MEASURED 2026-10-04..06: site and console refused every image recycle for two days while their
 // images fell 46 baked commits behind; the only trace was state/DEPLOY_FAILED and an hourly

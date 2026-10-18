@@ -12,18 +12,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
   type LiveStateResult,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 // Namespace-imported so the file still LOADS on a tree without the helper: every test there fails
 // on its own assertion instead of the whole file failing to link (proof discrimination).
-import * as sweep from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import * as sweep from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = Date.UTC(2026, 9, 4, 21, 36);
 const minutesAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();

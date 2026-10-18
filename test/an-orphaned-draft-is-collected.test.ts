@@ -9,10 +9,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { pruneOrphanedDrafts, type DraftedCandidate } from "../src/lib/inbox.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildInboxDraftHook } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { pruneOrphanedDrafts, type DraftedCandidate } from "#src/lib/inbox.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildInboxDraftHook } from "#src/run-task.js";
 
 const cand = (id: string): DraftedCandidate => ({ proposalId: id, fragmentYaml: `- id: ${id}\n`, stampLine: "stamp", anchorFingerprint: "" });
 

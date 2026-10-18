@@ -9,8 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as sweep from "../src/lib/sweep.js";
-import type { OpenPrView, SweepDeps } from "../src/lib/sweep.js";
+import * as sweep from "#src/lib/sweep.js";
+import type { OpenPrView, SweepDeps } from "#src/lib/sweep.js";
 
 const NOW = Date.parse("2026-10-10T03:00:00Z");
 const RECENT = "2026-10-10T02:50:00Z";

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow } from "../src/lib/operator-agent-capacity.js";
-import { adaptOperatorDecisionRows } from "../src/lib/operator-agent-decisions.js";
-import { adaptOperatorAgentProofRows } from "../src/lib/operator-agent-proof.js";
-import { adaptVerdictCalibrationReport } from "../src/lib/operator-agent-outcomes.js";
-import type { VerdictCalibrationReport } from "../src/lib/verdict-calibration.js";
+import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow } from "#src/lib/operator-agent-capacity.js";
+import { adaptOperatorDecisionRows } from "#src/lib/operator-agent-decisions.js";
+import { adaptOperatorAgentProofRows } from "#src/lib/operator-agent-proof.js";
+import { adaptVerdictCalibrationReport } from "#src/lib/operator-agent-outcomes.js";
+import type { VerdictCalibrationReport } from "#src/lib/verdict-calibration.js";
 
 test("W1-T3797 criterion 1: pool utilization includes configured capacity, observed occupancy, queued work, and a measurement window", () => {
   const signal = adaptOperatorAgentCapacityRows([

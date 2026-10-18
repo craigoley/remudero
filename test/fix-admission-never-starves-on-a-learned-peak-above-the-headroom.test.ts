@@ -8,11 +8,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { ContainerMemoryHeadroom } from "../src/lib/host-memory-shadow.js";
+import type { ContainerMemoryHeadroom } from "#src/lib/host-memory-shadow.js";
 import {
   createSweepFixAdmissionController, productionFixAdmissionReaders, readFixHostPressure,
   type FixAdmissionResidents, type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const FLOOR = 3_072;
 const P90 = 3_196;

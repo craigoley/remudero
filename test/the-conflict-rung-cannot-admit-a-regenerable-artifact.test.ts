@@ -9,7 +9,7 @@ import {
   isRegenerableArtifactConflict,
   type ConflictFileDiff,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 /**
  * W1-T2548 — MEASURED 2026-08-30, six merge conflicts in one evening, every one the SAME shape:

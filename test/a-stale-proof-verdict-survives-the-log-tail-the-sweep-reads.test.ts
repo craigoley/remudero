@@ -3,18 +3,19 @@
 // check-proof output, then two advice lines. The sweep reads a failed step's last lines before the `##[error]`
 // marker (CI_STEP_ERROR_CONTEXT_LINES in src/run-task.ts), so it saw only test output, found no stale proof,
 // skipped the proof-amendment route and escalated to a person. The verdict now closes the log.
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { proofDiscriminationEvidenceFromCheckLog } from "../src/lib/sweep.js";
+import { proofDiscriminationEvidenceFromCheckLog } from "#src/lib/sweep.js";
 
 // The failed-step extractor currently keeps eight lines before GitHub's error marker.
 // Keep the regression at that narrow tail without importing the full run-task command module.
 const STEP_TAIL_LINES = 8;
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = repoRoot();
 const gate = (await import(pathToFileURL(join(ROOT, "scripts", "proof-discrimination-gate.mjs")).href)) as {
   main: (argv: string[], deps: Record<string, unknown>) => number;
 };

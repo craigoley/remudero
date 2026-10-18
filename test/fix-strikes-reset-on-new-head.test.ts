@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { deriveStrikeHistory, priorStrikesFor, runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { deriveStrikeHistory, priorStrikesFor, runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 // W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
 // injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.

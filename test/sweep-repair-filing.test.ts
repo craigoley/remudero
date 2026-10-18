@@ -9,9 +9,9 @@ import {
   isValidFeedbackOrigin,
   readFeedbackEntry,
   type FeedbackOrigin,
-} from "../src/lib/feedback.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#src/lib/feedback.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   dueRepairFilings,
@@ -24,7 +24,7 @@ import {
   type RepairFilingRecurrence,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 /**
  * W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half).

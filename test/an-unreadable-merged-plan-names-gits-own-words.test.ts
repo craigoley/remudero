@@ -12,11 +12,11 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { attemptArm, logArmAttribution, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import { runStepsAsync, runStepsSync } from "../src/lib/git-push.js";
-import * as safety from "../src/lib/plan-pr-merge-safety.js";
-import type { PlanMergeSafetyReadings, PlanSafetyGit, PlanSafetyGitResult } from "../src/lib/plan-pr-merge-safety.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { attemptArm, logArmAttribution, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { runStepsAsync, runStepsSync } from "#src/lib/git-push.js";
+import * as safety from "#src/lib/plan-pr-merge-safety.js";
+import type { PlanMergeSafetyReadings, PlanSafetyGit, PlanSafetyGitResult } from "#src/lib/plan-pr-merge-safety.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/11995";
 const TARGET = { owner: "craigoley", repo: "remudero", prNumber: 11995 };

@@ -8,7 +8,7 @@
 // already depends on is untouched.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseProposalRegistry, parseProposalRegistryResult, type Proposal } from "../src/lib/inbox.js";
+import { parseProposalRegistry, parseProposalRegistryResult, type Proposal } from "#src/lib/inbox.js";
 
 test("parseProposalRegistryResult: an absent registry is reported apart from a genuinely empty one", () => {
   const absent = parseProposalRegistryResult(undefined);

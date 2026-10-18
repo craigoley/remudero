@@ -7,8 +7,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveDisposition, namesRule15Refusal } from "../src/lib/sweep.js";
-import { failSummary } from "../src/lib/review.js";
+import { deriveDisposition, namesRule15Refusal } from "#src/lib/sweep.js";
+import { failSummary } from "#src/lib/review.js";
 
 /** The rule-15 summary taken FROM ITS PRODUCER, not retyped. If `failSummary`'s literal is reworded,
  *  these tests move with it — and the one test that pins the coupling (below) is the one that fails. */

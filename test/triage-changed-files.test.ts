@@ -8,6 +8,7 @@
  * defect at all: the bug was git's own behaviour (`diff` does not report untracked paths), so a
  * test that fakes git would have agreed with the broken code.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -15,9 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { decidePlanArchitect } from "../src/lib/plan-architect.js";
-import { decideTriage } from "../src/lib/triage.js";
-import { worktreeChangedFiles } from "../src/run-task.js";
+import { decidePlanArchitect } from "#src/lib/plan-architect.js";
+import { decideTriage } from "#src/lib/triage.js";
+import { worktreeChangedFiles } from "#src/run-task.js";
 
 const SANDBOX = mkdtempSync(join(tmpdir(), "rmd-eo-triage-"));
 after(() => rmSync(SANDBOX, { recursive: true, force: true }));
@@ -199,7 +200,7 @@ describe("plan changed-file detection", () => {
     // someone put the tracked-only `git diff` back at the plan call site. That is precisely the shape
     // of the defect being fixed: a correct helper, unwired at one lane. planCommand cannot be driven
     // here without spawning a paid worker, so the wiring is asserted structurally instead.
-    const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+    const src = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
     const planLane = src.slice(src.indexOf("export async function planCommand("));
     // Anchor on the CALLEE NAME only. This used to slice on the whole literal
     // `decidePlanArchitect({ verdict, changedFiles })`, which pinned the argument spelling as

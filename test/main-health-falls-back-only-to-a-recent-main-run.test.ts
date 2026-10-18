@@ -15,8 +15,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildMainHealthRung, mainPushRunHistoryRestArgs } from "../src/lib/main-health-rung.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildMainHealthRung, mainPushRunHistoryRestArgs } from "#src/lib/main-health-rung.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HEAD = "a6a2851509b610144b82e8d8ff165df3e65750a7";
 const PARENT = "d".repeat(40);

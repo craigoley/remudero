@@ -3,17 +3,17 @@ import test, { type TestContext } from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import {
   baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey,
   strikesToRefund, type BaseProbeFile,
-} from "../src/lib/base-reproduction.js";
+} from "#src/lib/base-reproduction.js";
 import {
   BASE_RED_REFRESH_STEP, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { buildBaseReproductionProbe, deriveStrikeHistory, priorStrikesFor } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { buildBaseReproductionProbe, deriveStrikeHistory, priorStrikesFor } from "#src/run-task.js";
 
 const NOW = Date.now();
 const MAIN = "b".repeat(40);

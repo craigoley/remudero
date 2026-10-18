@@ -16,9 +16,9 @@ import {
   type AccountUsageInput,
   type AccountUsageProjection,
   type AccountUsageSnapshot,
-} from "../src/lib/account-usage.js";
-import { captureWorkerUsageProjection, WORKER_USAGE_PROJECTION_REL } from "../src/lib/worker.js";
-import { CLAUDE_CONFIG_REL, perRunWorkerHomeDir, reapWorkerHome } from "../src/lib/worker-home.js";
+} from "#src/lib/account-usage.js";
+import { captureWorkerUsageProjection, WORKER_USAGE_PROJECTION_REL } from "#src/lib/worker.js";
+import { CLAUDE_CONFIG_REL, perRunWorkerHomeDir, reapWorkerHome } from "#src/lib/worker-home.js";
 
 /**
  * W1-T2516: every worker's HOME is redirected to a Remudero-controlled scratch dir

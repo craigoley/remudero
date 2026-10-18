@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "./helpers/sweep-test.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { stalledStageEscalationSummary } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "#test/helpers/sweep-test.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { stalledStageEscalationSummary } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // #11698 and #11720: the sweep escalated PR #11679's conflict stall twice, same head and contract, 85 minutes
 // apart, because the stalled-stage title carried its age and episode start and its dedup is the exact title.

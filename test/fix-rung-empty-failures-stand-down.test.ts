@@ -26,13 +26,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung } from "./helpers/run-task-test.js";
-import type { CiFailure } from "./helpers/sweep-test.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import type { CiFailure } from "#test/helpers/sweep-test.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 // W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
 // injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.

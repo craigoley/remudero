@@ -4,11 +4,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { daemonBoot, runDaemon } from "../src/lib/daemon.js";
-import { LANDING_BRANCH, sweepFeedbackLanding, type LandFeedbackResult } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { daemonBoot, runDaemon } from "#src/lib/daemon.js";
+import { LANDING_BRANCH, sweepFeedbackLanding, type LandFeedbackResult } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { requestStop, stopDetail } from "#src/lib/fleet-control.js";
 
 // ── W1-T530 — THE LEVEL-TRIGGERED FEEDBACK-LANDING SWEEP ────────────────────────────────────
 //

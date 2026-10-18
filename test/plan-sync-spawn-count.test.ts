@@ -4,14 +4,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadPlan, loadPlanAtRef, readBlobsAtRef, type Plan } from "../src/lib/plan.js";
+import { loadPlan, loadPlanAtRef, readBlobsAtRef, type Plan } from "#src/lib/plan.js";
 import {
   GitFetchError,
   materializeOriginShards,
   readOriginShardsAtRef,
   syncPlanFromOrigin,
   type GitRunner,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 /**
  * test/plan-sync-spawn-count.test.ts — THE PLAN IS READ IN A CONSTANT NUMBER OF GIT CALLS.

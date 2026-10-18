@@ -3,9 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { validateConfig, type Config } from "../src/lib/config.js";
-import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "../src/lib/escalation-answers.js";
-import { renderIssueBody } from "../src/lib/escalate.js";
+import { validateConfig, type Config } from "#src/lib/config.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "#src/lib/escalation-answers.js";
+import { renderIssueBody } from "#src/lib/escalate.js";
 
 const body = renderIssueBody({ class: "GRILL", taskId: "TRIAGE-fb-fixture", summary: "route feedback", detail: "routing only",
   options: [{ label: "site-intake", detail: "ground against site" }], recommendation: "site-intake" });

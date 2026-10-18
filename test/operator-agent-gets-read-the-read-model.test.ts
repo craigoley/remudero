@@ -14,13 +14,13 @@ import {
   createOperatorAgentRowsView,
   OPERATOR_AGENT_ROWS_VIEW,
   type OperatorAgentRowsData,
-} from "../src/lib/operator-agent-read-model.js";
-import { buildOperatorAgentRoutes, OPERATOR_AGENT_PROPOSAL_STEP } from "../src/lib/operator-agent.js";
-import type { ReadModelDb } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, ledgerSource, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import type { ViewBodyEntry, ViewSource } from "../src/lib/views.js";
-import { clock, corpus, get, listen, NOW, post } from "./helpers/operator-agent-corpus.js";
+} from "#src/lib/operator-agent-read-model.js";
+import { buildOperatorAgentRoutes, OPERATOR_AGENT_PROPOSAL_STEP } from "#src/lib/operator-agent.js";
+import type { ReadModelDb } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, ledgerSource, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import type { ViewBodyEntry, ViewSource } from "#src/lib/views.js";
+import { clock, corpus, get, listen, NOW, post } from "#test/helpers/operator-agent-corpus.js";
 
 /** Every GET route, with the query its body is read with. */
 const GETS = [

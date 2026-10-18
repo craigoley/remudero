@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { buildFixProgressInput, fixRedClass } from "../src/lib/fix-progress-judge.js";
+import { buildFixProgressInput, fixRedClass } from "#src/lib/fix-progress-judge.js";
 import {
   DEFAULT_SWEEP_POLICY, fixRoundLabel, lastProgressJudgementFor, prRedClass, productionFixProgressJudge, runSweep,
   type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const TASK = "W1-T9001";
 const NOW = Date.now();

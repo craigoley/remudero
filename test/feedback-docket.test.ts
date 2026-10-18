@@ -13,9 +13,9 @@ import {
   writeFeedbackDocketMarker,
   type FeedbackDocketWindow,
   type RawFeedbackDocketInputs,
-} from "../src/lib/feedback-docket.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { parseProposalRegistry } from "../src/lib/inbox.js";
+} from "#src/lib/feedback-docket.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { parseProposalRegistry } from "#src/lib/inbox.js";
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -212,7 +212,7 @@ test("feedbackDocketLookbackWindow: a 7-day window ending at now", () => {
 // ── THE RUNG inside run-task.ts — real files, the pure-path form against a declared file ──
 
 test("runFeedbackDocketRung: files exactly one proposal quoting three same-rule reframes, then goes quiet for the week", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = tmp("rmd-fd-instance-");
   const repo = tmp("rmd-fd-repo-");
   try {
@@ -274,7 +274,7 @@ test("runFeedbackDocketRung: files exactly one proposal quoting three same-rule 
 });
 
 test("runFeedbackDocketRung: an empty window ledgers feedback_docket.empty and files nothing", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = tmp("rmd-fd-empty-instance-");
   const repo = tmp("rmd-fd-empty-repo-");
   try {
@@ -301,7 +301,7 @@ test("runFeedbackDocketRung: an empty window ledgers feedback_docket.empty and f
 });
 
 test("runFeedbackDocketRung: an unreadable/absent capture surface is skipped, never a reason to refuse the whole gather", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = tmp("rmd-fd-unread-instance-");
   const repo = tmp("rmd-fd-unread-repo-");
   try {
@@ -326,7 +326,7 @@ test("runFeedbackDocketRung: an unreadable/absent capture surface is skipped, ne
 });
 
 test("runFeedbackDocketRung: gathers rejected-feedback, question-answer, and operator-note surfaces from real files", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = tmp("rmd-fd-surfaces-instance-");
   const repo = tmp("rmd-fd-surfaces-repo-");
   try {
@@ -367,7 +367,7 @@ test("runFeedbackDocketRung: gathers rejected-feedback, question-answer, and ope
 });
 
 test("runFeedbackDocketRung: a non-empty docket whose synthesis still reports empty ledgers feedback_docket.empty", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = tmp("rmd-fd-synthempty-instance-");
   const repo = tmp("rmd-fd-synthempty-repo-");
   try {
@@ -410,7 +410,7 @@ test("runFeedbackDocketRung: a non-empty docket whose synthesis still reports em
 });
 
 test("runFeedbackDocketRung: a marker-write failure is caught, ledgers feedback_docket.error, and never throws", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   // `instanceRoot` is a FILE, not a directory: `config.root/state/...` can never be created,
   // so `writeFeedbackDocketMarker`'s mkdirSync throws — exercising the rung's own try/catch
   // (its doc: "a read failure here must never take down the sweep composite it rides inside").

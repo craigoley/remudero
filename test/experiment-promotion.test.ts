@@ -13,7 +13,7 @@ import {
   validateReplaySummary,
   type GuardObservation,
   type PromotionRecord,
-} from "../src/lib/experiment-promotion.js";
+} from "#src/lib/experiment-promotion.js";
 
 const NOW = "2026-09-20T10:00:00.000Z";
 

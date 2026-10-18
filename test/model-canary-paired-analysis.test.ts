@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { analyzeCanaryPairs } from "../src/lib/model-canary-paired-analysis.js";
-import { canaryTrialBlockId, type CanaryRun } from "../src/lib/model-canary-metrics.js";
-import { renderCanaryReport } from "../src/lib/model-canary-report.js";
+import { analyzeCanaryPairs } from "#src/lib/model-canary-paired-analysis.js";
+import { canaryTrialBlockId, type CanaryRun } from "#src/lib/model-canary-metrics.js";
+import { renderCanaryReport } from "#src/lib/model-canary-report.js";
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 function block(day = "2026-10-10", caseId = "case-1", aa = false): CanaryRun[] {

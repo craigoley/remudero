@@ -3,12 +3,12 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { drainDetachedSweepActions, detachedActionInFlight } from "../src/lib/sweep.js";
-import type { MergedSet } from "../src/lib/drain.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import type { RunResult } from "#src/run-task.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { drainDetachedSweepActions, detachedActionInFlight } from "#src/lib/sweep.js";
+import type { MergedSet } from "#src/lib/drain.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T2981 — A FIRED RETRO MUST NOT HOLD THE DISPATCH RUNG.
 //

@@ -1,9 +1,10 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { loadPlan } from "../src/lib/plan.js";
+import { loadPlan } from "#src/lib/plan.js";
 
 // ── W1-T2223: plan-state-claims reports EVERY not-shipped site per id, not only the first ─────────
 //
@@ -32,10 +33,9 @@ import { loadPlan } from "../src/lib/plan.js";
 // directly (not spawnSync) because these are genuinely UNIT-level claims about the exported
 // functions' return shapes, distinct from the sibling suite's CLI-surface end-to-end coverage.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const SCRIPT_URL = pathToFileURL(join(REPO_ROOT, "scripts", "plan-state-claims.mjs")).href;
-const FIXTURES = join(__dirname, "fixtures", "plan-state-claims");
+const FIXTURES = join(repoRoot(), "test/fixtures/plan-state-claims");
 
 type Mod = {
   checkPlanStateConsistency: (masterPlanMd: string, knownIds: string[]) => {

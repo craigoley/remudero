@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readRoutingDailyStatus } from "../src/lib/routing-daily-status.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { readRoutingDailyStatus } from "#src/lib/routing-daily-status.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 const asOf = "2026-10-02T12:00:00Z";
 const now = fixedClock(Date.parse("2026-10-02T14:00:00Z"));
 const report = () => ({ version: "routing-daily-review-v1", asOf, nextScheduledReviewAt: "2026-10-03T04:17:00Z",

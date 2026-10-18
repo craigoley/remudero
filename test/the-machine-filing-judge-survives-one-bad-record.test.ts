@@ -14,13 +14,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { machineShardHeaderLines, UNPRICED_PRIORITY } from "../src/lib/machine-filing.js";
-import { renderRuledShard, runMachineFilingJudge, type MachineJudgePorts } from "../src/lib/machine-filing-judge.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { taskRulingPin } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { machineShardHeaderLines, UNPRICED_PRIORITY } from "#src/lib/machine-filing.js";
+import { renderRuledShard, runMachineFilingJudge, type MachineJudgePorts } from "#src/lib/machine-filing-judge.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import type { RiskJudgeInput, RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const CLOCK = fixedClock(1790800000000);
 

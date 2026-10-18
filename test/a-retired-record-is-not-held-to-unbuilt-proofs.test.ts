@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { Task } from "../src/lib/plan.js";
-import { lintTask, type LintOpts } from "../src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
+import { lintTask, type LintOpts } from "#src/lib/task-linter.js";
 
 function shard(overrides: Partial<Task> = {}): Task {
   return {

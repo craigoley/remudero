@@ -31,8 +31,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { reconcileRetroChangesetClaim } from "../src/lib/plan-pr-emitter.js";
-import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
+import { reconcileRetroChangesetClaim } from "#src/lib/plan-pr-emitter.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "#src/lib/review.js";
 
 const RETRO_PATHS = ["MASTER-PLAN.md", "docs/ORIENTATION.md"];
 

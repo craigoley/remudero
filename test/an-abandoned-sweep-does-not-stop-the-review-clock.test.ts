@@ -10,15 +10,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
 import {
   drainDetachedSweepActions,
   detachedSweepActionCount,
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-09-03T01:33:05Z");
 const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

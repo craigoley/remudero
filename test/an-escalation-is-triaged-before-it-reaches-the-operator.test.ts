@@ -15,21 +15,21 @@ import {
   configureEscalationTriage,
   type Escalation,
   type IssueGateway,
-} from "../src/lib/escalate.js";
+} from "#src/lib/escalate.js";
 import {
   TRIAGE_ACTIONS,
   newTriagePass,
   parseEscalationTriagePolicy,
   triageEscalation,
-} from "../src/lib/escalation-triage.js";
-import { runStaleEscalationRejudge } from "../src/lib/sweep.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
-import { buildEscalationTriageRuntime, sweepEscalationTriage } from "../src/run-task.js";
-import type { GhAsyncExecutor } from "../src/lib/github-transport.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { pendingKicks } from "../src/lib/fleet-control.js";
-import type { Config } from "../src/lib/config.js";
-import type { EscalationJudgeVerdict } from "../src/lib/escalate.js";
+} from "#src/lib/escalation-triage.js";
+import { runStaleEscalationRejudge } from "#src/lib/sweep.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
+import { buildEscalationTriageRuntime, sweepEscalationTriage } from "#src/run-task.js";
+import type { GhAsyncExecutor } from "#src/lib/github-transport.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { pendingKicks } from "#src/lib/fleet-control.js";
+import type { Config } from "#src/lib/config.js";
+import type { EscalationJudgeVerdict } from "#src/lib/escalate.js";
 
 function ledger(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-")), "ledger.ndjson");

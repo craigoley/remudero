@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createService } from "../src/lib/service.js";
-import { buildInboxAttentionCensusRoute } from "../src/lib/panel-graph.js";
-import { runSlowLaneWorker } from "../src/lib/read-model-slow-lane.js";
-import { readPersistedInbox } from "../src/lib/fleet-lane.js";
-import { defaultInstanceInboxSources, NO_INSTANCE_RATIFY } from "../src/lib/instance-gateway.js";
-import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { createService } from "#src/lib/service.js";
+import { buildInboxAttentionCensusRoute } from "#src/lib/panel-graph.js";
+import { runSlowLaneWorker } from "#src/lib/read-model-slow-lane.js";
+import { readPersistedInbox } from "#src/lib/fleet-lane.js";
+import { defaultInstanceInboxSources, NO_INSTANCE_RATIFY } from "#src/lib/instance-gateway.js";
+import { mountInstanceInboxRoutes } from "#src/lib/instance-inbox-contract.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -21,13 +21,13 @@ const controls = { heldSecurity: { taskId: "W1-T216", observed: true, passed: tr
 const retirement = { id: "retirement-1", kind: "retire", scope, snapshotKey, at: "2026-10-13T12:00:00.000Z", authority: "automatic", heldAtRetirement: true } as const;
 
 test("an inbox dismissal audit keeps partial sources unmeasurable", async () => {
-  const { buildInboxDismissalAudit } = await import("../src/lib/inbox-dismissal-audit.js");
+  const { buildInboxDismissalAudit } = await import("#src/lib/inbox-dismissal-audit.js");
   const input = { scope: { instance: "core", repository: "owner/core" }, window, coverage, controls, receipts: [] };
   const empty = buildInboxDismissalAudit(input);
   assert.equal(empty.state, "measured");
   assert.equal(empty.measurement.falseDismissals, 0);
   assert.equal(empty.measurement.falseDismissalRate, null, "an empty denominator has no precision estimate");
-  const { validInboxDismissalAudit } = await import("../src/lib/inbox-dismissal-audit.js");
+  const { validInboxDismissalAudit } = await import("#src/lib/inbox-dismissal-audit.js");
   assert.equal(validInboxDismissalAudit({ ...empty, scope: { instance: null, repository: null } }), undefined);
   assert.equal(validInboxDismissalAudit({ ...empty, window: { from: window.to, to: window.from } }), undefined);
   assert.equal(validInboxDismissalAudit({ ...empty, truncated: true }), undefined);
@@ -39,7 +39,7 @@ test("an inbox dismissal audit keeps partial sources unmeasurable", async () => 
 });
 
 test("an inbox dismissal audit includes a held security ask as its negative control", async () => {
-  const { buildInboxDismissalAudit } = await import("../src/lib/inbox-dismissal-audit.js");
+  const { buildInboxDismissalAudit } = await import("#src/lib/inbox-dismissal-audit.js");
   const terminalScope = { ...scope, proposalId: "ruling:terminal", taskId: "W1-T900" };
   const terminal = { ...retirement, id: "terminal-retirement", scope: terminalScope, heldAtRetirement: false };
   const outcome = { id: "terminal-outcome", kind: "outcome", retirementId: terminal.id, scope: terminalScope, snapshotKey, at: "2026-10-13T13:00:00.000Z", outcome: "terminal_confirmed", evidence: "merged-own-task-receipt" } as const;
@@ -56,7 +56,7 @@ test("an inbox dismissal audit includes a held security ask as its negative cont
 });
 
 test("a dismissal audit joins only the exact source and retirement attempt", async () => {
-  const { buildInboxDismissalAudit } = await import("../src/lib/inbox-dismissal-audit.js");
+  const { buildInboxDismissalAudit } = await import("#src/lib/inbox-dismissal-audit.js");
   const input = { scope: { instance: "core", repository: "owner/core" }, window, coverage, controls,
     receipts: [{ ...retirement, heldAtRetirement: false },
       { id: "foreign-outcome", kind: "outcome", retirementId: retirement.id, scope: { ...scope, repository: "owner/site", instance: "site" }, snapshotKey, at: retirement.at, outcome: "terminal_confirmed", evidence: "foreign" },
@@ -74,7 +74,7 @@ test("a dismissal audit joins only the exact source and retirement attempt", asy
 });
 
 test("conflicting immutable receipts and unqualified legacy rows remain unmeasurable", async () => {
-  const { buildInboxDismissalAudit, inboxDismissalReceipts } = await import("../src/lib/inbox-dismissal-audit.js");
+  const { buildInboxDismissalAudit, inboxDismissalReceipts } = await import("#src/lib/inbox-dismissal-audit.js");
   const input = { scope: { instance: "core", repository: "owner/core" }, window, coverage, controls };
   const conflict = buildInboxDismissalAudit({ ...input, receipts: [retirement, { ...retirement, heldAtRetirement: false }] });
   assert.equal(conflict.denominator.conflicting, 1);
@@ -93,7 +93,7 @@ test("conflicting immutable receipts and unqualified legacy rows remain unmeasur
 });
 
 test("restoration is a later outcome and never proof of a false dismissal by itself", async () => {
-  const { buildInboxDismissalAudit } = await import("../src/lib/inbox-dismissal-audit.js");
+  const { buildInboxDismissalAudit } = await import("#src/lib/inbox-dismissal-audit.js");
   const restore = { id: "restore-1", kind: "restore", retirementId: retirement.id, scope, snapshotKey, at: "2026-10-13T14:00:00.000Z" };
   const audit = buildInboxDismissalAudit({ scope: { instance: "core", repository: "owner/core" }, window, coverage, controls,
     receipts: [{ ...retirement, heldAtRetirement: false, authority: "operator" }, restore] });
@@ -104,7 +104,7 @@ test("restoration is a later outcome and never proof of a false dismissal by its
 });
 
 test("the bounded evidence excerpt never caps the audit denominator or hides a later false dismissal", async () => {
-  const { buildInboxDismissalAudit, validInboxDismissalAudit } = await import("../src/lib/inbox-dismissal-audit.js");
+  const { buildInboxDismissalAudit, validInboxDismissalAudit } = await import("#src/lib/inbox-dismissal-audit.js");
   const receipts = Array.from({ length: 101 }, (_, i) => ({ ...retirement, id: `retire-${i}` }));
   const audit = buildInboxDismissalAudit({ scope: { instance: "core", repository: "owner/core" }, window, coverage, controls, receipts });
   assert.equal(audit.denominator.eligible, 101);
@@ -119,7 +119,7 @@ test("the bounded evidence excerpt never caps the audit denominator or hides a l
 });
 
 test("malformed audit inputs cannot certify an empty retirement history", async () => {
-  const { buildInboxDismissalAudit, validInboxDismissalAudit } = await import("../src/lib/inbox-dismissal-audit.js");
+  const { buildInboxDismissalAudit, validInboxDismissalAudit } = await import("#src/lib/inbox-dismissal-audit.js");
   const input = { scope: { instance: "core", repository: "owner/core" }, window, coverage, controls };
   for (const raw of [null, [], {}, { ...retirement, at: "not-time" }, { ...retirement, snapshotKey: "not-snapshot" },
     { ...retirement, authority: "unbound" }, { ...retirement, heldAtRetirement: "yes" }, { ...retirement, kind: "unknown" }]) {

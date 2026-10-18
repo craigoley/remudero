@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyProposal, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
-import { stampVerificationAsk } from "../src/lib/inbox-retirement.js";
-import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
-import { machineJudgeProposal } from "../src/lib/machine-filing-judge.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
+import { classifyProposal, type Proposal, type ReadinessContext } from "#src/lib/inbox.js";
+import { stampVerificationAsk } from "#src/lib/inbox-retirement.js";
+import { proposalFromJudgedShard } from "#src/lib/verify-human-judge.js";
+import { machineJudgeProposal } from "#src/lib/machine-filing-judge.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
 
 // Operator report 2026-10-13: W1-T7271 and W1-T6372 were released with `rmd approve` at 11:55Z, as their
 // machine-judge asks instruct, yet both asks stayed READY under Needs your decision for hours.

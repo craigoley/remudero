@@ -6,16 +6,17 @@
 // MANUAL/HARD_STOP escalation into the W1-T163 recap for an ASYNC verdict instead of paging in
 // real time; ATTENDED (the default, unset) delivers exactly as before this task. STOP and PAUSE
 // (fleet-control.ts, W1-T11) remain the only real-time-presence waits, untouched.
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { awayCommand, escalateCommand } from "../src/run-task.js";
-import { awayFilePath, deliversRealtime, presenceMode, setPresenceMode } from "../src/lib/escalate.js";
-import { buildRecapEvents } from "../src/lib/recap.js";
-import type { Plan } from "../src/lib/plan.js";
+import { awayCommand, escalateCommand } from "#src/run-task.js";
+import { awayFilePath, deliversRealtime, presenceMode, setPresenceMode } from "#src/lib/escalate.js";
+import { buildRecapEvents } from "#src/lib/recap.js";
+import type { Plan } from "#src/lib/plan.js";
 
 function setupRoot(): { root: string; home: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-away-"));
@@ -156,9 +157,9 @@ test("claim 2b: switching presence back to attended clears the AWAY flag and res
 // ── Claim 3: presence keys ONLY delivery — the dead presence×risk dispatch matrix stays absent ─
 
 test("claim 3: no dispatch-path module reads the presence signal — the presence×risk dispatch matrix (rounds 1-2) is absent, dead", () => {
-  const drainSrc = readFileSync(fileURLToPath(new URL("../src/lib/drain.ts", import.meta.url)), "utf8");
-  const overlapSrc = readFileSync(fileURLToPath(new URL("../src/lib/dispatch-overlap.ts", import.meta.url)), "utf8");
-  const riskSrc = readFileSync(fileURLToPath(new URL("../src/lib/risk-score.ts", import.meta.url)), "utf8");
+  const drainSrc = readFileSync(join(repoRoot(), "src/lib/drain.ts"), "utf8");
+  const overlapSrc = readFileSync(join(repoRoot(), "src/lib/dispatch-overlap.ts"), "utf8");
+  const riskSrc = readFileSync(join(repoRoot(), "src/lib/risk-score.ts"), "utf8");
   const sources: Array<[string, string]> = [
     ["drain.ts (nextRunnable/runnableCandidates — the dispatch selection surface)", drainSrc],
     ["dispatch-overlap.ts", overlapSrc],
@@ -173,7 +174,7 @@ test("claim 3: no dispatch-path module reads the presence signal — the presenc
 });
 
 test("claim 3b: STOP and PAUSE (fleet-control.ts) stay independent of the presence signal — the only real-time-presence waits, untouched by this task", () => {
-  const fleetControlSrc = readFileSync(fileURLToPath(new URL("../src/lib/fleet-control.ts", import.meta.url)), "utf8");
+  const fleetControlSrc = readFileSync(join(repoRoot(), "src/lib/fleet-control.ts"), "utf8");
   assert.ok(!fleetControlSrc.includes("escalate.js"), "fleet-control.ts must not depend on escalate.ts's presence signal");
   assert.ok(!fleetControlSrc.includes("presenceMode") && !fleetControlSrc.includes("PresenceMode"));
   assert.match(fleetControlSrc, /export function isStopped/, "STOP gate predicate is still present, unmodified in shape");
@@ -181,7 +182,7 @@ test("claim 3b: STOP and PAUSE (fleet-control.ts) stay independent of the presen
 });
 
 test("claim 3c: escalateCommand is the ONLY real-time-ping site gated on presence — every other escalate()/tryEscalate() call site in run-task.ts is presence-agnostic (relies on the recap/digest for async surfacing, exactly as before this task)", () => {
-  const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const runTaskSrc = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
   const occurrences = runTaskSrc.match(/deliversRealtime\(/g) ?? [];
   assert.equal(occurrences.length, 1, "deliversRealtime must gate exactly one call site — escalateCommand's real-time ping");
 });

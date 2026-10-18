@@ -8,8 +8,8 @@ import {
   MAX_PLAN_REPAIR_STRIKES,
   planCappedRepair,
   type CappedRepairState,
-} from "../src/lib/classify.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/lib/classify.js";
+import type { Config } from "#src/lib/config.js";
 import {
   DEFAULT_SWEEP_POLICY,
   PLAN_REPAIR_DISPATCH_STEP,
@@ -22,13 +22,13 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { CriterionVerdict } from "../src/lib/review.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
+} from "#test/helpers/sweep-test.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { CriterionVerdict } from "#src/lib/review.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
 
 // W1-T3390 — TWO STRIKES THEN A HUMAN IS NOT AN AUTOMATION LADDER. MEASURED on PR 5107: 30 sweep
 // dispositions reading "capped review still has non-discriminating proofs, but its shared fix

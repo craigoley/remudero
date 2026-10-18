@@ -1,3 +1,5 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { pathToFileURL } from "node:url";
 // The sweep's diff-coverage reporter feeds the red-base refresh decision. It reads repository paths
 // through the fix prompt's parser and retains absolute checkout paths when CI prints those instead.
 import assert from "node:assert/strict";
@@ -5,7 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
 
-import * as sweep from "../src/lib/sweep.js";
+import * as sweep from "#src/lib/sweep.js";
 
 const HEADER =
   "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests, even though the aggregate coverage-ratchet floor may still be satisfied:";
@@ -45,7 +47,7 @@ test("an absolute path from another checkout does not match a source basename", 
 });
 
 test('the absolute-path diff-coverage parser rejects a long "- /!/!/" line in linear time', async (t) => {
-  const moduleUrl = new URL("../src/lib/sweep.ts", import.meta.url).href;
+  const moduleUrl = pathToFileURL(`${repoRoot()}/src/lib/sweep.ts`).href;
   const program = `
     const { diffCoverageReport } = await import(${JSON.stringify(moduleUrl)});
     process.send({ ready: true });

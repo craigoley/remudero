@@ -3,12 +3,12 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import {
   CONTEXT_ITEM_STEP,
   readGovernedContext,
   type ContextItem,
-} from "../src/lib/operator-agent.js";
+} from "#src/lib/operator-agent.js";
 
 const NOW = Date.parse("2026-09-21T00:00:00.000Z");
 

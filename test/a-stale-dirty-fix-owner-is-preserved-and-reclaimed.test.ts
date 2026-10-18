@@ -9,12 +9,12 @@ import {
   decideRegisteredFixOwnerRecovery, preserveStaleDirtyFixOwner, registeredFixWorktreeOwner,
   removeAbandonedFixWorktreeOwner,
   type BuildSweepEffectsDeps, type CaptureRegisteredFixOwnerDeps, type RegisteredFixOwnerSnapshot,
-} from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, registeredFixOwnerIdleBoundMs, type OpenPrView } from "../src/lib/sweep.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, registeredFixOwnerIdleBoundMs, type OpenPrView } from "#src/lib/sweep.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T7719";
 const PR = 10551;

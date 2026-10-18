@@ -13,9 +13,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { captureFeedback, feedbackEntryPath, type FeedbackOrigin } from "../src/lib/feedback.js";
-import { memoryIncidentOrigin } from "../src/lib/host-resource-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { captureFeedback, feedbackEntryPath, type FeedbackOrigin } from "#src/lib/feedback.js";
+import { memoryIncidentOrigin } from "#src/lib/host-resource-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ORIGIN = memoryIncidentOrigin("azure", "remudero-daemon");
 const ID = `host-mem-${ORIGIN.slice("incident#".length, "incident#".length + 16)}`;

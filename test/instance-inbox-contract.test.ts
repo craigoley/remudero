@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AnalyticsSnapshotCache } from "../src/lib/analytics-route.js";
-import { buildInstanceGatewayRoutes, NO_INSTANCE_RATIFY, type InstanceStateRoot } from "../src/lib/instance-gateway.js";
+import type { AnalyticsSnapshotCache } from "#src/lib/analytics-route.js";
+import { buildInstanceGatewayRoutes, NO_INSTANCE_RATIFY, type InstanceStateRoot } from "#src/lib/instance-gateway.js";
 import {
   INBOX_RECEIPT_DIR,
   INSTANCE_INBOX_ROUTES,
@@ -22,12 +22,12 @@ import {
   instanceInboxContractState,
   mountInstanceInboxRoutes,
   type IntentReceipt,
-} from "../src/lib/instance-inbox-contract.js";
-import { inboxThreadId } from "../src/lib/inbox-thread.js";
-import { createInstancesView, type InstancesData } from "../src/lib/instances-view.js";
-import { sendJson } from "../src/lib/panel-actions.js";
-import { RAW_BODY_CACHE, createService, type Route } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/instance-inbox-contract.js";
+import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { createInstancesView, type InstancesData } from "#src/lib/instances-view.js";
+import { sendJson } from "#src/lib/panel-actions.js";
+import { RAW_BODY_CACHE, createService, type Route } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const READ = "inbox-contract-read";
 const WRITE = "inbox-contract-write";

@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -19,10 +20,10 @@ import {
   planArchitectPrompt,
   planCommitMessage,
   type PlanDecision,
-} from "../src/lib/plan-architect.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { planCommand } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/plan-architect.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { planCommand } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 /**
  * A real, throwaway git repo seeded with a baseline `plan/tasks.yaml` + `MASTER-PLAN.md` and
@@ -160,7 +161,7 @@ test("planArchitectPrompt: carries the mode and run id", () => {
 // There is only ONE definition of the shared functions — a grep-shaped proof that the module
 // never grew a per-mode copy of planArchitectPrompt/parsePlanVerdict/decidePlanArchitect.
 test("GREP PROOF: the shared functions each have exactly ONE definition in lib/plan-architect.ts", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/plan-architect.ts", import.meta.url)), "utf8");
+  const src = readFileSync(join(repoRoot(), "src/lib/plan-architect.ts"), "utf8");
   for (const fn of ["planArchitectPrompt", "parsePlanVerdict", "decidePlanArchitect"]) {
     const defs = [...src.matchAll(new RegExp(`export function ${fn}\\(`, "g"))];
     assert.equal(defs.length, 1, `${fn} must have exactly one definition, found ${defs.length}`);
@@ -390,7 +391,7 @@ test("planCommitMessage passes real configured commitlint", () => {
       "Repair RMD triage claim execution when the canonical target clone has no node_modules. Live evidence: rmd triage created its worktree then refused its claim.",
   });
   for (const line of message.split("\n")) assert.ok(line.length <= 100, `over-long line: ${JSON.stringify(line)}`);
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = repoRoot();
   const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
     cwd: root,
     input: message,
@@ -433,7 +434,7 @@ test("planCommitMessage wraps structured plan acceptance and preserves trailer",
   // completed build.
   assert.doesNotMatch(message, /^Remudero-Task:/m, "a plan-filing commit must never carry the trailer");
 
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = repoRoot();
   const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
     cwd: root,
     input: message,
@@ -478,7 +479,7 @@ test("planCommitMessage wraps a long brief and preserves it", () => {
   assert.match(bodyBlock.trimEnd(), /^Operator brief \(summary\) — repair the RMD plan lane so a long/);
   assert.doesNotMatch(message, /Two real rmd plan|^Brief:/m);
 
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = repoRoot();
   const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
     cwd: root,
     input: message,
@@ -864,8 +865,7 @@ async function withGrillWireHarness(
   const savedPath = process.env.PATH;
   const savedBranch = process.env.RMD_SHIM_BRANCH;
   const savedLog = process.env.GH_CALL_LOG;
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  const REPO_ROOT = join(__dirname, "..");
+  const REPO_ROOT = repoRoot();
   try {
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(

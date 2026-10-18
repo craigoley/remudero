@@ -19,8 +19,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { machineAuthorVerifyViolation, lintTask, taskRulingPin } from "../src/lib/task-linter.js";
-import type { Task, TaskRiskRuling } from "../src/lib/plan.js";
+import { machineAuthorVerifyViolation, lintTask, taskRulingPin } from "#src/lib/task-linter.js";
+import type { Task, TaskRiskRuling } from "#src/lib/plan.js";
 
 function task(over: Partial<Task> & { id: string }): Task {
   return {

@@ -22,10 +22,10 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { acquireDrainLock } from "../src/lib/drain-lock.js";
-import { mergeDraftCaches, type DraftAttemptCache, type DraftCache, type DraftedCandidate } from "../src/lib/inbox.js";
-import { buildInboxDraftHook } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+import { acquireDrainLock } from "#src/lib/drain-lock.js";
+import { mergeDraftCaches, type DraftAttemptCache, type DraftCache, type DraftedCandidate } from "#src/lib/inbox.js";
+import { buildInboxDraftHook } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 const cand = (id: string): DraftedCandidate => ({
   proposalId: id,

@@ -13,17 +13,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { renderIssueBody, type AsyncIssueGateway, type OpenIssue } from "../src/lib/escalate.js";
+import { renderIssueBody, type AsyncIssueGateway, type OpenIssue } from "#src/lib/escalate.js";
 import {
   buildMainHealthRung,
   escalationFor,
   MAIN_HEALTH_MET_PR_LIMIT,
   type MainHealthMergeReader,
   type MainHealthRungDeps,
-} from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { mainHealthFromRollup } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { mainHealthFromRollup } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const OWNER = "o";
 const REPO = "r";

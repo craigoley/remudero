@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import crypto, { createHash } from "node:crypto";
 import { syncBuiltinESMExports } from "node:module";
@@ -7,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.js";
+import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "#src/lib/routing-quarantine-resolution.js";
 
-const { dailyRoutingReview } = await import(pathToFileURL(join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs")).href);
+const { dailyRoutingReview } = await import(pathToFileURL(join(repoRoot(), "scripts/private-routing-daily-review.mjs")).href);
 const asOf = "2026-10-08T12:00:00.000Z";
 const cli = { ts: "2027-10-14T10:00:00.000Z", step: "cli.invoked", argv: ["status"] };
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -97,7 +98,7 @@ test("a trial assignment or a CLI row carrying outcome and billing evidence rema
     assert.equal(snapshot.sources[0].futureRows, 2);
     assert.equal(snapshot.sources[0].reports[0].reviewState, "source-incomplete");
   } finally { f.close(); }
-  const { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } = await import("../src/lib/routing-quarantine-resolution.js");
+  const { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } = await import("#src/lib/routing-quarantine-resolution.js");
   for (const row of [{ ...cli, step: "worker.assignment" }, ...["selection_assignment_id", "worker_assignment", "tokens",
     "total_cost_usd", "cost_usd", "notional_cost_usd", "billing_mode", "success", "served_model"].map(key => ({ ...cli, [key]: null }))]) {
     const raw = JSON.stringify(row);
@@ -118,7 +119,7 @@ test("resolving an irrelevant future row never clears malformed or invalid times
 });
 
 test("resolution manifests refuse unknown scopes, repetitions, oversized input and later decisions", async () => {
-  const { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } = await import("../src/lib/routing-quarantine-resolution.js");
+  const { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } = await import("#src/lib/routing-quarantine-resolution.js");
   for (const input of [null, {}, manifest(Array(201).fill(entry())), manifest([entry(), entry()]),
     manifest([{ ...entry(), sourceLabel: "unknown" }]), manifest([{ ...entry(), rowHash: "bad" }]),
     manifest([{ ...entry(), scope: "all-ledger" }]), manifest([{ ...entry(), reason: "assumed" }]),
@@ -140,9 +141,9 @@ test("the real daily CLI reads its default private resolution file and preserves
   try {
     mkdirSync(f.outDir); const file = join(f.outDir, "quarantine-resolutions.json");
     writeFileSync(file, JSON.stringify(manifest([entry()])), { mode: 0o600 });
-    const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
+    const script = join(repoRoot(), "scripts/private-routing-daily-review.mjs");
     const command = ["--import", "tsx", script, "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir];
-    const positive = spawnSync(process.execPath, command, { cwd: join(import.meta.dirname, ".."), encoding: "utf8" });
+    const positive = spawnSync(process.execPath, command, { cwd: repoRoot(), encoding: "utf8" });
     assert.equal(positive.status, 0, positive.stderr);
     const saved = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
     assert.equal(saved.sources[0].reports[0].sourceQuality.state, "observed");
@@ -171,10 +172,10 @@ const swap=(s)=>{if(!swapped&&s.ino===original.ino&&s.dev===original.dev){swappe
 fs.lstatSync=(path,...args)=>swap(realLstat(path,...args));
 fs.fstatSync=(fd,...args)=>swap(realFstat(fd,...args));
 syncBuiltinESMExports();process.on('exit',()=>{if(!swapped)process.exitCode=99;});`);
-    const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
+    const script = join(repoRoot(), "scripts/private-routing-daily-review.mjs");
     const child = spawnSync(process.execPath, ["--import", "tsx", "--import", preload, script,
       "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir],
-    { cwd: join(import.meta.dirname, ".."), encoding: "utf8" });
+    { cwd: repoRoot(), encoding: "utf8" });
     assert.equal(child.status, 0, child.stderr);
     const saved = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
     assert.equal(saved.sources[0].routingResolvedFutureRows, 1, "the opened original supplies the resolution");
@@ -193,10 +194,10 @@ test("a private resolution file growing after descriptor inspection still hits t
 const target=${JSON.stringify(file)}, original=fs.lstatSync(target), real=fs.fstatSync;
 let grown=false;fs.fstatSync=(fd,...args)=>{const s=real(fd,...args);if(!grown&&s.ino===original.ino&&s.dev===original.dev){grown=true;fs.appendFileSync(target,' '.repeat(65537));}return s;};
 syncBuiltinESMExports();process.on('exit',()=>{if(!grown)process.exitCode=99;});`);
-    const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
+    const script = join(repoRoot(), "scripts/private-routing-daily-review.mjs");
     const child = spawnSync(process.execPath, ["--import", "tsx", "--import", preload, script,
       "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir],
-    { cwd: join(import.meta.dirname, ".."), encoding: "utf8" });
+    { cwd: repoRoot(), encoding: "utf8" });
     assert.notEqual(child.status, 0);
     assert.match(child.stderr, /exceed the private input byte bound/);
   } finally { f.close(); }
@@ -207,10 +208,10 @@ test("the private resolution reader refuses directories, oversized files and non
   try {
     mkdirSync(f.outDir);
     const file = join(f.outDir, "quarantine-resolutions.json");
-    const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
+    const script = join(repoRoot(), "scripts/private-routing-daily-review.mjs");
     const command = ["--import", "tsx", script, "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir];
     const run = () => spawnSync(process.execPath, command,
-      { cwd: join(import.meta.dirname, ".."), encoding: "utf8", timeout: 10_000 });
+      { cwd: repoRoot(), encoding: "utf8", timeout: 10_000 });
     mkdirSync(file);
     assert.notEqual(run().status, 0);
     rmSync(file, { recursive: true });

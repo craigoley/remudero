@@ -14,8 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import * as inbox from "../src/lib/inbox.js";
+import { fixedClock } from "#src/lib/clock.js";
+import * as inbox from "#src/lib/inbox.js";
 import {
   anchorFingerprint,
   classifyProposal,
@@ -27,10 +27,10 @@ import {
   type DraftRepoFacts,
   type Proposal,
   type ReadinessContext,
-} from "../src/lib/inbox.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import { relintGuidanceLines } from "../src/lib/relint.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/inbox.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
+import { relintGuidanceLines } from "#src/lib/relint.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const KNOWN = new Set(["remudero", "none"]);
 const PROPOSAL_ID = "followup:W1-T5060-1790000000000";

@@ -16,9 +16,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
-import { runCensusFix, type CensusFixSpawn } from "../src/lib/census-fix.js";
-import { commitWorkerEditsWithCensusFix } from "../src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { runCensusFix, type CensusFixSpawn } from "#src/lib/census-fix.js";
+import { commitWorkerEditsWithCensusFix } from "#src/run-task.js";
 
 /** `scripts/source-size-ratchet.mjs`'s own bucket — matches its exported `CEILING_BUCKET_LINES`,
  *  restated rather than imported: this suite proves the OUTCOME a real subprocess produced, not a

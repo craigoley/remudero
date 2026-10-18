@@ -12,7 +12,7 @@ import {
   forwardDelegation,
   InMemoryDelegationEnvelopeStore,
   type DelegationRiskTier,
-} from "../src/lib/automation-action.js";
+} from "#src/lib/automation-action.js";
 
 const GATED_TIERS: readonly DelegationRiskTier[] = ["high", "production", "financial", "credential", "destructive"];
 

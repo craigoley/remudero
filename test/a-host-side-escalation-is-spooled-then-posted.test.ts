@@ -11,9 +11,9 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import type { AsyncIssueGateway, Escalation, OpenIssue } from "../src/lib/escalate.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import type { AsyncIssueGateway, Escalation, OpenIssue } from "#src/lib/escalate.js";
 import {
   drainEscalationSpool,
   ESCALATION_SPOOL_DRAIN_PASS,
@@ -28,14 +28,14 @@ import {
   withEscalationSpoolDrain,
   type SpoolEntry,
   type SpoolMeta,
-} from "../src/lib/host-escalation-spool.js";
-import { LIVE_EDIT_STEPS, liveEditStatePath } from "../src/lib/live-edit-ladder.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { escalationSpoolDrainWiring, liveEditsCommand } from "../src/run-task.js";
-import { runBeat } from "./helpers/fleet-heartbeat-harness.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/host-escalation-spool.js";
+import { LIVE_EDIT_STEPS, liveEditStatePath } from "#src/lib/live-edit-ladder.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { escalationSpoolDrainWiring, liveEditsCommand } from "#src/run-task.js";
+import { runBeat } from "#test/helpers/fleet-heartbeat-harness.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const T0 = Date.parse("2026-10-11T00:17:00Z");
 const HOUR = 3_600_000;

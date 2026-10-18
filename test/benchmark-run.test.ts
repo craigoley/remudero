@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { benchmarkRunAssignmentReceipt, benchmarkRunTerminalReceipt, compareBenchmarkStacks,
-  executingHarnessRevision, type BenchmarkStackEvidence } from "../src/lib/benchmark-run.js";
+  executingHarnessRevision, type BenchmarkStackEvidence } from "#src/lib/benchmark-run.js";
 
 const assignment = {
   id: "private-assignment-id",

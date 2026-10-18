@@ -3,11 +3,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
-import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand, dedicatedTargetPlanReloader, planReloader, resolveReloadPlan } from "../src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { daemonCommand, dedicatedTargetPlanReloader, planReloader, resolveReloadPlan } from "#src/run-task.js";
 
 // ── W1-T3554 ─────────────────────────────────────────────────────────────────────────────────
 //

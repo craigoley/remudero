@@ -4,13 +4,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { automergeHoldFromLedger } from "../src/lib/review.js";
-import { armAutoMergeAtOpen, armOutcomeReason, buildSweepEffects, realArmDeps } from "../src/run-task.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { captureFeedback } from "../src/lib/feedback.js";
-import { LANDING_BRANCH } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { automergeHoldFromLedger } from "#src/lib/review.js";
+import { armAutoMergeAtOpen, armOutcomeReason, buildSweepEffects, realArmDeps } from "#src/run-task.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { captureFeedback } from "#src/lib/feedback.js";
+import { LANDING_BRANCH } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 // ── W1-T1000002 ───────────────────────────────────────────────────────────────────────────
 //

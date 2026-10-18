@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { breMetacharsIn, proofGrepSafetyViolations } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { breMetacharsIn, proofGrepSafetyViolations } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── `?` IS AN ENGINE-DIFFERENCE, AND THE OBVIOUS ESCAPE INVERTS IT ──────────────────────────────
 //

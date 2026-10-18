@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -5,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { acquireDrainLock } from "../src/lib/drain-lock.js";
+import { acquireDrainLock } from "#src/lib/drain-lock.js";
 import {
   claimTriage,
   claimTriageWithLogging,
@@ -19,9 +20,9 @@ import {
   triageLockPath,
   type TriageClaimOutcome,
   type TriageClaimReserver,
-} from "../src/lib/auto-triage.js";
-import { mergedTriageSubjects, triageClaimReserverFor, triageCommand } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/auto-triage.js";
+import { mergedTriageSubjects, triageClaimReserverFor, triageCommand } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 // ── WHAT THIS FILE PROVES (W1-T1132) ─────────────────────────────────────────────────────────
 // The duplicate-triage guard W1-T300 shipped and W1-T1019 wired IS cross-host: it reads an OPEN
@@ -34,7 +35,7 @@ import type { WorkerResult } from "../src/lib/worker.js";
 // DECISION is pure and asserted without a git remote; the one I/O seam is asserted against a real
 // local bare repo, because a suite where every test injects a fake never executes the seam at all.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 
 function git(dir: string, ...args: string[]): string {

@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -10,9 +11,9 @@ import {
   type AutomationAction,
   type AutomationActionReceipt,
   type AutomationPreconditionObservation,
-} from "../src/lib/automation-action.js";
-import { reconcileExternalEffect, redactConnectorEvidence, type ExternalEffectRequest, type ExternalObservation } from "../src/lib/action-reconciliation.js";
-import { fixedClock } from "../src/lib/clock.js";
+} from "#src/lib/automation-action.js";
+import { reconcileExternalEffect, redactConnectorEvidence, type ExternalEffectRequest, type ExternalObservation } from "#src/lib/action-reconciliation.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 // W1-T3896: the automation-flow-v1 fixture corpus is what the console pins to test its adapter.
 // This suite proves it covers ready, refused, stale, unknown, expired, in-progress, pending and
@@ -20,7 +21,7 @@ import { fixedClock } from "../src/lib/clock.js";
 // stated input (so a fixture can never describe behaviour core does not have); and that dropping
 // the fixtures for any required outcome — a refusal included — fails the validator.
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = repoRoot();
 const REQUIRED_OUTCOMES = ["ready", "refused", "stale", "unknown", "expired", "in-progress", "pending", "partial"];
 
 interface Fixture {

@@ -3,10 +3,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { findUntrialedModels, deploymentCandidates, runDeploymentBakeoff, type DeployedModel, type DeploymentBakeoffCandidate } from "../src/lib/bakeoff-trigger.js";
-import { scoreCandidate } from "../src/lib/inbox-bakeoff.js";
-import { loadProposalRegistry } from "../src/lib/inbox.js";
-import { runSweepBakeoff } from "./helpers/sweep-test.js";
+import { findUntrialedModels, deploymentCandidates, runDeploymentBakeoff, type DeployedModel, type DeploymentBakeoffCandidate } from "#src/lib/bakeoff-trigger.js";
+import { scoreCandidate } from "#src/lib/inbox-bakeoff.js";
+import { loadProposalRegistry } from "#src/lib/inbox.js";
+import { runSweepBakeoff } from "#test/helpers/sweep-test.js";
 
 const deployed: DeployedModel[] = [
   { model: "gpt-5-nano", billing: "cash", efforts: ["low", "medium", "high"] },

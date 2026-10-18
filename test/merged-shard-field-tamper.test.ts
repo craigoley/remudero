@@ -7,8 +7,8 @@ import {
   mergedFieldChangeViolations,
   postMergeAmendmentViolations,
   type PostMergeAmendmentContext,
-} from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+} from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // W1-T2254: `postMergeAmendmentViolations` (task-linter.ts) guarded exactly ONE field of a
 // merged shard — `acceptance`, and only against an ADDED/CHANGED claim — so every other field

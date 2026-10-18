@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { inverseScopeAdvisorySection, judgeReview } from "../src/lib/review.js";
-import { subsystemsOf } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { inverseScopeAdvisorySection, judgeReview } from "#src/lib/review.js";
+import { subsystemsOf } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // W1-T3645 — W1-T3621 declared `files: [src/lib/inbox.ts, src/run-task.ts, test/...]`. #5689's
 // merged diff never touched `src/run-task.ts`: `planProjectionForDependsOn` was built and called

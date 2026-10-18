@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadProposalRecords, ProposalRecordError } from "../src/lib/plan-proposals.js";
-import { lintPlanCommand } from "../src/run-task.js";
+import { loadProposalRecords, ProposalRecordError } from "#src/lib/plan-proposals.js";
+import { lintPlanCommand } from "#src/run-task.js";
 
 function fixture(): { root: string; proposals: string; dispose: () => void } {
   const root = mkdtempSync(join(tmpdir(), "rmd-proposals-"));

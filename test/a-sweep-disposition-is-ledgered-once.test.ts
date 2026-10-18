@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const FIXTURE_NOW_MS = Date.UTC(2026, 8, 24, 11);
 const LAST_ACTIVITY_AT = new Date(FIXTURE_NOW_MS - 60 * 60_000).toISOString();

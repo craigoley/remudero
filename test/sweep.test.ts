@@ -1,13 +1,15 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { DEFAULT_ESTIMATE_MIB } from "../src/lib/host-memory-ledger.js";
-import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { classifyUpdateBranchFailure, reviewAttemptsForInput, updateBranchViaGh } from "./helpers/run-task-test.js";
+import { DEFAULT_ESTIMATE_MIB } from "#src/lib/host-memory-ledger.js";
+import { LiveWriteBlockedError, withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { classifyUpdateBranchFailure, reviewAttemptsForInput, updateBranchViaGh } from "#test/helpers/run-task-test.js";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeMutantModule } from "./helpers/mutant-module.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
 import {
   DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
@@ -53,13 +55,13 @@ import {
   type SupersessionVerdict,
   recordableRatchetRepairFor,
   recordableRatchetScripts,
-} from "./helpers/sweep-test.js";
-import { REVIEW_ENGINE_REVISION, reviewInputDigest, reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
+} from "#test/helpers/sweep-test.js";
+import { REVIEW_ENGINE_REVISION, reviewInputDigest, reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 // W1-T2381: the trip's surviving surface is the digest, so the end-to-end test renders one.
-import { buildDigest } from "../src/lib/digest.js";
-import { escalate, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
+import { buildDigest } from "#src/lib/digest.js";
+import { escalate, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type IssueGateway, type OpenIssue } from "#src/lib/escalate.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -1132,7 +1134,7 @@ test("W1-T1016: a contradiction failure is dispositioned blocked fixable", () =>
 });
 
 test("W1-T1016: removing the reason write fails the routing test", () => {
-  const reviewUrl = new URL("../src/lib/review.ts", import.meta.url);
+  const reviewUrl = pathToFileURL(join(repoRoot(), "src/lib/review.ts"));
   const src = readFileSync(reviewUrl, "utf8");
   const target = "  if (reasons.length === 0 && (verdict.changesetContradictions?.length ?? 0) > 0) {\n    reasons.push(verdict.summary);\n  }\n";
   const occurrences = src.split(target).length - 1;
@@ -1148,7 +1150,7 @@ test("W1-T1016: removing the reason write fails the routing test", () => {
 
   const mutantPath = writeMutantModule("review.ts", mutatedSrc);
   return (async () => {
-    const mutant = (await import(mutantPath)) as typeof import("../src/lib/review.js");
+    const mutant = (await import(mutantPath)) as typeof import("#src/lib/review.js");
 
     const mutantReasons = mutant.reviewLedgerReasons(contradictionVerdict());
     assert.deepEqual(mutantReasons, [], "the mutant reverts to the pre-fix reasons: [] shape");

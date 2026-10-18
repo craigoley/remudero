@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { approveProposal, ratificationShardFiles, writeRatificationShards } from "../src/lib/inbox.js";
-import type { DraftedCandidate, InboxClassification, RatifyGateway } from "../src/lib/inbox.js";
+import { approveProposal, ratificationShardFiles, writeRatificationShards } from "#src/lib/inbox.js";
+import type { DraftedCandidate, InboxClassification, RatifyGateway } from "#src/lib/inbox.js";
 
 // ── The ratification path filed into the monolith, and lint-plan forbids it ────────────────────
 //

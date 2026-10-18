@@ -6,9 +6,9 @@ import { test } from "node:test";
 import {
   promoteIntroducedPlanOnlyDiagnostics,
   type LintViolation,
-} from "../src/lib/task-linter.js";
-import { lintPlanCommand } from "../src/run-task.js";
-import { isolatedCheckout } from "./helpers/isolated-checkout.js";
+} from "#src/lib/task-linter.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { isolatedCheckout } from "#test/helpers/isolated-checkout.js";
 
 const FIXTURE = isolatedCheckout(process.cwd());
 

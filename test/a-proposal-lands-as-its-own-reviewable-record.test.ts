@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { loadProposalRegistry, parseProposalRegistry, proposalShardDir, updateProposalRegistry, type Proposal } from "../src/lib/inbox.js";
+import { loadProposalRegistry, parseProposalRegistry, proposalShardDir, updateProposalRegistry, type Proposal } from "#src/lib/inbox.js";
 
 /**
  * test/a-proposal-lands-as-its-own-reviewable-record.test.ts — W1-T2490: PROPOSAL SHARDING.

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { decideSweepArm, type OpenPrView } from "../src/lib/sweep.js";
+import { decideSweepArm, type OpenPrView } from "#src/lib/sweep.js";
 
 const HEAD = "head-3471";
 const TASK = "W1-T3471";

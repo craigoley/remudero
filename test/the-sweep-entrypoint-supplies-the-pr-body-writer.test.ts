@@ -26,11 +26,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects as buildSweepEffectsFromLib, type MissingTaskTrailerRepair } from "../src/lib/sweep.js";
-import { buildSweepEffects, type BuildSweepEffectsDeps } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
+import { buildSweepEffects as buildSweepEffectsFromLib, type MissingTaskTrailerRepair } from "#src/lib/sweep.js";
+import { buildSweepEffects, type BuildSweepEffectsDeps } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const REPAIR: MissingTaskTrailerRepair = {
   taskId: "W1-T3869",

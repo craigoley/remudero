@@ -43,13 +43,13 @@ import {
   ciGateFromRollup,
   pollToGate,
   STALL_WINDOW,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 import {
   checksStateFromRollup,
   REQUIRED_CHECK_FAIL,
   REQUIRED_CHECK_OK,
   type RollupCheckEntry,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const RUN_TASK_SRC = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "..", "src", "run-task.ts"),

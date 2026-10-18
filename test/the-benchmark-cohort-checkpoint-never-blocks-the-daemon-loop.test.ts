@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Worker } from "node:worker_threads";
 import { benchmarkCohortDaemonPass, runBenchmarkCohortPass, runBenchmarkCohortPassOffLoop,
-  type BenchmarkCohortSnapshot } from "../src/lib/benchmark-cohort.js";
+  type BenchmarkCohortSnapshot } from "#src/lib/benchmark-cohort.js";
 
 const CHECKPOINT = "benchmark-cohort-v1.json";
 

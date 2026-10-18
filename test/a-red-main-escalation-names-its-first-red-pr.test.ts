@@ -7,13 +7,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { prReferentFromIssueText } from "../src/lib/escalate.js";
-import { escalationFor } from "../src/lib/main-health-rung.js";
+import { prReferentFromIssueText } from "#src/lib/escalate.js";
+import { escalationFor } from "#src/lib/main-health-rung.js";
 import {
   enrichMainHealthObservation,
   mainHealthFromRollup,
   type MainHealthRunHistoryEntry,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const HEAD_SHA = "41231c6700000000000000000000000000000000";
 const RED_PUSH_SHA = "12ead908aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

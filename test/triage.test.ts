@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -23,16 +24,15 @@ import {
   triageCommitMessage,
   triagePrompt,
   type TriageDecision,
-} from "../src/lib/triage.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
-import { TRIAGE_WORKER_TOOLS, triageCommand } from "../src/run-task.js";
-import { escalate, renderIssueBody, type IssueGateway } from "../src/lib/escalate.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { workerTranscript, type WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/triage.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
+import { TRIAGE_WORKER_TOOLS, triageCommand } from "#src/run-task.js";
+import { escalate, renderIssueBody, type IssueGateway } from "#src/lib/escalate.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { workerTranscript, type WorkerResult } from "#src/lib/worker.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 
 function tempLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-grill-")), "ledger.ndjson");
@@ -1528,9 +1528,9 @@ test("W1-T4203: a refused triage commit is not re-triaged", async () => {
   assert.deepEqual([...refusedTriageIds([{ step: TRIAGE_COMMIT_REFUSED_STEP }, { step: "other", feedback_id: "a" }])], []);
 
   // (3) THE WIRING: autoTriageCheck never fires on a refused entry and does again once it is cleared.
-  const { autoTriageCheck } = await import("../src/run-task.js");
-  const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
-  const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
+  const { autoTriageCheck } = await import("#src/run-task.js");
+  const { loadPolicy, policyPath } = await import("#src/lib/policy.js");
+  const { newFeedbackIdsOldestFirst } = await import("#src/lib/auto-triage.js");
   const candidates = newFeedbackIdsOldestFirst(REPO_ROOT);
   assert.ok(candidates.length >= 1, "this checkout holds at least one status: new entry to exercise");
   const shipped = loadPolicy(policyPath(REPO_ROOT));
@@ -1538,7 +1538,7 @@ test("W1-T4203: a refused triage commit is not re-triaged", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-triage-refused-"));
   mkdirSync(join(root, "state"), { recursive: true });
   try {
-    const config = { root, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const config = { root, claudeBin: "/bin/true" } as unknown as import("#src/lib/config.js").Config;
     const claimReserver = { mintAnchor: () => "a", attempt: () => "created", claimedIds: () => new Map() } as never;
     const args = { config, policy, now: new Date(), deferralPending: true, dispatchCount: 1, laneBudget: 1, claimReserver };
     const [head] = candidates;
@@ -1553,8 +1553,8 @@ test("W1-T4203: a refused triage commit is not re-triaged", async () => {
     const after = await autoTriageCheck({ ...args, readRefusalRows: () => [refusal(head, "2026-01-01"), cleared(head, "2026-01-02")] });
     assert.equal(after.fire && after.feedbackId, head, "a clearing row makes it eligible again");
     // The DEFAULT read: a real ledger on disk, written through the real append path.
-    const { appendLedger } = await import("../src/lib/ledger.js");
-    const { ledgerPathFor } = await import("../src/lib/ledger-path.js");
+    const { appendLedger } = await import("#src/lib/ledger.js");
+    const { ledgerPathFor } = await import("#src/lib/ledger-path.js");
     for (const c of candidates) appendLedger(ledgerPathFor(config), { run_id: "TRIAGE-x", task_id: `TRIAGE-${c}`, step: TRIAGE_COMMIT_REFUSED_STEP, feedback_id: c });
     const real = await autoTriageCheck(args);
     assert.equal(real.fire, false, "the default ledger read sees the written refusal rows");

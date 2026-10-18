@@ -5,9 +5,9 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DECISION_RELEVANT_LEDGER_STEPS, OPERATOR_PREFERENCE_EVENT_LEDGER_STEP, OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP } from "../src/lib/ledger.js";
-import { buildOperatorAgentRoutes, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_PROPOSAL_STEP } from "../src/lib/operator-agent.js";
-import { createService } from "../src/lib/service.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, OPERATOR_PREFERENCE_EVENT_LEDGER_STEP, OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP } from "#src/lib/ledger.js";
+import { buildOperatorAgentRoutes, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_PROPOSAL_STEP } from "#src/lib/operator-agent.js";
+import { createService } from "#src/lib/service.js";
 
 const READ = "pref-optout-read";
 const WRITE = "pref-optout-write";

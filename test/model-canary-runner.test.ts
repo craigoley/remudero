@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { executeCanary, type CanaryExecutionPorts, type CanaryResponse } from "../src/lib/model-canary-runner.js";
-import { canarySuiteDigest, commonCanarySuite } from "../src/lib/model-canary-suite.js";
+import { executeCanary, type CanaryExecutionPorts, type CanaryResponse } from "#src/lib/model-canary-runner.js";
+import { canarySuiteDigest, commonCanarySuite } from "#src/lib/model-canary-suite.js";
 const cases = commonCanarySuite(), pin = { model: "model", route: "subscription", effort: "low", suiteHash: canarySuiteDigest(cases), billing: "subscription" as const };
 const resources = { durationMs: 1, firstTextMs: null, generationMs: null, inputTokens: 1, outputTokens: 1,
   cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null, usageRatedUsd: null,

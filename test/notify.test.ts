@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildSendScript, escapeAppleScriptString, notify, type NotifyChannel } from "../src/lib/notify.js";
+import { buildSendScript, escapeAppleScriptString, notify, type NotifyChannel } from "#src/lib/notify.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-notify-")), "ledger.ndjson");

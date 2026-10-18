@@ -19,17 +19,17 @@ import { join } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import * as emitter from "../src/lib/plan-pr-emitter.js";
-import type { PlanPrPreflightReading } from "../src/lib/plan-pr-emitter.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { REFUSAL_AMENDMENT_STEP, extractRefusal } from "../src/lib/refusal-amendment.js";
-import { PLAN_REPAIR_DISPATCH_STEP, buildSweepEffects, type BuildSweepEffectsDeps, type OpenPrView } from "../src/lib/sweep.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import type { Config } from "#src/lib/config.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import * as emitter from "#src/lib/plan-pr-emitter.js";
+import type { PlanPrPreflightReading } from "#src/lib/plan-pr-emitter.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { REFUSAL_AMENDMENT_STEP, extractRefusal } from "#src/lib/refusal-amendment.js";
+import { PLAN_REPAIR_DISPATCH_STEP, buildSweepEffects, type BuildSweepEffectsDeps, type OpenPrView } from "#src/lib/sweep.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 // A namespace read, so this file still loads at origin/main (where the async forms do not exist) and reds per subtest.
 const { planPrPreflight, planPrPreflightAsync, planPrPreflightAtCommit, planPrPreflightAtCommitAsync } = emitter;

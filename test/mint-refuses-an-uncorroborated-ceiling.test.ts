@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { describeMint, MAX_MENTION_LEAD, mintNextTaskId } from "../src/lib/task-id.js";
+import { describeMint, MAX_MENTION_LEAD, mintNextTaskId } from "#src/lib/task-id.js";
 
 // A plan whose REAL ceiling is 2288, matching the shape the fleet actually carries: a low
 // monolith and a much higher shard set. The gap between those two is itself large (280 vs 2288),

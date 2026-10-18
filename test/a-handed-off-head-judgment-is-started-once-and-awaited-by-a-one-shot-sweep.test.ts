@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import * as sweep from "./helpers/sweep-test.js";
-import * as entrypoint from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as sweep from "#test/helpers/sweep-test.js";
+import * as entrypoint from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const PROOF = "test/a-handed-off-head-judgment-is-started-once-and-awaited-by-a-one-shot-sweep.test.ts";
 const turn = () => new Promise<void>((resolve) => setImmediate(resolve));

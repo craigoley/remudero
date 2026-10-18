@@ -3,10 +3,10 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { lintTask, proofGrepAlreadyTrueViolations } from "../src/lib/task-linter.js";
-import type { AcceptanceCriterion, Task } from "../src/lib/plan.js";
-import { lintPlanCommand } from "../src/run-task.js";
-import { isolatedCheckout } from "./helpers/isolated-checkout.js";
+import { lintTask, proofGrepAlreadyTrueViolations } from "#src/lib/task-linter.js";
+import type { AcceptanceCriterion, Task } from "#src/lib/plan.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { isolatedCheckout } from "#test/helpers/isolated-checkout.js";
 
 const FIXTURE = isolatedCheckout(process.cwd());
 

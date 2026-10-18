@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { lintTask } from "../src/lib/task-linter.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 function task(overrides: Partial<Task> = {}): Task {
   return {

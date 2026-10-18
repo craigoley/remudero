@@ -3,16 +3,16 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   buildSweepEffects, noteReviewDuration, observedReviewOverrunBoundMs, renderClarificationQuestion,
   resetIdleReviewMemo, runSweep, type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { findDuplicateEscalation, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { findDuplicateEscalation, type IssueGateway, type OpenIssue } from "#src/lib/escalate.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // #10848 / #10874: the awaiting-review stage began 13:06:37Z, the review was admitted 13:10:45Z and ran to
 // about 13:51Z; the backstop opened a needs-human issue at 13:40Z, and that issue stood the fix rung down.

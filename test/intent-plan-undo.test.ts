@@ -5,7 +5,7 @@
 // written before the undo is still there, byte for byte, afterwards.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type AutomationActionReceipt, type AutomationActionState } from "../src/lib/automation-action.js";
+import { type AutomationActionReceipt, type AutomationActionState } from "#src/lib/automation-action.js";
 import {
   INTENT_PLAN_MAX_EVENTS,
   intentPlanActionEligibility,
@@ -13,9 +13,9 @@ import {
   type IntentPlanEvent,
   type IntentPlanLinkedAction,
   type IntentPlanUndoStep,
-} from "../src/lib/intent-plan.js";
-import { CLOCK, HEALTHY, MINUTE, NOW_MS, postJson, rowsAt, tempStatePath, validAction, withDelegationService } from "./helpers/delegation-profile-fixture.js";
-import { builtPlan, DECISION_PATH, planInput, PLANS_PATH, PROPOSER, planState, readPlans, stepInput } from "./helpers/intent-plan-fixture.js";
+} from "#src/lib/intent-plan.js";
+import { CLOCK, HEALTHY, MINUTE, NOW_MS, postJson, rowsAt, tempStatePath, validAction, withDelegationService } from "#test/helpers/delegation-profile-fixture.js";
+import { builtPlan, DECISION_PATH, planInput, PLANS_PATH, PROPOSER, planState, readPlans, stepInput } from "#test/helpers/intent-plan-fixture.js";
 
 const COMPLETION: AutomationActionReceipt = {
   version: "automation-action-v1",

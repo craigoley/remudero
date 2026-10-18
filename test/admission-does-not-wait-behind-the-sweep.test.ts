@@ -3,11 +3,11 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runDaemon } from "../src/lib/daemon.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { STALE_REVIEWER_SKIP_RESTART_STREAK } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { RunResult } from "../src/run-task.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { STALE_REVIEWER_SKIP_RESTART_STREAK } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { RunResult } from "#src/run-task.js";
 
 /**
  * W1-T4998 — the admission decision waited behind a 15-minute tick. Every tick awaited the full

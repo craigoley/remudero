@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask, proofUnitTestBaseWrapperViolations } from "../src/lib/task-linter.js";
-import type { NameFilterResolution } from "../src/lib/review.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, proofUnitTestBaseWrapperViolations } from "#src/lib/task-linter.js";
+import type { NameFilterResolution } from "#src/lib/review.js";
+import type { Task } from "#src/lib/plan.js";
 
 /** A minimal, otherwise-clean Task fixture — mirrors the sibling proof-discrimination suites so
  *  this reads consistently with the rest of the linter's tests. */

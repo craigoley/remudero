@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { FixProgressInput } from "../src/lib/fix-progress-judge.js";
+import type { FixProgressInput } from "#src/lib/fix-progress-judge.js";
 import {
   DEFAULT_SWEEP_POLICY, PLAN_REPAIR_DISPATCH_STEP, runSweep,
   type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const NOW = Date.parse("2026-10-10T12:00:00Z");
 const PR_URL = "https://github.com/acme/remudero/pull/7243";

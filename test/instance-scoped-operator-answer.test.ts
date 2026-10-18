@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -5,11 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { coldAnalyticsSnapshot, deriveAnalyticsSnapshot, type AnalyticsSnapshotCache } from "../src/lib/analytics-route.js";
-import { buildInstanceGatewayRoutes } from "../src/lib/instance-gateway.js";
-import { buildOperatorAgentAnswerRoute } from "../src/lib/operator-agent-answer.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { coldAnalyticsSnapshot, deriveAnalyticsSnapshot, type AnalyticsSnapshotCache } from "#src/lib/analytics-route.js";
+import { buildInstanceGatewayRoutes } from "#src/lib/instance-gateway.js";
+import { buildOperatorAgentAnswerRoute } from "#src/lib/operator-agent-answer.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const READ = "instance-answer-read";
 const WRITE = "instance-answer-write";
@@ -155,7 +156,7 @@ test("instance answer route is mounted read-only with an OpenAPI declaration", a
   const route = routes.find((item) => item.path === "/v1/i/site/operator-agent/ask" && item.method === "POST");
   assert.ok(route);
   assert.equal(route.scope, "read");
-  const openapi = readFileSync(join(import.meta.dirname, "..", "openapi", "daemon.yaml"), "utf8");
+  const openapi = readFileSync(join(repoRoot(), "openapi/daemon.yaml"), "utf8");
   assert.match(openapi, /^  \/v1\/i\/\{instance\}\/operator-agent\/ask:/m);
   assert.equal(coldAnalyticsSnapshot().asOf, null, "a newly mounted cache starts cold, not with core evidence");
 });

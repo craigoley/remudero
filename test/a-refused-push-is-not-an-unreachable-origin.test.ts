@@ -5,7 +5,7 @@ import {
   gitRemoteRefReserver,
   reserveTaskIdRemote,
   TaskIdReservationError,
-} from "../src/lib/task-id-reservation.js";
+} from "#src/lib/task-id-reservation.js";
 
 function reserveAfterPushFailure(stderr: string): () => void {
   const reserver = gitRemoteRefReserver({

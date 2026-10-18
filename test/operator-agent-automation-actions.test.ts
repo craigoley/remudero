@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { fixedClock } from "../src/lib/clock.js";
-import { createService } from "../src/lib/service.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createService } from "#src/lib/service.js";
 import {
   AUTOMATION_ACTION_MAX_RECEIPTS,
   automationRedactionViolation,
@@ -21,14 +21,14 @@ import {
   type AutomationAction,
   type AutomationActionReceipt,
   type AutomationPreconditionObservation,
-} from "../src/lib/automation-action.js";
+} from "#src/lib/automation-action.js";
 import {
   buildOperatorAgentRoutes,
   OPERATOR_AGENT_ACTION_DECISION_STEP,
   OPERATOR_AGENT_ACTION_RECEIPT_STEP,
   OPERATOR_AGENT_ACTION_STEP,
   readOperatorAgentActions,
-} from "../src/lib/operator-agent.js";
+} from "#src/lib/operator-agent.js";
 
 const READ_TOKEN = "action-routes-read-token";
 const WRITE_TOKEN = "action-routes-write-token";

@@ -22,7 +22,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before } from "node:test";
-import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
+import { BROWSER_SKIP, browserTest as test } from "#test/browser-absence.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import {
@@ -39,18 +39,18 @@ import {
   validateDecisionSummary,
   type DecisionSummary,
   type SummarizeDeps,
-} from "../src/lib/feedback.js";
-import { escalate, renderIssueBody, summarizeEscalation, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { fakeGhRateLimitExec } from "./helpers/fake-gh-rate-limit.js";
-import { shellBootReady } from "./setup/open-shell.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import { validateMounts, type Mount } from "../src/lib/mounts.js";
-import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/feedback.js";
+import { escalate, renderIssueBody, summarizeEscalation, type Escalation, type IssueGateway } from "#src/lib/escalate.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { fakeGhRateLimitExec } from "#test/helpers/fake-gh-rate-limit.js";
+import { shellBootReady } from "#test/setup/open-shell.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import { validateMounts, type Mount } from "#src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "#src/lib/worker.js";
 
 // ── Shared fixtures ───────────────────────────────────────────────────────────
 

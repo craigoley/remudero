@@ -11,13 +11,13 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { readLedgerLines } from "../src/lib/status.js";
-import * as sweep from "../src/lib/sweep.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import * as sweep from "#src/lib/sweep.js";
 import {
   DEFAULT_SWEEP_POLICY, drainDetachedSweepActions, drainInFlightReviews, runSweepLightPass,
   type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const T0 = Date.now();
 const PLAN = 12362;

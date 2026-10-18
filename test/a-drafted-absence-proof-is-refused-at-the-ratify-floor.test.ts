@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parse, stringify } from "yaml";
 
-import { inboxDraftExampleFragmentYaml, lintDraftedFragment } from "../src/lib/inbox.js";
+import { inboxDraftExampleFragmentYaml, lintDraftedFragment } from "#src/lib/inbox.js";
 
 const PROPOSAL = "retro-promotion:W1-T5814";
 const KNOWN = new Set(["remudero", "none"]);

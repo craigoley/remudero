@@ -8,16 +8,16 @@ import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { benchmarkAaCommand, buildBenchmarkAaReport, type AaLedgerEvidence, type AaRow, type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
+import { benchmarkAaCommand, buildBenchmarkAaReport, type AaLedgerEvidence, type AaRow, type BenchmarkAaReport } from "#src/lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand, buildPaidPilotReport, loadPaidPilotProtocol, paidPilotEvalCardTrial,
-  type PaidPilotEvidence, type PaidPilotReport, type PaidPilotRow } from "../src/lib/benchmark-paid-pilot.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { buildEvalCard, emptyEvalCardEvidence, parseEvalCardEvidence, parseEvalCardTrial, type EvalCard } from "../src/lib/eval-card.js";
-import { buildServeRoutes, EVAL_CARD_SOURCE_MAX_BYTES, readEvalCardInput, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+  type PaidPilotEvidence, type PaidPilotReport, type PaidPilotRow } from "#src/lib/benchmark-paid-pilot.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { buildEvalCard, emptyEvalCardEvidence, parseEvalCardEvidence, parseEvalCardTrial, type EvalCard } from "#src/lib/eval-card.js";
+import { buildServeRoutes, EVAL_CARD_SOURCE_MAX_BYTES, readEvalCardInput, type ServeDeps } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const clock = fixedClock(Date.parse("2026-09-27T12:10:00.000Z"));
 const at = (offsetMs: number) => fixedClock(clock.now() + offsetMs).iso();

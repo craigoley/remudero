@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runOperatorSync, type GitRunner } from "../src/lib/operator-sync.js";
-import { syncCommand } from "../src/run-task.js";
+import { runOperatorSync, type GitRunner } from "#src/lib/operator-sync.js";
+import { syncCommand } from "#src/run-task.js";
 
 const DECISIONS_FILE_NAME = "DECISIONS.md";
 

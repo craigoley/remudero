@@ -9,8 +9,8 @@ import {
   grepProofTargetRefusal,
   proofGrepSafetyViolations,
   type GrepProofTargetKind,
-} from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+} from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 /**
  * W1-T3653. `grepProofTargetNamesNoFile` (review.ts) approximates "is this path a file" with a

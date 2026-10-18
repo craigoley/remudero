@@ -11,14 +11,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { endRefusedRun, runTask, type RunResult } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import { detectRunningLong } from "../src/lib/cost-anomaly.js";
-import type { DispatchClaimOutcome, DispatchClaimReserver } from "../src/lib/dispatch-claim.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
+import { endRefusedRun, runTask, type RunResult } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import { detectRunningLong } from "#src/lib/cost-anomaly.js";
+import type { DispatchClaimOutcome, DispatchClaimReserver } from "#src/lib/dispatch-claim.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
 import {
   dispatchesWithoutNewOwnedPr,
   isDispatchBreakerTripped,
@@ -26,10 +26,10 @@ import {
   REFUSED_RUN_VERDICT_STAGE_LIST,
   THROWN_RUN_VERDICT_STAGES,
   type GitHub,
-} from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { spawnWorker } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { spawnWorker } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK_ID = "T-REFUSED-VERDICT";
 type Row = Record<string, unknown>;

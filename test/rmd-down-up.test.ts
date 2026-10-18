@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
+import type { Config } from "#src/lib/config.js";
 import {
   defaultPlanLifecycleCounts,
   defaultStopServeByPort,
@@ -30,7 +30,7 @@ import {
   type LiveInflightRun,
   type PlanLifecycleCountsIo,
   type UpDeps,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 function cfg(over: Partial<Config> = {}): Config {
   return { claudeBin: "/bin/true", root: "/nonexistent-down-up-root", ...over } as Config;

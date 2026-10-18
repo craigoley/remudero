@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { executeCatalogueAction } from "../src/lib/action-executor.js";
+import { executeCatalogueAction } from "#src/lib/action-executor.js";
 
 import {
   ACTION_HANDOFF_VERSION,
@@ -12,10 +12,10 @@ import {
   executeActionHandoff,
   prepareActionHandoff,
   type ActionHandoffConfig,
-} from "../src/lib/operator-agent-action-handoff.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { isPaused, isStopped } from "../src/lib/fleet-control.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/operator-agent-action-handoff.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { isPaused, isStopped } from "#src/lib/fleet-control.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const ACTOR = "operator:alice";
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");

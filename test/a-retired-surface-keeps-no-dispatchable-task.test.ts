@@ -23,15 +23,16 @@
  * names: "Return any one of the seven to `status: queued`"), and asserts the same check now catches
  * it — naming both the task id AND the surface, not a bare id.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { loadPlan, type Plan, type Task, type TaskStatus } from "../src/lib/plan.js";
+import { loadPlan, type Plan, type Task, type TaskStatus } from "#src/lib/plan.js";
 
 // Loaded VERBATIM from the real, still-open plan (monolith + tasks.d shards) — the same file the
 // daemon dispatches from, not a hand-built fixture. Mirrors test/task-linter.test.ts's REAL_PLAN.
-const REAL_PLAN = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
+const REAL_PLAN = loadPlan(`${repoRoot()}/plan/tasks.yaml`);
 
 // The declared unreachable surfaces — a list of SURFACES (path prefixes under the repo root),
 // never a list of task ids. `apps/dashboard` is the one measured unreachable today (rationale:

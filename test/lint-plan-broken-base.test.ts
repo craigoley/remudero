@@ -18,6 +18,7 @@
  *
  * Its own file per CLAUDE.md's coverage rule.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -26,10 +27,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { lintPlanCommand, type LintPlanStatusDeps } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 
 /** The fixture's OWN committer. `commit-tree` refuses with "Author identity unknown" when neither
  *  the repo nor the global config names one, and `actions/checkout` configures neither — so this

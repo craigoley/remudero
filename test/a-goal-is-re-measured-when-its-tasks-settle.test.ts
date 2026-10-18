@@ -4,14 +4,14 @@ import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import { GOAL_REMEASUREMENT_CADENCE_MS, loadGoals, measureGoal, remeasureSettledGoals, withGoalRemeasurement, type GoalRecord } from "../src/lib/goals.js";
-import { fixedClock, systemClock } from "../src/lib/clock.js";
-import { buildGather, renderGather } from "../src/lib/retro.js";
-import { parseTasksFromYaml, type Task } from "../src/lib/plan.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger, buildAnalyticsRoute } from "../src/lib/analytics-route.js";
-import { daemonCommand } from "../src/run-task.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
+import { GOAL_REMEASUREMENT_CADENCE_MS, loadGoals, measureGoal, remeasureSettledGoals, withGoalRemeasurement, type GoalRecord } from "#src/lib/goals.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
+import { buildGather, renderGather } from "#src/lib/retro.js";
+import { parseTasksFromYaml, type Task } from "#src/lib/plan.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger, buildAnalyticsRoute } from "#src/lib/analytics-route.js";
+import { daemonCommand } from "#src/run-task.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
 
 test("the daemon measures settled goals after its existing sweep and retains one durable observation", async () => {
   const home = mkdtempSync(join(tmpdir(), "rmd-goal-daemon-wiring-"));

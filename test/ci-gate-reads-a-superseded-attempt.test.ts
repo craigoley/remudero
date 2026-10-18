@@ -20,14 +20,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildFixRungDispatchArgs, ciGateFromRollup, ciGateSha, ciGateState, runFixRung, waitForCiGreen } from "./helpers/run-task-test.js";
-import { dedupeRollupByLatestAttempt, type RollupCheckEntry } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { buildFixRungDispatchArgs, ciGateFromRollup, ciGateSha, ciGateState, runFixRung, waitForCiGreen } from "#test/helpers/run-task-test.js";
+import { dedupeRollupByLatestAttempt, type RollupCheckEntry } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const PR_URL = "https://github.com/acme/remudero/pull/42";
 const OWNER = "acme";

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runSweep, type OpenPrView } from "../src/lib/sweep.js";
+import { runSweep, type OpenPrView } from "#src/lib/sweep.js";
 
 const NOW = Date.parse("2026-10-09T15:30:00Z");
 

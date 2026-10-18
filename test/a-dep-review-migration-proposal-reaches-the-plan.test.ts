@@ -14,9 +14,9 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { queuedFeedbackDir } from "../src/lib/feedback-landing.js";
-import { depReviewCommand, type DepReviewDeps } from "./helpers/run-task-test.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { queuedFeedbackDir } from "#src/lib/feedback-landing.js";
+import { depReviewCommand, type DepReviewDeps } from "#test/helpers/run-task-test.js";
 
 const NOW = Date.parse("2026-10-15T09:00:00.000Z");
 const MAJOR_TITLE = "build(deps-dev): bump @types/node from 22.20.2 to 25.9.6";

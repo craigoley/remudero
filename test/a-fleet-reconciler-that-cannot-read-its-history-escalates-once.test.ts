@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { DEFAULT_SWEEP_POLICY, runSweep } from "./helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep } from "#test/helpers/sweep-test.js";
 
 // W1-T5996 — runSweep's W1-T4817 block used to catch readFleetState's refusal and only log it, so
 // the fleet-state reconciler refused on every full pass with no incident. The first refusal for a

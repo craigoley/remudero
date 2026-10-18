@@ -14,14 +14,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import * as landing from "../src/lib/feedback-landing.js";
-import { appendThreadMessage, type ThreadIdentity } from "../src/lib/inbox-thread.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import * as panel from "../src/lib/panel-actions.js";
-import { createService } from "../src/lib/service.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as landing from "#src/lib/feedback-landing.js";
+import { appendThreadMessage, type ThreadIdentity } from "#src/lib/inbox-thread.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import * as panel from "#src/lib/panel-actions.js";
+import { createService } from "#src/lib/service.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK_ID = "W1-T9473";
 

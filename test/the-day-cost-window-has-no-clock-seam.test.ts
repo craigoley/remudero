@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
 
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { deriveDayCostUsd } from "../src/lib/sweep.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { costGovernorGateFor } from "../src/run-task.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { deriveDayCostUsd } from "#src/lib/sweep.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { costGovernorGateFor } from "#src/run-task.js";
 
 const BEFORE_MIDNIGHT = Date.parse("2026-09-10T23:59:59.000Z");
 const AFTER_MIDNIGHT = Date.parse("2026-09-11T00:00:01.000Z");

@@ -1,11 +1,12 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 import {
   findTaskShard,
@@ -20,17 +21,17 @@ import {
   type ProofAmendmentRecord,
   type ProofAmendmentRequest,
   type ProofAmendmentWritePorts,
-} from "../src/lib/proof-amendment.js";
-import type { ProofDiscriminationEvidence } from "../src/lib/sweep.js";
-import type { WhitelistedProof } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config-schema.js";
+} from "#src/lib/proof-amendment.js";
+import type { ProofDiscriminationEvidence } from "#src/lib/sweep.js";
+import type { WhitelistedProof } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config-schema.js";
 import {
   buildProofAmendmentGitOps,
   buildProofAmendmentWritePorts,
   dispatchProofAmendmentWrite,
-} from "./helpers/run-task-test.js";
-import { CHECK_PROOF_EXIT, buildBaseProofDir, checkProofCommand } from "../src/lib/check-proof.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
+} from "#test/helpers/run-task-test.js";
+import { CHECK_PROOF_EXIT, buildBaseProofDir, checkProofCommand } from "#src/lib/check-proof.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
 
 // W1-T3434 — #5154 was CAPPED because its `unit test:` proofs passed at both the implementation
 // head and its merge base, and the proof-discrimination worker was told to repair the PR BODY's
@@ -276,14 +277,14 @@ test("the live fix rung calls the proof-amendment parent rather than granting th
   // installed file rather than trusting the diff: the wiring must survive as ordinary source.
   const { readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
-  const runTaskSrc = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
+  const runTaskSrc = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
   assert.match(runTaskSrc, /requestProofAmendment\(/, "the fix rung must call the parent effect directly");
   assert.match(runTaskSrc, /kind:\s*"proof_amendment"/, "the durable fix.dispatch record identifies this amendment subtype");
   assert.doesNotMatch(
     runTaskSrc.match(/if \(mode === "proof-discrimination"\)[\s\S]{0,400}/)?.[0] ?? "",
     /repair the pr body/i,
   );
-  const promptRenderSrc = readFileSync(join(import.meta.dirname, "..", "src", "lib", "prompt-render.ts"), "utf8");
+  const promptRenderSrc = readFileSync(join(repoRoot(), "src/lib/prompt-render.ts"), "utf8");
   assert.doesNotMatch(promptRenderSrc, /Repair the PR BODY's Acceptance block only/);
   assert.match(promptRenderSrc, /PROOF_AMENDMENT:/, "the worker is asked to PROPOSE, not to write the body itself");
 
@@ -384,7 +385,7 @@ test("buildProofAmendmentWritePorts wires every write port through its own injec
       ghExecFn: ((...args: unknown[]) => {
         ghExecCalls.push(args);
         return Buffer.from("");
-      }) as unknown as typeof import("../src/lib/github-transport.js").ghExec,
+      }) as unknown as typeof import("#src/lib/github-transport.js").ghExec,
       assertLiveWriteAllowedFn: (action, reason) => {
         assertLiveWriteCalls.push({ action, reason });
       },
@@ -474,7 +475,7 @@ test("buildProofAmendmentWritePorts wires every write port through its own injec
     {
       ghExecFn: (() => {
         throw { stderr: "rejected: non-fast-forward" };
-      }) as unknown as typeof import("../src/lib/github-transport.js").ghExec,
+      }) as unknown as typeof import("#src/lib/github-transport.js").ghExec,
       assertLiveWriteAllowedFn: () => {},
     },
   );

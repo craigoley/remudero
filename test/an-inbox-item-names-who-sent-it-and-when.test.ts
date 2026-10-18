@@ -7,13 +7,13 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
-import { fixedClock } from "../src/lib/clock.js";
-import { inboxSender, inboxSenderName } from "../src/lib/inbox-owner.js";
-import { refreshInboxClassification, type InboxRefreshMemo } from "../src/lib/inbox-view.js";
-import { inboxFirstSeenPath, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { appendThreadMessage, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { inboxSender, inboxSenderName } from "#src/lib/inbox-owner.js";
+import { refreshInboxClassification, type InboxRefreshMemo } from "#src/lib/inbox-view.js";
+import { inboxFirstSeenPath, inboxThreadStorePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { appendThreadMessage, inboxThreadIdentity } from "#src/lib/inbox-thread.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 

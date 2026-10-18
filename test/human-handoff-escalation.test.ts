@@ -11,7 +11,7 @@ import {
   type HandoffResult,
   type HumanHandoff,
   type HumanHandoffInput,
-} from "../src/lib/human-handoff.js";
+} from "#src/lib/human-handoff.js";
 
 // W1-T3897 criterion 3: unclaimed, aging, quiet-hour, escalated, expired, and unavailable states stay
 // distinct — and no state label can hide an overdue unclaimed item.

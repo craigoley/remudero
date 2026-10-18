@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -5,10 +6,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { PLAN_MAX_NEW_TASKS, planCommand } from "../src/run-task.js";
-import { planArchitectPrompt, unreservedFiledIds } from "../src/lib/plan-architect.js";
-import { reserveTaskIdBlock, taskIdReservationsDir, taskIdReservationPath } from "../src/lib/task-id-reservation.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { PLAN_MAX_NEW_TASKS, planCommand } from "#src/run-task.js";
+import { planArchitectPrompt, unreservedFiledIds } from "#src/lib/plan-architect.js";
+import { reserveTaskIdBlock, taskIdReservationsDir, taskIdReservationPath } from "#src/lib/task-id-reservation.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
 // `rmd plan` files tasks but minted NOTHING: `planArchitectPrompt` took no id, so its worker
@@ -28,8 +29,7 @@ import type { WorkerResult } from "../src/lib/worker.js";
 // is AFTER the reservation, the spawn and the id check, and still inside the `finally` that
 // releases. A run that dies mid-flight is exactly the case claim 2 is about.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "t",

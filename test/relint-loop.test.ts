@@ -19,6 +19,7 @@
  *   None of this proves an LLM will FIX what it is handed — only that the loop hands it the real
  *   violations, bounds the attempts, and refuses legibly instead of opening a doomed PR.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -27,7 +28,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { parseTasksFromYaml } from "../src/lib/plan.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
 import {
   MAX_RELINT_ATTEMPTS,
   allWorkerUnfixable,
@@ -38,12 +39,11 @@ import {
   relintRefusalMessage,
   runRelintLoop,
   type RelintViolation,
-} from "../src/lib/relint.js";
-import { lintTask } from "../src/lib/task-linter.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/relint.js";
+import { lintTask } from "#src/lib/task-linter.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 
 function git(dir: string, ...args: string[]): string {
@@ -233,7 +233,7 @@ test("an unfixable refusal says so instead of blaming the attempt count", () => 
 // ── ONE IMPLEMENTATION, NOT TWO ──────────────────────────────────────────────
 
 test("the relint doctrine has ONE definition — the inbox prompt is composed from the same lines", async () => {
-  const { inboxDraftRelintPrompt } = await import("../src/lib/inbox.js");
+  const { inboxDraftRelintPrompt } = await import("#src/lib/inbox.js");
   const violations = [V("sizing", "two subsystems")];
   const shared = relintGuidanceLines(violations).join("\n");
 
@@ -325,7 +325,7 @@ test("newMonolithIdsAgainstBase fails OPEN on an unreadable base rather than thr
 
 test("THE REPLAY: W1-T286 as the triage worker actually wrote it is caught BEFORE a PR could open", () => {
   // Recovered verbatim from the filing commit (8e0d394, PR #1102) — not a reconstruction.
-  const shard = readFileSync(join(__dirname, "fixtures", "w1-t286-as-filed.yaml"), "utf8");
+  const shard = readFileSync(join(repoRoot(), "test/fixtures/w1-t286-as-filed.yaml"), "utf8");
   const root = planDir();
   try {
     writeFileSync(join(root, "plan", "tasks.yaml"), CLEAN_TASK("W1-T1"));
@@ -357,7 +357,7 @@ test("THE REPLAY: W1-T286 as the triage worker actually wrote it is caught BEFOR
 });
 
 test("THE REPLAY, corrected: the same task with executable proofs lints clean — the loop CAN converge", () => {
-  const shard = readFileSync(join(__dirname, "fixtures", "w1-t286-as-filed.yaml"), "utf8");
+  const shard = readFileSync(join(repoRoot(), "test/fixtures/w1-t286-as-filed.yaml"), "utf8");
   // Replace every prose proof with the dialect the prompt now teaches; change nothing else, EXCEPT
   // also declaring files: (W1-T504) — the real record's `note:` documents that omission as
   // deliberate at FILING time (the alert API had not been read yet), but a "corrected" redraft is
@@ -467,7 +467,7 @@ test("PLAN LANE: a dirty filing is relinted, and the clean redraft proceeds", as
   let attempts = 0;
   const prompts: string[] = [];
   const ledger = await withLane(undefined, async () => {
-    const { planCommand } = await import("../src/run-task.js");
+    const { planCommand } = await import("#src/run-task.js");
     await planCommand(["--mode=create", "a", "fixture", "brief"], {
       spawn: async (args: { cwd: string; prompt: string }) => {
         attempts++;
@@ -494,7 +494,7 @@ test("PLAN LANE: a dirty filing is relinted, and the clean redraft proceeds", as
 test("PLAN LANE: an unconverged filing REFUSES before any PR, and ledgers why", async () => {
   let attempts = 0;
   const ledger = await withLane(undefined, async () => {
-    const { planCommand } = await import("../src/run-task.js");
+    const { planCommand } = await import("#src/run-task.js");
     await planCommand(["--mode=create", "a", "fixture", "brief"], {
       spawn: async (args: { cwd: string; prompt: string }) => {
         attempts++;
@@ -540,7 +540,7 @@ test("TRIAGE LANE: a dirty filing is relinted with the real violations, and the 
   let attempts = 0;
   const prompts: string[] = [];
   const ledger = await withLane(seedFeedback, async () => {
-    const { triageCommand } = await import("../src/run-task.js");
+    const { triageCommand } = await import("#src/run-task.js");
     await triageCommand([FEEDBACK_ID], {
       spawn: async (args: { cwd: string; prompt: string }) => {
         attempts++;
@@ -566,7 +566,7 @@ test("TRIAGE LANE: the AGGREGATE assertion — what the loop lets through has NO
   // whole linter's blocking set is empty for what the loop accepted, not that one check passed.
   let filedYaml = "";
   await withLane(seedFeedback, async () => {
-    const { triageCommand } = await import("../src/run-task.js");
+    const { triageCommand } = await import("#src/run-task.js");
     await triageCommand([FEEDBACK_ID], {
       spawn: async (args: { cwd: string; prompt: string }) => {
         const id = reservedFromPrompt(args.prompt);
@@ -587,7 +587,7 @@ test("TRIAGE LANE: the AGGREGATE assertion — what the loop lets through has NO
 test("TRIAGE LANE: an unconverged filing refuses, ledgers the reason, and opens no PR", async () => {
   let attempts = 0;
   const ledger = await withLane(seedFeedback, async () => {
-    const { triageCommand } = await import("../src/run-task.js");
+    const { triageCommand } = await import("#src/run-task.js");
     await triageCommand([FEEDBACK_ID], {
       spawn: async (args: { cwd: string; prompt: string }) => {
         attempts++;

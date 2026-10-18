@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { loadPlanFromYaml, readTaskPrecondition, unmetTaskPrecondition, PRECONDITION_MAX_BYTES, PRECONDITION_TIMEOUT_MS } from "../src/lib/plan.js";
+import { loadPlanFromYaml, readTaskPrecondition, unmetTaskPrecondition, PRECONDITION_MAX_BYTES, PRECONDITION_TIMEOUT_MS } from "#src/lib/plan.js";
 
 // W1-T5632: the reader's kill bound is a parameter. A test injects it instead of waiting out the
 // production 5 s, and a real child that must NOT be killed gets a bound load cannot reach.

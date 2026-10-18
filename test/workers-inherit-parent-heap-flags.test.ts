@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -5,10 +6,10 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const exec = promisify(execFile);
-const repo = resolve(import.meta.dirname, "..");
+const repo = testRepoRoot();
 const moduleUrl = (name: string) => JSON.stringify(pathToFileURL(join(repo, "src/lib", `${name}.ts`)).href);
 
 test("production worker adapters survive a parent heap flag and retain the TypeScript loader", async (t) => {

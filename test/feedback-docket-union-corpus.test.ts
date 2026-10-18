@@ -23,9 +23,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
-import { appendLedger } from "../src/lib/ledger.js";
-import { parseProposalRegistry } from "../src/lib/inbox.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { parseProposalRegistry } from "#src/lib/inbox.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 /** A `ratify.reframed` row as the ratify path really writes one. */
 function reframeRow(taskId: string, feedback: string, ts: string): string {
@@ -39,7 +39,7 @@ function writeGzArchive(stateDir: string, name: string, rows: string[]): void {
 }
 
 test("W1-T1273: feedback rotated into an archive still reaches the docket — the live file alone misses it", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = makeTempDir("fd-union-instance");
   const repo = makeTempDir("fd-union-repo");
   try {
@@ -87,7 +87,7 @@ test("W1-T1273: feedback rotated into an archive still reaches the docket — th
 });
 
 test("W1-T1273: a state dir with NO archives still gathers from the live file — the union read degrades, never blanks", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = makeTempDir("fd-union-noarch-instance");
   const repo = makeTempDir("fd-union-noarch-repo");
   try {
@@ -126,7 +126,7 @@ test("W1-T1273: a state dir with NO archives still gathers from the live file �
 // ── The five properties the swap must NOT disturb (W1-T1273 criteria 2-6) ─────────────────────
 
 test("W1-T1273: the three non-ledger surfaces still reach the gather unchanged by the corpus swap", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = makeTempDir("fd-union-nonledger-instance");
   const repo = makeTempDir("fd-union-nonledger-repo");
   try {
@@ -180,7 +180,7 @@ test("W1-T1273: the three non-ledger surfaces still reach the gather unchanged b
 });
 
 test("W1-T1273: the marker still enforces its seven-day interval across the wider corpus", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
   const instanceRoot = makeTempDir("fd-union-marker-instance");
   const repo = makeTempDir("fd-union-marker-repo");
   try {
@@ -209,8 +209,8 @@ test("W1-T1273: the marker still enforces its seven-day interval across the wide
 });
 
 test("W1-T1273: an empty window still writes the marker, files nothing, and names every empty surface", async () => {
-  const { runFeedbackDocketRung } = await import("../src/run-task.js");
-  const { readFeedbackDocketMarker } = await import("../src/lib/feedback-docket.js");
+  const { runFeedbackDocketRung } = await import("#src/run-task.js");
+  const { readFeedbackDocketMarker } = await import("#src/lib/feedback-docket.js");
   const instanceRoot = makeTempDir("fd-union-empty-instance");
   const repo = makeTempDir("fd-union-empty-repo");
   try {
@@ -254,7 +254,7 @@ test("W1-T1273: an empty window still writes the marker, files nothing, and name
 // ── The two degradation arms, driven rather than assumed (coverage-ratchet, W1-T1273) ─────────
 
 test("W1-T1273: ONE torn row in an archive costs that row and no other — the corpus is not discarded", async () => {
-  const { readDocketLedgerCorpus } = await import("../src/run-task.js");
+  const { readDocketLedgerCorpus } = await import("#src/run-task.js");
   const instanceRoot = makeTempDir("fd-union-torn");
   try {
     const stateDir = join(instanceRoot, "state");
@@ -280,7 +280,7 @@ test("W1-T1273: ONE torn row in an archive costs that row and no other — the c
 });
 
 test("W1-T1273: a union reader that THROWS degrades to the live file and names the reason", async () => {
-  const { readDocketLedgerCorpus } = await import("../src/run-task.js");
+  const { readDocketLedgerCorpus } = await import("#src/run-task.js");
   const instanceRoot = makeTempDir("fd-union-throw");
   try {
     const ledgerPath = join(instanceRoot, "state", "ledger.ndjson");

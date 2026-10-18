@@ -11,7 +11,7 @@ import {
   nextTaskIdCommand,
   reservationAuditHistoryIds,
   type ReservationAuditRef,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const NOW = Date.parse("2026-09-12T00:00:00.000Z");
 const OLD = "2026-08-20T00:00:00.000Z";

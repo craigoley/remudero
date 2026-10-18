@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { adaptOperatorAgentProofRows } from "../src/lib/operator-agent-proof.js";
+import { adaptOperatorAgentProofRows } from "#src/lib/operator-agent-proof.js";
 
 test("W1-T3794 criterion 1: executed proof passes and failures are counted from review.posted proof_exec values with a named denominator", () => {
   const signal = adaptOperatorAgentProofRows([

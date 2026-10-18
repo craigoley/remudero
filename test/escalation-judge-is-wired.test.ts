@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung } from "./helpers/run-task-test.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
 import {
   ESCALATION_JUDGED_STEP,
   FLEET_NOTICE_LABEL,
@@ -12,14 +12,14 @@ import {
   configureEscalationTriage,
   escalate,
   isEscalationJudgeExempt,
-} from "../src/lib/escalate.js";
-import type { Escalation, EscalationJudgeVerdict, IssueGateway } from "../src/lib/escalate.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/escalate.js";
+import type { Escalation, EscalationJudgeVerdict, IssueGateway } from "#src/lib/escalate.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 /**
  * W1-T3166 — THE RESIDUAL ESCALATION JUDGE HAD ZERO PRODUCTION CALLERS.

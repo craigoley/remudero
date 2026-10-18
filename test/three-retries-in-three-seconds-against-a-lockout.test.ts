@@ -6,6 +6,7 @@
 // as W1-T2515s own named falsifier (its shard proofs resolve to this path) and carries the
 // end-to-end incident narrative; classify.test.ts carries the mutant-killing unit assertions.
 
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,8 +18,8 @@ import {
   detectUsageLimitRefusal,
   runDiagnoseThenRetry,
   transientBackoffMs,
-} from "../src/lib/classify.js";
-import type { AttemptOutcome } from "../src/lib/classify.js";
+} from "#src/lib/classify.js";
+import type { AttemptOutcome } from "#src/lib/classify.js";
 
 // W1-T2515. The incident, verbatim from the ledger's `stderr_excerpt` on four consecutive
 // `implement.done` rows for W1-T2471, all `api_error: true`:
@@ -37,7 +38,7 @@ function recorder() {
 }
 
 test("the production retry driver is given a backoff and no longer retries with zero delay", () => {
-  const src = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
+  const src = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
   assert.match(
     src,
     /runDiagnoseThenRetry\(\{[\s\S]{0,400}?sleep: \(ms\) => new Promise\(\(resolve\) => setTimeout\(resolve, ms\)\)/,

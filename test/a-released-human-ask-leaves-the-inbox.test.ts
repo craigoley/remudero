@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { classifyAllProposalsMemo, buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { inboxThreadId, type ThreadMessage } from "../src/lib/inbox-thread.js";
-import { listThreadViews, type InboxThreadItem } from "../src/lib/inbox-responder.js";
-import { createService } from "../src/lib/service.js";
-import { updateProposalRegistry } from "../src/lib/inbox.js";
-import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { classifyAllProposalsMemo, buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { inboxThreadId, type ThreadMessage } from "#src/lib/inbox-thread.js";
+import { listThreadViews, type InboxThreadItem } from "#src/lib/inbox-responder.js";
+import { createService } from "#src/lib/service.js";
+import { updateProposalRegistry } from "#src/lib/inbox.js";
+import { proposalFromJudgedShard } from "#src/lib/verify-human-judge.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const TASK = "W1-T1216";
 const HUMAN = `verify-human:${TASK}`;

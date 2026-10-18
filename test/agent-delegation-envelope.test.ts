@@ -8,7 +8,7 @@ import {
   createDelegationEnvelope,
   DELEGATION_ENVELOPE_SCHEMA_VERSION,
   type DelegationEnvelopeInput,
-} from "../src/lib/automation-action.js";
+} from "#src/lib/automation-action.js";
 
 function baseInput(overrides: Partial<DelegationEnvelopeInput> = {}): DelegationEnvelopeInput {
   return {

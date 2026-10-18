@@ -3,14 +3,14 @@ import test from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { CashRequestEffortCount, CashRequestTransport } from "../src/lib/cash-request-effort.js";
-import { fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import { spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
+import type { CashRequestEffortCount, CashRequestTransport } from "#src/lib/cash-request-effort.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import { spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 
 test("cash effort evidence reads each actual transport parameter without retaining request content", async () => {
-  const { cashRequestEffort } = await import("../src/lib/cash-request-effort.js");
+  const { cashRequestEffort } = await import("#src/lib/cash-request-effort.js");
   for (const [transport, body, parameter] of [
     ["chat-completions", { reasoning_effort: "none" }, "reasoning_effort"],
     ["responses", { reasoning: { effort: "high" } }, "reasoning.effort"],
@@ -26,7 +26,7 @@ test("cash effort evidence reads each actual transport parameter without retaini
 });
 
 test("an omitted cash effort parameter stays omitted without inferring a provider default", async () => {
-  const { cashRequestEffort } = await import("../src/lib/cash-request-effort.js");
+  const { cashRequestEffort } = await import("#src/lib/cash-request-effort.js");
   for (const transport of ["chat-completions", "responses", "foundry-messages"] as const) {
     assert.equal(cashRequestEffort("{}", transport).state, "parameter-omitted");
     assert.equal(cashRequestEffort("{}", transport).value, null);
@@ -36,7 +36,7 @@ test("an omitted cash effort parameter stays omitted without inferring a provide
 });
 
 test("unreadable cash request parameters are distinct from omitted parameters", async () => {
-  const { cashRequestEffort } = await import("../src/lib/cash-request-effort.js");
+  const { cashRequestEffort } = await import("#src/lib/cash-request-effort.js");
   for (const body of ["{bad", "null", "[]", "42", '"string"']) {
     assert.equal(cashRequestEffort(body, "chat-completions").state, "parameter-unreadable");
   }
@@ -52,14 +52,14 @@ test("unreadable cash request parameters are distinct from omitted parameters", 
 });
 
 test("cash request effort accepts only bounded known effort scalars", async () => {
-  const { cashRequestEffort } = await import("../src/lib/cash-request-effort.js");
+  const { cashRequestEffort } = await import("#src/lib/cash-request-effort.js");
   for (const effort of ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
     assert.equal(cashRequestEffort(JSON.stringify({ reasoning_effort: effort }), "chat-completions").value, effort);
 });
 
 
 test("cash effort evidence bounds tuple storage while retaining every attempted request count", async () => {
-  const { recordCashRequestEffort } = await import("../src/lib/cash-request-effort.js");
+  const { recordCashRequestEffort } = await import("#src/lib/cash-request-effort.js");
   const entries: CashRequestEffortCount[] = [];
   for (let i = 0; i < 10_000; i++) recordCashRequestEffort(entries, '{"reasoning_effort":"none"}', "chat-completions");
   recordCashRequestEffort(entries, "{}", "chat-completions");
@@ -114,7 +114,7 @@ test("actual Luna tool-less requests retain omitted effort alongside the request
 });
 
 test("actual cash adapters report their own serialized parameter without changing tool compatibility", async () => {
-  const { cashRequestEffort } = await import("../src/lib/cash-request-effort.js");
+  const { cashRequestEffort } = await import("#src/lib/cash-request-effort.js");
   const f = fixture();
   try {
     for (const [model, effort, tools, parameter, value] of [

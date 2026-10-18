@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -30,10 +31,10 @@ import {
   SPAWN_OWNERSHIP_CUE,
   subsystemsOf,
   TaskLintError,
-} from "../src/lib/task-linter.js";
-import { loadPlan, loadPlanFromYaml, type Plan, type Task } from "../src/lib/plan.js";
-import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
-import { importsModule } from "./helpers/import-sweep.js";
+} from "#src/lib/task-linter.js";
+import { loadPlan, loadPlanFromYaml, type Plan, type Task } from "#src/lib/plan.js";
+import { nextRunnable, type MergedSet } from "#src/lib/drain.js";
+import { importsModule } from "#test/helpers/import-sweep.js";
 
 /** A minimal, otherwise-clean Task fixture — every test overrides only what it needs. */
 function task(over: Partial<Task> & { id: string }): Task {
@@ -337,7 +338,7 @@ test("two lexicon terms joined by a SPACED slash still flag — only a BARE '/' 
 // ── W1-T81 ACCEPTANCE 1: the three #146 false positives, loaded VERBATIM from the
 // real plan, no longer flag ──────────────────────────────────────────────────
 
-const REAL_PLAN = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
+const REAL_PLAN = loadPlan(`${repoRoot()}/plan/tasks.yaml`);
 
 function realTask(id: string): Task {
   const t = REAL_PLAN.tasks.find((x) => x.id === id);
@@ -732,7 +733,7 @@ test("W1-T246 ACCEPTANCE 3: unit test: proofDialect warn mode returns ok true wi
 test("W1-T246 ACCEPTANCE 4: grep: parseWhitelistedProof in src/lib/task-linter.ts", () => {
   // The check reuses review.ts's OWN executed-proof predicate — never a reimplementation that
   // could drift from what remudero-review actually runs (see the module's design doc).
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  const src = readFileSync(`${repoRoot()}/src/lib/task-linter.ts`, "utf8");
   assert.match(src, /parseWhitelistedProof/);
   assert.match(src, /import\s*\{[^}]*parseWhitelistedProof[^}]*\}\s*from\s*"\.\/review\.js"/);
 });
@@ -875,7 +876,7 @@ test("a satisfied_by criterion is exempt from proof-resolvability too — Archit
 });
 
 test("proofResolvabilityViolations reuses parseWhitelistedProof's sibling dialect shape, never a check that silently drifts from the linter's own module contract", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  const src = readFileSync(`${repoRoot()}/src/lib/task-linter.ts`, "utf8");
   assert.match(src, /PROOF_PAYLOAD_SHAPES/);
   assert.match(src, /export function proofResolvabilityViolations/);
 });
@@ -1604,7 +1605,7 @@ test("W1-T180: an amended task whose derived status is NOT merged (still open/qu
 });
 
 test("W1-T180 ACCEPTANCE 5: the check stays PURE — task-linter.ts imports neither status.ts nor any gh/exec surface", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  const src = readFileSync(`${repoRoot()}/src/lib/task-linter.ts`, "utf8");
   // W1-T2531: resolved through the shared any-import-form predicate, not a static `from`-only
   // regex -- a `await import("./status.js")` reaching the same module must refuse too.
   assert.ok(!importsModule(src, /(^|\/)status\.js$/), "must not import lib/status.ts");
@@ -1836,14 +1837,14 @@ test("advisoryRoutingViolations matches the measured live-corpus fixture shapes:
 });
 
 test("ACCEPTANCE 3 (W1-T519): advisoryRoutingViolations lands beside the other violation families as one idiom — grep: advisoryRoutingViolations in src/lib/task-linter.ts", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  const src = readFileSync(`${repoRoot()}/src/lib/task-linter.ts`, "utf8");
   assert.match(src, /export function advisoryRoutingViolations\(/);
   assert.match(src, /\.\.\.advisoryRoutingViolations\(task\)/); // wired into lintTask's aggregator,
   // spread exactly like proofShapeViolations/headlessFitnessViolations/dispatchPriorityViolations
 });
 
 test("advisory-routing carries NO severity override anywhere in LintOpts — warn-only by construction, unlike proofDialect/proofResolvability", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  const src = readFileSync(`${repoRoot()}/src/lib/task-linter.ts`, "utf8");
   const fnStart = src.indexOf("export function advisoryRoutingViolations(");
   assert.ok(fnStart >= 0);
   const fnSrc = src.slice(fnStart, src.indexOf("\n}", fnStart));

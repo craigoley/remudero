@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canaryTransportCapture } from "../src/lib/model-canary-transport.js";
+import { canaryTransportCapture } from "#src/lib/model-canary-transport.js";
 
 test("canary Claude stream counts cumulative usage once and times only visible text", () => {
   const c = canaryTransportCapture("anthropic-messages", 100);

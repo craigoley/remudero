@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView, type SweepPolicy } from "../src/lib/sweep.js";
-import type { SupersessionVerdict } from "../src/lib/supersession.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView, type SweepPolicy } from "#src/lib/sweep.js";
+import type { SupersessionVerdict } from "#src/lib/supersession.js";
 
 // ── W1-T3731 — A PREREQUISITE IS NOT A SUPERSESSION ──────────────────────────────────────────
 //

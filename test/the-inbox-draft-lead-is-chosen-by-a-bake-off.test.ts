@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BAKEOFF_CANDIDATES, rankBakeoff, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "../src/lib/inbox-bakeoff.js";
-import { inboxDraftExampleFragmentYaml, type DraftSpawn, type Proposal } from "../src/lib/inbox.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { BAKEOFF_CANDIDATES, rankBakeoff, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "#src/lib/inbox-bakeoff.js";
+import { inboxDraftExampleFragmentYaml, type DraftSpawn, type Proposal } from "#src/lib/inbox.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const PROPOSALS: Proposal[] = ["P1", "P2", "P3"].map((id) => ({ id, summary: `summary of ${id}`, evidenceAnchors: [{ description: "x", pattern: "landed" }] }));
 

@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { loadPlan, type Task } from "../src/lib/plan.js";
-import { lintTask, literalTestTitlesIn, unboundCriterionViolations } from "../src/lib/task-linter.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { loadPlan, type Task } from "#src/lib/plan.js";
+import { lintTask, literalTestTitlesIn, unboundCriterionViolations } from "#src/lib/task-linter.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const REPO_ROOT = process.cwd();
 const TARGET = "test/a-criterion-names-the-test-that-proves-it.fixture.test.ts";

@@ -5,20 +5,21 @@
  * #10441). An uncovered line the PR did NOT add, or unreadable added-line evidence, keeps the
  * W1-T2782 refresh.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import { addedLinesFromPatch, prAddedLinesFromPullFiles } from "../src/lib/sweep.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { decideRedBaseRefresh, redBaseRefreshFactsFromRest, runFixRung } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import { addedLinesFromPatch, prAddedLinesFromPullFiles } from "#src/lib/sweep.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { decideRedBaseRefresh, redBaseRefreshFactsFromRest, runFixRung } from "#src/run-task.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = repoRoot();
 const HOT = "src/lib/affected-suites.ts";
 
 function coverageRed(...lines: string[]) {

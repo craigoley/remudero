@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lintTask, monolithFilingViolations } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, monolithFilingViolations } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── impl-DS: a NEW task id may not be filed into plan/tasks.yaml ──────────────────────────
 //
@@ -82,8 +82,8 @@ test("severity is demotable to warn without touching the logic", () => {
 test("lint-plan without --base PRINTS the skip note, so a check that cannot run never looks passed", async () => {
   // Trap 1's other half. Silence would be worse than the check not existing: whole-plan is the mode
   // people run by hand, and a check that quietly does nothing there is one nobody notices is broken.
-  const { lintPlanCommand } = await import("../src/run-task.js");
-  const { fakeGitHub } = await import("./helpers/fake-github.js");
+  const { lintPlanCommand } = await import("#src/run-task.js");
+  const { fakeGitHub } = await import("#test/helpers/fake-github.js");
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
 

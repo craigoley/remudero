@@ -18,9 +18,9 @@ import {
   detectReviewFalseBlock,
   detectCiLogVerdictUnchanged,
   classifyNoPrShape,
-} from "../src/lib/fix-rung-classify.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
+} from "#src/lib/fix-rung-classify.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
 
 // ── shared fixtures, mirroring the pre-move suites' own conventions ─────────────────────────────
 

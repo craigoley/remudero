@@ -6,7 +6,7 @@ import {
   selectFromRoutingPool,
   unavailableRoutingPool,
   type RoutingPoolRequest,
-} from "../src/lib/model-pool.js";
+} from "#src/lib/model-pool.js";
 
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");
 const BASELINE = { provider: "claude", model: "claude-sonnet-5", effort: "medium", reviewedBy: "review#7" };

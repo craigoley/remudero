@@ -3,13 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   drainDetachedSweepActions, runSweep, runSweepLightPass,
   type FixDispatchEvidence, type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
-import { fixRungAllowedBesideInFlight, lightPassActionable } from "../src/run-task.js";
+} from "#src/lib/sweep.js";
+import { fixRungAllowedBesideInFlight, lightPassActionable } from "#src/run-task.js";
 
 // 2026-10-14 on the core ledger: 220 `conflicted` rows read "deferred to full sweep (light pass)" against
 // 7 that acted, while full passes finished a median 18.9 min apart (p90 44.5, max 100). #11679 went dirty

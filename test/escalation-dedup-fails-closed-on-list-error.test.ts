@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { escalate, type Escalation, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
+import { escalate, type Escalation, type IssueGateway, type OpenIssue } from "#src/lib/escalate.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-escalate-dedup-")), "ledger.ndjson");

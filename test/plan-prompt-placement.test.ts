@@ -28,9 +28,9 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "node:test";
 
-import { planArchitectPrompt } from "../src/lib/plan-architect.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { lintTask, monolithFilingViolations } from "../src/lib/task-linter.js";
+import { planArchitectPrompt } from "#src/lib/plan-architect.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { lintTask, monolithFilingViolations } from "#src/lib/task-linter.js";
 
 /**
  * A task shaped as the CORRECTED prompt directs — including `origin: architect`, which the prompt

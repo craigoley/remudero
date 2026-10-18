@@ -14,8 +14,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkWaitStalled, ciGateFromRollup, STALL_WINDOW } from "../src/run-task.js";
-import { checksStateFromRollup, REQUIRED_CHECK_OK, type RollupCheckEntry } from "../src/lib/sweep.js";
+import { checkWaitStalled, ciGateFromRollup, STALL_WINDOW } from "#src/run-task.js";
+import { checksStateFromRollup, REQUIRED_CHECK_OK, type RollupCheckEntry } from "#src/lib/sweep.js";
 
 /** GitHub's own check-run/status-context conclusion vocabulary, verbatim from this task's own
  *  rationale (§1): "GitHub's conclusion set is eight values". */

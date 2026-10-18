@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { preDispatchContractRevision, terminalPreDispatchRefusalRevisions } from "../src/lib/dispatch-repair.js";
-import type { Config } from "../src/lib/config.js";
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { preDispatchContractRevision, terminalPreDispatchRefusalRevisions } from "#src/lib/dispatch-repair.js";
+import type { Config } from "#src/lib/config.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 import {
   REFUSAL_AMENDMENT_STEP,
   draftRefusalAmendment,
@@ -19,15 +19,15 @@ import {
   refusalAmendmentComment,
   type RefusalAmendmentIo,
   type RefusalCandidate,
-} from "../src/lib/refusal-amendment.js";
+} from "#src/lib/refusal-amendment.js";
 import {
   SWEEP_EFFECT_SURFACE,
   buildSweepEffects,
   runSweep,
   type BuildSweepEffectsDeps,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
+} from "#test/helpers/sweep-test.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
 
 // W1-T4838 — a worker's REASONED refusal was scored as a failed attempt and re-dispatched until the
 // breaker tripped. These tests prove the categorized refusal now HOLDS the task and drafts ONE

@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { seedDirtyFleetRepo } from "./helpers/dirty-fleet-repo.js";
+import { seedDirtyFleetRepo } from "#test/helpers/dirty-fleet-repo.js";
 
-import { rebaseDirtyFleetBranchViaGit, type OpenPrView } from "../src/lib/sweep.js";
+import { rebaseDirtyFleetBranchViaGit, type OpenPrView } from "#src/lib/sweep.js";
 
 const GIT_IDENTITY_ENV = {
   ...process.env,

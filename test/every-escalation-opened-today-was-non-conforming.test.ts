@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { escalate, escalateWithJudge, NEEDS_HUMAN_LABEL, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
+import { escalate, escalateWithJudge, NEEDS_HUMAN_LABEL, type Escalation, type IssueGateway } from "#src/lib/escalate.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-escalation-consequence-")), "ledger.ndjson");

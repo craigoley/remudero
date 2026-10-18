@@ -4,31 +4,31 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { feedbackLineageAuthority } from "../src/lib/authority.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, type AutoTriageInputs } from "../src/lib/auto-triage.js";
-import { classifyContribution, feedbackContentDigest, feedbackLineagePayload, type AdmissionPolicy, type FeedbackAdmissionSubject } from "../src/lib/contributor-admission.js";
+import { feedbackLineageAuthority } from "#src/lib/authority.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, type AutoTriageInputs } from "#src/lib/auto-triage.js";
+import { classifyContribution, feedbackContentDigest, feedbackLineagePayload, type AdmissionPolicy, type FeedbackAdmissionSubject } from "#src/lib/contributor-admission.js";
 import {
   admitFeedbackContribution, captureFeedback, feedbackEntryPath, homeRepoPath, inheritFeedbackLineage, proposeFeedbackWithSummary,
   readFeedbackEntry, type FeedbackEntry,
-} from "../src/lib/feedback.js";
-import { ghIssueListGateway, normalizeIssue, pollIssues, type IssueListGateway } from "../src/lib/issues-intake.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { mergeFeedbackRecord } from "../src/lib/feedback-record-merge.js";
-import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent, sweepFeedbackLanding } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { feedbackEntryBlock } from "../src/lib/triage.js";
-import { operatorVerdictEvidence } from "../src/lib/sweep.js";
+} from "#src/lib/feedback.js";
+import { ghIssueListGateway, normalizeIssue, pollIssues, type IssueListGateway } from "#src/lib/issues-intake.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { mergeFeedbackRecord } from "#src/lib/feedback-record-merge.js";
+import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent, sweepFeedbackLanding } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { feedbackEntryBlock } from "#src/lib/triage.js";
+import { operatorVerdictEvidence } from "#src/lib/sweep.js";
 import { buildFixRungDispatchArgs, feedbackFixConstraint, runPlanScopedFixRound, buildIntakeRungsDaemonHooks,
-  feedbackReconcileCommand, ledgerPathFor, watchDispatchSpawn } from "./helpers/run-task-test.js";
-import * as admissionModule from "../src/lib/contributor-admission.js";
-import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src/lib/contributor-admission.js";
-import { ghEscalationAnswerGateway, readEscalationAnswers } from "../src/lib/escalation-answers.js";
-import { renderIssueBody } from "../src/lib/escalate.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { resolveProducerIdentity } from "../src/lib/producer-identity.js";
+  feedbackReconcileCommand, ledgerPathFor, watchDispatchSpawn } from "#test/helpers/run-task-test.js";
+import * as admissionModule from "#src/lib/contributor-admission.js";
+import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "#src/lib/contributor-admission.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers } from "#src/lib/escalation-answers.js";
+import { renderIssueBody } from "#src/lib/escalate.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { resolveProducerIdentity } from "#src/lib/producer-identity.js";
 import { __resetRunningWorkersForTest, createClaudeExecutableCache, CLAUDE_BIN_ENV_OVERRIDE,
-  deliverOperatorAnswerToRunningWorker, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
+  deliverOperatorAnswerToRunningWorker, spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
 
 // W1-T7754 — an issue or comment is an outside contribution until the shared classifier admits
 // its ORIGINAL actor. These fixtures drive real captures through pollIssues/captureFeedback and

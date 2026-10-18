@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -16,15 +17,15 @@ import {
   decideCashTrial,
   summarizeCashTrial,
   type CashTrialEvidence,
-} from "../src/lib/cash-trial.js";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { GitHub } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { selectOpenWeightModel } from "../src/lib/worker-provider.js";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
+} from "#src/lib/cash-trial.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { GitHub } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { selectOpenWeightModel } from "#src/lib/worker-provider.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 import {
   IMPLEMENT_CASH_TOOLS,
   createClaudeExecutableCache,
@@ -32,16 +33,16 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
-import { runTask } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
+import { runTask } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // Operator ruling 2026-09-24 (DECISIONS.md): a small capped share of the simplest implement work
 // runs on a cheap cash model beside a same-class subscription control, tagged trial "cash-simple",
 // and stops itself when the cash arm falls below the bar. It re-opens as its failures age out.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = repoRoot();
 const docsTask = { id: "T-DOCS", type: "implement", risk: "low", files: ["docs/guide.md"] };
 
 test("only low-risk single-file docs or plan implement work is trial work", () => {

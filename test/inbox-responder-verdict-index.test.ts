@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { registryThreadItems } from "../src/lib/inbox-responder.js";
-import { plainInboxMessage, plainSourceFingerprint, plainStorePath, plainTemplate } from "../src/lib/inbox-plain.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { registryThreadItems } from "#src/lib/inbox-responder.js";
+import { plainInboxMessage, plainSourceFingerprint, plainStorePath, plainTemplate } from "#src/lib/inbox-plain.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const proof = "test/inbox-responder-verdict-index.test.ts";
 const proposal = (n: number) => ({ id: `verify-human:W1-T${n}`, summary: `Decision ${n}`, evidenceAnchors: [] });

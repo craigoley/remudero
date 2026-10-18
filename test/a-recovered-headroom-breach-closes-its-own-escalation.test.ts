@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import {
   escalateHeadroomReserve,
   buildHeadroomRecoveryCandidates,
@@ -13,8 +13,8 @@ import {
   renderHeadroomRecoveryCloseComment,
   buildEscalationReconcileCandidates,
   sweepEscalationReconcile,
-} from "../src/run-task.js";
-import { runEscalationReconcile, type EscalationReconcileCandidate } from "../src/lib/sweep.js";
+} from "#src/run-task.js";
+import { runEscalationReconcile, type EscalationReconcileCandidate } from "#src/lib/sweep.js";
 
 /**
  * W1-T2603 — A RECOVERED HEADROOM BREACH NEVER CLOSES ITS OWN ESCALATION.

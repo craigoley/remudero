@@ -12,10 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, type CiGateOutcome, type WorktreeSnapshot } from "./helpers/run-task-test.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { runFixRung, type CiGateOutcome, type WorktreeSnapshot } from "#test/helpers/run-task-test.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 type Row = { step: string } & Record<string, unknown>;
 type Run = Parameters<typeof runFixRung>[0];

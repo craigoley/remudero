@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { addedTestFilesAtHead, prMetadataRestArgs, repairPrMetadata, scopeAmendmentFromFixReport } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { addedTestFilesAtHead, prMetadataRestArgs, repairPrMetadata, scopeAmendmentFromFixReport } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 function subject(checks: string[] = ["commitlint"], headSha = "head-a"): OpenPrView {
   return {

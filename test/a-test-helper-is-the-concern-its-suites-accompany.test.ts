@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { checkOneConcern } from "../src/lib/review.js";
-import { subsystemsOf } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { checkOneConcern } from "#src/lib/review.js";
+import { subsystemsOf } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 function diffOf(files: string[]): string {
   return files.flatMap((file) => [

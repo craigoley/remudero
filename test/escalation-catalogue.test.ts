@@ -3,11 +3,11 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { StarvationCensus } from "../src/lib/daemon.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import type { Task } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { StarvationCensus } from "#src/lib/daemon.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import type { Task } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   escalateCircuitBreak,
   escalateCrashLoop,
@@ -19,7 +19,7 @@ import {
   escalateQuotaExhaustion,
   escalateStarvation,
   escalateStarvationCleared,
-} from "../src/lib/escalation-catalogue.js";
+} from "#src/lib/escalation-catalogue.js";
 
 interface CreatedIssue {
   title: string;

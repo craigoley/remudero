@@ -16,9 +16,9 @@ import {
   executeBoundedDelegation,
   forwardDelegation,
   InMemoryDelegationEnvelopeStore,
-} from "../src/lib/automation-action.js";
-import { createService } from "../src/lib/service.js";
-import { buildOperatorAgentRoutes } from "../src/lib/operator-agent.js";
+} from "#src/lib/automation-action.js";
+import { createService } from "#src/lib/service.js";
+import { buildOperatorAgentRoutes } from "#src/lib/operator-agent.js";
 
 function issueAndAccept(store: InMemoryDelegationEnvelopeStore) {
   const envelope = createDelegationEnvelope({

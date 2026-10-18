@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,26 +15,26 @@ import {
   fixRoutingWeights,
   type FixLearnedArms,
   type FixRoutingCandidate,
-} from "../src/lib/fix-routing-learner.js";
+} from "#src/lib/fix-routing-learner.js";
 import {
   routingDrawValue,
   selectWorkerProvider,
   type ProviderCapacity,
   type ProviderMixing,
   type RoutingDrawSeed,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 import {
   createClaudeExecutableCache,
   spawnWorker,
   type WorkerResult,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // W1-T5535: the fix lane's auction learns from whether an arm's fix rounds COMMIT. Measured over
 // 2026-09-26..10-03, codex/gpt-6.1-sol was refused on 23 of 37 rounds and claude-opus-5-5 on 1 of 8.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = repoRoot();
 const NOW = Date.parse("2026-10-05T12:00:00.000Z");
 const DAY = 24 * 3_600_000;
 
@@ -409,7 +410,7 @@ test("W1-T5535: a decision sink that throws is logged and never changes routing"
 });
 
 test("W1-T5535: an unreadable routing ledger is named on its own row and the round routes by headroom", async () => {
-  const { fixLearnedArmsFor } = await import("../src/run-task.js");
+  const { fixLearnedArmsFor } = await import("#src/run-task.js");
   const rows: Array<[string, Record<string, unknown> | undefined]> = [];
   const log = (step: string, extra?: Record<string, unknown>) => { rows.push([step, extra]); };
   const strike = { strike: 1, round: "ci-log" };

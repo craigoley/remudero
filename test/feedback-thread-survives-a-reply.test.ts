@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,12 +7,12 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
-import { createService } from "../src/lib/service.js";
-import { buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
-import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
-import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
-import type { GitHub } from "../src/lib/status.js";
-import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { createService } from "#src/lib/service.js";
+import { buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps, type RatifyCliGateway } from "#src/lib/panel-graph.js";
+import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "#src/lib/feedback.js";
+import type { TraceGithub, TracePrView } from "#src/lib/trace.js";
+import type { GitHub } from "#src/lib/status.js";
+import { landQueuedFeedback } from "#test/helpers/land-queued-feedback.js";
 
 // ── W1-T2278: a reply is a new item, and the link back to what it answers must be a durable ────
 // field, not only prose inside the reply's own text ─────────────────────────────────────────
@@ -234,8 +235,7 @@ test("POST /v1/feedback stays write-scoped, tier low -- no new tier introduced f
 // operator's behalf" are properties of the WHOLE tree, not just of one request/response pair --
 // proven here by scanning the real source rather than trusting a single exercised path.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 
 function readSrc(relPath: string): string {
   return readFileSync(join(REPO_ROOT, "src", relPath), "utf8");

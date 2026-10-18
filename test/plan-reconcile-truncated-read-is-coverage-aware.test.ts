@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { BOARD_MAX_PAGES, fetchBoardPrsRest, type RestPullRow } from "../src/lib/open-prs-rest.js";
-import type { Task } from "../src/lib/plan.js";
-import { buildBatchedGithub, deriveStatus, type GitHub } from "../src/lib/status.js";
-import { creditProjectionWithReadState, defaultCreditedMergedIds, planReconcileCommand } from "../src/run-task.js";
+import { BOARD_MAX_PAGES, fetchBoardPrsRest, type RestPullRow } from "#src/lib/open-prs-rest.js";
+import type { Task } from "#src/lib/plan.js";
+import { buildBatchedGithub, deriveStatus, type GitHub } from "#src/lib/status.js";
+import { creditProjectionWithReadState, defaultCreditedMergedIds, planReconcileCommand } from "#src/run-task.js";
 
 const PAGE_SIZE = 100;
 const url = (n: number) => `https://github.com/o/r/pull/${n}`;

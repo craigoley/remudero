@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { daemonCommand } from "../src/run-task.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import { daemonCommand } from "#src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
 
 function fixtureHome(): { home: string; planPath: string } {
   const home = mkdtempSync(join(tmpdir(), "rmd-nonself-feedback-landing-"));

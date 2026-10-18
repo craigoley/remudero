@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { backfillPlainMessages, checkPlainMessage, plainInboxMessage, plainSourceFingerprint, plainStorePath, plainTemplate, readPlainStore, type PlainInboxMessage } from "../src/lib/inbox-plain.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { backfillPlainMessages, checkPlainMessage, plainInboxMessage, plainSourceFingerprint, plainStorePath, plainTemplate, readPlainStore, type PlainInboxMessage } from "#src/lib/inbox-plain.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const proposal = { id: "verify-human:W1-T216", summary: "Sandbox drill awaits a defined scope" };
 const message: PlainInboxMessage = {

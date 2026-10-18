@@ -18,9 +18,9 @@ import {
   saveCreditStore,
   singlePathCreditedIds,
   type CreditStore,
-} from "../src/lib/status.js";
-import { runCreditBackfill, type CreditCandidate } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/status.js";
+import { runCreditBackfill, type CreditCandidate } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function tempState(): { dir: string; ledgerPath: string } {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}credit-receipt-`));

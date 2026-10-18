@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { answerThread, readMarksPath, registryThreadItems } from "../src/lib/inbox-responder.js";
-import { inboxThreadId, readAllThreads } from "../src/lib/inbox-thread.js";
-import { buildInboxThreadReadRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { answerThread, readMarksPath, registryThreadItems } from "#src/lib/inbox-responder.js";
+import { inboxThreadId, readAllThreads } from "#src/lib/inbox-thread.js";
+import { buildInboxThreadReadRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, inboxThreadStorePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const OPERATOR_ID = "verify-human:W1-T235";
 const NON_OPERATOR_ID = "proof-debt:W1-T2";

@@ -8,7 +8,7 @@ import {
   readProviderAuthProfiles,
   startProviderAuthSession,
   type ProviderAuthSessionDeps,
-} from "../src/lib/provider-auth-sessions.js";
+} from "#src/lib/provider-auth-sessions.js";
 
 class FakeChild extends EventEmitter {
   readonly writes: string[] = [];

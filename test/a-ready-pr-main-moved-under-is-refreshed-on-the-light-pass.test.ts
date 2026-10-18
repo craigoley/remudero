@@ -12,18 +12,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runLightPassReadyRefresh,
   type ArmedStalledPr,
   type BaseChangedFiles,
   type OpenPrView,
-} from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildSweepLightHook } from "../src/run-task.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
-import { appendGitConfigEnv } from "./setup/no-live-remote.js";
+} from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildSweepLightHook } from "#src/run-task.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { appendGitConfigEnv } from "#test/setup/no-live-remote.js";
 
 const NOW = 1_800_000_000_000;
 const FILE = "src/lib/read-model-worker.ts";

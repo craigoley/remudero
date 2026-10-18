@@ -18,7 +18,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
+import { filingAcceptanceCriteria } from "#src/lib/plan-pr-emitter.js";
 
 const SHARDS = [
   "plan/tasks.d/W1-T3392-submit-the-attrition-ruling.yaml",

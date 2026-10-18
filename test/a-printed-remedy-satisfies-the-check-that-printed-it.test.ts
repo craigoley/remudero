@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -26,8 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // negative control that the FIX is to print a working form rather than to relax the matcher) with
 // other text trailing it on the same line.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const gate = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 const HOLDER_BRANCH = "unknown";

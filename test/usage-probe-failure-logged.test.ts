@@ -1,16 +1,17 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { Config } from "../src/lib/config.js";
+import type { Config } from "#src/lib/config.js";
 import {
   ledgerUsageProbeFailure,
   readUsageSnapshot,
   type UsageProbeFailureStage,
   type UsageProbeRunner,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 /**
  * A USAGE-PROBE FAILURE MUST NAME ITSELF, DURABLY, ON THE FIRST TICK.
@@ -27,7 +28,7 @@ import {
  * `UsageProbeRunner` seam, so nothing here spawns a real `claude`, touches a real keychain, or
  * reaches a real `runTask`/`drain`/`sweep`.
  */
-const FIXTURE = fileURLToPath(new URL("./fixtures/usage/usage-resetless-weekly.txt", import.meta.url));
+const FIXTURE = join(repoRoot(), "test/fixtures/usage/usage-resetless-weekly.txt");
 const REAL_CAPTURE = readFileSync(FIXTURE, "utf8");
 
 function tmpConfig(): Config {

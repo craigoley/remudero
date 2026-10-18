@@ -11,11 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
 import {
   buildSweepEffects,
   decideFixSuperseded,
@@ -25,11 +25,11 @@ import {
   type BuildSweepEffectsDeps,
   type FixDispatchSnapshot,
   type RollupCheckEntry,
-} from "../src/lib/sweep.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { priorStrikesFor, runFixRung } from "./helpers/run-task-test.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/sweep.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { priorStrikesFor, runFixRung } from "#test/helpers/run-task-test.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const OLD_HEAD = "3dd6d72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_HEAD = "dde0c1861bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

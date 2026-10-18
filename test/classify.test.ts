@@ -3,12 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { openWeightAllowancePath, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { finishTransientRetry, implementAttemptOutcome } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { buildFixProgressInput, type FixProgressInput, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { openWeightAllowancePath, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { finishTransientRetry, implementAttemptOutcome } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { buildFixProgressInput, type FixProgressInput, type FixProgressJudge } from "#src/lib/fix-progress-judge.js";
 import {
   judgeCappedRepair,
   DIAGNOSE_AT_STRIKES,
@@ -25,7 +25,7 @@ import {
   transientBackoffMs,
   type AttemptOutcome,
   type FailureSignal,
-} from "../src/lib/classify.js";
+} from "#src/lib/classify.js";
 
 // ── acceptance #1: "network/5xx/CI-flake retries consume NO strike;
 // deterministic failures do" — classifier unit tests over RECORDED fixtures.

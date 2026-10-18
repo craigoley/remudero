@@ -13,21 +13,21 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, utimesSyn
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import type { Config } from "#src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 // A namespace import, so the file still loads where prHeadTreeGit is absent and each test fails on its own.
-import * as sweep from "../src/lib/sweep.js";
-import { planRepairGitRun, rebaseDirtyFleetBranchViaGit, renumberPlanPrIds, type OpenPrView } from "../src/lib/sweep.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import * as sweep from "#src/lib/sweep.js";
+import { planRepairGitRun, rebaseDirtyFleetBranchViaGit, renumberPlanPrIds, type OpenPrView } from "#src/lib/sweep.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 import {
   credentialHelperSocketWired,
   reapStaleWorktreesAsync,
   runAdhocLaneReapRung,
   wireCredentialHelperSocket,
   worktreeAdd,
-} from "../src/lib/worker.js";
-import { WorktreePointerRefusedError } from "../src/lib/worktree-git.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/worker.js";
+import { WorktreePointerRefusedError } from "#src/lib/worktree-git.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const BRANCH = "run-W1-T9001-1791354199000";
 /** Every hook a commit, a rebase, a checkout or a push can run. */

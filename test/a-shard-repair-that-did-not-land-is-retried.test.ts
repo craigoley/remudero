@@ -10,12 +10,12 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { GARDEN_FILING_RETRY_BASE_MS } from "../src/lib/gardener.js";
-import { gitBlobSha } from "../src/lib/plan-shard-repair.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import * as runTask from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import type { Clock } from "#src/lib/clock.js";
+import { GARDEN_FILING_RETRY_BASE_MS } from "#src/lib/gardener.js";
+import { gitBlobSha } from "#src/lib/plan-shard-repair.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import * as runTask from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 /** W1-T5431's shard as main carried it before #8877: the judge's priority 2.5, the gardener's 4 and its marker. */
 const BROKEN_SHARD = [

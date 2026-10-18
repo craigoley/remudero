@@ -3,15 +3,15 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import {
   judgeReview,
   TASK_ID_LINE_RE,
   taskIdDeclarationsAtRef,
   taskIdDeclarationsInDiff,
-} from "../src/lib/review.js";
-import { taskIdCollisions } from "../src/lib/task-id-reservation.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/review.js";
+import { taskIdCollisions } from "#src/lib/task-id-reservation.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T4389 — MEASURED 2026-09-23: remudero-console #1695 added CONSOLE-T58 in a shard named unlike
 // the one #1699 had merged it in, so git reported MERGEABLE. The review must refuse that collision

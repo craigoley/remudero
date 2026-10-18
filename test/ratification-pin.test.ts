@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { GATED_RUNGS, loadDefaultPolicy, loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
+import { GATED_RUNGS, loadDefaultPolicy, loadPolicy, policyPath, type Policy } from "#src/lib/policy.js";
 import {
   buildRatificationRow,
   computeOperationHash,
@@ -14,7 +15,7 @@ import {
   ratificationsPath,
   renderRatificationRow,
   type Ratifications,
-} from "../src/lib/ratification.js";
+} from "#src/lib/ratification.js";
 import {
   autoTriageCheck,
   ledgerPathFor,
@@ -22,12 +23,12 @@ import {
   logWorktreeReapBootSurvey,
   ratifyCommand,
   RUNG_CONTRACT_VERSIONS,
-} from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { CloneReapSummary } from "../src/lib/clone-reaper.js";
-import type { WorktreeReapSummary } from "../src/lib/worker.js";
+} from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { CloneReapSummary } from "#src/lib/clone-reaper.js";
+import type { WorktreeReapSummary } from "#src/lib/worker.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 
 /**
  * test/ratification-pin.test.ts — W1-T2694, LAW 5's SIGNATURE.

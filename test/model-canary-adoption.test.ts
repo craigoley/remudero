@@ -1,25 +1,26 @@
 /** Production entrypoint controls also fail explicitly when transplanted onto pre-feature main. */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
-const suite = existsSync(new URL("../src/lib/model-canary-suite.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-suite.js") : null;
-const runner = existsSync(new URL("../src/lib/model-canary-runner.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-runner.js") : null;
-const metrics = existsSync(new URL("../src/lib/model-canary-metrics.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-metrics.js") : null;
-const command = existsSync(new URL("../src/lib/model-canary-command.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-command.js") : null;
-const schedule = existsSync(new URL("../src/lib/model-canary-schedule.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-schedule.js") : null;
-const retention = existsSync(new URL("../src/lib/model-canary-retention.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-retention.js") : null;
-const transport = existsSync(new URL("../src/lib/model-canary-transport.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-transport.js") : null;
+const suite = existsSync(join(repoRoot(), "src/lib/model-canary-suite.ts"))
+  ? await import("#src/lib/model-canary-suite.js") : null;
+const runner = existsSync(join(repoRoot(), "src/lib/model-canary-runner.ts"))
+  ? await import("#src/lib/model-canary-runner.js") : null;
+const metrics = existsSync(join(repoRoot(), "src/lib/model-canary-metrics.ts"))
+  ? await import("#src/lib/model-canary-metrics.js") : null;
+const command = existsSync(join(repoRoot(), "src/lib/model-canary-command.ts"))
+  ? await import("#src/lib/model-canary-command.js") : null;
+const schedule = existsSync(join(repoRoot(), "src/lib/model-canary-schedule.ts"))
+  ? await import("#src/lib/model-canary-schedule.js") : null;
+const retention = existsSync(join(repoRoot(), "src/lib/model-canary-retention.ts"))
+  ? await import("#src/lib/model-canary-retention.js") : null;
+const transport = existsSync(join(repoRoot(), "src/lib/model-canary-transport.ts"))
+  ? await import("#src/lib/model-canary-transport.js") : null;
 
 test("canary production runner retains actual tool authority and unavailable attempt cost", async () => {
   assert.ok(suite && runner && metrics, "production canary modules are absent at this head");

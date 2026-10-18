@@ -5,8 +5,8 @@
 // High-risk and irreversible actions stay human-gated inside an accepted profile.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evaluateAutomationAction, type AutomationActionReceipt } from "../src/lib/automation-action.js";
-import { buildDelegationProfile, delegationEligibility } from "../src/lib/delegation-profile.js";
+import { evaluateAutomationAction, type AutomationActionReceipt } from "#src/lib/automation-action.js";
+import { buildDelegationProfile, delegationEligibility } from "#src/lib/delegation-profile.js";
 import {
   actionBody,
   at,
@@ -22,7 +22,7 @@ import {
   tempStatePath,
   validAction,
   withDelegationService,
-} from "./helpers/delegation-profile-fixture.js";
+} from "#test/helpers/delegation-profile-fixture.js";
 
 const APPROVED = { decision: "approved" as const, decidedBy: "operator:owner", decidedAt: at(0) };
 

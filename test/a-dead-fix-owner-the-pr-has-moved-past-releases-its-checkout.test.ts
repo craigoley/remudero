@@ -26,11 +26,11 @@ import {
   removeAbandonedFixWorktreeOwner,
   resetTrackedDirtyFixOwner,
   type BuildSweepEffectsDeps,
-} from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const TASK = "W1-T500";
 const PR = 9471;

@@ -1,4 +1,3 @@
-// test/sweep-escalations-carry-the-task-contract.test.ts
 //
 // LIVE 2026-10-11, remudero-console #2035 (CONSOLE-T99): the sweep opened BLOCKED #2036 and MANUAL
 // #2037 about the PR. Neither body carried a `**Contract:**` line. The fix rung's open-escalation
@@ -18,8 +17,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "./helpers/sweep-test.js";
-import { openEscalationStandDownReason } from "./helpers/run-task-test.js";
+import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { openEscalationStandDownReason } from "#test/helpers/run-task-test.js";
 import {
   CONTRACT_REVISION_LINE_RE,
   findDuplicateEscalation,
@@ -27,10 +26,10 @@ import {
   type EscalationDedupKey,
   type IssueGateway,
   type OpenIssue,
-} from "../src/lib/escalate.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/escalate.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TASK_ID = "CONSOLE-T99";
 const PR_NUMBER = 2035;

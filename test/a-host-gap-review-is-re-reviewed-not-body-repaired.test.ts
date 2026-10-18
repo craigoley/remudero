@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { FixProgressInput } from "../src/lib/fix-progress-judge.js";
+import type { FixProgressInput } from "#src/lib/fix-progress-judge.js";
 import {
   HOST_GAP_REREVIEW_STEP, DEFAULT_SWEEP_POLICY, cappedProofDiscriminationFromLedger,
   hostGapProblem, hostGapProgressInput, hostGapRereviewFacts, hostGapRereviewWaitMs, isHostGapCriterion, planHostGapRereview, runSweep,
   type HostGapRereviewState, type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const MIN = 60_000;
 const NOW = Date.parse("2026-10-11T12:00:00Z");

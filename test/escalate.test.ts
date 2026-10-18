@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -5,8 +6,8 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { planCommand } from "../src/run-task.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { planCommand } from "#src/run-task.js";
 import {
   ESCALATION_JUDGE_TOOLS,
   FLEET_NOTICE_LABEL,
@@ -31,10 +32,10 @@ import {
   type EscalationJudgeVerdict,
   type EscalationOption,
   type IssueGateway,
-} from "../src/lib/escalate.js";
-import type { SummarizeDeps } from "../src/lib/feedback.js";
-import { validateMounts, type Mount, type Mounts } from "../src/lib/mounts.js";
-import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/escalate.js";
+import type { SummarizeDeps } from "#src/lib/feedback.js";
+import { validateMounts, type Mount, type Mounts } from "#src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "#src/lib/worker.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-escalate-")), "ledger.ndjson");
@@ -427,8 +428,7 @@ async function withGrillFailHarness(
   const savedHome = process.env.HOME;
   const savedPath = process.env.PATH;
   const savedBranch = process.env.RMD_SHIM_BRANCH;
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  const REPO_ROOT = join(__dirname, "..");
+  const REPO_ROOT = repoRoot();
   try {
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
@@ -1798,7 +1798,7 @@ test("escalateWithJudge: an escalation with no options is refused before the jud
 // merged" note with no judgment attached, …). Ambiguous cases default to `operator-acted` — the
 // SAFE direction per the false-negative asymmetry this whole task exists to protect.
 
-const CORPUS_FIXTURE = fileURLToPath(new URL("./fixtures/needs-human-corpus.json", import.meta.url));
+const CORPUS_FIXTURE = join(repoRoot(), "test/fixtures/needs-human-corpus.json");
 
 interface CorpusEntry {
   number: number;

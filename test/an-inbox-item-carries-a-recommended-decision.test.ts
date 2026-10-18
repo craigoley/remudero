@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { InboxClassification, InboxState } from "../src/lib/inbox.js";
+import type { InboxClassification, InboxState } from "#src/lib/inbox.js";
 import {
   backfillRecommendations,
   buildRecommendationPrompt,
@@ -21,12 +21,12 @@ import {
   type EvidenceKind,
   type RecommendationEvidence,
   type StoredRecommendation,
-} from "../src/lib/inbox-recommendation.js";
-import { writeClassificationSnapshot } from "../src/lib/fleet-lane.js";
-import { inboxLanes } from "../src/lib/panel-graph.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { SPEC, violations } from "./helpers/openapi-strict.js";
+} from "#src/lib/inbox-recommendation.js";
+import { writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
+import { inboxLanes } from "#src/lib/panel-graph.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { SPEC, violations } from "#test/helpers/openapi-strict.js";
 
 const READY_ID = "machine-judge:W1-T5418";
 const READY_SUMMARY = "A parked fix is waiting for a ruling on whether to land it.";

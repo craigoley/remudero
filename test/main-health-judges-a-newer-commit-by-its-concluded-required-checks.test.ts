@@ -16,8 +16,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildMainHealthRung } from "../src/lib/main-health-rung.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildMainHealthRung } from "#src/lib/main-health-rung.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HEAD = "a".repeat(40);
 const NEWER = "916e5ced0".padEnd(40, "1");

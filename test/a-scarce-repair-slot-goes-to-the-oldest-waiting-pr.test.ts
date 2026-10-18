@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as sweep from "../src/lib/sweep.js";
-import type { OpenPrView, SweepDeps } from "../src/lib/sweep.js";
+import * as sweep from "#src/lib/sweep.js";
+import type { OpenPrView, SweepDeps } from "#src/lib/sweep.js";
 
 // A namespace read, so the file still loads at a base without sweepWalkOrder and the proof misses there.
 const { DEFAULT_SWEEP_POLICY, runSweep } = sweep;

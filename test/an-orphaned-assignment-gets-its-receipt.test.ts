@@ -18,10 +18,10 @@ import {
   orphanedRunWindowStart,
   receiptOrphanedAssignments,
   sweepInflightLocksWithReceipts,
-} from "../src/lib/benchmark-run.js";
-import { fixedClock, systemClock, type Clock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import { orphanWorkerKillLedger, runInflightLockSweepRung } from "../src/run-task.js";
+} from "#src/lib/benchmark-run.js";
+import { fixedClock, systemClock, type Clock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import { orphanWorkerKillLedger, runInflightLockSweepRung } from "#src/run-task.js";
 
 const TASK = "W1-T9644";
 

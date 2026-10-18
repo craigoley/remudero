@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import * as inbox from "../src/lib/inbox.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import * as inbox from "#src/lib/inbox.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const clock = fixedClock(Date.parse("2026-10-12T20:30:00-04:00"));
 const proposal: inbox.Proposal = {

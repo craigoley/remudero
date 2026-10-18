@@ -9,8 +9,8 @@ import {
   renderIssueBody,
   type Escalation,
   type IssueGateway,
-} from "../src/lib/escalate.js";
-import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "../src/lib/sweep.js";
+} from "#src/lib/escalate.js";
+import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "#src/lib/sweep.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-head-independent-dedup-")), "ledger.ndjson");

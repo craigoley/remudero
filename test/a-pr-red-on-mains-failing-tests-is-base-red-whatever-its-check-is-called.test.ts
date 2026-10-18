@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import * as reproduction from "../src/lib/base-reproduction.js";
-import type { BaseProbeFile, BaseProbeResult } from "../src/lib/base-reproduction.js";
+import * as reproduction from "#src/lib/base-reproduction.js";
+import type { BaseProbeFile, BaseProbeResult } from "#src/lib/base-reproduction.js";
 import {
   BASE_RED_REFRESH_STEP, BASE_RED_STOOD_DOWN_STEP, DEFAULT_SWEEP_POLICY, baseRedHistoryFromLedger, decideBaseRed,
   mainLatestRunFromLedger, runSweep, type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 // W1-T6024: on 2026-10-06 main failed two tests under `ci`/`ci-shard (n/8)` while #9566 and #9567
 // failed the same two under `coverage-ratchet`. The check-name classifier never matched, so the

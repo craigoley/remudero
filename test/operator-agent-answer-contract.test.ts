@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { buildOperatorAgentAnswer, readInboxAnswerEvidence } from "../src/lib/operator-agent-answer.js";
-import { adaptOperatorAgentProofRows } from "../src/lib/operator-agent-proof.js";
-import { inboxThreadId } from "../src/lib/inbox-thread.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { AnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { buildOperatorAgentAnswer, readInboxAnswerEvidence } from "#src/lib/operator-agent-answer.js";
+import { adaptOperatorAgentProofRows } from "#src/lib/operator-agent-proof.js";
+import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { AnalyticsSnapshot } from "#src/lib/analytics-route.js";
 
 const NOW = Date.parse("2026-09-26T10:00:00.000Z");
 

@@ -1,10 +1,11 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   AUTOMATION_ACTION_FORBIDDEN_FIELD_RE,
   AUTOMATION_ACTION_MAX_ID_CHARS,
@@ -12,16 +13,16 @@ import {
   AUTOMATION_ACTION_SECRET_VALUE_RE,
   AUTOMATION_ACTION_VERSION,
   AUTOMATION_PREFLIGHT_OUTCOMES,
-} from "../src/lib/automation-action.js";
-import { EXTERNAL_EFFECT_STATES, EXTERNAL_EFFECT_VERSION, redactConnectorEvidence } from "../src/lib/action-reconciliation.js";
-import { INTENT_PLAN_VERSION } from "../src/lib/intent-plan.js";
+} from "#src/lib/automation-action.js";
+import { EXTERNAL_EFFECT_STATES, EXTERNAL_EFFECT_VERSION, redactConnectorEvidence } from "#src/lib/action-reconciliation.js";
+import { INTENT_PLAN_VERSION } from "#src/lib/intent-plan.js";
 
 // W1-T3896: the automation-flow-v1 manifest is the ONE compatibility object core publishes for the
 // console. This suite proves it names its reviewed source revision, schema version, states, fields,
 // redaction rules and compatibility policy, and that every state family and redaction rule it
 // claims to derive from a core module actually equals that module's runtime value.
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = repoRoot();
 const MANIFEST_PATH = "contracts/automation-flow-v1.json";
 
 interface ManifestError { code: string; path: string; detail: string }

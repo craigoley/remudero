@@ -23,7 +23,7 @@ import {
   INBOX_CLASSIFY_SLICE,
   peekClassifiedInbox,
   type PanelGraphDeps,
-} from "../src/lib/panel-graph.js";
+} from "#src/lib/panel-graph.js";
 import {
   ANCHOR_GREP_CACHE_MAX_ENTRIES,
   cachedAnchorGrep,
@@ -39,11 +39,11 @@ import {
   readOriginMainSha,
   type EvidenceAnchor,
   type InboxClassification,
-} from "../src/lib/inbox.js";
-import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "../src/lib/measurement-cadence.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { projectPlan, readLedgerLines, type PrRef } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+} from "#src/lib/inbox.js";
+import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "#src/lib/measurement-cadence.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { projectPlan, readLedgerLines, type PrRef } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);

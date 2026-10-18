@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SWEEP_POLICY, runSweepLightPass, selectReviewAdmission, selectReviewAdmissions, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { appendLedger } from "../src/lib/ledger.js";
+import { DEFAULT_SWEEP_POLICY, runSweepLightPass, selectReviewAdmission, selectReviewAdmissions, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
 
 // ── W1-T526 — THE QUEUE-ADMISSION RULE ──────────────────────────────────────────────────────
 //

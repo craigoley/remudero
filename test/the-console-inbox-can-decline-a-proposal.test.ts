@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
-import { classifyProposal, refusalReason, renderInbox, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { GitHub } from "../src/lib/status.js";
+import { createService } from "#src/lib/service.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "#src/lib/panel-graph.js";
+import { classifyProposal, refusalReason, renderInbox, type Proposal, type ReadinessContext } from "#src/lib/inbox.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { GitHub } from "#src/lib/status.js";
 
 // ── W1-T2604: "THE CONSOLE INBOX CAN ONLY SAY YES" ──────────────────────────────────────────
 //

@@ -1,4 +1,5 @@
 // @source-text-subject: this suite pins the migration's call-site wiring and absence of retired writer paths; loadPlanIndex behavior is exercised separately.
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -6,12 +7,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { applyPlanProposalCommit } from "../src/lib/plan-architect.js";
-import { ENFORCEMENT_DATA_EXCLUSIONS, INSTRUMENT_SURFACE_EXCLUSIONS } from "../src/lib/review.js";
-import { loadPlanIndex } from "../src/lib/plan-index.js";
-import { REGENERABLE_ARTIFACT_GENERATORS } from "../src/lib/sweep.js";
+import { applyPlanProposalCommit } from "#src/lib/plan-architect.js";
+import { ENFORCEMENT_DATA_EXCLUSIONS, INSTRUMENT_SURFACE_EXCLUSIONS } from "#src/lib/review.js";
+import { loadPlanIndex } from "#src/lib/plan-index.js";
+import { REGENERABLE_ARTIFACT_GENERATORS } from "#src/lib/sweep.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = repoRoot();
 const PLAN_INDEX_PATH = "plan/plan-index.json";
 
 function git(root: string, args: string[]): string {

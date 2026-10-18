@@ -7,10 +7,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { attemptArm, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import { decidePlanPrMergeSafety, planSafetyGitSync, readPlanMergeSafetySteps } from "../src/lib/plan-pr-merge-safety.js";
-import { runStepsSync } from "../src/lib/git-push.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { attemptArm, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { decidePlanPrMergeSafety, planSafetyGitSync, readPlanMergeSafetySteps } from "#src/lib/plan-pr-merge-safety.js";
+import { runStepsSync } from "#src/lib/git-push.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/";
 const NONE = { count: 0, heads: [] };

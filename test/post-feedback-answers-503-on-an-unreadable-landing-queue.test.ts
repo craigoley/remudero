@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test, type TestContext } from "node:test";
 
-import { listFeedback, type FeedbackEntry } from "../src/lib/feedback.js";
-import { readQueuedFeedbackRecords } from "../src/lib/feedback-landing.js";
-import { buildSubmitFeedbackRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { listFeedback, type FeedbackEntry } from "#src/lib/feedback.js";
+import { readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { buildSubmitFeedbackRoute, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5731-`));

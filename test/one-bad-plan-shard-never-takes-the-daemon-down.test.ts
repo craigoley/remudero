@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Escalation } from "../src/lib/escalate.js";
-import { loadPlan, loadPlanQuarantiningDuplicates, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates } from "../src/lib/plan.js";
-import { withTempDir } from "../src/lib/tmp.js";
-import { createPlanSyncCoalescer, lintPlanCommand, loadDaemonPlan, quarantineReporter, quarantiningPlanSyncAsync, syncPlanFromOrigin } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { loadPlan, loadPlanQuarantiningDuplicates, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates } from "#src/lib/plan.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import { createPlanSyncCoalescer, lintPlanCommand, loadDaemonPlan, quarantineReporter, quarantiningPlanSyncAsync, syncPlanFromOrigin } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // 2026-10-03 — two plan PRs merged 28 s apart each added a `priority:` key to one shard. git merged both, the shard
 // stopped parsing ("Map keys must be unique"), and the core daemon crash-looped at boot: the whole fleet stopped

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Escalation } from "../src/lib/escalate.js";
-import { loadPlan, loadPlanQuarantiningDuplicates, PlanError } from "../src/lib/plan.js";
-import { withTempDir } from "../src/lib/tmp.js";
-import { loadDaemonPlan } from "../src/run-task.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { loadPlan, loadPlanQuarantiningDuplicates, PlanError } from "#src/lib/plan.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import { loadDaemonPlan } from "#src/run-task.js";
 
 // W1-T4409 — on 2026-09-23 a CONSOLE-T60 declared by two shards made the console daemon exit at boot
 // for three hours, and the daemon that would have merged the fold PR was the one down.

@@ -12,9 +12,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { machineTokens } from "../src/lib/inbox-plain.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { machineTokens } from "#src/lib/inbox-plain.js";
 import {
   answerThread,
   buildThreadDecisionPrompt,
@@ -27,15 +27,15 @@ import {
   registryThreadItems,
   startInboxResponder,
   type InboxResponderDeps,
-} from "../src/lib/inbox-responder.js";
-import { appendThreadMessage, inboxThreadId, inboxThreadIdentity, proposalIdOfThread, readAllThreads } from "../src/lib/inbox-thread.js";
-import { buildEscalationReplyRoute } from "../src/lib/panel-actions.js";
-import { buildInboxThreadsRoute, buildPanelGraphRoutes, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { inboxThreadDecider, type RunResult } from "../src/run-task.js";
+} from "#src/lib/inbox-responder.js";
+import { appendThreadMessage, inboxThreadId, inboxThreadIdentity, proposalIdOfThread, readAllThreads } from "#src/lib/inbox-thread.js";
+import { buildEscalationReplyRoute } from "#src/lib/panel-actions.js";
+import { buildInboxThreadsRoute, buildPanelGraphRoutes, inboxThreadStorePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { inboxThreadDecider, type RunResult } from "#src/run-task.js";
 
 const VH = "verify-human:W1-T235";
 const RULING = "ruling:operator-owned";

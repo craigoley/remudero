@@ -4,10 +4,10 @@
 // acceptance check and the inert-proof count.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
+import { acceptanceAuthorTimeCheck } from "#src/lib/review.js";
 
 /** Loaded inside each test, so at a base without the module the test itself fails rather than the file. */
-const bodyModule = () => import("../src/lib/alert-fix-body.js");
+const bodyModule = () => import("#src/lib/alert-fix-body.js");
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/96981";
 const HEALTHY_BODY = "Acceptance:\n- the guard is wired | grep: readFileIfExists( in src/lib/fs-safe.ts\n\nRemudero-Task: alert-code-scanning-9698\n";

@@ -22,14 +22,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { priorStrikesFor, strikeRegimeOf, runFixRung } from "./helpers/run-task-test.js";
-import { fixStrikeCap } from "../src/lib/config.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { priorStrikesFor, strikeRegimeOf, runFixRung } from "#test/helpers/run-task-test.js";
+import { fixStrikeCap } from "#src/lib/config.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 /** No `## Acceptance`/`Acceptance:` header and no `Remudero-Task:` trailer anywhere — byte-
  *  identical to test/acceptance-gate-body-repair.test.ts's own fixture, so this shard drives the

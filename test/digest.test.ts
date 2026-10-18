@@ -16,13 +16,13 @@ import {
   sendMarkerAwareDigest,
   sendRundown,
   summarize,
-} from "../src/lib/digest.js";
-import type { RundownLine } from "../src/lib/drain.js";
-import type { NotifyChannel } from "../src/lib/notify.js";
-import { escalate, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
-import { createLastSeenStore } from "../src/lib/last-seen.js";
-import { buildRecapEvents } from "../src/lib/recap.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+} from "#src/lib/digest.js";
+import type { RundownLine } from "#src/lib/drain.js";
+import type { NotifyChannel } from "#src/lib/notify.js";
+import { escalate, type Escalation, type IssueGateway } from "#src/lib/escalate.js";
+import { createLastSeenStore } from "#src/lib/last-seen.js";
+import { buildRecapEvents } from "#src/lib/recap.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 function ledgerFile(lines: Array<Record<string, unknown>>): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-digest-"));

@@ -7,16 +7,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { fixedClock } from "../src/lib/clock.js";
-import { createService } from "../src/lib/service.js";
-import { isPaused, kickFilePath, prActionFilePath, prActionSwitchOffPath, requestStop } from "../src/lib/fleet-control.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createService } from "#src/lib/service.js";
+import { isPaused, kickFilePath, prActionFilePath, prActionSwitchOffPath, requestStop } from "#src/lib/fleet-control.js";
 import {
   executeAutomationAction,
   validateAutomationAction,
   type AutomationAction,
   type AutomationActionReceipt,
   type AutomationPreconditionObservation,
-} from "../src/lib/automation-action.js";
+} from "#src/lib/automation-action.js";
 import {
   ACTION_CATALOGUE,
   ACTION_CATALOGUE_VERSION,
@@ -25,9 +25,9 @@ import {
   executeCatalogueAction,
   executorEvidenceRef,
   resolveCatalogueCapability,
-} from "../src/lib/action-executor.js";
-import { buildOperatorAgentRoutes, OPERATOR_AGENT_ACTION_RECEIPT_STEP, OPERATOR_AGENT_ACTION_STEP } from "../src/lib/operator-agent.js";
-import { buildPrActionRoute } from "../src/lib/panel-actions.js";
+} from "#src/lib/action-executor.js";
+import { buildOperatorAgentRoutes, OPERATOR_AGENT_ACTION_RECEIPT_STEP, OPERATOR_AGENT_ACTION_STEP } from "#src/lib/operator-agent.js";
+import { buildPrActionRoute } from "#src/lib/panel-actions.js";
 
 const WRITE_TOKEN = "executor-write-token";
 const NOW_MS = Date.parse("2026-09-28T11:00:00.000Z");

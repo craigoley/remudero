@@ -3,8 +3,8 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GitFetchError, planSyncGitRunnerAsync, syncPlanFromOrigin, syncPlanFromOriginAsync } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { GitFetchError, planSyncGitRunnerAsync, syncPlanFromOrigin, syncPlanFromOriginAsync } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 test("dispatch plan sync retries transient ref contention on both real git transports instead of refusing a fresh plan", async () => {
   const origin = gitRepo({ bare: true, kind: "dispatch-ref-origin" });

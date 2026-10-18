@@ -9,9 +9,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // @ts-expect-error -- test executes the untyped executable module directly.
-import { lintPlanPrecheckVerdict } from "../scripts/lint-plan-precheck.mjs";
-import { FAILURE_DETAIL_CHARS, planPrPreflight, planPrPreflightAllows, type PlanPrPreflightReading } from "../src/lib/plan-pr-emitter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { lintPlanPrecheckVerdict } from "#scripts/lint-plan-precheck.mjs";
+import { FAILURE_DETAIL_CHARS, planPrPreflight, planPrPreflightAllows, type PlanPrPreflightReading } from "#src/lib/plan-pr-emitter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const green: PlanPrPreflightReading = { status: 0, output: "" };
 

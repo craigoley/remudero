@@ -5,8 +5,8 @@ import {
   REFUSAL_AMENDMENT_STEP,
   extractRefusal,
   refusalExcerptFromFixReport,
-} from "../src/lib/refusal-amendment.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
+} from "#src/lib/refusal-amendment.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
 
 const NOW = Date.parse("2026-10-16T02:00:00.000Z");
 const HEAD = "3134b3bbf23ad92f29c055e93cc598d23c012392";

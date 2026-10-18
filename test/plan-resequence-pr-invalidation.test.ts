@@ -14,9 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildOpenPrViews } from "../src/run-task.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
+import { buildOpenPrViews } from "#src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "#src/lib/sweep.js";
 
 const NOW = Date.parse("2026-09-14T15:00:00.000Z");
 const PR_NUMBER = 5545;

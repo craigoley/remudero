@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { defaultInstanceInboxSources } from "../src/lib/instance-gateway.js";
-import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
-import { inboxThreadId } from "../src/lib/inbox-thread.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { defaultInstanceInboxSources } from "#src/lib/instance-gateway.js";
+import { mountInstanceInboxRoutes } from "#src/lib/instance-inbox-contract.js";
+import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function fixture(t: { after: (fn: () => void) => void }) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}instance-reframe-`));

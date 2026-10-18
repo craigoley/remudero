@@ -1,4 +1,3 @@
-// test/a-fix-round-refused-for-changing-nothing-reruns-the-failed-checks.test.ts
 //
 // LIVE 2026-10-09: #10234 at head f417641 had a red coverage shard. Its fix round at 12:35Z ended
 // `fix.commit_refused` "the worker changed nothing": a worker that read the red and found nothing to
@@ -7,12 +6,12 @@
 // "retrying the fix round" with refusals that are never strikes, and the shard was never re-run.
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
 import {
   buildSweepEffects, DEFAULT_SWEEP_POLICY, fixRoundTally, runSweep,
   type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 type Row = Record<string, unknown>;
 const HEAD = "a".repeat(40);

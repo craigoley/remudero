@@ -1,10 +1,11 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.js";
+import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "#src/lib/routing-experiments.js";
 
 const epoch = ROUTING_EXPERIMENTS.find(item => item.id === "sol61-vs-sonnet55")!;
 function assignment(id: string) {
@@ -62,7 +63,7 @@ test("trial effort evidence refuses invalid and conflicting receipts instead of 
 });
 
 test("persisted effort tuples reject malformed shape, invented defaults, duplicates and numeric overflow", async () => {
-  const { readCashRequestEfforts, summarizeCashRequestEfforts } = await import("../src/lib/cash-request-effort.js");
+  const { readCashRequestEfforts, summarizeCashRequestEfforts } = await import("#src/lib/cash-request-effort.js");
   assert.deepEqual(readCashRequestEfforts(undefined), { state: "unavailable", reason: "missing" });
   for (const value of [null, {}, [null], Array(28).fill(effort()), [{ ...effort(), provenance: "selected-label" }],
     [{ ...effort(), providerEffectiveEffort: "high" }], [{ ...effort(), transport: { toString: null } }],
@@ -87,7 +88,7 @@ test("the existing daily producer persists transmitted effort evidence without p
     mkdirSync(stateDir);
     writeFileSync(join(stateDir, "ledger.ndjson"), [assignment("1"), receipt("1", [effort(null, 2, "chat-completions", "parameter-omitted")])]
       .map(row => JSON.stringify(row)).join("\n") + "\n");
-    const script = join(import.meta.dirname, "..", "scripts", "private-routing-daily-review.mjs");
+    const script = join(repoRoot(), "scripts/private-routing-daily-review.mjs");
     const { dailyRoutingReview } = await import(pathToFileURL(script).href);
     const result = await dailyRoutingReview({ sources: [{ label: "core", stateDir }], outDir, asOf: "2026-10-08T12:00:00Z" });
     const persisted = JSON.parse(readFileSync(join(outDir, "latest.json"), "utf8"));

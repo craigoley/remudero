@@ -6,19 +6,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { CapabilityLadder } from "../src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { CapabilityLadder } from "#src/lib/mounts.js";
 import {
   clearProviderRoutingPolicyOverride,
   providerRoutingPolicyOverridePath,
   resolveProviderRoutingPolicy,
-} from "../src/lib/provider-routing-policy.js";
+} from "#src/lib/provider-routing-policy.js";
 import {
   MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES,
   providerRoutingStatusPath,
   readProviderRoutingStatus,
   writeProviderRoutingStatus,
-} from "../src/lib/provider-routing-status.js";
+} from "#src/lib/provider-routing-status.js";
 import {
   clearCodexCapacityCache,
   readCodexCapacity,
@@ -26,9 +26,9 @@ import {
   spawnCodexWorker,
   type CodexModelPreference,
   type ProviderCapacity,
-} from "../src/lib/worker-provider.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+} from "#src/lib/worker-provider.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 
 const NOW = Date.parse("2026-09-02T18:00:00.000Z");
 const READ_TOKEN = "codex-model-read-token";

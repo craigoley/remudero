@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { buildCreditCandidates, creditCandidatesFromProjection, prerequisiteOnlyMergeBody } from "../src/run-task.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, StatusProjection } from "../src/lib/status.js";
+import { buildCreditCandidates, creditCandidatesFromProjection, prerequisiteOnlyMergeBody } from "#src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub, StatusProjection } from "#src/lib/status.js";
 
 function ledgerPath(): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-credit-projection-"));

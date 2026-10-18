@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { lintPlan, lintTask, sizingViolation } from "../src/lib/task-linter.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { lintPlan, lintTask, sizingViolation } from "#src/lib/task-linter.js";
 
 const SLUG = "a-test-process-never-reads-the-hosts-scratch-switch";
 

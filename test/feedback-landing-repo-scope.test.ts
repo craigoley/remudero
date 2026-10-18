@@ -11,9 +11,9 @@ import {
   landingIdentity,
   landFeedback,
   type LandingRepository,
-} from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T2903: the shared `gitRepo()` fixture (test/helpers/git-repo.ts) builds every repo below,
 // rather than a hand-rolled pair of raw git-init invocations — that helper's own init call site

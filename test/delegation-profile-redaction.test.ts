@@ -10,8 +10,8 @@ import {
   DELEGATION_PROFILE_LEDGER_STEP,
   findNonAuthoritativeSignal,
   foldDelegationProfiles,
-} from "../src/lib/delegation-profile.js";
-import { OPERATOR_AGENT_ACTION_RECEIPT_STEP } from "../src/lib/operator-agent.js";
+} from "#src/lib/delegation-profile.js";
+import { OPERATOR_AGENT_ACTION_RECEIPT_STEP } from "#src/lib/operator-agent.js";
 import {
   builtProfile,
   CLOCK,
@@ -23,7 +23,7 @@ import {
   rowsAt,
   tempStatePath,
   withDelegationService,
-} from "./helpers/delegation-profile-fixture.js";
+} from "#test/helpers/delegation-profile-fixture.js";
 
 /** Every key the public projection may carry — the contract, named. */
 const CONTRACT_KEYS = [

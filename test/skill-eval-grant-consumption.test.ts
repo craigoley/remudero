@@ -1,3 +1,5 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
@@ -5,10 +7,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { consumeReservedEvalGrant, RESERVED_EVAL_GRANT_TABLE_SQL } from "../src/lib/skill-eval-grant-consumption.js";
-import type { ReservedEvalQualificationInput } from "../src/lib/skill-eval-reservation.js";
+import { consumeReservedEvalGrant, RESERVED_EVAL_GRANT_TABLE_SQL } from "#src/lib/skill-eval-grant-consumption.js";
+import type { ReservedEvalQualificationInput } from "#src/lib/skill-eval-reservation.js";
 // @ts-expect-error — plain service-plan ESM is outside tsconfig source roots.
-import {ownedRunServicePlan} from "../scripts/lib/owned-run-service-plan.mjs";
+import {ownedRunServicePlan} from "#scripts/lib/owned-run-service-plan.mjs";
 function fixture(): ReservedEvalQualificationInput {
  const nowMs=100001000,readyAtMs=100000000,finishByMs=readyAtMs+10800000;
  const binding={proposalId:'draft',draftSha256:'a'.repeat(64),heldOutSetHash:'b'.repeat(64),stackHash:'stack',sourceHead:'c'.repeat(40),
@@ -100,7 +102,7 @@ for (const crashPoint of ['before-commit','after-commit'] as const) {
    crash();
   `;
   const child=spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',program,path,JSON.stringify(input),crashPoint,
-   new URL('../src/lib/skill-eval-grant-consumption.ts',import.meta.url).href],
+   pathToFileURL(join(repoRoot(), "src/lib/skill-eval-grant-consumption.ts")).href],
    {encoding:'utf8',timeout:10000,maxBuffer:64<<10});
   assert.equal(child.error,undefined,child.stderr);
   assert.equal(child.status,null);assert.equal(child.signal,'SIGKILL','the owned child really died, not a synthetic exception');

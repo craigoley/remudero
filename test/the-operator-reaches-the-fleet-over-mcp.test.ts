@@ -5,8 +5,8 @@ import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createOperatorMcpServer, operatorMcpCommand, type OperatorMcpConfig } from "../src/lib/operator-mcp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { createOperatorMcpServer, operatorMcpCommand, type OperatorMcpConfig } from "#src/lib/operator-mcp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const base: OperatorMcpConfig = { url: "http://127.0.0.1:4317", readToken: "read-scope-secret", repoRoot: process.cwd() };
 async function connected(deps: OperatorMcpConfig = base) {

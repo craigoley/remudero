@@ -14,6 +14,7 @@
  *   3. `rmd lint-plan`'s summary line carries the absolute path + content hash of the plan
  *      file it actually opened (the read-identity assertion).
  */
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -22,11 +23,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { lintPlanCommand, resolveRepoRoot, stripRepoRootFlag } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { formatReadIdentity, isPathOutsideRoot } from "../src/lib/task-linter.js";
+import { lintPlanCommand, resolveRepoRoot, stripRepoRootFlag } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { formatReadIdentity, isPathOutsideRoot } from "#src/lib/task-linter.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = testRepoRoot();
 
 function sha256_12(raw: string): string {
   return createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);

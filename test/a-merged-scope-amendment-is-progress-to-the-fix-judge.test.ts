@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { buildFixProgressInput } from "../src/lib/fix-progress-judge.js";
-import { productionFixProgressJudge } from "../src/lib/sweep.js";
+import { buildFixProgressInput } from "#src/lib/fix-progress-judge.js";
+import { productionFixProgressJudge } from "#src/lib/sweep.js";
 
 // Shaped on PR #10628 (W1-T7616), 2026-10-10: round 1 ended NEEDS_SCOPE / scope_amendment_pending with no push,
 // amendment #10633 merged at 11:50, and the 12:16 judge read the round as a no-op and escalated.

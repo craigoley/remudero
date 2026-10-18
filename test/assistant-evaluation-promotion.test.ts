@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildOperatorAgentRoutes } from "../src/lib/operator-agent.js";
+import { createService } from "#src/lib/service.js";
+import { buildOperatorAgentRoutes } from "#src/lib/operator-agent.js";
 import {
   EXPERIMENT_PROMOTION_VERSION,
   evaluateAssistantTrust,
@@ -14,7 +14,7 @@ import {
   type AssistantTrustControlResult,
   type AssistantTrustEvidence,
   type PromotionRecord,
-} from "../src/lib/experiment-promotion.js";
+} from "#src/lib/experiment-promotion.js";
 
 const READY_REPLAY = { deterministic: true, sideEffectFree: true };
 const READY_GUARD = { state: "ready" as const, reasons: [], breachedMetrics: [] };

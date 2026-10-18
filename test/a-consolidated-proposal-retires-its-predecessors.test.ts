@@ -15,15 +15,15 @@
  */
 import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
-import { world } from "./helpers/why-me-world.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { defaultInboxGardenerPorts, runInboxGardener } from "../src/lib/inbox-gardener.js";
-import { proofDebtPopulationPermit, stampMechanicalAsk } from "../src/lib/inbox-retirement.js";
-import { readPersistedInbox } from "../src/lib/fleet-lane.js";
+import { world } from "#test/helpers/why-me-world.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { defaultInboxGardenerPorts, runInboxGardener } from "#src/lib/inbox-gardener.js";
+import { proofDebtPopulationPermit, stampMechanicalAsk } from "#src/lib/inbox-retirement.js";
+import { readPersistedInbox } from "#src/lib/fleet-lane.js";
 import { test } from "node:test";
 
-import { classifyProposal, updateProposalRegistry, supersedingProposalId, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
-import type { Plan } from "../src/lib/plan.js";
+import { classifyProposal, updateProposalRegistry, supersedingProposalId, type Proposal, type ReadinessContext } from "#src/lib/inbox.js";
+import type { Plan } from "#src/lib/plan.js";
 
 const PRED = "proof-debt:W1-T965:3";
 const SUCC = "proof-debt:W1-T965";

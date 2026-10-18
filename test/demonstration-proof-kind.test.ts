@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof } from "../src/lib/review.js";
-import { lintTask, proofDialectViolations } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof } from "#src/lib/review.js";
+import { lintTask, proofDialectViolations } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 /**
  * W1-T277: a third house dialect, `demonstration: <what the operator must

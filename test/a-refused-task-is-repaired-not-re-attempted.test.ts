@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import {
   decideRepairDispatch,
   preDispatchContractRevision,
@@ -12,14 +12,14 @@ import {
   terminalPreDispatchRefusalRevisions,
   type PriorRefusal,
   type RefusalViolation,
-} from "../src/lib/dispatch-repair.js";
-import { runnableCandidates, tallyDispatchFilters } from "../src/lib/drain.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { runTask } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { spawnWorker } from "../src/lib/worker.js";
+} from "#src/lib/dispatch-repair.js";
+import { runnableCandidates, tallyDispatchFilters } from "#src/lib/drain.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { runTask } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { spawnWorker } from "#src/lib/worker.js";
 
 // A TASK THE PRE-DISPATCH LINTER REFUSES IS REPAIRED, NOT RE-ATTEMPTED FOREVER (W1-T3657).
 //

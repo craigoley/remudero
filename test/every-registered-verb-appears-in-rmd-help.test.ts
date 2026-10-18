@@ -4,16 +4,17 @@
 // (`PROPOSAL_VERDICT_SYNTAX.decline`) matched nothing and vanished from the help an operator sees, while
 // the registry-built USAGE the other help test checks still listed it. Observed 2026-09-24 on the fleet
 // host: `rmd --help` printed no `decline` or `restore` line although both verbs worked.
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PROPOSAL_VERDICT_SYNTAX } from "../src/lib/inbox-verdict-command.js";
-import { COMMANDS } from "../src/run-task.js";
+import { PROPOSAL_VERDICT_SYNTAX } from "#src/lib/inbox-verdict-command.js";
+import { COMMANDS } from "#src/run-task.js";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = testRepoRoot();
 
 test("every registered verb appears in the help rmd --help prints", () => {
   const res = spawnSync(process.execPath, [join(repoRoot, "scripts", "rmd-help.mjs")], { encoding: "utf8" });

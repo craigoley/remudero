@@ -1,4 +1,3 @@
-// test/acceptance-round-trip-pipe.test.ts
 //
 // THE DEFECT, measured at f7ceb86 (recon-2026-09-05 R-13). `renderAcceptanceBlock`
 // (`src/lib/plan-pr-emitter.ts`) emitted `- ${claim} | ${proof}` with no escaping, and
@@ -22,23 +21,24 @@
 //     into the proof. Deleting this reddens "a pipe inside the proof" below.
 // The third test locks the far more common no-pipe body: byte-identical render, identical parse.
 
+import { repoRoot } from "#test/helpers/repo-root.js";
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
+import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
 import {
   acceptanceAuthorTimeCheck,
   acceptanceBlockDiagnostics,
   parseAcceptanceBlock,
   parseWhitelistedProof,
-} from "../src/lib/review.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+} from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 
 const SHARD = fileURLToPath(
-  new URL("../plan/tasks.d/W1-T2781-the-mkdtemp-callsite-check-is-not-run-by-ci.yaml", import.meta.url),
+  pathToFileURL(`${repoRoot()}/plan/tasks.d/W1-T2781-the-mkdtemp-callsite-check-is-not-run-by-ci.yaml`),
 );
 
 /** W1-T2781's own acceptance criteria, as the plan carries them today. */

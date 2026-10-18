@@ -29,7 +29,7 @@ import {
   refreshRequestRows,
   selectPacedRefreshRequest,
   type RefreshJudgeQuestion,
-} from "../src/lib/refresh-value.js";
+} from "#src/lib/refresh-value.js";
 import {
   DEFAULT_SWEEP_POLICY,
   recordForcedRefresh,
@@ -41,10 +41,10 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
-import { buildSweepEffects } from "../src/lib/sweep.js";
-import { BASE_RED_REFRESH_STEP, BASE_RED_STOOD_DOWN_STEP, REFRESH_ADMISSION_FORCED_BY, runLightPassRefreshAdmission } from "./helpers/sweep-test.js";
-import { runFixRebase } from "./helpers/run-task-test.js";
+} from "#test/helpers/sweep-test.js";
+import { buildSweepEffects } from "#src/lib/sweep.js";
+import { BASE_RED_REFRESH_STEP, BASE_RED_STOOD_DOWN_STEP, REFRESH_ADMISSION_FORCED_BY, runLightPassRefreshAdmission } from "#test/helpers/sweep-test.js";
+import { runFixRebase } from "#test/helpers/run-task-test.js";
 
 const NOW = 1_800_000_000_000;
 const POLICY: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, reviewWaitingBranchRefreshEnabled: true, reviewWaitingBranchRefreshThreshold: 10 };

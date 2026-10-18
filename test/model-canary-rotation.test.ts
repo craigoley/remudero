@@ -4,10 +4,10 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { rotatingCanarySuite } from "../src/lib/model-canary-rotation.js";
-import { canaryCommand } from "../src/lib/model-canary-command.js";
-import { commonCanarySuite, gradeCanary, canaryTools } from "../src/lib/model-canary-suite.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { rotatingCanarySuite } from "#src/lib/model-canary-rotation.js";
+import { canaryCommand } from "#src/lib/model-canary-command.js";
+import { commonCanarySuite, gradeCanary, canaryTools } from "#src/lib/model-canary-suite.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const KEY = "ab".repeat(32), DAY = "2026-10-11";
 function fixture(run: (root: string) => void) {

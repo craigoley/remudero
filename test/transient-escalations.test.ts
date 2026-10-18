@@ -9,11 +9,11 @@ import {
   runEscalationReconcile,
   type EscalationReconcileCandidate,
   type OpenPrView,
-} from "../src/lib/sweep.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { buildEscalationReconcileCandidates, buildSweepEffects, escalationTaskIdFor } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
+} from "#src/lib/sweep.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { buildEscalationReconcileCandidates, buildSweepEffects, escalationTaskIdFor } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
 
 /**
  * THE CLARIFICATION RUNG MANUFACTURED 57 UNRETIRABLE ISSUES IN ONE DAY.

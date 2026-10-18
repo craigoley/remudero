@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 
-const api = () => import("../src/lib/skill-eval-control.js");
+const api = () => import("#src/lib/skill-eval-control.js");
 test("eval whole-loop control is default off and never constructs a cancellation timer", async () => {
   assert.equal((await api()).createSkillEvalControl(), undefined);
 });

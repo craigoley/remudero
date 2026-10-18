@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AsyncIssueGateway } from "../src/lib/escalate.js";
+import type { AsyncIssueGateway } from "#src/lib/escalate.js";
 import {
   buildMainHealthRung,
   classifyMainRatchetRed,
@@ -28,20 +28,20 @@ import {
   type MainRatchetRecordRequest,
   type MainRepairFixRequest,
   type MainRepairLane,
-} from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+} from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import {
   MAIN_RATCHET_RECORD_BRANCH_PREFIX,
   openMainRatchetRecordPr,
   readMainCeilingVerdictAsync,
   runNpmScriptAsync,
-} from "../src/run-task.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
-import { identityGateVerdicts } from "./helpers/identity-gates.js";
+} from "#src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { identityGateVerdicts } from "#test/helpers/identity-gates.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

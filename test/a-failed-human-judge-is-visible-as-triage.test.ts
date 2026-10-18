@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { buildAttentionCensus, type AttentionCensusInput, type ThreadSummaryView } from "../src/lib/inbox-responder.js";
-import { classifyAllProposalsSliced, buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { persistedInboxPath, readPersistedInbox, writePersistedInbox } from "../src/lib/fleet-lane.js";
-import { createService } from "../src/lib/service.js";
-import { refreshInboxClassification } from "../src/lib/inbox-view.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { buildAttentionCensus, type AttentionCensusInput, type ThreadSummaryView } from "#src/lib/inbox-responder.js";
+import { classifyAllProposalsSliced, buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { persistedInboxPath, readPersistedInbox, writePersistedInbox } from "#src/lib/fleet-lane.js";
+import { createService } from "#src/lib/service.js";
+import { refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 function view(id: string): ThreadSummaryView {
   return { threadId: `thread:${id}::inbox::-::-`, proposalId: id, headline: id, snippet: "Current ask",

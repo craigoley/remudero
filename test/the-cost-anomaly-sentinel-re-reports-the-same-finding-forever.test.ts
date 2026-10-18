@@ -12,9 +12,9 @@ import {
   recordCostAnomalies,
   type CostAnomalyDeps,
   type CostAnomalyPolicy,
-} from "../src/lib/cost-anomaly.js";
-import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS, rotateLedger } from "../src/lib/ledger.js";
-import { gatherRuns, parseLedger } from "../src/lib/retro.js";
+} from "#src/lib/cost-anomaly.js";
+import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS, rotateLedger } from "#src/lib/ledger.js";
+import { gatherRuns, parseLedger } from "#src/lib/retro.js";
 
 // ── W1-T2558 — "THE COST-ANOMALY SENTINEL RE-REPORTS EVERY FINDING ON EVERY SWEEP, FOREVER"
 // (plan/tasks.d/W1-T2558-...). MEASURED 2026-09-01: 471 raw `cost.anomaly` rows collapsing to 45

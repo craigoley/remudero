@@ -7,7 +7,7 @@ import {
   renderBodyDefects,
   repairedProofsAreSafeToPush,
   type BodyCriterion,
-} from "../src/lib/body-repair.js";
+} from "#src/lib/body-repair.js";
 
 /**
  * W1-T3389 — MEASURED on PR 5108: the first review graded three criteria `not_yet_built`. The fix

@@ -1,10 +1,11 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { loadPlan } from "../src/lib/plan.js";
+import { loadPlan } from "#src/lib/plan.js";
 
 // ── THE THIRD OCCURRENCE OF A CLASS, CLOSED ──────────────────────────────────────────
 //
@@ -42,7 +43,7 @@ import { loadPlan } from "../src/lib/plan.js";
 //       `.<section>` grep while having nothing to do with mounts. #781's `architect:` case is
 //       that shape, so this test does NOT close that sub-shape; see impl-BS's report.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = testRepoRoot();
 
 /**
  * Rows deliberately kept while nothing reads them. EVERY entry needs a reason — the point of

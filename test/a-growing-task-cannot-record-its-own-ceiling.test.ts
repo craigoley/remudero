@@ -30,9 +30,9 @@ import {
   fixRungScopeStandDownReason,
   outOfDeclaredScopeFiles,
   scopeGuardOutOfScopeFiles,
-} from "../src/run-task.js";
-import { judgeReview, SCOPE_EXEMPT_GENERATED_ARTIFACTS } from "../src/lib/review.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+} from "#src/run-task.js";
+import { judgeReview, SCOPE_EXEMPT_GENERATED_ARTIFACTS } from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 
 const EXEMPT_PATH = "scripts/source-size-baseline.json";
 

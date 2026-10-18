@@ -1,4 +1,3 @@
-// test/post-review-stall-escalation.test.ts
 //
 // THE DEFECT, MEASURED at 2026-08-05 over the live ledger unioned with every rotation:
 // `sweep.post_review.failed` had fired 91 times — every one a GraphQL rate-limit — and produced NO
@@ -30,10 +29,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, POST_REVIEW_STALL_THRESHOLD, detectPostReviewStall } from "../src/lib/sweep.js";
-import { buildSweepEffects, escalatePostReviewStall } from "../src/run-task.js";
-import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger } from "../src/lib/ledger.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
+import { DEFAULT_SWEEP_POLICY, POST_REVIEW_STALL_THRESHOLD, detectPostReviewStall } from "#src/lib/sweep.js";
+import { buildSweepEffects, escalatePostReviewStall } from "#src/run-task.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger } from "#src/lib/ledger.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 
 /** The real observed error, verbatim apart from the PR number that varies per row. */
 function rateLimitError(pr: number): string {

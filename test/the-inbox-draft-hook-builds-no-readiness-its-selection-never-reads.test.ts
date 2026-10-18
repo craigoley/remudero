@@ -5,13 +5,13 @@ import { Session } from "node:inspector/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { Config } from "../src/lib/config.js";
-import { anchorFingerprint, type Proposal } from "../src/lib/inbox.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { buildInboxDraftHook } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import type { Config } from "#src/lib/config.js";
+import { anchorFingerprint, type Proposal } from "#src/lib/inbox.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { buildInboxDraftHook } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const PROOF = "unit test: test/the-inbox-draft-hook-builds-no-readiness-its-selection-never-reads.test.ts";
 

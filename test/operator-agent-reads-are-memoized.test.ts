@@ -15,8 +15,8 @@ import {
   readOperatorAgentExperiments,
   settleOperatorAgentUnionLoads,
   type OperatorAgentExperiment,
-} from "../src/lib/operator-agent.js";
-import { CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE } from "../src/lib/serve.js";
+} from "#src/lib/operator-agent.js";
+import { CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE } from "#src/lib/serve.js";
 
 const ARCHIVE_MTIME_S = 1_790_000_000;
 

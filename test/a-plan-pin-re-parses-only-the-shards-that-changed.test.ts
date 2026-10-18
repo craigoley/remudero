@@ -3,20 +3,20 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BroadcastChannel } from "node:worker_threads";
-import { createBoardProjection } from "../src/lib/board-projection.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
+import { createBoardProjection } from "#src/lib/board-projection.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import {
   assertRunnable, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, selectTask,
   taskRecordPath, transitiveDependents, unmetDependencies, visibleCriteria,
-} from "../src/lib/plan.js";
-import { packPlanBlobs } from "../src/lib/serve-plan-reload.js";
-import type { GitHub } from "../src/lib/status.js";
+} from "#src/lib/plan.js";
+import { packPlanBlobs } from "#src/lib/serve-plan-reload.js";
+import type { GitHub } from "#src/lib/status.js";
 import {
   adoptThreadPlan, PLAN_PIN_ADOPTED_STEP, publishThreadPlan, swapThreadPlanParser,
   threadPlanLoad, threadPlanPinnedRef, threadStrictPlan,
-} from "../src/lib/thread-plan.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/thread-plan.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 type Blob = { label: string; text: string };
 const record = (id: string, deps: string[] = [], extra = "") => `- id: ${id}

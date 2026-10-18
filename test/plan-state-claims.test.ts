@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
@@ -46,10 +47,9 @@ import { dirname, join } from "node:path";
 // the citation text is present on some line -- so that one case imports the exported function
 // directly instead of manufacturing an unreachable CLI scenario.)
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "plan-state-claims.mjs");
-const FIXTURES = join(__dirname, "fixtures", "plan-state-claims");
+const FIXTURES = join(repoRoot(), "test/fixtures/plan-state-claims");
 const FIXTURE_PLAN = join(FIXTURES, "tasks.yaml");
 
 function run(fixtureMd: string) {

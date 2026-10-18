@@ -6,7 +6,7 @@ import {
   type BenchmarkAssignmentEvidence,
   type BenchmarkEvidenceInput,
   type BenchmarkTerminalEvidence,
-} from "../src/lib/benchmark-evidence.js";
+} from "#src/lib/benchmark-evidence.js";
 
 function evidence(
   assignments: Array<[string, BenchmarkAssignmentEvidence]>,

@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlanQuarantiningDuplicates, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates } from "../src/lib/plan.js";
-import { withTempDir } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { syncPlanFromOrigin } from "../src/run-task.js";
-import type { QuarantinedTask } from "../src/lib/plan.js";
+import { loadPlanQuarantiningDuplicates, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates } from "#src/lib/plan.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { syncPlanFromOrigin } from "#src/run-task.js";
+import type { QuarantinedTask } from "#src/lib/plan.js";
 
 // W1-T4421 — W1-T4409 kept consumer daemons alive on a duplicate task id, but the core daemon loads its own plan
 // from origin/main blobs through mergePlanBlobs, which still threw, and an id declared twice inside ONE file threw

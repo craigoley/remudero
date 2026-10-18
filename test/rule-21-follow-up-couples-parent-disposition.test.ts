@@ -6,9 +6,9 @@ import {
   parentDispositionStated,
   postMergeAmendmentViolations,
   followUpCarriesCriteria,
-} from "../src/lib/task-linter.js";
-import type { LintViolation } from "../src/lib/task-linter.js";
-import type { AcceptanceCriterion, Task } from "../src/lib/plan.js";
+} from "#src/lib/task-linter.js";
+import type { LintViolation } from "#src/lib/task-linter.js";
+import type { AcceptanceCriterion, Task } from "#src/lib/plan.js";
 
 // W1-T2375 — the Rule 21 follow-up escape gave amended criteria a SECOND home without taking the
 // FIRST away, so parent and follow-up both stayed dispatchable and the fleet could build both.

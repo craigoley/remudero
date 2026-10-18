@@ -19,12 +19,12 @@
  */
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { inboxSemanticDigest, inboxProposalRevision, inboxRetirementFor, proofDebtPopulationPermit, stampMechanicalAsk, writeInboxGardenerStore, readInboxGardenerStore } from "../src/lib/inbox-retirement.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { inboxSemanticDigest, inboxProposalRevision, inboxRetirementFor, proofDebtPopulationPermit, stampMechanicalAsk, writeInboxGardenerStore, readInboxGardenerStore } from "#src/lib/inbox-retirement.js";
 import { test } from "node:test";
 
-import { classifyProposal, deriveTaskReferent, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { classifyProposal, deriveTaskReferent, type Proposal, type ReadinessContext } from "#src/lib/inbox.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 function task(id: string): Task {
   return {

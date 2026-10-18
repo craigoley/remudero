@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask, proofEngineDivergenceViolations, proofGrepSafetyViolations } from "../src/lib/task-linter.js";
-import { parseWhitelistedProof } from "../src/lib/review.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, proofEngineDivergenceViolations, proofGrepSafetyViolations } from "#src/lib/task-linter.js";
+import { parseWhitelistedProof } from "#src/lib/review.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── W1-T2294 — a `grep:` PROOF PATTERN'S MEANING DEPENDS ON A REGEX ENGINE NOTHING DECLARES ──
 //

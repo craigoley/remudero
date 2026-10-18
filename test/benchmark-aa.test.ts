@@ -9,9 +9,9 @@ import {
   aaArmFor, aaStackHash, buildAaAllocationReceipt, buildBenchmarkAaReport, exactBinomialHalfPValue,
   IMMUTABLE_REVISION_RE, parseAaTrialManifest, readAaLedgerEvidence, TRIAL_ID_RE, twoProportionPValue,
   type AaTrialManifest, type BenchmarkAaReport,
-} from "../src/lib/benchmark-aa.js";
-import { runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
+} from "#src/lib/benchmark-aa.js";
+import { runBenchmarkCohortPass } from "#src/lib/benchmark-cohort.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
 
 const NOW = "2026-09-27T12:10:00.000Z";
 const SHA = "a".repeat(40);

@@ -11,11 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, namesRule15Refusal, namesUnsatisfiableGate, type OpenPrView } from "../src/lib/sweep.js";
-import { reviewInputDigest } from "../src/lib/review.js";
-import * as runTask from "./helpers/run-task-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import type { Config } from "#src/lib/config.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, namesRule15Refusal, namesUnsatisfiableGate, type OpenPrView } from "#src/lib/sweep.js";
+import { reviewInputDigest } from "#src/lib/review.js";
+import * as runTask from "#test/helpers/run-task-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const TASK = "W1-T10600-FIXTURE";
 const PR_NUMBER = 10600;

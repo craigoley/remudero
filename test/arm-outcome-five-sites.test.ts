@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,9 +15,9 @@ import {
   sweepArmAttemptOutcome,
   type ArmDeps,
   type ArmOutcome,
-} from "../src/run-task.js";
-import { isInPlanScope, ORIENTATION_DOC } from "../src/lib/plan-architect.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
+} from "#src/run-task.js";
+import { isInPlanScope, ORIENTATION_DOC } from "#src/lib/plan-architect.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
 
 // ── THE DEFECT ────────────────────────────────────────────────────────────────────────
 // `armAutoMerge` RETURNS which of its seven branches it took; it never throws. Five of the
@@ -31,7 +32,7 @@ import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 // rows keyed exactly "RETRO" = 0 and rows keyed RETRO* = 7795 — the literal never matched a
 // verdict once, so every retro PR in this repo's history was refused and then logged as armed.
 
-const SRC = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+const SRC = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
 
 /** The window of source around a lane's own console line — where that lane's arm site lives. */
 function laneWindow(anchor: string, before = 14): string {
@@ -166,8 +167,8 @@ test("arm step name: no reader keyed on the old literal is left behind", () => {
   // POSITIVE CONTROL — the same pattern DOES find a real read when one exists, proving the
   // negative checks above are not just matching nothing. automerge.armed is genuinely read by
   // lib/autonomy.ts and lib/receipt.ts (never in run-task.ts itself).
-  const autonomySrc = readFileSync(new URL("../src/lib/autonomy.ts", import.meta.url), "utf8");
-  const receiptSrc = readFileSync(new URL("../src/lib/receipt.ts", import.meta.url), "utf8");
+  const autonomySrc = readFileSync(join(repoRoot(), "src/lib/autonomy.ts"), "utf8");
+  const receiptSrc = readFileSync(join(repoRoot(), "src/lib/receipt.ts"), "utf8");
   const armedReads = [...(autonomySrc.match(readPattern("automerge.armed")) ?? []), ...(receiptSrc.match(readPattern("automerge.armed")) ?? [])];
   assert.ok(armedReads.length > 0, "sanity: the read-pattern must actually catch a real consumer (automerge.armed)");
 });
@@ -506,7 +507,7 @@ test("plan scope admits the regenerated ORIENTATION doc as one named path, never
 // triage/plan. Nothing here touches the network: every effect is injected, and `config` is passed
 // because `loadConfig()` shells `which claude`, which no CI runner has (W1-T2 / PR #18).
 test("dep-review drives its arm branch to a real outcome and reports that outcome, not a fixed string", async () => {
-  const { depReviewCommand } = await import("../src/run-task.js");
+  const { depReviewCommand } = await import("#src/run-task.js");
   const tmp = mkdtempSync(join(tmpdir(), "rmd-bi-depreview-"));
   // ledgerPathFor(config) is `<root>/state/ledger.ndjson` — read the real path, do not guess it.
   const ledgerPath = join(tmp, "state", "ledger.ndjson");
@@ -612,7 +613,7 @@ async function driveDepReview(opts: {
   issues?: unknown;
   tmp?: string;
 }) {
-  const { depReviewCommand } = await import("../src/run-task.js");
+  const { depReviewCommand } = await import("#src/run-task.js");
   const tmp = opts.tmp ?? mkdtempSync(join(tmpdir(), "rmd-fr-"));
   const ledgerPath = join(tmp, "state", "ledger.ndjson");
   const armCalls: string[] = [];

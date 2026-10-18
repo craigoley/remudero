@@ -15,13 +15,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { diffContributesTaskShard, filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
-import { extractTaskTrailerId, filingSelfCreditCheck } from "../src/lib/review.js";
+import { diffContributesTaskShard, filingAcceptanceCriteria } from "#src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
+import { extractTaskTrailerId, filingSelfCreditCheck } from "#src/lib/review.js";
 // @ts-expect-error — `scripts/**` sits outside tsconfig's `include`, so this executable .mjs has
 // no declaration output (TS7016). The seam is declared below rather than left as `any`, the same
 // idiom test/a-filing-pr-is-judged-against-criteria-it-cannot-satisfy.test.ts uses.
-import * as authorGate from "../scripts/acceptance-author-gate.mjs";
+import * as authorGate from "#scripts/acceptance-author-gate.mjs";
 
 const evaluateGate = authorGate.evaluateGate as (input: {
   body: string;

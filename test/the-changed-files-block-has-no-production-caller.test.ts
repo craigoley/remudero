@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -9,9 +10,9 @@ import {
   filingAcceptanceCriteria,
   hasChangedFilesBlock,
   renderChangedFilesBlock,
-} from "../src/lib/plan-pr-emitter.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
-import { ratificationPrBody } from "../src/lib/inbox.js";
+} from "#src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
+import { ratificationPrBody } from "#src/lib/inbox.js";
 
 /**
  * W1-T2550 — `renderChangedFilesBlock` (W1-T2535) had NO production caller at all:
@@ -28,8 +29,7 @@ import { ratificationPrBody } from "../src/lib/inbox.js";
  * from what it just wrote to disk (`shardRelPaths`/`allShardRelPaths` + `"MASTER-PLAN.md"`).
  */
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const RUN_TASK_SRC = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
 
 /** Slices out an `openPlanPr(branch, ...) {` closure body, up to its own closing `    },` at the

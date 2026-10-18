@@ -1,13 +1,14 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadPlan, PlanError, type Plan } from "../src/lib/plan.js";
-import { fixRungTaskFor, resolvePlanCriteriaForReview } from "../src/run-task.js";
+import { loadPlan, PlanError, type Plan } from "#src/lib/plan.js";
+import { fixRungTaskFor, resolvePlanCriteriaForReview } from "#src/run-task.js";
 
-const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+const SRC_DIR = join(testRepoRoot(), "src");
 /** The tracked source of `name` (relative to `src/`), read fresh each call — never cached, so a
  *  structural assertion always reads what is actually on disk in this worktree. */
 function readSrc(name: string): string {
@@ -40,7 +41,7 @@ function readSrc(name: string): string {
 // `reviewCommand` itself is UNCHANGED in every other respect: same criteria, same body fallback,
 // same ledger/console shape, one new `divergence` fact recorded only when the plan load throws.
 
-const GATE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "acceptance-author-gate.mjs");
+const GATE_SCRIPT = join(testRepoRoot(), "scripts/acceptance-author-gate.mjs");
 const gateMod = (await import(pathToFileURL(GATE_SCRIPT).href)) as {
   declaredPlanTaskIds: (root?: string) => Set<string> | undefined;
   evaluateGate: (input: { body: string; authorLogin?: string; trailerResolves?: (taskId: string) => boolean }) => {

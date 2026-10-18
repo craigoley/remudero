@@ -36,13 +36,13 @@ import {
   unchangedTreeStandDownReason,
   captureWorktreeSnapshotViaGit,
   type WorktreeSnapshot,
-} from "./helpers/run-task-test.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
-import type { MergeConflictEvidence } from "../src/lib/merge-state.js";
+} from "#test/helpers/run-task-test.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import type { MergeConflictEvidence } from "#src/lib/merge-state.js";
 
 const GIT_ENV = {
   ...process.env,

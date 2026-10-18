@@ -12,9 +12,9 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Plan, Task } from "../src/lib/plan.js";
-import { buildBatchedGithub, projectPlan, type BatchedPr, type GitHub, type PrRef } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { buildBatchedGithub, projectPlan, type BatchedPr, type GitHub, type PrRef } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const ledgerPath = (): string => {
   const path = join(makeTempDir("plan-pass-inputs"), "ledger.ndjson");

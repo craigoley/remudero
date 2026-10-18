@@ -3,14 +3,14 @@
 // the original stays exactly as issued (and authoritative) until the replacement is accepted.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   buildDelegationReplacement,
   DELEGATION_DECISION_LEDGER_STEP,
   DELEGATION_PROFILE_LEDGER_STEP,
   foldDelegationProfiles,
-} from "../src/lib/delegation-profile.js";
-import { OPERATOR_AGENT_ACTION_RECEIPT_STEP } from "../src/lib/operator-agent.js";
+} from "#src/lib/delegation-profile.js";
+import { OPERATOR_AGENT_ACTION_RECEIPT_STEP } from "#src/lib/operator-agent.js";
 import {
   at,
   builtProfile,
@@ -26,7 +26,7 @@ import {
   rowsAt,
   tempStatePath,
   withDelegationService,
-} from "./helpers/delegation-profile-fixture.js";
+} from "#test/helpers/delegation-profile-fixture.js";
 
 test("W1-T3878: a replacement is a linked new revision and never mutates the original", () => {
   const original = builtProfile();

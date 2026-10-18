@@ -9,8 +9,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 
-import { createConfirmNonceStore, createService, makeConfirmNonceRoute, type IdentityProvider } from "../src/lib/service.js";
-import { appendPanelLedger } from "../src/lib/panel-actions.js";
+import { createConfirmNonceStore, createService, makeConfirmNonceRoute, type IdentityProvider } from "#src/lib/service.js";
+import { appendPanelLedger } from "#src/lib/panel-actions.js";
 import {
   buildOperatorAgentRoutes,
   MAX_PENDING_CONSEQUENCES,
@@ -18,7 +18,7 @@ import {
   OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP,
   OPERATOR_AGENT_CONSEQUENCES_SOURCE,
   type PendingConsequenceRead,
-} from "../src/lib/operator-agent.js";
+} from "#src/lib/operator-agent.js";
 
 const NOW = Date.parse("2026-09-22T12:00:00.000Z");
 const iso = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();

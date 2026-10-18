@@ -9,9 +9,9 @@ import {
   queuedFeedbackLandings,
   sweepFeedbackLanding,
   sweepFeedbackLandingAsync,
-} from "../src/lib/feedback-landing.js";
-import { listFeedback } from "../src/lib/feedback.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/feedback-landing.js";
+import { listFeedback } from "#src/lib/feedback.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const PROOF = "test/a-landed-capture-stays-visible-until-the-checkout-holds-it.test.ts";
 const REL = "plan/feedback/fb-checkout.yaml";

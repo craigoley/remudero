@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildFixRungDispatchArgs, runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { CriterionVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { CI_LOG_FENCE_CLOSE } from "../src/lib/fix-fence.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
+import { buildFixRungDispatchArgs, runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { CriterionVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { CI_LOG_FENCE_CLOSE } from "#src/lib/fix-fence.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
 
 const headSha = "a".repeat(40);
 const prUrl = "https://github.com/acme/remudero/pull/1";

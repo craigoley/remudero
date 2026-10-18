@@ -23,6 +23,7 @@
  *      other than the two structured fields
  *   7. deleting the check makes the population unnamed again — the report is doing the work
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -31,10 +32,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { loadPlanFromYaml, RETIREMENT_REASONS, type Plan, type Task } from "../src/lib/plan.js";
-import { blockedRecordUnruledViolations, lintPlan, lintTask, type BlockedDispositionContext } from "../src/lib/task-linter.js";
+import { loadPlanFromYaml, RETIREMENT_REASONS, type Plan, type Task } from "#src/lib/plan.js";
+import { blockedRecordUnruledViolations, lintPlan, lintTask, type BlockedDispositionContext } from "#src/lib/task-linter.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 
 // ── shared fixtures (pure, in-memory — no I/O, mirrors every other suite in this file family) ──
 

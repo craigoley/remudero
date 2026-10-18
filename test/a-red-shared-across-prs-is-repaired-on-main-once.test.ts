@@ -15,10 +15,10 @@ import {
   mainRepairRecordsFromLedger,
   type MainRepairFixRequest,
   type MainRepairLane,
-} from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   MAIN_INHERITED_RED_STEP,
   restMainInheritanceReads,
@@ -27,7 +27,7 @@ import {
   type MainInheritanceReads,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

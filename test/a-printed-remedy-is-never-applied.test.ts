@@ -32,13 +32,13 @@ import {
   remedyGeneratorNamedInLog,
   runFixRung,
   runGeneratorFixForCiFailures,
-} from "./helpers/run-task-test.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/run-task-test.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 // ── shared fixtures (mirrors test/fix-rung-empty-failures-stand-down.test.ts's own conventions) ─
 

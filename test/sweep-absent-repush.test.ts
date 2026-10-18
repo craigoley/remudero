@@ -13,12 +13,12 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { gitPushEmptyCommit } from "../src/lib/git-push.js";
-import { buildOpenPrViews, buildSweepEffects } from "../src/run-task.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+} from "#test/helpers/sweep-test.js";
+import { gitPushEmptyCommit } from "#src/lib/git-push.js";
+import { buildOpenPrViews, buildSweepEffects } from "#src/run-task.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 // ── Fixture clock. Pinned, and every age-sensitive assertion passes it explicitly: the
 // ABSENT remedy is time-gated, so a wall-clock read here would make these tests rot exactly

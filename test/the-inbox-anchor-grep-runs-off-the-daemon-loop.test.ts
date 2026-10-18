@@ -18,8 +18,8 @@ import {
   warmAnchorGrepCache,
   warmedAnchorGrep,
   type EvidenceAnchor,
-} from "../src/lib/inbox.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/inbox.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const landed: EvidenceAnchor = { description: "landed", pattern: "LANDED", path: "sub/note.md" };
 const absent: EvidenceAnchor = { description: "absent", pattern: "NEVER-THERE", path: "sub/note.md" };

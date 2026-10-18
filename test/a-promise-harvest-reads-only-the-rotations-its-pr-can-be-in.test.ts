@@ -4,10 +4,10 @@ import { createReadStream, existsSync, mkdtempSync, readdirSync, readFileSync, r
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { ghShim } from "./helpers/gh-shim.js";
-import { rotateLedger } from "../src/lib/ledger.js";
-import { judgeReview, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewDecisionDigest, type PromisedFollowUpObservation } from "../src/lib/review.js";
-import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import { judgeReview, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewDecisionDigest, type PromisedFollowUpObservation } from "#src/lib/review.js";
+import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 
 const taskId = "W1-T8775", prUrl = "https://github.com/o/r/pull/11255", headSha = "a".repeat(40);
 const promise = { path: "docs/adr/example.md", text: "file the child task", taskId };

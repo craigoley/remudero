@@ -10,6 +10,7 @@
  * The decision is staged by the real POST route; the sweep's acknowledgement (an unlink of the queued
  * record once origin/main carries it) is W1-T5460's own suite, so here the record is removed directly.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -18,11 +19,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 
-import * as feedback from "../src/lib/feedback.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import * as panelGraph from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as feedback from "#src/lib/feedback.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import * as panelGraph from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const QUEUE_DIR = join("state", "feedback-landing-pending", "plan", "feedback");
 
@@ -148,7 +149,7 @@ test("GET /v1/feedback reads no landing queue when feedbackLand is not wired", a
 });
 
 test("the openapi feedback entry schema documents landing and landingUnknown next to discharged", () => {
-  const spec = parse(readFileSync(new URL("../openapi/daemon.yaml", import.meta.url), "utf8")) as {
+  const spec = parse(readFileSync(join(repoRoot(), "openapi/daemon.yaml"), "utf8")) as {
     components: { schemas: Record<string, { properties?: Record<string, { type?: unknown; enum?: unknown[]; description?: string }> }> };
   };
   const entry = Object.values(spec.components.schemas).find((s) => s.properties?.discharged && s.properties?.dischargeUndecidable);

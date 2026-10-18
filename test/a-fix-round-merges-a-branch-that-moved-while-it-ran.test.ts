@@ -1,3 +1,5 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { pathToFileURL } from "node:url";
 /**
  * A fix round whose branch moved while its worker ran merges the new tip and pushes once.
  *
@@ -10,10 +12,10 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
-const reapplyModule = new URL("../src/lib/fix-round-reapply.ts", import.meta.url);
-const load = async () => (await import(reapplyModule.href)) as typeof import("../src/lib/fix-round-reapply.js");
+const reapplyModule = pathToFileURL(join(repoRoot(), "src/lib/fix-round-reapply.ts"));
+const load = async () => (await import(reapplyModule.href)) as typeof import("#src/lib/fix-round-reapply.js");
 
 interface Pair { upstream: GitRepo; wt: GitRepo; base: string; committed: string }
 

@@ -22,7 +22,7 @@ import {
   type DraftCache,
   type DraftedCandidate,
   type Proposal,
-} from "../src/lib/inbox.js";
+} from "#src/lib/inbox.js";
 
 // ── W1-T241 ──────────────────────────────────────────────────────────────────────────────
 //

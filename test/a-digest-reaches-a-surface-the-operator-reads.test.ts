@@ -8,8 +8,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { CONSOLE_INBOX_DIGEST_LIMIT, buildInboxDigestsRoute, readConsoleInboxDigests } from "../src/lib/serve.js";
-import { inboxDigestsPath } from "../src/lib/digest.js";
+import { CONSOLE_INBOX_DIGEST_LIMIT, buildInboxDigestsRoute, readConsoleInboxDigests } from "#src/lib/serve.js";
+import { inboxDigestsPath } from "#src/lib/digest.js";
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-inbox-digests-"));

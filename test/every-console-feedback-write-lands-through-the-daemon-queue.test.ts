@@ -16,18 +16,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import * as feedback from "../src/lib/feedback.js";
-import * as landing from "../src/lib/feedback-landing.js";
-import { appendThreadMessage } from "../src/lib/inbox-thread.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import * as panelActions from "../src/lib/panel-actions.js";
-import * as panelGraph from "../src/lib/panel-graph.js";
-import * as skillRun from "../src/lib/panel-skill-run.js";
-import { createService, type Route } from "../src/lib/service.js";
-import { skillsDir } from "../src/lib/skill.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as feedback from "#src/lib/feedback.js";
+import * as landing from "#src/lib/feedback-landing.js";
+import { appendThreadMessage } from "#src/lib/inbox-thread.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import * as panelActions from "#src/lib/panel-actions.js";
+import * as panelGraph from "#src/lib/panel-graph.js";
+import * as skillRun from "#src/lib/panel-skill-run.js";
+import { createService, type Route } from "#src/lib/service.js";
+import { skillsDir } from "#src/lib/skill.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const QUEUE_DIR = join("state", "feedback-landing-pending");
 

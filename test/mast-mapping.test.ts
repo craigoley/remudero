@@ -13,7 +13,7 @@ import {
   parseLedger,
   parseMastMapping,
   type MastMapping,
-} from "../src/lib/retro.js";
+} from "#src/lib/retro.js";
 
 // The REAL, committed table (plan/mast-mapping.yaml) — every test below that asserts an
 // exact category distribution reads THIS, not a hand-copied stand-in, so a future edit to

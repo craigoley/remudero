@@ -7,11 +7,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { HostMemoryReading, ReadingEntry } from "../src/lib/host-memory-ledger.js";
+import type { HostMemoryReading, ReadingEntry } from "#src/lib/host-memory-ledger.js";
 import {
   createSweepFixAdmissionController, fixAdmissionChargeMib, productionFixAdmissionReaders, productionFixAdmissionResidents,
   type FixHostPressure, type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const FLOOR = 3_072;
 const REVIEW_MIB = 1_220;

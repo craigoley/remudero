@@ -39,11 +39,11 @@ import {
   spawnRulingJudgeWorker,
   STANDING_ANCHOR_RE,
   standingAnchorsCited,
-} from "../src/lib/ruling-judge.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { recordRuling } from "../src/lib/feedback-landing.js";
-import { readStandingDecisions, routeRuling, ruleCommand, type RouteRulingDeps } from "../src/run-task.js";
+} from "#src/lib/ruling-judge.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { recordRuling } from "#src/lib/feedback-landing.js";
+import { readStandingDecisions, routeRuling, ruleCommand, type RouteRulingDeps } from "#src/run-task.js";
 
 const RULING: AgentRuling = {
   taskId: "W1-T4242",

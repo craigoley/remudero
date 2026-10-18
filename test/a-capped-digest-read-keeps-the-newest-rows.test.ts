@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { readDigestWindow } from "../src/lib/digest.js";
+import { readDigestWindow } from "#src/lib/digest.js";
 
 /** Three rows stamped inside `hour`, tagged `<tag>0..2`. */
 function rows(tag: string, hour: number): string {

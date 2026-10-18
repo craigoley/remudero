@@ -6,7 +6,7 @@ import {
   verifyAssistantTrustControls,
   type AssistantTrustControlResult,
   type AssistantTrustEvidence,
-} from "../src/lib/experiment-promotion.js";
+} from "#src/lib/experiment-promotion.js";
 
 function cleanEvidence(overrides: Partial<AssistantTrustEvidence> = {}): AssistantTrustEvidence {
   return { unauthorizedSideEffects: 0, staleContextUses: 0, receiptsComplete: true, rollbackAttempted: false, rollbackSucceeded: true, ...overrides };

@@ -10,7 +10,7 @@ import {
   type EscalationJudgeVerdict,
   type IssueGateway,
   type OpenIssue,
-} from "../src/lib/escalate.js";
+} from "#src/lib/escalate.js";
 
 // W1-T5765 — a judged escalation awaits its gateway: the dedup search, the issue create and the
 // supersede closes all run under the async driver, so a slow `gh` call never parks the daemon loop.

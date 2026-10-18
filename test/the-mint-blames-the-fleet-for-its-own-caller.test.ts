@@ -9,8 +9,8 @@ import {
   describeContestedId,
   nextTaskIdCommand,
   readReservationHolder,
-} from "../src/run-task.js";
-import { type RemoteRefReserver, type RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
+} from "#src/run-task.js";
+import { type RemoteRefReserver, type RemoteReserveOutcome } from "#src/lib/task-id-reservation.js";
 
 const NO_OPEN_PRS = (): string[] => [];
 

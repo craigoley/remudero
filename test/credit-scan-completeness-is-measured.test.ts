@@ -29,9 +29,9 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { runCreditBackfill } from "../src/lib/sweep.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { runCreditBackfill } from "#src/lib/sweep.js";
 
 /** The retired rotation cap — kept as a fixture depth, so each corpus sits where the old bound bit. */
 const CREDIT_SCAN_MAX_ROTATIONS = 24;

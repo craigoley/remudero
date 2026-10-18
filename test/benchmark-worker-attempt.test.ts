@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { benchmarkRunAttemptReceipt } from "../src/lib/benchmark-run.js";
+import { benchmarkRunAttemptReceipt } from "#src/lib/benchmark-run.js";
 
 test("benchmark worker attempts join each spawn without duplicating the run verdict", () => {
   const one = benchmarkRunAttemptReceipt({ step: "worker.attempt", selection_assignment_id: "a1", success: true });

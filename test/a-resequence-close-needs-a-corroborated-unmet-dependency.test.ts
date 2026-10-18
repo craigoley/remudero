@@ -9,10 +9,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { StatusProjection } from "../src/lib/status.js";
-import { corroboratedIneligibilityReason, DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
-import { buildOpenPrViews, resequenceMergedResolver } from "../src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { StatusProjection } from "#src/lib/status.js";
+import { corroboratedIneligibilityReason, DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "#src/lib/sweep.js";
+import { buildOpenPrViews, resequenceMergedResolver } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-09-26T20:42:26.000Z");
 const PR_NUMBER = 7333;

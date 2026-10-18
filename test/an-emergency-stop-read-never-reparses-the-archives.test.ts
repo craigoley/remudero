@@ -6,9 +6,9 @@ import { statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "../src/lib/ledger.js";
-import { emergencyStopRows } from "../src/lib/operator-agent.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "#src/lib/ledger.js";
+import { emergencyStopRows } from "#src/lib/operator-agent.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const ARCHIVE_MTIME_S = 1_790_000_000;
 

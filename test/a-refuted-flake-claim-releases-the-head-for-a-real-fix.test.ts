@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { join } from "node:path";
-import * as sweepCore from "../src/lib/sweep.js";
+import * as sweepCore from "#src/lib/sweep.js";
 import { fixRoundTally, fixRungStalledWithoutNewHead, runSweep,
-  type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-import { runFixRung } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+  type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const TASK = "W1-T7449", HEAD = "a5975e7", NOW = Date.now();
 type Row = Record<string, unknown>;

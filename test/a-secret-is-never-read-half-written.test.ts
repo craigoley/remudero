@@ -1,4 +1,3 @@
-// test/a-secret-is-never-read-half-written.test.ts
 //
 // `loadEscalationLinkSecret` (escalate.ts) and `resolveServiceTokens` (serve.ts) used to create
 // their file with `wx` and only THEN write it. A reader between the two got `raw: ""`, and a
@@ -13,16 +12,16 @@ import { closeSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { escalationLinkSecretPath, loadEscalationLinkSecret, signOptionLink } from "../src/lib/escalate.js";
+import { escalationLinkSecretPath, loadEscalationLinkSecret, signOptionLink } from "#src/lib/escalate.js";
 import {
   createOrReadPublished,
   HEX_SECRET_RE,
   InvalidSecretFileError,
   StillBeingWrittenError,
   writeAtomic,
-} from "../src/lib/fs-race-safe.js";
-import { resolveServiceTokens, serviceTokensPath } from "../src/lib/serve.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/fs-race-safe.js";
+import { resolveServiceTokens, serviceTokensPath } from "#src/lib/serve.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const PUBLISHED = "b".repeat(64);
 

@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -5,17 +6,17 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask, lintPlanCommand, HANDLERS, type LintPlanStatusDeps } from "../src/run-task.js";
-import { assertLintClean } from "../src/lib/task-linter.js";
-import { loadPlan } from "../src/lib/plan.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { spawnWorker } from "../src/lib/worker.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { runTask, lintPlanCommand, HANDLERS, type LintPlanStatusDeps } from "#src/run-task.js";
+import { assertLintClean } from "#src/lib/task-linter.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { spawnWorker } from "#src/lib/worker.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const runTaskSrc = readFileSync(join(testRepoRoot(), "src/run-task.ts"), "utf8");
+const REPO_ROOT = testRepoRoot();
 
 // ── §5C Layer A pre-dispatch guard is WIRED into the run path (W1-T20c) ───────
 

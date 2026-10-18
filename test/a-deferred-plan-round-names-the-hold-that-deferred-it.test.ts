@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as sweep from "../src/lib/sweep.js";
-import type { OpenPrView, SweepDeps } from "../src/lib/sweep.js";
+import * as sweep from "#src/lib/sweep.js";
+import type { OpenPrView, SweepDeps } from "#src/lib/sweep.js";
 
 // #10488 (2026-10-09): a fleet plan filing sat on "plan-scoped round deferred" for passes with no
 // plan round ever dispatched, and the one reason covered three different holds — a light pass, a

@@ -10,7 +10,7 @@ import {
   executeBoundedDelegation,
   InMemoryDelegationEnvelopeStore,
   revokeDelegationEnvelope,
-} from "../src/lib/automation-action.js";
+} from "#src/lib/automation-action.js";
 
 function issue(store: InMemoryDelegationEnvelopeStore, overrides: Partial<Parameters<typeof createDelegationEnvelope>[0]> = {}) {
   const envelope = createDelegationEnvelope({

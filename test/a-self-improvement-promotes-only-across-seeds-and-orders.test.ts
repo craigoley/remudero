@@ -12,7 +12,7 @@ import {
   seedShuffleLedgerRow,
   shuffleTaskOrderForSeed,
   type SeedRunObservation,
-} from "../src/lib/experiment-promotion.js";
+} from "#src/lib/experiment-promotion.js";
 
 const TASK_IDS = ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"];
 

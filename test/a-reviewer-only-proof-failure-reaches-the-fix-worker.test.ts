@@ -10,6 +10,7 @@
  * reviewer's sandbox (or says plainly that no output was recorded), and the progress judge sees a
  * FIXED round followed by the same reviewer output as a reviewer-only failure.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,10 +18,10 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { buildOpenPrViews } from "./helpers/run-task-test.js";
+import { buildOpenPrViews } from "#test/helpers/run-task-test.js";
 // Namespace imports, so each test (not the file's load) fails on a tree without these exports.
-import * as progressJudge from "../src/lib/fix-progress-judge.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
+import * as progressJudge from "#src/lib/fix-progress-judge.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
 import {
   execWhitelistedProof,
   judgeReview,
@@ -29,9 +30,9 @@ import {
   reviewInputDigest,
   type CriterionVerdict,
   type ProofSpawner,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 const PROOF = "unit test: test/a-reviewer-only-proof-failure-reaches-the-fix-worker.test.ts";
 const DIFF = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const a = 1;\n";
 

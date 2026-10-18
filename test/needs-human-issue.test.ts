@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
@@ -7,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // The repo idiom (see test/mutation-ratchet.test.ts) is a runtime import of the real module --
 // which also guarantees these assertions run against the file the workflow executes, not a copy.
 const MODULE_URL = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "needs-human-issue.mjs"),
+  join(repoRoot(), "scripts/needs-human-issue.mjs"),
 ).href;
 
 type Issue = { number: number; body: string; title: string };

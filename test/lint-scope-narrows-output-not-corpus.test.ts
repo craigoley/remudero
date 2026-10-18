@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { lintPlan } from "../src/lib/task-linter.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { lintPlan } from "#src/lib/task-linter.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 // ── GET /v1/inbox lints the whole plan once per proposal, and reads back two tasks ────────────
 //
@@ -145,7 +145,7 @@ const FRAGMENT = `
 `;
 
 test("blockingLintMessages asks only for the fragment's own ids, never the whole merged plan", async () => {
-  const { blockingLintMessages } = await import("../src/lib/inbox.js");
+  const { blockingLintMessages } = await import("#src/lib/inbox.js");
   const base = planOf(COLLIDING);
   const fragment = planOf(FRAGMENT);
 
@@ -167,7 +167,7 @@ test("blockingLintMessages asks only for the fragment's own ids, never the whole
 });
 
 test("narrowing the caller does not change the messages it returns", async () => {
-  const { blockingLintMessages } = await import("../src/lib/inbox.js");
+  const { blockingLintMessages } = await import("#src/lib/inbox.js");
   const base = planOf(COLLIDING);
   const fragment = planOf(FRAGMENT);
 

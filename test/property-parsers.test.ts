@@ -1,10 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import fc from "fast-check";
-import { parseWhitelistedProof } from "../src/lib/review.js";
-import { prStateFromRest } from "../src/lib/open-prs-rest.js";
-import { prReferentFromIssueText } from "../src/lib/escalate.js";
-import { parsePlanVerdict } from "../src/lib/plan-architect.js";
+import { parseWhitelistedProof } from "#src/lib/review.js";
+import { prStateFromRest } from "#src/lib/open-prs-rest.js";
+import { prReferentFromIssueText } from "#src/lib/escalate.js";
+import { parsePlanVerdict } from "#src/lib/plan-architect.js";
 
 /**
  * PROPERTY TESTS FOR THIS REPO'S FOUR LOAD-BEARING PURE PARSERS.

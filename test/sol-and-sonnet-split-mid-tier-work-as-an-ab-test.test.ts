@@ -1,25 +1,26 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import test from "node:test";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 import {
   evaluateRoutingExperiment,
   ROUTING_EXPERIMENTS,
   routingAbCommand,
   routingExperimentFor,
   type RoutingExperiment,
-} from "../src/lib/routing-experiments.js";
-import { selectCodexModel, type CodexModelInfo, type ProviderCapacity } from "../src/lib/worker-provider.js";
-import { workerSelectionAssignment, type SpawnWorkerArgs } from "../src/lib/worker.js";
+} from "#src/lib/routing-experiments.js";
+import { selectCodexModel, type CodexModelInfo, type ProviderCapacity } from "#src/lib/worker-provider.js";
+import { workerSelectionAssignment, type SpawnWorkerArgs } from "#src/lib/worker.js";
 
 // Operator ruling 2026-09-24 (DECISIONS.md): Sol vs Sonnet for mid-tier work is an A/B test. The
 // headroom auction splits sonnet/high work between the two, each such assignment is tagged, and
 // `rmd routing-ab` compares the arms from the ledger. Revisit 2026-10-08.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = repoRoot();
 const SOL_VS_SONNET = ROUTING_EXPERIMENTS.find((experiment) => experiment.id === "sol-vs-sonnet")!;
 
 const MODELS: CodexModelInfo[] = ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"].map((id) => ({

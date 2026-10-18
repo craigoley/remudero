@@ -1,7 +1,7 @@
 // Proof path: test/action-reconciliation-partial-success.test.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { reconcileExternalEffect, type ExternalEffectRequest, type ExternalObservationResponse } from "../src/lib/action-reconciliation.js";
+import { reconcileExternalEffect, type ExternalEffectRequest, type ExternalObservationResponse } from "#src/lib/action-reconciliation.js";
 
 const NOW = new Date("2026-09-21T12:00:00.000Z");
 

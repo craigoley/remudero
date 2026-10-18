@@ -5,15 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { prepareGardenTaskIds, releaseGardenTaskIds, runGarden, runGardenAsync, type GardenCheckout, type GardenerDeps, type GardenSpec, type GardenTaskIdMinter } from "../src/lib/gardener.js";
-import { fileConsumerVia } from "../src/lib/host-resource-gardener.js";
-import { runSelectorShadowGardener } from "../src/lib/selector-shadow-gardener.js";
-import { RESERVATION_RELEASED_STEP, RESERVATION_RELEASE_SKIPPED_STEP, releaseTaskIdReservation, releaseTaskIdReservationAsync } from "../src/lib/task-id-release.js";
-import { gitRemoteRefReserver, gitReservationRunnerAsync, reserveTaskIdRemote, taskIdReservationRef } from "../src/lib/task-id-reservation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ciLearningTaskIdMinter } from "../src/run-task.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { prepareGardenTaskIds, releaseGardenTaskIds, runGarden, runGardenAsync, type GardenCheckout, type GardenerDeps, type GardenSpec, type GardenTaskIdMinter } from "#src/lib/gardener.js";
+import { fileConsumerVia } from "#src/lib/host-resource-gardener.js";
+import { runSelectorShadowGardener } from "#src/lib/selector-shadow-gardener.js";
+import { RESERVATION_RELEASED_STEP, RESERVATION_RELEASE_SKIPPED_STEP, releaseTaskIdReservation, releaseTaskIdReservationAsync } from "#src/lib/task-id-release.js";
+import { gitRemoteRefReserver, gitReservationRunnerAsync, reserveTaskIdRemote, taskIdReservationRef } from "#src/lib/task-id-reservation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ciLearningTaskIdMinter } from "#src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // A filing that a gate refuses before any branch or PR carries its id gives the id's
 // refs/rmd-id ref back — leased on the sha THIS run pushed, so no other writer's claim is touched.

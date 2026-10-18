@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { fixedClock } from "../src/lib/clock.js";
-import type { Task } from "../src/lib/plan.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Task } from "#src/lib/plan.js";
 import { buildTaskCaseFile, CASE_TELEMETRY_STEPS, MAX_CASE_TELEMETRY_ROWS_PER_STEP, readTaskCaseLedger,
-  readTaskCaseLedgers } from "../src/lib/task-case-file.js";
+  readTaskCaseLedgers } from "#src/lib/task-case-file.js";
 
 const asOf = "2026-09-27T14:00:00.000Z";
 const archive = "ledger.2026-09-26T16-27-20-296Z.ndjson.gz";

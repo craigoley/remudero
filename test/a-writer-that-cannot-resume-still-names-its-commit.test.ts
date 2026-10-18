@@ -11,13 +11,13 @@ import {
   missingCommitLinePrompt,
   resumeForMissingCommitLine,
   runFixRung,
-} from "./helpers/run-task-test.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#test/helpers/run-task-test.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const missingLine = "no anchored COMMIT_MESSAGE line in the report";
 

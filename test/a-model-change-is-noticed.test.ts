@@ -3,12 +3,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
+import { runBenchmarkCohortPass } from "#src/lib/benchmark-cohort.js";
 import {
   DRIFT_BLOCK_SIZE, DRIFT_FAMILY_ALPHA, MAX_DRIFT_SERIES, MAX_TIMELINE_ENTRIES, MODEL_DRIFT_VERSION,
   deriveModelDrift, unavailableModelDrift, upperNormalQuantile, wilsonInterval, type ModelExposure,
-} from "../src/lib/model-drift.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
+} from "#src/lib/model-drift.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
 
 // Minute `i` after 10:00 on 2026-09-27, as the canonical ISO form the ledger writes.
 const at = (i: number, seconds = 0): string => {

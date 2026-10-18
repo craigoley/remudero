@@ -2,6 +2,7 @@
 // so 193 queued records there were invisible to it. The verb now applies its OWN pure decision to each monolith
 // record READ-ONLY and prints the queued count plus the ids it would have flipped. It never writes the monolith.
 
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,8 +10,8 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { reconcilePlan } from "../src/lib/plan-reconcile.js";
-import { planReconcileCommand, readInlinePlanRecords, renderPlanReconcile } from "../src/run-task.js";
+import { reconcilePlan } from "#src/lib/plan-reconcile.js";
+import { planReconcileCommand, readInlinePlanRecords, renderPlanReconcile } from "#src/run-task.js";
 
 const record = (id: string, status = "queued", extra: string[] = []) => ({
   taskId: id,
@@ -149,7 +150,7 @@ test("W1-T5035: an unreadable monolith is reported and never read as no records"
 });
 
 test("W1-T5035: the default reader splits the real monolith into its records", () => {
-  const path = join(dirname(fileURLToPath(import.meta.url)), "..", "plan", "tasks.yaml");
+  const path = join(repoRoot(), "plan/tasks.yaml");
   const text = readFileSync(path, "utf8");
   const expected = [...text.matchAll(/^- id: (\S+)/gm)].map((m) => m[1]);
   const records = readInlinePlanRecords(path)!;

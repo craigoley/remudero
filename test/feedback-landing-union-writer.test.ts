@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { LANDING_BRANCH, landFeedback } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { LANDING_BRANCH, landFeedback } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // ── W1-T3560 — THE UNION WRITER + LEASE, NOT A WHOLE-REF REPLACE ───────────────────────────
 //

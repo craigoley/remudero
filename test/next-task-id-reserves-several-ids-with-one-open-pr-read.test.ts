@@ -13,8 +13,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
-import * as reservation from "../src/lib/task-id-reservation.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import * as reservation from "#src/lib/task-id-reservation.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 type Handle = reservation.RemoteReservationHandle;
 type KeepingHeld = (start: number, count: number, one: (from: number) => Handle) => { held: Handle[]; error?: unknown };

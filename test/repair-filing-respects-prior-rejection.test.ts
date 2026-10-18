@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
-import { renderDigest, summarize } from "../src/lib/digest.js";
-import { feedbackDir, feedbackEntryPath, readFeedbackEntry, type FeedbackEntry, type FeedbackStatus } from "../src/lib/feedback.js";
-import { queuedFeedbackDir, queuedFeedbackLandings } from "../src/lib/feedback-landing.js";
-import type { RepairFilingCapture } from "./helpers/sweep-test.js";
-import { captureRepairFeedbackWithPriorVerdict, latestPriorVerdictSuppresses } from "../src/run-task.js";
+import { renderDigest, summarize } from "#src/lib/digest.js";
+import { feedbackDir, feedbackEntryPath, readFeedbackEntry, type FeedbackEntry, type FeedbackStatus } from "#src/lib/feedback.js";
+import { queuedFeedbackDir, queuedFeedbackLandings } from "#src/lib/feedback-landing.js";
+import type { RepairFilingCapture } from "#test/helpers/sweep-test.js";
+import { captureRepairFeedbackWithPriorVerdict, latestPriorVerdictSuppresses } from "#src/run-task.js";
 
 /**
  * W1-T2416 — "THE REPAIR-RECURRENCE FILER HAS NO MEMORY OF ITS OWN VERDICT". Falsifies every

@@ -5,7 +5,7 @@ import {
   validateAssistantTrustControlResults,
   verifyAssistantTrustControls,
   type AssistantTrustControlResult,
-} from "../src/lib/experiment-promotion.js";
+} from "#src/lib/experiment-promotion.js";
 
 function control(overrides: Partial<AssistantTrustControlResult> = {}): AssistantTrustControlResult {
   return {

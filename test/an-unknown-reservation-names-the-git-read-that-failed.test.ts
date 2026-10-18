@@ -11,9 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { failSummary, judgeReview, taskIdOwnershipFindings, unknownReservationReads, type TaskIdOwnershipFinding } from "../src/lib/review.js";
-import { readReservationAnchors, readReservationAnchorsAsync } from "../src/lib/task-id-reservation.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { failSummary, judgeReview, taskIdOwnershipFindings, unknownReservationReads, type TaskIdOwnershipFinding } from "#src/lib/review.js";
+import { readReservationAnchors, readReservationAnchorsAsync } from "#src/lib/task-id-reservation.js";
 
 const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
 const CRITERIA: AcceptanceCriterion[] = [{ claim: "the widget renders", proof: "the widget renders" }];

@@ -21,9 +21,9 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { loadOperatorNotesForTask } from "../src/lib/operator-notes.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { loadOperatorNotesForTask } from "#src/lib/operator-notes.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 function storeLines(root: string): Array<Record<string, unknown>> {
   const p = join(root, "plan", "operator-notes.ndjson");
@@ -32,7 +32,7 @@ function storeLines(root: string): Array<Record<string, unknown>> {
 }
 
 test("W1-T3351: `rmd note <id> <text...>` writes one stamped note the docket's surface can read", async () => {
-  const { noteCommand } = await import("../src/run-task.js");
+  const { noteCommand } = await import("#src/run-task.js");
   const root = makeTempDir("note-cli");
   const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const code = await noteCommand(["W1-T42", "prefer", "the", "union", "reader", "here"], {
@@ -54,7 +54,7 @@ test("W1-T3351: `rmd note <id> <text...>` writes one stamped note the docket's s
 });
 
 test("W1-T3351: a note with no text, or no id, is a usage error that writes NOTHING", async () => {
-  const { noteCommand } = await import("../src/run-task.js");
+  const { noteCommand } = await import("#src/run-task.js");
   const root = makeTempDir("note-cli-bad");
   const quiet = { root, log: () => {} };
 
@@ -65,7 +65,7 @@ test("W1-T3351: a note with no text, or no id, is a usage error that writes NOTH
 });
 
 test("W1-T3351: `rmd approve <P##> --note` is accepted, and a REFUSED approve records no note", async () => {
-  const { approveCommand } = await import("../src/run-task.js");
+  const { approveCommand } = await import("#src/run-task.js");
   const root = makeTempDir("note-approve-refused");
   // An id that names no proposal: approveCommand refuses before any ratification happens.
   const code = await approveCommand(["P-does-not-exist", "--note", "this must not be recorded"], {
@@ -81,7 +81,7 @@ test("W1-T3351: `rmd approve <P##> --note` is accepted, and a REFUSED approve re
 });
 
 test("W1-T3351: a SUCCEEDING approve chains the note, and the same approve without --note writes none", async () => {
-  const { approveCommand } = await import("../src/run-task.js");
+  const { approveCommand } = await import("#src/run-task.js");
   const { mkdirSync, writeFileSync } = await import("node:fs");
   const root = makeTempDir("note-approve-ok");
   mkdirSync(join(root, "plan"), { recursive: true });
@@ -114,7 +114,7 @@ test("W1-T3351: a SUCCEEDING approve chains the note, and the same approve witho
 });
 
 test("W1-T3351: `rmd note` reports a REFUSED store write — exit 1, nothing crashes, the ledger says why", async () => {
-  const { noteCommand } = await import("../src/run-task.js");
+  const { noteCommand } = await import("#src/run-task.js");
   const { writeFileSync } = await import("node:fs");
   const root = makeTempDir("note-cli-refused");
   // A file sits where `appendOperatorNote` needs the `plan/` DIRECTORY — `mkdirSync(..., {
@@ -134,7 +134,7 @@ test("W1-T3351: `rmd note` reports a REFUSED store write — exit 1, nothing cra
 });
 
 test("W1-T3351: a SUCCEEDING approve whose note-store write is REFUSED still reports the release's own code", async () => {
-  const { approveCommand } = await import("../src/run-task.js");
+  const { approveCommand } = await import("#src/run-task.js");
   const { mkdirSync, writeFileSync, statSync, readdirSync } = await import("node:fs");
   const root = makeTempDir("note-approve-store-refused");
   mkdirSync(join(root, "plan"), { recursive: true });

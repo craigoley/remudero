@@ -1,13 +1,14 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { writeMutantModule } from "./helpers/mutant-module.js";
-import { TRIAGE_PROOF_NEEDLE, mutateTriageProofSource } from "./helpers/triage-proof-needle.js";
-import { execWhitelistedProof, parseWhitelistedProof } from "../src/lib/review.js";
-import { feedbackEntryRepoPath } from "../src/lib/feedback.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
+import { TRIAGE_PROOF_NEEDLE, mutateTriageProofSource } from "#test/helpers/triage-proof-needle.js";
+import { execWhitelistedProof, parseWhitelistedProof } from "#src/lib/review.js";
+import { feedbackEntryRepoPath } from "#src/lib/feedback.js";
 
 // ── W1-T2587: A HAND-ROLLED MUTATION TEST COLLIDES WITH THE REAL HARNESS ───────────────────────
 //
@@ -37,7 +38,7 @@ import { feedbackEntryRepoPath } from "../src/lib/feedback.js";
 // this task fixes — see the assertion below that pins that down, so this test cannot pass
 // vacuously against a mimic that happens not to exercise the regression.
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = testRepoRoot();
 const triageTsPath = join(repoRoot, "src", "lib", "triage.ts");
 
 /** The statement-shaped needle the OLD, now-removed check searched for. */
@@ -90,7 +91,7 @@ test("W1-T2587: the guard is not disabled inside the sandbox — an unmutated in
   const original = readFileSync(triageTsPath, "utf8");
   const instrumented = buildInstrumentedMimic(original);
   const instrumentedPath = writeMutantModule("triage.ts", instrumented);
-  const instrumentedModule = (await import(instrumentedPath)) as typeof import("../src/lib/triage.js");
+  const instrumentedModule = (await import(instrumentedPath)) as typeof import("#src/lib/triage.js");
 
   const feedbackId = "fb-1784766956423-6635d1";
   const relPath = feedbackEntryRepoPath(feedbackId);
@@ -126,7 +127,7 @@ test("W1-T2587: the guard is not disabled inside the sandbox — the mutation is
   assert.notEqual(mutated, instrumented, "the mutation must actually change the instrumented source");
 
   const mutantPath = writeMutantModule("triage.ts", mutated);
-  const mutant = (await import(mutantPath)) as typeof import("../src/lib/triage.js");
+  const mutant = (await import(mutantPath)) as typeof import("#src/lib/triage.js");
 
   const feedbackId = "fb-1784766956423-6635d1";
   const relPath = feedbackEntryRepoPath(feedbackId);

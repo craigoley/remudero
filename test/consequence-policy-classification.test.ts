@@ -8,7 +8,7 @@ import {
   CONSEQUENCE_POLICY_SCHEMA_VERSION,
   classifyConsequenceAction,
   type ConsequenceActionInput,
-} from "../src/lib/consequence-policy.js";
+} from "#src/lib/consequence-policy.js";
 
 const FUTURE = new Date(Date.now() + 60_000).toISOString();
 const PAST = new Date(Date.now() - 60_000).toISOString();

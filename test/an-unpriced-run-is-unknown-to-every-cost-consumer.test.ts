@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { RunSummary } from "../src/lib/retro.js";
-import { detectCostAnomalies, costAnomalyLine } from "../src/lib/cost-anomaly.js";
-import { settledClassCosts, cohortOutcome } from "../src/lib/config-gardener.js";
-import { cohortGuardObservations } from "../src/lib/experiment-promotion.js";
-import { closureByClass, renderClosureByClass } from "../src/lib/retro-closure.js";
+import type { RunSummary } from "#src/lib/retro.js";
+import { detectCostAnomalies, costAnomalyLine } from "#src/lib/cost-anomaly.js";
+import { settledClassCosts, cohortOutcome } from "#src/lib/config-gardener.js";
+import { cohortGuardObservations } from "#src/lib/experiment-promotion.js";
+import { closureByClass, renderClosureByClass } from "#src/lib/retro-closure.js";
 // @ts-expect-error — an .mjs script with no declaration file
-import { computeClassSweep, computeArmSweep } from "../scripts/mount-headroom-sweep.mjs";
+import { computeClassSweep, computeArmSweep } from "#scripts/mount-headroom-sweep.mjs";
 
 const run = (id: string, over: Partial<RunSummary> = {}): RunSummary => ({
   runId: id, taskId: `T-${id}`, type: "implement", startTs: "2026-10-08T10:00:00Z", verdict: "merged",

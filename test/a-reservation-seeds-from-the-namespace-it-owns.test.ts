@@ -15,8 +15,8 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_ALLOCATABLE_TASK_ID } from "../src/lib/task-id.js";
-import { nextTaskIdCommand } from "../src/run-task.js";
+import { MAX_ALLOCATABLE_TASK_ID } from "#src/lib/task-id.js";
+import { nextTaskIdCommand } from "#src/run-task.js";
 import {
   RESERVATION_REF_RE,
   gitRemoteRefReserver,
@@ -25,7 +25,7 @@ import {
   reserveTaskIdBlockRemote,
   reserveTaskIdRemote,
   type RemoteRefReserver,
-} from "../src/lib/task-id-reservation.js";
+} from "#src/lib/task-id-reservation.js";
 
 /** A minimal plan whose highest declared id sits BELOW the floor under test. */
 function planFixture(): string {

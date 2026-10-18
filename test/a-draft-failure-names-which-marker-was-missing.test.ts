@@ -23,7 +23,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { describeDraftParseFailure } from "../src/lib/inbox.js";
+import { describeDraftParseFailure } from "#src/lib/inbox.js";
 
 test("W1-T3350: each way a draft can fail is a DIFFERENT recorded reason, not one string", () => {
   const none = describeDraftParseFailure("");

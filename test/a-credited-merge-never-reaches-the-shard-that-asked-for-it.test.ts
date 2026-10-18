@@ -16,8 +16,8 @@ import {
   RECONCILE_TO_STATUS,
   reconcilePlan,
   reconcileShardStatus,
-} from "../src/lib/plan-reconcile.js";
-import { planReconcileCommand, renderPlanReconcile } from "../src/run-task.js";
+} from "#src/lib/plan-reconcile.js";
+import { planReconcileCommand, renderPlanReconcile } from "#src/run-task.js";
 
 /** A shard with the real field order, so the byte-identity assertions mean something. */
 function shard(over: { status?: string; retirement?: string; extra?: string } = {}): string {

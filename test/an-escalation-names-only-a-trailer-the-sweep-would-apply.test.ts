@@ -6,7 +6,7 @@ import {
   deriveDisposition,
   missingTaskTrailerRepairDecision,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 /**
  * #10597 — an operator plan filing on `run-unfiled-<epoch>` whose body carried a judged

@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import { appendOperatorNote, loadOperatorNotesForTask } from "../src/lib/operator-notes.js";
-import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import { appendOperatorNote, loadOperatorNotesForTask } from "#src/lib/operator-notes.js";
+import type { Plan } from "#src/lib/plan.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-04T12:00:00.000Z");
 const stamp = (offset = 0) => new Date(NOW + offset).toISOString();

@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,15 +12,15 @@ import {
   spawnDecisionPoint,
   type ProviderCapacity,
   type RoutingDrawSeed,
-} from "../src/lib/worker-provider.js";
-import { selectWorkerProviderForPolicy, type EffectiveProviderRoutingPolicy } from "../src/lib/provider-routing-policy.js";
+} from "#src/lib/worker-provider.js";
+import { selectWorkerProviderForPolicy, type EffectiveProviderRoutingPolicy } from "#src/lib/provider-routing-policy.js";
 import {
   evaluateRoutingExperiment,
   experimentArmForTask,
   experimentDrawSeed,
   experimentIntentionToTreat,
   ROUTING_EXPERIMENTS,
-} from "../src/lib/routing-experiments.js";
+} from "#src/lib/routing-experiments.js";
 import {
   auctionDrawSeed,
   createClaudeExecutableCache,
@@ -28,13 +29,13 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // W1-T4617: every routed assignment records each candidate's selection probability, the draw and
 // its seed, and an experiment keeps ONE arm per task across retries and fix rungs.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = repoRoot();
 const NOW = Date.parse("2026-09-27T12:00:00.000Z");
 const SOL_VS_SONNET = ROUTING_EXPERIMENTS.find((experiment) => experiment.id === "sol-vs-sonnet")!;
 const AUTOMATIC = { preference: "automatic" as const, reservePercent: 5, provenance: "default" as const };

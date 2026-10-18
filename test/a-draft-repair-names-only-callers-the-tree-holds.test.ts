@@ -13,19 +13,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   inboxDraftRelintPrompt,
   lintDraftedFragment,
   runDraftRung,
   type DraftRepoFacts,
   type Proposal,
-} from "../src/lib/inbox.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { callSiteCandidates } from "../src/lib/relint.js";
-import { callSiteViolations, proofScopeViolations } from "../src/lib/task-linter.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/inbox.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { callSiteCandidates } from "#src/lib/relint.js";
+import { callSiteViolations, proofScopeViolations } from "#src/lib/task-linter.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const KNOWN = new Set(["remudero", "none"]);
 const PROPOSAL_ID = "standing-debt:5";

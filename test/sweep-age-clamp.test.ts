@@ -23,7 +23,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "#src/lib/sweep.js";
 
 const MS_PER_DAY = 86_400_000;
 const NOW = Date.parse("2026-08-22T12:00:00Z");

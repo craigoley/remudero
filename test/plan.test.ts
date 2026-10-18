@@ -13,7 +13,7 @@ import {
   transitiveDependents,
   unmetDependencies,
   visibleCriteria,
-} from "../src/lib/plan.js";
+} from "#src/lib/plan.js";
 
 function planFile(yaml: string): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-plan-"));

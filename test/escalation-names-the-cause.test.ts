@@ -30,13 +30,13 @@ import {
   CI_LOG_DIAGNOSTIC_RE,
   CI_LOG_LINE_PREFIX_RE,
   runFixRung,
-} from "./helpers/run-task-test.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/run-task-test.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 function result(over: Partial<WorkerResult> = {}): WorkerResult {
   return {

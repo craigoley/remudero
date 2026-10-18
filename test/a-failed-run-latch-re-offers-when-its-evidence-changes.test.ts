@@ -8,9 +8,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { preDispatchContractRevision } from "../src/lib/dispatch-repair.js";
-import { deriveStatus, type GitHub, type StatusProjection } from "../src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
+import { preDispatchContractRevision } from "#src/lib/dispatch-repair.js";
+import { deriveStatus, type GitHub, type StatusProjection } from "#src/lib/status.js";
 
 const TASK = "W1-T9001";
 const T0 = Date.parse("2026-10-07T12:00:00.000Z");

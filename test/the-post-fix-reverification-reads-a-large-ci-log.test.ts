@@ -11,10 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { CI_GATE_TIMEOUT_FIX_CLASS, type OpenPrView } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fetchCiFailures, sweepPostFixReverification } from "./helpers/run-task-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { CI_GATE_TIMEOUT_FIX_CLASS, type OpenPrView } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fetchCiFailures, sweepPostFixReverification } from "#test/helpers/run-task-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const JOB = "8001";
 const PR_URL = "https://github.com/o/r/pull/5856";

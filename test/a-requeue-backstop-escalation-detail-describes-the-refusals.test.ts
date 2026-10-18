@@ -8,8 +8,8 @@ import {
   CHECK_REQUEUE_DEFERRAL_BACKSTOP,
   type CancelledCheckEscalationKind,
   type OpenPrView,
-} from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 test("test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5978-`));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
 
 test("an acceptance producer refuses loss or truncation of any authored claim or proof", () => {
   const good = { claim: "one intact", proof: "unit test: one intact" };

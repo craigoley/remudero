@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "../src/lib/benchmark-verified-outcome.js";
-import { buildTaskCaseFile, type CaseLedgerRead, type CasePrRead, type TaskCaseFile } from "../src/lib/task-case-file.js";
-import type { Task } from "../src/lib/plan.js";
-import type { StatusProjection } from "../src/lib/status.js";
+import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "#src/lib/benchmark-verified-outcome.js";
+import { buildTaskCaseFile, type CaseLedgerRead, type CasePrRead, type TaskCaseFile } from "#src/lib/task-case-file.js";
+import type { Task } from "#src/lib/plan.js";
+import type { StatusProjection } from "#src/lib/status.js";
 
 // W1-T4646: a run-task run writes one `worker.assignment` row per rung (recon, implement, diagnose,
 // fix). The case file must remember every one, and every one must join the run's shared outcome.

@@ -18,11 +18,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { operatorVerdictEvidence } from "../src/lib/sweep.js";
-import { renderIssueBody, type Escalation, type OpenIssue } from "../src/lib/escalate.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { operatorVerdictEvidence } from "#src/lib/sweep.js";
+import { renderIssueBody, type Escalation, type OpenIssue } from "#src/lib/escalate.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   ghEscalationAnswerGateway,
   isOwnerReaction,
@@ -30,8 +30,8 @@ import {
   readEscalationAnswers,
   type EscalationAnswerGateway,
   type EscalationIssueReaction,
-} from "../src/lib/escalation-answers.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+} from "#src/lib/escalation-answers.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 
 const CLOCK_MS = Date.UTC(2026, 8, 29, 12, 0, 0);
 const OWNER_LOGIN = "craigoley";

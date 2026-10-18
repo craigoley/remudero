@@ -19,6 +19,7 @@
  *        moved without editing reports nothing — a gate that marks everything changed is as
  *        useless as one that marks nothing.
  */
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -26,11 +27,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { rawChangedTaskIds, splitTaskRecordBlocks } from "../src/lib/task-linter.js";
-import { lintPlanCommand } from "../src/run-task.js";
-import { isolatedCheckout } from "./helpers/isolated-checkout.js";
+import { rawChangedTaskIds, splitTaskRecordBlocks } from "#src/lib/task-linter.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { isolatedCheckout } from "#test/helpers/isolated-checkout.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = testRepoRoot();
 
 function shard(id: string, design: string): string {
   return [`- id: ${id}`, `  title: "t ${id}"`, "  design: |", `    ${design}`, "  status: queued", ""].join("\n");

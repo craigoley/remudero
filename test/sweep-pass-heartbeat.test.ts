@@ -1,4 +1,3 @@
-// test/sweep-pass-heartbeat.test.ts
 //
 // THE DEFECT: A BLIND SWEEP AND A QUIET FLEET ARE INDISTINGUISHABLE.
 //
@@ -29,9 +28,9 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-08-05T13:00:00.000Z");
 const RECENT = new Date(NOW - 60_000).toISOString();

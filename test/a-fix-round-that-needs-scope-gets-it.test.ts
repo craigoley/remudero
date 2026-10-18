@@ -3,13 +3,13 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
-import { requestScopeAmendment } from "../src/lib/proof-amendment.js";
-import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import { runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { requestScopeAmendment } from "#src/lib/proof-amendment.js";
+import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "#src/lib/proof-amendment.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T6465: a fleet build PR identifies its task by its run-<taskId>-<epochMs> head ref, not a
 // `Remudero-Task:` trailer — and every scope amendment on 2026-10-08 was refused for lacking one.

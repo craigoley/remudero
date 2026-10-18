@@ -6,11 +6,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { appendThreadReplyOnce, inboxThreadId, readAllThreads } from "../src/lib/inbox-thread.js";
-import { acquireInflightLock } from "../src/lib/inflight-lock.js";
-import { buildInboxThreadReplyRoute, inboxReplyAuditState, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { appendThreadReplyOnce, inboxThreadId, readAllThreads } from "#src/lib/inbox-thread.js";
+import { acquireInflightLock } from "#src/lib/inflight-lock.js";
+import { buildInboxThreadReplyRoute, inboxReplyAuditState, inboxThreadStorePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const PROPOSAL = "verify-human:W1-T235";
 const THREAD = inboxThreadId(PROPOSAL);

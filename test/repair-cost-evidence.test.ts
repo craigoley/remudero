@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { projectFlowRow } from "../src/lib/field-trials-flow.js";
-import { projectRepairCostContext, repairCostCells, repairCostsByPull, repairReceiptFields } from "../src/lib/repair-cost-evidence.js";
+import { projectFlowRow } from "#src/lib/field-trials-flow.js";
+import { projectRepairCostContext, repairCostCells, repairCostsByPull, repairReceiptFields } from "#src/lib/repair-cost-evidence.js";
 
 function row(step: string, id: string, extra: Record<string, unknown> = {}) {
   return projectFlowRow({ step, ts: "2026-10-01T00:00:00Z", task_id: "W1-Tshared", run_id: "daemon",

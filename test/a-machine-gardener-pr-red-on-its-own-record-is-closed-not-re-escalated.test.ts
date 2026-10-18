@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { GARDEN_NAMES } from "../src/run-task.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import { GARDEN_NAMES } from "#src/run-task.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 
 const HEAD = "a".repeat(40);
 const PATH = "plan/tasks.d/W1-T5984-fixture.yaml";

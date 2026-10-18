@@ -21,7 +21,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { mintNextTaskIdWithHistory, taskIdsEverFiled } from "../src/run-task.js";
+import { mintNextTaskIdWithHistory, taskIdsEverFiled } from "#src/run-task.js";
 
 const GIT_ENV = {
   ...process.env,

@@ -7,6 +7,7 @@
  * ruling makes the record dispatchable; an escalate ruling parks it and reaches the inbox; a record
  * edited after judging is judged again; and a judge that fails writes nothing and is asked again.
  */
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,12 +15,12 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { dispatchOrder, runnableCandidates } from "../src/lib/drain.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { costPriority, deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard, UNPRICED_PRIORITY } from "../src/lib/machine-filing.js";
-import { ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
-import { ciLearningShardYaml } from "../src/lib/measurement-cadence.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { dispatchOrder, runnableCandidates } from "#src/lib/drain.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { costPriority, deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard, UNPRICED_PRIORITY } from "#src/lib/machine-filing.js";
+import { ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
+import { ciLearningShardYaml } from "#src/lib/measurement-cadence.js";
 import {
   earnedConfidenceBar,
   familyTrackRecord,
@@ -36,22 +37,22 @@ import {
   shardRelPath,
   startMachineFilingJudge,
   type MachineJudgePorts,
-} from "../src/lib/machine-filing-judge.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import type { Proposal } from "../src/lib/inbox.js";
-import { rotateLedger } from "../src/lib/ledger.js";
-import { appendOperatorNote } from "../src/lib/operator-notes.js";
-import { loadPlan, loadPlanFromYaml, RELEASE_LEDGER_STEP, releasedTaskIds, type Plan } from "../src/lib/plan.js";
-import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { SELECTOR_SHADOW_MISS_TEST_PATH, selectorShadowMissTask } from "../src/lib/selector-shadow-gardener.js";
-import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveCommand, daemonCommand, parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "../src/run-task.js";
-import { releaseAutomatedShard } from "../src/lib/verify-human-release.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/machine-filing-judge.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import type { Proposal } from "#src/lib/inbox.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import { appendOperatorNote } from "#src/lib/operator-notes.js";
+import { loadPlan, loadPlanFromYaml, RELEASE_LEDGER_STEP, releasedTaskIds, type Plan } from "#src/lib/plan.js";
+import type { RiskJudgeInput, RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import { SELECTOR_SHADOW_MISS_TEST_PATH, selectorShadowMissTask } from "#src/lib/selector-shadow-gardener.js";
+import { machineAuthorVerifyViolation, taskRulingPin } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { approveCommand, daemonCommand, parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "#src/run-task.js";
+import { releaseAutomatedShard } from "#src/lib/verify-human-release.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const CLOCK = fixedClock(1790700000000);
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = testRepoRoot();
 
 function machineShard(id: string, over: { title?: string; files?: string[]; origin?: string } = {}): string {
   const files = over.files ?? ["docs/ci-friction-remedies.md"];

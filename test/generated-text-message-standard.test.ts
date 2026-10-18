@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -5,15 +6,15 @@ import {
   CONVENTIONAL_LIMITS,
   checkCommitMessage,
   renderCommitNarrativeParagraphs,
-} from "../src/lib/commit-message.js";
-import { OPERATOR_MESSAGE_PARTS } from "../src/lib/operator-message.js";
+} from "#src/lib/commit-message.js";
+import { OPERATOR_MESSAGE_PARTS } from "#src/lib/operator-message.js";
 import {
   buildPlanPrCommitMessage,
   type PlanPrBodyOpts,
   type PlanPrCommitOpts,
-} from "../src/lib/plan-pr-emitter.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
+} from "#src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
 
 // ── W1-T2807 ────────────────────────────────────────────────────────────────────────────────────
 // `shapeCommitMessage` guarantees a header length, a subject case and a wrapped body. Every one of
@@ -47,7 +48,7 @@ function bodyOpts(overrides: Partial<PlanPrBodyOpts> = {}): PlanPrBodyOpts {
 // ── criterion 1: the standard names both surfaces ───────────────────────────────────────────────
 
 test("the standard names generated commit messages and generated PR bodies as surfaces in scope", () => {
-  const doc = readFileSync(new URL("../docs/operator-message-standard.md", import.meta.url), "utf8");
+  const doc = readFileSync(`${repoRoot()}/docs/operator-message-standard.md`, "utf8");
   const surfaces = doc.slice(doc.indexOf("## Surfaces in scope"), doc.indexOf("## Out of scope"));
 
   assert.ok(surfaces.includes("buildPlanPrCommitMessage"), "the commit surface is not named in scope");
@@ -205,7 +206,7 @@ test("the extension introduces no readability, length or vocabulary score on eit
 });
 
 test("the wrapping the narrative goes through is shapeCommitMessage's own — neither writer re-implements a limit", () => {
-  const emitter = readFileSync(new URL("../src/lib/plan-pr-emitter.ts", import.meta.url), "utf8");
+  const emitter = readFileSync(`${repoRoot()}/src/lib/plan-pr-emitter.ts`, "utf8");
   assert.ok(emitter.includes("shapeCommitMessage("));
   // A second, local copy of either limit is how a writer and its gate drift apart.
   assert.ok(!emitter.includes("headerMaxLength:"));
@@ -215,8 +216,8 @@ test("the wrapping the narrative goes through is shapeCommitMessage's own — ne
 // ── the removed check layer stays removed ────────────────────────────────────────────────────────
 
 test("the unreachable check-and-report layer is gone from both writers, and nothing it fed was left orphaned", () => {
-  const emitter = readFileSync(new URL("../src/lib/plan-pr-emitter.ts", import.meta.url), "utf8");
-  const commit = readFileSync(new URL("../src/lib/commit-message.ts", import.meta.url), "utf8");
+  const emitter = readFileSync(`${repoRoot()}/src/lib/plan-pr-emitter.ts`, "utf8");
+  const commit = readFileSync(`${repoRoot()}/src/lib/commit-message.ts`, "utf8");
 
   // A grep proof cannot demonstrate an absence — it reads 0 and grades `no-match`. This is where
   // the deletion is pinned instead. `buildPlanPrCommitMessageChecked` is the symbol the
@@ -242,7 +243,7 @@ test("the unreachable check-and-report layer is gone from both writers, and noth
 });
 
 test("the kept half is still reachable from the live builders — the removal took no wiring with it", () => {
-  const emitter = readFileSync(new URL("../src/lib/plan-pr-emitter.ts", import.meta.url), "utf8");
+  const emitter = readFileSync(`${repoRoot()}/src/lib/plan-pr-emitter.ts`, "utf8");
   /** One exported function's body: from its signature to the next top-level `export`. A fixed
    *  character window silently truncates — a first draft of this test used 900 and its own control
    *  fell outside it, which is how the window was found to be wrong rather than the code. */

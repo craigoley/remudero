@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkDocsAwareness } from "../src/lib/review.js";
-import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "../src/lib/task-linter.js";
+import { checkDocsAwareness } from "#src/lib/review.js";
+import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "#src/lib/task-linter.js";
 
 // W1-T2547: `USER_VISIBLE_SURFACE_RE` matches `scripts/*-baseline.json` by filename alone (W1-T212,
 // Standing rule 25's instrument surface) -- but `scripts/source-size-baseline.json` is a GENERATED
@@ -106,14 +106,14 @@ test("docs-awareness-does-not-read-a-ledger-as-a-surface: the exemption is GENER
 test("docs-awareness-does-not-read-a-ledger-as-a-surface: the one-concern arm's own pinned behavior for this exact ledger is UNCHANGED (out of scope, named) -- source-size-baseline.json still counts as its own Rule 19 concern", async () => {
   // Imported dynamically so a failure to resolve subsystemsOf never masks this suite's own review.ts
   // assertions above -- this criterion is about NOT touching the other arm, proven directly against it.
-  const { subsystemsOf } = await import("../src/lib/task-linter.js");
+  const { subsystemsOf } = await import("#src/lib/task-linter.js");
   const t = {
     id: "W1-TX",
     repo: "remudero",
     type: "implement",
     risk: "medium",
     files: ["src/lib/sweep.ts", "test/sweep-conflicted-disposition.test.ts", "scripts/source-size-baseline.json"],
-  } as import("../src/lib/plan.js").Task;
+  } as import("#src/lib/plan.js").Task;
   assert.deepEqual(
     [...subsystemsOf(t)].sort(),
     ["source-size-baseline", "sweep"],

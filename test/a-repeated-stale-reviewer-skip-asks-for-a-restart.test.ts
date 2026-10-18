@@ -8,11 +8,11 @@ import {
   STALE_REVIEWER_SKIP_RESTART_STREAK,
   trackStaleReviewerSkipRecurrence,
   type StaleReviewerRecurrenceState,
-} from "../src/lib/sweep.js";
-import { priorStaleReviewerRecurrenceState, runDaemon } from "../src/lib/daemon.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { RunResult } from "../src/run-task.js";
+} from "#src/lib/sweep.js";
+import { priorStaleReviewerRecurrenceState, runDaemon } from "#src/lib/daemon.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { RunResult } from "#src/run-task.js";
 
 /**
  * W1-T3691 — A review skipped for stale reviewer code retries forever and alarms nothing. Six

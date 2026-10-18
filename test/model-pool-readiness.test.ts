@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ServerResponse } from "node:http";
-import { buildAnalyticsRoute, coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { buildAnalyticsRoute, coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 import {
   ROUTING_POOL_READINESS_STATES,
   ROUTING_POOL_VERSION,
@@ -13,10 +13,10 @@ import {
   readRoutingPoolSnapshot,
   routingPoolPath,
   type RoutingPoolProjection,
-} from "../src/lib/model-pool.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { declaredBody, violations } from "./helpers/openapi-strict.js";
+} from "#src/lib/model-pool.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
 
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");
 

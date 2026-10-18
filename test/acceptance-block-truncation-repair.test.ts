@@ -37,8 +37,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bodyNeedsAcceptanceRepair, ensureJudgeableBody, renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
-import { acceptanceBlockDiagnostics, isDialectPrefixed, parseAcceptanceBlock } from "../src/lib/review.js";
+import { bodyNeedsAcceptanceRepair, ensureJudgeableBody, renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
+import { acceptanceBlockDiagnostics, isDialectPrefixed, parseAcceptanceBlock } from "#src/lib/review.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────
 

@@ -18,13 +18,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import * as landing from "../src/lib/feedback-landing.js";
-import type { CiLearningFilingResult, CiLearningShardDraft } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { ciLearningRecordVerdict, ciLearningShardYaml } from "../src/lib/measurement-cadence.js";
-import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
-import { buildCiLearningCadenceRunner } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as landing from "#src/lib/feedback-landing.js";
+import type { CiLearningFilingResult, CiLearningShardDraft } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { ciLearningRecordVerdict, ciLearningShardYaml } from "#src/lib/measurement-cadence.js";
+import type { PlanPrPreflightResult } from "#src/lib/plan-pr-emitter.js";
+import { buildCiLearningCadenceRunner } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // A namespace read, so this file still loads at origin/main (where the async form does not exist) and reds per subtest.
 const { CI_LEARNING_LANDING_BRANCH, landCiLearningShards } = landing;

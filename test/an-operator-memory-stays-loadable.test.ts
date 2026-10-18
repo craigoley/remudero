@@ -18,9 +18,9 @@ import {
   mergeMemoryDirs,
   renderMemoryLint,
   textContainment,
-} from "../src/lib/memory-lint.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { memoryLintCommand, memoryLintCorpus } from "../src/run-task.js";
+} from "#src/lib/memory-lint.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { memoryLintCommand, memoryLintCorpus } from "#src/run-task.js";
 
 const memory = (name: string, body: string) => `---\nname: ${name}\ndescription: about ${name}\nmetadata:\n  type: feedback\n---\n\n${body}\n`;
 

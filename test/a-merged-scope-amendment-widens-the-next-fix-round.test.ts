@@ -17,12 +17,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
-import type { Config } from "../src/lib/config.js";
-import { fixRungTaskAtHead } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { resolveFixRungTaskContractAtHead, runFixRung } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { Config } from "#src/lib/config.js";
+import { fixRungTaskAtHead } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { resolveFixRungTaskContractAtHead, runFixRung } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const taskId = "W1-T9";
 const prUrl = "https://github.com/acme/repo/pull/42";

@@ -9,8 +9,8 @@ import {
   taskIdFromHeadRef,
   unwrapGrepPattern,
   type BodyCriterion,
-} from "../src/lib/body-repair.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
+} from "#src/lib/body-repair.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "#src/lib/sweep.js";
 
 /**
  * W1-T2541 — every fix-rung remedy is "push a commit", so a PR blocked by its own BODY is

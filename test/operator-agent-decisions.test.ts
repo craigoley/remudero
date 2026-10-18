@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { adaptOperatorDecisionRows, type OperatorDecisionLedgerRow } from "../src/lib/operator-agent-decisions.js";
+import { adaptOperatorDecisionRows, type OperatorDecisionLedgerRow } from "#src/lib/operator-agent-decisions.js";
 
 test("W1-T3796 criterion 1: explicit decisions and automatic merge events are separate populations", () => {
   const rows: OperatorDecisionLedgerRow[] = [

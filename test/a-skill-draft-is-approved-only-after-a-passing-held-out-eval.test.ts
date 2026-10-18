@@ -17,9 +17,9 @@ import {
   type RatifyGateway,
   type SkillEvalRecord,
   type SkillFilePayload,
-} from "../src/lib/inbox.js";
-import { skillEvalVerdict } from "../src/lib/skill-eval.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/inbox.js";
+import { skillEvalVerdict } from "#src/lib/skill-eval.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const ID = "skill-draft:proc-gate";
 const SKILL: SkillFilePayload = {

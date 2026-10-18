@@ -40,9 +40,9 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { applyPlanProposalCommit } from "../src/lib/plan-architect.js";
-import { commitGeneratorOutputViaGit } from "../src/run-task.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { applyPlanProposalCommit } from "#src/lib/plan-architect.js";
+import { commitGeneratorOutputViaGit } from "#src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /** Always refuses, on stderr, with the same "pre-commit refused" phrase the real hook uses
  *  (recon: `hooks/pre-commit` prints it) — so a test asserting on that text is asserting on the

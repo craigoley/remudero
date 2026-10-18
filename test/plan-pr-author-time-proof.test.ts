@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildPlanPrBody } from "../src/lib/plan-pr-emitter.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { buildPlanPrBody } from "#src/lib/plan-pr-emitter.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const BASE = "0123456789abcdef0123456789abcdef01234567";
 const criteria = [{

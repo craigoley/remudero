@@ -3,13 +3,13 @@ import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { machineShardHeaderLines } from "../src/lib/machine-filing.js";
-import { MACHINE_JUDGE_STATE_FILE, runMachineFilingJudge, type MachineJudgePorts } from "../src/lib/machine-filing-judge.js";
-import { loadPlan, parseTasksFromYaml } from "../src/lib/plan.js";
-import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
+import { MACHINE_JUDGE_STATE_FILE, runMachineFilingJudge, type MachineJudgePorts } from "#src/lib/machine-filing-judge.js";
+import { loadPlan, parseTasksFromYaml } from "#src/lib/plan.js";
+import { machineAuthorVerifyViolation, taskRulingPin } from "#src/lib/task-linter.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ID = "W1-T9001";
 const PATH = "plan/tasks.d/W1-T9001-pin.yaml";

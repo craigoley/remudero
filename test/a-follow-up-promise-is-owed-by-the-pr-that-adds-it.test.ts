@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { promisedFollowUps, unreportedFollowUps } from "../src/lib/promised-follow-ups.js";
-import { judgeReview, observePromisedFollowUps } from "../src/lib/review.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { promisedFollowUps, unreportedFollowUps } from "#src/lib/promised-follow-ups.js";
+import { judgeReview, observePromisedFollowUps } from "#src/lib/review.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const adrPath = "docs/adr/0006-example.md";
 const bullet = "precompiled daemon child entries built once per release";

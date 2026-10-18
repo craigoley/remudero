@@ -8,7 +8,7 @@ import {
   fileRatificationDraft,
   inboxDraftExampleFragmentYaml,
   type Proposal,
-} from "../src/lib/inbox.js";
+} from "#src/lib/inbox.js";
 
 const proposal: Proposal = {
   id: "followup:DAEMON-1789548928143-PR-5737-task-0",

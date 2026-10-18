@@ -3,14 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runDaemon } from "../src/lib/daemon.js";
-import type { HeavyBuildHold } from "../src/lib/heavy-build-reservation.js";
-import { runnableCandidates } from "../src/lib/drain.js";
-import { preDispatchContractRevision, terminalPreDispatchRefusalRevisions, writePriorRefusal } from "../src/lib/dispatch-repair.js";
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { extractRefusal, holdTaskForRefusal, noPrVerdictRowsFromLedger, refusalHoldVerdict } from "../src/lib/refusal-amendment.js";
-import { projectPlan, type GitHub, type StatusProjection } from "../src/lib/status.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import type { HeavyBuildHold } from "#src/lib/heavy-build-reservation.js";
+import { runnableCandidates } from "#src/lib/drain.js";
+import { preDispatchContractRevision, terminalPreDispatchRefusalRevisions, writePriorRefusal } from "#src/lib/dispatch-repair.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { extractRefusal, holdTaskForRefusal, noPrVerdictRowsFromLedger, refusalHoldVerdict } from "#src/lib/refusal-amendment.js";
+import { projectPlan, type GitHub, type StatusProjection } from "#src/lib/status.js";
 
 const report = "REFUSED:\n1. [outside-declared-files] AgentView needs its published contract and file scope";
 const sourceRun = "t100-refused";

@@ -17,9 +17,9 @@ import {
   type RatificationPayload,
   type RatifyGateway,
   type ReadinessContext,
-} from "../src/lib/inbox.js";
-import type { Task } from "../src/lib/plan.js";
-import { reserveTaskIdBlock, TaskIdReservationError } from "../src/lib/task-id-reservation.js";
+} from "#src/lib/inbox.js";
+import type { Task } from "#src/lib/plan.js";
+import { reserveTaskIdBlock, TaskIdReservationError } from "#src/lib/task-id-reservation.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask, sizingViolation, type RiskTransitionContext } from "../src/lib/task-linter.js";
-import { BAND_MEANINGS, PlanError, parseTasksFromYaml, type Task } from "../src/lib/plan.js";
+import { lintTask, sizingViolation, type RiskTransitionContext } from "#src/lib/task-linter.js";
+import { BAND_MEANINGS, PlanError, parseTasksFromYaml, type Task } from "#src/lib/plan.js";
 
 /**
  * W1-T2503: `sizingViolation` used to exempt EVERY `risk: high` task from Rule 19's span

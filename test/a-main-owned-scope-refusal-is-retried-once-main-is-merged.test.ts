@@ -4,12 +4,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runFixRung } from "./helpers/run-task-test.js";
-import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import type { Config } from "../src/lib/config.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "#src/lib/proof-amendment.js";
+import type { Config } from "#src/lib/config.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const taskId = "W1-T9807X";
 const shardPath = `plan/tasks.d/${taskId}-fixture.yaml`;

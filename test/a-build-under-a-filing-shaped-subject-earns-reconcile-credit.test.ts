@@ -9,17 +9,17 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { buildCreditCandidates, creditCandidatesFromProjection, creditIsReconcilable } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildCreditCandidates, creditCandidatesFromProjection, creditIsReconcilable } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   projectMergedTaskCandidates,
   type OpenPrView,
-} from "../src/lib/sweep.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, StatusProjection } from "../src/lib/status.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/sweep.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub, StatusProjection } from "#src/lib/status.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function projection(taskId: string, prNumber: number): StatusProjection {
   return {

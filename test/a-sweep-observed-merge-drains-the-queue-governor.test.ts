@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_SWEEP_POLICY, checkQueueGovernor, deriveQueueGovernorTrailingFlow, type SweepPolicy } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, checkQueueGovernor, deriveQueueGovernorTrailingFlow, type SweepPolicy } from "#src/lib/sweep.js";
 
 // 2026-10-09: no dispatch for ~95 minutes while 8+ PRs merged. The governor logged
 // trailing_merged_count 0 because those merges were ledgered only as sweep `pr.terminal` rows

@@ -8,7 +8,7 @@ import {
   PUSH_VACUOUS_SUCCESS_CHECK_NAMES,
   type MainHealthObservation,
   type RollupCheckEntry,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 /**
  * W1-T2204 — nothing in the fleet reads main's own check state. Measured control: `checksState`

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "../src/lib/drain-lock.js";
+import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "#src/lib/drain-lock.js";
 import {
   decideAutoTriage,
   newFeedbackIdsOldestFirst,
@@ -11,7 +11,7 @@ import {
   recordAutoTriageFire,
   triageLockPath,
   type AutoTriagePolicy,
-} from "../src/lib/auto-triage.js";
+} from "#src/lib/auto-triage.js";
 
 // The daemon's SECOND work-generating rung. It spends ~$2.00 unsupervised per fire, so every bound
 // below is a spend bound, and the lock is a plan-integrity bound: two overlapping triage runs mint
@@ -245,8 +245,8 @@ function collidingPairPlan(dir: string) {
 }
 
 test("runDaemon: the rung fires ONCE across many DEFERRING ticks and never takes the daemon down", async () => {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-at-loop-");
   try {
     const plan = loadPlan(collidingPairPlan(dir));
@@ -323,8 +323,8 @@ test("W1-T469: a deferral CANNOT occur on an idle tick, which is why the rung si
   // non-empty `dispatch`. Running the rung before the idle `continue` would therefore add no
   // decision — it would only write one identical refusal on all ~390 idle polls a night, flushing
   // the 200-row retained window this rung is diagnosed from.
-  const { partitionByFileOverlap } = await import("../src/lib/dispatch-overlap.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { partitionByFileOverlap } = await import("#src/lib/dispatch-overlap.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-at-inv-");
   try {
     const plan = loadPlan(collidingPairPlan(dir));
@@ -344,8 +344,8 @@ test("W1-T469: a deferral CANNOT occur on an idle tick, which is why the rung si
 });
 
 test("runDaemon: with no checkAutoTriage hook the loop behaves exactly as before", async () => {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-at-off-");
   try {
     const f = join(dir, "tasks.yaml");
@@ -380,7 +380,7 @@ test("runDaemon: with no checkAutoTriage hook the loop behaves exactly as before
 // ── the CLI path REFUSES while the lock is held ───────────────────────────────
 
 test("THE LOCK, END TO END: rmd triage REFUSES and spawns NOTHING while the rung holds it", async () => {
-  const { triageCommand, triageLockRefusalMessage } = await import("../src/run-task.js");
+  const { triageCommand, triageLockRefusalMessage } = await import("#src/run-task.js");
   const root = tmp("rmd-at-cli-");
   try {
     mkdirSync(join(root, "state"), { recursive: true });
@@ -419,8 +419,8 @@ test("THE LOCK, END TO END: rmd triage REFUSES and spawns NOTHING while the rung
 });
 
 test("THE LOCK IS RELEASED on every exit, so one failed run cannot wedge the fleet", async () => {
-  const { triageCommand } = await import("../src/run-task.js");
-  const { autoTriageMarkerPath } = await import("../src/lib/auto-triage.js");
+  const { triageCommand } = await import("#src/run-task.js");
+  const { autoTriageMarkerPath } = await import("#src/lib/auto-triage.js");
   const root = tmp("rmd-at-rel-");
   try {
     mkdirSync(join(root, "state"), { recursive: true });
@@ -478,8 +478,8 @@ test("an unreadable feedback entry is skipped, never a reason to refuse the whol
 test("runDaemon: a THROWING checkAutoTriage is caught and ledgered, never fatal", async () => {
   // The other half of fail-soft: the DECISION hook itself throwing (an unreadable policy, a
   // filesystem error) must cost one logged tick, not the daemon.
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-at-throw-");
   try {
     // Same rework as the fixture above: the hook is only reached on a DEFERRING tick now, so an
@@ -569,8 +569,8 @@ test("W1-T469 EMPTY RESERVOIR: an empty feedback dir yields no candidates, and t
   // bound-fires-on-a-healthy-condition defect. Read the reservoir with the REAL exported reader
   // rather than hand-passing `candidates: []`, so an `newFeedbackIdsOldestFirst` regression that
   // invented entries would fail here.
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const root = tmp("rmd-at-dry-");
   const dir = tmp("rmd-at-dry-plan-");
   try {
@@ -619,8 +619,8 @@ test("W1-T469 HELD LOCK: a hand-run `rmd triage` holding the lock makes the rung
   // RUNG holds. This proves the rung refuses while the CLI holds — the direction the ruling makes
   // reachable far more often, because the rung is now consulted on busy ticks rather than only when
   // the fleet is idle and nobody is likely to be typing.
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const root = tmp("rmd-at-held-");
   const dir = tmp("rmd-at-held-plan-");
   mkdirSync(join(root, "state"), { recursive: true });
@@ -682,8 +682,8 @@ test("W1-T469 THE SKIP NAMES ITS CAUSE: a refused tick's ledger row distinguishe
   // carried the old gate's reason. It is not enough that the rung refuses — the row must say WHICH
   // bound refused, or the next investigation is as blind as this one was. Drive four distinct
   // refusals through the daemon and assert four distinguishable reasons reach the ledger.
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-at-reasons-");
   try {
     const refusals = [
@@ -913,8 +913,8 @@ test("runDaemon: THE RUNG IS REACHED ON A STARVED TICK — the placement, not ju
   // Adding the trigger without moving the rung would have shipped it as dead code, and every unit
   // test above would still have passed.
   return (async () => {
-    const { runDaemon } = await import("../src/lib/daemon.js");
-    const { loadPlan } = await import("../src/lib/plan.js");
+    const { runDaemon } = await import("#src/lib/daemon.js");
+    const { loadPlan } = await import("#src/lib/plan.js");
     const dir = tmp("rmd-at-starved-loop-");
     try {
       const f = join(dir, "tasks.yaml");

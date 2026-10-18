@@ -4,9 +4,9 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { landPlanReconcileShards } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { landPlanReconcileShards } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 test("W1-T4753 criterion 1: plan reconciliation proves YAML status field instead of prose", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-plan-proof-"));

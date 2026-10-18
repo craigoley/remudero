@@ -1,4 +1,3 @@
-// test/a-merged-triage-pr-blocks-a-re-triage-until-the-checkout-catches-up.test.ts
 //
 // LIVE 2026-10-09 (#10255 / #10265): a feedback entry's `status: new` changes only when its triage
 // PR MERGES, and the daemon reads that status from its own checkout, which lags main. The in-flight
@@ -11,7 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ID = "fb-1789927308301-29a363";
 
@@ -26,8 +25,8 @@ function planFile(dir: string): string {
 }
 
 async function runGuard(mainStatus: string | undefined, wired = true) {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = mkdtempSync(join(tmpdir(), "rmd-triage-merged-"));
   try {
     let fires = 0;
@@ -72,7 +71,7 @@ test("an unreadable main status fails open, as an unwired read always has", asyn
 });
 
 test("feedbackStatusOnMain reads the status committed on origin/main, not the working tree", async () => {
-  const { feedbackStatusOnMain } = await import("../src/lib/auto-triage.js");
+  const { feedbackStatusOnMain } = await import("#src/lib/auto-triage.js");
   const upstream = gitRepo({ kind: "triage-upstream" });
   const local = gitRepo({ kind: "triage-local", cloneFrom: upstream.dir });
   try {
@@ -92,7 +91,7 @@ test("feedbackStatusOnMain reads the status committed on origin/main, not the wo
 });
 
 test("feedbackStatusOnMain propagates a refused repository before reading main", async () => {
-  const { feedbackStatusOnMain } = await import("../src/lib/auto-triage.js");
+  const { feedbackStatusOnMain } = await import("#src/lib/auto-triage.js");
   const dir = mkdtempSync(join(tmpdir(), "rmd-triage-refused-"));
   try {
     assert.throws(() => feedbackStatusOnMain(dir, ID), { name: "WorktreePointerRefusedError" });

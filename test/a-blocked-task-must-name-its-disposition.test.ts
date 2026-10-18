@@ -27,6 +27,7 @@
  * commits (the same `commit-tree` fixture recipe base-lint-attributes-pre-existing-violations.test.ts
  * uses) for the criteria that are about what actually happens end-to-end on a PR's diff.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -35,12 +36,12 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { RETIREMENT_REASONS, type Task } from "../src/lib/plan.js";
-import { blockedDispositionViolations, type BlockedDispositionContext } from "../src/lib/task-linter.js";
-import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { RETIREMENT_REASONS, type Task } from "#src/lib/plan.js";
+import { blockedDispositionViolations, type BlockedDispositionContext } from "#src/lib/task-linter.js";
+import { lintPlanCommand, type LintPlanStatusDeps } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 
 /** W1-T4226: lint-plan reads GitHub through its `LintPlanStatusDeps` seam, not the refused `gh` —
  *  offline, with a recording fake gateway so a test can assert none was ever built (mirrors

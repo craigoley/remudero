@@ -1,4 +1,3 @@
-// test/retro-acceptance-block-shape.test.ts
 //
 // W1-T2437 — THE RETRO'S ACCEPTANCE BLOCK IS AUTHORED BY AN AGENT, NOT RENDERED BY CODE.
 // `renderAcceptanceBlock` (lib/plan-pr-emitter.ts) gives the plan-FILING lane "one bullet per
@@ -31,16 +30,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RETRO_ACCEPTANCE_BLOCK_GRAMMAR, retroPrompt } from "../src/run-task.js";
+import { RETRO_ACCEPTANCE_BLOCK_GRAMMAR, retroPrompt } from "#src/run-task.js";
 import {
   acceptanceAuthorTimeCheck,
   isDialectPrefixed,
   parseAcceptanceBlock,
   parseWhitelistedProof,
   wrappedGrepPattern,
-} from "../src/lib/review.js";
-import { renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
+} from "#src/lib/review.js";
+import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
 
 // ── 1. retroPrompt() actually carries the new rules ─────────────────────────────────────────
 

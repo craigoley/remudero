@@ -12,8 +12,8 @@ import {
   inboxDraftRelintPrompt,
   lintDraftedFragment,
   RatificationDraftRefusedError,
-} from "../src/lib/inbox.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
+} from "#src/lib/inbox.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "rmd-w1-t9162-"));
 mkdirSync(join(ROOT, "src", "lib"), { recursive: true });

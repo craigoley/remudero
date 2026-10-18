@@ -11,7 +11,7 @@ import {
   forwardDelegation,
   InMemoryDelegationEnvelopeStore,
   revokeDelegationEnvelope,
-} from "../src/lib/automation-action.js";
+} from "#src/lib/automation-action.js";
 
 function issueAndAccept(
   store: InMemoryDelegationEnvelopeStore,

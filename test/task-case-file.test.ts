@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { buildTaskCaseFile, readTaskCaseLedger, type CaseLedgerRead, type CasePrRead } from "../src/lib/task-case-file.js";
-import type { Task } from "../src/lib/plan.js";
-import type { StatusProjection } from "../src/lib/status.js";
+import { buildTaskCaseFile, readTaskCaseLedger, type CaseLedgerRead, type CasePrRead } from "#src/lib/task-case-file.js";
+import type { Task } from "#src/lib/plan.js";
+import type { StatusProjection } from "#src/lib/status.js";
 
 const now = "2026-09-27T14:00:00.000Z";
 const task = { id: "W1-T4607", title: "Evidence case file", repo: "remudero", depends_on: [], type: "implement",

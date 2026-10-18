@@ -12,14 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createEmergencyStop } from "../src/lib/emergency-control.js";
-import { EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "../src/lib/ledger.js";
-import { DELEGATION_PROFILE_LEDGER_STEP } from "../src/lib/delegation-profile.js";
-import { OPERATOR_AGENT_EXPERIMENT_STEP, settleOperatorAgentUnionLoads } from "../src/lib/operator-agent.js";
-import { builtProfile, READ_TOKEN, withDelegationService } from "./helpers/delegation-profile-fixture.js";
-import { writeLedger, type LedgerFixture, type LedgerRotationFixture } from "./helpers/ledger-fixture.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { createEmergencyStop } from "#src/lib/emergency-control.js";
+import { EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "#src/lib/ledger.js";
+import { DELEGATION_PROFILE_LEDGER_STEP } from "#src/lib/delegation-profile.js";
+import { OPERATOR_AGENT_EXPERIMENT_STEP, settleOperatorAgentUnionLoads } from "#src/lib/operator-agent.js";
+import { builtProfile, READ_TOKEN, withDelegationService } from "#test/helpers/delegation-profile-fixture.js";
+import { writeLedger, type LedgerFixture, type LedgerRotationFixture } from "#test/helpers/ledger-fixture.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const ARCHIVES = 80;
 const LINES_PER_ARCHIVE = 10_000;

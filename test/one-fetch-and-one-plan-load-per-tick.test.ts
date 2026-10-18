@@ -10,10 +10,10 @@ import {
   syncPlanFromOrigin,
   syncPlanOrRefuse,
   type SyncedPlan,
-} from "../src/run-task.js";
-import { loadPlan } from "../src/lib/plan.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
+} from "#src/run-task.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
 
 // ── W1-T2513: EVERY DISPATCH LANE RE-FETCHES ORIGIN AND RE-LOADS THE WHOLE PLAN BEFORE IT
 // YIELDS. `runTask` carries ZERO `await` across its whole preamble (see that function's own

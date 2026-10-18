@@ -29,10 +29,10 @@ import {
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
-} from "../src/lib/escalate.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { buildMainHealthRung, type MainHealthRungDeps } from "../src/lib/main-health-rung.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/escalate.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { buildMainHealthRung, type MainHealthRungDeps } from "#src/lib/main-health-rung.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   defaultCiAnnotationFetchAsync,
   defaultCiJobLogFetchAsync,
@@ -41,8 +41,8 @@ import {
   requeueActionsJob,
   requeueActionsJobAsync,
   type CiFailureFetchOptions,
-} from "../src/run-task.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+} from "#src/run-task.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 
 type Row = Record<string, unknown>;
 const HEAD = "a".repeat(40);

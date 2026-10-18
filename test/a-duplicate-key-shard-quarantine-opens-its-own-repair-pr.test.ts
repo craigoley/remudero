@@ -8,15 +8,15 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Escalation } from "../src/lib/escalate.js";
-import type { QuarantinedTask } from "../src/lib/plan.js";
-import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "../src/lib/review.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import * as runTask from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import type { QuarantinedTask } from "#src/lib/plan.js";
+import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import * as runTask from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** Loaded per test, so this file still loads where the module does not exist yet. */
-const repairModule = () => import("../src/lib/plan-shard-repair.js");
+const repairModule = () => import("#src/lib/plan-shard-repair.js");
 
 /** W1-T5431's shard exactly as main carried it before #8877 (f267479f^): the judge's 2.5, the gardener's 4 and marker. */
 const REAL_1003_SHARD = [

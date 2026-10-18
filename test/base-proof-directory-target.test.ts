@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "#src/run-task.js";
 import {
   execWhitelistedProof,
   explainGrepProofRefusal,
@@ -31,9 +31,9 @@ import {
   judgeCriterion,
   parseWhitelistedProof,
   ProofTargetIsDirectoryError,
-} from "../src/lib/review.js";
-import { proofGrepSafetyViolations } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+} from "#src/lib/review.js";
+import { proofGrepSafetyViolations } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 const DIRECTORY_PROOF = "grep: reclaimStaleLock( in src/lib";
 const FILE_PROOF = "grep: reclaimStaleLock( in src/lib/plan.ts";

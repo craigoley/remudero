@@ -20,10 +20,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { ArmTimelineEvent } from "../src/lib/arm-auto-merge.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { ArmTimelineEvent } from "#src/lib/arm-auto-merge.js";
 import {
   CHECK_REQUEUE_DEFERRED_STEP,
   DEFAULT_SWEEP_POLICY,
@@ -38,8 +38,8 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { blockedFixableIsRequeueOnly, lightPassActionable } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { blockedFixableIsRequeueOnly, lightPassActionable } from "#src/run-task.js";
 
 const PR_NUMBER = 9392;
 const PR_URL = `https://github.com/craigoley/remudero/pull/${PR_NUMBER}`;

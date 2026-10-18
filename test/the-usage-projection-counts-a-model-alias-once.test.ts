@@ -11,10 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
-import { claudeModelAliases, claudeModelAliasesAt, type UsageProjection } from "../src/lib/usage-telemetry.js";
+import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { claudeModelAliases, claudeModelAliasesAt, type UsageProjection } from "#src/lib/usage-telemetry.js";
 
 const NOW = "2026-09-24T12:00:00.000Z";
 

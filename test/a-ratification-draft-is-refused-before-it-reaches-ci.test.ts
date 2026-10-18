@@ -10,9 +10,9 @@ import {
   stampLineViolations,
   type Proposal,
   type ReadinessContext,
-} from "../src/lib/inbox.js";
-import { loadPlanFromYaml, parseTasksFromYaml, type Plan } from "../src/lib/plan.js";
-import { fixedClock } from "../src/lib/clock.js";
+} from "#src/lib/inbox.js";
+import { loadPlanFromYaml, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 // A RATIFICATION DRAFT CI IS CERTAIN TO REFUSE MUST NOT READ AS READY. Observed 2026-09-23: one
 // `rmd approve` batch opened 15 ratify PRs and every one was red. Ten carried a whole-file proof

@@ -4,7 +4,7 @@
 // `exhausted` rather than asking forever.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   clarifyIntentPlan,
   INTENT_PLAN_EVENT_LEDGER_STEP,
@@ -13,10 +13,10 @@ import {
   intentPlanClarification,
   resolveIntentPlan,
   type IntentPlanEvent,
-} from "../src/lib/intent-plan.js";
-import { DEFAULT_MAX_ROUNDS } from "../src/lib/reply-interpreter.js";
-import { CLOCK, DAY, NOW_MS, postJson, rowsAt, tempStatePath, withDelegationService } from "./helpers/delegation-profile-fixture.js";
-import { answerEvent, builtPlan, DECISION_PATH, planInput, PLANS_PATH, PROPOSER, readPlans, planState, stepInput } from "./helpers/intent-plan-fixture.js";
+} from "#src/lib/intent-plan.js";
+import { DEFAULT_MAX_ROUNDS } from "#src/lib/reply-interpreter.js";
+import { CLOCK, DAY, NOW_MS, postJson, rowsAt, tempStatePath, withDelegationService } from "#test/helpers/delegation-profile-fixture.js";
+import { answerEvent, builtPlan, DECISION_PATH, planInput, PLANS_PATH, PROPOSER, readPlans, planState, stepInput } from "#test/helpers/intent-plan-fixture.js";
 
 const COSTLY = [stepInput({ estimatedCostUsd: 8 })];
 

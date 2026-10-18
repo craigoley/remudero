@@ -30,9 +30,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { fixRungTaskFor, fixRungTaskWithPlanReload } from "../src/lib/sweep.js";
-import { commitWorkerEdits } from "../src/run-task.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { fixRungTaskFor, fixRungTaskWithPlanReload } from "#src/lib/sweep.js";
+import { commitWorkerEdits } from "#src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const T = (id: string, over: Partial<Task> = {}): Task =>
   ({ id, title: id, repo: "remudero", depends_on: [], type: "implement", verify: "auto", status: "queued", attempts: 0, ...over }) as Task;

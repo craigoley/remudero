@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { creditIsReconcilable } from "../src/run-task.js";
-import { reconcilePlan } from "../src/lib/plan-reconcile.js";
+import { creditIsReconcilable } from "#src/run-task.js";
+import { reconcilePlan } from "#src/lib/plan-reconcile.js";
 
 // W1-T3084 — the sweep's credit rung declines `creditIsImplementation !== true` (sweep.ts:1347).
 // `defaultCreditedMergedIds` filtered on `.merged` alone, so the verb that WRITES `status: merged`

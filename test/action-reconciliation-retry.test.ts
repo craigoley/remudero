@@ -1,7 +1,7 @@
 // Proof path: test/action-reconciliation-retry.test.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { retryExternalEffect, type ExternalEffectRequest } from "../src/lib/action-reconciliation.js";
+import { retryExternalEffect, type ExternalEffectRequest } from "#src/lib/action-reconciliation.js";
 
 const NOW = new Date("2026-09-21T12:00:00.000Z");
 

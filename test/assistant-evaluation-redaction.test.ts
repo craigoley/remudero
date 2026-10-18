@@ -6,7 +6,7 @@ import {
   validateRawAssistantTrustContext,
   verifyAssistantTrustControls,
   type AssistantTrustControlResult,
-} from "../src/lib/experiment-promotion.js";
+} from "#src/lib/experiment-promotion.js";
 
 test("unit test: redacted evidence never carries the raw prompt, transcript, or credential text — only bounded counts", () => {
   const raw = {

@@ -3,17 +3,17 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { CorpusProofOutcome, GoldenCorpusItem, ReplayIdleSignal } from "../src/lib/golden-corpus.js";
-import type { UsageSnapshot } from "../src/lib/headroom.js";
-import type { PairedAttemptRequest, PairedAttemptResult, PairedGrade } from "../src/lib/paired-trial.js";
-import type { HeldOutSelected, SkillEvalAttempt, SkillEvalRun } from "../src/lib/skill-eval.js";
+import type { CorpusProofOutcome, GoldenCorpusItem, ReplayIdleSignal } from "#src/lib/golden-corpus.js";
+import type { UsageSnapshot } from "#src/lib/headroom.js";
+import type { PairedAttemptRequest, PairedAttemptResult, PairedGrade } from "#src/lib/paired-trial.js";
+import type { HeldOutSelected, SkillEvalAttempt, SkillEvalRun } from "#src/lib/skill-eval.js";
 
 // Phase 3 of 5 of the held-out skill eval (operator rulings 2026-10-13): the runner that attempts a draft with
 // and without the skill on K = 3 held-out tasks x R = 2 trials per arm, and the verdict it reaches. Every
 // dispatcher and grader here is a fake but one, which greps real temp heads; nothing spawns a worker or spends.
 
 /** Loaded inside each test, so on a tree without the runner each proof FAILS rather than the file failing to load. */
-const skillEval = (): Promise<typeof import("../src/lib/skill-eval.js")> => import("../src/lib/skill-eval.js");
+const skillEval = (): Promise<typeof import("#src/lib/skill-eval.js")> => import("#src/lib/skill-eval.js");
 
 function corpusItem(taskId: string, proof = `unit test: the held-out proof title of ${taskId}`): GoldenCorpusItem {
   return {
@@ -322,7 +322,7 @@ test("a skill eval trial order is seeded by the draft sha256 and interleaves the
 
 test("a skill eval spend ceiling is 180 USD, and a run that could exceed it refuses before dispatching anything", async () => {
   const { runSkillEval, SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_HELD_OUT_TASKS, SKILL_EVAL_TRIALS_PER_ARM } = await skillEval();
-  const { PAIRED_ATTEMPT_MAX_BUDGET_USD } = await import("../src/lib/paired-trial.js");
+  const { PAIRED_ATTEMPT_MAX_BUDGET_USD } = await import("#src/lib/paired-trial.js");
   assert.equal(SKILL_EVAL_MAX_SPEND_USD, 180);
   assert.equal(SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_HELD_OUT_TASKS * SKILL_EVAL_TRIALS_PER_ARM * 2 * PAIRED_ATTEMPT_MAX_BUDGET_USD);
   const four = await selected(4);

@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { buildOperatorAgentAnswerRoute } from "../src/lib/operator-agent-answer.js";
-import { createService } from "../src/lib/service.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { buildOperatorAgentAnswerRoute } from "#src/lib/operator-agent-answer.js";
+import { createService } from "#src/lib/service.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const READ = "operator-answer-read";
 const WRITE = "operator-answer-write";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import * as sweep from "./helpers/sweep-test.js";
+import * as sweep from "#test/helpers/sweep-test.js";
 import {
   BASE_RED_REFRESH_STEP,
   BASE_RED_STOOD_DOWN_STEP,
@@ -10,7 +10,7 @@ import {
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 // W1-T9595 — on 2026-10-14 #11776 and #11777 were held 13 dispositions each (20:20-21:56Z) while the
 // sweep's one `baseRedRefreshPr` slot went to one other PR per full pass. Main's fix had already

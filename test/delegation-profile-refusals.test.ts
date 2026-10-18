@@ -3,10 +3,10 @@
 // operator-agent execution path, where the refusal enters the action's own preflight.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { evaluateAutomationAction, type AutomationActionReceipt } from "../src/lib/automation-action.js";
-import { delegationEligibility, delegationLifecycleState, delegationProfileStatus } from "../src/lib/delegation-profile.js";
-import { OPERATOR_AGENT_ACTION_RECEIPT_STEP } from "../src/lib/operator-agent.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { evaluateAutomationAction, type AutomationActionReceipt } from "#src/lib/automation-action.js";
+import { delegationEligibility, delegationLifecycleState, delegationProfileStatus } from "#src/lib/delegation-profile.js";
+import { OPERATOR_AGENT_ACTION_RECEIPT_STEP } from "#src/lib/operator-agent.js";
 import {
   actionBody,
   at,
@@ -26,7 +26,7 @@ import {
   tempStatePath,
   validAction,
   withDelegationService,
-} from "./helpers/delegation-profile-fixture.js";
+} from "#test/helpers/delegation-profile-fixture.js";
 
 const codesFor = (input: Parameters<typeof delegationEligibility>[0]) => delegationEligibility(input).map((finding) => finding.code);
 

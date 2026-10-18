@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = process.cwd();
 const SCRIPT = join(REPO_ROOT, "scripts", "task-id-existence-check.mjs");

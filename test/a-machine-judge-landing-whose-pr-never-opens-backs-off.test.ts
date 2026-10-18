@@ -10,13 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { gardenPacingDue, recordGardenPacing } from "../src/lib/garden-registry.js";
-import type { GardenCheckout } from "../src/lib/gardener.js";
-import { machineShardHeaderLines } from "../src/lib/machine-filing.js";
-import { machineJudgeFoundWork, runMachineFilingJudge, type MachineJudgePorts } from "../src/lib/machine-filing-judge.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { gardenPacingDue, recordGardenPacing } from "#src/lib/garden-registry.js";
+import type { GardenCheckout } from "#src/lib/gardener.js";
+import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
+import { machineJudgeFoundWork, runMachineFilingJudge, type MachineJudgePorts } from "#src/lib/machine-filing-judge.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const MINUTE = 60_000;
 

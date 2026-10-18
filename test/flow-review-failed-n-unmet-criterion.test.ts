@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { MAX_STALE_PROOF_CLOSES_PER_PASS, runSweep, type OpenPrView } from "../src/lib/sweep.js";
+import { MAX_STALE_PROOF_CLOSES_PER_PASS, runSweep, type OpenPrView } from "#src/lib/sweep.js";
 
 const NOW = Date.parse("2026-10-09T12:00:00Z");
 

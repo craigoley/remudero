@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { HUMAN_HANDOFF_LEDGER_STEP } from "../src/lib/ledger.js";
+import { HUMAN_HANDOFF_LEDGER_STEP } from "#src/lib/ledger.js";
 import {
   HANDOFF_CLOSURE_OUTCOMES,
   appendHumanHandoff,
@@ -15,7 +15,7 @@ import {
   recordHumanHandoffDelivery,
   type HandoffResult,
   type HumanHandoff,
-} from "../src/lib/human-handoff.js";
+} from "#src/lib/human-handoff.js";
 
 // W1-T3897 criterion 5: closure records the human decision and the authoritative outcome; delivery
 // is a receipt and never completion.

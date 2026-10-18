@@ -6,7 +6,7 @@ import { test } from "node:test";
 // clarification question — re-dispatching" for hours on answers written two days earlier. An answer
 // is spent once a fix round dispatches after it; it still rides later rounds as their constraint.
 
-const sweep = await import("../src/lib/sweep.js");
+const sweep = await import("#src/lib/sweep.js");
 const TASK = "W1-ANSWERED";
 
 const answer = (ts: string) => ({ ts, task: TASK, answer: "use the head-only grep proof" });

@@ -15,10 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Clock } from "../src/lib/clock.js";
-import { runnableCandidates } from "../src/lib/drain.js";
-import { rotateLedger } from "../src/lib/ledger.js";
-import { machineShardHeaderLines } from "../src/lib/machine-filing.js";
+import type { Clock } from "#src/lib/clock.js";
+import { runnableCandidates } from "#src/lib/drain.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
 import {
   MACHINE_JUDGE_REASK_SCALE_MS,
   MACHINE_JUDGE_STATE_FILE,
@@ -28,12 +28,12 @@ import {
   reaskIntervalMs,
   runMachineFilingJudge,
   type MachineJudgePorts,
-} from "../src/lib/machine-filing-judge.js";
-import type { Proposal } from "../src/lib/inbox.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/machine-filing-judge.js";
+import type { Proposal } from "#src/lib/inbox.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import type { RiskJudgeInput, RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import { machineAuthorVerifyViolation, taskRulingPin } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const T0 = 1790700000000;
 const DAY = MACHINE_JUDGE_REASK_SCALE_MS;

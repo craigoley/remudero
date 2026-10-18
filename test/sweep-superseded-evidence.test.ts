@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView, type SupersessionVerdict } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView, type SupersessionVerdict } from "#src/lib/sweep.js";
 
 const SUPERSEDED: SupersessionVerdict = {
   status: "superseded",

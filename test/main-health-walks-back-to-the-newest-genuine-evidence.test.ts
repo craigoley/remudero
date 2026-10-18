@@ -18,9 +18,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildMainHealthRung } from "../src/lib/main-health-rung.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { BASE_RED_STOOD_DOWN_STEP, mainLatestRunFromLedger, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
+import { buildMainHealthRung } from "#src/lib/main-health-rung.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { BASE_RED_STOOD_DOWN_STEP, mainLatestRunFromLedger, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
 
 const HEAD = "a".repeat(40);
 const PARENT = "b".repeat(40);

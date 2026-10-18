@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,9 +6,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildEscalationReplyRoute, type IssueCloser, type PanelActionDeps } from "../src/lib/panel-actions.js";
-import { appendThreadMessage, deriveThreadId, readThread, type ThreadIdentity, type ThreadMessage } from "../src/lib/inbox-thread.js";
+import { createService } from "#src/lib/service.js";
+import { buildEscalationReplyRoute, type IssueCloser, type PanelActionDeps } from "#src/lib/panel-actions.js";
+import { appendThreadMessage, deriveThreadId, readThread, type ThreadIdentity, type ThreadMessage } from "#src/lib/inbox-thread.js";
 import {
   interpretReply,
   formatClarifyingQuestion,
@@ -16,7 +17,7 @@ import {
   DEFAULT_MAX_ROUNDS,
   type ClarificationRule,
   type ReplyContext,
-} from "../src/lib/reply-interpreter.js";
+} from "#src/lib/reply-interpreter.js";
 
 // ── W1-T2499: three onboarding question generators, a validator, an unanswered-set and an
 // assert-complete guard all ship today (onboard/session.ts, onboard/synthesize.ts) -- and grep
@@ -36,8 +37,7 @@ import {
 //   8. the onboarding generators keep their existing callers and behaviour
 //   9. the reply route calls the interpreter rather than the interpreter standing alone
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 
 function readSrc(relPath: string): string {
   return readFileSync(join(REPO_ROOT, "src", relPath), "utf8");

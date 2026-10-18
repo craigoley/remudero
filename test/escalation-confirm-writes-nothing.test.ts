@@ -9,14 +9,14 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { escalationLinkSecretPath, EscalationLinkSecretMissingError, loadEscalationLinkSecret, mintOptionLink, readEscalationLinkSecret } from "../src/lib/escalate.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { InvalidSecretFileError } from "../src/lib/fs-race-safe.js";
-import { createLinkRefusalRollup, LINK_REFUSAL_ROLLUP_MAX_KEYS } from "../src/lib/panel-actions.js";
-import { buildServeRoutes } from "../src/lib/serve.js";
-import { loadPlan } from "../src/lib/plan.js";
-import type { Route } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { escalationLinkSecretPath, EscalationLinkSecretMissingError, loadEscalationLinkSecret, mintOptionLink, readEscalationLinkSecret } from "#src/lib/escalate.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { InvalidSecretFileError } from "#src/lib/fs-race-safe.js";
+import { createLinkRefusalRollup, LINK_REFUSAL_ROLLUP_MAX_KEYS } from "#src/lib/panel-actions.js";
+import { buildServeRoutes } from "#src/lib/serve.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { Route } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = 1_790_000_000_000;
 

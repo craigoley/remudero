@@ -7,9 +7,9 @@
 // to make structurally impossible rather than a rendering convention two templates might drift on.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
-import type { InboxState } from "../src/lib/inbox.js";
-import { projectConsoleStatusResponse } from "../src/lib/serve.js";
+import { classifyAskRecordItem } from "#src/lib/ask-classification.js";
+import type { InboxState } from "#src/lib/inbox.js";
+import { projectConsoleStatusResponse } from "#src/lib/serve.js";
 
 // Every InboxState the real registry can hold (inbox.ts) — asserted exhaustively below so a new
 // state added there without an opinion here fails loudly instead of silently defaulting.

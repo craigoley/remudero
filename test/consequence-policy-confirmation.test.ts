@@ -9,7 +9,7 @@ import {
   evaluateConsequencePolicy,
   recordConsequenceExecution,
   type ConsequenceActionInput,
-} from "../src/lib/consequence-policy.js";
+} from "#src/lib/consequence-policy.js";
 
 const NOW = Date.now();
 const FUTURE = new Date(NOW + 60_000).toISOString();

@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { coveragePrecheck, coveragePushRefusal, pushFixRoundPrechecked, type CoveragePrecheckPorts } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { coveragePrecheck, coveragePushRefusal, pushFixRoundPrechecked, type CoveragePrecheckPorts } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function consumerTree(changedPath: string) {
   const tree = gitRepo({ kind: "consumer-coverage-precheck" });

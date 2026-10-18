@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runSweep, type FixDispatchEvidence, type OpenPrView } from "./helpers/sweep-test.js";
+import { runSweep, type FixDispatchEvidence, type OpenPrView } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-09T11:30:00Z");
 

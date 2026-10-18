@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { claimHumanHandoff, createHumanHandoff, reassignHumanHandoff, type HandoffResult, type HumanHandoff } from "../src/lib/human-handoff.js";
+import { claimHumanHandoff, createHumanHandoff, reassignHumanHandoff, type HandoffResult, type HumanHandoff } from "#src/lib/human-handoff.js";
 
 // W1-T3897 criterion 2: claim and reassign are idempotent, scoped, and receipt-backed.
 

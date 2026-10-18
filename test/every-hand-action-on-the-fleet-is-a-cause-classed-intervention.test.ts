@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { fixLaneInventoryOf, interventionsFromPullRequest } from "../src/lib/fix-lane-gardener.js";
-import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { fixLaneInventoryOf, interventionsFromPullRequest } from "#src/lib/fix-lane-gardener.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import {
   deriveControlInterventions,
   interventionFingerprint,
@@ -16,9 +16,9 @@ import {
   interventionLedgerLine,
   normalizeClassToken,
   prCauseClass,
-} from "../src/lib/operator-interventions.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { runSreLanePass } from "../src/lib/sre-lane.js";
+} from "#src/lib/operator-interventions.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { runSreLanePass } from "#src/lib/sre-lane.js";
 
 // The 2026-10-11 core ledger, replayed: a Codex supervisor paused core, and sessions resumed it by hand.
 const NOW = Date.parse("2026-10-11T19:00:00Z");

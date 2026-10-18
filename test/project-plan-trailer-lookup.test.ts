@@ -9,8 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildBatchedGithub, projectPlan, type BatchedPr, type GitHub, type PrRef } from "../src/lib/status.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { buildBatchedGithub, projectPlan, type BatchedPr, type GitHub, type PrRef } from "#src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const ledgerPath = (): string => {
   const path = join(mkdtempSync(join(tmpdir(), "rmd-t3763-")), "ledger.ndjson");

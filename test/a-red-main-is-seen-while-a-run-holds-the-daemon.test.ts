@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import * as mainHealth from "../src/lib/main-health-rung.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
+import * as mainHealth from "#src/lib/main-health-rung.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
 
 // 2026-10-09: main went red at 13:52Z (#10349 x #10353) while fleet runs held the daemon. Only the
 // full sweep observed main, and it ran at 14:01Z and next at 14:49Z, so rmd never saw the red and a

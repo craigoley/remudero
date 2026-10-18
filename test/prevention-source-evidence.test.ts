@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -5,11 +6,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureImportedModule, importedModuleOf, preventionRegistrationsOf, preventionAdoption,
-  type ImportedModuleEvidence, type PreventionSourceRegistration } from "../src/lib/prevention-source-evidence.js";
-import { executingHarnessRevision, benchmarkRunAssignmentReceipt } from "../src/lib/benchmark-run.js";
-import { ciFrictionGardenSpec, readCiFrictionPlanTasks } from "../src/lib/ci-friction-gardener.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
-import { fixedClock, clockFromIsoFn } from "../src/lib/clock.js";
+  type ImportedModuleEvidence, type PreventionSourceRegistration } from "#src/lib/prevention-source-evidence.js";
+import { executingHarnessRevision, benchmarkRunAssignmentReceipt } from "#src/lib/benchmark-run.js";
+import { ciFrictionGardenSpec, readCiFrictionPlanTasks } from "#src/lib/ci-friction-gardener.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
+import { fixedClock, clockFromIsoFn } from "#src/lib/clock.js";
 
 const SHA = "a".repeat(40), BLOB = "b".repeat(40);
 const T = (day: number) => `2026-10-${String(day).padStart(2, "0")}T00:00:00.000Z`;
@@ -94,8 +95,8 @@ test("the real imported module capture shells Git and refuses physical source dr
 test("import-time source identity survives a later checkout advance in a real Node child", (t) => {
   const repo = gitRepo({ kind: "prevention-import-once" }); t.after(() => repo.cleanup()); mkdirSync(join(repo.dir, "src"));
   const path = join(repo.dir, "src", "owner.mjs");
-  const evidenceUrl = pathToFileURL(fileURLToPath(new URL("../src/lib/prevention-source-evidence.ts", import.meta.url))).href;
-  const benchmarkUrl = pathToFileURL(fileURLToPath(new URL("../src/lib/benchmark-run.ts", import.meta.url))).href;
+  const evidenceUrl = pathToFileURL(join(testRepoRoot(), "src/lib/prevention-source-evidence.ts")).href;
+  const benchmarkUrl = pathToFileURL(join(testRepoRoot(), "src/lib/benchmark-run.ts")).href;
   writeFileSync(path, `import {captureImportedModule} from ${JSON.stringify(evidenceUrl)};\nimport {executingHarnessRevision} from ${JSON.stringify(benchmarkUrl)};\nimport {fileURLToPath} from 'node:url';\nconst file=fileURLToPath(import.meta.url);\nexport const captured=captureImportedModule(file,executingHarnessRevision(file));\n`);
   repo.git("add", "."); repo.git("commit", "-qm", "module before loading"); const before = repo.git("rev-parse", "HEAD");
   const script = `import {execFileSync} from 'node:child_process';import{readFileSync,writeFileSync}from'node:fs';\nconst path=${JSON.stringify(path)};const url=${JSON.stringify(pathToFileURL(path).href)};const root=${JSON.stringify(repo.dir)};\nconst first=await import(url);writeFileSync(path,readFileSync(path,'utf8')+'// later checkout\\n');\nexecFileSync('git',['-C',root,'add','.']);execFileSync('git',['-C',root,'commit','-qm','later checkout']);\nconst second=await import(url);console.log(JSON.stringify({same:first===second,captured:second.captured,head:execFileSync('git',['-C',root,'rev-parse','HEAD'],{encoding:'utf8'}).trim()}));`;

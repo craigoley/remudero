@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,20 +21,20 @@ import {
   type DeterministicDigestItem,
   type DigestCadencePolicy,
   type GenerativeDigestItem,
-} from "../src/lib/digest.js";
-import { measurementCadenceMarkerPath, readMeasurementCadenceMarker, recordMeasurementCadenceFire } from "../src/lib/measurement-cadence.js";
-import { loadPolicy, policyPath } from "../src/lib/policy.js";
-import { daemonCommand, buildDigestCadenceDaemonHooks } from "../src/run-task.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import type { NotifyChannel } from "../src/lib/notify.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/lib/digest.js";
+import { measurementCadenceMarkerPath, readMeasurementCadenceMarker, recordMeasurementCadenceFire } from "#src/lib/measurement-cadence.js";
+import { loadPolicy, policyPath } from "#src/lib/policy.js";
+import { daemonCommand, buildDigestCadenceDaemonHooks } from "#src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import type { NotifyChannel } from "#src/lib/notify.js";
+import type { Config } from "#src/lib/config.js";
 
 // ── W1-T2277: the digest (lib/digest.ts) shipped built and had a CLI verb, but nothing ever
 // fired it on a cadence, its window had no configurable interval, and its one delivery adapter
 // (iMessage) cannot run on this (Linux) fleet. This file proves the eight acceptance criteria on
 // W1-T2277's own shard, in order.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 const NOW = new Date("2026-08-25T12:00:00.000Z");
 
 function tmp(prefix: string): string {
@@ -137,8 +138,8 @@ test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer
 });
 
 test("runDaemon: with no checkDigestCadence hook the loop behaves exactly as before", async () => {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-dc-noop-");
   try {
     const f = join(dir, "tasks.yaml");
@@ -164,8 +165,8 @@ test("runDaemon: with no checkDigestCadence hook the loop behaves exactly as bef
 });
 
 test("runDaemon: a FIRING digest-cadence decision runs the digest and logs its result", async () => {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-dc-fire-");
   try {
     const f = join(dir, "tasks.yaml");
@@ -199,8 +200,8 @@ test("runDaemon: a FIRING digest-cadence decision runs the digest and logs its r
 });
 
 test("runDaemon: a REFUSING digest-cadence decision never runs the digest, and names why", async () => {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-dc-skip-");
   try {
     const f = join(dir, "tasks.yaml");
@@ -234,8 +235,8 @@ test("runDaemon: a REFUSING digest-cadence decision never runs the digest, and n
 });
 
 test("runDaemon: a THROWING checkDigestCadence/runDigestCadence is caught and ledgered, never fatal", async () => {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-dc-throw-");
   try {
     const f = join(dir, "tasks.yaml");

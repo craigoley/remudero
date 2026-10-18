@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -6,13 +7,13 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // Namespace imports: this file must LOAD on a base without W1-T6026's symbols, so each proof fails
 // there on its own assertion rather than on a missing export.
-import * as reservation from "../src/lib/task-id-reservation.js";
-import * as runTask from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as reservation from "#src/lib/task-id-reservation.js";
+import * as runTask from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T6026, MEASURED 2026-10-06: W1-T5997 was taken over 15 s after a codex session reserved it, from
 // a checkout 687 commits behind origin/main, and the takeover printed only a hand-off line that the
@@ -262,7 +263,7 @@ test("W1-T6026: the policy-currency default compares the loaded file's blob with
 });
 
 test("W1-T6026: with no path the default reads the module that is actually loaded", () => {
-  const modulePath = fileURLToPath(new URL("../src/lib/task-id-reservation.ts", import.meta.url));
+  const modulePath = join(testRepoRoot(), "src/lib/task-id-reservation.ts");
   const git = (args: string[]) => spawnSync("git", ["-C", dirname(modulePath), ...args], { encoding: "utf8" });
   const loaded = git(["hash-object", modulePath]).stdout.trim();
   const main = git(["rev-parse", "--verify", "--quiet", `origin/main:${POLICY_PATH}`]);

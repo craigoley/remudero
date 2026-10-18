@@ -5,7 +5,7 @@ import {
   EXTERNAL_EFFECT_VERSION,
   reconcileExternalEffect,
   type ExternalEffectRequest,
-} from "../src/lib/action-reconciliation.js";
+} from "#src/lib/action-reconciliation.js";
 
 const NOW = new Date("2026-09-21T12:00:00.000Z");
 

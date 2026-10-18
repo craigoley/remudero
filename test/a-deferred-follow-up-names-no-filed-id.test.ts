@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -10,8 +11,8 @@ import {
   NEAR_MISS_PREFIX_RE,
   proofDialectViolations,
   sentenceAround,
-} from "../src/lib/task-linter.js";
-import { loadPlan, type Task } from "../src/lib/plan.js";
+} from "#src/lib/task-linter.js";
+import { loadPlan, type Task } from "#src/lib/plan.js";
 
 /** A minimal, otherwise-clean Task fixture (mirrors test/task-linter.test.ts's own `task()`
  *  helper) — `files:`/the in-scope proof keep every OTHER check silent, so a test here isolates
@@ -144,7 +145,7 @@ test("ACCEPTANCE 3: no knob anywhere demotes or promotes this check — the lexi
 
 // ── ACCEPTANCE 4: the hit count across the tracked shard corpus at head is MEASURED ────────
 
-const REAL_PLAN = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
+const REAL_PLAN = loadPlan(`${repoRoot()}/plan/tasks.yaml`);
 
 test("ACCEPTANCE 4: the detector's hit rate across the real, tracked plan corpus is measured and stated", () => {
   const hits = REAL_PLAN.tasks.filter((t) => deferredFollowUpViolations(t).length > 0);

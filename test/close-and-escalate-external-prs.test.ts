@@ -6,18 +6,18 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout, clearTimeout } from "node:timers";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
-import { validateConfigShape } from "../src/lib/config-schema.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
+import { validateConfigShape } from "#src/lib/config-schema.js";
 import { executeAdmissionDisposition, admissionDispositionStore, observeAdmissionDisposition,
   type AdmissionDispositionReceipt, type AdmissionDispositionStore,
-  type AdmissionDispositionSimulation } from "../src/lib/action-executor.js";
-import type { AdmissionRead, AdmissionSettings } from "../src/lib/contributor-admission.js";
-import { assessContribution } from "../src/lib/contributor-admission.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { depReviewCommand, fixCommand, reviewCommand } from "./helpers/run-task-test.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
+  type AdmissionDispositionSimulation } from "#src/lib/action-executor.js";
+import type { AdmissionRead, AdmissionSettings } from "#src/lib/contributor-admission.js";
+import { assessContribution } from "#src/lib/contributor-admission.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { depReviewCommand, fixCommand, reviewCommand } from "#test/helpers/run-task-test.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
 
 const sha = "a".repeat(40);
 const target = { owner: "acme", repo: "core", prNumber: 42, headSha: sha };

@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
-import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway, type EscalationIssueComment } from "../src/lib/escalation-answers.js";
-import { renderIssueBody, type AsyncIssueGateway, type OpenIssue } from "../src/lib/escalate.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway, type EscalationIssueComment } from "#src/lib/escalation-answers.js";
+import { renderIssueBody, type AsyncIssueGateway, type OpenIssue } from "#src/lib/escalate.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const secret = "REFUSED PRIVATE TEXT: do not put this in a prompt";
 const comment = (id: number, over: Partial<EscalationIssueComment> = {}): EscalationIssueComment => ({

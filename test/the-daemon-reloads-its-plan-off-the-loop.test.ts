@@ -4,11 +4,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
-import { loadPlanAtRef, loadPlanAtRefAsync, mergePlanBlobs, type Plan } from "../src/lib/plan.js";
-import { resolvePlanCriteriaAtHead, resolvePlanCriteriaAtHeadAsync } from "../src/lib/review.js";
-import { dedicatedTargetPlanReloader, planReloader } from "../src/run-task.js";
-import { runDaemon } from "../src/lib/daemon.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { loadPlanAtRef, loadPlanAtRefAsync, mergePlanBlobs, type Plan } from "#src/lib/plan.js";
+import { resolvePlanCriteriaAtHead, resolvePlanCriteriaAtHeadAsync } from "#src/lib/review.js";
+import { dedicatedTargetPlanReloader, planReloader } from "#src/run-task.js";
+import { runDaemon } from "#src/lib/daemon.js";
 
 const SYNC_PRIMITIVES = ["execFileSync", "spawnSync", "execSync"] as const;
 

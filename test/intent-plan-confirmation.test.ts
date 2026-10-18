@@ -4,9 +4,9 @@
 // only once every action's completion receipt names its evidence.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { validateAutomationAction, type AutomationActionState } from "../src/lib/automation-action.js";
-import { OPERATOR_AGENT_ACTION_STEP } from "../src/lib/operator-agent.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { validateAutomationAction, type AutomationActionState } from "#src/lib/automation-action.js";
+import { OPERATOR_AGENT_ACTION_STEP } from "#src/lib/operator-agent.js";
 import {
   confirmIntentPlan,
   INTENT_PLAN_EVENT_LEDGER_STEP,
@@ -15,9 +15,9 @@ import {
   intentPlanExecution,
   type IntentPlanEvent,
   type IntentPlanLinkedAction,
-} from "../src/lib/intent-plan.js";
-import { CLOCK, DAY, HEALTHY, issueAndAccept, MINUTE, NOW_MS, postJson, rowsAt, stepsAt, tempStatePath, validAction, withDelegationService } from "./helpers/delegation-profile-fixture.js";
-import { builtPlan, DECISION_PATH, planInput, PLANS_PATH, PROPOSER, planState, readPlans, stepInput } from "./helpers/intent-plan-fixture.js";
+} from "#src/lib/intent-plan.js";
+import { CLOCK, DAY, HEALTHY, issueAndAccept, MINUTE, NOW_MS, postJson, rowsAt, stepsAt, tempStatePath, validAction, withDelegationService } from "#test/helpers/delegation-profile-fixture.js";
+import { builtPlan, DECISION_PATH, planInput, PLANS_PATH, PROPOSER, planState, readPlans, stepInput } from "#test/helpers/intent-plan-fixture.js";
 
 test("W1-T3898: confirmation derives one valid, bounded automation-action-v1 request per step", () => {
   const plan = builtPlan({ idempotencyKey: "canary-7", steps: [stepInput(), stepInput({ capability: "deploy.promote", risk: "production" })] });

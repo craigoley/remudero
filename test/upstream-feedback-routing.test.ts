@@ -12,8 +12,8 @@ import {
   feedbackEntryPath,
   homeRepoPath,
   loadHomeRepoPointer,
-} from "../src/lib/feedback.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/feedback.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T397 — "`rmd feedback` always writes the LOCAL checkout's plan/feedback/, so an instance
 // working on another codebase files rmd's own bugs where no rmd maintainer will read them:

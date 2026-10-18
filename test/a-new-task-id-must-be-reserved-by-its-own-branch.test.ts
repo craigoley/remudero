@@ -11,14 +11,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { judgeReview, taskIdOwnershipFindings } from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { formatReservationAnchorMessage, readReservationAnchors, reservationHolderBranch } from "../src/lib/task-id-reservation.js";
-import { cloneTargetPlan, nextTaskIdCommand, runReview } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import type { Config } from "#src/lib/config.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { judgeReview, taskIdOwnershipFindings } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { formatReservationAnchorMessage, readReservationAnchors, reservationHolderBranch } from "#src/lib/task-id-reservation.js";
+import { cloneTargetPlan, nextTaskIdCommand, runReview } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
 const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };

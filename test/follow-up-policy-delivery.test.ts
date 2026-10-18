@@ -5,7 +5,7 @@ import {
   followUpReceipt,
   type FollowUpCandidate,
   type FollowUpHistory,
-} from "../src/lib/follow-up-policy.js";
+} from "#src/lib/follow-up-policy.js";
 
 const candidate: FollowUpCandidate = {
   version: FOLLOW_UP_POLICY_VERSION,

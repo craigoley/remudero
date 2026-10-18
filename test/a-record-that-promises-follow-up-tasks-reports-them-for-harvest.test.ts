@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps } from "../src/lib/promised-follow-ups.js";
-import { judgeReview, observePromisedFollowUps, recoverPromisedFollowUpReports, preparePromisedReviewDecision, reviewDecisionDigest, reviewInputDigest, REVIEW_ENGINE_REVISION, type PromisedFollowUpObservation } from "../src/lib/review.js";
-import { parseFollowups } from "../src/lib/worker.js";
+import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps } from "#src/lib/promised-follow-ups.js";
+import { judgeReview, observePromisedFollowUps, recoverPromisedFollowUpReports, preparePromisedReviewDecision, reviewDecisionDigest, reviewInputDigest, REVIEW_ENGINE_REVISION, type PromisedFollowUpObservation } from "#src/lib/review.js";
+import { parseFollowups } from "#src/lib/worker.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { gzipSync } from "node:zlib";
 
 const path = "docs/adr/0007-example.md";

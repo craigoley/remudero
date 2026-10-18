@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { candidateFilesFromArgs, overlapAdvisoryLines, overlapWarningLinesFor, rareOverlapWarningLines } from "../src/run-task.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { OpenPrFileScope } from "../src/lib/dispatch-overlap.js";
+import { candidateFilesFromArgs, overlapAdvisoryLines, overlapWarningLinesFor, rareOverlapWarningLines } from "#src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { OpenPrFileScope } from "#src/lib/dispatch-overlap.js";
 
 /**
  * W1-T917 — the READER for `rareOverlapWarnings`, which shipped with W1-T533/#1968 and had ZERO

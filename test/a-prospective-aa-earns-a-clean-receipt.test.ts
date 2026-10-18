@@ -8,18 +8,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { aaStackHash, BENCHMARK_AA_RECEIPT_VERSION, BENCHMARK_AA_VERSION, parseAaTrialManifest,
-  type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
+  type BenchmarkAaReport } from "#src/lib/benchmark-aa.js";
 import {
   API_BILLING_REFUSAL, prospectiveAaCommand, prospectiveAaDir, prospectiveAaOrder, prospectiveAaUnit, resolveAttemptBilling,
   runProspectiveAa, runProspectiveAaPair, type ProspectiveAaPairInput, type ProspectiveAaPairResult, type ProspectiveAaRequest,
   type ProspectiveAaSummary,
-} from "../src/lib/benchmark-aa-prospective.js";
-import { activateBenchmarkPaidPilot, parsePaidPilotRequest } from "../src/lib/benchmark-paid-pilot.js";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
+} from "#src/lib/benchmark-aa-prospective.js";
+import { activateBenchmarkPaidPilot, parsePaidPilotRequest } from "#src/lib/benchmark-paid-pilot.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { claimPairSlot, PAIRED_ATTEMPT_MAX_BUDGET_USD, type PairedAttemptRequest, type PairedAttemptResult,
-  type PairedGrade } from "../src/lib/paired-trial.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { HANDLERS } from "../src/run-task.js";
+  type PairedGrade } from "#src/lib/paired-trial.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { HANDLERS } from "#src/run-task.js";
 
 type Row = Record<string, unknown>;
 const SHA = "a".repeat(40);

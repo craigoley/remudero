@@ -25,7 +25,7 @@ import {
   type DraftAttemptCache,
   type DraftCache,
   type Proposal,
-} from "../src/lib/inbox.js";
+} from "#src/lib/inbox.js";
 
 /** N never-drafted proposals shaped like the ones the follow-up router mints: free-prose summary,
  *  `evidenceAnchors: []` stated rather than synthesized. */

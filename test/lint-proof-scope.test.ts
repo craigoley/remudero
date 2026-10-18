@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask, proofScopeViolations } from "../src/lib/task-linter.js";
-import { parseWhitelistedProof } from "../src/lib/review.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, proofScopeViolations } from "#src/lib/task-linter.js";
+import { parseWhitelistedProof } from "#src/lib/review.js";
+import type { Task } from "#src/lib/plan.js";
 
 /** A minimal, otherwise-clean Task fixture — mirrors task-linter.test.ts's own helper so this
  *  suite reads consistently with the rest of the linter's tests. */

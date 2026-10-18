@@ -3,17 +3,17 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 import { stringify } from "yaml";
-import { reconcilePlan } from "../src/lib/plan-reconcile.js";
+import { reconcilePlan } from "#src/lib/plan-reconcile.js";
 import {
   defaultCreditStorePath, deriveStatus, loadCreditStore, persistVerifiedCredit,
   type GitHub, type PrRef, type StatusProjection,
-} from "../src/lib/status.js";
-import { buildCreditCandidates, creditCandidatesFromProjection, creditIsReconcilable, runTask } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/status.js";
+import { buildCreditCandidates, creditCandidatesFromProjection, creditIsReconcilable, runTask } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const id = "W9-T5661";
 const shard = "plan/tasks.d/W9-T5660-deliverable.yaml";

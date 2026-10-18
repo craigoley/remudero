@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,17 +6,17 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   buildEscalationReplyRoute,
   buildEscalationMarkHandledRoute,
   buildAnswerQuestionRoute,
   type IssueCloser,
   type PanelActionDeps,
-} from "../src/lib/panel-actions.js";
-import { readFeedbackEntry, listFeedback, FEEDBACK_STATUSES, isValidFeedbackOrigin } from "../src/lib/feedback.js";
-import { appendThreadMessage, deriveThreadId, readThread, type ThreadIdentity } from "../src/lib/inbox-thread.js";
-import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+} from "#src/lib/panel-actions.js";
+import { readFeedbackEntry, listFeedback, FEEDBACK_STATUSES, isValidFeedbackOrigin } from "#src/lib/feedback.js";
+import { appendThreadMessage, deriveThreadId, readThread, type ThreadIdentity } from "#src/lib/inbox-thread.js";
+import { landQueuedFeedback } from "#test/helpers/land-queued-feedback.js";
 
 // ── W1-T2496: forty console routes shipped and not one let a human answer an escalation in
 // prose. `/v1/escalation/mark-handled` dismisses (no words); `/v1/questions/answer` answers a
@@ -256,8 +257,7 @@ test("POST /v1/escalation/reply is write-scoped, tier low -- exactly what the ot
 // primitive, NO ratify gateway, and NO issue-comment/close/create call anywhere in its body, not
 // merely on the one path the tests above happened to exercise.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 
 function readSrc(relPath: string): string {
   return readFileSync(join(REPO_ROOT, "src", relPath), "utf8");

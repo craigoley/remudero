@@ -1,4 +1,3 @@
-// test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts
 //
 // W1-T2576 — ROUTING EVIDENCE IS POOLED OR IT IS PER-REPO AND BOTH ARE WRONG. Pool everything and
 // the busiest repo's idiosyncrasies become the prior every OTHER repo inherits; isolate per repo
@@ -17,6 +16,7 @@
 //      averaging with it.
 //   6. one repo's volume cannot move another repo's estimate once that repo has its own evidence.
 
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,9 +28,9 @@ import {
   operatorPriorFromPrinciples,
   pooledPriorFor,
   type PoolableEvidence,
-} from "../src/lib/routing-prior.js";
+} from "#src/lib/routing-prior.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 
 // ── Claim 1: reached from the recommender, not only from this test ────────────────────────────
 

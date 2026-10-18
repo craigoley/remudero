@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import * as judge from "../src/lib/fix-progress-judge.js";
+import * as judge from "#src/lib/fix-progress-judge.js";
 
 const url = (pr: number) => `https://github.com/craigoley/remudero/pull/${pr}`;
 const round = (pr: number, id: string, head: string) => [

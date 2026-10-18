@@ -3,14 +3,14 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
+import type { Config } from "#src/lib/config.js";
 import {
   classifySuccessors,
   readCashModelCatalog,
   readCodexModelCatalog,
   watchSuccessorModels,
   type SuccessorAlert,
-} from "../src/lib/model-availability.js";
+} from "#src/lib/model-availability.js";
 
 test("W1-T4080: a higher generation in a routed family is a successor", () => {
   const successors = classifySuccessors(

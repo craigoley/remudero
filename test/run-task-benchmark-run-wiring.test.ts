@@ -4,13 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { benchmarkRunLedgerLogger, runTask } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { spawnWorker } from "../src/lib/worker.js";
-import type { WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { benchmarkRunLedgerLogger, runTask } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { spawnWorker } from "#src/lib/worker.js";
+import type { WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 test("run task wires benchmark run receipts at assignment and terminal", () => {
   const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];

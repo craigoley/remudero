@@ -13,13 +13,13 @@
  */
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { inboxDraftPrompt } from "../src/lib/inbox.js";
-import { triagePrompt } from "../src/lib/triage.js";
-import { planArchitectPrompt } from "../src/lib/plan-architect.js";
-import { filedTaskRelintPrompt } from "../src/lib/relint.js";
-import { partitionByFileOverlap } from "../src/lib/dispatch-overlap.js";
-import { buildSynthesizeTasksYamlPrompt } from "../src/run-task.js";
-import type { Task } from "../src/lib/plan.js";
+import { inboxDraftPrompt } from "#src/lib/inbox.js";
+import { triagePrompt } from "#src/lib/triage.js";
+import { planArchitectPrompt } from "#src/lib/plan-architect.js";
+import { filedTaskRelintPrompt } from "#src/lib/relint.js";
+import { partitionByFileOverlap } from "#src/lib/dispatch-overlap.js";
+import { buildSynthesizeTasksYamlPrompt } from "#src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
 
 /** A minimal Proposal — only the fields inboxDraftPrompt reads. */
 /** Minimal SynthesizeDraftInput — only the fields the prompt interpolates. */

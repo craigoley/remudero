@@ -26,7 +26,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parseProposalRegistry, updateProposalRegistry, type Proposal } from "../src/lib/inbox.js";
+import { parseProposalRegistry, updateProposalRegistry, type Proposal } from "#src/lib/inbox.js";
 
 function tmpRegistry(): { dir: string; registryPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-inbox-registry-holder-stale-"));

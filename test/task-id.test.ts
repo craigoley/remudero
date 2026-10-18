@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { declaredTaskIds, describeMint, mentionedTaskIds, mintNextTaskId } from "../src/lib/task-id.js";
+import { declaredTaskIds, describeMint, mentionedTaskIds, mintNextTaskId } from "#src/lib/task-id.js";
 
 // ── the mint (the 2/2 collision evidence: W1-T256->257 #770, W1-T260->261 #775) ──
 // An id picked from "the last one I saw" collides with ids that live where the picker

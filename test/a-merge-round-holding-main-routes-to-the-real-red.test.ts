@@ -11,11 +11,11 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
-import { MERGE_UP_TO_DATE_REASON, runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { FixProgressInput } from "../src/lib/fix-progress-judge.js";
-import { withTempDir } from "../src/lib/tmp.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { MERGE_UP_TO_DATE_REASON, runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { FixProgressInput } from "#src/lib/fix-progress-judge.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 type Run = Parameters<typeof runFixRung>[0];
 type Row = { step: string } & Record<string, unknown>;

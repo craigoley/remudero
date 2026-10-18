@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
@@ -5,15 +6,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import type { CanarySlotOwner } from "../src/lib/model-canary-owner.js";
-import { buildCanarySchedule, type CanarySlot, type CanarySchedulePorts } from "../src/lib/model-canary-schedule.js";
-import { commonCanarySuite, canarySuiteDigest } from "../src/lib/model-canary-suite.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { CanarySlotOwner } from "#src/lib/model-canary-owner.js";
+import { buildCanarySchedule, type CanarySlot, type CanarySchedulePorts } from "#src/lib/model-canary-schedule.js";
+import { commonCanarySuite, canarySuiteDigest } from "#src/lib/model-canary-suite.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 type Outcome = Parameters<CanarySchedulePorts["terminal"]>[1];
 // A genuinely absent new feature must fail its criterion on base, not become a loader refusal.
-const ownerModule = existsSync(new URL("../src/lib/model-canary-owner.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-owner.js") : null;
+const ownerModule = existsSync(join(repoRoot(), "src/lib/model-canary-owner.ts"))
+  ? await import("#src/lib/model-canary-owner.js") : null;
 function openOwner(dir: string): CanarySlotOwner {
   assert.ok(ownerModule, "durable canary ownership source is absent");
   return new ownerModule.CanarySlotOwner(dir);

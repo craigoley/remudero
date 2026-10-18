@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseTasksFromYaml, type Plan, type Task } from "../src/lib/plan.js";
-import { nextRunnable, recordTaskRoutedLogger, runDrain, runnableCandidates, type MergedSet } from "../src/lib/drain.js";
-import { isRecordTask, lintTask } from "../src/lib/task-linter.js";
+import { parseTasksFromYaml, type Plan, type Task } from "#src/lib/plan.js";
+import { nextRunnable, recordTaskRoutedLogger, runDrain, runnableCandidates, type MergedSet } from "#src/lib/drain.js";
+import { isRecordTask, lintTask } from "#src/lib/task-linter.js";
 
 // W1-T4818 — a task whose EVERY acceptance proof greps its own plan/tasks.d shard has nothing for a
 // worker to build. The drain routes it away from workers; the plan lint only warns, never refuses.

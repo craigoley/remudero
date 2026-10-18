@@ -3,10 +3,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildShardStandingBriefs } from "../src/lib/learnings.js";
-import { buildStandingBrief, findMissingOrUncitedClaims } from "../src/lib/standing-briefs.js";
-import type { LocalLearningEntry } from "../src/lib/learnings.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildShardStandingBriefs } from "#src/lib/learnings.js";
+import { buildStandingBrief, findMissingOrUncitedClaims } from "#src/lib/standing-briefs.js";
+import type { LocalLearningEntry } from "#src/lib/learnings.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T4680 — 34% of tasks overflow the flat learnings budget and lose whatever the ranker cut
 // (src/lib/knowledge-outcome.ts). This keeps ONE standing brief per shard instead: every claim

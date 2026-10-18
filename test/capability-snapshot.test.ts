@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
@@ -5,8 +6,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { loadPlanIndex } from "../src/lib/plan-index.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { loadPlanIndex } from "#src/lib/plan-index.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // ── W1-T383: the MASTER-PLAN.md CAPABILITY SNAPSHOT generator + drift gate ─────────────────────
 //
@@ -23,8 +24,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // surface, run under `node --import tsx` the same way `npm run capability-snapshot` /
 // `capability-snapshot:check` invoke it via the `tsx` bin.)
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-capability-snapshot.mjs");
 
 const CLAIM_LABELS = ["Daemon dispatch lanes", "Daily cost ceiling", "Recon turn cap", "ci-gate REQUIRED checks"];

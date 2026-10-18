@@ -11,14 +11,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
-import { systemClock } from "../src/lib/clock.js";
-import type { GhCallPacer } from "../src/lib/open-prs-rest.js";
-import type { ReadGeneration } from "../src/lib/read-plane.js";
-import { buildRereadPrAtAct, servedTickRead } from "./helpers/run-task-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { systemClock } from "#src/lib/clock.js";
+import type { GhCallPacer } from "#src/lib/open-prs-rest.js";
+import type { ReadGeneration } from "#src/lib/read-plane.js";
+import { buildRereadPrAtAct, servedTickRead } from "#test/helpers/run-task-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveIdleLightCadenceMs,
@@ -30,8 +30,8 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

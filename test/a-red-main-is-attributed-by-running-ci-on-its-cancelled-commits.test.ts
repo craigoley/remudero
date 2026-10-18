@@ -16,9 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AsyncIssueGateway } from "../src/lib/escalate.js";
-import { ghJsonAsync, type GhAsyncExecutor } from "../src/lib/github-transport.js";
-import { appendLedger } from "../src/lib/ledger.js";
+import type { AsyncIssueGateway } from "#src/lib/escalate.js";
+import { ghJsonAsync, type GhAsyncExecutor } from "#src/lib/github-transport.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import {
   buildMainHealthRung,
   chooseProbeConcurrency,
@@ -33,15 +33,15 @@ import {
   type MainRepairLane,
   type MainRepairProbes,
   type MainRepairRevertRequest,
-} from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   mainHealthFirstRedCommitFromRunHistory,
   type CiFailure,
   type MainHealthRunHistoryEntry,
-} from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

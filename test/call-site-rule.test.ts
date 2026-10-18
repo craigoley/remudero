@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { callSiteViolations, lintTask } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { callSiteViolations, lintTask } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── impl-DO: a task creating a src/ module must prove something CALLS it ──────────────────
 //

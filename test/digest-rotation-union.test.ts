@@ -16,6 +16,7 @@
  * says a step belongs there only while a real DECIDING reader consults it, and the digest is a
  * reporter.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,9 +24,9 @@ import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { test } from "node:test";
 
-import { DIGEST_MAX_ROWS, buildDigest, readDigestWindow, renderDigest, summarize } from "../src/lib/digest.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import type { LedgerGrepFsDeps } from "../src/lib/ledger-grep.js";
+import { DIGEST_MAX_ROWS, buildDigest, readDigestWindow, renderDigest, summarize } from "#src/lib/digest.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import type { LedgerGrepFsDeps } from "#src/lib/ledger-grep.js";
 
 const SINCE = "2026-08-27T00:00:00.000Z";
 const LIVE = "/state/ledger.ndjson";
@@ -203,7 +204,7 @@ test("W1-T2388: no step is added to DECISION_RELEVANT_LEDGER_STEPS by this task"
 });
 
 test("W1-T2388: the digest stays a REPORTER — it files nothing and paces nothing", () => {
-  const src = readFileSync(new URL("../src/lib/digest.ts", import.meta.url), "utf8");
+  const src = readFileSync(join(repoRoot(), "src/lib/digest.ts"), "utf8");
   for (const writer of ["captureFeedback", "updateProposalRegistry", "landFeedback"]) {
     assert.equal(src.includes(writer), false, `${writer} must not appear — this rung writes no plan record of its own (W1-T2456: the citation here read "Rule 15", which carries no filing doctrine)`);
   }

@@ -8,7 +8,7 @@ import {
   reservationHolderDrift,
   reserveTaskIdRemote,
   type RemoteRefReserver,
-} from "../src/lib/task-id-reservation.js";
+} from "#src/lib/task-id-reservation.js";
 
 type GitResult = { status: number; stdout: string; stderr: string };
 

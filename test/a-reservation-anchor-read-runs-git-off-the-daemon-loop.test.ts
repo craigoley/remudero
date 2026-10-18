@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 // Namespace imports: this file must LOAD on a base without the awaited symbols, so each proof
 // fails there on its own assertion rather than on a missing export.
-import * as reviewLib from "../src/lib/review.js";
-import * as reservationLib from "../src/lib/task-id-reservation.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import * as reviewLib from "#src/lib/review.js";
+import * as reservationLib from "#src/lib/task-id-reservation.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const { readReservationAnchors, formatReservationAnchorMessage } = reservationLib;
 const { reviewReservationOwnershipEvidence } = reviewLib;

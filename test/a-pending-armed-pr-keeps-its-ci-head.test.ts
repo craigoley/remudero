@@ -7,7 +7,7 @@ import {
   type ArmedStalledPr,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const NOW = 1_800_000_000_000;
 const POLICY = {

@@ -3,11 +3,11 @@
 // keeps its own name instead of collapsing into a healthy-looking plan.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { OPERATOR_AGENT_ACTION_STEP } from "../src/lib/operator-agent.js";
-import { previewIntentPlan, projectIntentPlan, type IntentPlan, type IntentPlanEvent } from "../src/lib/intent-plan.js";
-import { at, builtProfile, CLOCK, DAY, HOUR, MINUTE, NOW_MS, postJson, stateOf, stepsAt, tempStatePath, withDelegationService } from "./helpers/delegation-profile-fixture.js";
-import { answerEvent, builtPlan, planInput, PLANS_PATH, planState, readPlans, stepInput } from "./helpers/intent-plan-fixture.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { OPERATOR_AGENT_ACTION_STEP } from "#src/lib/operator-agent.js";
+import { previewIntentPlan, projectIntentPlan, type IntentPlan, type IntentPlanEvent } from "#src/lib/intent-plan.js";
+import { at, builtProfile, CLOCK, DAY, HOUR, MINUTE, NOW_MS, postJson, stateOf, stepsAt, tempStatePath, withDelegationService } from "#test/helpers/delegation-profile-fixture.js";
+import { answerEvent, builtPlan, planInput, PLANS_PATH, planState, readPlans, stepInput } from "#test/helpers/intent-plan-fixture.js";
 
 const preview = (plan: IntentPlan, events: IntentPlanEvent[] = [], clock = CLOCK) => previewIntentPlan({ plan, events, clock });
 const codes = (plan: IntentPlan, events: IntentPlanEvent[] = [], clock = CLOCK) => preview(plan, events, clock).findings.map((finding) => finding.code);

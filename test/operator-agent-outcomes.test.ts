@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { adaptVerdictCalibrationReport, type OperatorAgentTaskOutcomeSignal } from "../src/lib/operator-agent-outcomes.js";
-import { verdictCalibrationReport, type VerdictCalibrationReport, type VerdictRow } from "../src/lib/verdict-calibration.js";
+import { adaptVerdictCalibrationReport, type OperatorAgentTaskOutcomeSignal } from "#src/lib/operator-agent-outcomes.js";
+import { verdictCalibrationReport, type VerdictCalibrationReport, type VerdictRow } from "#src/lib/verdict-calibration.js";
 
 const policy = {
   windowDays: 14,

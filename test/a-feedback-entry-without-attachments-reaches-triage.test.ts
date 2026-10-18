@@ -5,9 +5,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FeedbackError, listFeedback, readFeedbackEntry } from "../src/lib/feedback.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { triagePrompt } from "../src/lib/triage.js";
+import { FeedbackError, listFeedback, readFeedbackEntry } from "#src/lib/feedback.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { triagePrompt } from "#src/lib/triage.js";
 
 const ID = "fb-1789601878740-3711ab";
 

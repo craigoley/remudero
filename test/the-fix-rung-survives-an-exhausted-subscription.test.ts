@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS } from "../src/lib/fix-fence.js";
-import { cashCanServeToolSurface, cashFallbackRefusal } from "../src/lib/worker.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import type { Config } from "../src/lib/config-schema.js";
+import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS } from "#src/lib/fix-fence.js";
+import { cashCanServeToolSurface, cashFallbackRefusal } from "#src/lib/worker.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import type { Config } from "#src/lib/config-schema.js";
 
 // W1-T3727. MEASURED on the first live squeeze (2026-09-17): claude weekly 100%, codex unreadable,
 // and this rung logged "fix rung: strike 1/2 REFUSED — spawn infrastructure blocked" on every
@@ -62,7 +62,7 @@ test("a Claude round still pushes for itself — the default is unchanged", () =
 // behaviour is wrong. `fixRoundGitOwnership` returns BOTH halves from one call, so the rule is a
 // property of the value rather than of two call sites someone must keep in step.
 
-import { fixRoundGitOwnership } from "../src/run-task.js";
+import { fixRoundGitOwnership } from "#src/run-task.js";
 
 test("with the opt-in, the harness holds git AND a shell-less surface is offered — together", () => {
   const d = fixRoundGitOwnership({ workerProviders: { harnessCommitsFix: true } } as never);

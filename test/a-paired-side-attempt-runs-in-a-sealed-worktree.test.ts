@@ -8,21 +8,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildBenchmarkAaReport, parseAaTrialManifest, type AaLedgerEvidence, type AaRow,
-  type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
-import { activateBenchmarkPaidPilot, parsePaidPilotRequest, type PaidPilotEvidence, type PaidPilotProtocol } from "../src/lib/benchmark-paid-pilot.js";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+  type BenchmarkAaReport } from "#src/lib/benchmark-aa.js";
+import { activateBenchmarkPaidPilot, parsePaidPilotRequest, type PaidPilotEvidence, type PaidPilotProtocol } from "#src/lib/benchmark-paid-pilot.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import {
   gradeHeadWithReviewerExecutor, PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, PAIRED_PR_URL_RE, pairedAttemptRoot,
   probeSealedIsolation, runPairedTrial, sealedPairedAttemptDispatcher, SEALED_ATTEMPT_CONTRACT_LINES,
   type PairedAttemptRequest, type PairedTrialInput, type PairedTrialResult, type SealedPairedAttemptOptions,
-} from "../src/lib/paired-trial.js";
-import type { AcceptanceCriterion, Task } from "../src/lib/plan.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
-import type { spawnWorker, SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { runTask } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/paired-trial.js";
+import type { AcceptanceCriterion, Task } from "#src/lib/plan.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
+import type { spawnWorker, SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { runTask } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 type Row = Record<string, unknown>;
 const HOUR = 3_600_000;

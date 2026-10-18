@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { anchorFingerprint, beginFragmentPass, blockingLintMessages, checkoutRepoFacts, classifyProposal, createFragmentMemo, inboxDraftPrompt,
   lintDraftedFragment, parseDraftedCandidate, runDraftRung, MAX_DRAFT_LINT_ATTEMPTS,
-  type DraftedCandidate, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
-import { loadPlan, loadPlanFromYaml } from "../src/lib/plan.js";
-import { approveCommand } from "../src/run-task.js";
-import { repoRoot } from "../src/lib/repo-location.js";
-import { ledgerPathFor } from "../src/lib/ledger-path.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+  type DraftedCandidate, type Proposal, type ReadinessContext } from "#src/lib/inbox.js";
+import { loadPlan, loadPlanFromYaml } from "#src/lib/plan.js";
+import { approveCommand } from "#src/run-task.js";
+import { repoRoot } from "#src/lib/repo-location.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const parkedYaml = `- id: W1-T1041
   title: release the existing shard

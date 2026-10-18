@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideTriage, triagePrompt } from "../src/lib/triage.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
+import { decideTriage, triagePrompt } from "#src/lib/triage.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
 
 // A triage PROPOSAL must land as its own `plan/tasks.d/<id>-<slug>.yaml` shard, never as an append
 // to the 12,547-line `plan/tasks.yaml` monolith. Confirmed in production: the 11:34Z run opened

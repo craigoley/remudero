@@ -16,8 +16,8 @@ import {
   type RatificationPayload,
   type RatifyBatchGateway,
   type RatifyGateway,
-} from "../src/lib/inbox.js";
-import type { DuplicateCorpusEntry } from "../src/lib/knowledge-dedup.js";
+} from "#src/lib/inbox.js";
+import type { DuplicateCorpusEntry } from "#src/lib/knowledge-dedup.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 

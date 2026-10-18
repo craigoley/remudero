@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 // Read through the namespace, so this file still LOADS at a base that lacks a symbol and fails per test.
-import * as sweep from "../src/lib/sweep.js";
-import type { CiFailure, OpenPrView, SweepDeps } from "../src/lib/sweep.js";
+import * as sweep from "#src/lib/sweep.js";
+import type { CiFailure, OpenPrView, SweepDeps } from "#src/lib/sweep.js";
 
 // W1-T9250 — #11407 (plan-file-1791906392752, authored by cao825) went red on ci-shard (8/8) while main
 // was red on the same check. `decidePlanRepair` gave its base-red wait only to fleet machine-lane heads,

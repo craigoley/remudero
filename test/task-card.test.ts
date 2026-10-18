@@ -9,13 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { buildTaskCard, computeTaskCard, taskCardRuns } from "../src/lib/task-card.js";
-import type { Task } from "../src/lib/plan.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
+import { buildTaskCard, computeTaskCard, taskCardRuns } from "#src/lib/task-card.js";
+import type { Task } from "#src/lib/plan.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

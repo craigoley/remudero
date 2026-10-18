@@ -6,15 +6,16 @@
  * refresh that stays red reaches the ordinary strike after the local checkout is fast-forwarded
  * to GitHub's merge commit; the refresh itself never masquerades as a fix.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 import {
   decideRedBaseRefresh,
   failingTestFilesFromCiFailures,
@@ -22,10 +23,10 @@ import {
   ghUpdateBranchArgv,
   redBaseRefreshFactsFromRest,
   runFixRung,
-} from "./helpers/run-task-test.js";
+} from "#test/helpers/run-task-test.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = repoRoot();
 
 function criterion(met: boolean): CriterionVerdict {
   return { claim: "the repair works", proof: "unit test", met, reason: met ? "" : "not yet", proof_exec: "not_executable" };

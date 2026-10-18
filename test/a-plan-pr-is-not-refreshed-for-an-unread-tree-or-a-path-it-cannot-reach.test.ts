@@ -10,9 +10,9 @@
 // same head; a PR with no non-plan file of its own is judged by its merged-plan load alone.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { attemptArm, attemptArmAsync, logArmAttribution, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import { runStepsSync as runSync } from "../src/lib/git-push.js";
-import * as safetyModule from "../src/lib/plan-pr-merge-safety.js";
+import { attemptArm, attemptArmAsync, logArmAttribution, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { runStepsSync as runSync } from "#src/lib/git-push.js";
+import * as safetyModule from "#src/lib/plan-pr-merge-safety.js";
 
 const safety = safetyModule as unknown as Record<string, any>;
 const runStepsSync = (steps: unknown): any => runSync(steps as never);

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { imessageChannel, notify, type NotifyChannel } from "../src/lib/notify.js";
+import { imessageChannel, notify, type NotifyChannel } from "#src/lib/notify.js";
 
 /**
  * THE PLATFORM GUARD, PROVED IN BOTH DIRECTIONS — and the second direction is the point.

@@ -15,12 +15,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
-import { FOLLOW_UP_POLICY_VERSION, appendFollowUpCandidate, type FollowUpCandidate } from "../src/lib/follow-up-policy.js";
-import { buildOperatorAgentFollowUpReadRoute } from "../src/lib/operator-agent.js";
-import { MEASUREMENT_SUMMARY_MAX_STRING, summarizeMeasurementValue } from "../src/lib/measurement-cadence.js";
-import { buildSelfMeasurementRoute } from "../src/lib/serve.js";
-import type { LedgerUnionResult } from "../src/lib/ledger-union.js";
-import type { Route } from "../src/lib/service.js";
+import { FOLLOW_UP_POLICY_VERSION, appendFollowUpCandidate, type FollowUpCandidate } from "#src/lib/follow-up-policy.js";
+import { buildOperatorAgentFollowUpReadRoute } from "#src/lib/operator-agent.js";
+import { MEASUREMENT_SUMMARY_MAX_STRING, summarizeMeasurementValue } from "#src/lib/measurement-cadence.js";
+import { buildSelfMeasurementRoute } from "#src/lib/serve.js";
+import type { LedgerUnionResult } from "#src/lib/ledger-union.js";
+import type { Route } from "#src/lib/service.js";
 
 /** A fixed whole-second mtime for every fixture archive. */
 const ARCHIVE_MTIME_S = 1_790_000_000;

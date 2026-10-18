@@ -10,10 +10,10 @@ import {
   runDraftRung,
   validateDraftFragmentData,
   MAX_DRAFT_LINT_ATTEMPTS,
-} from "../src/lib/inbox.js";
-import type { DraftSpawnContext, Proposal } from "../src/lib/inbox.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/inbox.js";
+import type { DraftSpawnContext, Proposal } from "#src/lib/inbox.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 // ── W1-T4864: a lint-dirty inbox draft walks to the next ladder model ─────────────────────────────
 //

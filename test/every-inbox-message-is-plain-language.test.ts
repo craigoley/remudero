@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { inboxKind } from "../src/lib/inbox-owner.js";
+import { inboxKind } from "#src/lib/inbox-owner.js";
 import {
   backfillPlainMessages,
   checkPlainMessage,
@@ -26,13 +26,13 @@ import {
   TEMPLATED_KINDS,
   writePlainMessage,
   type PlainInboxMessage,
-} from "../src/lib/inbox-plain.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { plainInboxWriter, type RunResult } from "../src/run-task.js";
+} from "#src/lib/inbox-plain.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { plainInboxWriter, type RunResult } from "#src/run-task.js";
 
 // Verbatim live summaries, 2026-09-22 (one per kind, truncated where the live text ran on).
 const LIVE = [

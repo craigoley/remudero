@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ENV_REGISTRY } from "../src/lib/config-schema.js";
-import { isRegisteredHarnessEnvName } from "../src/lib/env.js";
-import { declaredHarnessEnvNames, harnessEnvNamesInSource, srcFiles } from "./env-var-registry.test.js";
+import { ENV_REGISTRY } from "#src/lib/config-schema.js";
+import { isRegisteredHarnessEnvName } from "#src/lib/env.js";
+import { declaredHarnessEnvNames, harnessEnvNamesInSource, srcFiles } from "#test/env-var-registry.test.js";
 
 const DOT_READERS = {
   REMUDERO_PROCESS_ACTOR: ["src/lib/ledger.ts", "src/lib/replay-harness.ts"],

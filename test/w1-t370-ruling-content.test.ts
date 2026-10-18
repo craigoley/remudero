@@ -34,9 +34,9 @@ import {
   rulingRecordContent,
   rulingRecordRelPath,
   type AgentRuling,
-} from "../src/lib/ruling-judge.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { routeRuling, ruleCommand, type RouteRulingDeps } from "../src/run-task.js";
+} from "#src/lib/ruling-judge.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { routeRuling, ruleCommand, type RouteRulingDeps } from "#src/run-task.js";
 
 const TASK_ID = "W1-T370";
 /** `ruleCommand`'s own default when `--run` is omitted (`RULE-<taskId>`) — asserted against

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // Namespace-loaded so the base tree (which lacks the module) fails inside the tests, not at link time.
-const loadBase = async () => (await import("../src/lib/fix-round-base.js")) as typeof import("../src/lib/fix-round-base.js");
+const loadBase = async () => (await import("#src/lib/fix-round-base.js")) as typeof import("#src/lib/fix-round-base.js");
 
 function advancedBranch() {
   const repo = gitRepo({ branch: "run-unfiled-1" });

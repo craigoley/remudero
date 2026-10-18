@@ -11,13 +11,13 @@ import {
   isFleetOwnedRunBranch,
   logQueueGovernorDeferral,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
-import { readLedgerLines, type GitHub } from "../src/lib/status.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { drainCommand, daemonCommand } from "../src/run-task.js";
-import type { DrainDeps, DrainSummary } from "../src/lib/drain.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/lib/sweep.js";
+import { readLedgerLines, type GitHub } from "#src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { drainCommand, daemonCommand } from "#src/run-task.js";
+import type { DrainDeps, DrainSummary } from "#src/lib/drain.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import type { Config } from "#src/lib/config.js";
 
 // ── W1-T4465 — THE QUEUE GOVERNOR HELD ALL DISPATCH FOR 2.7 HOURS WHILE THE QUEUE WAS DRAINING ──
 //

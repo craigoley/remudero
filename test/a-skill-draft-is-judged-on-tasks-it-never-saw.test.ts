@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -6,8 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { GoldenCorpusItem } from "../src/lib/golden-corpus.js";
-import type { HeldOutSelection } from "../src/lib/skill-eval.js";
+import type { GoldenCorpusItem } from "#src/lib/golden-corpus.js";
+import type { HeldOutSelection } from "#src/lib/skill-eval.js";
 
 // Phase 2 of 5 of the held-out skill eval (operator rulings 2026-10-13): the pure selector that picks
 // the K merged tasks a skill draft is attempted on, its leak refusals, and the import boundary that
@@ -18,7 +19,7 @@ const sha256 = (text: string): string => createHash("sha256").update(text).diges
 /** Loaded inside each test, not at file load. On a tree without skill-eval.ts each proof then FAILS, which
  *  the reviewer's merge-base run records as discrimination; a file that cannot load reads as an unmeasured
  *  environment gap instead (`ProofCannotLoadError`, src/lib/review.ts). */
-const skillEval = (): Promise<typeof import("../src/lib/skill-eval.js")> => import("../src/lib/skill-eval.js");
+const skillEval = (): Promise<typeof import("#src/lib/skill-eval.js")> => import("#src/lib/skill-eval.js");
 
 /** `type: null` builds an item with no dispatchable spec. */
 function corpusItem(taskId: string, type: string | null = "implement"): GoldenCorpusItem {
@@ -153,7 +154,7 @@ test("heldOutSetHash is a sha256 of the sorted selected ids and is stable under 
 
 // ── The import boundary: the real dependency-cruiser binary over a planted fixture tree ─────────
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = testRepoRoot();
 const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");
 const configPath = join(repoRoot, ".dependency-cruiser.cjs");
 

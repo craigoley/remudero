@@ -14,8 +14,8 @@ import {
   strikeScheduleFor,
   type StrikePassRate,
   type StrikePassRow,
-} from "../src/lib/strike-schedule.js";
-import { taskShapeKey } from "../src/lib/parallel-attempts.js";
+} from "#src/lib/strike-schedule.js";
+import { taskShapeKey } from "#src/lib/parallel-attempts.js";
 
 const RISKY_SHAPE_TASK = { risk: "high" as const, files: ["src/lib/sweep.ts"] };
 

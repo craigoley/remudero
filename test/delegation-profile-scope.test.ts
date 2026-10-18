@@ -15,7 +15,7 @@ import {
   DELEGATION_PROFILE_MAX_LIST,
   riskWithinProfile,
   validateDelegationProfile,
-} from "../src/lib/delegation-profile.js";
+} from "#src/lib/delegation-profile.js";
 import {
   at,
   builtProfile,
@@ -30,7 +30,7 @@ import {
   tempStatePath,
   validAction,
   withDelegationService,
-} from "./helpers/delegation-profile-fixture.js";
+} from "#test/helpers/delegation-profile-fixture.js";
 
 test("W1-T3878: a built profile carries a bounded scope, capability set, risk tier, budget, approval policy, expiry, and revocation reference", () => {
   const profile = builtProfile();

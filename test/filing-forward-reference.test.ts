@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { judgeCriterion, judgeReview, shardDeclaredFilesInDiff } from "../src/lib/review.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
-import { buildOpenPrViews } from "../src/run-task.js";
+import { judgeCriterion, judgeReview, shardDeclaredFilesInDiff } from "#src/lib/review.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "#src/lib/sweep.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 
 /** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
 const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };

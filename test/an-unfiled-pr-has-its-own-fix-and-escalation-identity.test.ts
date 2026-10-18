@@ -17,16 +17,16 @@ import {
   fixRoundTally,
   fixRungTaskFor,
   reviewOutcomeTaskIdFor,
-} from "../src/lib/sweep.js";
-import * as sweepLib from "../src/lib/sweep.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
+import * as sweepLib from "#src/lib/sweep.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
 
 // The head-ownership predicate is reached by an assembled name: the check-proof parity fixture greps test/ for its
 // literal, and a file that merely names it joins that fixture's candidate set.
 const headOwned = (sweepLib as unknown as Record<string, (head: string, taskId: string, synthetic: boolean) => boolean>)[
   ["fixHead", "Acceptable"].join("")
 ]!;
-import type { Plan } from "../src/lib/plan.js";
+import type { Plan } from "#src/lib/plan.js";
 
 const PLAN: Plan = { tasks: [], byId: new Map() };
 const HEAD_A = "a".repeat(40);

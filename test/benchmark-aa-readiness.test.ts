@@ -10,18 +10,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   API_BILLING_REFUSAL, listProspectiveAaRegistrations, prospectiveAaDir, prospectiveAaLedgerRows, runProspectiveAa, runProspectiveAaPair,
-} from "../src/lib/benchmark-aa-prospective.js";
+} from "#src/lib/benchmark-aa-prospective.js";
 import {
   benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, READINESS_FOLLOW_UPS_FILE, runBenchmarkAaReadiness,
   runtimePinRefusals,
   type BenchmarkAaReadinessInput, type ReadinessTask, type RuntimePins,
-} from "../src/lib/benchmark-aa-readiness.js";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
-import { DEFAULT_INSTANCE_STATE_BASE } from "../src/lib/instance-gateway.js";
-import type { PairedAttemptRequest, PairedAttemptResult, PairedGrade } from "../src/lib/paired-trial.js";
-import type { AcceptanceCriterion, Task } from "../src/lib/plan.js";
-import { benchmarkAaReadinessRuntime, HANDLERS } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/benchmark-aa-readiness.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import { DEFAULT_INSTANCE_STATE_BASE } from "#src/lib/instance-gateway.js";
+import type { PairedAttemptRequest, PairedAttemptResult, PairedGrade } from "#src/lib/paired-trial.js";
+import type { AcceptanceCriterion, Task } from "#src/lib/plan.js";
+import { benchmarkAaReadinessRuntime, HANDLERS } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SHA = "a".repeat(40);
 const OTHER_SHA = "b".repeat(40);

@@ -24,6 +24,7 @@
  * THE POLICY IS READ FROM THE SHIPPED FILE, never hardcoded — that is what couples these tests to
  * `plan/policy.yaml` and makes the falsifier bite.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,11 +36,11 @@ import {
   readAutoTriageMarker,
   recordAutoTriageFire,
   type AutoTriagePolicy,
-} from "../src/lib/auto-triage.js";
-import { loadPolicy, policyPath } from "../src/lib/policy.js";
+} from "#src/lib/auto-triage.js";
+import { loadPolicy, policyPath } from "#src/lib/policy.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = repoRoot();
 
 /** The SHIPPED policy — not a fixture. A revert of plan/policy.yaml changes this. */
 function shippedAutoTriagePolicy(): AutoTriagePolicy {

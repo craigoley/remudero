@@ -1,11 +1,12 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { lintTask, proofNameResolutionViolations } from "../src/lib/task-linter.js";
-import { resolveNameFilteredCandidates } from "../src/lib/review.js";
-import type { NameFilterResolution } from "../src/lib/review.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, proofNameResolutionViolations } from "#src/lib/task-linter.js";
+import { resolveNameFilteredCandidates } from "#src/lib/review.js";
+import type { NameFilterResolution } from "#src/lib/review.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── W1-T492: proofNameResolutionViolations (W1-T488) is CALLED unconditionally by lintTask, but
 // its resolver is an injected dependency (opts.resolveNameFilteredCandidates) with a
@@ -15,9 +16,9 @@ import type { Task } from "../src/lib/plan.js";
 // by cross-referencing test/task-linter-wiring.test.ts (the --base CLI integration) and
 // test/lint-proof-name-resolution.test.ts (the check's own pure-function behavior).
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-const taskLinterSrc = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const runTaskSrc = readFileSync(`${repoRoot()}/src/run-task.ts`, "utf8");
+const taskLinterSrc = readFileSync(`${repoRoot()}/src/lib/task-linter.ts`, "utf8");
+const REPO_ROOT = repoRoot();
 
 function task(over: Partial<Task> & { id: string }): Task {
   return {

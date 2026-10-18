@@ -21,8 +21,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ensureTaskTrailer, prBodyRestArgs, repairRetroAcceptanceBlock, updatePrBodyViaGh, writePrBodyRest } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ensureTaskTrailer, prBodyRestArgs, repairRetroAcceptanceBlock, updatePrBodyViaGh, writePrBodyRest } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const PR_URL = "https://github.com/o/r/pull/1216";
 

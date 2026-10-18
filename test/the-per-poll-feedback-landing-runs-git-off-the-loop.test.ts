@@ -16,11 +16,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
-import { LANDING_BRANCH, sweepFeedbackLanding, sweepFeedbackLandingAsync } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { LANDING_BRANCH, sweepFeedbackLanding, sweepFeedbackLandingAsync } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { PlanPrPreflightResult } from "#src/lib/plan-pr-emitter.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const execFileAsync = promisify(execFile);
 const GREEN: PlanPrPreflightResult = { ok: true, failures: [], unreadable: [] };

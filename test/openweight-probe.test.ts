@@ -4,6 +4,7 @@
 // transport. No test makes a network call, and the only "key" anywhere in this file is the obvious
 // fixture FAKE_KEY below; the process environment is never consulted for a real one.
 
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
@@ -13,9 +14,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error — this executable .mjs intentionally has no declaration output; the seam this
 // suite consumes is typed immediately below rather than left as any.
-import * as probeModule from "../scripts/openweight-probe.mjs";
-import { OPENWEIGHT_OUTPUT_CONTRACT } from "../src/lib/worker-provider.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import * as probeModule from "#scripts/openweight-probe.mjs";
+import { OPENWEIGHT_OUTPUT_CONTRACT } from "#src/lib/worker-provider.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 let otherRepo: GitRepo | undefined;
 const otherWorkTree = (): string => (otherRepo ??= gitRepo({ kind: "openweight-probe-other" })).dir;
@@ -77,7 +78,7 @@ const probe = probeModule as {
   AZURE_NAME_RE: RegExp;
 };
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = testRepoRoot();
 const FAKE_KEY = "rmd-fixture-fake-openweight-key-7f3a9c";
 const ENDPOINT = "https://probe-fixture.example.invalid/";
 const EXPECTED_URL =

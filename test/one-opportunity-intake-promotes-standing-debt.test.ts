@@ -1,17 +1,18 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadPlanFromYaml, type Task } from "../src/lib/plan.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { collectOpportunityCandidates, productionOpportunityIntakePorts, runOpportunityIntake, type OpportunityIntakePorts } from "../src/lib/opportunity-intake.js";
-import { readStandingRetroDebt } from "../src/lib/retro.js";
-import { loadProposalRegistry } from "../src/lib/inbox.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
-import { gateFireRatesPath } from "../src/lib/gate-fire-rate.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadPlanFromYaml, type Task } from "#src/lib/plan.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { collectOpportunityCandidates, productionOpportunityIntakePorts, runOpportunityIntake, type OpportunityIntakePorts } from "#src/lib/opportunity-intake.js";
+import { readStandingRetroDebt } from "#src/lib/retro.js";
+import { loadProposalRegistry } from "#src/lib/inbox.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import { gateFireRatesPath } from "#src/lib/gate-fire-rate.js";
 
 const clock = fixedClock(Date.parse("2026-10-02T12:00:00Z"));
 const debt = `**(j) THE STANDING DEBT LINE — EACH ENTRY WITH ITS AGE IN CYCLES (R51-5's arm).**
@@ -227,7 +228,7 @@ test("source keys match whole identities and stay scoped to their repository", a
 });
 
 test("the parser reads the shipped standing corpus and refuses duplicated headers", () => {
-  const actual = readStandingRetroDebt(readFileSync(new URL("../MASTER-PLAN.md", import.meta.url), "utf8"));
+  const actual = readStandingRetroDebt(readFileSync(join(testRepoRoot(), "MASTER-PLAN.md"), "utf8"));
   assert.ok(actual.openCount > 0);
   assert.equal(actual.openCount, actual.entries.length);
   assert.equal(actual.dwellCycles, actual.entries.reduce((sum, entry) => sum + entry.ageCycles, 0));

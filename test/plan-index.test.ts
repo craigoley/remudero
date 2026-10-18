@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -5,15 +6,14 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { loadPlanIndex, renderPlanIndex, type PlanIndex } from "../src/lib/plan-index.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { loadPlanIndex, renderPlanIndex, type PlanIndex } from "#src/lib/plan-index.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T4432: runtime readers derive the plan index from MASTER-PLAN.md instead of maintaining
 // plan/plan-index.json as a committed PR artifact. Generator CLI coverage below remains explicit
 // and isolated; runtime tests prove missing-file reads build/cache the projection without writes.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-plan-index.mjs");
 
 function runCheck(source: string, out: string) {

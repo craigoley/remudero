@@ -25,8 +25,8 @@ import {
   type EscalationOption,
   type EscalationOptionKind,
   type IssueGateway,
-} from "../src/lib/escalate.js";
-import { resolveEscalationOptionAffordance } from "../src/lib/serve.js";
+} from "#src/lib/escalate.js";
+import { resolveEscalationOptionAffordance } from "#src/lib/serve.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-escalation-options-")), "ledger.ndjson");

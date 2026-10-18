@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { sizingViolation } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { sizingViolation } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

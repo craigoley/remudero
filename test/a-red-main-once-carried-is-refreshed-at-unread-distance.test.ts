@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 // OBSERVED 2026-10-15: main was red on test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts
 // until #12034 merged at 15:02Z. #12019's probe at cd482d43 (15:17Z) and #12044's (15:35Z) read `clear`, yet no
@@ -121,7 +121,7 @@ test("an unread distance with no record of main carrying the red keeps the PR on
 });
 
 test("main's formerly failing files skip the current tip and shas main's own CI judged green", async () => {
-  const { mainFormerlyFailingTestFiles } = await import("../src/lib/base-reproduction.js");
+  const { mainFormerlyFailingTestFiles } = await import("#src/lib/base-reproduction.js");
   const green = "9".repeat(40);
   const rows: Row[] = [
     formerlyFailing(),

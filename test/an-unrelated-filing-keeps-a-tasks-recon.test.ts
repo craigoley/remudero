@@ -10,7 +10,7 @@ import {
   planSha,
   taskRecordSha,
   type ReconArtifact,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 // ── W1-T2510: AN UNRELATED PLAN FILING THROWS AWAY A TASK'S RECON ──────────────────────────────
 //

@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
@@ -6,11 +7,11 @@ import {
   lintTask,
   lintPlan,
   type DuplicateSurfaceCorpusEntry,
-} from "../src/lib/task-linter.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+} from "#src/lib/task-linter.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { creditedMergedIdsFrom, lintPlanCommand, surfaceCorpusFrom } from "../src/run-task.js";
+import { creditedMergedIdsFrom, lintPlanCommand, surfaceCorpusFrom } from "#src/run-task.js";
 
 // ── W1-T2676 ─────────────────────────────────────────────────────────────────────────────────
 //
@@ -428,7 +429,7 @@ test("no projection is not an empty projection — absent means `read status: al
 // strict subset, giving `--base HEAD` a real changed-task diff; it is restored byte-for-byte in a
 // `finally` no matter the outcome. `projectPlan` is injected, so no network is touched.
 
-const DSC_FIXTURE = fileURLToPath(new URL("./fixtures/duplicate-surface-credit/tasks.yaml", import.meta.url));
+const DSC_FIXTURE = `${repoRoot()}/test/fixtures/duplicate-surface-credit/tasks.yaml`;
 const DSC_BASE_YAML = readFileSync(DSC_FIXTURE, "utf8");
 const DSC_WITH_DUPLICATE =
   DSC_BASE_YAML +

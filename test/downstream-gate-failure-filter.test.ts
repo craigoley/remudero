@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CI_GATE_CHECK_NAME, withoutDownstreamGateFailure, type CiFailure } from "../src/lib/sweep.js";
+import { CI_GATE_CHECK_NAME, withoutDownstreamGateFailure, type CiFailure } from "#src/lib/sweep.js";
 
 // ── `ci-gate` IS A DOWNSTREAM AGGREGATOR, AND WAS COUNTED AS A PEER ─────────────────────────────
 //

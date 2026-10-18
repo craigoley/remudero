@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { renderDigest, renderPromptParts, summarize, summarizePromptParts } from "../src/lib/digest.js";
+import { renderDigest, renderPromptParts, summarize, summarizePromptParts } from "#src/lib/digest.js";
 
 const SINCE = "2026-09-07T00:00:00.000Z";
 

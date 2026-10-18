@@ -4,18 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { captureFeedback, feedbackEntryPath, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
-import { feedbackDischargeState, feedbackOriginTag } from "../src/lib/trace.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { captureFeedback, feedbackEntryPath, setFeedbackStatus, type FeedbackEntry } from "#src/lib/feedback.js";
+import { feedbackDischargeState, feedbackOriginTag } from "#src/lib/trace.js";
 import {
   buildFeedbackInboxRoute,
   decorateFeedbackDischarge,
   type PanelGraphDeps,
   type RatifyCliGateway,
   type ReconciledFeedbackEntry,
-} from "../src/lib/panel-graph.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
+} from "#src/lib/panel-graph.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
 
 // ── W1-T1257: the feedback inbox has no discharge path ──────────────────────────────────
 //

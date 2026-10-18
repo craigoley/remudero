@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,7 +11,7 @@ import {
   reservationHandoffNoteLine,
   taskIdReservationRef,
   type RemoteRefReserver,
-} from "../src/lib/task-id-reservation.js";
+} from "#src/lib/task-id-reservation.js";
 
 // ── W1-T3640: FIX THE MINTER, NOT THE GATE ──────────────────────────────────────────────────────
 //
@@ -34,8 +35,7 @@ import {
 // test/a-reservation-names-its-holder.test.ts already does, so a divergence between the two shows up
 // here rather than only in production.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const gate = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 function scratch(): string {

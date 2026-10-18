@@ -32,8 +32,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MAX_MENTION_LEAD, describeMint, mintNextTaskId } from "../src/lib/task-id.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { MAX_MENTION_LEAD, describeMint, mintNextTaskId } from "#src/lib/task-id.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /** A plan whose LOCAL half declares exactly `localCeiling` — a monolith plus one shard, the two
  *  sources `mintNextTaskId` folds as "the plan". Same shape as W1-T2710's fixture beside it. */

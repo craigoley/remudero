@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FOLLOW_UP_POLICY_VERSION, type FollowUpCandidate } from "../src/lib/follow-up-policy.js";
+import { FOLLOW_UP_POLICY_VERSION, type FollowUpCandidate } from "#src/lib/follow-up-policy.js";
 import {
   HUMAN_HANDOFF_VERSION,
   appendHumanHandoff,
@@ -12,8 +12,8 @@ import {
   readHumanHandoffs,
   type HumanHandoff,
   type HumanHandoffInput,
-} from "../src/lib/human-handoff.js";
-import { handOffOperatorAgentFollowUp } from "../src/lib/operator-agent.js";
+} from "#src/lib/human-handoff.js";
+import { handOffOperatorAgentFollowUp } from "#src/lib/operator-agent.js";
 
 // W1-T3897 criterion 1: a handoff records why a human is needed, its source receipt, scope, owner
 // state, priority, deadline, and freshness — and none of them may be omitted.

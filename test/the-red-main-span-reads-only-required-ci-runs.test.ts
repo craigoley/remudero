@@ -12,12 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AsyncIssueGateway } from "../src/lib/escalate.js";
-import { buildMainHealthRung, type MainRepairFixRequest, type MainRepairLane } from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { AsyncIssueGateway } from "#src/lib/escalate.js";
+import { buildMainHealthRung, type MainRepairFixRequest, type MainRepairLane } from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

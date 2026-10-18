@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,8 +10,8 @@ import {
   operatorMessageFooter,
   OPERATOR_MESSAGE_PARTS,
   type OperatorMessage,
-} from "../src/lib/operator-message.js";
-import { escalate, toOperatorMessage, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
+} from "#src/lib/operator-message.js";
+import { escalate, toOperatorMessage, type Escalation, type IssueGateway } from "#src/lib/escalate.js";
 
 // W1-T2498: docs/operator-message-standard.md (W1-T2279) is ratified and its own suite asserts
 // over the DOCUMENT, but nothing in src/ ever checked a message anything actually produced
@@ -18,9 +19,8 @@ import { escalate, toOperatorMessage, type Escalation, type IssueGateway } from 
 // operator-message.ts's four-part presence check, and escalate.ts's wiring into it, satisfy
 // every acceptance claim on W1-T2498's own task record.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const escalateSrc = readFileSync(join(__dirname, "..", "src", "lib", "escalate.ts"), "utf8");
-const containmentSrc = readFileSync(join(__dirname, "..", "src", "lib", "containment.ts"), "utf8");
+const escalateSrc = readFileSync(join(repoRoot(), "src/lib/escalate.ts"), "utf8");
+const containmentSrc = readFileSync(join(repoRoot(), "src/lib/containment.ts"), "utf8");
 
 // The exact turns-exhausted verdict string docs/operator-message-standard.md itself quotes
 // verbatim (and its own suite proves still exists in containment.ts). Reused here, byte-for-byte,

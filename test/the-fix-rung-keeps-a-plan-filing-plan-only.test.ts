@@ -16,7 +16,7 @@ import {
   isPlanFilingBaseline,
   outOfDeclaredScopeFiles,
   renderFixPrompt,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const SHARD = "plan/tasks.d/W1-T2949-worker-provider.yaml";
 const SRC = "src/lib/worker-provider.ts";

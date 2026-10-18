@@ -5,11 +5,11 @@ import { test } from "node:test";
 
 // NAMESPACE imports: the new exports do not exist at the merge base, and a named import would fail the whole file at
 // load, which the reviewer reads as "never ran" rather than as a red.
-import * as declarations from "../src/lib/advance-declarations.js";
-import * as judge from "../src/lib/deploy-judge.js";
-import { daemonFreshnessReads } from "../src/run-task.js";
-import { asyncGit, type ServiceFreshness } from "../src/lib/self-sync.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as declarations from "#src/lib/advance-declarations.js";
+import * as judge from "#src/lib/deploy-judge.js";
+import { daemonFreshnessReads } from "#src/run-task.js";
+import { asyncGit, type ServiceFreshness } from "#src/lib/self-sync.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * MEASURED 2026-10-13/14 (core ledger, ~/Remudero-notes/restart-cause-2026-10-14/): 34 of 47 core boots were freshness

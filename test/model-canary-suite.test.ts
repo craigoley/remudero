@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canarySuiteDigest, canaryTools, commonCanarySuite, gradeCanary, weeklyCanarySuite } from "../src/lib/model-canary-suite.js";
+import { canarySuiteDigest, canaryTools, commonCanarySuite, gradeCanary, weeklyCanarySuite } from "#src/lib/model-canary-suite.js";
 
 test("canary common cases refuse fabricated completion and grade actual failure recovery", () => {
   const suite = commonCanarySuite(); assert.equal(suite.length, 12);

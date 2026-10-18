@@ -1,4 +1,3 @@
-// test/an-unobserved-fix-exit-ends-the-round-for-dedupe.test.ts
 //
 // LIVE 2026-10-09: #10555's fix round wrote `fix.done` with `worker_exit: "unobserved"` at 04:27 —
 // the worker threw without naming a process end, so nothing was pushed and no `fix.review`,
@@ -9,7 +8,7 @@
 // re-derives its remedy and the W1-T7096 progress judge sees the round.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixRungStalledWithoutNewHead } from "../src/lib/sweep.js";
+import { fixRungStalledWithoutNewHead } from "#src/lib/sweep.js";
 
 const TASK = "unfiled";
 const HEAD = "5a1d9c0e7b3f2a4d6c8e0f1a2b3c4d5e6f708192";

@@ -9,10 +9,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { aaArmFor, buildBenchmarkAaReport, parseAaTrialManifest, readAaLedgerEvidence, type AaTrialManifest,
-  type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { CASH_SERVED_MODEL_REASONS, CODEX_SERVED_MODEL_REASON } from "../src/lib/worker-provider.js";
+  type BenchmarkAaReport } from "#src/lib/benchmark-aa.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { CASH_SERVED_MODEL_REASONS, CODEX_SERVED_MODEL_REASON } from "#src/lib/worker-provider.js";
 
 const NOW = "2026-09-28T12:10:00.000Z";
 const SHA = "b".repeat(40);

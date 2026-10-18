@@ -11,17 +11,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FixRoundPushError, harnessCommitForShellLessWorker, pushFixRound, runFixRung } from "./helpers/run-task-test.js";
-import { buildFixProgressInput } from "../src/lib/fix-progress-judge.js";
-import { fixArmEvidence } from "../src/lib/fix-routing-learner.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { fixLedgerRowsForHead, fixRoundTally } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { FixRoundPushError, harnessCommitForShellLessWorker, pushFixRound, runFixRung } from "#test/helpers/run-task-test.js";
+import { buildFixProgressInput } from "#src/lib/fix-progress-judge.js";
+import { fixArmEvidence } from "#src/lib/fix-routing-learner.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { fixLedgerRowsForHead, fixRoundTally } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T9618X";
 const BRANCH = "run-W1-T9618X-1";

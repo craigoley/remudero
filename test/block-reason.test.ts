@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { INITIAL_RETRY_STATE, MAX_STRIKES, MAX_TRANSIENT_RETRIES, type RetryState } from "../src/lib/classify.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import { reasonAboutBlock, verdictFailureClass, verdictIsFixable } from "../src/lib/block-reason.js";
+import { INITIAL_RETRY_STATE, MAX_STRIKES, MAX_TRANSIENT_RETRIES, type RetryState } from "#src/lib/classify.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
+import { reasonAboutBlock, verdictFailureClass, verdictIsFixable } from "#src/lib/block-reason.js";
 
 // A -> B -> C (chain); D independent (no dependents at all, no dependencies).
 const YAML = `

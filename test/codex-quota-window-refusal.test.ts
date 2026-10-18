@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { detectUsageLimitRefusal } from "../src/lib/classify.js";
+import { detectUsageLimitRefusal } from "#src/lib/classify.js";
 
 // ── W1-T2567: the Codex ROLLING-QUOTA-WINDOW refusal, pinned by a REAL captured string ──────
 //

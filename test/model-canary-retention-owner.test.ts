@@ -4,14 +4,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { CanarySlotOwner } from "../src/lib/model-canary-owner.js";
+import { CanarySlotOwner } from "#src/lib/model-canary-owner.js";
 import { buildRetentionCanarySchedule, executeRetentionCanarySchedule,
-  retentionSlotTurnBound } from "../src/lib/model-canary-retention-schedule.js";
-import { retentionCanaryProtocol } from "../src/lib/model-canary-retention.js";
-import { buildCanarySchedule, type CanarySchedulePorts, type CanarySlot } from "../src/lib/model-canary-schedule.js";
-import { commonCanarySuite, canarySuiteDigest } from "../src/lib/model-canary-suite.js";
-import { projectCanaryRuns, type CanaryRun } from "../src/lib/model-canary-metrics.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+  retentionSlotTurnBound } from "#src/lib/model-canary-retention-schedule.js";
+import { retentionCanaryProtocol } from "#src/lib/model-canary-retention.js";
+import { buildCanarySchedule, type CanarySchedulePorts, type CanarySlot } from "#src/lib/model-canary-schedule.js";
+import { commonCanarySuite, canarySuiteDigest } from "#src/lib/model-canary-suite.js";
+import { projectCanaryRuns, type CanaryRun } from "#src/lib/model-canary-metrics.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const eligible = { sourceAdopted: true, adapterQualified: true, productionBusy: false, squeeze: false,
   spareSubscription: true, experimentalCashAllowed: false, premium: false };

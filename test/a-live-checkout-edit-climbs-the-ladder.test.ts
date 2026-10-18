@@ -9,12 +9,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Escalation } from "../src/lib/escalate.js";
-import { LIVE_EDIT_STEPS, liveEditStatePath, runLiveEditLadder, trackedEditPaths, withLiveEditLadders, type LiveEditRungInput } from "../src/lib/live-edit-ladder.js";
-import { asyncGit, checkServiceFreshnessAsync, daemonFreshnessFromService } from "../src/lib/self-sync.js";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { LIVE_EDIT_STEPS, liveEditStatePath, runLiveEditLadder, trackedEditPaths, withLiveEditLadders, type LiveEditRungInput } from "#src/lib/live-edit-ladder.js";
+import { asyncGit, checkServiceFreshnessAsync, daemonFreshnessFromService } from "#src/lib/self-sync.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-10-11T00:17:00Z");

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { benchmarkCohortCadence, runBenchmarkCohortPass, type BenchmarkCohortCadence,
-  type BenchmarkCohortPassResult } from "../src/lib/benchmark-cohort.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
+  type BenchmarkCohortPassResult } from "#src/lib/benchmark-cohort.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 
 const MINUTE = 60_000;
 

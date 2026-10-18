@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { closedPrLookup, runPrTerminalReconcile } from "../src/lib/sweep.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { closedPrLookup, runPrTerminalReconcile } from "#src/lib/sweep.js";
 
 const url = (n: number) => `https://github.com/o/r/pull/${n}`;
 const row = (n: number, step = "pr.opened", extra: Record<string, unknown> = {}) =>

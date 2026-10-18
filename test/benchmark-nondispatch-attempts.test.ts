@@ -1,18 +1,19 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
-import { spawnFlightJudgeWorker } from "../src/lib/flight-judge.js";
-import { spawnSpecialistWorker } from "../src/lib/specialist-panel.js";
-import { runOpenWeightWalkingLadder, spawnWorker } from "../src/lib/worker.js";
-import { clearOpenWeightAbsence } from "../src/lib/worker-provider.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
+import { benchmarkNonDispatchSpawn } from "#src/lib/benchmark-run.js";
+import { spawnFlightJudgeWorker } from "#src/lib/flight-judge.js";
+import { spawnSpecialistWorker } from "#src/lib/specialist-panel.js";
+import { runOpenWeightWalkingLadder, spawnWorker } from "#src/lib/worker.js";
+import { clearOpenWeightAbsence } from "#src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = repoRoot();
 
 function assignment(id: string, provider: "cash" | "codex", model: string): WorkerSelectionAssignment {
   return { version: 1, id, phase: "pre-execution",

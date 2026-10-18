@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -9,10 +10,10 @@ import {
   detectCostAnomalies,
   loadCostAnomalyPolicy,
   parseCostAnomalyPolicy,
-} from "../src/lib/cost-anomaly.js";
-import type { RunSummary } from "../src/lib/retro.js";
+} from "#src/lib/cost-anomaly.js";
+import type { RunSummary } from "#src/lib/retro.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 const POLICY_PATH = join(REPO_ROOT, "plan", "policy.yaml");
 const PLACEHOLDER_MULTIPLIER = 3;
 const EXPECTED_MULTIPLIER = 8;

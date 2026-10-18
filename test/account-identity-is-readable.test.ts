@@ -25,6 +25,7 @@
 // never entered, and every other branch (no-cache/account-mismatch/too-old) already returns
 // identity alongside the reason — locked in below alongside the two real changes, so a future edit
 // cannot quietly reintroduce the discard this task closes.
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
@@ -38,13 +39,13 @@ import {
   deriveAccountUsage,
   readAccountUsageFile,
   type AccountUsageInput,
-} from "../src/lib/account-usage.js";
-import { ACCOUNT_FILE_PATH_ENV, resolveAccountFilePath } from "../src/lib/serve.js";
+} from "#src/lib/account-usage.js";
+import { ACCOUNT_FILE_PATH_ENV, resolveAccountFilePath } from "#src/lib/serve.js";
 
-const FIXTURE = fileURLToPath(new URL("./fixtures/account-usage/claude-json.json", import.meta.url));
+const FIXTURE = join(repoRoot(), "test/fixtures/account-usage/claude-json.json");
 const CAPTURED_AT = 1785516413209;
-const SERVE_CONTAINER_SH = fileURLToPath(new URL("../deploy/serve-container.sh", import.meta.url));
-const ACCOUNT_USAGE_TS = fileURLToPath(new URL("../src/lib/account-usage.ts", import.meta.url));
+const SERVE_CONTAINER_SH = join(repoRoot(), "deploy/serve-container.sh");
+const ACCOUNT_USAGE_TS = join(repoRoot(), "src/lib/account-usage.ts");
 
 // ── (1) THE PATH THE SERVE PROCESS ACTUALLY RESOLVES NOW EXISTS WHERE IT RUNS ───────────────────
 

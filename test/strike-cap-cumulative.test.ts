@@ -30,13 +30,14 @@
  * closure, driven gateway-free (a stub `gh`, no repository — every case below is decided before
  * any worktree is ever created), proving the gate is wired at the real call site, not just typed.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildSweepEffects } from "./helpers/run-task-test.js";
+import { buildSweepEffects } from "#test/helpers/run-task-test.js";
 import {
   DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
@@ -46,9 +47,9 @@ import {
   strikeCapForAnswer,
   type OpenPrView,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { CriterionVerdict } from "../src/lib/review.js";
+} from "#src/lib/sweep.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { CriterionVerdict } from "#src/lib/review.js";
 
 const NOW = Date.parse("2026-08-29T12:00:00Z");
 const RECENT = "2026-08-29T11:00:00Z"; // well under DEFAULT_SWEEP_POLICY.staleDays
@@ -207,7 +208,7 @@ test("an identical unmet set remains fixable for judgment with or without an ope
 // ── (D) structural lock: the dispatch site can never fall through a non-positive budget ──────
 
 test("src/run-task.ts: dispatchFix computes fixDispatchBudget and checks it BEFORE ever calling runFixRung — a null budget cannot reach the rung", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
   const closureStart = src.indexOf("dispatchFix: async (pr, evidence) => {");
   assert.ok(closureStart >= 0, "the dispatchFix closure must exist verbatim (re-grep if this ever legitimately renames)");
 

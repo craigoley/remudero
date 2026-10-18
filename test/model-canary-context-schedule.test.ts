@@ -1,19 +1,20 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { CanarySlotOwner } from "../src/lib/model-canary-owner.js";
-import { contextCanaryProtocol } from "../src/lib/model-canary-context.js";
-import type { CanarySlot, CanarySchedulePorts } from "../src/lib/model-canary-schedule.js";
-import type { CanaryExecutionPorts, CanaryResponse } from "../src/lib/model-canary-runner.js";
-import type { CanaryRun } from "../src/lib/model-canary-metrics.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { CanarySlotOwner } from "#src/lib/model-canary-owner.js";
+import { contextCanaryProtocol } from "#src/lib/model-canary-context.js";
+import type { CanarySlot, CanarySchedulePorts } from "#src/lib/model-canary-schedule.js";
+import type { CanaryExecutionPorts, CanaryResponse } from "#src/lib/model-canary-runner.js";
+import type { CanaryRun } from "#src/lib/model-canary-metrics.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // A missing feature on base must fail the behavior criterion instead of refusing to load the test.
-const module = existsSync(new URL("../src/lib/model-canary-context-schedule.ts", import.meta.url))
-  ? await import("../src/lib/model-canary-context-schedule.js") : null;
+const module = existsSync(join(repoRoot(), "src/lib/model-canary-context-schedule.ts"))
+  ? await import("#src/lib/model-canary-context-schedule.js") : null;
 function feature() { assert.ok(module, "durable context scheduling source is absent"); return module; }
 const namespace = "a".repeat(64);
 function plan(treatment: "first-use" | "repeat" = "repeat", aa = false, billing: "api" | "subscription" = "subscription") {

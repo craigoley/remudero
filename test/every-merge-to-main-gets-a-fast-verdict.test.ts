@@ -25,6 +25,7 @@
  * commit's run — exactly the defect measured above, reproduced here as a POSITIVE CONTROL against
  * the ref-keyed shape before asserting the shipped, sha-keyed shape never does that.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -34,18 +35,18 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import type { IssueGateway } from "../src/lib/escalate.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 import {
   buildMainHealthRung,
   MAIN_TRIPWIRE_CHECK_NAME,
   withTripwireOverride,
   type MainHealthRungDeps,
-} from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { mainHealthFromRollup, type RollupCheckEntry } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { mainHealthFromRollup, type RollupCheckEntry } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "main-tripwire.yml");
 
 type WorkflowJob = {

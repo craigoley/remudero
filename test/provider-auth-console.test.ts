@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { buildProviderAuthRoutes, ProviderAuthSessionStore } from "../src/lib/provider-auth-sessions.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
+import { buildProviderAuthRoutes, ProviderAuthSessionStore } from "#src/lib/provider-auth-sessions.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

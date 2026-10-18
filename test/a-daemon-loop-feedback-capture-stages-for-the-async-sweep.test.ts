@@ -19,12 +19,12 @@ import { join } from "node:path";
 import { mock, test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { feedbackEvidenceCoverageFiler } from "../src/lib/evidence-coverage-gardener.js";
-import { feedbackEntryPath, stageFeedbackCapture, type FeedbackEntry } from "../src/lib/feedback.js";
-import { queuedFeedbackDir, queuedFeedbackLandings } from "../src/lib/feedback-landing.js";
-import { issueFeedbackId, normalizeIssue, pollIssues } from "../src/lib/issues-intake.js";
-import { productionIssueRevalidationPorts } from "../src/lib/issue-revalidation-garden.js";
-import { alertFeedbackId, pollAlerts, type RawAlert } from "../src/lib/ops.js";
+import { feedbackEvidenceCoverageFiler } from "#src/lib/evidence-coverage-gardener.js";
+import { feedbackEntryPath, stageFeedbackCapture, type FeedbackEntry } from "#src/lib/feedback.js";
+import { queuedFeedbackDir, queuedFeedbackLandings } from "#src/lib/feedback-landing.js";
+import { issueFeedbackId, normalizeIssue, pollIssues } from "#src/lib/issues-intake.js";
+import { productionIssueRevalidationPorts } from "#src/lib/issue-revalidation-garden.js";
+import { alertFeedbackId, pollAlerts, type RawAlert } from "#src/lib/ops.js";
 
 /** A checkout and the state root whose queue the sweep drains, apart as in the daemon. */
 function roots(): { root: string; stateRoot: string } {

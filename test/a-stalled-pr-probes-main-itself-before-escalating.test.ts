@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { BASE_REPRODUCTION_MAX_FILES, type BaseProbeFile } from "../src/lib/base-reproduction.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { BASE_REPRODUCTION_MAX_FILES, type BaseProbeFile } from "#src/lib/base-reproduction.js";
 
 const NOW = Date.now();
 const ago = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();

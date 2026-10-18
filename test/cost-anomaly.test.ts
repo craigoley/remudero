@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,14 +21,14 @@ import {
   runningLongIncidentEvent,
   type CostAnomalyDeps,
   type CostAnomalyPolicy,
-} from "../src/lib/cost-anomaly.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { parseLedger, type RunSummary } from "../src/lib/retro.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { runSweep, type FixDispatchEvidence, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import type { ClarificationQuestion } from "./helpers/sweep-test.js";
+} from "#src/lib/cost-anomaly.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { parseLedger, type RunSummary } from "#src/lib/retro.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
+import { runSweep, type FixDispatchEvidence, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import type { ClarificationQuestion } from "#test/helpers/sweep-test.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 
 function ledgerTmpPath(): string {
   return join(mkdtempSync(join(tmpdir(), "cost-anomaly-ledger-")), "ledger.ndjson");

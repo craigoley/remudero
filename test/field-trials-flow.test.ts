@@ -15,12 +15,12 @@ import {
   parseReleaseManifest, periodOf, projectFlowRow, PR_URL_RE, readFieldTrialsLedger, recordRelease, revokeRelease,
   revokeWithdrawnConsent, SAFE_LABEL_RE, SAFE_MODEL_RE, suppressCell, unavailableLedger,
   type FieldTrialsConsent, type FieldTrialsFlowSnapshot, type FieldTrialsLedgerRead, type FieldTrialsSource, type ReleaseCell,
-} from "../src/lib/field-trials-flow.js";
-import { emptyRepoStore, pullOf, type FieldTrialsGithubStore, type GithubPage, type PullDetail } from "../src/lib/field-trials-github.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { servedTrialCohorts, trialRevisionPins, TRIAL_COHORT_MAX, TRIAL_REVISION_RE } from "../src/lib/field-trials-cohorts.js";
+} from "#src/lib/field-trials-flow.js";
+import { emptyRepoStore, pullOf, type FieldTrialsGithubStore, type GithubPage, type PullDetail } from "#src/lib/field-trials-github.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { servedTrialCohorts, trialRevisionPins, TRIAL_COHORT_MAX, TRIAL_REVISION_RE } from "#src/lib/field-trials-cohorts.js";
 
 const T = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).toISOString();
 

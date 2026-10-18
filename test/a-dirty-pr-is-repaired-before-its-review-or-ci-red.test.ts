@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import * as sweep from "../src/lib/sweep.js";
-import type { ConflictFileDiff, OpenPrView } from "../src/lib/sweep.js";
+import * as sweep from "#src/lib/sweep.js";
+import type { ConflictFileDiff, OpenPrView } from "#src/lib/sweep.js";
 
 /**
  * #10555, 2026-10-09: a run-unfiled PR sat `mergeable_state: dirty` from 05:32Z until an operator

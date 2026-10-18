@@ -1,13 +1,14 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { INBOX_DRAFT_DISALLOWED_TOOLS, runDraftRung, DAEMON_DRAFT_BATCH_CAP } from "../src/lib/inbox.js";
-import type { Proposal } from "../src/lib/inbox.js";
+import { INBOX_DRAFT_DISALLOWED_TOOLS, runDraftRung, DAEMON_DRAFT_BATCH_CAP } from "#src/lib/inbox.js";
+import type { Proposal } from "#src/lib/inbox.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = repoRoot();
 
 // ── W1-T2591: THE DRAFT CAP IS A BATCH SIZE, NOT A CONCURRENCY LIMIT ────────────────────────
 //

@@ -1,4 +1,3 @@
-// test/an-acceptance-header-inside-a-code-fence-is-an-example-not-the-block.test.ts
 //
 // W1-T5621. THE DEFECT, reproduced on origin/main before the fix: a PR body that SHOWS the
 // acceptance format inside a ``` fence, ahead of its real `## Acceptance` block, parsed back ONLY
@@ -17,9 +16,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import * as review from "../src/lib/review.js";
-import { acceptanceBlockDiagnostics, acceptanceBlockRegion, parseAcceptanceBlock } from "../src/lib/review.js";
-import { replaceAcceptanceBlock, SUPERSEDED_HEADER_SUFFIX } from "../src/lib/plan-pr-emitter.js";
+import * as review from "#src/lib/review.js";
+import { acceptanceBlockDiagnostics, acceptanceBlockRegion, parseAcceptanceBlock } from "#src/lib/review.js";
+import { replaceAcceptanceBlock, SUPERSEDED_HEADER_SUFFIX } from "#src/lib/plan-pr-emitter.js";
 
 // The two symbols this task ADDS are read off the namespace, never named-imported: a named import of
 // an export the base lacks fails the whole file at link time, so a base run would report a load

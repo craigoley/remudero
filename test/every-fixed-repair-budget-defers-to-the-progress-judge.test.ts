@@ -4,14 +4,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runFixRung, buildSweepEffects, runPlanScopedFixRound, routeFix,
-  finishTransientRetry, implementAttemptOutcome } from "./helpers/run-task-test.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { buildFixProgressInput, FIX_BUDGET_JUDGE_SITES, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
-import { judgeSloRebuild, BLOCKER_SLO_MS } from "../src/lib/pr-blocker.js";
-import { systemClock } from "../src/lib/clock.js";
+  finishTransientRetry, implementAttemptOutcome } from "#test/helpers/run-task-test.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { buildFixProgressInput, FIX_BUDGET_JUDGE_SITES, type FixProgressJudge } from "#src/lib/fix-progress-judge.js";
+import { judgeSloRebuild, BLOCKER_SLO_MS } from "#src/lib/pr-blocker.js";
+import { systemClock } from "#src/lib/clock.js";
 import { createSweepFixAdmissionController, checkQueueGovernor, deriveQueueGovernorTrailingFlow,
   DEFAULT_SWEEP_POLICY, runSweep, readFixHostPressure, PLAN_REPAIR_DISPATCH_STEP, REARMED_AFTER_DISARM_STEP,
-  type SweepDeps, type OpenPrView } from "../src/lib/sweep.js";
+  type SweepDeps, type OpenPrView } from "#src/lib/sweep.js";
 
 const NOW = Date.now();
 const pr = (over: Partial<OpenPrView> = {}): OpenPrView => ({

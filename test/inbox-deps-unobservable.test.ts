@@ -13,8 +13,8 @@ import {
   type Proposal,
   type ReadinessContext,
   type RatifyGateway,
-} from "../src/lib/inbox.js";
-import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
+} from "#src/lib/inbox.js";
+import { loadPlanFromYaml, type MergedResolver, type Plan } from "#src/lib/plan.js";
 
 /**
  * W1-T510: `ReadinessContext.isMerged` (`MergedResolver`) is a plain boolean, so a
@@ -290,8 +290,8 @@ test("an unobservable dep keeps the proposal out of READY, and rmd approve refus
 // sites need a live plan and a real GitHub gateway, so the body was reachable from no test; it is
 // exported for exactly this, and driven here against injected gateways.
 
-import { buildDepsReadinessAccessors } from "../src/run-task.js";
-import { type GitHub } from "../src/lib/status.js";
+import { buildDepsReadinessAccessors } from "#src/run-task.js";
+import { type GitHub } from "#src/lib/status.js";
 
 const ACCESSOR_PLAN_YAML = `
 - id: ACC-1

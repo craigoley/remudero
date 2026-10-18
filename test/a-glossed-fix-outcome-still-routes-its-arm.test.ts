@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { anchoredFixOutcome, decideFixOutcomeAction } from "../src/lib/fix-outcome.js";
+import { anchoredFixOutcome, decideFixOutcomeAction } from "#src/lib/fix-outcome.js";
 
 // Real report tails from 2026-10-09 fix rounds. Each was ledgered fix_outcome "unstated", so #10234's FLAKE
 // round went to a commit attempt ("the worker changed nothing") instead of the rerun it asked for.

@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -6,9 +7,9 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import test from "node:test";
-import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS, routingAbCommand } from "../src/lib/routing-experiments.js";
+import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS, routingAbCommand } from "#src/lib/routing-experiments.js";
 
-const root = join(import.meta.dirname, "..");
+const root = repoRoot();
 const script = join(root, "scripts/private-routing-daily-review.mjs");
 const { dailyRoutingReview } = await import(pathToFileURL(script).href);
 const epoch = ROUTING_EXPERIMENTS.find((item) => item.id === "sol61-vs-sonnet55")!;
@@ -332,7 +333,7 @@ test("a daily row-budget breach remains partial evidence rather than a healthy z
 
 
 test("the installed daily collector preserves lesson exposure identities from one latest firing over all ledger forms", async () => {
-  const { judgeCiLessonEfficacy, summarizeCiLessonRecurrences } = await import("../src/lib/ci-lesson-recurrence.js");
+  const { judgeCiLessonEfficacy, summarizeCiLessonRecurrences } = await import("#src/lib/ci-lesson-recurrence.js");
   const f = fixture();
   try {
     const summary = summarizeCiLessonRecurrences(judgeCiLessonEfficacy({

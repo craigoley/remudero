@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -10,8 +11,8 @@ import {
   deriveKnowledgeBudgetCap,
   measureKnowledgeBudgetPressure,
   type LedgerLine,
-} from "../src/lib/digest.js";
-import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, buildEntryWeightIndex, type LearningEntry } from "../src/lib/learnings.js";
+} from "#src/lib/digest.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, buildEntryWeightIndex, type LearningEntry } from "#src/lib/learnings.js";
 
 // ── W1-T941: THE KNOWLEDGE BUDGET IS A DERIVED CAP, NOT A PICKED NUMBER ─────────────────────
 //
@@ -24,8 +25,7 @@ import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, buildEntryWeightIndex, type LearningEnt
 // figure, and negligible pressure derives the CURRENT figure unchanged -- never a raise dressed as
 // a measurement.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "knowledge-budget-baseline.json");
 
 function loadBaseline(): { capChars: number } {

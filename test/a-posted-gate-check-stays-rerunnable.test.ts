@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { readFileSync } from "node:fs";
-import { checkJobId } from "../src/lib/sweep.js";
-import { buildOpenPrViews, buildSweepEffects, cancelledRequiredChecks, fetchCiFailures, fetchOpenPrsWithPostedIds } from "../src/run-task.js";
+import { checkJobId } from "#src/lib/sweep.js";
+import { buildOpenPrViews, buildSweepEffects, cancelledRequiredChecks, fetchCiFailures, fetchOpenPrsWithPostedIds } from "#src/run-task.js";
 
 const OWNER = "owner";
 const REPO = "repo";

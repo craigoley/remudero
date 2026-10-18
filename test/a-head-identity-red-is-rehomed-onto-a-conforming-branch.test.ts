@@ -1,14 +1,16 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { rmSync } from "node:fs";
-import { AUTHORITY_TABLE } from "../src/lib/authority.js";
-import { createHeadRehomePorts, headRehomePlan, identityCommitMessage, type HeadRehomeObservation } from "../src/lib/head-rehome.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { checkCommitMessage } from "../src/lib/commit-message.js";
-import { extractTaskTrailerId } from "../src/lib/review.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, dedupeRollupByLatestAttempt, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-const { hasValidTaskTrailer } = (await import(new URL("../scripts/head-identity-gate.mjs", import.meta.url).href)) as {
+import { AUTHORITY_TABLE } from "#src/lib/authority.js";
+import { createHeadRehomePorts, headRehomePlan, identityCommitMessage, type HeadRehomeObservation } from "#src/lib/head-rehome.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { checkCommitMessage } from "#src/lib/commit-message.js";
+import { extractTaskTrailerId } from "#src/lib/review.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, dedupeRollupByLatestAttempt, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+const { hasValidTaskTrailer } = (await import(pathToFileURL(`${repoRoot()}/scripts/head-identity-gate.mjs`).href)) as {
   hasValidTaskTrailer: (message: string) => boolean;
 };
 

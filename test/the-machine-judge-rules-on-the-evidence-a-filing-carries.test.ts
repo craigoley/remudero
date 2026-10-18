@@ -13,12 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { deterministicEscalation, renderMachineShard } from "../src/lib/machine-filing.js";
-import { judgeMachineShard, machineJudgeInput, MACHINE_JUDGE_EVIDENCE_CAP } from "../src/lib/machine-filing-judge.js";
-import { loadPlanFromYaml, type Task } from "../src/lib/plan.js";
-import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { deterministicEscalation, renderMachineShard } from "#src/lib/machine-filing.js";
+import { judgeMachineShard, machineJudgeInput, MACHINE_JUDGE_EVIDENCE_CAP } from "#src/lib/machine-filing-judge.js";
+import { loadPlanFromYaml, type Task } from "#src/lib/plan.js";
+import type { RiskJudgeInput, RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const CLOCK = fixedClock(Date.parse("2026-10-13T12:00:00.000Z"));
 const RECORD = { family: "ci-friction", merged: 3, declined: 1, alpha: 4, beta: 2, mean: 4 / 6 };

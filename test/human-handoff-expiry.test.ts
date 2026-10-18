@@ -11,7 +11,7 @@ import {
   releaseExpiredHandoffClaim,
   type HandoffResult,
   type HumanHandoff,
-} from "../src/lib/human-handoff.js";
+} from "#src/lib/human-handoff.js";
 
 // W1-T3897 criterion 4: an expired claim cannot silently authorize work, and the item returns to a
 // bounded handoff state rather than staying owned forever.

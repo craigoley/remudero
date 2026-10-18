@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { runBenchmarkCohortIdlePass, runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
+import { runBenchmarkCohortIdlePass, runBenchmarkCohortPass } from "#src/lib/benchmark-cohort.js";
 
 const row = (value: Record<string, unknown>) => JSON.stringify(value) + "\n";
 

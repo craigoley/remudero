@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildOpenPrViews } from "../src/run-task.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 
 import {
   DEFAULT_SWEEP_POLICY,
@@ -13,7 +13,7 @@ import {
   type MissingTaskTrailerRepair,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-09-10T12:00:00.000Z");
 const RECENT = "2026-09-10T11:00:00.000Z";

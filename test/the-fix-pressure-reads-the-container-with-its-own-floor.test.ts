@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { ContainerMemoryHeadroom } from "../src/lib/host-memory-shadow.js";
+import type { ContainerMemoryHeadroom } from "#src/lib/host-memory-shadow.js";
 import {
   DEFAULT_SWEEP_POLICY,
   checkQueueGovernor,
@@ -19,7 +19,7 @@ import {
   pressureWorkers,
   readFixHostPressure,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const FLOOR = 3072;
 // The core host: MemTotal 15988 MiB, MemAvailable 9765 MiB.

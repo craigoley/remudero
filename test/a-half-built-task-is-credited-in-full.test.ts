@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // W1-T3748 — the branch-name credit path asks only which task a PR belongs to, never whether the
 // diff covered the scope the record declared. `creditedFileCoverageViolations` gives that second

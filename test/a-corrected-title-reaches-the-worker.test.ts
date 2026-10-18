@@ -6,10 +6,10 @@ import {
   mergedFieldChangeViolations,
   RATIONALE_CORRECTION_MARKER,
   rationaleRecordsCorrection,
-} from "../src/lib/task-linter.js";
-import type { LintOpts, PostMergeAmendmentContext } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
-import { implementPromptParts, renderImplementPrompt } from "../src/run-task.js";
+} from "#src/lib/task-linter.js";
+import type { LintOpts, PostMergeAmendmentContext } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
+import { implementPromptParts, renderImplementPrompt } from "#src/run-task.js";
 
 /**
  * W1-T2438: THE FROZEN TITLE IS THE ONLY FIELD A WORKER READS.

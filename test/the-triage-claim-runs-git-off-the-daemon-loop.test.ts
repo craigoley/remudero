@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -7,16 +8,16 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 // Namespace imports: this file must LOAD on a base without the awaited symbols, so each proof
 // fails there on its own assertion rather than on a missing export.
-import * as triageLib from "../src/lib/auto-triage.js";
-import * as claimLib from "../src/lib/dispatch-claim.js";
-import * as runTaskMod from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+import * as triageLib from "#src/lib/auto-triage.js";
+import * as claimLib from "#src/lib/dispatch-claim.js";
+import * as runTaskMod from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 const { claimTriage, gitTriageClaimReserver, newFeedbackIdsOldestFirst, triageClaimRef } = triageLib;
 const { triageClaimReserverFor } = runTaskMod;
 const gitTriageClaimReserverAsync: typeof triageLib.gitTriageClaimReserverAsync = (...a) => triageLib.gitTriageClaimReserverAsync(...a);
 const triageClaimReserverAsyncFor: typeof runTaskMod.triageClaimReserverAsyncFor = (...a) => runTaskMod.triageClaimReserverAsyncFor(...a);
 const gitClaimRunnerAsync: typeof claimLib.gitClaimRunnerAsync = (...a) => claimLib.gitClaimRunnerAsync(...a);
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // MEASURED 2026-10-06: the triage claim reserver ran `spawnSync` git inside the daemon process —
 // ~543 s of synchronous spawn per 17 h of daemon.loop_lag (the lane's claim and release, and the
@@ -182,7 +183,7 @@ test("a failed triage anchor mint is refused as unreachable, names the failure, 
 });
 
 test("the auto-triage pass sweeps the claim namespace through awaited git, keeping a timer firing", async () => {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = testRepoRoot();
   const candidates = newFeedbackIdsOldestFirst(repoRoot);
   assert.ok(candidates.length >= 2, `this proof needs two status:new feedback entries in the checkout (${candidates.length})`);
   const [head] = candidates;
@@ -197,7 +198,7 @@ test("the auto-triage pass sweeps the claim namespace through awaited git, keepi
     const tree = f.work.git("hash-object", "-t", "tree", "/dev/null").trim();
     const held = f.work.git("commit-tree", tree, "-m", `rmd-triage claim 7@elsewhere ${new Date().toISOString()}`).trim();
     f.work.git("push", "--quiet", "origin", `${held}:${triageClaimRef(head)}`);
-    const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
+    const { loadPolicy, policyPath } = await import("#src/lib/policy.js");
     const shipped = loadPolicy(policyPath(repoRoot));
     const policy = { ...shipped, values: { ...shipped.values, autoTriage: { enabled: true, minIntervalMinutes: 1, maxPerDay: 50 } } };
     const config = { root, claudeBin: "/bin/true" } as unknown as Config;

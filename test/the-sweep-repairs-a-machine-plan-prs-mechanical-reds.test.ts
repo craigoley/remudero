@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { Plan } from "../src/lib/plan.js";
+import type { Config } from "#src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { Plan } from "#src/lib/plan.js";
 // W1-T5349's own symbols are read through the namespace, so this file still LOADS at a base
 // that lacks them and fails per test instead of at import.
-import * as sweep from "./helpers/sweep-test.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import * as sweep from "#test/helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 // W1-T5349 — a red machine-lane plan-only PR used to get only W1-T4351's `refused-escalate`, an issue
 // per head that nobody answered. The rung repairs the three mechanical signatures from the failing

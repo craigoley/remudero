@@ -16,14 +16,15 @@
  * task in the plan — so each refusal test is paired with the implementation PR that must still
  * credit, and the fixtures are proven to REACH the predicate rather than assumed to.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { buildBatchedGithub, deriveStatus, ghGateway, isPlanOnlyChangeset, type GitHub, type PrRef } from "../src/lib/status.js";
-import { writeMutantModule } from "./helpers/mutant-module.js";
+import type { Task } from "#src/lib/plan.js";
+import { buildBatchedGithub, deriveStatus, ghGateway, isPlanOnlyChangeset, type GitHub, type PrRef } from "#src/lib/status.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
 
 function task(id: string): Task {
   return {
@@ -297,7 +298,7 @@ test("MUTANT: crediting without the plan-only test restores the false credit for
   // neighbouring accident. The substitution target is asserted UNIQUE first: a mutation applied to
   // two sites, or to none, would make the result unattributable.
   const { readFileSync } = await import("node:fs");
-  const src = readFileSync(new URL("../src/lib/status.ts", import.meta.url), "utf8");
+  const src = readFileSync(join(repoRoot(), "src/lib/status.ts"), "utf8");
   const target = "const files = deps.github.changedFiles?.(trailerPr.url);";
   const occurrences = src.split(target).length - 1;
   assert.equal(occurrences, 1, "the substitution target must be UNIQUE or the mutant proves nothing");
@@ -313,7 +314,7 @@ test("MUTANT: crediting without the plan-only test restores the false credit for
   );
   // The mutant reads the file list as permanently UNAVAILABLE, which is exactly the pre-fix
   // behaviour: every anchored trailer credits regardless of what the PR changed.
-  const mutant = (await import(mutantPath)) as typeof import("../src/lib/status.js");
+  const mutant = (await import(mutantPath)) as typeof import("#src/lib/status.js");
   const gh = github("W1-T395", {
     head: "claude/shard-corrections-t395-t391-t388",
     files: ["plan/tasks.d/W1-T395-x.yaml"],

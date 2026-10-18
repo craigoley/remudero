@@ -4,15 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { CapabilityLadder } from "../src/lib/mounts.js";
-import { clearCodexCapacityCache, readCodexCapacity, type CodexCapacityDeps } from "../src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config.js";
+import type { CapabilityLadder } from "#src/lib/mounts.js";
+import { clearCodexCapacityCache, readCodexCapacity, type CodexCapacityDeps } from "#src/lib/worker-provider.js";
 import {
   ROUTING_POOL_VERSION,
   parseRoutingPoolSnapshot,
   selectFromRoutingPool,
   type RoutingPoolRequest,
-} from "../src/lib/model-pool.js";
+} from "#src/lib/model-pool.js";
 
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");
 

@@ -43,19 +43,19 @@ import {
   renderFixPrompt,
   runFixRung,
   type FixEvidence,
-} from "./helpers/run-task-test.js";
+} from "#test/helpers/run-task-test.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   runSweep,
   type ActionableGateFailure,
   type OpenPrView,
-} from "./helpers/sweep-test.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/sweep-test.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 function criterion(over: Partial<CriterionVerdict> & Pick<CriterionVerdict, "claim" | "met">): CriterionVerdict {
   return { proof: "proof", reason: "", proof_exec: "not_executable", ...over };

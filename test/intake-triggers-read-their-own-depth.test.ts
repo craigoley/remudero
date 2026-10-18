@@ -1,13 +1,14 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, type AutoTriagePolicy } from "../src/lib/auto-triage.js";
-import { evaluateRetroTrigger, saveMarker, type ShippedGithub } from "../src/lib/retro.js";
-import { retroTriggerCheck } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, type AutoTriagePolicy } from "#src/lib/auto-triage.js";
+import { evaluateRetroTrigger, saveMarker, type ShippedGithub } from "#src/lib/retro.js";
+import { retroTriggerCheck } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 // ── W1-T2289 ──────────────────────────────────────────────────────────────────────────────────
 //
@@ -23,7 +24,7 @@ import type { Config } from "../src/lib/config.js";
 // W1-T2288 IS CITED, NOT RE-FILED (rationale (8)/note (x)): nothing here touches `shippedSince`,
 // `gatherRuns` or `ownBranchOf` — the run-vs-merge counting cause is a different record.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = testRepoRoot();
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function tmp(prefix: string): string {

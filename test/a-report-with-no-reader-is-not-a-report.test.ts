@@ -22,7 +22,7 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { emailChannel, EMAIL_COMMAND_ENV, notify } from "../src/lib/notify.js";
+import { emailChannel, EMAIL_COMMAND_ENV, notify } from "#src/lib/notify.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-w1t2976-")), "ledger.ndjson");

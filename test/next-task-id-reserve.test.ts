@@ -35,9 +35,9 @@ import {
   nextTaskIdCommand as runNextTaskIdCommand,
   readReservationHolder,
   validateReserveArgs,
-} from "../src/run-task.js";
-import { type RemoteRefReserver, type RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+} from "#src/run-task.js";
+import { type RemoteRefReserver, type RemoteReserveOutcome } from "#src/lib/task-id-reservation.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const mintRepo = gitRepo({ kind: "reserve-mint-plan" });
 mkdirSync(join(mintRepo.dir, "plan"), { recursive: true });

@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -6,16 +7,16 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import {
   proofAmendmentIneligibleReason,
   requestProofAmendment,
   type ProofAmendmentPrState,
   type ProofAmendmentWritePorts,
-} from "../src/lib/proof-amendment.js";
-import { deriveFixMode } from "../src/lib/prompt-render.js";
-import { wrappedGrepPattern } from "../src/lib/review.js";
+} from "#src/lib/proof-amendment.js";
+import { deriveFixMode } from "#src/lib/prompt-render.js";
+import { wrappedGrepPattern } from "#src/lib/review.js";
 import {
   proofRepairLadder,
   proofRepairRouteEvidence,
@@ -25,9 +26,9 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
+} from "#test/helpers/sweep-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
 import {
   acceptanceGateBodyRepair,
   buildFixRungDispatchArgs,
@@ -41,9 +42,9 @@ import {
   runFixRung,
   trailerBodyDivergenceRepair,
   wrappedGrepBodyRepair,
-} from "./helpers/run-task-test.js";
+} from "#test/helpers/run-task-test.js";
 
-const authorGate = (await import(pathToFileURL(join(fileURLToPath(new URL(".", import.meta.url)), "..", "scripts", "acceptance-author-gate.mjs")).href)) as {
+const authorGate = (await import(pathToFileURL(join(repoRoot(), "scripts/acceptance-author-gate.mjs")).href)) as {
   trailerBodyProofDivergenceRefusal: (input: {
     body: string;
     taskAcceptanceForId?: (taskId: string) => readonly { claim: string; proof: string }[] | undefined;

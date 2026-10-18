@@ -14,9 +14,9 @@ import {
   RatificationDraftRefusedError,
   type Proposal,
   type RatificationPayload,
-} from "../src/lib/inbox.js";
+} from "#src/lib/inbox.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { loadCorpus } from "../scripts/citation-anchor-census.mjs";
+import { loadCorpus } from "#scripts/citation-anchor-census.mjs";
 
 const ID = "W1-T5507";
 const proposal: Proposal = {

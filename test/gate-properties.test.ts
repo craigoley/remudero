@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import fc from "fast-check";
-import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
-import { breMetacharsIn } from "../src/lib/task-linter.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "#src/lib/review.js";
+import { breMetacharsIn } from "#src/lib/task-linter.js";
 
 /**
  * PROPERTY TESTS FOR THE TWO GATES WHOSE **WRONG** ANSWER BLOCKS CORRECT WORK.

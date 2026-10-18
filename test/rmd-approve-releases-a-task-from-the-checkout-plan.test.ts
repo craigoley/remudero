@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ledgerPathFor } from "../src/lib/ledger-path.js";
-import { RELEASE_LEDGER_STEP } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveCommand } from "../src/run-task.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { RELEASE_LEDGER_STEP } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { approveCommand } from "#src/run-task.js";
 
 const PARKED = ["- id: W1-T1041", "  title: a parked shard", "  repo: remudero", "  type: implement", "  verify: human", "  status: queued", "  depends_on: []"].join("\n");
 

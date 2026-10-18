@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -10,14 +11,14 @@ import {
   fetchMainPushRunHistory,
   MAIN_HEALTH_TASK_ID,
   type MainHealthRungDeps,
-} from "../src/lib/main-health-rung.js";
-import { requeueActionsJob } from "../src/run-task.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { buildSweepHook, buildSweepLightHook } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#src/lib/main-health-rung.js";
+import { requeueActionsJob } from "#src/run-task.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { buildSweepHook, buildSweepLightHook } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -386,7 +387,7 @@ test("the full sweep contains an injected main-health failure and continues its 
 });
 
 test("daemonCommand supplies the real REST and issue gateways to the one event-and-sweep observer", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
   const observerStart = source.indexOf("const mainHealthRung = buildMainHealthRung(");
   const call = source.slice(observerStart, source.indexOf("sweepLight: buildSweepLightHook(", observerStart));
 

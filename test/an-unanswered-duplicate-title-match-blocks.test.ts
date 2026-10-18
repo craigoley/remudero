@@ -13,6 +13,7 @@
 // NEAR_IDENTITY_DUPLICATE_CUTOFF, well above the warn-only check's DEFAULT_DUPLICATE_CUTOFF) with
 // neither shard citing the other via plan_refs or rationale. Either shard's citation clears it.
 
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -25,9 +26,9 @@ import {
   unansweredDuplicateTitleViolations,
   type DuplicateAnswerCorpusEntry,
   type LintOpts,
-} from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
-import { duplicateCorpusOpts } from "../src/run-task.js";
+} from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
+import { duplicateCorpusOpts } from "#src/run-task.js";
 
 /** A minimal, otherwise-clean Task fixture — mirrors test/knowledge-dedup.test.ts's own helper. */
 function task(over: Partial<Task> & { id: string; title: string }): Task {
@@ -108,7 +109,7 @@ test("SANITY: the fixtures score where this suite depends on them scoring", () =
 // two severities the two checks really return, the file where `if (blocking.length)` is executable
 // code rather than quoted prose, and `duplicateCorpusOpts`'s real empty-object return.
 test("CRITERION 1: inbox.ts's ratification comment no longer asserts lint-plan is not required, and each surviving reason holds against the mechanism it describes", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/inbox.ts", import.meta.url)), "utf8");
+  const src = readFileSync(`${repoRoot()}/src/lib/inbox.ts`, "utf8");
   assert.doesNotMatch(
     src,
     /and `lint-plan` is not a required check\. So `rmd approve`/,
@@ -117,7 +118,7 @@ test("CRITERION 1: inbox.ts's ratification comment no longer asserts lint-plan i
 
   // THE CORRECTION, CHECKED AGAINST THE DATA IT CORRECTS. ci-gate.yml's REQUIRED array is YAML
   // data, not a comment, so this cannot be satisfied by anyone merely writing the sentence down.
-  const ciGate = readFileSync(fileURLToPath(new URL("../.github/workflows/ci-gate.yml", import.meta.url)), "utf8");
+  const ciGate = readFileSync(`${repoRoot()}/.github/workflows/ci-gate.yml`, "utf8");
   assert.match(
     ciGate,
     /^\s*"lint-plan",\s*$/m,
@@ -138,7 +139,7 @@ test("CRITERION 1: inbox.ts's ratification comment no longer asserts lint-plan i
 
   // SURVIVING REASON 2 — `if (blocking.length)` is EXECUTABLE code in run-task.ts. The same literal
   // in inbox.ts is quoted prose, which is what made the original assertion undiscriminating.
-  const runTask = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const runTask = readFileSync(`${repoRoot()}/src/run-task.ts`, "utf8");
   assert.match(
     runTask,
     /if \(blocking\.length\)/,

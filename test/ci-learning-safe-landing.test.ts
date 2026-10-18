@@ -5,22 +5,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import {
   CI_LEARNING_LANDING_BRANCH,
   ciLearningMergedOrigins,
   ciLearningPendingOrigins,
   landCiLearningShards,
   landingIdentity,
-} from "../src/lib/feedback-landing.js";
-import { buildCiLearningCadenceRunner, ciLearningCommand, ciLearningPlanOrigins } from "../src/run-task.js";
+} from "#src/lib/feedback-landing.js";
+import { buildCiLearningCadenceRunner, ciLearningCommand, ciLearningPlanOrigins } from "#src/run-task.js";
 import {
   ciLearningRecordVerdict,
   ciLearningShardYaml,
   CI_LEARNING_LESSONS_FILE,
   type CiLearningShardDraft,
-} from "../src/lib/measurement-cadence.js";
+} from "#src/lib/measurement-cadence.js";
 
 const GIT_ENV = {
   ...process.env,

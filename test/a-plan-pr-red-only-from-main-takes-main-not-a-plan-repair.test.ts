@@ -3,8 +3,8 @@ import test from "node:test";
 
 // The new symbols are read through the namespace, so this file still LOADS at a base that lacks
 // them and fails per test instead of at import.
-import * as sweep from "../src/lib/sweep.js";
-import type { CiFailure, OpenPrView, SweepDeps } from "../src/lib/sweep.js";
+import * as sweep from "#src/lib/sweep.js";
+import type { CiFailure, OpenPrView, SweepDeps } from "#src/lib/sweep.js";
 
 // #10365 — a plan-only filing sat red for hours on ci-shard (1/8): its branch was 58 commits behind and
 // based inside the 10-09 13:52-14:45Z main typecheck red. Every red on a plan-only PR went to plan repair,

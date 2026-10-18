@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask, proofBaseDiscriminationViolations } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, proofBaseDiscriminationViolations } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 /** A minimal, otherwise-clean Task fixture — every test overrides only what it needs. */
 function task(over: Partial<Task> & { id: string }): Task {

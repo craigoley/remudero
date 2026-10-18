@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { buildLedgerIndex, deriveStatus, type CreditStore, type GitHub, type PrRef } from "../src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
+import { buildLedgerIndex, deriveStatus, type CreditStore, type GitHub, type PrRef } from "#src/lib/status.js";
 
 const id = "W9-T5679";
 const delivered = "plan/tasks.d/W9-T100-deliverable.yaml";

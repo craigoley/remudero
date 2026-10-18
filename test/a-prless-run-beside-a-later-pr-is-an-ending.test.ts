@@ -3,10 +3,10 @@
 // a run that opened a DIFFERENT PR is a mismatch. Timestamps compare only against the injected asOf/cutoff.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "../src/lib/benchmark-verified-outcome.js";
-import type { Task } from "../src/lib/plan.js";
-import type { StatusProjection } from "../src/lib/status.js";
-import { buildTaskCaseFile, type CaseLedgerRead, type TaskCaseFile } from "../src/lib/task-case-file.js";
+import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "#src/lib/benchmark-verified-outcome.js";
+import type { Task } from "#src/lib/plan.js";
+import type { StatusProjection } from "#src/lib/status.js";
+import { buildTaskCaseFile, type CaseLedgerRead, type TaskCaseFile } from "#src/lib/task-case-file.js";
 
 const NOW = "2026-09-28T12:10:00.000Z";
 type Row = Record<string, unknown>;

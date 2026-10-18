@@ -10,8 +10,8 @@ import {
   cadenceDefsMisjudgedByFallback,
   cadenceMarkerRows,
   type CadenceMarkerDef,
-} from "../src/lib/status-board.js";
-import { feedbackDocketDue } from "../src/lib/feedback-docket.js";
+} from "#src/lib/status-board.js";
+import { feedbackDocketDue } from "#src/lib/feedback-docket.js";
 
 // ── W1-T3757 — THE FALLBACK OVER-REPORTED FOR THE ONLY TWO ROWS THAT USED IT ─────────────────
 //

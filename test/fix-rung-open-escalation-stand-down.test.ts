@@ -34,19 +34,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, openEscalationStandDownReason, taskContractRevision } from "./helpers/run-task-test.js";
+import { runFixRung, openEscalationStandDownReason, taskContractRevision } from "#test/helpers/run-task-test.js";
 import {
   escalationHeadSha,
   escalationContractRevision,
   findDuplicateEscalation,
   CONTRACT_REVISION_LINE_RE,
   type EscalationDedupKey,
-} from "../src/lib/escalate.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/escalate.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 // #3889's own four heads, in the order its comment stream recorded them.
 const HEAD_1 = "f28ac5ecfe469bccea54297c9e809c41e4447023";

@@ -10,9 +10,9 @@ import {
   inboxDraftExampleFragmentYaml,
   lintDraftedFragment,
   RatificationDraftRefusedError,
-} from "../src/lib/inbox.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { lintTask } from "../src/lib/task-linter.js";
+} from "#src/lib/inbox.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
 
 const PROPOSAL = "verify-human-automate:W1-T3332";
 const KNOWN = new Set(["remudero", "none"]);

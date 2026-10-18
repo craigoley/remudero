@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { inboxThreadId } from "../src/lib/inbox-thread.js";
-import { createService } from "../src/lib/service.js";
-import { updateProposalRegistry } from "../src/lib/inbox.js";
-import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { createService } from "#src/lib/service.js";
+import { updateProposalRegistry } from "#src/lib/inbox.js";
+import { proposalFromJudgedShard } from "#src/lib/verify-human-judge.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const RELEASED = "verify-human:W1-T217";
 const UNRELEASED_TASK = "W1-T218";

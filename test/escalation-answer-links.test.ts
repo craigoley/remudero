@@ -15,12 +15,12 @@ import {
   verifyOptionLink,
   type EscalationOptionKind,
   type OptionLinkClaims,
-} from "../src/lib/escalate.js";
-import { renderEscalationPing } from "../src/lib/notify.js";
-import { buildEscalationLinkAnswerRoute, buildEscalationLinkConfirmRoute, createLinkRefusalRollup } from "../src/lib/panel-actions.js";
-import { appendThreadMessage } from "../src/lib/inbox-thread.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fixedClock } from "../src/lib/clock.js";
+} from "#src/lib/escalate.js";
+import { renderEscalationPing } from "#src/lib/notify.js";
+import { buildEscalationLinkAnswerRoute, buildEscalationLinkConfirmRoute, createLinkRefusalRollup } from "#src/lib/panel-actions.js";
+import { appendThreadMessage } from "#src/lib/inbox-thread.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 /**
  * test/escalation-answer-links.test.ts — W1-T2696.
@@ -318,8 +318,8 @@ test("W1-T2696: the signed payload binds every claim, so no field can be moved b
 // ── the wiring ───────────────────────────────────────────────────────────────
 
 test("W1-T2696: the REAL escalate command's ping carries the links, so the renderer is not shipped inert", async () => {
-  const { escalateCommand } = await import("../src/run-task.js");
-  const { setPresenceMode } = await import("../src/lib/escalate.js");
+  const { escalateCommand } = await import("#src/run-task.js");
+  const { setPresenceMode } = await import("#src/lib/escalate.js");
   const r = root();
   const home = root();
   const oldHome = process.env.HOME;
@@ -450,7 +450,7 @@ test("W1-T2696: losing the race to claim the marker is refused already-used, not
 });
 
 test("W1-T2696: an unusable state root degrades the ping to today's text instead of dropping the page", async () => {
-  const { escalateCommand } = await import("../src/run-task.js");
+  const { escalateCommand } = await import("#src/run-task.js");
   const r = root();
   const home = root();
   const oldHome = process.env.HOME;

@@ -6,10 +6,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { renderRuledShard } from "../src/lib/machine-filing-judge.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import type { FilingRiskRuling } from "../src/lib/risk-judge.js";
-import { taskRulingPin } from "../src/lib/task-linter.js";
+import { renderRuledShard } from "#src/lib/machine-filing-judge.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import type { FilingRiskRuling } from "#src/lib/risk-judge.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
 
 const REL = "plan/tasks.d/W1-T9890-a-commented-verify-line.yaml";
 const WHY = "writes a repository ruleset, scratch branches and replay PRs on the live repo; the operator owns the queue decision";

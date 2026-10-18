@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { reviewOrphansFor } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
+import { reviewOrphansFor } from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "#src/lib/sweep.js";
 
 /**
  * W1-T5713 — `reviewOrphansFor` used to skip every head the sweep itself superseded, so after a

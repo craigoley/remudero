@@ -13,10 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { escalateReplayStranded } from "../src/lib/escalation-catalogue.js";
-import { readClassificationSnapshot, triageFleetLane, writeClassificationSnapshot } from "../src/lib/fleet-lane.js";
-import type { DraftLintViolation } from "../src/lib/inbox.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { escalateReplayStranded } from "#src/lib/escalation-catalogue.js";
+import { readClassificationSnapshot, triageFleetLane, writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
+import type { DraftLintViolation } from "#src/lib/inbox.js";
 import {
   BAND_MEANING_REPLAY_STORE,
   replayBandMeaningRefusals,
@@ -24,8 +24,8 @@ import {
   type BandMeaningReplayInput,
   type BandMeaningReplayStore,
   type ReplayStranded,
-} from "../src/lib/inbox-replay.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/inbox-replay.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const SEED = "2026-10-13T00:10:45.000Z";
 const SEED_MS = Date.parse(SEED);

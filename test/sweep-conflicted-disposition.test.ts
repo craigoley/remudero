@@ -3,8 +3,8 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SWEEP_POLICY, conflictRefusalCause, deriveDisposition, hasCapturedMergeConflictEvidence, isPureConcurrentAddition, type ConflictFileDiff, type OpenPrView } from "../src/lib/sweep.js";
-import { hydrateMergeStateObservations, hydrateMergeStates, mergeStateFromRest, MERGE_STATE_HYDRATION_CAP } from "../src/lib/open-prs-rest.js";
+import { DEFAULT_SWEEP_POLICY, conflictRefusalCause, deriveDisposition, hasCapturedMergeConflictEvidence, isPureConcurrentAddition, type ConflictFileDiff, type OpenPrView } from "#src/lib/sweep.js";
+import { hydrateMergeStateObservations, hydrateMergeStates, mergeStateFromRest, MERGE_STATE_HYDRATION_CAP } from "#src/lib/open-prs-rest.js";
 
 /**
  * PR #1074, 2026-08-01 16:01–16:05Z: dispositioned `mergeable` FIVE CONSECUTIVE TIMES while
@@ -168,7 +168,7 @@ test("buildOpenPrViews WIRES the hydrator: a dirty PR arrives at the sweep carry
   // THE SEAM ITSELF. Every other sweep test hand-builds `OpenPrView` fixtures, so the wiring that
   // connects the gateway to the disposition table was never executed — which is exactly how the
   // dirty rows sat unreachable for so long. This drives the REAL function with a recorder.
-  const { buildOpenPrViews } = await import("../src/run-task.js");
+  const { buildOpenPrViews } = await import("#src/run-task.js");
   const dir = mkdtempSync(join(tmpdir(), "rmd-openprviews-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   writeFileSync(ledgerPath, "");

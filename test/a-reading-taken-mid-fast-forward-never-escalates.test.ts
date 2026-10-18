@@ -13,11 +13,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Escalation } from "../src/lib/escalate.js";
-import { runLiveEditLadder } from "../src/lib/live-edit-ladder.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { runLiveEditLadder } from "#src/lib/live-edit-ladder.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const T0 = Date.parse("2026-10-14T12:18:58Z");
 

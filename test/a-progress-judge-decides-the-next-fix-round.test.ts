@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict } from "../src/lib/fix-progress-judge.js";
-import { productionFixProgressJudge, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-import { runFixRung, buildFixRungDispatchArgs, readFixRoundCommitsViaGit } from "./helpers/run-task-test.js";
-import type { ReviewRunResult } from "./helpers/run-task-test.js";
+import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict } from "#src/lib/fix-progress-judge.js";
+import { productionFixProgressJudge, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { runFixRung, buildFixRungDispatchArgs, readFixRoundCommitsViaGit } from "#test/helpers/run-task-test.js";
+import type { ReviewRunResult } from "#test/helpers/run-task-test.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 

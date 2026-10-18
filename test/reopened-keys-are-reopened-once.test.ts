@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -10,8 +11,8 @@ import {
   writeReopenedKeys,
   type DraftAttemptCache,
   type DraftCache,
-} from "../src/lib/inbox.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/inbox.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // ── W1-T2566: THE MIGRATION IS BOUNDED WITHIN A BOOT AND UNBOUNDED ACROSS BOOTS ──────────────
 //
@@ -145,7 +146,7 @@ test("W1-T2566: the eviction predicate itself is unchanged — explicitly out of
 });
 
 test("W1-T2566: the closure flag is NOT removed — it is what keeps this off the per-poll path", () => {
-  const runTask = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
+  const runTask = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
   assert.match(runTask, /if \(!attemptsMigrated\) \{/, "the once-per-process guard must remain");
   // Running the eviction per poll re-opens the key W1-T192 had just written for a GENUINE failure
   // in that same poll — an unbounded retry loop wearing a migration's clothes. The flag and the

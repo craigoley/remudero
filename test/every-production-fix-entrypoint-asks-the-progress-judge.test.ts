@@ -7,12 +7,12 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { buildSweepEffects, isProductionFixProgressJudge, observeSweepEffectsWiring, productionFixProgressJudge, runSweep,
-  DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
-import { buildSweepHook, buildSweepLightHook, fixCommand, formerBoundStandIn } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+  DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
+import { buildSweepHook, buildSweepLightHook, fixCommand, formerBoundStandIn } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 type Row = { step: string; extra?: Record<string, unknown> };
 

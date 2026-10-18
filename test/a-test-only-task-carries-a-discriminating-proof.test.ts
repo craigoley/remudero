@@ -4,8 +4,8 @@ import {
   lintTask,
   promoteIntroducedPlanOnlyDiagnostics,
   proofTestOnlyDiscriminationViolations,
-} from "../src/lib/task-linter.js";
-import type { AcceptanceCriterion, Task } from "../src/lib/plan.js";
+} from "#src/lib/task-linter.js";
+import type { AcceptanceCriterion, Task } from "#src/lib/plan.js";
 
 const CENSUS = "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts";
 

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import * as goals from "../src/lib/goals.js";
-import * as carry from "../src/lib/ledger-carry.js";
+import * as goals from "#src/lib/goals.js";
+import * as carry from "#src/lib/ledger-carry.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/42";
 const at = (minute: number) => new Date(Date.UTC(2026, 9, 9, 12, minute)).toISOString();

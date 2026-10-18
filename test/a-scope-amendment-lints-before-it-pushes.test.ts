@@ -2,9 +2,9 @@
 // ever running the task linter; Rule 19 sizing blocked it and no lane could repair it.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { newAmendedBlockers, requestScopeAmendment, type ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import { lintTask } from "../src/lib/task-linter.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { newAmendedBlockers, requestScopeAmendment, type ProofAmendmentWritePorts } from "#src/lib/proof-amendment.js";
+import { lintTask } from "#src/lib/task-linter.js";
 
 const taskId = "W1-T9001";
 const shardPath = `plan/tasks.d/${taskId}-a-fixture-shard.yaml`;

@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,8 +6,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { gitRepo } from "./helpers/git-repo.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import {
   formatHandMintReservationMessage,
   gitRemoteRefReserver,
@@ -14,8 +15,8 @@ import {
   taskIdReservationRef,
   type RemoteRefReserver,
   type RemoteReserveOutcome,
-} from "../src/lib/task-id-reservation.js";
-import { classifyReservationAnchor, describeContestedId, nextTaskIdCommand, readReservationHolder } from "../src/run-task.js";
+} from "#src/lib/task-id-reservation.js";
+import { classifyReservationAnchor, describeContestedId, nextTaskIdCommand, readReservationHolder } from "#src/run-task.js";
 
 const mintRepo = gitRepo({ kind: "holder-mint-plan" });
 mkdirSync(join(mintRepo.dir, "plan"), { recursive: true });
@@ -23,8 +24,7 @@ writeFileSync(join(mintRepo.dir, "plan", "tasks.yaml"), "- id: W1-T3100\n  title
 mintRepo.git("add", "plan/tasks.yaml");
 mintRepo.git("commit", "--quiet", "-m", "fixture plan");
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = testRepoRoot();
 const gate = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 const NO_OPEN_PRS = (): string[] => [];

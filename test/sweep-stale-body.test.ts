@@ -8,9 +8,9 @@ import {
   queueStaleBodyReReview,
   runSweep,
   type StaleBodyPrView,
-} from "./helpers/sweep-test.js";
-import { runDaemon, staleBodyFindingsForTick } from "../src/lib/daemon.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
+} from "#test/helpers/sweep-test.js";
+import { runDaemon, staleBodyFindingsForTick } from "#src/lib/daemon.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
 
 const URL = "https://github.com/o/r/pull/9124";
 const HEAD = "aaaa111";

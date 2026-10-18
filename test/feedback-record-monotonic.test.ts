@@ -21,11 +21,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
-import { FEEDBACK_STATUSES, type FeedbackStatus } from "../src/lib/feedback.js";
-import { mergeFeedbackRecord } from "../src/lib/feedback-record-merge.js";
-import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent, sweepFeedbackLanding } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { FEEDBACK_STATUSES, type FeedbackStatus } from "#src/lib/feedback.js";
+import { mergeFeedbackRecord } from "#src/lib/feedback-record-merge.js";
+import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent, sweepFeedbackLanding } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // ── Section 1: mergeFeedbackRecord — a pure table over the six §7B statuses ─────────────────
 

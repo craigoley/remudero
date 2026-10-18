@@ -26,17 +26,17 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fetchCiFailures, renderFixPrompt } from "../src/run-task.js";
+import { fetchCiFailures, renderFixPrompt } from "#src/run-task.js";
 import {
   CI_LOG_FENCE_CLOSE,
   CI_LOG_FENCE_OPEN,
-} from "../src/lib/fix-fence.js";
+} from "#src/lib/fix-fence.js";
 import {
   describeCiLogUnavailable,
   renderClarificationQuestion,
   type CiFailure,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const JOB_URL = "https://github.com/craigoley/remudero/actions/runs/1/job/97999587744";
 
@@ -211,7 +211,7 @@ test("escalation body: a CAPTURED log adds no unavailability wording — the esc
 // ── the cost this restores sight to (NOT changed by this suite, only witnessed) ────────────────
 
 test("the auto-resolve table is regex-over-logTail, so an empty tail matches NO row — the cost an unexplained empty tail hid", async () => {
-  const { DEFAULT_FIX_CLASSES } = await import("../src/lib/sweep.js");
+  const { DEFAULT_FIX_CLASSES } = await import("#src/lib/sweep.js");
   const denied = withFakeGh("exit 1", () => one(failingRollup(JOB_URL)));
   const view = { ciFailures: [{ ...denied, name: "ci-gate" }] } as unknown as OpenPrView;
 

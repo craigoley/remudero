@@ -5,8 +5,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { benchmarkAaCommand, buildBenchmarkAaReport, type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
-import { COMMANDS, HANDLERS } from "../src/run-task.js";
+import { benchmarkAaCommand, buildBenchmarkAaReport, type BenchmarkAaReport } from "#src/lib/benchmark-aa.js";
+import { COMMANDS, HANDLERS } from "#src/run-task.js";
 
 const SHA = "d".repeat(40);
 const NOW = "2026-09-27T12:10:00.000Z";

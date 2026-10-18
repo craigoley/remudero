@@ -11,12 +11,12 @@ import {
   RUNNING_LONG_STEP,
   type CostAnomalyPolicy,
   type ReportedAnomalies,
-} from "../src/lib/cost-anomaly.js";
-import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
-import { realLedgerFs } from "../src/lib/ledger-union.js";
-import { parseLedger } from "../src/lib/retro.js";
-import { runSweep, type SweepDeps } from "./helpers/sweep-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/cost-anomaly.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { realLedgerFs } from "#src/lib/ledger-union.js";
+import { parseLedger } from "#src/lib/retro.js";
+import { runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T4702 — a running-long run was reported on every sweep, not once. `rotateLedger` archives every
 // `run.running_long` row (and all but the newest 200 `cost.anomaly` rows) while the run's own

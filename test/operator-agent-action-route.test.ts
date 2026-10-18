@@ -6,13 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
-import { isPaused, isStopped, pauseFilePath, requestStop, stopFilePath } from "../src/lib/fleet-control.js";
-import { buildOperatorAgentActionHandoffRoutes, type ActionHandoffConfig } from "../src/lib/operator-agent-action-handoff.js";
-import { createService, type Route, type Scope } from "../src/lib/service.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import { isPaused, isStopped, pauseFilePath, requestStop, stopFilePath } from "#src/lib/fleet-control.js";
+import { buildOperatorAgentActionHandoffRoutes, type ActionHandoffConfig } from "#src/lib/operator-agent-action-handoff.js";
+import { createService, type Route, type Scope } from "#src/lib/service.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const PREPARE = "/v1/operator-agent/action-handoff/prepare";
 const EXECUTE = "/v1/operator-agent/action-handoff/execute";

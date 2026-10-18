@@ -1,16 +1,17 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { getPriority } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { planPrPreflight, planPrPreflightAsync } from "../src/lib/plan-pr-emitter.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { planPrPreflight, planPrPreflightAsync } from "#src/lib/plan-pr-emitter.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const SETUP_URL = new URL("./setup/tmp-hygiene.ts", import.meta.url).href;
+const ROOT = repoRoot();
+const SETUP_URL = pathToFileURL(join(repoRoot(), "test/setup/tmp-hygiene.ts")).href;
 const PROOF_NAME = "test/the-plan-pr-shard-check-runs-with-the-setup-preload.test.ts";
 
 function fixture(withSetup: boolean) {

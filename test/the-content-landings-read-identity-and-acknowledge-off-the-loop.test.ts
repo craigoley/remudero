@@ -20,11 +20,11 @@ import {
   landCiLearningShardsAsync,
   landPlanReconcileShardsAsync,
   type LandCiLearningShardsOptions,
-} from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { PlanPrPreflightResult } from "#src/lib/plan-pr-emitter.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const GREEN: PlanPrPreflightResult = { ok: true, failures: [], unreadable: [] };
 const PR_URL = "https://github.com/o/r/pull/9755";

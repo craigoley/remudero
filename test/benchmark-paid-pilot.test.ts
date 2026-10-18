@@ -8,14 +8,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { buildBenchmarkAaReport, parseAaTrialManifest, type AaLedgerEvidence, type AaRow,
-  type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
+  type BenchmarkAaReport } from "#src/lib/benchmark-aa.js";
 import {
   activateBenchmarkPaidPilot, benchmarkPaidPilotCommand, buildPaidPilotReport, loadPaidPilotProtocol, paidArmPauseReasons,
   paidPilotArmAdmission, paidPilotArmFor, parsePaidPilotRequest, PAID_PILOT_CASH_CEILING_USD, PAID_PILOT_WINDOW_MS, readPaidPilotEvidence,
   REPO_IDENTITY_RE, summarizePaidPilotSpend, type PaidPilotEvidence, type PaidPilotProtocol, type PaidPilotReport,
-} from "../src/lib/benchmark-paid-pilot.js";
-import { protocolHash } from "../src/lib/eval-card.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
+} from "#src/lib/benchmark-paid-pilot.js";
+import { protocolHash } from "#src/lib/eval-card.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
 
 const SHA = "a".repeat(40);
 const AA_NOW = "2026-09-27T12:10:00.000Z";
@@ -531,7 +531,7 @@ test("paid benchmark pilot reports evidence without fabricated wins", async () =
 });
 
 test("rmd benchmark-paid-pilot is an operator verb, and a refused activation starts nothing", async () => {
-  const { COMMANDS, HANDLERS } = await import("../src/run-task.js");
+  const { COMMANDS, HANDLERS } = await import("#src/run-task.js");
   assert.ok(COMMANDS.some((spec) => spec.name === "benchmark-paid-pilot" && spec.syntax.includes("activate --request") && !spec.syntax.includes("confirm-cash-ceiling")));
   const home = mkdtempSync(join(tmpdir(), "rmd-benchmark-paid-pilot-home-"));
   const savedHome = process.env.HOME;

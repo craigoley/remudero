@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evaluateFollowUpPolicy, FOLLOW_UP_POLICY_VERSION, type FollowUpCandidate, type FollowUpHistory } from "../src/lib/follow-up-policy.js";
+import { evaluateFollowUpPolicy, FOLLOW_UP_POLICY_VERSION, type FollowUpCandidate, type FollowUpHistory } from "#src/lib/follow-up-policy.js";
 
 const base: FollowUpCandidate = {
   version: FOLLOW_UP_POLICY_VERSION,

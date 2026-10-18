@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stringify } from "yaml";
 
-import { lintDraftedFragment } from "../src/lib/inbox.js";
+import { lintDraftedFragment } from "#src/lib/inbox.js";
 
 const PROPOSAL = "verify-human-automate:W1-T3332";
 const KNOWN = new Set(["remudero", "remudero-console", "none"]);

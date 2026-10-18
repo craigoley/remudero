@@ -22,6 +22,7 @@
  *     fixture file, exactly the shape every real affected file has, rather than reaching into
  *     tmp-hygiene.ts's own internals.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -31,11 +32,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
 
-import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { lintPlanCommand, type LintPlanStatusDeps } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = repoRoot();
 const HYGIENE_HREF = pathToFileURL(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts")).href;
 const GH_FIRST_HREF = pathToFileURL(join(REPO_ROOT, "test", "helpers", "gh-first-on-path.ts")).href;
 

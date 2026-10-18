@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask, proofGrepSelfCertifyingViolations, proofGrepUnmatchableViolations } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, proofGrepSelfCertifyingViolations, proofGrepUnmatchableViolations } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── W1-T2990: WARN when a `grep:` proof aimed at the task's OWN plan record matches nothing there
 //    except the criterion carrying it — and stop that same self-match hiding the sibling check.

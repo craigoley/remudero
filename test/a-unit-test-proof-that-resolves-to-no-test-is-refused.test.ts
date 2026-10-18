@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask, proofUnitTestUnresolvableViolations } from "../src/lib/task-linter.js";
-import type { NameFilterResolution } from "../src/lib/review.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, proofUnitTestUnresolvableViolations } from "#src/lib/task-linter.js";
+import type { NameFilterResolution } from "#src/lib/review.js";
+import type { Task } from "#src/lib/plan.js";
 
 /** A minimal, otherwise-clean Task fixture — mirrors test/lint-proof-name-resolution.test.ts's own
  *  helper so this suite reads consistently with the rest of the linter's tests. */

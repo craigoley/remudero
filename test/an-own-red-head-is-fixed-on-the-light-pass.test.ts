@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   drainDetachedSweepActions, runSweep, runSweepLightPass,
   type FixDispatchEvidence, type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
-import { fixRungAllowedBesideInFlight, lightPassActionable } from "../src/run-task.js";
+} from "#src/lib/sweep.js";
+import { fixRungAllowedBesideInFlight, lightPassActionable } from "#src/run-task.js";
 
 const NOW = Date.now();
 const DEFERRED = "deferred to full sweep (light pass)";

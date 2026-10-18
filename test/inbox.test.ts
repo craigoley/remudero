@@ -42,12 +42,12 @@ import {
   type InboxClassification,
   type Proposal,
   type ReadinessContext,
-} from "../src/lib/inbox.js";
-import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { fixedClock } from "../src/lib/clock.js";
+} from "#src/lib/inbox.js";
+import { loadPlanFromYaml, type MergedResolver, type Plan } from "#src/lib/plan.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 

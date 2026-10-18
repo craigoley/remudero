@@ -1,12 +1,13 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { loadMounts, mountsPath, resolveMount } from "../src/lib/mounts.js";
-import { loadPlan, parseTasksFromYaml, PlanError, TASK_TYPES } from "../src/lib/plan.js";
+import { loadMounts, mountsPath, resolveMount } from "#src/lib/mounts.js";
+import { loadPlan, parseTasksFromYaml, PlanError, TASK_TYPES } from "#src/lib/plan.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = repoRoot();
 
 function shard(type: string): string {
   return `- id: T-${type}
@@ -52,7 +53,7 @@ test("W1-T3371: every declared task type still loads and resolves a mount, so th
 test("W1-T3371: the committed plan carries no unroutable task type", () => {
   // THE CHECK THAT WOULD HAVE CAUGHT IT ON THE DAY IT WAS FILED. A validator that only ever sees
   // fixtures proves nothing about the tree it ships with.
-  const plan = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
+  const plan = loadPlan(`${repoRoot()}/plan/tasks.yaml`);
   assert.ok(plan.tasks.length > 100, `positive control: the real plan must load (${plan.tasks.length} tasks)`);
   const mounts = loadMounts(mountsPath(REPO_ROOT));
   for (const task of plan.tasks) {

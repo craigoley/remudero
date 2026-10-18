@@ -18,7 +18,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { providerRoutingOwnsHeadroom, resolveHeadroomEnabled, overflowFallbackRefusal } from "../src/lib/config.js";
+import { providerRoutingOwnsHeadroom, resolveHeadroomEnabled, overflowFallbackRefusal } from "#src/lib/config.js";
 
 const KEY = "test-only-overflow-factor-present";
 

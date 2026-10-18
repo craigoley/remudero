@@ -26,8 +26,8 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPlan } from "../src/lib/plan.js";
-import { parkedVerifyHumanShards, shardEvidence } from "../src/run-task.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { parkedVerifyHumanShards, shardEvidence } from "#src/run-task.js";
 
 const clock = { now: () => Date.UTC(2026, 8, 22), date: () => new Date(Date.UTC(2026, 8, 22)), iso: () => "2026-09-22T00:00:00.000Z" };
 

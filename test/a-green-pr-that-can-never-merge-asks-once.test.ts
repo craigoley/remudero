@@ -21,9 +21,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DISPOSITION_RULES, type OpenPrView } from "../src/lib/sweep.js";
-import { terminalArmRefusal } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+import { DISPOSITION_RULES, type OpenPrView } from "#src/lib/sweep.js";
+import { terminalArmRefusal } from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY } from "#src/lib/sweep.js";
 
 const HEAD = "aaaa111";
 const OTHER_HEAD = "bbbb222";

@@ -4,19 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import type { Config } from "#src/lib/config.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { PlanPrPreflightResult } from "#src/lib/plan-pr-emitter.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
   noPrVerdictRowsFromLedger,
   refusalIsMainCaused,
-} from "../src/lib/refusal-amendment.js";
-import { buildSweepEffects, runSweep, type BuildSweepEffectsDeps, type SweepDeps } from "./helpers/sweep-test.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
+} from "#src/lib/refusal-amendment.js";
+import { buildSweepEffects, runSweep, type BuildSweepEffectsDeps, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
 
 // W1-T5531 — W1-T5405 records a red refusal-amendment preflight as the source run's outcome, and the
 // reader treated every such row as handled forever. When origin/main ITSELF was red, the amendment failed

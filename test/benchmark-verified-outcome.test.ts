@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runBenchmarkCohortPass, runBenchmarkVerifiedOverlayPass } from "../src/lib/benchmark-cohort.js";
-import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "../src/lib/benchmark-verified-outcome.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
+import { runBenchmarkCohortPass, runBenchmarkVerifiedOverlayPass } from "#src/lib/benchmark-cohort.js";
+import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "#src/lib/benchmark-verified-outcome.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
 
 const cutoff = "2026-09-27T12:10:00.000Z";
 const sha = "a".repeat(40);

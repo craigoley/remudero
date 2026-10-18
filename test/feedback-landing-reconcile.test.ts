@@ -19,17 +19,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
-import { FEEDBACK_STATUSES, type FeedbackStatus } from "../src/lib/feedback.js";
-import { LANDING_BRANCH, landFeedback } from "../src/lib/feedback-landing.js";
+import { FEEDBACK_STATUSES, type FeedbackStatus } from "#src/lib/feedback.js";
+import { LANDING_BRANCH, landFeedback } from "#src/lib/feedback-landing.js";
 import {
   reconcileFeedbackLanding,
   buildFeedbackReconcileManifest,
   ROOT_NAME_RE,
   type FeedbackReconcileRoot,
-} from "../src/lib/feedback-reconcile.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { feedbackReconcileCommand, HANDLERS, renderFeedbackReconcile } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/feedback-reconcile.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { feedbackReconcileCommand, HANDLERS, renderFeedbackReconcile } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function entryYaml(fields: { status: FeedbackStatus; id?: string; raw?: string } & Record<string, unknown>): string {
   const { status, id = "fb-test", raw = "fixture text", ...rest } = fields;

@@ -3,10 +3,10 @@ import fs, { mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "n
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { loadPlan } from "../src/lib/plan.js";
-import { planFilesIdentity } from "../src/lib/thread-plan.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { buildOpenPrViews } from "../src/run-task.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { planFilesIdentity } from "#src/lib/thread-plan.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 
 const entry = (retired = false) => `- id: W1-T1
   title: fixture task

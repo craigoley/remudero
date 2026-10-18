@@ -11,8 +11,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { COMPANION_PATH_CLASSES, type CompanionPathClass } from "../src/lib/companion-paths.js";
-import { checkOneConcern, judgeRubric } from "../src/lib/review.js";
+import { COMPANION_PATH_CLASSES, type CompanionPathClass } from "#src/lib/companion-paths.js";
+import { checkOneConcern, judgeRubric } from "#src/lib/review.js";
 
 const REVIEW_SRC = "src/lib/review.ts";
 

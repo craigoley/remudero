@@ -19,8 +19,8 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
-import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
+} from "#test/helpers/sweep-test.js";
+import { activeWorkerCount, withWorkerOccupancy } from "#src/lib/worker.js";
 
 const NOW = Date.parse("2026-09-05T20:00:00Z");
 const HOUR = 60 * 60 * 1000;

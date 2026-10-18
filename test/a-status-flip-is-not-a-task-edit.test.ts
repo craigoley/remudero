@@ -19,17 +19,18 @@
  *        (test/fixtures/live-plan-writers/status-flip/) in a disposable checkout, so a concurrent
  *        suite never observes a fixture's temporary mutation.
  */
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
-import { statusFlipOnlyTaskIds, STATUS_LINE_RE } from "../src/lib/task-linter.js";
-import { lintPlanCommand } from "../src/run-task.js";
-import { isolatedCheckout } from "./helpers/isolated-checkout.js";
+import { statusFlipOnlyTaskIds, STATUS_LINE_RE } from "#src/lib/task-linter.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { isolatedCheckout } from "#test/helpers/isolated-checkout.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = testRepoRoot();
 const FIXTURE_CHECKOUT = isolatedCheckout(REPO_ROOT);
 const FIXTURE_PLAN = join(FIXTURE_CHECKOUT.root, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.yaml");
 const FIXTURE_DIR = join(FIXTURE_CHECKOUT.root, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.d");

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { retentionCanaryProtocol, executeRetentionCanary } from "../src/lib/model-canary-retention.js";
-import { projectCanaryRuns } from "../src/lib/model-canary-metrics.js";
-import type { CanaryExecutionPorts } from "../src/lib/model-canary-runner.js";
+import { retentionCanaryProtocol, executeRetentionCanary } from "#src/lib/model-canary-retention.js";
+import { projectCanaryRuns } from "#src/lib/model-canary-metrics.js";
+import type { CanaryExecutionPorts } from "#src/lib/model-canary-runner.js";
 
 test("canary retention replays native roles at 25 and 50 turns and grades the whole conversation", async () => {
   for (const turns of [25, 50] as const) {

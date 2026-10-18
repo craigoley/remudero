@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { execWhitelistedProof, judgeReview, parseWhitelistedProof } from "../src/lib/review.js";
-import { proofGrepSafetyViolations } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { execWhitelistedProof, judgeReview, parseWhitelistedProof } from "#src/lib/review.js";
+import { proofGrepSafetyViolations } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── W1-T3208 ──────────────────────────────────────────────────────────────
 //

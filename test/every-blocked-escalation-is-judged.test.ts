@@ -32,20 +32,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { daemonCommand, ledgerPathFor } from "./helpers/run-task-test.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import { daemonCommand, ledgerPathFor } from "#test/helpers/run-task-test.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
 import {
   escalateCircuitBreak,
   escalateLifetimeCapExceeded,
   escalateCrashLoop,
-} from "../src/lib/escalation-catalogue.js";
-import { ESCALATION_JUDGED_STEP, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, configureEscalationTriage } from "../src/lib/escalate.js";
-import type { Escalation, EscalationJudgeVerdict, IssueGateway } from "../src/lib/escalate.js";
-import type { Task } from "../src/lib/plan.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/escalation-catalogue.js";
+import { ESCALATION_JUDGED_STEP, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, configureEscalationTriage } from "#src/lib/escalate.js";
+import type { Escalation, EscalationJudgeVerdict, IssueGateway } from "#src/lib/escalate.js";
+import type { Task } from "#src/lib/plan.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // ── fixture plumbing — the same recipe test/daemon-crashloop-wiring.test.ts already established
 // for driving daemonCommand's real self-target boot path without a live daemon loop ──────────────

@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { buildSweepHook, DECLARED_BRANCH_GUARDS, reapBranchesCommand, runAutomaticBranchReapRung } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { buildSweepHook, DECLARED_BRANCH_GUARDS, reapBranchesCommand, runAutomaticBranchReapRung } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const SLUG = "w1t1060-instrument-declare";
 const parsed = (): Plan => ({ tasks: [{ id: "W1-T1060" }], byId: new Map() }) as never;

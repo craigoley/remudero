@@ -14,10 +14,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
-import { LANDING_BRANCH } from "../src/lib/feedback-landing.js";
-import { buildFeedbackReconcileManifest, reconcileFeedbackLanding } from "../src/lib/feedback-reconcile.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { LANDING_BRANCH } from "#src/lib/feedback-landing.js";
+import { buildFeedbackReconcileManifest, reconcileFeedbackLanding } from "#src/lib/feedback-reconcile.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const FB = "plan/feedback";
 

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildOperatorAgentRoutes, type ContextItem } from "../src/lib/operator-agent.js";
+import { createService } from "#src/lib/service.js";
+import { buildOperatorAgentRoutes, type ContextItem } from "#src/lib/operator-agent.js";
 
 const READ = "context-shape-read";
 const WRITE = "context-shape-write";

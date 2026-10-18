@@ -1,13 +1,15 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as review from "../src/lib/review.js";
-import * as reservation from "../src/lib/task-id-reservation.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as review from "#src/lib/review.js";
+import * as reservation from "#src/lib/task-id-reservation.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
-const gate = await import(new URL("../scripts/task-id-existence-check.mjs", import.meta.url).href);
+const gate = await import(pathToFileURL(join(repoRoot(), "scripts/task-id-existence-check.mjs")).href);
 const ID = "W1-T96076";
 const REF = `refs/rmd-id/${ID}`;
 const FILE = `plan/tasks.d/${ID}-fixture.yaml`;

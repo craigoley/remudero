@@ -9,8 +9,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { inboxThreadId, type ThreadMessage } from "../src/lib/inbox-thread.js";
-import { listThreadViews, type InboxThreadItem } from "../src/lib/inbox-responder.js";
+import { inboxThreadId, type ThreadMessage } from "#src/lib/inbox-thread.js";
+import { listThreadViews, type InboxThreadItem } from "#src/lib/inbox-responder.js";
 
 const plain = {
   headline: "A question", whatHappened: "It happened.", whatWeNeed: "Review it.", ifNothingHappens: "It waits.", options: [], source: "template",

@@ -19,11 +19,11 @@ import { test } from "node:test";
 
 // The two shapes are read off the module namespaces, so this file still LOADS at a base without them and its tests
 // fail there rather than the whole file refusing to link.
-import * as inbox from "../src/lib/inbox.js";
-import { materializeDraftTaskIds, type DraftTaskIdMintDeps } from "../src/lib/inbox.js";
-import * as taskLinter from "../src/lib/task-linter.js";
-import { lintPlanCommand } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import * as inbox from "#src/lib/inbox.js";
+import { materializeDraftTaskIds, type DraftTaskIdMintDeps } from "#src/lib/inbox.js";
+import * as taskLinter from "#src/lib/task-linter.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const record = (id: string, title: string, dependsOn: string[] | string = []) =>
   [

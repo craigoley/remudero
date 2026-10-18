@@ -17,9 +17,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { codexCapacityFromRateLimits } from "../src/lib/worker-provider.js";
-import { writeProviderRoutingStatus, providerRoutingStatusPath } from "../src/lib/provider-routing-status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { codexCapacityFromRateLimits } from "#src/lib/worker-provider.js";
+import { writeProviderRoutingStatus, providerRoutingStatusPath } from "#src/lib/provider-routing-status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 import { readFileSync } from "node:fs";
 
 const BUCKET = {

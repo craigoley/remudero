@@ -1,3 +1,5 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -7,7 +9,7 @@ import {
   reviewAdmissionKey,
   selectReviewAdmission,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 // W1-T3272 — CLOCK-ANCHORED, NOT CALENDAR-STAMPED. These fixtures were dated 2026-08-27/28 and the
 // sweep's staleness rung ages `lastActivityAt` against `Date.now()` at 14 days, so on 2026-09-10
@@ -146,7 +148,7 @@ test("W1-T2426 (acceptance 4): only a post-review-eligible PR is ever a candidat
 // ── acceptance 5: nothing waits, sleeps or paces ────────────────────────────────────────────
 
 test("W1-T2426 (acceptance 5): the admission path adds nothing that waits, sleeps or paces", () => {
-  const src = new URL("../src/lib/sweep.ts", import.meta.url);
+  const src = pathToFileURL(`${repoRoot()}/src/lib/sweep.ts`);
   const text = readFileSyncUtf8(src);
   const fn = extractFunction(text, "export function reviewAdmissionKey");
   assert.ok(fn.length > 0, "the function must be found, or this assertion is vacuous");
@@ -194,7 +196,7 @@ test("W1-T2426 (acceptance 6): the shared comparator keeps its tie-break and its
 // ── acceptance 7: a stand-down names the mechanism that stood it down ───────────────────────
 
 test("W1-T2426 (acceptance 7): the light pass names the admission bound as the reason a post-review stood down", () => {
-  const text = readFileSyncUtf8(new URL("../src/lib/sweep.ts", import.meta.url));
+  const text = readFileSyncUtf8(pathToFileURL(`${repoRoot()}/src/lib/sweep.ts`));
   assert.match(
     text,
     /not admitted this pass: semantic post-review admission bound \$\{semanticBound\}/,

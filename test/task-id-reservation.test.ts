@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import { strict as assert } from "node:assert";
 import {
   copyFileSync,
@@ -37,10 +38,10 @@ import {
   TaskIdReservationError,
   idReservationFailureFields,
   withIdReservationLogging,
-} from "../src/lib/task-id-reservation.js";
-import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, rotateLedger } from "../src/lib/ledger.js";
-import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/task-id-reservation.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { parseWhitelistedProof, narrowNameFilteredArgs } from "#src/lib/review.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * The property this module exists for: a minted id is unusable by anyone else from the moment it
@@ -245,7 +246,7 @@ test("nextTaskIdCommand still exits 0 when the config — and so the reservation
   writeFileSync(planPath, "- id: W1-T5\n");
   t.mock.method(console, "log", () => {});
 
-  const { nextTaskIdCommand } = await import("../src/run-task.js");
+  const { nextTaskIdCommand } = await import("#src/run-task.js");
   assert.equal(await nextTaskIdCommand(["--plan", planPath, "--offline"]), 0);
 });
 
@@ -456,7 +457,7 @@ test("W1-T949: reserveTaskIdBlockRemote refuses a non-positive count instead of 
 // a temp root and the child is pointed at that -- the exact shape test/ledger-rotation.test.ts's
 // own W1-T964 check uses (fixed by #2881), reproduced here rather than re-derived.
 test("W1-T949: removing the per id reservation fails the N ref test", () => {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = testRepoRoot();
   const srcRelPath = join("src", "lib", "task-id-reservation.ts");
   const srcPath = join(repoRoot, srcRelPath);
   const targetTestFile = "test/task-id-reservation.test.ts";

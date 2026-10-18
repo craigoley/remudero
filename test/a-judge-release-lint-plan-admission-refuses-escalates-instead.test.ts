@@ -9,14 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { Proposal } from "../src/lib/inbox.js";
-import { machineShardHeaderLines } from "../src/lib/machine-filing.js";
-import { renderRuledShard, runMachineFilingJudge } from "../src/lib/machine-filing-judge.js";
-import { loadPlan, machineFilingAdmissionViolations, parseTasksFromYaml } from "../src/lib/plan.js";
-import type { FilingRiskRuling } from "../src/lib/risk-judge.js";
-import { taskRulingPin } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Proposal } from "#src/lib/inbox.js";
+import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
+import { renderRuledShard, runMachineFilingJudge } from "#src/lib/machine-filing-judge.js";
+import { loadPlan, machineFilingAdmissionViolations, parseTasksFromYaml } from "#src/lib/plan.js";
+import type { FilingRiskRuling } from "#src/lib/risk-judge.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const CLOCK = fixedClock(Date.parse("2026-10-10T18:30:00Z"));
 const DOC = "docs/ci-friction-remedies.md";

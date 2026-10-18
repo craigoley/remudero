@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
@@ -5,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { triageClaimReserverFor } from "../src/run-task.js";
+import { triageClaimReserverFor } from "#src/run-task.js";
 import {
   TRIAGE_CLAIM_AGE_ONLY_CEILING_MS,
   TRIAGE_CLAIM_LIVENESS_WINDOW_MS,
@@ -18,7 +19,7 @@ import {
   type AutoTriageInputs,
   type TriageClaimReserver,
   type TriageLivenessRow,
-} from "../src/lib/auto-triage.js";
+} from "#src/lib/auto-triage.js";
 
 // W1-T4769 — a dead holder's triage claim stalled a 44-entry backlog because every pass re-selected
 // the same oldest entry and nothing could release a claim whose lane died before its `finally`.
@@ -238,11 +239,11 @@ test("W1-T4769 REAL GIT: the reserver lists claims in one ls-remote and reads th
 // ── THE WIRING — autoTriageCheck itself, not just the pure halves ────────────────────────────
 
 test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a failing ledger write", async () => {
-  const { autoTriageCheck } = await import("../src/run-task.js");
-  const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
-  const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
+  const { autoTriageCheck } = await import("#src/run-task.js");
+  const { loadPolicy, policyPath } = await import("#src/lib/policy.js");
+  const { newFeedbackIdsOldestFirst } = await import("#src/lib/auto-triage.js");
   const { mkdirSync, writeFileSync } = await import("node:fs");
-  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repo = repoRoot();
   const candidates = newFeedbackIdsOldestFirst(repo);
   if (candidates.length < 1) return; // nothing `status: new` in this checkout: the sweep is never reached
   const shipped = loadPolicy(policyPath(repo));
@@ -257,7 +258,7 @@ test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a 
   const rootA = mkdtempSync(join(tmpdir(), "rmd-liveness-default-read-"));
   mkdirSync(join(rootA, "state"), { recursive: true });
   try {
-    const config = { root: rootA, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const config = { root: rootA, claudeBin: "/bin/true" } as unknown as import("#src/lib/config.js").Config;
     const reserver = fakeReserver({ [head]: { sha: "s", message: anchor(94, "h", 0).replace(iso(0), at(5 * HOUR)) } });
     const d = await autoTriageCheck({ ...args, config, claimReserver: reserver });
     assert.deepEqual(reserver.drops, [], "an unobservable holder is not dropped on the default read");
@@ -277,7 +278,7 @@ test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a 
     return true;
   };
   try {
-    const config = { root: rootB, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const config = { root: rootB, claudeBin: "/bin/true" } as unknown as import("#src/lib/config.js").Config;
     const d = await autoTriageCheck({
       ...args,
       config,
@@ -297,11 +298,11 @@ test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a 
 });
 
 test("W1-T4769 WIRING: autoTriageCheck skips a held head and releases a dead holder before deciding", async () => {
-  const { autoTriageCheck } = await import("../src/run-task.js");
-  const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
-  const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
+  const { autoTriageCheck } = await import("#src/run-task.js");
+  const { loadPolicy, policyPath } = await import("#src/lib/policy.js");
+  const { newFeedbackIdsOldestFirst } = await import("#src/lib/auto-triage.js");
   const { mkdirSync } = await import("node:fs");
-  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repo = repoRoot();
   const candidates = newFeedbackIdsOldestFirst(repo);
   if (candidates.length < 2) return; // the checkout holds too few `status: new` entries to have a head to skip
   const shipped = loadPolicy(policyPath(repo));
@@ -309,7 +310,7 @@ test("W1-T4769 WIRING: autoTriageCheck skips a held head and releases a dead hol
   const root = mkdtempSync(join(tmpdir(), "rmd-liveness-wiring-"));
   mkdirSync(join(root, "state"), { recursive: true });
   try {
-    const config = { root, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const config = { root, claudeBin: "/bin/true" } as unknown as import("#src/lib/config.js").Config;
     const now = new Date();
     const at = (agoMs: number): string => new Date(now.getTime() - agoMs).toISOString();
     const [head, second] = candidates;

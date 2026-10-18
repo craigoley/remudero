@@ -17,7 +17,7 @@ import {
   projectMergedTaskCandidates,
   type CreditCandidate,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 function openPr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {

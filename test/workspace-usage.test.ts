@@ -5,10 +5,10 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Script } from "node:vm";
-import { assessWorkspaceDiskBudget, sampleWorkspaceUsage, workspaceSizeWarning, workspaceUsageEvidence } from "../src/lib/workspace-usage.js";
-import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
-import { renderCanaryReport } from "../src/lib/model-canary-report.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
+import { assessWorkspaceDiskBudget, sampleWorkspaceUsage, workspaceSizeWarning, workspaceUsageEvidence } from "#src/lib/workspace-usage.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { renderCanaryReport } from "#src/lib/model-canary-report.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 
 test("workspace measurements distinguish a proven empty root from missing or budget-incomplete evidence", (t) => {
   const { dir } = ownedFixtureDir(t, "workspace-observation");

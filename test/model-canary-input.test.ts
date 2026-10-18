@@ -4,8 +4,8 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { canaryCommand } from "../src/lib/model-canary-command.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { canaryCommand } from "#src/lib/model-canary-command.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 test("canary descriptor input refuses a platform without the required no-follow flag", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-descriptor-flags-`));
   try {

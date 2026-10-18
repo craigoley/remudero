@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlan, PlanError, taskRecordPath } from "../src/lib/plan.js";
+import { loadPlan, PlanError, taskRecordPath } from "#src/lib/plan.js";
 
 /**
  * test/plan-sharding.test.ts — W1-T122: PLAN SHARDING (plan/tasks.d/).

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { checksStateFromRollup, dedupeRollupByLatestAttempt, type RollupCheckEntry } from "../src/lib/sweep.js";
-import { fetchCiFailures } from "../src/run-task.js";
+import { checksStateFromRollup, dedupeRollupByLatestAttempt, type RollupCheckEntry } from "#src/lib/sweep.js";
+import { fetchCiFailures } from "#src/run-task.js";
 
 /**
  * W1-T457 — a SUPERSEDED cancelled check-run makes checksState red forever, so the fix rung

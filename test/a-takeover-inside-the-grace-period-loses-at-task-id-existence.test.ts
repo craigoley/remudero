@@ -11,6 +11,7 @@
 //
 // Every fixture below pushes that exact two-commit chain to a LOCAL bare origin — never a real
 // refs/rmd-id/* — under a synthetic id.
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,13 +19,12 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { formatReservationAnchorMessage, RESERVATION_PUSH_GRACE_MS } from "../src/lib/task-id-reservation.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { formatReservationAnchorMessage, RESERVATION_PUSH_GRACE_MS } from "#src/lib/task-id-reservation.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const gate = await import(pathToFileURL(join(__dirname, "..", "scripts", "task-id-existence-check.mjs")).href);
+const gate = await import(pathToFileURL(join(repoRoot(), "scripts/task-id-existence-check.mjs")).href);
 
 const ID = "W1-T9597";
 const REF = `refs/rmd-id/${ID}`;

@@ -3,9 +3,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { lintTask, proofScopeViolations } from "../src/lib/task-linter.js";
-import { judgeCriterion } from "../src/lib/review.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, proofScopeViolations } from "#src/lib/task-linter.js";
+import { judgeCriterion } from "#src/lib/review.js";
+import type { Task } from "#src/lib/plan.js";
 
 /** A minimal, otherwise-clean Task fixture — mirrors lint-proof-scope.test.ts's own helper so
  *  this suite reads consistently with the rest of the linter's tests. */

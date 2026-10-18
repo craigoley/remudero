@@ -11,8 +11,8 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { writeAtomic } from "../src/lib/fs-race-safe.js";
+import type { Config } from "#src/lib/config.js";
+import { writeAtomic } from "#src/lib/fs-race-safe.js";
 import {
   createProposalShardReader,
   loadProposalRegistry,
@@ -22,9 +22,9 @@ import {
   type DraftedCandidate,
   type Proposal,
   type ProposalShardReaderFs,
-} from "../src/lib/inbox.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildInboxDraftHook } from "../src/run-task.js";
+} from "#src/lib/inbox.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildInboxDraftHook } from "#src/run-task.js";
 
 const proposal = (id: string, summary = "s"): Proposal => ({ id, summary, evidenceAnchors: [] }) as unknown as Proposal;
 const cand = (id: string): DraftedCandidate => ({ proposalId: id, fragmentYaml: `- id: ${id}\n`, stampLine: "stamp", anchorFingerprint: "" });

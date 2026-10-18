@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { escalate, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
+import { escalate, type Escalation, type IssueGateway } from "#src/lib/escalate.js";
 
 /**
  * W1-T4659 — "A NEW HEAD OPENS A NEW NEEDS-HUMAN ISSUE AND THE OLD ONE STAYS OPEN FOREVER".

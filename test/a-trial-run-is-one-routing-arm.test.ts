@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { accumulateUsageLine, buildUsageProjection, usageTelemetryState, reasonPreview } from "../src/lib/usage-telemetry.js";
-import { buildAnalyticsRoute, deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "../src/lib/analytics-route.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { accumulateUsageLine, buildUsageProjection, usageTelemetryState, reasonPreview } from "#src/lib/usage-telemetry.js";
+import { buildAnalyticsRoute, deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "#src/lib/analytics-route.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 const now = "2026-10-02T12:00:00Z";
 const reason = "trial spend evidence unavailable: ledger source unreadable or incomplete; preserve the complete explanation";
 const assignment = (id: string, trialReason = reason) => ({ step: "worker.assignment", ts: "2026-10-02T10:00:00Z", run_id: id,

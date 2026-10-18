@@ -6,9 +6,9 @@ import {
   hasChangedFilesBlock,
   renderAcceptanceBlock,
   renderChangedFilesBlock,
-} from "../src/lib/plan-pr-emitter.js";
-import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
-import { bodyContradictsDiff, changesetClaimsDisagreeing, parseAcceptanceBlock } from "../src/lib/review.js";
+} from "#src/lib/plan-pr-emitter.js";
+import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, parseAcceptanceBlock } from "#src/lib/review.js";
 
 /**
  * W1-T2535 — every "exactly N files" or scope sentence in a PR body is `git diff --name-only`

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintTask, type DeclaredBudgetCalibrationByClass } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask, type DeclaredBudgetCalibrationByClass } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 function task(overrides: Partial<Task> = {}): Task {
   return {

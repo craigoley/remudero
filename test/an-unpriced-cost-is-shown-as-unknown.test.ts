@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, rmSync } from "node:fs";
-import { accumulateUsageLine, buildUsageProjection, usageTelemetryState } from "../src/lib/usage-telemetry.js";
-import { createAnalyticsSnapshotCache, writeAnalyticsCheckpoint, deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "../src/lib/analytics-route.js";
-import { deriveDayUnpricedRows, checkCostGovernor, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { costGovernorGateFor } from "../src/run-task.js";
+import { accumulateUsageLine, buildUsageProjection, usageTelemetryState } from "#src/lib/usage-telemetry.js";
+import { createAnalyticsSnapshotCache, writeAnalyticsCheckpoint, deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "#src/lib/analytics-route.js";
+import { deriveDayUnpricedRows, checkCostGovernor, DEFAULT_SWEEP_POLICY } from "#src/lib/sweep.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { costGovernorGateFor } from "#src/run-task.js";
 
 const now = "2026-10-02T12:00:00Z";
 const rows = [undefined, 0, 2, -1, NaN].map((cost, i) => ({

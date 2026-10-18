@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -14,14 +15,14 @@ import {
   RatificationDraftRefusedError,
   ratificationPrBody,
   type RatificationPayload,
-} from "../src/lib/inbox.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { fixedClock, systemClock } from "../src/lib/clock.js";
-import { changedFilesBlockDrift } from "../src/lib/plan-pr-emitter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveCommand } from "../src/run-task.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/inbox.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
+import { changedFilesBlockDrift } from "#src/lib/plan-pr-emitter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { approveCommand } from "#src/run-task.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T4706. W1-T4700 routed the SINGLE approve through `fileRatificationDraft` (the stamp and repo
 // re-check, and a PR body naming only the paths written). The BATCH lane still wrote through the
@@ -30,7 +31,7 @@ import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "./helpers/git-
 // two-shard body. The drives below run the REAL un-injected gateways offline: a bare throwaway
 // origin, a `gh` shim on PATH, and `approveCommand` itself.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = repoRoot();
 const KNOWN = new Set(["none", "remudero"]);
 const OWN_PR_URL = "https://github.com/craigoley/remudero/pull/4706";
 const PRIOR_PR_URL = "https://github.com/craigoley/remudero/pull/4437";

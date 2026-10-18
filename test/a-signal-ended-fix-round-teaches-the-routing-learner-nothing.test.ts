@@ -5,7 +5,7 @@ import {
   fixArmEvidence,
   fixRoutingDecisionFields,
   fixRoutingWeights,
-} from "../src/lib/fix-routing-learner.js";
+} from "#src/lib/fix-routing-learner.js";
 
 // W1-T6028: a fix round whose worker was ENDED BY A SIGNAL (orphan sweep, deploy, OOM) says nothing about
 // whether its arm's rounds commit. W1-T5999 writes such a round as `subtype: "signal_terminated"`,

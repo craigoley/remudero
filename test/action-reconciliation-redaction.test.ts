@@ -4,8 +4,8 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendExternalEffectLedger } from "../src/lib/ledger.js";
-import { reconcileExternalEffect } from "../src/lib/action-reconciliation.js";
+import { appendExternalEffectLedger } from "#src/lib/ledger.js";
+import { reconcileExternalEffect } from "#src/lib/action-reconciliation.js";
 
 test("connector evidence is redacted and an unavailable observation cannot become a healthy receipt", async () => {
   const result = await reconcileExternalEffect({

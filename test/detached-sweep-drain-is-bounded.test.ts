@@ -4,15 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runDaemon, type DaemonFreshness } from "../src/lib/daemon.js";
-import { loadPlan } from "../src/lib/plan.js";
+import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
+import { loadPlan } from "#src/lib/plan.js";
 import {
   DEFAULT_SWEEP_POLICY,
   drainDetachedSweepActions,
   detachedSweepActionCount,
   runSweepLightPass,
   type OpenPrView,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

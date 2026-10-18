@@ -1,13 +1,14 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { lintTask } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 const MISSING = "test/w1-t3747-does-not-exist.test.ts";
 const PROOF = `unit test: ${MISSING}`;
-const gate = (await import(pathToFileURL(join(fileURLToPath(new URL(".", import.meta.url)), "..", "scripts", "acceptance-author-gate.mjs")).href)) as {
+const gate = (await import(pathToFileURL(join(repoRoot(), "scripts/acceptance-author-gate.mjs")).href)) as {
   evaluateGate: (input: Record<string, unknown>) => { ok: boolean; defect?: string; message: string };
 };
 

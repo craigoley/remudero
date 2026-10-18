@@ -3,8 +3,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { captureCiRemedyComponent, recordCiRemedyExecution, ciRemedyExecutionOf, ciRemedyExecutionReport,
-  CI_REMEDY_EXECUTIONS_MAX, type CiRemedyExecution } from "../src/lib/ci-remedy-execution.js";
-import type { ImportedModuleEvidence } from "../src/lib/prevention-source-evidence.js";
+  CI_REMEDY_EXECUTIONS_MAX, type CiRemedyExecution } from "#src/lib/ci-remedy-execution.js";
+import type { ImportedModuleEvidence } from "#src/lib/prevention-source-evidence.js";
 
 const T = (n: number) => `2026-10-12T00:00:${String(n).padStart(2, "0")}.000Z`;
 const caller: ImportedModuleEvidence = { state: "observed", source: "module-import-git", path: "src/run-task.ts",

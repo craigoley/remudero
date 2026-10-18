@@ -6,16 +6,16 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { BENCHMARK_AA_RECEIPT_VERSION, BENCHMARK_AA_VERSION } from "../src/lib/benchmark-aa.js";
+import { BENCHMARK_AA_RECEIPT_VERSION, BENCHMARK_AA_VERSION } from "#src/lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, buildPaidPilotReport, paidArmPauseReasons, paidPilotArmAdmission, parsePaidPilotRequest,
-  readPaidPilotEvidence } from "../src/lib/benchmark-paid-pilot.js";
-import type { Config } from "../src/lib/config.js";
-import type { GoldenCorpusItem } from "../src/lib/golden-corpus.js";
-import type { PairedReviewCase } from "../src/lib/paired-review-eval.js";
-import { reviewerReplayStack, sealedReviewer } from "../src/lib/replay-harness.js";
-import { verifyReviewerCaseEvidence } from "../src/lib/review-finding-evidence.js";
-import { benchmarkReviewerReplayCommand, HANDLERS } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+  readPaidPilotEvidence } from "#src/lib/benchmark-paid-pilot.js";
+import type { Config } from "#src/lib/config.js";
+import type { GoldenCorpusItem } from "#src/lib/golden-corpus.js";
+import type { PairedReviewCase } from "#src/lib/paired-review-eval.js";
+import { reviewerReplayStack, sealedReviewer } from "#src/lib/replay-harness.js";
+import { verifyReviewerCaseEvidence } from "#src/lib/review-finding-evidence.js";
+import { benchmarkReviewerReplayCommand, HANDLERS } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const idle = { liveness: { state: "up" as const, quiet: true as const },

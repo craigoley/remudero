@@ -15,10 +15,10 @@ import {
   type AutomationAction,
   type AutomationActionReceipt,
   type AutomationApprovalDecision,
-} from "../src/lib/automation-action.js";
-import { EXECUTOR_EVIDENCE_CODE, SELF_REPORTED_CODE, executeCatalogueAction, executorEvidenceRef } from "../src/lib/action-executor.js";
-import { OPERATOR_AGENT_ACTION_RECEIPT_STEP, OPERATOR_AGENT_ACTION_STEP } from "../src/lib/operator-agent.js";
-import { appendPanelLedger } from "../src/lib/panel-actions.js";
+} from "#src/lib/automation-action.js";
+import { EXECUTOR_EVIDENCE_CODE, SELF_REPORTED_CODE, executeCatalogueAction, executorEvidenceRef } from "#src/lib/action-executor.js";
+import { OPERATOR_AGENT_ACTION_RECEIPT_STEP, OPERATOR_AGENT_ACTION_STEP } from "#src/lib/operator-agent.js";
+import { appendPanelLedger } from "#src/lib/panel-actions.js";
 import {
   intentPlanActions,
   intentPlanExecution,
@@ -26,9 +26,9 @@ import {
   type IntentPlan,
   type IntentPlanEvent,
   type IntentPlanLinkedAction,
-} from "../src/lib/intent-plan.js";
-import { CLOCK, HEALTHY, MINUTE, NOW_MS, postJson, rowsAt, tempStatePath, withDelegationService } from "./helpers/delegation-profile-fixture.js";
-import { builtPlan, DECISION_PATH, planInput, PROPOSER, planState, readPlans, stepInput } from "./helpers/intent-plan-fixture.js";
+} from "#src/lib/intent-plan.js";
+import { CLOCK, HEALTHY, MINUTE, NOW_MS, postJson, rowsAt, tempStatePath, withDelegationService } from "#test/helpers/delegation-profile-fixture.js";
+import { builtPlan, DECISION_PATH, planInput, PROPOSER, planState, readPlans, stepInput } from "#test/helpers/intent-plan-fixture.js";
 
 /** A catalogued kick: the catalogue entry's own declared risk, approval and rollback. */
 const KICK_STEP = stepInput({

@@ -13,20 +13,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AffectedSuitesInput } from "../src/lib/affected-suites.js";
-import type { AsyncIssueGateway } from "../src/lib/escalate.js";
+import type { AffectedSuitesInput } from "#src/lib/affected-suites.js";
+import type { AsyncIssueGateway } from "#src/lib/escalate.js";
 // A namespace import, so at a base without the brief this file still loads and each test fails on its own.
-import * as rung from "../src/lib/main-health-rung.js";
+import * as rung from "#src/lib/main-health-rung.js";
 import {
   buildMainHealthRung,
   type MainHealthRungDeps,
   type MainRepairFixRequest,
   type MainRepairLane,
   type MainRepairMerge,
-} from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

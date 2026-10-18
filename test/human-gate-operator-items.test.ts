@@ -2,20 +2,20 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { COST_ANOMALY_STEP } from "../src/lib/cost-anomaly.js";
-import { deployAutoPath, deployImageManualPath, deployMarkerPath } from "../src/lib/deployer.js";
-import { TOKEN_REFRESHED_STEP, TOKEN_REFRESH_FAILED_STEP } from "../src/lib/github-app.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { COST_ANOMALY_STEP } from "#src/lib/cost-anomaly.js";
+import { deployAutoPath, deployImageManualPath, deployMarkerPath } from "#src/lib/deployer.js";
+import { TOKEN_REFRESHED_STEP, TOKEN_REFRESH_FAILED_STEP } from "#src/lib/github-app.js";
 import {
   consumeHumanGateCounts, OPERATOR_ITEM_CLASSIFICATION, projectHumanGates, projectOperatorItemGates, type OperatorItemGateInput,
-} from "../src/lib/human-gate.js";
-import { IMAGE_DRIFT_STEP } from "../src/lib/image-drift.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createNowView, NOW_DAEMON_SILENT_MS, type NowViewData } from "../src/lib/now-view.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import type { GitHub, StatusProjection } from "../src/lib/status.js";
-import { costAnomalyUsd, deriveOperatorItems } from "../src/lib/status-board.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/human-gate.js";
+import { IMAGE_DRIFT_STEP } from "#src/lib/image-drift.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createNowView, NOW_DAEMON_SILENT_MS, type NowViewData } from "#src/lib/now-view.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import type { GitHub, StatusProjection } from "#src/lib/status.js";
+import { costAnomalyUsd, deriveOperatorItems } from "#src/lib/status-board.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const AT = "2026-10-04T12:00:00.000Z";
 const NOW = Date.parse(AT);

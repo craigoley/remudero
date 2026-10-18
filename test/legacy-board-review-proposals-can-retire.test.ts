@@ -8,8 +8,8 @@ import {
   type DraftedCandidate,
   type Proposal,
   type ReadinessContext,
-} from "../src/lib/inbox.js";
-import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
+} from "#src/lib/inbox.js";
+import { loadPlanFromYaml, type MergedResolver, type Plan } from "#src/lib/plan.js";
 
 /**
  * test/legacy-board-review-proposals-can-retire.test.ts — W1-T2460.

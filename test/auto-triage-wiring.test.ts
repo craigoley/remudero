@@ -3,11 +3,11 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { daemonCommand, triageCommand } from "../src/run-task.js";
-import { acquireDrainLock } from "../src/lib/drain-lock.js";
-import { triageLockPath } from "../src/lib/auto-triage.js";
-import { loadPolicy, policyPath } from "../src/lib/policy.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import { daemonCommand, triageCommand } from "#src/run-task.js";
+import { acquireDrainLock } from "#src/lib/drain-lock.js";
+import { triageLockPath } from "#src/lib/auto-triage.js";
+import { loadPolicy, policyPath } from "#src/lib/policy.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
 
 // ── impl-DM: the auto-triage rung's PRODUCER is wired into daemonCommand ──────────────────
 //
@@ -228,8 +228,8 @@ test("BOUNDS SURVIVE THE WIRING: runAutoTriage records the fire BEFORE running t
   // this PR) reading the marker. This pins the half the WIRING owns: the marker must advance before
   // the ~$2.00 run, so a triage that throws or a process that dies mid-run costs one skipped period
   // rather than authorising an immediate retry.
-  const { buildAutoTriageDaemonHooks } = await import("../src/run-task.js");
-  const { readAutoTriageMarker, autoTriageMarkerPath } = await import("../src/lib/auto-triage.js");
+  const { buildAutoTriageDaemonHooks } = await import("#src/run-task.js");
+  const { readAutoTriageMarker, autoTriageMarkerPath } = await import("#src/lib/auto-triage.js");
   const { home, root } = fixtureHome();
   const oldHome = process.env.HOME;
   process.env.HOME = home;

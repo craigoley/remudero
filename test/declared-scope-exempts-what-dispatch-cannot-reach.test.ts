@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { changedTaskIds, declaredScopeViolation, lintPlan, lintTask } from "../src/lib/task-linter.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { changedTaskIds, declaredScopeViolation, lintPlan, lintTask } from "#src/lib/task-linter.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 // W1-T2481 — `declaredScopeViolation` (task-linter.ts) blocks any task with an absent or empty
 // `files:`, and its own message says the harm lands at the DISPATCHER: an undeclared scope

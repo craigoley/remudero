@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { operatorIdentityConfig } from "../src/lib/serve.js";
-import { OPERATOR_IDENTITY_PATH_ENV, operatorIdentityFromFile, parseOperatorIdentity } from "../src/lib/operator-identity-file.js";
+import { operatorIdentityConfig } from "#src/lib/serve.js";
+import { OPERATOR_IDENTITY_PATH_ENV, operatorIdentityFromFile, parseOperatorIdentity } from "#src/lib/operator-identity-file.js";
 
 const FILE_IDENTITY = {
   issuer: "https://clerk.example.test",

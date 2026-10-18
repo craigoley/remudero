@@ -12,8 +12,8 @@ import {
   warmedAnchorGrep,
   type AnchorGrepExecFile,
   type EvidenceAnchor,
-} from "../src/lib/inbox.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/inbox.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const anchor = (pattern: string, path?: string): EvidenceAnchor => ({ description: pattern, pattern, path });
 const syncFallback = (): boolean => assert.fail("a warmed answer must not spawn synchronously");

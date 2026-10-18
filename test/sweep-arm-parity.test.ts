@@ -3,13 +3,13 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decideSweepArm, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { decideSweepArm, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 import {
   decideAutoMergeArm,
   postedArmFactsFromLedger,
   reviewLedgerLegibilityFields,
-} from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 // ── THE DEFECT ──────────────────────────────────────────────────────────────
 //

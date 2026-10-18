@@ -10,9 +10,9 @@ import {
   sweepFeedbackLanding,
   type CiLearningShardDraft,
   type LandingRepository,
-} from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T9753: a landing branch is ONE commit built on the main of its day (`commit-tree -p <main>`),
 // so everything it holds that its own commit did not change was inherited from that older main.

@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,8 +14,8 @@ import {
   readAccountUsageFile,
   type AccountUsageInput,
   type AccountUsageSnapshot,
-} from "../src/lib/account-usage.js";
-import { ACCOUNT_FILE_PATH_ENV, resolveAccountFilePath } from "../src/lib/serve.js";
+} from "#src/lib/account-usage.js";
+import { ACCOUNT_FILE_PATH_ENV, resolveAccountFilePath } from "#src/lib/serve.js";
 
 /**
  * The console's ACCOUNT strip — which Anthropic account the fleet is spending, and how much of
@@ -37,7 +38,7 @@ import { ACCOUNT_FILE_PATH_ENV, resolveAccountFilePath } from "../src/lib/serve.
  * of the committed fixture is byte-identical to the live capture's. Nothing else was touched: the
  * usage block's values are verbatim.
  */
-const FIXTURE = fileURLToPath(new URL("./fixtures/account-usage/claude-json.json", import.meta.url));
+const FIXTURE = join(repoRoot(), "test/fixtures/account-usage/claude-json.json");
 
 /** The fixture's own `fetchedAtMs`, so "now" in these tests is relative to the real capture. */
 const CAPTURED_AT = 1785516413209;
@@ -235,7 +236,7 @@ test("the account reader projects only identity and usage out of the config file
   // the reader must be a projection rather than a pass-through: anything it does not name is
   // dropped by construction. Feeding it a file that carries an extra secret-shaped key proves
   // nothing leaks into the payload that the route serializes.
-  const withSecrets = fileURLToPath(new URL("./fixtures/account-usage/claude-json.json", import.meta.url));
+  const withSecrets = join(repoRoot(), "test/fixtures/account-usage/claude-json.json");
   const input = readAccountUsageFile(withSecrets);
   assert.deepEqual(
     Object.keys(input).sort(),

@@ -6,10 +6,10 @@ import { join } from "node:path";
 import {
   applyOperatorMergeHold,
   parseOperatorMergeHoldArgs,
-} from "../src/lib/operator-merge-hold.js";
-import { automergeHoldFromLedger } from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { mergeHoldCommand } from "../src/run-task.js";
+} from "#src/lib/operator-merge-hold.js";
+import { automergeHoldFromLedger } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { mergeHoldCommand } from "#src/run-task.js";
 
 const CLI_AUTHORITY = { authority: "interactive-cli" as const };
 

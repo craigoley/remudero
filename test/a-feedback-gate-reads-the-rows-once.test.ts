@@ -2,8 +2,8 @@
 // now build (about 1.7 s, 2026-10-07 replay). It now walks the rows once per call and answers each entry from that pass.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
-import { projectFeedbackGates } from "../src/lib/human-gate.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import { projectFeedbackGates } from "#src/lib/human-gate.js";
 
 const FROM = "2026-10-02T10:00:00.000Z";
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");

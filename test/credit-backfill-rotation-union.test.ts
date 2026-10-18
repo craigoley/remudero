@@ -26,8 +26,8 @@ import { gzipSync } from "node:zlib";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readLedgerLines, readMergeCreditedTaskIds } from "../src/lib/status.js";
-import { runCreditBackfill } from "../src/lib/sweep.js";
+import { readLedgerLines, readMergeCreditedTaskIds } from "#src/lib/status.js";
+import { runCreditBackfill } from "#src/lib/sweep.js";
 
 const row = (o: Record<string, unknown>): string => JSON.stringify({ ts: "2026-08-12T00:00:00.000Z", ...o });
 const credit = (taskId: string) => row({ task_id: taskId, step: "verdict.merged", verdict: "merged" });

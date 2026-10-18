@@ -4,12 +4,12 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
-import { canaryCommand } from "../src/lib/model-canary-command.js";
-import { renderCanaryReport } from "../src/lib/model-canary-report.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { BROWSER_SKIP, browserTest as test } from "#test/browser-absence.js";
+import { canaryCommand } from "#src/lib/model-canary-command.js";
+import { renderCanaryReport } from "#src/lib/model-canary-report.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { chromium, type Browser } from "playwright";
-import type { CanaryRun } from "../src/lib/model-canary-metrics.js";
+import type { CanaryRun } from "#src/lib/model-canary-metrics.js";
 let browser: Browser;
 // Await the PROMISE, never the resolved handle (test/serve-browser-teardown.test.ts): a zero-match
 // `--test-name-pattern` run fires `after` while the launch is still in flight.

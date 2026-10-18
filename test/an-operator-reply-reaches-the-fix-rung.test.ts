@@ -18,23 +18,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildEscalationReplyRoute, type PanelActionDeps } from "../src/lib/panel-actions.js";
-import { appendThreadMessage, type ThreadIdentity } from "../src/lib/inbox-thread.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { operatorVerdictEvidence } from "./helpers/sweep-test.js";
-import { renderIssueBody, type Escalation, type OpenIssue } from "../src/lib/escalate.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
-import { buildSweepHook } from "../src/run-task.js";
+import { createService } from "#src/lib/service.js";
+import { buildEscalationReplyRoute, type PanelActionDeps } from "#src/lib/panel-actions.js";
+import { appendThreadMessage, type ThreadIdentity } from "#src/lib/inbox-thread.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { operatorVerdictEvidence } from "#test/helpers/sweep-test.js";
+import { renderIssueBody, type Escalation, type OpenIssue } from "#src/lib/escalate.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { buildSweepHook } from "#src/run-task.js";
 import {
   ghEscalationAnswerGateway,
   readEscalationAnswers,
   type EscalationAnswerGateway,
   type EscalationIssueComment,
-} from "../src/lib/escalation-answers.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+} from "#src/lib/escalation-answers.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 
 const CLOCK_MS = Date.UTC(2026, 8, 24, 12, 0, 0);
 

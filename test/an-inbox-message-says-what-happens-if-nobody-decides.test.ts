@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { validateDecisionSummary } from "../src/lib/feedback.js";
+import { validateDecisionSummary } from "#src/lib/feedback.js";
 import {
   backfillPlainMessages,
   checkPlainMessage,
@@ -21,8 +21,8 @@ import {
   readPlainStore,
   TEMPLATED_KINDS,
   writePlainMessage,
-} from "../src/lib/inbox-plain.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/inbox-plain.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const proposal = { id: "machine-judge:W1-T5418", summary: "A parked fix is waiting for a ruling on whether to land it." };
 const NON_ANSWER = "No decision or change is made by viewing this summary.";

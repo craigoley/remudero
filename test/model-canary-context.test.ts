@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { contextCanaryProtocol, executeContextCanary } from "../src/lib/model-canary-context.js";
-import { projectCanaryRuns } from "../src/lib/model-canary-metrics.js";
-import type { CanaryExecutionPorts, CanaryResponse } from "../src/lib/model-canary-runner.js";
+import { contextCanaryProtocol, executeContextCanary } from "#src/lib/model-canary-context.js";
+import { projectCanaryRuns } from "#src/lib/model-canary-metrics.js";
+import type { CanaryExecutionPorts, CanaryResponse } from "#src/lib/model-canary-runner.js";
 
 const namespace = "a".repeat(64);
 const protocol = () => contextCanaryProtocol(2048, "repeat", namespace);

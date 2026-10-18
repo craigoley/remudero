@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { logArmAttribution } from "../src/lib/arm-auto-merge.js";
-import type { Config } from "../src/lib/config.js";
-import { ghJsonAsync } from "../src/lib/github-transport.js";
-import type { Plan } from "../src/lib/plan.js";
+import { logArmAttribution } from "#src/lib/arm-auto-merge.js";
+import type { Config } from "#src/lib/config.js";
+import { ghJsonAsync } from "#src/lib/github-transport.js";
+import type { Plan } from "#src/lib/plan.js";
 import {
   buildSweepEffects as buildLibSweepEffects,
   DEFAULT_SWEEP_POLICY,
@@ -15,9 +15,9 @@ import {
   SWEEP_EFFECT_SURFACE,
   sweepArmAttemptOutcome,
   type BuildSweepEffectsDeps,
-} from "../src/lib/sweep.js";
-import { buildSweepEffects as buildEntrypointSweepEffects } from "./helpers/run-task-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/sweep.js";
+import { buildSweepEffects as buildEntrypointSweepEffects } from "#test/helpers/run-task-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T3654: this suite used to carry its OWN `EFFECT_KEYS` constant, independently ordered from
 // the one `test/build-sweep-effects-takes-one-deps-object.test.ts` carried. Both now read

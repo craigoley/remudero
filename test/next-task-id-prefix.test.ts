@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { cloneTargetPlan, nextTaskIdCommand } from "../src/run-task.js";
+import { cloneTargetPlan, nextTaskIdCommand } from "#src/run-task.js";
 import {
   formatReservationAnchorMessage,
   nextPrefixedTaskIdStart,
@@ -18,8 +18,8 @@ import {
   prefixedTaskIdsIn,
   type RemoteRefReserver,
   type RemoteReserveOutcome,
-} from "../src/lib/task-id-reservation.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/task-id-reservation.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const REPO = "craigoley/remudero-console";
 const FILER = "run-CONSOLE-T61-1790000000000";

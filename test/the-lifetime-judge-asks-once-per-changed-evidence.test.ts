@@ -1,18 +1,19 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlan } from "../src/lib/plan.js";
-import type { Config } from "../src/lib/config-schema.js";
-import { taskAttributableLifetimeDispatches } from "../src/lib/status.js";
-import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
-import { routeAdaptiveLifetimePressure } from "../src/run-task.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { Config } from "#src/lib/config-schema.js";
+import { taskAttributableLifetimeDispatches } from "#src/lib/status.js";
+import type { spawnWorker, WorkerResult } from "#src/lib/worker.js";
+import { routeAdaptiveLifetimePressure } from "#src/run-task.js";
 
 function fixture(note = "") {
   const dir = mkdtempSync(join(tmpdir(), "rmd-lifetime-judge-"));
   mkdirSync(join(dir, ".remudero"));
-  copyFileSync(join(import.meta.dirname, "..", ".remudero", "mounts.yaml"), join(dir, ".remudero", "mounts.yaml"));
+  copyFileSync(join(repoRoot(), ".remudero/mounts.yaml"), join(dir, ".remudero", "mounts.yaml"));
   mkdirSync(join(dir, "state"));
   writeFileSync(join(dir, "tasks.yaml"), `- id: T-LIFETIME\n  title: feature with runtime confirmation\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  note: ${JSON.stringify(note)}\n`);
   const plan = loadPlan(join(dir, "tasks.yaml"));

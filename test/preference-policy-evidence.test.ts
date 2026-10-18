@@ -6,15 +6,15 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { OPERATOR_PREFERENCE_EVENT_LEDGER_STEP, OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP } from "../src/lib/ledger.js";
-import { buildOperatorAgentRoutes, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_PROPOSAL_STEP } from "../src/lib/operator-agent.js";
+import { OPERATOR_PREFERENCE_EVENT_LEDGER_STEP, OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP } from "#src/lib/ledger.js";
+import { buildOperatorAgentRoutes, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_PROPOSAL_STEP } from "#src/lib/operator-agent.js";
 import {
   inferPreferenceHypothesis,
   preferenceDecisionSamples,
   validateOperatorPreference,
   validatePreferenceDecisionRef,
-} from "../src/lib/preference-policy.js";
-import { createService } from "../src/lib/service.js";
+} from "#src/lib/preference-policy.js";
+import { createService } from "#src/lib/service.js";
 
 const READ = "pref-evidence-read";
 const WRITE = "pref-evidence-write";

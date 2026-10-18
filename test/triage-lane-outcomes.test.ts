@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   foldTriageLaneOutcomes,
   renderTriageLaneReport,
   triageOutcomesCommand,
   TRIAGE_LANE_MIN_TERMINAL_RUNS,
-} from "../src/lib/triage-lane-outcomes.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/triage-lane-outcomes.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 type Row = Record<string, unknown>;
 
@@ -173,7 +173,7 @@ test("W1-T3547: an incomplete ledger read is refused rather than counted", () =>
 });
 
 test("W1-T3547: rmd triage-outcomes is registered and reads the host ledger it is run against", async () => {
-  const { HANDLERS } = await import("../src/run-task.js");
+  const { HANDLERS } = await import("#src/run-task.js");
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}triage-outcomes-home-`));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });

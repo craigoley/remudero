@@ -14,6 +14,7 @@
  * The refusal here is a held `.git/index.lock`: a lock is a refusal W1-T9623's move-aside cannot
  * clear, which is the general case this backstop exists for.
  */
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -21,16 +22,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { fixedClock } from "../src/lib/clock.js";
-import { runDaemon, type DaemonFreshness } from "../src/lib/daemon.js";
-import { DEPLOY_RESTART_RATE_CEILING_MS } from "../src/lib/deploy-judge.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { drainEscalationSpool, escalationSpoolDir } from "../src/lib/host-escalation-spool.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
+import { DEPLOY_RESTART_RATE_CEILING_MS } from "#src/lib/deploy-judge.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { drainEscalationSpool, escalationSpoolDir } from "#src/lib/host-escalation-spool.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "deploy", "entrypoint.sh");
+const SCRIPT = join(repoRoot(), "deploy/entrypoint.sh");
 const SPOOL_NAME = "escalate-entrypoint-stale-boot.json";
 
 /** An origin carrying the two files a boot needs: package.json, and a bin/rmd the PATH step accepts. */

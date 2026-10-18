@@ -10,10 +10,10 @@ import {
   renderIssuesSummary,
   type IssueListGateway,
   type RawIssue,
-} from "../src/lib/issues-intake.js";
-import { feedbackEntryPath, listFeedback } from "../src/lib/feedback.js";
-import { summarize as summarizeDigest, renderDigest } from "../src/lib/digest.js";
-import type { ManagedRepo } from "../src/lib/managed-repos.js";
+} from "#src/lib/issues-intake.js";
+import { feedbackEntryPath, listFeedback } from "#src/lib/feedback.js";
+import { summarize as summarizeDigest, renderDigest } from "#src/lib/digest.js";
+import type { ManagedRepo } from "#src/lib/managed-repos.js";
 
 function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

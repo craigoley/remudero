@@ -8,8 +8,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { resolveProviderRoutingPolicy, writeProviderRoutingPolicyOverride } from "../src/lib/provider-routing-policy.js";
-import { providerRoutingStatusPath, readProviderRoutingStatus, writeProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
+import { resolveProviderRoutingPolicy, writeProviderRoutingPolicyOverride } from "#src/lib/provider-routing-policy.js";
+import { providerRoutingStatusPath, readProviderRoutingStatus, writeProviderRoutingStatus } from "#src/lib/provider-routing-status.js";
 
 const NOW = Date.parse("2026-09-26T14:00:00.000Z");
 

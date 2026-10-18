@@ -30,22 +30,22 @@ import {
   taskShapeCovariates,
   topLevelArea,
   type TaskShapeCovariates,
-} from "../src/lib/benchmark-run.js";
+} from "#src/lib/benchmark-run.js";
 import {
   TASK_SHAPE_DIMENSIONS,
   TASK_SHAPE_STRATA_VERSION,
   TASK_SHAPE_STRATUM_VALUE_RE,
   runBenchmarkCohortPass,
   taskShapeStratumValue,
-} from "../src/lib/benchmark-cohort.js";
-import { benchmarkRunLedgerLogger, buildInboxDraftSpawnArgs, harnessCommitForShellLessWorker, runFixRung, runTask } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/benchmark-cohort.js";
+import { benchmarkRunLedgerLogger, buildInboxDraftSpawnArgs, harnessCommitForShellLessWorker, runFixRung, runTask } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 type Row = Record<string, unknown>;
 

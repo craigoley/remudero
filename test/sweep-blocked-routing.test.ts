@@ -12,8 +12,8 @@ import {
   type CiFailure,
   type OpenPrView,
   type RollupCheckEntry,
-} from "./helpers/sweep-test.js";
-import type { CriterionVerdict } from "../src/lib/review.js";
+} from "#test/helpers/sweep-test.js";
+import type { CriterionVerdict } from "#src/lib/review.js";
 
 /**
  * PR #1441, 2026-08-07: dispositioned `blocked-fixable` with reason `required checks red —

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   buildOperatorAgentRoutes,
   createOperatorAgentMemorySource,
@@ -13,7 +13,7 @@ import {
   OPERATOR_AGENT_PROPOSAL_STEP,
   type OperatorAgentMemorySource,
   type OperatorAgentProposal,
-} from "../src/lib/operator-agent.js";
+} from "#src/lib/operator-agent.js";
 
 const READ_TOKEN = "operator-agent-read-token";
 const WRITE_TOKEN = "operator-agent-write-token";

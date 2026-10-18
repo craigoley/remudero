@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { escalationFor } from "../src/lib/main-health-rung.js";
+import { escalationFor } from "#src/lib/main-health-rung.js";
 import {
   enrichMainHealthObservation,
   mainHealthEscalationDecision,
@@ -9,7 +9,7 @@ import {
   type CiFailure,
   type MainHealthRunHistoryEntry,
   type RollupCheckEntry,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const HEAD_SHA = "41231c6700000000000000000000000000000000";
 

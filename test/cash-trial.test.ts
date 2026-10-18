@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { decideCashTrial } from "../src/lib/cash-trial.js";
-import type { Config } from "../src/lib/config.js";
-import { ledgerCarriedPrefixPath, ledgerRetainedStepsPath } from "../src/lib/ledger.js";
-import { ledgerLivePath } from "../src/lib/ledger-union.js";
+import { decideCashTrial } from "#src/lib/cash-trial.js";
+import type { Config } from "#src/lib/config.js";
+import { ledgerCarriedPrefixPath, ledgerRetainedStepsPath } from "#src/lib/ledger.js";
+import { ledgerLivePath } from "#src/lib/ledger-union.js";
 
 const docsTask = { id: "T-DOCS", type: "implement", risk: "low", files: ["docs/guide.md"] };
 const SHA = "a".repeat(64);

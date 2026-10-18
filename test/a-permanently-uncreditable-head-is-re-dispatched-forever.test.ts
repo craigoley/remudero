@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
-import * as RT from "../src/run-task.js";
-import { buildSweepEffects } from "../src/run-task.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
+import * as RT from "#src/run-task.js";
+import { buildSweepEffects } from "#src/run-task.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
 
 const TASK_ID = "W1-T2723";
 const TASK = {

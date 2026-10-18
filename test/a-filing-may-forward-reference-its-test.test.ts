@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { proofUnitTestUnresolvableViolations } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { proofUnitTestUnresolvableViolations } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── W1-T3730 — A FILING CANNOT DECLARE ITS OWN TEST FILE ─────────────────────────────────────
 //

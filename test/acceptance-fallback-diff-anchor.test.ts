@@ -25,14 +25,14 @@ import {
   repairRetroAcceptanceBlock,
   runFixRung,
   runGhPrCreate,
-} from "./helpers/acceptance-fallback-surface.js";
-import { acceptanceAuthorTimeCheck, execWhitelistedProof, parseAcceptanceBlock, parseWhitelistedProof, preexistingProofHits } from "../src/lib/review.js";
-import { renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/acceptance-fallback-surface.js";
+import { acceptanceAuthorTimeCheck, execWhitelistedProof, parseAcceptanceBlock, parseWhitelistedProof, preexistingProofHits } from "#src/lib/review.js";
+import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const STATIC_PROOF = "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts";
 const ADDED_LINE = "export const diffAnchorMarker = 4263;";

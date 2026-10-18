@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { renderIssueBody, type OpenIssue } from "../src/lib/escalate.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildSweepHook } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { renderIssueBody, type OpenIssue } from "#src/lib/escalate.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildSweepHook } from "#src/run-task.js";
 // A NAMESPACE import: the reader's async shape is what this file tests, and a named import of a symbol that
 // changes shape would fail the whole file at load rather than red the one test that names it.
-import * as answers from "../src/lib/escalation-answers.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import * as answers from "#src/lib/escalation-answers.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 /**
  * W1-T6248 — ESCALATION ANSWERS ARE READ OFF THE DAEMON LOOP. The gateway ran every list and comment read through

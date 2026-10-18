@@ -9,10 +9,10 @@ import {
   type OpenPrView,
   type SweepDeps,
   type UpdateBranchOutcome,
-} from "../src/lib/sweep.js";
-import { taskContractRevision } from "../src/lib/escalate.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
+} from "#src/lib/sweep.js";
+import { taskContractRevision } from "#src/lib/escalate.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
 
 /**
  * remudero-console #2035 (CONSOLE-T99) sat red for 30+ hours. The fix progress judge escalated it

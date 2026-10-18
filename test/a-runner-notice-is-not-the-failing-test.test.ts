@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { defaultCiAnnotationFetch, extractCiFailureRegion, fetchCiFailures, isBareExitCodeAnnotation } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { defaultCiAnnotationFetch, extractCiFailureRegion, fetchCiFailures, isBareExitCodeAnnotation } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // What a failing test shard's annotations really were on PR #7816 (coverage-shard (5/8), check run
 // 109405184736, read 2026-09-29): GitHub's exit line WITH its trailing period, and a runner-image

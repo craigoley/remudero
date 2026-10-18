@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import * as reservation from "../src/lib/task-id-reservation.js";
+import { fixedClock } from "#src/lib/clock.js";
+import * as reservation from "#src/lib/task-id-reservation.js";
 import {
   formatReservationHolderLine,
   gitRemoteRefReserver,
   parseReservationHolderLine,
   reservationHolderDrift,
-} from "../src/lib/task-id-reservation.js";
+} from "#src/lib/task-id-reservation.js";
 
 // W1-T5279: refs/rmd-id/W1-T5209 was reserved by the ci-friction gardener at 07:44:15Z and taken
 // over by a triage run at 07:44:36Z -- 21 seconds later, before the gardener had pushed its branch.

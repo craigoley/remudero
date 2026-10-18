@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -40,8 +41,7 @@ import { test } from "node:test";
 // coverage is not the parent run's, and a suite that only drove the classifier would leave the
 // wiring in `main` unproven -- the exact shape that let this check ship mute.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = repoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "task-id-existence-check.mjs");
 
 const mod = await import(pathToFileURL(SCRIPT).href);

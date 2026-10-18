@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ASSISTANT_TRUST_METRIC_NAMES, assistantTrustMetricSpec, assistantTrustMetricSpecs } from "../src/lib/experiment-promotion.js";
+import { ASSISTANT_TRUST_METRIC_NAMES, assistantTrustMetricSpec, assistantTrustMetricSpecs } from "#src/lib/experiment-promotion.js";
 
 test("unit test: each trust metric names its population, denominator, window, sample floor, source, freshness, and unmeasurable state", () => {
   const specs = assistantTrustMetricSpecs();

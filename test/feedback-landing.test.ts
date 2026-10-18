@@ -1,3 +1,4 @@
+import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -5,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { captureFeedback, feedbackEntryPath, readFeedbackEntry, setFeedbackStatus } from "../src/lib/feedback.js";
+import { captureFeedback, feedbackEntryPath, readFeedbackEntry, setFeedbackStatus } from "#src/lib/feedback.js";
 import {
   DECISIONS_LANDING_BRANCH,
   DECISIONS_LANDING_PR_TITLE,
@@ -17,11 +18,11 @@ import {
   landFeedback,
   landPlanReconcileShards,
   recordDecision,
-} from "../src/lib/feedback-landing.js";
-import { checkCliFreshness } from "../src/lib/self-sync.js";
-import { missingFeedbackMessage } from "../src/lib/triage.js";
-import { makeLandingReviewRequest, triageCommand } from "../src/run-task.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+} from "#src/lib/feedback-landing.js";
+import { checkCliFreshness } from "#src/lib/self-sync.js";
+import { missingFeedbackMessage } from "#src/lib/triage.js";
+import { makeLandingReviewRequest, triageCommand } from "#src/run-task.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 // ── Why every landFeedback()/captureFeedback({land}) call below is wrapped ──────────────
 // This whole suite exercises the durable-inbox commit bridge, which commits and PUSHES for
@@ -39,8 +40,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 // Counting this defect by grepping for the error name undercounts it.
 
 // commitlint (W1-T136 class) — same subprocess pattern as test/orientation.test.ts.
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = testRepoRoot();
 const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 
 function lint(message: string) {

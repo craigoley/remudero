@@ -1,3 +1,5 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
+import { pathToFileURL } from "node:url";
 /**
  * W1-T5894 — one plan change is one git read for every thread. `publishThreadPlan` broadcast only the pin, so each
  * subscribed thread ran its own `readServePlanAtRef` of the same commit: five threads cost ~50 s of git per merge on
@@ -12,11 +14,11 @@ import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import { threadId, Worker } from "node:worker_threads";
 
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { packPlanBlobs, reloadServePlan } from "../src/lib/serve-plan-reload.js";
-import { adoptThreadPlan, PLAN_PIN_ADOPTED_STEP, publishThreadPlan, threadPlanPin, threadStrictPlan } from "../src/lib/thread-plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { packPlanBlobs, reloadServePlan } from "#src/lib/serve-plan-reload.js";
+import { adoptThreadPlan, PLAN_PIN_ADOPTED_STEP, publishThreadPlan, threadPlanPin, threadStrictPlan } from "#src/lib/thread-plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 type Row = [string, Record<string, unknown>];
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -58,7 +60,7 @@ function countGitPlanReads(t: { after(fn: () => void): void }): () => number {
 }
 
 function viewThread(t: { after(fn: () => void): void }, fixture: ReturnType<typeof planSlot>): () => Promise<string[]> {
-  const view = new Worker(new URL("./helpers/plan-pin-view-thread.ts", import.meta.url), { workerData: { planPath: fixture.planPath, ledgerDir: fixture.dir, ids: ["W1-T1", "W1-T2", "W1-T9"] } });
+  const view = new Worker(pathToFileURL(join(repoRoot(), "test/helpers/plan-pin-view-thread.ts")), { workerData: { planPath: fixture.planPath, ledgerDir: fixture.dir, ids: ["W1-T1", "W1-T2", "W1-T9"] } });
   t.after(() => void view.terminate());
   return async () => {
     const answer = new Promise<string[]>((resolve) => view.once("message", resolve));

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildMainHealthRung } from "../src/lib/main-health-rung.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { buildMainHealthRung } from "#src/lib/main-health-rung.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   BASE_RED_REFRESH_STEP,
   BASE_RED_STOOD_DOWN_STEP,
@@ -14,7 +14,7 @@ import {
   mainLatestRunFromLedger,
   runSweep,
   type OpenPrView,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const HEAD = "a".repeat(40);
 const LAST = "b".repeat(40);

@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   FOLLOW_UP_POLICY_VERSION,
   appendFollowUpCandidate,
   evaluateFollowUpPolicy,
   readFollowUpHistory,
   type FollowUpCandidate,
-} from "../src/lib/follow-up-policy.js";
+} from "#src/lib/follow-up-policy.js";
 
 const candidate = (id: string): FollowUpCandidate => ({
   version: FOLLOW_UP_POLICY_VERSION,

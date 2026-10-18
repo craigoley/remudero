@@ -1,4 +1,3 @@
-// test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts
 //
 // LIVE 2026-10-09: a fix rung that STANDS DOWN (pre-strike, no commit) wrote `fix.stood_down` and
 // nothing else. `fixRungStalledWithoutNewHead` never read that step, so when the task's last
@@ -9,7 +8,7 @@
 // zero enumerable failing check(s)") are pre-strike and carry no follow-up row of their own.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixRungStalledWithoutNewHead } from "../src/lib/sweep.js";
+import { fixRungStalledWithoutNewHead } from "#src/lib/sweep.js";
 
 const TASK = "W1-T5808";
 const OLD_HEAD = "3ddaee544d2f1f0d9a3c6b1e7f1a2b3c4d5e6f70";

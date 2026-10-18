@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseTasksFromYaml, type Plan, type Task } from "../src/lib/plan.js";
+import { parseTasksFromYaml, type Plan, type Task } from "#src/lib/plan.js";
 // Namespace import: the new symbols resolve to `undefined` at base instead of failing the load.
-import * as drain from "../src/lib/drain.js";
+import * as drain from "#src/lib/drain.js";
 
 // W1-T5351 — the fleet GitHub App has no `workflows` permission (operator decision 2026-10-02), so a
 // worker's push touching .github/workflows/ is remote-rejected after a whole build. A task whose

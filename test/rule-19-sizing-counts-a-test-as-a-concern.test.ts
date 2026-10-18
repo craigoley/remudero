@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { declaredScopeViolation, sizingViolation, subsystemsOf } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { declaredScopeViolation, sizingViolation, subsystemsOf } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 /**
  * W1-T2525 — Rule 19 sizing must not count a source file and ITS OWN test as two concerns, and

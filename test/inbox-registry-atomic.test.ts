@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 // The DEFAULT export -- a plain, mutable object -- so `t.mock.method` can actually
@@ -11,9 +12,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parseProposalRegistry, updateProposalRegistry, type Proposal, type RatifyGateway } from "../src/lib/inbox.js";
-import type { Config } from "../src/lib/config.js";
-import { approveCommand, inboxCommand, reframeCommand } from "../src/run-task.js";
+import { parseProposalRegistry, updateProposalRegistry, type Proposal, type RatifyGateway } from "#src/lib/inbox.js";
+import type { Config } from "#src/lib/config.js";
+import { approveCommand, inboxCommand, reframeCommand } from "#src/run-task.js";
 
 // ── W1-T240 ──────────────────────────────────────────────────────────────────────────────
 //
@@ -348,8 +349,8 @@ test("W1-T240 claim 2: releasing the lock in `finally` is idempotent -- somethin
 // sites must call updateProposalRegistry(, and none may retain a bare
 // writeFileSync(registryPath -- which would silently reopen the exact race this task closes.
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-const inboxViewSrc = readFileSync(fileURLToPath(new URL("../src/lib/inbox-view.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(join(repoRoot(), "src/run-task.ts"), "utf8");
+const inboxViewSrc = readFileSync(join(repoRoot(), "src/lib/inbox-view.ts"), "utf8");
 
 /** Extract one top-level function/`export function` declaration's source text, from its
  *  signature to the start of the NEXT top-level function declaration (or EOF) -- good

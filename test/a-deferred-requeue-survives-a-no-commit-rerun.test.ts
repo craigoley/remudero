@@ -9,7 +9,7 @@ import test from "node:test";
 import {
   DEFAULT_SWEEP_POLICY, runSweep,
   type OpenPrView, type RollupCheckEntry, type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 type Row = Record<string, unknown>;
 const HEAD = "3c92df1a4f10".padEnd(40, "0");

@@ -17,18 +17,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { attemptAssignmentJoin, benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
-import type { Config } from "../src/lib/config.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import { spawnEscalationJudgeWorker } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { GitHub } from "../src/lib/status.js";
-import { spawnVerifyHumanJudgeWorker } from "../src/lib/verify-human-judge.js";
-import type { spawnWorker, SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { harnessCommitForShellLessWorker, runFixRung, runTask } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { attemptAssignmentJoin, benchmarkNonDispatchSpawn } from "#src/lib/benchmark-run.js";
+import type { Config } from "#src/lib/config.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import { spawnEscalationJudgeWorker } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { GitHub } from "#src/lib/status.js";
+import { spawnVerifyHumanJudgeWorker } from "#src/lib/verify-human-judge.js";
+import type { spawnWorker, SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { harnessCommitForShellLessWorker, runFixRung, runTask } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 type Row = { step: string } & Record<string, unknown>;
 

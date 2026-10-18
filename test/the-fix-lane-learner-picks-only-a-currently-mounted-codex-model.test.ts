@@ -1,20 +1,21 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { fixArmEvidence, fixRoutingWeights, type FixLearnedArms } from "../src/lib/fix-routing-learner.js";
-import type { ProviderCapacity } from "../src/lib/worker-provider.js";
-import { createClaudeExecutableCache, spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { fixArmEvidence, fixRoutingWeights, type FixLearnedArms } from "#src/lib/fix-routing-learner.js";
+import type { ProviderCapacity } from "#src/lib/worker-provider.js";
+import { createClaudeExecutableCache, spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // W1-T6360: the fix-lane learner re-read Codex for ANY historical selected_model whose draw won, so after the
 // 2026-10-02 Sol 6.1 switch it kept routing the lane back to gpt-6-sol (W1-T6028 measured gpt-6-sol at 0.53 and
 // gpt-6.1-sol at 0.39 here). The operator ruled 2026-10-08 to use Sol 6.1 everywhere: the learner's candidate arms
 // are now only the models the lane's CURRENT capability row mounts.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = repoRoot();
 const NOW = Date.parse("2026-10-08T12:00:00.000Z");
 
 function capacity(provider: "claude" | "codex", usedPercent: number, model?: string): ProviderCapacity {

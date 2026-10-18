@@ -8,11 +8,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { EvidenceAnchor } from "../src/lib/inbox.js";
-import { buildInboxDraftHook } from "../src/run-task.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
+import type { EvidenceAnchor } from "#src/lib/inbox.js";
+import { buildInboxDraftHook } from "#src/run-task.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
 
 const landed: EvidenceAnchor = { description: "landed", pattern: "LANDED", path: "sub/note.md" };
 const anywhere: EvidenceAnchor = { description: "anywhere", pattern: "LANDED" };

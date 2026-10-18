@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { backfillPlainMessages, checkPlainMessage, plainInboxMessage, plainSourceFingerprint, plainStorePath, plainTemplate, readPlainStore, TEMPLATED_KINDS, writePlainMessage, type PlainInboxMessage } from "../src/lib/inbox-plain.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { backfillPlainMessages, checkPlainMessage, plainInboxMessage, plainSourceFingerprint, plainStorePath, plainTemplate, readPlainStore, TEMPLATED_KINDS, writePlainMessage, type PlainInboxMessage } from "#src/lib/inbox-plain.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const proposal = {
   id: "machine-judge:W1-T5984",

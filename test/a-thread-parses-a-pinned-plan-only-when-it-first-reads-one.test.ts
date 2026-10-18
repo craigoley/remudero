@@ -3,9 +3,9 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { BroadcastChannel, isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
-import { mergePlanBlobsQuarantiningDuplicates, type Plan } from "../src/lib/plan.js";
-import { packPlanBlobs } from "../src/lib/serve-plan-reload.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { mergePlanBlobsQuarantiningDuplicates, type Plan } from "#src/lib/plan.js";
+import { packPlanBlobs } from "#src/lib/serve-plan-reload.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 type Reply = {
   type: string; ref?: string; decodes: number; pin: string; pinnedRef?: string;
@@ -19,7 +19,7 @@ const blobs = (ref: string, texts: string[]) => texts.map((text, i) => ({
 
 if (!isMainThread) {
   const input = workerData as { path: string };
-  let api: typeof import("../src/lib/thread-plan.js") | undefined;
+  let api: typeof import("#src/lib/thread-plan.js") | undefined;
   let decodes = 0;
   const from = Buffer.from;
   // Count actual shared-text decoding, including attempts that fail before an adoption row.
@@ -49,7 +49,7 @@ if (!isMainThread) {
       });
     },
   });
-  api = await import("../src/lib/thread-plan.js");
+  api = await import("#src/lib/thread-plan.js");
   Object.defineProperty(BroadcastChannel.prototype, "onmessage", descriptor);
   const { threadPlan, threadPlanLoad, threadStrictPlan } = api;
   parentPort!.on("message", (method: "load" | "plan" | "strict") => {
@@ -65,7 +65,7 @@ if (!isMainThread) {
   const {
     adoptThreadPlan, PLAN_PIN_ADOPTED_STEP, PLAN_PIN_ADOPT_FAILED_STEP, publishThreadPlan, swapThreadPlanParser,
     threadPlanLoad,
-  } = await import("../src/lib/thread-plan.js");
+  } = await import("#src/lib/thread-plan.js");
   function fixture(t: TestContext) {
     const prior = swapThreadPlanParser(() => { throw new Error("main must not read plan files"); });
     t.after(() => swapThreadPlanParser(prior));

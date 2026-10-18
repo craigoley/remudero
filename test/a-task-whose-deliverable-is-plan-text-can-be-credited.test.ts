@@ -13,8 +13,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { deriveStatus, isPlanTextDeliverable, type CreditStore, type GitHub, type PrRef } from "../src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
+import { deriveStatus, isPlanTextDeliverable, type CreditStore, type GitHub, type PrRef } from "#src/lib/status.js";
 
 function task(id: string, files: string[]): Task {
   return {

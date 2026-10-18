@@ -4,10 +4,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { buildCreditCandidates, buildEscalationReconcileCandidates } from "../src/run-task.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { buildCreditCandidates, buildEscalationReconcileCandidates } from "#src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const TASK_ID = "W1-T4774";
 const PR_NUMBER = 9001;

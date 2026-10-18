@@ -5,16 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createDemandBook } from "../src/lib/view-demand.js";
-import { createInboxThreadView, inboxThreadViewKey, type InboxThreadViewData } from "../src/lib/inbox-thread-view.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { answerThread, createThreadEventSync, registryThreadItems, startInboxResponder, type InboxResponderDeps, type ThreadDetailView } from "../src/lib/inbox-responder.js";
-import { parseProposalRegistry, recordRowThreadEvents, reframeProposal, type Proposal } from "../src/lib/inbox.js";
-import { appendThreadReplyOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessage } from "../src/lib/inbox-thread.js";
-import { buildDeclineProposalRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, buildRestoreProposalRoute, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveParkedTask } from "../src/run-task.js";
+import { createDemandBook } from "#src/lib/view-demand.js";
+import { createInboxThreadView, inboxThreadViewKey, type InboxThreadViewData } from "#src/lib/inbox-thread-view.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { answerThread, createThreadEventSync, registryThreadItems, startInboxResponder, type InboxResponderDeps, type ThreadDetailView } from "#src/lib/inbox-responder.js";
+import { parseProposalRegistry, recordRowThreadEvents, reframeProposal, type Proposal } from "#src/lib/inbox.js";
+import { appendThreadReplyOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessage } from "#src/lib/inbox-thread.js";
+import { buildDeclineProposalRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, buildRestoreProposalRoute, inboxThreadStorePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { approveParkedTask } from "#src/run-task.js";
 
 const T0 = Date.parse("2026-10-13T10:00:00.000Z");
 const iso = (offsetMs: number) => new Date(T0 + offsetMs).toISOString();

@@ -1,4 +1,3 @@
-// test/a-merged-scope-amendment-re-enters-its-parked-fix-rung.test.ts
 //
 // LIVE 2026-10-09: #10300's ci-log fix round asked for a scope amendment, opened #10308 and ended
 // `fix.done subtype scope_amendment_pending`. #10308 merged at 10:22Z, yet every later sweep stood
@@ -7,7 +6,7 @@
 // re-entered, so its pending-scope branch never asked GitHub to update the PR branch.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixRungStalledWithoutNewHead } from "../src/lib/sweep.js";
+import { fixRungStalledWithoutNewHead } from "#src/lib/sweep.js";
 
 const TASK = "W1-T5791";
 const HEAD = "5898c3b12a9cc79fc39176fd51acec6c814d9c9a";

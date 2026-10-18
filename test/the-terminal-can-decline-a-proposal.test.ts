@@ -10,10 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { InboxClassification, Proposal } from "../src/lib/inbox.js";
-import { proposalVerdictCommand } from "../src/lib/inbox-verdict-command.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { proposalVerdictCliCommand } from "../src/run-task.js";
+import type { InboxClassification, Proposal } from "#src/lib/inbox.js";
+import { proposalVerdictCommand } from "#src/lib/inbox-verdict-command.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { proposalVerdictCliCommand } from "#src/run-task.js";
 
 type Found = { exists: boolean; classification?: InboxClassification };
 

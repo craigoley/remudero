@@ -17,8 +17,8 @@ import {
   type OpenPrView,
   type StrikeAttempt,
   type SweepDeps,
-} from "../src/lib/sweep.js";
-import type { CriterionVerdict } from "../src/lib/review.js";
+} from "#src/lib/sweep.js";
+import type { CriterionVerdict } from "#src/lib/review.js";
 
 const NOW = Date.parse("2026-08-28T12:00:00Z");
 const RECENT = "2026-08-28T11:00:00Z";

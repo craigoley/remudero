@@ -7,11 +7,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { aaArmFor, buildBenchmarkAaReport, parseAaTrialManifest, readAaLedgerEvidence } from "../src/lib/benchmark-aa.js";
-import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "../src/lib/benchmark-verified-outcome.js";
-import type { Task } from "../src/lib/plan.js";
-import type { StatusProjection } from "../src/lib/status.js";
-import { buildTaskCaseFile, type CaseLedgerRead, type CasePrRead, type TaskCaseFile } from "../src/lib/task-case-file.js";
+import { aaArmFor, buildBenchmarkAaReport, parseAaTrialManifest, readAaLedgerEvidence } from "#src/lib/benchmark-aa.js";
+import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "#src/lib/benchmark-verified-outcome.js";
+import type { Task } from "#src/lib/plan.js";
+import type { StatusProjection } from "#src/lib/status.js";
+import { buildTaskCaseFile, type CaseLedgerRead, type CasePrRead, type TaskCaseFile } from "#src/lib/task-case-file.js";
 
 const NOW = "2026-09-28T12:10:00.000Z";
 const SHA = "a".repeat(40);

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Task } from "../src/lib/plan.js";
-import { lintTask } from "../src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
 
 /** A record with one PROSE proof — the `proof-dialect` shape that refused #5718's ten retirements. */
 function taskWithProseProof(over: Partial<Task> = {}): Task {

@@ -16,7 +16,7 @@ import {
   buildFixRungDispatchArgs,
   buildOpenPrViews,
   runFixRung,
-} from "./helpers/run-task-test.js";
+} from "#test/helpers/run-task-test.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -24,11 +24,11 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { reviewInputDigest } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/sweep-test.js";
+import { reviewInputDigest } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

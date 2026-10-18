@@ -9,8 +9,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stringify as stringifyYaml } from "yaml";
 
-import { loadPlanFromYaml, PlanError, type Task } from "../src/lib/plan.js";
-import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
+import { loadPlanFromYaml, PlanError, type Task } from "#src/lib/plan.js";
+import { machineAuthorVerifyViolation, taskRulingPin } from "#src/lib/task-linter.js";
 
 const baseRecord = (): Record<string, unknown> => ({
   id: "W1-TFIXTURE",

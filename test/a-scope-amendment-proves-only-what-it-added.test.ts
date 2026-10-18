@@ -7,9 +7,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as amendments from "../src/lib/proof-amendment.js";
-import type { ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as amendments from "#src/lib/proof-amendment.js";
+import type { ProofAmendmentWritePorts } from "#src/lib/proof-amendment.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const taskId = "W1-T5534";
 const shardPath = `plan/tasks.d/${taskId}-fixture.yaml`;

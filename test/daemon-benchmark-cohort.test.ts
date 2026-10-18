@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { runDaemon } from "../src/lib/daemon.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { detachSweepAction, drainDetachedSweepActions, detachedActionInFlight } from "../src/lib/sweep.js";
-import { runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { detachSweepAction, drainDetachedSweepActions, detachedActionInFlight } from "#src/lib/sweep.js";
+import { runBenchmarkCohortPass } from "#src/lib/benchmark-cohort.js";
 
 test("daemon benchmark cohort failure preserves worker and review flow", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-daemon-benchmark-"));

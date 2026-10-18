@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Mount } from "../src/lib/mounts.js";
-import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "#src/lib/worker.js";
 import {
   buildRiskJudgeSpawnArgs,
   parseRiskJudgeResponse,
@@ -11,7 +11,7 @@ import {
   RISK_JUDGE_MAX_ATTEMPTS,
   type RiskJudgeInput,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 import {
   classifyTriageOutcome,
   decideTriage,
@@ -19,7 +19,7 @@ import {
   runTriageWithRetry,
   TRIAGE_VERDICT_MAX_ATTEMPTS,
   type TriageAttemptResult,
-} from "../src/lib/triage.js";
+} from "#src/lib/triage.js";
 
 // ── shared fixtures ───────────────────────────────────────────────────────
 

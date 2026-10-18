@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { reasonAboutBlock, verdictIsFixable } from "../src/lib/block-reason.js";
-import { haltsDrain, NON_HALTING_VERDICTS, runDrain, type MergedSet } from "../src/lib/drain.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { loadPlanFromYaml, unmetDependencies, type Plan, type Task } from "../src/lib/plan.js";
-import { pollToGate, STALL_WINDOW, type RunResult } from "../src/run-task.js";
+import { reasonAboutBlock, verdictIsFixable } from "#src/lib/block-reason.js";
+import { haltsDrain, NON_HALTING_VERDICTS, runDrain, type MergedSet } from "#src/lib/drain.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlanFromYaml, unmetDependencies, type Plan, type Task } from "#src/lib/plan.js";
+import { pollToGate, STALL_WINDOW, type RunResult } from "#src/run-task.js";
 
 const PR_URL = "https://github.com/acme/remudero/pull/3662";
 const HEAD_SHA = "abc3662";

@@ -4,7 +4,7 @@
 // fold rebuilds the SAME plan from it.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   buildIntentPlan,
   foldIntentPlans,
@@ -22,9 +22,9 @@ import {
   INTENT_PLAN_SCOPE_ANSWER_RE,
   INTENT_PLAN_USD_ANSWER_RE,
   validateIntentPlanEvent,
-} from "../src/lib/intent-plan.js";
-import { at, CLOCK, DAY, HOUR, MINUTE, postJson, rowsAt, tempStatePath, withDelegationService } from "./helpers/delegation-profile-fixture.js";
-import { builtPlan, planInput, PLANS_PATH, PROPOSER, readPlans, stepInput } from "./helpers/intent-plan-fixture.js";
+} from "#src/lib/intent-plan.js";
+import { at, CLOCK, DAY, HOUR, MINUTE, postJson, rowsAt, tempStatePath, withDelegationService } from "#test/helpers/delegation-profile-fixture.js";
+import { builtPlan, planInput, PLANS_PATH, PROPOSER, readPlans, stepInput } from "#test/helpers/intent-plan-fixture.js";
 
 test("W1-T3898: a built plan records outcome, constraints, sources, scope, consequence, budget, approval, expiry, and idempotency metadata", () => {
   const plan = builtPlan({

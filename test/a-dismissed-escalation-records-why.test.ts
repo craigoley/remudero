@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import type { IssueCloser, PanelActionDeps } from "../src/lib/panel-actions.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import type { IssueCloser, PanelActionDeps } from "#src/lib/panel-actions.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 import {
   ESCALATION_DISPOSITIONS,
   MIN_SAMPLE_FOR_DEMOTION,
@@ -17,7 +17,7 @@ import {
   escalationClassSignal,
   escalationClassSignals,
   escalationClassTier,
-} from "../src/lib/escalation-precision.js";
+} from "#src/lib/escalation-precision.js";
 
 // ── W1-T4677: DISMISSING AN ESCALATION RECORDS NOTHING ──────────────────────────────────────────
 //

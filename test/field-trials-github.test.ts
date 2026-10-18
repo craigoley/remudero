@@ -12,9 +12,9 @@ import {
   authorClassOf, emptyRepoStore, ghApiFetch, GITHUB_PAGE_SIZE, ingestFieldTrialsGithub, observedCurrentHeadGreen, pageOf, parseGithubStore, pullOf,
   REVERTS_LINE_RE, revertedPrNumber, RUN_BRANCH_RE, summarizeChecks, TRAILER_LINE_RE, trailerTaskIds,
   type FieldTrialsGithubStore, type GithubPage,
-} from "../src/lib/field-trials-github.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/field-trials-github.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 type Fixture = {
   pulls?: unknown[]; commits?: unknown[]; deployments?: unknown[];

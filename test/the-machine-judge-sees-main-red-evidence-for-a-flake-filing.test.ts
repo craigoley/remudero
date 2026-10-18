@@ -12,18 +12,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 // Namespace imports, so at a base without these exports the file still loads and each test fails on its own.
-import * as flake from "../src/lib/flake-incident-gardener.js";
-import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
-import { renderMachineShard } from "../src/lib/machine-filing.js";
-import { machineJudgeFoundWork, renderRuledShard, runMachineFilingJudge, type MachineJudgePorts } from "../src/lib/machine-filing-judge.js";
-import * as rung from "../src/lib/main-health-rung.js";
-import { loadPlan, parseTasksFromYaml } from "../src/lib/plan.js";
-import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { taskRulingPin } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as flake from "#src/lib/flake-incident-gardener.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
+import { renderMachineShard } from "#src/lib/machine-filing.js";
+import { machineJudgeFoundWork, renderRuledShard, runMachineFilingJudge, type MachineJudgePorts } from "#src/lib/machine-filing-judge.js";
+import * as rung from "#src/lib/main-health-rung.js";
+import { loadPlan, parseTasksFromYaml } from "#src/lib/plan.js";
+import type { RiskJudgeInput, RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const CLOCK = fixedClock(Date.parse("2026-10-15T16:35:05Z"));
 const FILE = "test/the-sweep-never-sends-a-fix-worker-at-a-red-it-cannot-fix.test.ts";

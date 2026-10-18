@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { PlanError, loadPlan, loadPlanFromYaml, validateAcceptanceShape } from "../src/lib/plan.js";
+import { PlanError, loadPlan, loadPlanFromYaml, validateAcceptanceShape } from "#src/lib/plan.js";
 
 /**
  * test/plan-acceptance-shape.test.ts — W1-T2908.

@@ -7,9 +7,9 @@ import {
   splitConcatenatedJsonPages,
   NEEDS_HUMAN_LABEL,
   escalationContractRevision,
-} from "../src/lib/escalate.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import { ghUpdateBranchArgv } from "../src/run-task.js";
+} from "#src/lib/escalate.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import { ghUpdateBranchArgv } from "#src/run-task.js";
 
 /**
  * The escalation-lifecycle issue reads (the batched board gateway's `fetchAllIssues` and

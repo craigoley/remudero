@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { shouldSelfHealNothingChanged } from "../src/lib/fix-rung-classify.js";
+import { shouldSelfHealNothingChanged } from "#src/lib/fix-rung-classify.js";
 
 const R = "the worker changed nothing";
 

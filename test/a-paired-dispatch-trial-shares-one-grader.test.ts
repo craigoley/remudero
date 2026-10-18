@@ -8,26 +8,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildBenchmarkAaReport, parseAaTrialManifest, type AaLedgerEvidence, type AaRow,
-  type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
+  type BenchmarkAaReport } from "#src/lib/benchmark-aa.js";
 import {
   activateBenchmarkPaidPilot, activePaidPilotProtocols, benchmarkPaidPilotCommand, loadPaidPilotProtocol, pairedSampleDraw,
   paidPilotArmAdmission, parsePaidPilotRequest, readPaidPilotControls, readPaidPilotEvidence, summarizePaidPilotSpend,
   PAIRED_UNCERTAINTY_METHOD, type PaidPilotArm, type PaidPilotEvidence, type PaidPilotProtocol, type PaidPilotRow,
   type PairedTrialRowFields,
-} from "../src/lib/benchmark-paid-pilot.js";
-import type { Clock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+} from "#src/lib/benchmark-paid-pilot.js";
+import type { Clock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import {
   buildPairedPilotReport, gradeHeadWithReviewerExecutor, mcnemarExact, pairedAttemptOrder, pairedDifference, pairedPilotReportView,
   pairedStackEvidence, runPairedTrial, type GradedPair, type PairedAttemptRequest, type PairedAttemptResult, type PairedGrade,
   type PairedTrialInput, type PairedTrialResult,
-} from "../src/lib/paired-trial.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import type { TaskCaseFile } from "../src/lib/task-case-file.js";
-import type { spawnWorker, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { HANDLERS, runTask } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/paired-trial.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
+import type { spawnWorker, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { HANDLERS, runTask } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SHA = "a".repeat(40);
 const OTHER_SHA = "c".repeat(40);

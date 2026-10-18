@@ -6,12 +6,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { decideFixOutcomeAction, readRedAttribution, redAttribution } from "../src/lib/fix-outcome.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import { runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { decideFixOutcomeAction, readRedAttribution, redAttribution } from "#src/lib/fix-outcome.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 } as const;
 type Row = { step: string } & Record<string, unknown>;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildRecapEvents } from "../src/lib/recap.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { buildRecapEvents } from "#src/lib/recap.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

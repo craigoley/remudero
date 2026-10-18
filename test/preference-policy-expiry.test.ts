@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOperatorAgentRoutes, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_PROPOSAL_STEP } from "../src/lib/operator-agent.js";
+import { buildOperatorAgentRoutes, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_PROPOSAL_STEP } from "#src/lib/operator-agent.js";
 import {
   applyScopedPreference,
   evaluatePreference,
@@ -19,8 +19,8 @@ import {
   type PreferenceEvent,
   type PreferenceLifecycle,
   type PreferenceState,
-} from "../src/lib/preference-policy.js";
-import { createService } from "../src/lib/service.js";
+} from "#src/lib/preference-policy.js";
+import { createService } from "#src/lib/service.js";
 
 const READ = "pref-expiry-read";
 const WRITE = "pref-expiry-write";

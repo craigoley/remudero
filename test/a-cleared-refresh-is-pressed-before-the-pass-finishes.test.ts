@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createRefreshAdmission, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
+import { createRefreshAdmission, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-17T10:00:00Z");
 const MAIN = "c".repeat(40);

@@ -6,10 +6,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, SPAWN_FAILURE_MESSAGE_MAX_CHARS, spawnFailureDetail } from "../src/lib/benchmark-run.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { recordBenchmarkWorkerAttempt } from "../src/run-task.js";
+import { benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, SPAWN_FAILURE_MESSAGE_MAX_CHARS, spawnFailureDetail } from "#src/lib/benchmark-run.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { recordBenchmarkWorkerAttempt } from "#src/run-task.js";
 
 const SECRET = "sk-ant-api03-SENSITIVEvalue1234567890";
 const PATH = "/home/node/Remudero/worker-home-1de6/.claude.json";

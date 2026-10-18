@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { redPrWithStaleGate, selectUpdateBranchTarget, type OpenPrView } from "../src/lib/sweep.js";
+import { redPrWithStaleGate, selectUpdateBranchTarget, type OpenPrView } from "#src/lib/sweep.js";
 
 // ── W1-T1212: a red PR runs a FROZEN copy of the very gate that blocks it ──────────────────────
 //

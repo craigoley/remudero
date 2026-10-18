@@ -9,11 +9,11 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ACTION_CATALOGUE, executeCatalogueAction, resolveCatalogueCapability } from "../src/lib/action-executor.js";
-import type { AutomationAction, AutomationActionReceipt } from "../src/lib/automation-action.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { isPaused, pauseFilePath, stopFilePath } from "../src/lib/fleet-control.js";
-import { buildIntentPlan, INTENT_PLAN_LEDGER_STEP, intentPlanActions, previewIntentPlan, type IntentPlan } from "../src/lib/intent-plan.js";
+import { ACTION_CATALOGUE, executeCatalogueAction, resolveCatalogueCapability } from "#src/lib/action-executor.js";
+import type { AutomationAction, AutomationActionReceipt } from "#src/lib/automation-action.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { isPaused, pauseFilePath, stopFilePath } from "#src/lib/fleet-control.js";
+import { buildIntentPlan, INTENT_PLAN_LEDGER_STEP, intentPlanActions, previewIntentPlan, type IntentPlan } from "#src/lib/intent-plan.js";
 import {
   boardPrReading,
   boardTaskReading,
@@ -30,15 +30,15 @@ import {
   type GoalBoardView,
   type GoalEvidenceReader,
   type GoalStepPlan,
-} from "../src/lib/intent-planner.js";
-import { buildOperatorAgentRoutes } from "../src/lib/operator-agent.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { buildServeRoutes } from "../src/lib/serve.js";
-import { createService } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { at, CLOCK, HOUR, MINUTE, NOW_MS, READ_TOKEN, rowsAt, tempStatePath, WRITE_TOKEN } from "./helpers/delegation-profile-fixture.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { stepInput } from "./helpers/intent-plan-fixture.js";
+} from "#src/lib/intent-planner.js";
+import { buildOperatorAgentRoutes } from "#src/lib/operator-agent.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { buildServeRoutes } from "#src/lib/serve.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { at, CLOCK, HOUR, MINUTE, NOW_MS, READ_TOKEN, rowsAt, tempStatePath, WRITE_TOKEN } from "#test/helpers/delegation-profile-fixture.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { stepInput } from "#test/helpers/intent-plan-fixture.js";
 
 const PROPOSER = "operator:owner";
 const PLANS_PATH = "/v1/operator-agent/intent-plans";

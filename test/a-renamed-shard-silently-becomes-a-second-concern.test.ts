@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { ownFalsifierRenameCandidates, sizingViolation, subsystemsOf } from "../src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
+import { ownFalsifierRenameCandidates, sizingViolation, subsystemsOf } from "#src/lib/task-linter.js";
 
 /**
  * test/a-renamed-shard-silently-becomes-a-second-concern.test.ts — W1-T2673.

@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { applyPlanProposalCommit } from "../src/lib/plan-architect.js";
-import { loadPlanIndex } from "../src/lib/plan-index.js";
+import { applyPlanProposalCommit } from "#src/lib/plan-architect.js";
+import { loadPlanIndex } from "#src/lib/plan-index.js";
 
 function git(dir: string, args: string[]): string {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });

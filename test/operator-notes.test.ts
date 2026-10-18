@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { assertProvenance, lintPrompt } from "../src/lib/provenance.js";
-import { renderImplementPrompt, renderReconPrompt } from "../src/run-task.js";
-import type { Task } from "../src/lib/plan.js";
+import { createService } from "#src/lib/service.js";
+import { assertProvenance, lintPrompt } from "#src/lib/provenance.js";
+import { renderImplementPrompt, renderReconPrompt } from "#src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
 import {
   appendOperatorNote,
   buildAddOperatorNoteRoute,
@@ -15,7 +15,7 @@ import {
   loadOperatorNotesForTask,
   renderOperatorNotes,
   type OperatorNoteEntry,
-} from "../src/lib/operator-notes.js";
+} from "#src/lib/operator-notes.js";
 
 // ── W1-T164 acceptance (plan/tasks.yaml):
 //   (1) a stamped operator_note on task A is injected into task A's recon/implement prompt,

@@ -14,12 +14,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { readCiGateRequiredChecks } from "../src/lib/ci-gate-required.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { buildMainHealthRung, type MainHealthRungDeps } from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import type { RollupCheckEntry } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readCiGateRequiredChecks } from "#src/lib/ci-gate-required.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { buildMainHealthRung, type MainHealthRungDeps } from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import type { RollupCheckEntry } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const OWNER = "o";
 const REPO = "r";

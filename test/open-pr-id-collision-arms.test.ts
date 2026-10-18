@@ -1,3 +1,4 @@
+import { repoRoot } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
@@ -16,7 +17,7 @@ import { test } from "node:test";
 // unparsable remote url, a detached HEAD, a `gh` that cannot run, a response that is not JSON,
 // a response that is not an array. Each gets its own test rather than one "malformed input"
 // case, which would pass while the rest stayed dead.
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = repoRoot();
 const mod = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 function scratchRepo(remoteUrl?: string): string {

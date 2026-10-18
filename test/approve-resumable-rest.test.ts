@@ -3,8 +3,8 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { approveProposal, approveRunBranch, describeApproveGatewayError, priorApproveRunBranch, type DraftedCandidate, type InboxClassification, type RatifyGateway } from "../src/lib/inbox.js";
-import { createPlanPrRest, probeExistingPlanPr, ratifyPrCreateRestArgs, ratifyPrProbeRestArgs } from "../src/lib/plan-pr-emitter.js";
+import { approveProposal, approveRunBranch, describeApproveGatewayError, priorApproveRunBranch, type DraftedCandidate, type InboxClassification, type RatifyGateway } from "#src/lib/inbox.js";
+import { createPlanPrRest, probeExistingPlanPr, ratifyPrCreateRestArgs, ratifyPrProbeRestArgs } from "#src/lib/plan-pr-emitter.js";
 
 // W1-T903: `rmd approve` used to commit + push the ratification branch and only THEN shell
 // `gh pr create` (GraphQL) — an exhausted GraphQL budget stranded a pushed branch with no PR,

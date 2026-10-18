@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
-import { ghStubPath, pathWith } from "./helpers/gh-stub.js";
+import { ghStubPath, pathWith } from "#test/helpers/gh-stub.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { FeedbackEntry } from "../src/lib/feedback.js";
-import { loadProposalRegistry, pruneRatifiedProposals, type Proposal } from "../src/lib/inbox.js";
-import { readCodeScanningAlerts, type RawAlert } from "../src/lib/ops.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import { loadProposalRegistry, pruneRatifiedProposals, type Proposal } from "#src/lib/inbox.js";
+import { readCodeScanningAlerts, type RawAlert } from "#src/lib/ops.js";
 import {
   codeqlQualityProposalId,
   partitionCodeqlQualityAlerts,
   reconcileCodeqlQualityProposals,
-} from "../src/lib/codeql-quality-intake.js";
+} from "#src/lib/codeql-quality-intake.js";
 
 function alert(id: string, ruleId: string, opts: Partial<RawAlert> = {}): RawAlert {
   return {

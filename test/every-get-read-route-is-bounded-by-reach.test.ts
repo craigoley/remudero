@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import type { Route } from "../src/lib/service.js";
+import type { Route } from "#src/lib/service.js";
 
 const context = new AsyncLocalStorage<string>();
 const archiveOpens = new Map<string, number>();
@@ -45,11 +45,11 @@ fs.openSync = charged(fs.openSync);
 fsp.readFile = charged(fsp.readFile);
 syncBuiltinESMExports();
 
-const { buildServeRoutes, CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE } = await import("../src/lib/serve.js");
-const { latestMeasurementRows } = await import("../src/lib/measurement-cadence.js");
-const { loadPlan } = await import("../src/lib/plan.js");
-const { inboxThreadId } = await import("../src/lib/inbox-thread.js");
-const { ProviderAuthSessionStore } = await import("../src/lib/provider-auth-sessions.js");
+const { buildServeRoutes, CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE } = await import("#src/lib/serve.js");
+const { latestMeasurementRows } = await import("#src/lib/measurement-cadence.js");
+const { loadPlan } = await import("#src/lib/plan.js");
+const { inboxThreadId } = await import("#src/lib/inbox-thread.js");
+const { ProviderAuthSessionStore } = await import("#src/lib/provider-auth-sessions.js");
 
 const READ_TOKEN = "read-token";
 const ARCHIVE_MTIME_S = 1_790_000_000;

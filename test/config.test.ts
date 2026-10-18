@@ -13,7 +13,7 @@ import {
   resolveHeadroomEnabled,
   validateConfig,
   type Config,
-} from "../src/lib/config.js";
+} from "#src/lib/config.js";
 
 // NOTE: calling loadConfig() on its CREATE path shells `which claude`, which is
 // absent in CI (LEARNINGS.md: lazy-config-in-ci). validateConfig is a pure function

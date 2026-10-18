@@ -9,9 +9,9 @@ import {
   runningLongLine,
   settledSpansByClass,
   type CostAnomalyPolicy,
-} from "../src/lib/cost-anomaly.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { THROWN_RUN_VERDICT_STAGES } from "../src/lib/status.js";
+} from "#src/lib/cost-anomaly.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { THROWN_RUN_VERDICT_STAGES } from "#src/lib/status.js";
 
 // W1-T4709 — a run that threw or deferred before doing any work now ends with `verdict: "failed"`
 // and a `stage` in THROWN_RUN_VERDICT_STAGES (W1-T4655/W1-T4701), and the operator's backfill adds

@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { test } from "node:test";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { LOCATION_RELATIVE_ERE, aliasFor, hasLocationRelativeSpecifier, main as codemodMain, rewriteSource } from "#scripts/test-location-codemod.mjs";
+import { LOCATION_RELATIVE_ERE, aliasFor, codeMask, hasLocationRelativeSpecifier, main as codemodMain, rewriteRootReads, rewriteSource } from "#scripts/test-location-codemod.mjs";
 
 const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
 
@@ -206,4 +206,77 @@ test("W1-T9864: --folder selects the tests the placement table maps to that fold
     process.stdout.write = out;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("W1-T9865: a specifier inside a fixture string or comment is never rewritten", () => {
+  const file = "test/nested/thing.test.ts";
+  const fixture = `const planted = ${JSON.stringify(imp("./b.js"))};`;
+  const input = [
+    fixture,
+    "const multi = `",
+    imp("./c.js"),
+    "${1 + 1}",
+    "`;",
+    `// ${imp("./d.js")}`,
+    "const pattern = /[\"']/g;",
+    imp("../../src/lib/real.js"),
+    "",
+  ].join("\n");
+  const out = rewriteSource(input, file);
+  assert.equal(out.rewritten, 1, "only the real import is rewritten");
+  assert.ok(out.text.includes(fixture), "a string fixture keeps its relative specifier");
+  assert.ok(out.text.includes(imp("./c.js")), "a template literal keeps its relative specifier");
+  assert.ok(out.text.includes(`// ${imp("./d.js")}`), "a comment keeps its relative specifier");
+  assert.ok(out.text.includes(imp("#src/lib/real.js")));
+  const mask = codeMask(`a "b" c`);
+  assert.deepEqual([...mask], [1, 1, 0, 0, 0, 1, 1]);
+});
+
+test("W1-T9865: an own-location root read becomes a repoRoot() read, and a read that stays in the test's folder is only reported", () => {
+  const file = "test/thing.test.ts";
+  const root = rewriteRootReads(
+    [
+      `import { join, dirname } from "node:path";`,
+      `import { fileURLToPath } from "node:url";`,
+      `const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");`,
+      `const SRC = join(import.meta.dirname, "..", "src", "run-task.ts");`,
+      `const FX = join(import.meta.dirname, "fixtures", "a.yaml");`,
+      `const SIBLING = join(import.meta.dirname, "other.test.ts");`,
+      `const GEN = ${JSON.stringify("const p = join(import.meta.dirname, '..');")};`,
+      "",
+    ].join("\n"),
+    file,
+  );
+  assert.equal(root.count, 3);
+  assert.ok(root.text.startsWith(`import { repoRoot } from "#test/helpers/repo-root.js";\n`));
+  assert.ok(root.text.includes("const ROOT = repoRoot();"));
+  assert.ok(root.text.includes(`const SRC = join(repoRoot(), "src/run-task.ts");`));
+  assert.ok(root.text.includes(`const FX = join(repoRoot(), "test/fixtures/a.yaml");`));
+  assert.ok(root.text.includes(`join(import.meta.dirname, "other.test.ts")`), "a read of another test is left for the report");
+  assert.ok(root.text.includes("join(import.meta.dirname, '..')"), "generated text inside a string is left alone");
+  assert.equal(rewriteSource(root.text, file).unresolved.some((u) => /other\.test\.ts/.test(u)), true);
+
+  // A file that already names `repoRoot` locally gets the helper under another name, so no call reads a shadow.
+  const shadow = rewriteRootReads(`import { join } from "node:path";\nconst repoRoot = join(import.meta.dirname, "..");\n`, file);
+  assert.ok(shadow.text.includes(`import { repoRoot as testRepoRoot } from "#test/helpers/repo-root.js";`));
+  assert.ok(shadow.text.includes("const repoRoot = testRepoRoot();"));
+
+  // new URL(...) forms: a file URL is rebuilt from the path.
+  const url = rewriteRootReads(`import { fileURLToPath } from "node:url";\nconst u = new URL("../src/lib/x.ts", import.meta.url);\n`, file);
+  assert.ok(url.text.includes(`import { fileURLToPath, pathToFileURL } from "node:url";`));
+  assert.ok(url.text.includes("const u = pathToFileURL(`${repoRoot()}/src/lib/x.ts`);"));
+
+  // No node:url import yet: one is added. A readFileSync(new URL(...)) becomes a plain path read.
+  const bare = rewriteRootReads(`const u = new URL("../src/lib/x.ts", import.meta.url);\nconst t = readFileSync(new URL("../plan/tasks.yaml", import.meta.url), "utf8");\n`, file);
+  assert.ok(bare.text.includes(`import { pathToFileURL } from "node:url";`));
+  assert.ok(bare.text.includes("readFileSync(`${repoRoot()}/plan/tasks.yaml`, \"utf8\")"));
+
+  // A `const __dirname` declaration goes once nothing else reads it; a `__dirname` read elsewhere keeps it.
+  const dunder = `import { join, dirname } from "node:path";\nconst __dirname = dirname(fileURLToPath(import.meta.url));\nconst a = join(__dirname, "..", "src");\n`;
+  const dropped = rewriteRootReads(dunder, file);
+  assert.equal(dropped.text.includes("const __dirname"), false);
+  assert.ok(dropped.text.includes(`const a = join(repoRoot(), "src");`));
+  const kept = rewriteRootReads(`${dunder}const b = __dirname;\n`, file);
+  assert.ok(kept.text.includes("const __dirname"), "a __dirname still read elsewhere keeps its declaration");
+  assert.equal(rewriteRootReads(`const x = 1;\n`, file).count, 0);
 });

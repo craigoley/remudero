@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   buildOperatorAgentRoutes,
   OPERATOR_AGENT_EXPERIMENT_STEP,
   type OperatorAgentExperiment,
-} from "../src/lib/operator-agent.js";
+} from "#src/lib/operator-agent.js";
 
 const READ_TOKEN = "experiment-read-token";
 const WRITE_TOKEN = "experiment-write-token";

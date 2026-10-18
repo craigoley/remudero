@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildAttentionCensus, type AttentionCensusInput, type ThreadSummaryView } from "../src/lib/inbox-responder.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { classifyProposal, updateProposalRegistry } from "../src/lib/inbox.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { buildAttentionCensus, type AttentionCensusInput, type ThreadSummaryView } from "#src/lib/inbox-responder.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { classifyProposal, updateProposalRegistry } from "#src/lib/inbox.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { proposalFromJudgedShard } from "#src/lib/verify-human-judge.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 function view(proposalId: string, attention: ThreadSummaryView["attention"]): ThreadSummaryView {
   return {

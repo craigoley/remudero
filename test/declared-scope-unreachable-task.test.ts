@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { declaredScopeViolation, lintTask } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { declaredScopeViolation, lintTask } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 // W1-T1030 — `declaredScopeViolation` (task-linter.ts) blocks any task with an absent or empty
 // `files:`, and its own rationale is entirely about `overlappingPaths` at DISPATCH. But

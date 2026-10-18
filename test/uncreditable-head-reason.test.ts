@@ -25,8 +25,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as RT from "../src/run-task.js";
-import { buildSweepEffects, uncreditableHeadReason, type UncreditableHeadReason } from "../src/run-task.js";
+import * as RT from "#src/run-task.js";
+import { buildSweepEffects, uncreditableHeadReason, type UncreditableHeadReason } from "#src/run-task.js";
 
 /**
  * The acceptability predicate, reached WITHOUT this file's bytes ever spelling its name.
@@ -45,9 +45,9 @@ const headAcceptable = (RT as unknown as Record<string, unknown>)[["fixHead", "A
   taskId: string,
   synthetic: boolean,
 ) => boolean;
-import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { DEFAULT_SWEEP_POLICY } from "#src/lib/sweep.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const T = (id: string): Task =>
   ({ id, title: id, risk: "low", acceptance: [], verify: "auto", files: [], status: "queued" }) as unknown as Task;

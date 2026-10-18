@@ -26,9 +26,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MAX_MENTION_LEAD, describeMint, mintNextTaskId } from "../src/lib/task-id.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { describeMintWithHistory, mintNextTaskIdWithHistory, remotePlanCeilingOnRef } from "../src/run-task.js";
+import { MAX_MENTION_LEAD, describeMint, mintNextTaskId } from "#src/lib/task-id.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { describeMintWithHistory, mintNextTaskIdWithHistory, remotePlanCeilingOnRef } from "#src/run-task.js";
 
 const GIT_ENV = {
   ...process.env,

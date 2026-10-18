@@ -12,12 +12,12 @@ import {
   realMergeHoldActorProbe,
   type MergeHoldActorProbe,
   type OperatorMergeHoldInput,
-} from "../src/lib/operator-merge-hold.js";
-import { automergeHoldFromLedger, describeHoldSetter } from "../src/lib/review.js";
-import { deriveBlockedPrSections } from "../src/lib/status-board.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { diagnoseCappedRoutingBlock, type OpenPrView } from "./helpers/sweep-test.js";
-import { mergeHoldCommand } from "../src/run-task.js";
+} from "#src/lib/operator-merge-hold.js";
+import { automergeHoldFromLedger, describeHoldSetter } from "#src/lib/review.js";
+import { deriveBlockedPrSections } from "#src/lib/status-board.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { diagnoseCappedRoutingBlock, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { mergeHoldCommand } from "#src/run-task.js";
 
 const SESSION = "954513d4-fb16-405c-a008-874081e11477";
 

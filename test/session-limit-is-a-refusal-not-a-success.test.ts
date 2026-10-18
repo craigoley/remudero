@@ -15,14 +15,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { collectWorkerResult, workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
+import { collectWorkerResult, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import {
   evictRefusalPoisonedKeys,
   runDraftRung,
   type DraftAttemptCache,
   type DraftCache,
   type DraftedCandidate,
-} from "../src/lib/inbox.js";
+} from "#src/lib/inbox.js";
 
 /** The stderr the fleet actually recorded, verbatim from ledger.ndjson at 2026-09-01T10:15:55.352Z. */
 const REAL_SWALLOWED =

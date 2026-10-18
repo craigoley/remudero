@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildCanarySchedule, executeCanarySchedule, type CanarySchedulePorts } from "../src/lib/model-canary-schedule.js";
-import { commonCanarySuite, canarySuiteDigest } from "../src/lib/model-canary-suite.js";
-import { projectCanaryRuns, type CanaryRun } from "../src/lib/model-canary-metrics.js";
+import { buildCanarySchedule, executeCanarySchedule, type CanarySchedulePorts } from "#src/lib/model-canary-schedule.js";
+import { commonCanarySuite, canarySuiteDigest } from "#src/lib/model-canary-suite.js";
+import { projectCanaryRuns, type CanaryRun } from "#src/lib/model-canary-metrics.js";
 
 test("canary schedule pins paired cases and A A labels without duplicate execution after a crash", async () => {
   const cases = commonCanarySuite().slice(0, 2), suiteHash = canarySuiteDigest(cases);

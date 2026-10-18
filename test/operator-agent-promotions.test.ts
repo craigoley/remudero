@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildOperatorAgentRoutes, type OperatorAgentPromotionHistory } from "../src/lib/operator-agent.js";
-import { EXPERIMENT_PROMOTION_VERSION, type PromotionRecord } from "../src/lib/experiment-promotion.js";
+import { createService } from "#src/lib/service.js";
+import { buildOperatorAgentRoutes, type OperatorAgentPromotionHistory } from "#src/lib/operator-agent.js";
+import { EXPERIMENT_PROMOTION_VERSION, type PromotionRecord } from "#src/lib/experiment-promotion.js";
 
 const READ_TOKEN = "promotion-read-token";
 const WRITE_TOKEN = "promotion-write-token";

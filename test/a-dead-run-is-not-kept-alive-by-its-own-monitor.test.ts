@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { recordRunningLong, RUNNING_LONG_STEP } from "../src/lib/cost-anomaly.js";
-import { dispatchesWithoutNewOwnedPr, orphanedRunIds, taskAttributableLifetimeDispatches } from "../src/lib/status.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
+import { recordRunningLong, RUNNING_LONG_STEP } from "#src/lib/cost-anomaly.js";
+import { dispatchesWithoutNewOwnedPr, orphanedRunIds, taskAttributableLifetimeDispatches } from "#src/lib/status.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
 
 const TASK = "W1-T4819";
 const START = "2026-09-01T00:00:00.000Z";

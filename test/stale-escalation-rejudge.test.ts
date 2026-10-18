@@ -12,8 +12,8 @@ import {
   type EscalationReconcileCandidate,
   type StaleEscalationRejudgeCandidate,
   type StaleEscalationRejudgeOptions,
-} from "../src/lib/sweep.js";
-import type { Escalation, EscalationJudgeVerdict } from "../src/lib/escalate.js";
+} from "#src/lib/sweep.js";
+import type { Escalation, EscalationJudgeVerdict } from "#src/lib/escalate.js";
 
 /**
  * MEASURED 2026-09-08 (this task's rationale): issues #4541, #4568, #4595 and #4604 all named the
@@ -318,8 +318,8 @@ test("the default bound mirrors MAX_ESCALATION_CLOSES_PER_CYCLE's own value", ()
 // ── design iii: the prompt actually carries the three pieces of evidence only time can supply. ──
 
 test("the re-judge prompt extends the birth prompt with age, referent state and siblings — never replaces it", async () => {
-  const { buildStaleEscalationRejudgePrompt } = await import("../src/lib/sweep.js");
-  const { buildEscalationJudgePrompt } = await import("../src/lib/escalate.js");
+  const { buildStaleEscalationRejudgePrompt } = await import("#src/lib/sweep.js");
+  const { buildEscalationJudgePrompt } = await import("#src/lib/escalate.js");
   const candidate = candidateOf({ ageMs: 7 * HOUR });
   const prompt = buildStaleEscalationRejudgePrompt(candidate);
   const birthPrompt = buildEscalationJudgePrompt(candidate.escalation);
@@ -332,7 +332,7 @@ test("the re-judge prompt extends the birth prompt with age, referent state and 
 });
 
 test("no siblings renders explicitly, never a blank section", async () => {
-  const { buildStaleEscalationRejudgePrompt } = await import("../src/lib/sweep.js");
+  const { buildStaleEscalationRejudgePrompt } = await import("#src/lib/sweep.js");
   const prompt = buildStaleEscalationRejudgePrompt(candidateOf({ siblingSummaries: [] }));
   assert.match(prompt, /\(none — this is the only open escalation naming this referent\)/);
 });

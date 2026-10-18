@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyProposal, deriveTaskReferent, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
-import { stampVerificationAsk } from "../src/lib/inbox-retirement.js";
-import { loadPlanFromYaml, type Task } from "../src/lib/plan.js";
+import { classifyProposal, deriveTaskReferent, type Proposal, type ReadinessContext } from "#src/lib/inbox.js";
+import { stampVerificationAsk } from "#src/lib/inbox-retirement.js";
+import { loadPlanFromYaml, type Task } from "#src/lib/plan.js";
 
 const ID = "W1-T9002";
 const proposal = (id = `machine-judge:${ID}`): Proposal => ({ id, summary: "A security judgement remains unresolved", evidenceAnchors: [] });

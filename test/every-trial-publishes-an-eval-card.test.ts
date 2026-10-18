@@ -15,8 +15,8 @@ import {
   twoProportionSampleSize,
   type EvalCardEvidence,
   type EvalCardTrial,
-} from "../src/lib/eval-card.js";
-import { buildAnalyticsRoute, coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+} from "#src/lib/eval-card.js";
+import { buildAnalyticsRoute, coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 
 /**
  * W1-T4630 — A FIELD-TRIAL RESULT CANNOT SHOW ITS OWN VALIDITY. Every trial (W1-T4575's A/A,

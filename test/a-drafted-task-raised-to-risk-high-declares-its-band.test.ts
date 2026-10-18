@@ -15,10 +15,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { acquireDrainLock } from "../src/lib/drain-lock.js";
-import { readClassificationSnapshot, triageFleetLane, writeClassificationSnapshot } from "../src/lib/fleet-lane.js";
-import * as inbox from "../src/lib/inbox.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { acquireDrainLock } from "#src/lib/drain-lock.js";
+import { readClassificationSnapshot, triageFleetLane, writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
+import * as inbox from "#src/lib/inbox.js";
 import {
   inboxDraftRelintPrompt,
   lintDraftedFragment,
@@ -27,11 +27,11 @@ import {
   runDraftRung,
   writeRatificationShards,
   type Proposal,
-} from "../src/lib/inbox.js";
-import { BAND_MEANING_REPLAY_STORE, readBandMeaningReplayStore, replayBandMeaningRefusals, type BandMeaningReplayStore } from "../src/lib/inbox-replay.js";
-import { relintGuidanceLines } from "../src/lib/relint.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/inbox.js";
+import { BAND_MEANING_REPLAY_STORE, readBandMeaningReplayStore, replayBandMeaningRefusals, type BandMeaningReplayStore } from "#src/lib/inbox-replay.js";
+import { relintGuidanceLines } from "#src/lib/relint.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const W8502 = "verify-human-automate:W1-T8502";
 
