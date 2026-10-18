@@ -268,16 +268,18 @@ test("W1-T9240: a rejected default timer is not converted to successful acquisit
 
 test("W1-T9240: release preserves a replaced lock's inode and contents", async t => {
   const root = ownedFixtureDir(t, "registry-release-identity").dir;
-  for (const mode of ["inode", "contents"]) {
+  for (const mode of ["inode", "contents", "missing"]) {
     const path = join(root, `${mode}.json`);
     const raw = JSON.stringify({ pid: process.pid, host: hostname(), startedAt: "replacement" });
     await updateProposalRegistryAsync(path, () => {
       if (mode === "inode") {
         fs.writeFileSync(`${path}.replacement`, raw);
         fs.renameSync(`${path}.replacement`, `${path}.lock`);
-      } else fs.writeFileSync(`${path}.lock`, raw);
+      } else if (mode === "contents") fs.writeFileSync(`${path}.lock`, raw);
+      else fs.unlinkSync(`${path}.lock`);
       return null;
     }, { maxWaitMs: 1000 });
-    assert.equal(fs.readFileSync(`${path}.lock`, "utf8"), raw, "release must not unlink a different acquisition");
+    assert.equal(fs.existsSync(`${path}.lock`), mode !== "missing", "release must not unlink a different acquisition");
+    if (mode !== "missing") assert.equal(fs.readFileSync(`${path}.lock`, "utf8"), raw);
   }
 });
