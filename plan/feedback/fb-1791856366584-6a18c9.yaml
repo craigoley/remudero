@@ -42,10 +42,11 @@ raw: >-
   at current main first (they were read at origin/main efd226b50).
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: nanoclaw-2026-10-13/portal-t-trailer-credit
 thread_id: null
+answered_by: null
