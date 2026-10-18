@@ -10,7 +10,7 @@
   risk: high
   band_meaning: span
   origin: "operator-authorized three-daemon recovery, 2026-10-18"
-  plan_refs: [W1-T3792, W1-T4052, W1-T5325]
+  plan_refs: [W1-T100, W1-T3792, W1-T4052, W1-T5325, W1-T9748]
   files:
     - src/lib/worker.ts
     - src/run-task.ts
@@ -35,6 +35,9 @@
     Subject sweep at 2026-10-18: 430 remote heads / 424 unique trees, counted against main,
     found no added owner for resume provider provenance or cross-provider sessions. W1-T3792
     already requires write-capable Codex continuations to start fresh; preserve that boundary.
+    W1-T100 owns CI-red disposition into the fix lane, not the next worker's conversation
+    namespace. W1-T9748 researches declared-file propagation into staging, not continuation
+    provider identity or context. They share dispatcher files but do not build this remedy.
   design: |
     One concern: make continuation identity and context coherent with the provider actually
     selected. Carry session origin from the previous WorkerResult.provider, never infer it from
