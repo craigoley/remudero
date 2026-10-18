@@ -1,0 +1,32 @@
+- id: W1-T10158
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:Analyze (javascript-typescript) cost 16.8 PR minute(s) across 6 round(s) on 5 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.3
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:Analyze (javascript-typescript)"
+  files:
+    - .github/workflows/codeql.yml
+    - test/check-analyze-javascript-typescript.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:Analyze (javascript-typescript)"
+      proof: "grep: test(\"W1-T10158: check:Analyze (javascript-typescript) is prevented, not retried\" in test/check-analyze-javascript-typescript.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:Analyze (javascript-typescript)'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:Analyze (javascript-typescript) cost 16.8 PR minute(s) across 6 red run(s) within the measured window on 5 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/codeql.yml: declares job analyze for Analyze (javascript-typescript)
+
+    RECENT ROUNDS (newest first):
+    - (none recorded)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
