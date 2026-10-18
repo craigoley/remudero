@@ -2213,9 +2213,18 @@ export async function classifyAllProposalsSliced(
   // Only a complete archive read may replace the store; a partial one keeps what the store already holds.
   const receipts = retained.verdictReceiptsRead ? { verdictReceipts: mergeVerdictReceipts(fp.verdictReceipts, fp.ledgerLines.flatMap((row) => verdictReceiptOf(row) ?? [])) } : {};
   const reused = reusableResult(state, fp);
-  if (reused !== undefined) return JSON.stringify(reused.attentionEvidence) === JSON.stringify(attentionEvidence) &&
-    (receipts.verdictReceipts === undefined || JSON.stringify(reused.verdictReceipts) === JSON.stringify(receipts.verdictReceipts))
-    ? reused : { ...reused, attentionEvidence, ...receipts };
+  if (reused !== undefined) {
+    let result = reused;
+    if (JSON.stringify(reused.attentionEvidence) !== JSON.stringify(attentionEvidence)
+      || JSON.stringify(reused.verdictReceipts) !== JSON.stringify(receipts.verdictReceipts)) {
+      // Do not carry complete-read authority from an older snapshot into a partial read.
+      const { verdictReceipts: _previousReceipts, ...classification } = reused;
+      result = { ...classification, attentionEvidence, ...receipts };
+    }
+    // Readers and refresh callers must see the same complete immutable envelope.
+    state.last = { ...state.last!, result };
+    return result;
+  }
   if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
   const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
