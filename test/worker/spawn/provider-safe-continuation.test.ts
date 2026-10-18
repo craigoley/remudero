@@ -154,4 +154,6 @@ test("ordinary spawns and bounded prior-report handoffs keep their own contracts
   const cash = workerExecutionForProvider({ prompt: action, resumeSessionId: "cash-id", continuation: { ...c, provider: "openweight" } }, "cash");
   assert.equal(cash.resumeSessionId, undefined);
   assert.equal(cash.receipt?.reason, "provider-fresh-only");
+  assert.throws(() => workerExecutionForProvider({ prompt: action, resumeSessionId: "old",
+    continuation: { provider: "codex", contextPrompt: " " } }, "claude"), /must not be blank/);
 });

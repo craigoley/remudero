@@ -2451,10 +2451,12 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
     return { prompt: args.prompt, resumeSessionId: args.resumeSessionId,
       receipt: { mode: "resumed", reason: "same-provider", from, to } };
   }
-  if (!args.continuation?.contextPrompt.trim()) {
+  const contextPrompt = args.continuation?.contextPrompt;
+  if (contextPrompt === undefined) {
     throw new Error("continuation requires provider provenance and a self-contained fresh handoff before execution");
   }
-  return { prompt: `${args.continuation.contextPrompt}\n\nPending action:\n${args.prompt}`,
+  if (contextPrompt.trim() === "") throw new Error("continuation fresh handoff must not be blank");
+  return { prompt: `${contextPrompt}\n\nPending action:\n${args.prompt}`,
     receipt: { mode: "fresh-handoff",
       reason: !args.resumeSessionId ? "session-unavailable" : from === undefined ? "origin-unavailable"
         : from !== to ? "provider-changed" : "provider-fresh-only",
