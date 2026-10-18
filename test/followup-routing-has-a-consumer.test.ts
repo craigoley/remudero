@@ -245,24 +245,12 @@ test("followupProposalId is stable across calls for the same candidate and names
 
 test("retroCommand's real-run path calls routeFollowupsToRegistry right alongside recordFollowupHarvest", () => {
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const anchor = src.indexOf("recordFollowupHarvest(gather.followups, { ledgerPath });");
-  assert.notEqual(anchor, -1, "the pre-existing, reached ledger-mark call must still be present");
-  const nearby = src.slice(anchor, anchor + 1000);
-  // W1-T2601 WIDENED, NOT WEAKENED: the path may now be carried in `followupRegistryPath` so the
-  // producer and the retirement arm beside it provably share ONE registry rather than two identical
-  // string literals free to drift. The claim is unchanged — the producer is called on
-  // `gather.followups` in the same real-run block — and the variable form is pinned to its own
-  // definition below, so this cannot admit a call aimed at some other registry.
-  assert.match(
-    nearby,
-    /routeFollowupsToRegistry\(gather\.followups, \{ registryPath: (join\(config\.root, "state", "inbox-proposals\.json"\)|followupRegistryPath) \}\);/,
-    "routeFollowupsToRegistry must be called on gather.followups, in the same real-run block as the ledger marks",
-  );
-  if (/registryPath: followupRegistryPath \}\);/.test(nearby)) {
-    assert.match(
-      src,
-      /const followupRegistryPath = join\(config\.root, "state", "inbox-proposals\.json"\);/,
-      "the variable form must resolve to the SAME inbox-proposals.json this assertion has always pinned",
-    );
-  }
+  assert.match(src, /publishFollowupHarvest\(gather\.followups, \{ registryPath: followupRegistryPath, ledgerPath \}\);/);
+  assert.match(src, /const followupRegistryPath = join\(config\.root, "state", "inbox-proposals\.json"\);/);
+  const retro = readFileSync(new URL("../src/lib/retro.ts", import.meta.url), "utf8");
+  const bridge = retro.slice(retro.indexOf("export function publishFollowupHarvest("), retro.indexOf("// ── Follow-up retirement"));
+  assert.match(bridge, /recordFollowupHarvest\(harvest,/);
+  assert.match(bridge, /routeFollowupsToRegistry\(harvest, deps\)/);
+  assert.ok(bridge.indexOf("routeFollowupsToRegistry(harvest, deps)") < bridge.indexOf("write(deps.ledgerPath, line)"),
+    "a registry failure must precede every durable harvest mark");
 });
