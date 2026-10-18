@@ -18,6 +18,7 @@ import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
+import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
@@ -528,6 +529,8 @@ export interface ReviewEvidence {
   execProof?: ProofExecutor;
   /** Async runner used by the daemon's review path. Audit callers can keep the synchronous seam. */
   asyncExecProof?: AsyncProofExecutor;
+  /** Already-observed form corrections only. The synchronous fold never spawns a file reader. */
+  proofFormCorrections?: ReadonlyMap<string, string | undefined>;
   /** The task's DECLARED `files:` scope (W1-T322) — read ONLY for the INVERSE-SCOPE advisory, the direction {@link
    *  "../run-task.js".scopeGuardOutOfScopeFiles} cannot see: that guard flags a diff touching an UNDECLARED file, this
    *  flags a declared file the diff never touched. Advisory only; absent ⇒ it never fires. */
@@ -3580,6 +3583,8 @@ export function vitestNameFilteredOutcome(stdout: string, stderr = ""): ProofRes
 /** PR-head checkout a criterion's proof may be executed against (W1-T65). */
 export interface ProofExecContext {
   cwd: string;
+  /** Source observed by the bounded async review path, not an unverified report string. */
+  proofFormCorrections?: ReadonlyMap<string, string | undefined>;
   exec?: ProofExecutor;
   /** (W1-T3525) mirrors {@link ReviewEvidence.target} — threaded into {@link parseWhitelistedProof} so
    *  a `unit test:` proof resolves against the SAME registered target every other consumer would, never
@@ -3814,16 +3819,9 @@ function proofFormText(s: string): string {
   return s.replace(/[\\`]/g, "").replace(/\s+/g, " ").trim();
 }
 
-/** A target file's text, or `undefined` when it is absent, unreadable, or resolves outside `root` (R-18). */
-function readTargetInside(root: string, target: string): string | undefined {
-  try {
-    const realRoot = realpathSync(root);
-    const real = realpathSync(join(realRoot, target));
-    if (!real.startsWith(realRoot + pathSep) || !statSync(real).isFile()) return undefined;
-    return readFileSync(real, "utf8");
-  } catch {
-    return undefined; // deliberate: absent and unreadable both mean "no literal here", never a manufactured match
-  }
+/** Descriptor-bound read/absence. Unreadable or escaped is UNKNOWN, never absent. */
+async function readTargetInside(root: string, target: string): Promise<ProofFileObservation> {
+  return observeProofFileInside(root, target);
 }
 
 function literalPresent(text: string, pattern: string, target: string): boolean {
@@ -3833,16 +3831,16 @@ function literalPresent(text: string, pattern: string, target: string): boolean 
 }
 
 /** Why a failed dialect grep is a proof-form error rather than a missing change, or `undefined`. */
-export function proofFormCorrection(proof: string, execCtx: ProofExecContext): string | undefined {
+export async function proofFormCorrection(proof: string, execCtx: ProofExecContext): Promise<string | undefined> {
   const w = parseWhitelistedProof(proof, execCtx.target);
   const target = w ? dialectGrepTargetPath(w) : undefined;
   if (!w || target === undefined || execCtx.baseCwd === undefined || execCtx.baseUnreadablePaths?.has(target)) return undefined;
   const pattern = w.args[2];
   if (proofFormText(pattern).length < PROOF_FORM_MIN_NEEDLE) return undefined;
-  const head = readTargetInside(execCtx.cwd, target);
-  if (head === undefined || !literalPresent(head, pattern, target)) return undefined;
-  const base = execCtx.addedTestFiles?.has(target) ? undefined : readTargetInside(execCtx.baseCwd, target);
-  if (base !== undefined && literalPresent(base, pattern, target)) return undefined;
+  const head = await readTargetInside(execCtx.cwd, target);
+  if (head.state !== 'read' || !literalPresent(head.text, pattern, target)) return undefined;
+  const base = execCtx.addedTestFiles?.has(target) ? {state:'absent' as const,reason:'test path added by this committed diff'} : await readTargetInside(execCtx.baseCwd, target);
+  if (base.state === 'unavailable' || base.state === 'read' && literalPresent(base.text, pattern, target)) return undefined;
   return (
     `grep (${w.label}) matched nothing as written, but its text IS in ${target} at head and absent at the merge-base ` +
     "once backslash escapes, backticks and line wraps are ignored — a proof-form error, not a missing change; " +
@@ -4251,7 +4249,7 @@ export function judgeCriterion(
     proofSkip = "no-exec-context";
   }
 
-  const proofForm = proofExec === "executed_fail" && execCtx ? proofFormCorrection(criterion.proof, execCtx) : undefined;
+  const proofForm = proofExec === "executed_fail" ? execCtx?.proofFormCorrections?.get(criterion.proof) : undefined;
   if (proofForm !== undefined) {
     proofExec = "not_executable";
     proofSkip = "proof-form";
@@ -5445,6 +5443,7 @@ export function judgeReview(
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
         cwd: evidence.headCheckoutDir,
+        proofFormCorrections: evidence.proofFormCorrections,
         exec: proofMemo?.exec,
         target: evidence.target,
         baseCwd: evidence.baseCheckoutDir,
@@ -5730,12 +5729,13 @@ export async function judgeReviewAsync(
     | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string }
     | { error: unknown };
   const observed = new Map<string, Observation>();
+  const proofFormCorrections = new Map<string, string | undefined>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
   const asyncExec: AsyncProofExecutor = evidence.asyncExecProof ??
     (evidence.execProof ? async (w, cwd) => evidence.execProof!(w, cwd) : execWhitelistedProofAsync);
   // The first fold requests head runs. A passing head may request a base run in the next fold.
   // No proof is launched until the existing judge asks for it, preserving filing carve-outs.
-  for (let pass = 0; pass <= criteria.length * 2 + 1; pass++) {
+  for (let pass = 0; pass <= criteria.length * 3 + 1; pass++) {
     const pending = new Map<string, { whitelisted: WhitelistedProof; cwd: string }>();
     const replay: ProofExecutor = (whitelisted, cwd) => {
       const key = keyOf(whitelisted, cwd);
@@ -5751,8 +5751,9 @@ export async function judgeReviewAsync(
       pending.set(key, { whitelisted, cwd });
       throw new Error("async proof observation pending");
     };
-    const verdict = judgeReview(criteria, { ...evidence, execProof: replay });
-    if (pending.size === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
+    const verdict = judgeReview(criteria, { ...evidence, execProof: replay, proofFormCorrections });
+    const pendingForms = verdict.criteria.filter(c => c.proof_exec === "executed_fail" && !proofFormCorrections.has(c.proof));
+    if (pending.size === 0 && pendingForms.length === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
     for (const [key, { whitelisted, cwd }] of pending) {
       try {
         const outcome = await asyncExec(whitelisted, cwd);
@@ -5764,6 +5765,13 @@ export async function judgeReviewAsync(
         // Preserve this exact proof error for the next deterministic verdict fold.
         observed.set(key, { error });
       }
+    }
+    for (const criterion of pendingForms) {
+      if (proofFormCorrections.has(criterion.proof)) continue;
+      proofFormCorrections.set(criterion.proof, await proofFormCorrection(criterion.proof, {
+        cwd: evidence.headCheckoutDir, target: evidence.target, baseCwd: evidence.baseCheckoutDir,
+        baseUnreadablePaths: evidence.baseUnreadablePaths, addedTestFiles: evidence.addedTestFiles,
+      }));
     }
   }
   throw new Error("async proof observations did not converge");
