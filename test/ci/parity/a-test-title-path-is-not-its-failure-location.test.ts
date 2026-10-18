@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   ciFailureLedgerEntry, ciFailureSignature, ciFrictionCauseKey, ciFrictionRoundsFromLedger,
   gitCiFrictionOwnerSearch, RED_WITH_NO_FAILING_TEST,
-} from "../../../src/lib/ci-friction-gardener.js";
-import { locateCiFrictionOwner } from "../../../src/lib/ci-friction-remedy.js";
-import type { LedgerRecord } from "../../../src/lib/retro.js";
-import { gitRepo } from "../../helpers/git-repo.js";
+} from "#src/lib/ci-friction-gardener.js";
+import { locateCiFrictionOwner } from "#src/lib/ci-friction-remedy.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const MENTIONED = "test/classify.test.ts";
 const ACTUAL = "test/mutation-trigger-covers-its-own-command.test.ts";
@@ -36,15 +36,17 @@ const rows = (entry: ReturnType<typeof ciFailureLedgerEntry>): LedgerRecord[] =>
 
 function ownerFixture(t: TestContext) {
   const repo = gitRepo({ scope: t, kind: "failure-location-owner" });
+  // Fixture imports resolve within the disposable repository, independent of this suite's folder.
+  const importSource = (file: string, target: string) => `import ${JSON.stringify(posix.relative(posix.dirname(file), target))};\n`;
   const put = (path: string, text: string) => {
     mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
     writeFileSync(join(repo.dir, path), text);
   };
   put(ACTUAL, readFileSync(new URL("../../mutation-trigger-covers-its-own-command.test.ts", import.meta.url), "utf8"));
   put("scripts/mutation-ratchet.mjs", readFileSync(new URL("../../../scripts/mutation-ratchet.mjs", import.meta.url), "utf8"));
-  put(MENTIONED, 'import "../src/lib/classify.js";\n');
+  put(MENTIONED, importSource(MENTIONED, "src/lib/classify.js"));
   put("src/lib/classify.ts", "export const classify = () => true;\n");
-  put("test/real-product.test.ts", 'import "../src/lib/real-product.js";\n');
+  put("test/real-product.test.ts", importSource("test/real-product.test.ts", "src/lib/real-product.js"));
   put("src/lib/real-product.ts", "export const product = () => true;\n");
   put(".github/workflows/ci.yml", "jobs:\n  test:\n    name: ci-shard\n");
   repo.git("add", "."); repo.git("commit", "-qm", "fixture");
