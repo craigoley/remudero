@@ -14,7 +14,7 @@
     - src/lib/host-memory-shadow.ts
     - src/lib/host-memory-admission.ts
     - test/the-psi-start-bound-is-learned-like-swap-in.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator ruling 10-17: the fixed PSI bound held every long fix wait of the day
   attempts: 0
   rationale: |
