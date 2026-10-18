@@ -283,3 +283,17 @@ test("W1-T9240: release preserves a replaced lock's inode and contents", async t
     if (mode !== "missing") assert.equal(fs.readFileSync(`${path}.lock`, "utf8"), raw);
   }
 });
+
+test("W1-T9240: an unreadable release identity is reported without unlinking it", async t => {
+  const path = join(ownedFixtureDir(t, "registry-release-unreadable").dir, "registry.json");
+  const lstat = fs.lstatSync;
+  const rows: string[] = [];
+  const probe = t.mock.method(fs, "lstatSync", (...args: Parameters<typeof lstat>) => {
+    if (String(args[0]) === `${path}.lock`) throw Object.assign(new Error("fixture identity unreadable"), { code: "EACCES" });
+    return lstat(...args);
+  });
+  await updateProposalRegistryAsync(path, () => null, { maxWaitMs: 1000, log: step => rows.push(step) });
+  probe.mock.restore();
+  assert.equal(fs.existsSync(`${path}.lock`), true);
+  assert.deepEqual(rows, ["proposal_registry.lock_release_unavailable"]);
+});

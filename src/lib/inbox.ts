@@ -3391,6 +3391,7 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
     if (opts.signal?.aborted) registryWaitRefusal(opts, "cancelled", lockPath, holder);
     if (systemClock.now() >= deadline) registryWaitRefusal(opts, "deadline", lockPath, holder);
   };
+  let acquired!: { dev: number; ino: number; contents: string };
   for (;;) {
     check();
     try {
@@ -3412,6 +3413,7 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
         }
         throw error;
       }
+      acquired = { dev: identity.dev, ino: identity.ino, contents };
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
@@ -3447,7 +3449,13 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
       recordRegistryHold(registryPath, started, opts);
     } finally {
       ownedAsyncRegistryLocks.delete(ownedPath);
-      try { await fs.promises.unlink(lockPath); } catch { /* already gone */ }
+      try {
+        const current = fs.lstatSync(lockPath);
+        if (current.dev === acquired.dev && current.ino === acquired.ino &&
+            fs.readFileSync(lockPath, "utf8") === acquired.contents) fs.unlinkSync(lockPath);
+      } catch (error) {
+        if (!isEnoent(error)) opts.log?.("proposal_registry.lock_release_unavailable", { lock_path: lockPath, reason: String(error) });
+      }
     }
   };
   // Cancellation/deadline can arrive during async open/write/close. Do not run the update afterwards.
