@@ -10,6 +10,7 @@ import {
 import { locateCiFrictionOwner } from "#src/lib/ci-friction-remedy.js";
 import type { LedgerRecord } from "#src/lib/retro.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { repoRoot } from "#test/helpers/repo-root.js";
 
 const MENTIONED = "test/classify.test.ts";
 const ACTUAL = "test/mutation-trigger-covers-its-own-command.test.ts";
@@ -42,8 +43,8 @@ function ownerFixture(t: TestContext) {
     mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
     writeFileSync(join(repo.dir, path), text);
   };
-  put(ACTUAL, readFileSync(new URL("../../mutation-trigger-covers-its-own-command.test.ts", import.meta.url), "utf8"));
-  put("scripts/mutation-ratchet.mjs", readFileSync(new URL("../../../scripts/mutation-ratchet.mjs", import.meta.url), "utf8"));
+  put(ACTUAL, readFileSync(join(repoRoot(), ACTUAL), "utf8"));
+  put("scripts/mutation-ratchet.mjs", readFileSync(join(repoRoot(), "scripts/mutation-ratchet.mjs"), "utf8"));
   put(MENTIONED, importSource(MENTIONED, "src/lib/classify.js"));
   put("src/lib/classify.ts", "export const classify = () => true;\n");
   put("test/real-product.test.ts", importSource("test/real-product.test.ts", "src/lib/real-product.js"));
