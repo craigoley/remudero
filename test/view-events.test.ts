@@ -493,3 +493,37 @@ test("a sampled view.emitted row bounds its row's wait with prevRowTs and buildS
     { emittedAt: iso(T0 + 60_000), rowTs: iso(T0 + 50_000), prevRowTs: iso(T0 + 8_000), buildStartedAt: iso(T0 + 56_000) },
   ]);
 });
+
+
+test("push and versions use the same view identity as HTTP freshness reads", async (t) => {
+  const rm = fakeReadModel({ instances: "serve", now: "serve" });
+  const instance = entry("instances", "", { n: 1 });
+  const now = entry("now", "instance=core", { n: 2 });
+  rm.post(instance); rm.post(now);
+  let behind = true;
+  const seen: Array<{ view: string; key: string } | undefined> = [];
+  const judge: NonNullable<ViewEventsOptions["readModel"]>["judge"] = (sources, _at, identity) => {
+    seen.push(identity);
+    const stale = identity?.view === "instances" && behind;
+    return sources.map(source => ({ ...source, state: stale ? "stale" as const : "fresh" as const }));
+  };
+  const ticks = timers();
+  const { url } = await serve(t, { names: ["instances", "now"], readModel: { ...rm, judge }, clock, every: ticks.every });
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  const hello = await stream.next(frame => frame.event === "hello");
+  assert.deepEqual(hello.data.views, { instances: { "": viewEtag("instances", 1, true, instance.body.data) }, now: { "instance=core": now.etag } }, "hello uses the same per-body judgement as a GET");
+  const versions = await (await fetch(`${url}${VIEW_VERSIONS_PATH}`, { headers: READ })).json() as { views: unknown };
+  assert.deepEqual(versions.views, hello.data.views);
+  behind = false; ticks.fire(1_000);
+  const fresh = await stream.next(frame => frame.event === "view" && frame.data.view === "instances" && frame.data.stale === false);
+  assert.equal(fresh.data.etag, instance.etag);
+  behind = true; ticks.fire(1_000);
+  const stale = await stream.next(frame => frame.event === "view" && frame.data.view === "instances" && frame.data.stale === true);
+  assert.equal(stale.data.cause, "judge");
+  behind = false;
+  rm.post(entry("instances", "", { n: 3 }));
+  const changed = await stream.next(frame => frame.event === "view" && frame.data.cause === "body");
+  assert.equal(changed.data.stale, false);
+  assert.ok(seen.every(identity => identity !== undefined), "all hello, versions, sweep and body paths pass identity");
+  assert.ok(seen.some(identity => identity?.view === "now" && identity.key === "instance=core"), "a keyed body retains its own key");
+});
