@@ -178,6 +178,13 @@ function runtimeSpecifiers(text: string): string[] {
   const tokens: { kind: SyntaxKind; value: string }[] = [];
   const braceDepths: number[] = [];
   for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
+    if ((kind === SyntaxKind.SlashToken || kind === SyntaxKind.SlashEqualsToken) &&
+        /^(?:=|\(|\[|\{|,|:|\?|return|case|=>|!|&&|\|\||\?\?)$/.test(tokens.at(-1)?.value ?? "=")) {
+      kind = scanner.reScanSlashToken();
+    }
+    if (kind === SyntaxKind.PrivateIdentifier && scanner.getTokenEnd() === scanner.getTokenStart()) {
+      kind = scanner.reScanHashToken();
+    }
     if (kind === SyntaxKind.TemplateHead) braceDepths.push(0);
     else if (kind === SyntaxKind.OpenBraceToken && braceDepths.length > 0) braceDepths[braceDepths.length - 1]++;
     else if (kind === SyntaxKind.CloseBraceToken && braceDepths.length > 0) {
@@ -193,7 +200,7 @@ function runtimeSpecifiers(text: string): string[] {
     const token = tokens[i]!;
     const next = tokens[i + 1];
     const importing = token.kind === SyntaxKind.ImportKeyword;
-    if ((importing || (token.kind === SyntaxKind.Identifier && token.value === "require")) && next?.kind === SyntaxKind.OpenParenToken &&
+    if ((importing || token.kind === SyntaxKind.RequireKeyword) && next?.kind === SyntaxKind.OpenParenToken &&
         tokens[i + 2]?.kind === SyntaxKind.StringLiteral) {
       out.push(tokens[i + 2]!.value);
       continue;

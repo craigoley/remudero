@@ -27,13 +27,13 @@ function discover(files: Record<string, string>) {
 
 function trees() {
   const base: Record<string, string> = {
-    [SUPERVISOR_SEED]: 'import "#test/ledger.js";',
-    [DEPLOYER_SEED]: 'export * from "#test/ledger.js";',
+    [SUPERVISOR_SEED]: 'import "./ledger.js";',
+    [DEPLOYER_SEED]: 'export * from "./ledger.js";',
     [LEDGER]: "export const value = 1;",
     "src/lib/host-identity.ts": "export const host = 1;",
     "src/lib/outside.ts": "export const other = 1;",
   };
-  const head = { ...base, [LEDGER]: 'import "#test/host-identity.js";\nexport const value = 1;' };
+  const head: Record<string, string> = { ...base, [LEDGER]: 'import "./host-identity.js";\nexport const value = 1;' };
   return { base, head };
 }
 
@@ -51,9 +51,9 @@ function evaluate(changed: string[], head: Record<string, string>, base: Record<
 test("W1-T9806: a census-closure seed walks its whole runtime import closure", () => {
   const files = {
     "test/closure.test.ts": "// @census-closure: a.ts side.ts — prose missing.ts\n",
-    "a.ts": 'import { b } from "#test/b.js"; import "#test/side.js";',
-    "b.ts": 'export { c } from "#test/c.js"; export * from "#test/all.js";',
-    "c.ts": 'import("#test/dynamic.js"); require("./required.js"); import "#test/a.js";',
+    "a.ts": 'import { b } from "./b.js"; import "./side.js";',
+    "b.ts": 'export { c } from "./c.js"; export * from "./all.js";',
+    "c.ts": 'import("./dynamic.js"); require("./required.js"); import "./a.js";',
     "side.ts": "", "all.ts": "", "dynamic.ts": "", "required.ts": "",
     "missing.ts": "", "unused.ts": "",
   };
@@ -81,21 +81,25 @@ test("W1-T9806: a type-only import or a missing seed adds no walk", () => {
     "test/missing.test.ts": "// @census-closure: src/missing.ts\n",
     "test/unmarked.test.ts": 'const fixture = "// @census-closure: src/unused.ts";',
     "src/a.ts": [
-      'import type { T } from "#test/types.js";',
-      'import { type T } from "#test/inline-types.js";',
-      'export type { T } from "#test/exports.js";',
-      'export { type T } from "#test/inline-exports.js";',
-      'import { type T, value } from "#test/value.js";',
-      '// import "#test/comment.js";',
-      'const text = \'import "#test/string.js"\';',
-      'const template = `value ${1} import "#test/template.js"`;',
+      'import type { T } from "./types.js";',
+      'import { type T } from "./inline-types.js";',
+      'export type { T } from "./exports.js";',
+      'export { type T } from "./inline-exports.js";',
+      'import { type T, value } from "./value.js";',
+      '// import "./comment.js";',
+      'const text = \'import "./string.js"\';',
+      'const template = `value ${1} import "./template.js"`;',
+      String.raw`const pattern = /^\s*(#|$)/; const decoy = /import "\.\/regexp.js"/;`,
+      'if (true) /#/.test("");',
+      'const quotient = 6 / 2; import "./after-division.js";',
       'import "node:fs"; import "external-package";',
     ].join("\n"),
     "src/types.ts": "", "src/inline-types.ts": "", "src/exports.ts": "", "src/inline-exports.ts": "",
     "src/value.ts": "", "src/comment.ts": "", "src/string.ts": "", "src/template.ts": "", "src/unused.ts": "",
+    "src/regexp.ts": "", "src/after-division.ts": "",
   });
   assert.deepEqual(readers.map((r) => [r.testFile, r.walks]), [
-    ["test/closure.test.ts", ["src/a.ts", "src/value.ts"]], ["test/missing.test.ts", []],
+    ["test/closure.test.ts", ["src/a.ts", "src/after-division.ts", "src/value.ts"]], ["test/missing.test.ts", []],
   ]);
   assert.equal(isUnplacedSourceReader(readers[1]!), true);
 });
@@ -137,7 +141,7 @@ test("W1-T9806: a baked-closure refusal names the lists that catalog the closure
 
 test("W1-T9806: an import outside both closures asks no baked-closure census", () => {
   const { head, base } = trees();
-  head["src/lib/outside.ts"] = 'import "#test/host-identity.js";';
+  head["src/lib/outside.ts"] = 'import "./host-identity.js";';
   assert.deepEqual(evaluate(["src/lib/outside.ts"], head, base).asked, []);
   assert.deepEqual(evaluate([], head, base).asked, []);
 });
