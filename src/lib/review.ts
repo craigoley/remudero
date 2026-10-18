@@ -1,7 +1,8 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { boundChildByLoopTime } from "./loop-bounded-child.js";
+import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { refreshInstallationToken, type RefreshOptions } from "./github-app.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
@@ -6389,6 +6390,119 @@ export interface ReviewStatusEntry {
    * authenticating credential rather than the request body. `undefined` only if GitHub's response is malformed, and
    * treated the same as a mismatched login. */
   posterLogin?: string;
+  posterType?: string;
+}
+
+export function reviewStatusEntryFromCombined(payload: unknown): ReviewStatusEntry | undefined {
+  const raw = payload as {
+    statuses?: Array<{ context?: string; state?: string; creator?: { login?: string; type?: string } }>;
+  };
+  if (!raw || !Array.isArray(raw.statuses) || raw.statuses.some(entry => !entry || typeof entry.context !== "string")) {
+    throw new Error("combined commit status has no readable statuses array");
+  }
+  const entry = raw.statuses.find(entry => entry.context === REVIEW_CONTEXT);
+  if (!entry) return undefined;
+  const state = entry.state === "error" ? "failure" : entry.state;
+  if (state !== "success" && state !== "pending" && state !== "failure") throw new Error("unrecognized remudero-review state");
+  return { state, posterLogin: entry.creator?.login, posterType: entry.creator?.type };
+}
+
+export async function readReviewStatusEntry(owner: string, repo: string, sha: string,
+  fetch: GhApiFetcher = (args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit),
+): Promise<ReviewStatusEntry | undefined> {
+  return reviewStatusEntryFromCombined(await fetch(combinedStatusRestArgs(owner, repo, sha)));
+}
+
+export interface ReviewReplayPublisherEvidence {
+  requiredAppId: number | null;
+  trustedLogin?: string;
+  posterLogin?: string;
+  publisherAppId?: number;
+  publishingAppId?: number;
+  source: "required-app" | "trusted-login" | "legacy";
+}
+
+let nativeReviewPublisher: { tokenDigest: string; appId: number; expiresAtMs: number } | undefined;
+const publisherTokenDigest = (token: string) => createHash("sha256").update(token).digest("hex");
+
+/** Retain proof from the existing native exchange, bound to its exact token, without logging credentials. */
+export async function refreshReviewPublisherToken(opts: RefreshOptions = {}): ReturnType<typeof refreshInstallationToken> {
+  const env = opts.env ?? process.env;
+  const appId = Number(opts.appId ?? env.GH_APP_ID);
+  const result = await refreshInstallationToken(opts);
+  if (result.ok && env === process.env && env.GH_TOKEN && Number.isSafeInteger(appId) && appId > 0) {
+    nativeReviewPublisher = { tokenDigest: publisherTokenDigest(env.GH_TOKEN), appId, expiresAtMs: result.expiresAtMs! };
+  }
+  return result;
+}
+
+async function replayPublisher(
+  opts: PostReviewStatusGuardedOpts,
+  lifecycle: PrLifecycleState,
+  entry: ReviewStatusEntry | undefined,
+): Promise<{ trusted: boolean; canPublish: boolean; evidence: ReviewReplayPublisherEvidence }> {
+  const fetch = opts.fetchPublisher ?? ghJsonAsync;
+  let snapshot: RequiredStatusChecksSnapshot | undefined;
+  // status.ts's graph reaches review; load its existing reader only after both modules initialized.
+  const statusModule = "./status.js";
+  const { readRequiredStatusCheckContextsAsync } = await import(statusModule);
+  const binding = await readRequiredStatusCheckContextsAsync(opts.owner, opts.repo, encodeURIComponent(lifecycle.baseRef ?? "main"), async (args: string[]) => {
+    const raw = await fetch(args);
+    snapshot = raw as RequiredStatusChecksSnapshot;
+    return JSON.stringify(raw);
+  });
+  if (binding.kind === "unreadable") throw new Error(`required publisher source unreadable: ${binding.reason}`);
+  if (!snapshot || (snapshot.contexts !== undefined && (!Array.isArray(snapshot.contexts) ||
+      snapshot.contexts.some(context => typeof context !== "string"))) || !Array.isArray(snapshot.checks) || snapshot.checks.some(check =>
+    !check || typeof check.context !== "string" || !check.context.trim() ||
+    (check.app_id !== null && (!Number.isSafeInteger(check.app_id) || check.app_id <= 0)))) {
+    throw new Error("required publisher source malformed: checks must carry explicit App IDs or null");
+  }
+  const checks = snapshot.checks.filter(check => check.context === REVIEW_CONTEXT);
+  if (checks.length > 1 || (snapshot.contexts?.includes(REVIEW_CONTEXT) && checks.length === 0)) {
+    throw new Error("required publisher source malformed: ambiguous review binding");
+  }
+  const requiredAppId = checks.length && !unpinnedRequiredContexts(snapshot).includes(REVIEW_CONTEXT) ? checks[0].app_id : null;
+  const trustedLogin = process.env[REVIEWER_IDENTITY_ENV]?.trim();
+  const evidence: ReviewReplayPublisherEvidence = {
+    requiredAppId, ...(entry?.posterLogin ? { posterLogin: entry.posterLogin } : {}),
+    ...(requiredAppId === null && trustedLogin ? { trustedLogin } : {}),
+    source: requiredAppId !== null ? "required-app" : trustedLogin ? "trusted-login" : "legacy",
+  };
+  if (entry && (typeof entry.posterLogin !== "string" || !entry.posterLogin.trim() ||
+      (entry.posterType !== "Bot" && entry.posterType !== "User"))) {
+    throw new Error("live review publisher creator is unknown or malformed");
+  }
+  if (requiredAppId !== null) {
+    let trusted = false;
+    const slug = entry?.posterType === "Bot" && /^([a-z0-9-]+)\[bot\]$/i.exec(entry.posterLogin!);
+    if (slug) {
+      const app = await fetch(["api", `apps/${slug[1]}`]) as { id?: number; slug?: string };
+      if (!app || !Number.isSafeInteger(app.id) || app.id! <= 0 || typeof app.slug !== "string" || app.slug.toLowerCase() !== slug[1].toLowerCase()) {
+        throw new Error("live review publisher App metadata is malformed");
+      }
+      evidence.publisherAppId = app.id;
+      trusted = app.id === requiredAppId && resolveReviewProvenance(entry, `${app.slug}[bot]`) !== "absent";
+    }
+    const token = process.env[REVIEWER_TOKEN_ENV] || process.env.GH_TOKEN;
+    const canPublish = nativeReviewPublisher !== undefined && token !== undefined &&
+      nativeReviewPublisher.tokenDigest === publisherTokenDigest(token) && nativeReviewPublisher.appId === requiredAppId &&
+      nativeReviewPublisher.expiresAtMs > systemClock.now();
+    if (canPublish) evidence.publishingAppId = nativeReviewPublisher!.appId;
+    return { trusted, canPublish, evidence };
+  }
+  const trusted = entry !== undefined && (!trustedLogin || resolveReviewProvenance(entry, trustedLogin) !== "absent");
+  // An unpinned legacy repository retains its established posting semantics. A configured identity
+  // must instead be authenticated by the exact credential the existing status poster will use.
+  let canPublish = !trustedLogin;
+  if (trustedLogin && (!trusted || entry?.state === "pending")) {
+    const token = process.env[REVIEWER_TOKEN_ENV];
+    const env = token ? { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token } : process.env;
+    const user = await ghJsonAsync(["api", "user"], (file, args, options) =>
+      execFileLoopBounded(file, args, { ...options, env })) as { login?: string };
+    canPublish = resolveReviewProvenance({ state: "success", posterLogin: user.login }, trustedLogin) === "success";
+  }
+  return { trusted, canPublish, evidence };
 }
 
 /** THE PROVENANCE GATE (acceptance criteria 1-3). Resolve what a fetched `remudero-review` status ACTUALLY proves,
@@ -10351,6 +10465,7 @@ export function assessPendingReviewOwner(
 export interface PrLifecycleState {
   merged: boolean;
   closed: boolean;
+  baseRef?: string;
   /** Content address of the live head+body returned by the SAME single-PR REST read. Optional
    *  only for legacy/injected callers that can observe lifecycle but not the review subject. */
   reviewInputDigest?: string;
@@ -10388,6 +10503,7 @@ export function fetchPrLifecycle(
   const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
   const state = prStateFromRest(row);
   const headSha = row.head?.sha;
+  const baseRef = (row.base as { ref?: unknown } | undefined)?.ref;
   const currentInput =
     (row.state === "open" || row.state === "closed") &&
     typeof headSha === "string" &&
@@ -10398,6 +10514,7 @@ export function fetchPrLifecycle(
   return {
     merged: state === "MERGED",
     closed: state === "CLOSED",
+    ...(typeof baseRef === "string" && baseRef ? { baseRef } : {}),
     ...(currentInput !== undefined ? { reviewInputDigest: currentInput } : {}),
   };
 }
@@ -10756,7 +10873,9 @@ export interface PostReviewStatusGuardedOpts {
   fetchLifecycle: () => PrLifecycleState;
   /** Latest GitHub commit status for this context, read inside the lock on a decision replay.
    * A later pending claim can replace the status even though the ledger's terminal decision remains final. */
-  fetchCurrentStatus?: () => PostableReviewState | undefined;
+  fetchCurrentStatus?: () => PostableReviewState | ReviewStatusEntry | undefined;
+  fetchCurrentStatusEntry?: () => ReviewStatusEntry | undefined | Promise<ReviewStatusEntry | undefined>;
+  fetchPublisher?: GhApiFetcher;
   /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a TRANSIENT gh error
    *  internally (rule (iv) above). May return a Promise, as the default does, or `void`. */
   post?: (o: {
@@ -10782,6 +10901,7 @@ export interface PostReviewStatusGuardedResult {
   conflict?: boolean;
   replayed?: boolean;
   effectiveState?: ReviewState;
+  publisherEvidence?: ReviewReplayPublisherEvidence;
   /** Present only when `posted` is false — either {@link decideReviewStatusPost} refused the write (see
    * `review.post_refused`), or the post itself failed after retries or as a permanent error (`review.post_failed`). */
   reason?: string;
@@ -10864,12 +10984,15 @@ export async function postReviewStatusGuarded(
       : undefined;
     const replacingDegradedTerminal = opts.reopenedDegradedTerminal === true && priorDecision !== undefined &&
       isReopenableDegradedTerminal(priorDecision, true);
+    let publisherEvidence: ReviewReplayPublisherEvidence | undefined;
     const withholdReplay = (reason: string): PostReviewStatusGuardedResult => {
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused",
         head_sha: opts.sha, attempted_state: opts.state, evidence: opts.evidence, reason,
         ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
         ...(opts.reviewDecisionDigest !== undefined ? { review_decision_digest: opts.reviewDecisionDigest } : {}),
+        ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+        ...(publisherEvidence ? { status_publisher: publisherEvidence } : {}),
       });
       return { posted: false, reason };
     };
@@ -10880,10 +11003,21 @@ export async function postReviewStatusGuarded(
           reason: "cannot-evaluate hold cannot overwrite a terminal verdict for the same review decision" };
       }
       if (priorDecision.state === opts.state) {
-        if (opts.fetchCurrentStatus) {
+        const guarded = decideReviewStatusPost({ headSha: opts.sha, state: opts.state, evidence: opts.evidence,
+          reviewInputDigest: opts.reviewInputDigest }, prior, lifecycle);
+        if (!guarded.post) return withholdReplay(guarded.reason);
+        {
           let current: PostableReviewState | undefined;
           try {
-            current = opts.fetchCurrentStatus();
+            const raw = await (opts.fetchCurrentStatusEntry ? opts.fetchCurrentStatusEntry() : opts.fetchCurrentStatus
+              ? opts.fetchCurrentStatus() : readReviewStatusEntry(opts.owner, opts.repo, opts.sha));
+            const entry = typeof raw === "string" ? { state: raw } : raw;
+            const publisher = await replayPublisher(opts, lifecycle, entry);
+            publisherEvidence = publisher.evidence;
+            if (publisher.trusted) current = entry?.state;
+            if ((!publisher.trusted || current === "pending" || current === undefined) && !publisher.canPublish) {
+              return withholdReplay(`required review publisher mismatch: live '${entry?.posterLogin ?? "absent"}', required ${publisher.evidence.requiredAppId ?? publisher.evidence.trustedLogin ?? "legacy publisher"}; current credential is not an authorized publisher`);
+            }
           } catch (error) {
             return withholdReplay(`could not verify the live remudero-review status: ${String(error)}`);
           }
@@ -10892,7 +11026,7 @@ export async function postReviewStatusGuarded(
             return withholdReplay(`live remudero-review is ${current} while the final decision is ${priorDecision.state}; refusing to overwrite a conflicting terminal status`);
           }
         }
-        if (!restoreTerminal) return { posted: false, replayed: true, effectiveState: priorDecision.state, reason: "terminal verdict already exists for this review decision" };
+        if (!restoreTerminal) return { posted: false, replayed: true, effectiveState: priorDecision.state, publisherEvidence, reason: "terminal verdict already exists for this review decision" };
       }
       if (!restoreTerminal) {
         const reason = `contradictory ${opts.state} attempted after terminal ${priorDecision.state} for review decision ${opts.reviewDecisionDigest}`;
@@ -10929,7 +11063,7 @@ export async function postReviewStatusGuarded(
         return { posted: false, conflict: true, effectiveState: "failure", reason };
       }
     }
-    const decision = restoreTerminal ? { post: true as const } : decideReviewStatusPost(
+    const decision = decideReviewStatusPost(
       {
         headSha: opts.sha,
         state: opts.state,
@@ -11009,7 +11143,7 @@ export async function postReviewStatusGuarded(
         pr_url: opts.prUrl, head_sha: opts.sha, issue_url: issueUrl,
       });
     }
-    return { posted: true };
+    return { posted: true, ...(publisherEvidence ? { publisherEvidence } : {}) };
   } finally {
     handle.release();
   }

@@ -45,8 +45,8 @@
   origin: feedback#fb-1791856366577-09684b
   plan_refs: ["§7B"]
   files: [src/lib/skill-steps.ts, src/lib/skill-workshop.ts, src/run-task.ts, .claude/skills/proof-preflight/SKILL.md, test/skill-steps.test.ts, test/skill-steps-run.test.ts, test/skill-steps-report.test.ts]
-  priority: 2
+  priority: 3
   status: queued
-  # backlog gardener: band=2 evidence=b461f6caa741fb34
+  # backlog gardener: band=3 evidence=cb24605b623f5129
   attempts: 0
   note: "Rule 19 merits: one integration test requires the skill fences, runner, harness prompt/ledger wiring and report consumer together to prove the same executed steps reach the effectiveness report; this invariant is unsatisfiable piecewise. verify:auto — pilot on proof-preflight only."

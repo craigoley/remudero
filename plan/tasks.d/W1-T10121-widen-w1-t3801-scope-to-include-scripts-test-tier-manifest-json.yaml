@@ -6,7 +6,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f3fd6235e2711a72
   attempts: 0
   files:
     - scripts/test-tier-manifest.json
