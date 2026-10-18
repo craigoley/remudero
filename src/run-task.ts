@@ -1895,6 +1895,7 @@ import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-tele
 import {
   createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
 } from "./lib/daemon-memory-census.js";
+import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -23595,6 +23596,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
+  let ownTaskRecordMissing = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
   // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
@@ -23607,6 +23609,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     taskRisk = resolved.taskRisk;
     taskBudgetUsd = resolved.taskBudgetUsd;
     resolverDivergence = resolved.divergence;
+    // W1-T9232: a head cut before its own shard merged is pending a refresh from main, not a plan fault. Only a task
+    // origin/main HAS qualifies; one absent from both, or a TRIAGE-/main-repair/unfiled identity, keeps today's path.
+    if (taskId !== UNFILED_RUN_SENTINEL && resolved.divergence === undefined && resolved.criteria.length === 0 &&
+      resolved.taskRisk === undefined && resolved.taskBudgetUsd === undefined) {
+      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main");
+      ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
+    }
   }
   if (criteria.length === 0) {
     const fromBody = parseAcceptanceBlock(reportBody);
@@ -23711,6 +23720,20 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     });
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
+
+  // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.
+  // The sweep reads this row, refreshes the branch from main and re-reviews the new head.
+  if (ownTaskRecordMissing) {
+    log("review.reviewer.skipped", {
+      reason: OWN_TASK_RECORD_MISSING_CAUSE, pr_number: view.number, pr_url: view.url, head_sha: view.headRefOid,
+      derived_repair: "refresh the branch from main", missing: ["risk", "budget_usd", "criteria"],
+    });
+    console.log(
+      `rmd review PR #${view.number}: ${taskId} has no record at head ${view.headRefOid.slice(0, 7)} but origin/main has it ` +
+        `(${OWN_TASK_RECORD_MISSING_CAUSE}) — pending; refresh the branch from main, then re-review`,
+    );
+    return 2;
   }
 
   // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
