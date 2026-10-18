@@ -22,6 +22,13 @@ Dependency-health diagnostics use Python's standard library, already required by
 the generated-cache helper, rather than requiring Node on cron's PATH. Unknown
 probe results still retain data and never trigger dependency installation.
 
+The six-hour floor covers both modification and kernel change time in generic
+temporary-file pruning and whole temporary/session-scratch retirement, not just
+TSX caches. Restoring old mtime does not make a newly changed file eligible.
+Before pruning old regular leaves from a mixed-age scratch tree, the cleaner
+checks the enclosing tree's process/CWD/open-file activity and rechecks it at
+each deletion boundary. Activity or an unavailable probe retains the tree.
+
 ## Preventing new validation growth
 
 The `scripts/preflight-author.mjs` CLI checks Mac workspace and TMPDIR capacity
