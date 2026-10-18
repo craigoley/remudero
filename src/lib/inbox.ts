@@ -3394,10 +3394,22 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
     check();
     try {
       const handle = await fs.promises.open(lockPath, "wx");
+      const identity = fs.fstatSync(handle.fd);
+      const contents = JSON.stringify({ pid: process.pid, host: hostname(), startedAt: systemClock.iso() });
       try {
-        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), startedAt: systemClock.iso() }));
-      } finally {
-        await handle.close();
+        try { await handle.writeFile(contents); }
+        finally { await handle.close(); }
+      } catch (error) {
+        // A failed publication is ours to clean only if the pathname still names our descriptor's file.
+        // A reclaimer's replacement is not ours, even when writing the original lock failed.
+        try {
+          const current = fs.statSync(lockPath);
+          const raw = fs.readFileSync(lockPath, "utf8");
+          if (current.dev === identity.dev && current.ino === identity.ino && (raw === "" || raw === contents)) fs.unlinkSync(lockPath);
+        } catch (cleanup) {
+          opts.log?.("proposal_registry.lock_creation_cleanup_failed", { lock_path: lockPath, reason: String(cleanup) });
+        }
+        throw error;
       }
       break;
     } catch (e) {

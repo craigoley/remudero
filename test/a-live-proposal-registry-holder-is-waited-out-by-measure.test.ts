@@ -230,3 +230,27 @@ test("W1-T9240: cancellation arriving during real lock creation prevents a later
   assert.equal(calls, 0);
   assert.equal(fs.existsSync(`${path}.lock`), false);
 });
+
+test("W1-T9240: a failed lock publication cleans only its own inode", async t => {
+  const root = ownedFixtureDir(t, "registry-lock-write-failure").dir;
+  const open = fs.promises.open;
+  for (const replacement of [false, true]) {
+    const path = join(root, `${replacement}.json`);
+    const raw = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
+    const mock = t.mock.method(fs.promises, "open", async (...args: Parameters<typeof open>) => {
+      const handle = await open(...args);
+      t.mock.method(handle, "writeFile", async () => {
+        if (replacement) {
+          fs.writeFileSync(`${path}.replacement`, raw);
+          fs.renameSync(`${path}.replacement`, `${path}.lock`);
+        }
+        throw new Error("fixture lock write failed");
+      });
+      return handle;
+    });
+    await assert.rejects(updateProposalRegistryAsync(path, () => [], { maxWaitMs: 1000 }), /fixture lock write failed/);
+    mock.mock.restore();
+    assert.equal(fs.existsSync(`${path}.lock`), replacement, "never delete another acquisition's replacement");
+    if (replacement) assert.equal(fs.readFileSync(`${path}.lock`, "utf8"), raw);
+  }
+});
