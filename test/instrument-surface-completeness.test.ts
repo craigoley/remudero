@@ -210,3 +210,58 @@ test("a diff carrying no instrument path never entangles whatever else it holds"
   assert.equal(r.entangled, false, "product-only is a sanctioned shape too");
   assert.deepEqual(r.instrumentPaths, [], "control: the instrument set really is empty here");
 });
+
+test("hosted author and calibration tools are exact protected instruments, never data exclusions", () => {
+  for (const path of ["scripts/preflight-author.mjs", "scripts/calibrate-author-runtime.mjs"]) {
+    assert.equal(INSTRUMENT_SURFACE_EXCLUSIONS[path], undefined);
+    assert.deepEqual(INSTRUMENT_SURFACE.filter(pattern => new RegExp(pattern).test(path)), [
+      "^" + path.replaceAll(".", "\\.") + "$",
+    ]);
+    assert.equal(DECLARED_RE.test(path), true);
+    for (const sibling of [path + ".bak", "prefix/" + path]) assert.equal(DECLARED_RE.test(sibling), false);
+    const without = new RegExp(INSTRUMENT_SURFACE.filter(pattern => !new RegExp(pattern).test(path)).join("|"));
+    assert.deepEqual(findUnexplainedGaps([path], without, INSTRUMENT_SURFACE_EXCLUSIONS), [path]);
+    const verdict = detectInstrumentEntanglement([path, "src/lib/dispatch-overlap.ts"]);
+    assert.equal(verdict.entangled, true);
+    assert.ok(verdict.instrumentPaths.includes(path));
+  }
+});
+
+test("the generated document index is data while its freshness and path checks remain wired", () => {
+  const path = "docs/docs-index.json", tree = liveTree(REPO_ROOT);
+  assert.ok(tree.tracked.has(path), "control: the classified data really exists");
+  assert.doesNotThrow(() => JSON.parse(tree.readText(path)!));
+  assert.equal(DECLARED_RE.test(path), false);
+  assert.match(INSTRUMENT_SURFACE_EXCLUSIONS[path], /Generated document inventory/);
+  assert.deepEqual(findUnexplainedGaps([path], DECLARED_RE, INSTRUMENT_SURFACE_EXCLUSIONS), []);
+  const without = { ...INSTRUMENT_SURFACE_EXCLUSIONS };
+  delete without[path];
+  assert.deepEqual(findUnexplainedGaps([path], DECLARED_RE, without), [path]);
+  const pkg = JSON.parse(tree.readText("package.json")!);
+  assert.equal(pkg.scripts["docs-index:check"], "node scripts/generate-docs-index.mjs --check");
+  assert.equal(pkg.scripts["docs-index:check-paths"], "node scripts/generate-docs-index.mjs --check-paths");
+  for (const sibling of [path + ".bak", "docs/other-index.json", "scripts/new-validation-helper.mjs"]) {
+    assert.equal(INSTRUMENT_SURFACE_EXCLUSIONS[sibling], undefined);
+    assert.deepEqual(findUnexplainedGaps([sibling], DECLARED_RE, INSTRUMENT_SURFACE_EXCLUSIONS), [sibling]);
+  }
+});
+
+test("hosted tooling registration still refuses a newly unregistered executable in a workflow", () => {
+  const actual = liveTree(REPO_ROOT), workflow = ".github/workflows/hosted-membership-control.yml";
+  const helper = "scripts/unregistered-hosted-control.mjs";
+  const tracked = new Set([...actual.tracked, workflow, helper]);
+  const candidates = deriveInstrumentCandidates({
+    tracked,
+    readText: path => path === workflow
+      ? "jobs:\n  author:\n    steps:\n      - run: node scripts/preflight-author.mjs\n      - run: node scripts/calibrate-author-runtime.mjs\n      - run: node " + helper + "\n"
+      : path === helper ? "export const fixture = true;" : actual.readText(path),
+  });
+  for (const path of [helper, "scripts/preflight-author.mjs", "scripts/calibrate-author-runtime.mjs", "docs/docs-index.json"]) {
+    assert.ok(candidates.includes(path), "control: the real maintained derivation must see " + path);
+  }
+  const gaps = findUnexplainedGaps(candidates, DECLARED_RE, INSTRUMENT_SURFACE_EXCLUSIONS);
+  assert.ok(gaps.includes(helper), "new executable remains a refusal, not an exclusion");
+  for (const path of ["scripts/preflight-author.mjs", "scripts/calibrate-author-runtime.mjs", "docs/docs-index.json"]) {
+    assert.equal(gaps.includes(path), false);
+  }
+});
