@@ -2634,7 +2634,8 @@ export function codexPreToolUseProfile(settingsFile: string): string[] {
   ];
 }
 
-function codexReadOnly(args: CodexSpawnArgs): boolean {
+/** The adapter's actual resume boundary; routers reuse it rather than guessing from a mount. */
+export function codexReadOnly(args: Pick<CodexSpawnArgs, "sandboxIntent" | "tools">): boolean {
   return args.sandboxIntent !== "disposable-review" && Array.isArray(args.tools) &&
     !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
 }
