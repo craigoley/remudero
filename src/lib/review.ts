@@ -2368,7 +2368,10 @@ function checkoutRunnerPath(whitelisted: WhitelistedProof, cwd: string): string 
 
 function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly string[], cwd: string): readonly string[] {
   const runner = checkoutRunnerPath(whitelisted, cwd);
-  return runner === undefined ? args : [runner, ...args.slice(1)];
+  if (runner === undefined) return args;
+  const rooted = [runner, ...args.slice(1)];
+  // Vite bundles config into node_modules/.vite-temp; a shared proof install is mounted read-only.
+  return lstatSync(join(cwd, "node_modules")).isSymbolicLink() ? [...rooted, "--configLoader", "native"] : rooted;
 }
 
 /** Refresh a reviewer-owned checkout once after measured module-load failure. Worktrees link the
