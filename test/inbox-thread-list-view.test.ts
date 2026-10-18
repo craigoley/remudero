@@ -485,6 +485,60 @@ test("thread generation follows full content and marks, not only row sizes or ve
   assert.notEqual(partial.threadListKey, marked.threadListKey); assert.equal(partial.source.completeness, "partial");
 });
 
+function individualSerialization(t: TestContext, records: Set<object>, label: string) {
+  const original = JSON.stringify, seen = new Set<object>();
+  const containsRecord = (value: unknown): boolean => value !== null && typeof value === "object" &&
+    (records.has(value) || Object.values(value).some(containsRecord));
+  t.mock.method(JSON, "stringify", (value: unknown, ...args: unknown[]) => {
+    if (value !== null && typeof value === "object" && records.has(value)) seen.add(value);
+    else assert.equal(containsRecord(value), false, `${label} must be serialized individually, never as an aggregate`);
+    return Reflect.apply(original, JSON, [value, ...args]) as string;
+  });
+  assert.throws(() => JSON.stringify([...records]), /must be serialized individually/, "the mechanism control sees a real aggregate");
+  assert.equal(seen.size, 0, "a rejected aggregate did not count as individual hashing");
+  return seen;
+}
+
+test("thread identity hashes stored messages individually without serializing their corpus", async t => {
+  const messages = [message("p2", 1), message("p1", 1), message("p1", 2), message("p2", 2)];
+  messages[1]!.body = "First. original";
+  messages[1]!.extra = { event: { kind: "released", key: "event:1" }, operator: "first" };
+  const r = rig(messages), c = classification([item("p1"), item("p2")], r.clock.now);
+  r.sources.classify = async () => c;
+  const seen = individualSerialization(t, new Set(messages), "stored messages"), view = createInboxThreadListView(r.sources);
+  const first = await readInboxThreadListView(view);
+  assert.ok(first.kind === "ok"); assert.deepEqual(seen, new Set(messages), "every historical row is hashed individually");
+  assert.equal(r.store.read.status, "ok"); if (r.store.read.status !== "ok") return;
+  r.store.read.threads = new Map([...r.store.read.threads].reverse());
+  const reordered = await readInboxThreadListView(view);
+  assert.ok(reordered.kind === "ok"); assert.equal(reordered.threadListKey, first.threadListKey, "map insertion order does not change semantic identity");
+  messages[1]!.body = "First. replaced";
+  const edited = await readInboxThreadListView(view);
+  assert.ok(edited.kind === "ok"); assert.notEqual(edited.threadListKey, first.threadListKey, "an equal-length historical body edit changes the key with the last row unchanged");
+  assert.deepEqual(edited.threads, first.threads, "an invisible history edit still invalidates continuation");
+  messages[1]!.extra!.operator = "other";
+  const extra = await readInboxThreadListView(view);
+  assert.ok(extra.kind === "ok"); assert.notEqual(extra.threadListKey, edited.threadListKey, "message metadata is not stripped from the digest");
+  r.store.read.threads.set("empty-thread", []);
+  const emptyThread = await readInboxThreadListView(view);
+  assert.ok(emptyThread.kind === "ok"); assert.notEqual(emptyThread.threadListKey, extra.threadListKey, "an empty thread still has an identity");
+});
+
+test("thread identity hashes semantic items individually without serializing their aggregate", async t => {
+  const items = [item("p1"), item("p2"), item("p3")], records = new Set<object>(items), r = rig();
+  let c = classification(items, r.clock.now);
+  r.sources.classify = async () => c;
+  const seen = individualSerialization(t, records, "semantic items"), view = createInboxThreadListView(r.sources);
+  const first = await readInboxThreadListView(view);
+  assert.ok(first.kind === "ok"); assert.deepEqual(seen, records, "all classification items contribute, not a sample");
+  const changed = structuredClone(items); changed[1]!.summary += " Changed source detail.";
+  for (const row of changed) records.add(row);
+  c = classification(changed, c.classifiedAtMs);
+  const edited = await readInboxThreadListView(view);
+  assert.ok(edited.kind === "ok"); assert.notEqual(edited.threadListKey, first.threadListKey, "same-clock invisible classification changes remain load-bearing");
+  assert.deepEqual(edited.threads, first.threads);
+});
+
 test("thread page byte and cursor refusals never truncate a singleton or invent an empty prefix", async () => {
   const r = rig(), c = classification([item("p1")], r.clock.now);
   r.sources.classify = async () => c;

@@ -149,10 +149,21 @@ export async function warmInboxThreadListView<C>(view: InboxThreadListView<C>): 
 }
 
 function threadsDigest(threads: Map<string, ThreadMessage[]>): string {
-  return digest([...threads].sort(([a], [b]) => a.localeCompare(b)));
+  const hash = createHash("sha256");
+  for (const id of [...threads.keys()].sort()) {
+    hash.update(JSON.stringify([id, sequenceDigest(threads.get(id)!)])).update("\n");
+  }
+  return hash.digest("hex");
 }
 
 function digest(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+
+/** Compact JSON escapes embedded newlines, so each complete row has an unambiguous boundary without a corpus string. */
+function sequenceDigest(values: Iterable<unknown>): string {
+  const hash = createHash("sha256");
+  for (const value of values) hash.update(JSON.stringify(value)).update("\n");
+  return hash.digest("hex");
+}
 
 /** The projection over `classification`, rebuilt only when a thing it was built from has changed. */
 function project<C>(view: InboxThreadListView<C>, classification: ThreadListClassification<C>, threads: Map<string, ThreadMessage[]>): Built<C> {
@@ -168,7 +179,7 @@ function project<C>(view: InboxThreadListView<C>, classification: ThreadListClas
     classified: classification.classified, threadsKey, marksKey, inputsKey,
     builtAtMs: sources.now(),
     views: listThreadViews(items, threads, marks),
-    contentKey: digest([items, threadsKey, marksKey]),
+    contentKey: digest([sequenceDigest(items), threadsKey, marksKey]),
   };
   view.built = built;
   return built;
