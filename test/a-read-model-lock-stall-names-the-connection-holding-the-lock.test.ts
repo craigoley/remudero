@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import threads from "node:worker_threads";
+import { buildSync } from "esbuild";
 import * as adapter from "#src/lib/read-model-db.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { createReadModelTicker, READ_MODEL_STALL_MS, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
@@ -351,4 +352,31 @@ test("publisher capacity is bounded and refuses extra diagnostics without refusi
   f.db.exec("BEGIN IMMEDIATE"); f.db.prepare("INSERT INTO value VALUES(?)").run(37); f.db.exec("COMMIT");
   assert.equal(f.db.prepare("SELECT n FROM value").get()?.n, 37);
   assert.deepEqual(reports, ["read_model.holder_record_failed"]);
+});
+
+test("compiled transaction diagnostics name business callers for direct and fenced writes", async (t) => {
+  const f = await fixture(t);
+  const entry = join(f.dir, "bundled-writer.mjs");
+  const module = join(process.cwd(), "src/lib/read-model-db.ts");
+  const contents = `import {openReadModel,flushReadModelTransactions,readReadModelTransactions,acquireLease,withWriteTransaction} from ${JSON.stringify(module)};
+const db=openReadModel({stateDir:process.argv[2],instance:'core',schemaVersion:1});
+await flushReadModelTransactions();
+function businessDirectWrite(){db.exec('BEGIN IMMEDIATE')}
+businessDirectWrite();await flushReadModelTransactions();
+const direct=readReadModelTransactions(db.path).records[0]?.label;
+db.exec('ROLLBACK');await flushReadModelTransactions();
+const acquired=acquireLease(db);if(!acquired.ok)throw Error('private lease not acquired');
+await flushReadModelTransactions();
+function businessFencedWrite(){return withWriteTransaction(db,acquired.lease,()=>readReadModelTransactions(db.path).records[0]?.label)}
+const fenced=businessFencedWrite();db.close();await flushReadModelTransactions();
+console.log(JSON.stringify({direct,fenced}));
+`;
+  const built = buildSync({ stdin: { contents, resolveDir: process.cwd(), sourcefile: "caller-client.ts" },
+    bundle: true, write: false, platform: "node", format: "esm", target: "node24" });
+  writeFileSync(entry, built.outputFiles[0]!.contents);
+  const child = spawnSync(process.execPath, [entry, f.dir], { encoding: "utf8", timeout: 20_000, maxBuffer: 65_536 });
+  assert.equal(child.status, 0, child.stderr);
+  const labels = JSON.parse(child.stdout);
+  assert.match(labels.direct, /businessDirectWrite/, "a bundle filename cannot identify the transaction caller");
+  assert.match(labels.fenced, /businessFencedWrite/, "the lease helper must not hide its business caller");
 });

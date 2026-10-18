@@ -351,13 +351,19 @@ export function createReadModelTransactionRecorder(path: string, connection: str
       current = undefined;
     });
   };
-  return {
-    attempt(): string {
+  const observer: { attempt(caller?: (...args: never[]) => unknown): string; acquired(nonce: string): void;
+    release(nonce: string): void; close(): void } = {
+    attempt(caller: (...args: never[]) => unknown = observer.attempt): string {
       const nonce = randomUUID();
       diagnostic(() => {
         if (!identityRead) { identity = opts.identity?.(); identityRead = true; }
-        const caller = new Error().stack?.split("\n").find(line => line.includes(" at ") && !line.includes("read-model-db."))?.trim().split(" (")[0];
-        current = { connection, transaction: nonce, recorder, label: (opts.label ?? caller ?? "unlabeled").slice(0, 120),
+        // Function references survive bundling; adapter filenames do not. Trim the outer transaction helper first.
+        const site: { stack?: string } = {};
+        Error.captureStackTrace(site, withWriteTransaction);
+        if (!site.stack?.includes("\n")) Error.captureStackTrace(site, acquireLease);
+        if (!site.stack?.includes("\n")) Error.captureStackTrace(site, caller);
+        const label = site.stack?.split("\n")[1]?.trim().split(" (")[0];
+        current = { connection, transaction: nonce, recorder, label: (opts.label ?? label ?? "unlabeled").slice(0, 120),
           pid: process.pid, thread: threadId, identity, recordedState: "attempting", attemptedAt: now(), updatedAt: now() };
         publish(current);
       });
@@ -384,6 +390,7 @@ export function createReadModelTransactionRecorder(path: string, connection: str
       });
     },
   };
+  return observer;
 }
 
 function readTransactionRecord(file: string): TransactionRecord {
@@ -586,7 +593,7 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
         : /^ROLLBACK(?: TRANSACTION)?$/i.test(command) ? "exec.rollback" : "exec";
       const writeBegin = target === raw && /^BEGIN (?:IMMEDIATE|EXCLUSIVE)(?: TRANSACTION)?$/i.test(command);
       // A nested/failed BEGIN must not overwrite evidence of an existing successful transaction.
-      const attempt = writeBegin && !raw.isTransaction ? recorder?.attempt() : undefined;
+      const attempt = writeBegin && !raw.isTransaction ? recorder?.attempt(db.exec) : undefined;
       if (attempt) transaction = attempt;
       checked(target, () => target.exec(sql), label);
       if (attempt) recorder?.acquired(attempt);
