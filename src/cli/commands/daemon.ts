@@ -456,7 +456,8 @@ export async function daemonCommand(
   // mutable checkout may advance while the process stays alive, so it cannot prove which review
   // code is executing. This is intentionally the same module-relative source used for the
   // daemon.boot `boot_head_sha` below, and is never refreshed from cwd or HEAD during a sweep.
-  const daemonModuleRepoDir = dirname(dirname(fileURLToPath(import.meta.url)));
+  // W1-T9333: this module sits two directories deeper than src/run-task.ts did, so the repo root is two more levels up.
+  const daemonModuleRepoDir = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))));
   const daemonLoadedCodeSha = (() => {
     try {
       return execFileSync("git", ["-C", daemonModuleRepoDir, "rev-parse", "HEAD"], {
@@ -464,6 +465,7 @@ export async function daemonCommand(
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
     } catch {
+      // No git or no checkout here: the loaded code identity is unknown, which the freshness check reads as undefined.
       return undefined;
     }
   })();
@@ -1111,8 +1113,9 @@ export async function daemonCommand(
     // rather than throwing (the account/roots check above still runs either way).
     (() => {
       try {
-        return readFileSync(fileURLToPath(new URL("../.nvmrc", import.meta.url)), "utf8").trim();
+        return readFileSync(fileURLToPath(new URL("../../../.nvmrc", import.meta.url)), "utf8").trim();
       } catch {
+        // An unreadable .nvmrc leaves the pinned runtime unknown; the account/roots check above still runs.
         return undefined;
       }
     })(),
@@ -1155,7 +1158,7 @@ export async function daemonCommand(
   const measurementCadenceChild = target.isSelf ? measurementCadenceChildRunner({
     statePath: join(config.root, "state", "measurement-cadence-child.json"),
     spawn: childMeasurementCadenceSpawn({
-      entry: fileURLToPath(new URL(`./measurement-cadence-child${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
+      entry: fileURLToPath(new URL(`../../measurement-cadence-child${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
       cwd: repoRoot,
       config,
     }),
