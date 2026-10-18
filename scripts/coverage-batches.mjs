@@ -221,7 +221,12 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
       if (compressed.status !== 0 || compressed.interrupted) throw new Error('coverage batch compaction failed');
       Object.assign(record, { state: 'complete', lcov: batchLcov, lcovSha256: batchDigest, compact: packed });
       samples.push(observe());
-      if (!keepRaw) { rmSync(raw, { recursive: true, force: true }); record.rawDisposed = true; scratchRoots.delete(raw); }
+      if (!keepRaw) {
+        const owned = scratchRoots.get(raw), current = pinWorkspaceScratchRoot(raw);
+        if (current.path !== owned.path || current.dev !== owned.dev || current.ino !== owned.ino || current.uid !== owned.uid)
+          throw new Error('raw scratch identity changed; retained without disposal');
+        rmSync(raw, { recursive: true, force: true }); record.rawDisposed = true; scratchRoots.delete(raw);
+      }
       samples.push(observe());
       compact.push(packed); lineLcov.push('--line-lcov', batchLcov); save();
     }

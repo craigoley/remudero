@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { closeSync, constants, copyFileSync, fsyncSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, copyFileSync, fsyncSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -241,14 +241,9 @@ export function mergeShardLineHits(summary, lcovTexts) {
 }
 
 function readCoverageSource(file, limit = Infinity) {
-  const descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = fstatSync(descriptor);
-    if (!stat.isFile() || stat.size > limit) throw new Error(`${file} exceeds its coverage file byte bound or is not regular`);
-    return readFileSync(descriptor, 'utf8');
-  } finally {
-    closeSync(descriptor);
-  }
+  const stat = lstatSync(file);
+  if (!stat.isFile() || stat.size > limit) throw new Error(`${file} exceeds its coverage file byte bound or is not regular`);
+  return readCoverageChunkBytes(file, stat.size, limit).toString('utf8');
 }
 
 /**
