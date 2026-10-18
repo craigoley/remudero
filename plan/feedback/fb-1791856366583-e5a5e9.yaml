@@ -49,7 +49,7 @@ raw: >-
   at current main first (they were read at origin/main efd226b50).
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/12752
 summary:
