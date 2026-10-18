@@ -3499,11 +3499,9 @@ export interface OpenWeightSpawnArgs {
   requestTimeoutMs?: number;
   /** Test-only override; production reads the daemon process environment. */
   env?: NodeJS.ProcessEnv;
-  /**
-   * Test-only port around the bubblewrap check runner. Production always starts the fixed argv
-   * in a fresh user and network namespace; tests use this port to exercise child-env handling on
-   * hosts where bubblewrap is intentionally unavailable.
-   */
+  /** Caller-supplied check-child extras, never the daemon credential environment (W1-T10024). */
+  workerEnv?: Record<string, string>;
+  /** Test-only check port for hosts without bubblewrap; production runs fixed argv in fresh user/network namespaces. */
   runCheck?: (input: OpenWeightCheckInput) => string | Promise<string>;
   /** Test-only clock port; production records duration from the system clock. `iso` rides beside
    *  `now` because the daily allowance keys on a UTC calendar day, which is read off the ISO
@@ -3664,7 +3662,13 @@ export interface OpenWeightCheckInput {
  * variable here only with a demonstrated fixed-check need; copying `process.env` would turn the
  * adapter boundary into a claim rather than a control.
  */
-export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env,
+  extra: Record<string, string> = {}): Record<string, string> {
+  for (const key of Object.keys(extra)) {
+    if (/^(ANTHROPIC_|RMD_(OPENWEIGHT|FOUNDRY_CLAUDE)_API_KEY$|CLAUDE_CODE_OAUTH_TOKEN$|GH_TOKEN$)/i.test(key)) {
+      throw new Error(`openWeightCheckEnv: credential/billing-boundary violation: ${key}`);
+    }
+  }
   const tmp = join(workerHome, "tmp");
   mkdirSync(tmp, { recursive: true });
   const out: Record<string, string> = {
@@ -3676,6 +3680,7 @@ export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = 
     const value = env[key];
     if (value !== undefined) out[key] = value;
   }
+  Object.assign(out, extra, { HOME: workerHome, TMPDIR: tmp });
   return out;
 }
 
@@ -4531,7 +4536,7 @@ export async function spawnFoundryClaudeWorker(
       return { name: fn.name, description: fn.description, input_schema: fn.parameters };
     });
     const declaredNames = new Set(tools.map((tool) => tool.name));
-    const checkEnv = openWeightCheckEnv(args.workerHome, env);
+    const checkEnv = openWeightCheckEnv(args.workerHome, env, args.workerEnv);
     const maxTurns = args.maxTurns ?? 1;
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error(`cash ${label} maxTurns must be a positive integer`);
     const messages: Array<{ role: string; content: unknown }> = [{ role: "user", content: args.prompt }];
@@ -4732,7 +4737,7 @@ export async function spawnOpenWeightWorker(
     const env = args.env ?? process.env;
     // Built once, before any model tool call.  The Azure key stays in `env` for the HTTPS request
     // below, but never crosses this distinct process boundary into `run_check`.
-    const checkEnv = openWeightCheckEnv(args.workerHome, env);
+    const checkEnv = openWeightCheckEnv(args.workerHome, env, args.workerEnv);
     const webSearchConsented = cashWebSearchEnabled(config);
     const tools = openWeightTools(args.tools, webSearchConsented);
     const key = env[OPENWEIGHT_API_KEY_ENV];

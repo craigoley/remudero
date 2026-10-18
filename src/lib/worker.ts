@@ -1179,7 +1179,7 @@ export interface SpawnWorkerArgs {
     /** Test seam for the contained Azure adapter. Production reads the daemon-only API key
      * directly and never places it in a worker environment. */
     spawnOpenWeight?: (
-      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string },
+      args: Omit<SpawnWorkerArgs, "env"> & { workerEnv?: Record<string, string>; workerHome: string; zdotdir?: string },
       config: Config,
       selection: { model: string; effort: string },
     ) => Promise<WorkerResult>;
@@ -2928,6 +2928,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw new SubscriptionOnlyRefusedError(args.model!);
     }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    // env means child extras here, but a complete daemon override in the adapter. Keep custody distinct.
+    const { env: workerEnv, ...cashArgs } = args;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
       assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -3011,7 +3013,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
             },
           });
-          const rung: WorkerResult = await runOpenWeight({ ...args, prompt: executionPrompt, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
           if (args.draftRouting) {
