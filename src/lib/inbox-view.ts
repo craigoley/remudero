@@ -254,6 +254,7 @@ export function inboxViewBodies(lanes: Lanes, source: ViewSource, snapshotKey?: 
  * `timing`; otherwise it pages the last classification GET /v1/inbox's memo holds.
  */
 export function inboxLegacyView(deps: PanelGraphDeps, clock = systemClock): ViewDefinition<InboxViewData> {
+  let paged: { lanes: Lanes; asOf: string | null; snapshotKey?: string; bodies: Map<string, InboxViewBody> } | undefined;
   return {
     name: INBOX_VIEW_NAME,
     version: INBOX_VIEW_VERSION,
@@ -300,7 +301,12 @@ export function inboxLegacyView(deps: PanelGraphDeps, clock = systemClock): View
       const source = read
         ? inboxStoreSource(read.generatedAt, clock.now() - Date.parse(read.generatedAt) > INBOX_STALE_AFTER_MS ? "stale" : "fresh")
         : inboxStoreSource(clock.iso());
-      const body = inboxViewBodies(inboxLanes(classified, deps.inboxRoot), source, cursor?.snapshotKey).find((b) => b.key === viewKey(params));
+      const lanes = read?.lanes() ?? inboxLanes(classified, deps.inboxRoot);
+      if (!paged || paged.lanes !== lanes || paged.asOf !== source.asOf || paged.snapshotKey !== cursor?.snapshotKey) {
+        paged = { lanes, asOf: source.asOf, snapshotKey: cursor?.snapshotKey,
+          bodies: new Map(inboxViewBodies(lanes, source, cursor?.snapshotKey).map(body => [body.key, body])) };
+      }
+      const body = paged.bodies.get(viewKey(params));
       return body ? { data: body.data, sources: body.sources } : { error: `no such page: ${viewKey(params)}` };
     },
   };
