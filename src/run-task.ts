@@ -43446,8 +43446,9 @@ export function commitWorkerEdits(
     }
     if (mergeHead !== undefined) {
       runGit(["merge", "--quit"]);
-      runGit(["read-tree", sha]);
     }
+    // W1-T10068: refresh the index only after CAS; never update working-tree files.
+    runGit(["read-tree", sha]);
   }
   return {
     committed: true,
