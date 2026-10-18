@@ -1,0 +1,159 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadProposalRegistry } from "#src/lib/inbox.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import {
+  automationProposalFromJudgedShard,
+  proposalFromJudgedShard,
+  type ShardUnderJudgement,
+  type VerifyHumanVerdict,
+} from "#src/lib/verify-human-judge.js";
+import type { Config } from "#src/lib/config-schema.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { routeAdaptiveLifetimePressure } from "#src/run-task.js";
+
+// W1-T8827: the adaptive lifetime-pressure path judged every task with `ageDays: 0` and the
+// proposal then worded it as "filed `verify: human` 0 days ago". These tests drive the real route
+// with a fake judge spawn and read what the judge was shown and what the operator was told.
+
+const DAY_MS = 86_400_000;
+const NOW_MS = Date.parse("2026-10-16T12:00:00Z");
+const ID = "T8827-OLD";
+
+const PLAN_YAML = `
+- id: ${ID}
+  title: an old task whose build kept failing
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+`;
+
+type Fixture = { dir: string; plan: Plan; ledgerPath: string; config: Config };
+
+function fixture(inRepo = false): Fixture {
+  const dir = inRepo ? gitRepo({ seedCommit: false, kind: "lifetime-age" }).dir : mkdtempSync(join(tmpdir(), "rmd-lifetime-age-"));
+  writeFileSync(join(dir, "tasks.yaml"), PLAN_YAML);
+  mkdirSync(join(dir, ".remudero"), { recursive: true });
+  copyFileSync(join(import.meta.dirname, "..", ".remudero", "mounts.yaml"), join(dir, ".remudero", "mounts.yaml"));
+  mkdirSync(join(dir, "state"), { recursive: true });
+  return { dir, plan: loadPlan(join(dir, "tasks.yaml")), ledgerPath: join(dir, "ledger.ndjson"), config: { root: dir } as unknown as Config };
+}
+
+/** Commit the shard file `daysAgo` days before NOW_MS, so `git log --diff-filter=A` dates it. */
+function commitShard(dir: string, daysAgo: number): void {
+  const when = new Date(NOW_MS - daysAgo * DAY_MS).toISOString();
+  const { name, email } = GIT_REPO_FIXTURE_IDENTITY;
+  const env = { ...process.env, GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when,
+    GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+  const git = (...args: string[]): void => void execFileSync("git", ["-C", dir, ...args], { env, stdio: "pipe" });
+  mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(dir, "plan", "tasks.d", `${ID}-old.yaml`), "- id: x\n");
+  git("add", "plan");
+  git("commit", "-q", "-m", "add shard");
+}
+
+function failedAttempts(n: number, daysAgo: number): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  for (let i = 0; i < n; i++) {
+    const ts = new Date(NOW_MS - (daysAgo - i) * DAY_MS).toISOString();
+    rows.push({ ts, step: "run.start", task_id: ID, run_id: `r${i}` });
+    rows.push({ ts, step: "verdict", task_id: ID, run_id: `r${i}`, verdict: "failed", stage: "implement", reason: "retry" });
+  }
+  return rows;
+}
+
+function writeLedger(path: string, rows: Record<string, unknown>[]): void {
+  writeFileSync(path, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+}
+
+/** Run the real route; the judge says needs_operator and its prompt is captured. */
+async function route(f: Fixture): Promise<{ prompts: string[]; summaries: string[]; ids: string[] }> {
+  const prompts: string[] = [];
+  const spawn: typeof spawnWorker = async (args: SpawnWorkerArgs) => {
+    prompts.push(String((args as { prompt?: string }).prompt ?? ""));
+    return { text: "VERIFY_HUMAN_DECISION: needs_operator\nVERIFY_HUMAN_REASON: fixture" } as WorkerResult;
+  };
+  const result = await routeAdaptiveLifetimePressure([f.plan.byId.get(ID)!], {
+    plan: f.plan, root: f.dir, config: f.config, ledgerPath: f.ledgerPath, runId: "RUN-T8827",
+    shadowJudgeSpawns: { primary: spawn, shadow: spawn }, clock: fixedClock(NOW_MS),
+  });
+  assert.equal(result.judged, 1);
+  const staged = loadProposalRegistry(join(f.dir, "state", "inbox-proposals.json"));
+  return { prompts, summaries: staged.map((p) => p.summary), ids: staged.map((p) => p.id) };
+}
+
+test("W1-T8827: a lifetime-pressure proposal says the build kept failing and how long", async () => {
+  const f = fixture(true);
+  try {
+    commitShard(f.dir, 30);
+    writeLedger(f.ledgerPath, failedAttempts(4, 3));
+    const { summaries, ids } = await route(f);
+    assert.deepEqual(ids, [`verify-human:${ID}`], "the proposal id format is unchanged");
+    assert.match(summaries[0]!, new RegExp(`${ID} kept failing to build \\(4 attempts over 30 days\\) and a judge reads it as still needing you`));
+    assert.doesNotMatch(summaries[0]!, /was filed `verify: human`/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T8827: an old task is judged with its real age", async () => {
+  const f = fixture(true);
+  try {
+    commitShard(f.dir, 30);
+    writeLedger(f.ledgerPath, failedAttempts(4, 3));
+    const { prompts } = await route(f);
+    assert.match(prompts[0]!, /AGE: 30 days since filing/);
+    assert.doesNotMatch(prompts[0]!, /AGE: 0 days/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T8827: a task with no shard file is aged from its first dispatch row, never zero", async () => {
+  const f = fixture(); // no git repository: the shard's first commit cannot be read
+  try {
+    writeLedger(f.ledgerPath, failedAttempts(2, 20));
+    const { prompts, summaries } = await route(f);
+    assert.match(prompts[0]!, /AGE: 20 days since filing/);
+    assert.match(summaries[0]!, /\(2 attempts over 20 days\)/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T8827: an age that cannot be read is said to be unknown, never zero", async () => {
+  const f = fixture();
+  try {
+    writeLedger(f.ledgerPath, [{ step: "run.start", task_id: ID, run_id: "r0" }]); // no ts
+    const { summaries } = await route(f);
+    assert.match(summaries[0]!, /\(1 attempts over an unknown number of days \(filing age unknown: /);
+    assert.doesNotMatch(summaries[0]!, / 0 days/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T8827: a verify-human proposal keeps its wording and id", () => {
+  const verdict: VerifyHumanVerdict = { decision: "needs_operator", reason: "r" };
+  const base: ShardUnderJudgement = {
+    id: "W1-T216", title: "t", rationale: "", acceptance: [], ageDays: 49, depsAllMerged: true, citedInSrc: false,
+  };
+  for (const shard of [base, { ...base, route: "verify-human" as const }]) {
+    const p = proposalFromJudgedShard(shard, verdict);
+    assert.equal(p.id, "verify-human:W1-T216");
+    assert.match(p.summary, /^W1-T216 was filed `verify: human` 49 days ago and a judge reads it as still needing you:/);
+    const a = automationProposalFromJudgedShard(shard, verdict);
+    assert.equal(a.id, "verify-human-automate:W1-T216");
+    assert.match(a.summary, /^W1-T216 was filed `verify: human` 49 days ago and a judge reads it as safe to enter/);
+  }
+  const lifetime = automationProposalFromJudgedShard({ ...base, route: "lifetime-pressure", attributableDispatches: 3 }, verdict);
+  assert.equal(lifetime.id, "verify-human-automate:W1-T216", "the id does not depend on the route");
+  assert.match(lifetime.summary, /^W1-T216 kept failing to build \(3 attempts over 49 days\) and a judge reads it as safe to enter/);
+});
