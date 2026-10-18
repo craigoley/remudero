@@ -29,6 +29,8 @@ export interface DispatchValueContext {
   readonly openDependentFanoutByTaskId: ReadonlyMap<string, number>;
   readonly costOfDelayByTaskId?: ReadonlyMap<string, number>;
   readonly stridePassByTaskId?: ReadonlyMap<string, number>;
+  /** W1-T10028: each scored task's slot inputs (tier, blocked, pass0, passF), so {@link redealFanoutOver} can deal again over a subset. */
+  readonly stridePassInputsByTaskId?: ReadonlyMap<string, TierPass>;
   readonly costOfDelayInputsByTaskId?: ReadonlyMap<string, DispatchScoreInputs>;
   readonly costOfDelayFallback?: boolean;
   /** W1-T7534: open tasks the filing history cannot date — left unscored, ordered after the scored tier. */
@@ -543,7 +545,7 @@ export function validityShareNearAge(
   return { valid, total };
 }
 
-interface TierPass { readonly id: string; readonly tier: number; readonly blocked: boolean; readonly pass0: number; readonly passF: number }
+export interface TierPass { readonly id: string; readonly tier: number; readonly blocked: boolean; readonly pass0: number; readonly passF: number }
 
 /**
  * W1-T9968 (operator 2026-10-17: fan-out never jumps a tier): the no-fan-out passes fix which tier owns each
@@ -568,11 +570,24 @@ function fanoutWithinTier(passes: readonly TierPass[]): Map<string, number> {
   return stridePassByTaskId;
 }
 
+/**
+ * W1-T10028: deal W1-T9968's slots over `ids` only — the tasks the selector can dispatch in this pass. A task the
+ * selector declines (verify: human, retired, blocked) must not hold a slot, or an eligible task of its tier takes
+ * it and jumps the tiers above. MEASURED 2026-10-17: W1-T9874 (P2) took W1-T9378's best P2 slot and sorted above
+ * about 10 eligible P1s. A context with no slot inputs (fallback, unscored) is returned unchanged.
+ */
+export function redealFanoutOver(context: DispatchValueContext | undefined, ids: ReadonlySet<string>): DispatchValueContext | undefined {
+  const inputs = context?.stridePassInputsByTaskId;
+  if (!context || context.stridePassByTaskId === undefined || inputs === undefined) return context;
+  const passes = [...inputs.values()].filter(entry => ids.has(entry.id));
+  return Object.freeze({ ...context, stridePassByTaskId: fanoutWithinTier(passes) });
+}
+
 function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
-): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits" | "costOfDelayDependentValues" | "costOfDelayDependentCycle"> }
+): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "stridePassInputsByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits" | "costOfDelayDependentValues" | "costOfDelayDependentCycle"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
   const starts = new Map<string, { id: string; at: number }>();
@@ -722,7 +737,7 @@ function costOfDelayContext(
   const stridePassByTaskId = fanoutWithinTier(passes);
   return {
     kind: "ready",
-    context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayInputsByTaskId, costOfDelayTierWaits,
+    context: { costOfDelayByTaskId, stridePassByTaskId, stridePassInputsByTaskId: new Map(passes.map(entry => [entry.id, entry])), costOfDelayInputsByTaskId, costOfDelayTierWaits,
       costOfDelayDependentValues, costOfDelayDependentCycle: dependents.cycle,
       ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
   };

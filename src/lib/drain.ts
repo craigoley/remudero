@@ -23,7 +23,7 @@ import {
 import { taskIdFromRunBranch } from "./status.js";
 import { isRecordTask } from "./task-linter.js";
 import type { OpenSiblingBuild, StatusProjection } from "./status.js";
-import { measuredDispatchValue, type DispatchValueContext } from "./dispatch-value.js";
+import { measuredDispatchValue, redealFanoutOver, type DispatchValueContext } from "./dispatch-value.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
@@ -296,6 +296,9 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   /** W1-T3412: already-proved, pure ranking evidence. Omitted means historic priority/scope/id
    * ordering exactly; neither the selector nor {@link compareDispatch} may read history itself. */
   dispatchValueContext?: DispatchValueContext;
+  /** W1-T10028: the eligible tasks in the order the selector used, and the context whose slots were dealt over
+   * them. Observation only; a reader of the pick (the `dispatch.pick_scored` row) reads rank and pass from here. */
+  onEligibleOrdered?: (ordered: readonly Task[], context: DispatchValueContext | undefined) => void;
   /** Returns the open PR number for a task whose latest PR is currently OPEN. */
   isOpenPr?: OpenPrCheck;
   /** Tasks holding a pending pre-PR handoff receipt (daemon.ts `pendingWorkerBoundaryHandoffs`): a run of each
@@ -540,15 +543,12 @@ function observeOpenSibling(t: Task, opts: NextRunnableOpts): void {
 }
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
-  opts.beginSelectionPass?.();
-  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
-    if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
-    // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
-    // is returned unchanged, so it is structurally incapable of changing the answer.
-    observeOpenSibling(t, opts);
-    return t;
-  }
-  return undefined;
+  const t = dispatchEligibleCandidates(plan, isMerged, opts)[0];
+  if (t === undefined) return undefined;
+  // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
+  // is returned unchanged, so it is structurally incapable of changing the answer.
+  observeOpenSibling(t, opts);
+  return t;
 }
 
 /** Why the eligibility filter declined a task, first-match — see {@link tallyDispatchFilters}.
@@ -820,11 +820,16 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
  *  frontier needs membership for every task, not an N-lane pack of all N candidates. */
 function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts): Task[] {
   opts.beginSelectionPass?.();
+  // W1-T10028: eligibility is walked ONCE (its callbacks write rows and tallies, and the live read is not free),
+  // in the pre-pass order; the fan-out slots are then dealt over the eligible set only and that set is re-sorted.
   const eligible: Task[] = [];
   for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
   }
-  return eligible;
+  const context = redealFanoutOver(opts.dispatchValueContext, new Set(eligible.map((t) => t.id)));
+  const ordered = dispatchOrder(eligible, context, opts.resumableTaskIds);
+  opts.onEligibleOrdered?.(ordered, context);
+  return ordered;
 }
 
 /** Every eligible id through the SAME predicate and filter callbacks as the dispatcher, without

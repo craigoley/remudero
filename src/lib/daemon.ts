@@ -2015,17 +2015,24 @@ export function runBranchDispatchOpts(
   };
 }
 
-function captureDispatchFrontier(plan: Plan, opts: NextRunnableOpts) {
+/** W1-T10028: exported so a test can drive the pick row with the selector's own frontier. */
+export function captureDispatchFrontier(plan: Plan, opts: NextRunnableOpts) {
+  // W1-T10028: the selector's own ordered eligible set and the context whose fan-out slots were dealt over it —
+  // never the eligibility walk's order or the pre-pass context, which dealt slots to tasks that cannot dispatch.
   const eligible: Task[] = [];
-  return { eligible, opts: { ...opts, hasPushedRunBranch: (id: string) => {
-    // This is eligibility's final guard; retain its answer and observe without a second selection pass.
-    const blocked = opts.hasPushedRunBranch?.(id) ?? false;
-    if (!blocked) eligible.push(plan.byId.get(id)!);
-    return blocked;
-  } } };
+  const selection: { eligible: Task[]; context: DispatchValueContext | undefined; opts: NextRunnableOpts } = {
+    eligible, context: opts.dispatchValueContext,
+    opts: { ...opts, onEligibleOrdered: (ordered, context) => {
+      opts.onEligibleOrdered?.(ordered, context);
+      eligible.length = 0;
+      eligible.push(...ordered);
+      selection.context = context;
+    } },
+  };
+  return selection;
 }
 
-function dispatchPickPayload(
+export function dispatchPickPayload(
   task: Task, site: "tick" | "lane-refill", eligible: readonly Task[], context: DispatchValueContext | undefined,
   started: readonly Task[], occupied: readonly Task[], observed: ObservedScopeByTask,
 ): Record<string, unknown> {
@@ -6490,6 +6497,7 @@ export async function runDaemon(
     });
     let dispatchSet: Task[];
     let tickEligible: Task[] = [];
+    let tickContext: DispatchValueContext | undefined = dispatchOpts.dispatchValueContext;
     // Hoisted here because the partition is scoped to the else branch below while the rung now runs
     // outside the idle branch. Zero means nothing was deferred this tick; the forced path leaves it zero,
     // which is correct — an operator-forced dispatch is not evidence of a collision.
@@ -6525,6 +6533,7 @@ export async function runDaemon(
       });
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
       tickEligible = selection.eligible;
+      tickContext = selection.context;
       // Passed explicitly rather than relying on the partition's own default parameter — see
       // `DaemonDeps.observedByTask` (W1-T2286).
       const partition = partitionByFileOverlap([...occupiedTasks, ...candidates], deps.observedByTask ?? NO_OBSERVED_SCOPE);
@@ -7099,7 +7108,7 @@ export async function runDaemon(
           });
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, selection.opts);
           refillEligible = selection.eligible;
-          refillContext = selection.opts.dispatchValueContext;
+          refillContext = selection.context;
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
           const poolIds = new Set(pool.map((t) => t.id));
@@ -7495,7 +7504,7 @@ export async function runDaemon(
       try {
         const tickStarted = admitted.filter(t => !occupiedChildren.has(t));
         for (const task of tickStarted) log("dispatch.pick_scored", dispatchPickPayload(task, "tick", tickEligible,
-          dispatchOpts.dispatchValueContext, tickStarted, occupiedTasks, deps.observedByTask ?? NO_OBSERVED_SCOPE));
+          tickContext, tickStarted, occupiedTasks, deps.observedByTask ?? NO_OBSERVED_SCOPE));
         if (dispatchSet.length > 1 && admitted.length > 0) {
           log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
         }
