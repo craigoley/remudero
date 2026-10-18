@@ -196,6 +196,10 @@ test("real serial coverage batches conserve positive line hits and dispose only 
   assert.equal(result.status, 0, readFileSync(result.receiptPath, "utf8"));
   const receipt = JSON.parse(readFileSync(result.receiptPath, "utf8"));
   assert.equal(receipt.state, "complete"); assert.equal(receipt.batches.length, 2);
+  assert.equal(receipt.resourceScope, "workspace-and-registered-scratch");
+  assert.equal(receipt.diskProfile, null); assert.equal(receipt.estimatedPeakBasis, "not-supplied");
+  assert.ok(receipt.resources.samples[3].generatedPathBytes > receipt.resources.samples[4].generatedPathBytes,
+    "the raw-plus-compact phase charges external raw output before its confirmed disposal");
   for (const batch of receipt.batches) {
     assert.equal(batch.verdict.complete, true); assert.equal(batch.verdict.reported, 1);
     assert.equal(batch.rawDisposed, true); assert.equal(existsSync(batch.raw), false);
@@ -217,12 +221,15 @@ test("coverage batches refuse ghost inputs and retain an actual failing batch wi
     "--test-reporter=lcov", "--test-reporter-destination=coverage/lcov.info", "--experimental-test-coverage"],
     files: ["test/fail.test.mjs", "test/later.test.mjs"], batchSize: 1, lcov: join(repo.dir, "coverage/lcov.info"), base: "HEAD" };
   await assert.rejects(runCoverageBatches({ ...opts, files: ["test/ghost.test.mjs"] }), /ENOENT/);
+  mkdirSync(join(repo.dir, "coverage"), { recursive: true }); writeFileSync(opts.lcov, "previous evidence");
   const blocked = await runCoverageBatches({ ...opts,
     diskProfile: { minimumFreeBytes: Number.MAX_SAFE_INTEGER, reservedBytes: 0, estimatedPeakBytes: 1 } },
   { acquire: async () => f.slot, log() {} });
   assert.equal(blocked.status, 75);
   const blockedReceipt = JSON.parse(readFileSync(blocked.receiptPath, "utf8"));
   assert.equal(blockedReceipt.state, "not-run-disk-capacity"); assert.equal(blockedReceipt.batches.length, 0);
+  assert.equal(readFileSync(opts.lcov, "utf8"), "previous evidence", "capacity refusal preserves previous evidence");
+  assert.equal(blockedReceipt.estimatedPeakBasis, "declared-profile");
   f.write();
   const lost = await runCoverageBatches(opts, { acquire: async () => f.slot, log() {},
     run: async () => { rmSync(f.path); return { status: 7, signal: null }; } });
