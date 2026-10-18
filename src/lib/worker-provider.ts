@@ -2001,7 +2001,8 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     return { ...selected, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable" },
       detail: `Codex capacity carried forward ${ageMs}ms from ${fixedClock(current.readAt).iso()}; ${failure.detail ?? "probe unavailable"}` };
   } catch (error) {
-    return { ...failure, detail: `${failure.detail}; last-good unavailable: ${String((error as Error).message).slice(0, 256)}` };
+    const reason = String((error as Error).message).slice(0, 256);
+    return { ...failure, detail: `${failure.detail}; last-good unavailable: ${reason}` };
   }
 }
 
