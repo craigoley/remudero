@@ -3474,6 +3474,20 @@ export async function publishFollowupHarvestAsync(harvest: FollowupHarvest,
   return outcomes;
 }
 
+/** Publish before acknowledging the harvest. A failed registry write leaves its source retryable;
+ * a crash before the marks replays through the router's existing stable-id dedup. */
+export function publishFollowupHarvest(
+  harvest: FollowupHarvest,
+  deps: RouteFollowupsDeps & Parameters<typeof recordFollowupHarvest>[1],
+): FollowupRouteOutcome[] {
+  const pending: LedgerLine[] = [];
+  recordFollowupHarvest(harvest, { ...deps, writeLedger: (_path, line) => { pending.push(line); } });
+  const outcomes = routeFollowupsToRegistry(harvest, deps);
+  const write = deps.writeLedger ?? appendLedger;
+  for (const line of pending) write(deps.ledgerPath, line);
+  return outcomes;
+}
+
 // ── Follow-up retirement (W1-T2563) ────────────────────────────────────────
 //
 // `routeFollowupsToRegistry` appends every routable candidate and refuses to re-add one already

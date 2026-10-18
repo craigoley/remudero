@@ -6970,7 +6970,103 @@ function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: stri
   return false;
 }
 
+/** W1-T9289: one git call whose non-zero exit is a RESULT (`status`), never an erasure. */
+function gitStatusResult(git: (args: string[]) => string, args: string[]): { status: number | null; out: string; error?: string } {
+  try {
+    return { status: 0, out: git(args) };
+  } catch (error) {
+    const failed = error as { status?: unknown; stdout?: unknown; message?: unknown };
+    return { status: typeof failed.status === "number" ? failed.status : null, out: String(failed.stdout ?? ""),
+      error: String(failed.message ?? error) };
+  }
+}
+
+/**
+ * W1-T9289 — THE CONFLICT MODE OF THE PLAN-SCOPED ROUND. A dirty fleet plan PR gets origin/main MERGED into its head
+ * (a merge commit, never a rebase or a force push). Main's side is the newer fleet decision and is kept; the worker
+ * re-applies the branch's change only where it still applies to the merged task and edits ONLY the conflicted plan
+ * paths. The pushed merge commit must preflight clean, so a head that fails `planPrPreflight` is never pushed.
+ */
+async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+  const { pr, deps, worktreePath } = input;
+  const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
+  const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => deps.preflight
+    ? deps.preflight(tree, sha, { ...meta, headRef: pr.headRefName })
+    : planPrPreflightAtCommitAsync(tree, sha, { ...meta, headRef: pr.headRefName }, { log: deps.log });
+  let roundId: string | undefined;
+  const roundFields = () => ({ task_id: input.task.id, pr_number: pr.prNumber, head_sha: pr.headSha,
+    round_id: roundId, strike: pr.priorStrikes + 1, mode: "plan-conflict" });
+  const refuse = (reason: string, verdict?: PlanPrPreflightResult) => {
+    if (roundId) {
+      deps.log("fix.commit_refused", { ...roundFields(), reason });
+      deps.log("fix.done", { ...roundFields(), subtype: "commit_refused" });
+    }
+    return { outcome: "refused" as const, reason, preflight: verdict };
+  };
+  const metadata = { title: input.title, body: input.body };
+  try {
+    if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the plan round head moved before dispatch");
+    const merged = gitStatusResult(git, ["merge", "--no-commit", "--no-ff", "origin/main"]);
+    const unmerged = git(["diff", "--name-only", "--diff-filter=U", "-z"]).split("\0").filter(Boolean);
+    if (merged.status !== 0 && unmerged.length === 0) return refuse(`merging origin/main failed without a conflict: ${merged.error}`);
+    const outside = unmerged.filter((path) => !isInPlanScope(path) || path.split("/").includes(".."));
+    if (outside.length) return refuse(`the merge conflicts outside the plan scope: ${outside.join(", ")}`);
+    let report = "";
+    if (unmerged.length > 0) {
+      roundId = `${input.runId ?? input.task.id}:${pr.priorStrikes + 1}:${systemClock.now()}`;
+      deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
+      report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files: unmerged }, round: 1, branch: pr.headRefName!,
+        harnessCommits: true, evidence: {
+          planGateFindings: unmerged.map((path) => ({ check: "merge-conflict", firstLine:
+            `${path} has conflict markers: keep main's side (the newer fleet decision, e.g. a retirement or status); ` +
+            "re-apply the branch's change only where it still applies to the merged task; drop an edit aimed at a task " +
+            "main has retired or merged, and propose a PR_ACCEPTANCE without its line" })),
+          constraint: [input.lastRefusal, feedbackFixConstraint(pr.pendingAnswer)].filter(Boolean).join("\n\n") || undefined } }));
+      if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
+      const touched = git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]).split("\0")
+        .filter((entry) => entry.length >= 4 && entry[1] !== " ").map((entry) => entry.slice(3));
+      const stray = touched.filter((path) => !unmerged.includes(path));
+      if (stray.length) return refuse(`plan round changed paths outside the conflicted plan paths: ${stray.join(", ")}`);
+      git(["add", "-A", "--", ...unmerged]);
+      const markers = gitStatusResult(git, ["grep", "--cached", "-n", "-E", "^(<{7}|>{7})( |$)", "--", ...unmerged]);
+      if (markers.status === 0) return refuse(`conflict markers remain: ${markers.out.split("\n")[0]}`);
+      if (markers.status !== 1) return refuse(`checking for conflict markers failed: ${markers.error}`);
+    }
+    const proposedTitle = /^PR_TITLE:[ \t]*(.+)$/m.exec(report)?.[1];
+    const proposedAcceptance = /^PR_ACCEPTANCE:[ \t]*\r?\n([\s\S]*?)^END_PR_ACCEPTANCE[ \t]*$/m.exec(report)?.[1];
+    const proposedBody = /^PR_BODY:[ \t]*\r?\n([\s\S]*?)^END_PR_BODY[ \t]*$/m.exec(report)?.[1];
+    if (proposedTitle) metadata.title = proposedTitle.trim();
+    if (proposedBody) metadata.body = proposedBody.trimEnd();
+    if (proposedAcceptance) {
+      const check = acceptanceAuthorTimeCheck(proposedAcceptance);
+      if (!check.ok) return refuse(check.message);
+      // The block is REPLACED in place, so a criterion for a retired task's edit is gone, not demoted.
+      const region = acceptanceBlockRegion(metadata.body);
+      const rendered = renderAcceptanceBlock(parseAcceptanceBlock(proposedAcceptance) as AcceptanceCriterion[]).replace(/\n+$/, "");
+      if (region) {
+        const lines = metadata.body.split("\n");
+        lines.splice(region.headerLine, region.endLine - region.headerLine, ...rendered.split("\n"));
+        metadata.body = lines.join("\n");
+      } else metadata.body = replaceAcceptanceBlock(metadata.body, parseAcceptanceBlock(proposedAcceptance));
+    }
+    git(["commit", "-m", `Merge branch 'main' into ${pr.headRefName}`]);
+    const sha = git(["rev-parse", "HEAD"]).trim();
+    const verdict = await preflight(worktreePath, sha, metadata);
+    if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
+    if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
+    await deps.push(sha);
+    deps.log("sweep.plan_round.merged", { pr_number: pr.prNumber, head_sha: pr.headSha, merge_sha: sha, conflicted: unmerged });
+    if (roundId) deps.log("fix.done", { ...roundFields(), subtype: "success", pushed_head_sha: sha });
+    return { outcome: "pushed", headSha: sha, preflight: verdict };
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
+    return refuse(reason);
+  }
+}
+
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+  if (input.conflict === true) return runPlanScopedConflictRound(input);
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
   const preflightImpl = deps.preflight ?? planPrPreflightAtCommitAsync;
