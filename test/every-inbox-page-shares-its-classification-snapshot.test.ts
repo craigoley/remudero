@@ -372,7 +372,8 @@ function retainAttention(w: ReturnType<typeof world>, edit: (content: PersistedI
   assert.ok(before?.attentionCensus);
   const { identity: _identity, generatedAt: _at, whyMeFeedback: _oldFeedback, ...content } = structuredClone(before);
   content.attentionCensus!.state = "complete";
-  for (const name of Object.keys(content.attentionCensus!.sources) as Array<keyof typeof content.attentionCensus.sources>) content.attentionCensus!.sources[name] = "observed";
+  const sources = content.attentionCensus!.sources;
+  for (const name of Object.keys(sources) as Array<keyof typeof sources>) sources[name] = "observed";
   edit(content);
   const census = content.attentionCensus!;
   census.counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
