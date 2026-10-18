@@ -47,3 +47,10 @@ test('platform metadata records interruptions and never copies arbitrary test ou
  assert.equal(platformEventRecord(undefined),null);
  const plan=platformEventRecord({type:'test:plan',data:{count:3}})!;assert.equal((plan.data as {count:number}).count,3);
 });
+test('platform failure metadata preserves the failed outcome without serializing arbitrary error details',()=>{
+ const secret='PRIVATE_ASSERTION_ACTUAL_VALUE',error=Object.assign(new Error(secret),{name:secret,code:secret,cause:{secret}});
+ const failed=platformEventRecord({type:'test:complete',data:{details:{passed:false,error}}})!;
+ assert.equal((failed.data as {details:{passed:boolean}}).details.passed,false);
+ assert.deepEqual((failed.data as {details:{error:unknown}}).details.error,{present:true});
+ assert(!JSON.stringify(failed).includes(secret),'error name/code/message/cause must not enter observational metadata');
+});

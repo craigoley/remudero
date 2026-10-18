@@ -18,13 +18,15 @@ export function platformEventRecord(event){
  if(['test:enqueue','test:dequeue','test:complete'].includes(event?.type)){
   const data=Object.fromEntries(['entryFile','file','line','column','testId','parentId','name','nesting','testNumber','skip','todo','tags'].map(k=>[k,d[k]??null]));
   data.type=d.details?.type??d.type??null;
-  if(event.type==='test:complete')data.details={passed:d.details?.passed??null,duration_ms:d.details?.duration_ms??null,error:d.details?.error?{name:d.details.error.name??null,code:d.details.error.code??null,message:d.details.error.message??null}:null};
+  // Assertion errors can embed private actual/expected values in every error field.
+  // Outcome and error presence suffice here; diagnostic content belongs to the primary reporter.
+  if(event.type==='test:complete')data.details={passed:d.details?.passed??null,duration_ms:d.details?.duration_ms??null,error:d.details?.error?{present:true}:null};
   return {...base,data};
  }
  if(event?.type==='test:summary')return {...base,data:{file:d.file??null,counts:Object.fromEntries(['tests','passed','failed','cancelled','skipped','todo','suites','topLevel'].map(k=>[k,d.counts?.[k]??null])),success:d.success??null,duration_ms:d.duration_ms??null}};
  if(event?.type==='test:plan')return {...base,data:{file:d.file??null,entryFile:d.entryFile??null,nesting:d.nesting??null,count:d.count??null}};
  if(event?.type==='test:interrupted'||event?.type?.startsWith('test:watch:'))return {...base,state:'UNKNOWN_INTERRUPTED_OR_WATCH_RUN'};
- return null; // Never copy arbitrary test stdout, stderr, diagnostics or credentials into metadata.
+ return null; // Omit arbitrary stdout/stderr, diagnostics and error detail; identity fields remain test metadata.
 }
 export default async function* readMapPlatformReporter(events){
  yield JSON.stringify({format:'rmd-platform-test-event-v1',event:'producer',runtime:{node:process.version,platform:process.platform,arch:process.arch,executableSha256:digest(process.execPath)},reporterSha256:digest(fileURLToPath(import.meta.url)),state:'RAW_SHADOW_METADATA_NOT_QUALIFIED',...safety})+'\n';
