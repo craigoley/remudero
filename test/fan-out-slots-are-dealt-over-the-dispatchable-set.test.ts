@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDispatchValueContext } from "../src/lib/dispatch-value.js";
+import { buildDispatchValueContext, stridePassInputs } from "../src/lib/dispatch-value.js";
 import type { DispatchValueContext } from "../src/lib/dispatch-value.js";
 import { dispatchOrder, nextRunnable, runnableCandidates } from "../src/lib/drain.js";
 import { NO_OBSERVED_SCOPE } from "../src/lib/dispatch-overlap.js";
@@ -118,7 +118,7 @@ test("W1-T10028: every cross-tier pair of eligible tasks keeps its no-fan-out or
     const eligible = open.filter(t => t.verify === "auto" && t.status === "queued" && t.depends_on.every(id => retired.has(id)));
     assert.deepEqual(new Set(order.map(t => t.id)), new Set(eligible.map(t => t.id)), `seed ${seed}: the dispatchable set`);
     // The no-fan-out order of the eligible set: their own pass0, which no dependent moves.
-    const pass0 = (t: Task) => context.stridePassInputsByTaskId!.get(t.id)!.pass0;
+    const pass0 = (t: Task) => stridePassInputs(context)!.get(t.id)!.pass0;
     const noFanout = [...eligible].sort((a, b) => pass0(a) - pass0(b));
     assert.deepEqual(order.map(t => t.priority), noFanout.map(t => t.priority), `seed ${seed}: tiers in the no-fan-out order`);
     checked += eligible.length;

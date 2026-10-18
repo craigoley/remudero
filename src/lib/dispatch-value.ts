@@ -29,8 +29,6 @@ export interface DispatchValueContext {
   readonly openDependentFanoutByTaskId: ReadonlyMap<string, number>;
   readonly costOfDelayByTaskId?: ReadonlyMap<string, number>;
   readonly stridePassByTaskId?: ReadonlyMap<string, number>;
-  /** W1-T10028: each scored task's slot inputs (tier, blocked, pass0, passF), so {@link redealFanoutOver} can deal again over a subset. */
-  readonly stridePassInputsByTaskId?: ReadonlyMap<string, TierPass>;
   readonly costOfDelayInputsByTaskId?: ReadonlyMap<string, DispatchScoreInputs>;
   readonly costOfDelayFallback?: boolean;
   /** W1-T7534: open tasks the filing history cannot date — left unscored, ordered after the scored tier. */
@@ -570,6 +568,14 @@ function fanoutWithinTier(passes: readonly TierPass[]): Map<string, number> {
   return stridePassByTaskId;
 }
 
+/** W1-T10028: each dealt pass map's slot inputs. Keyed by the map itself, so a context whose `stridePassByTaskId` was replaced has none and is never redealt. */
+const slotInputsByPassMap = new WeakMap<ReadonlyMap<string, number>, ReadonlyMap<string, TierPass>>();
+
+/** The slot inputs (tier, blocked, pass0, passF) behind a context's dealt passes, when it still holds the map they dealt. */
+export function stridePassInputs(context: DispatchValueContext | undefined): ReadonlyMap<string, TierPass> | undefined {
+  return context?.stridePassByTaskId === undefined ? undefined : slotInputsByPassMap.get(context.stridePassByTaskId);
+}
+
 /**
  * W1-T10028: deal W1-T9968's slots over `ids` only — the tasks the selector can dispatch in this pass. A task the
  * selector declines (verify: human, retired, blocked) must not hold a slot, or an eligible task of its tier takes
@@ -577,17 +583,18 @@ function fanoutWithinTier(passes: readonly TierPass[]): Map<string, number> {
  * about 10 eligible P1s. A context with no slot inputs (fallback, unscored) is returned unchanged.
  */
 export function redealFanoutOver(context: DispatchValueContext | undefined, ids: ReadonlySet<string>): DispatchValueContext | undefined {
-  const inputs = context?.stridePassInputsByTaskId;
-  if (!context || context.stridePassByTaskId === undefined || inputs === undefined) return context;
-  const passes = [...inputs.values()].filter(entry => ids.has(entry.id));
-  return Object.freeze({ ...context, stridePassByTaskId: fanoutWithinTier(passes) });
+  const inputs = stridePassInputs(context);
+  if (!context || inputs === undefined) return context;
+  const dealt = fanoutWithinTier([...inputs.values()].filter(entry => ids.has(entry.id)));
+  slotInputsByPassMap.set(dealt, inputs);
+  return Object.freeze({ ...context, stridePassByTaskId: dealt });
 }
 
 function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
-): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "stridePassInputsByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits" | "costOfDelayDependentValues" | "costOfDelayDependentCycle"> }
+): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits" | "costOfDelayDependentValues" | "costOfDelayDependentCycle"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
   const starts = new Map<string, { id: string; at: number }>();
@@ -735,9 +742,10 @@ function costOfDelayContext(
     }));
   }
   const stridePassByTaskId = fanoutWithinTier(passes);
+  slotInputsByPassMap.set(stridePassByTaskId, new Map(passes.map(entry => [entry.id, entry])));
   return {
     kind: "ready",
-    context: { costOfDelayByTaskId, stridePassByTaskId, stridePassInputsByTaskId: new Map(passes.map(entry => [entry.id, entry])), costOfDelayInputsByTaskId, costOfDelayTierWaits,
+    context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayInputsByTaskId, costOfDelayTierWaits,
       costOfDelayDependentValues, costOfDelayDependentCycle: dependents.cycle,
       ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
   };
