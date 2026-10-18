@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   BASE_RED_REFRESH_ADMISSION_STEP, createRefreshAdmission, refreshAdmissionReading, type OpenPrView,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const BEFORE = "0c535ce0".padEnd(40, "0");
 const REFRESHED = "9601162d".padEnd(40, "0");
