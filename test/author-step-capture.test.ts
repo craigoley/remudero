@@ -232,6 +232,57 @@ function pidClosed(pid: number) {
   try { process.kill(pid, 0); return false; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true; throw error; }
 }
+
+test('a closed author leader cannot leave a disconnected reader group or certify success', async () => {
+  const f = fixture(), readyPath = join(f.root, 'disconnected-reader.json');
+  // Self-expiration also bounds the negative control against the old capture implementation.
+  const reader = `require('node:fs').writeFileSync(process.argv[1],String(process.pid));
+    process.on('SIGTERM',()=>{}); setTimeout(()=>process.exit(91),12000);`;
+  const leader = `const fs=require('node:fs');
+    require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(reader)},${JSON.stringify(readyPath)}],{stdio:'ignore'}).unref();
+    const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(readyPath)})){clearInterval(timer);process.exit(0)}},10);`;
+  const unrelated = spawn(process.execPath, ['-e', 'setTimeout(()=>{},15000)'], { stdio: 'ignore' });
+  const unrelatedClosed = new Promise(resolve => unrelated.once('close', resolve));
+  let pid: number | undefined;
+  try {
+    const result = mod.captureStepSync(process.execPath, ['-e', leader], { ...f, cwd: ROOT, runtimeMs: 15000 });
+    pid = Number(readFileSync(readyPath, 'utf8'));
+    assert.equal(result.status, 0, 'preserve the leader verdict separately from incomplete group closure');
+    assert.equal((result.error as NodeJS.ErrnoException)?.code, 'ERR_AUTHOR_DESCENDANTS_ALIVE');
+    assert.equal(result.outputComplete, false);
+    assert.equal(pidClosed(pid), true, 'the disconnected resistant reader must be gone before publication');
+    assert.equal(pidClosed(unrelated.pid!), false, 'a different process group must stay untouched');
+    assert.equal(JSON.parse(readFileSync(f.resultPath, 'utf8')).error.code, 'ERR_AUTHOR_DESCENDANTS_ALIVE');
+  } finally {
+    if (unrelated.exitCode === null && unrelated.signalCode === null) unrelated.kill('SIGKILL');
+    await unrelatedClosed;
+    if (pid !== undefined) await boundedWait(() => pidClosed(pid!), 'self-expiring owned reader did not close', 14000);
+  }
+});
+
+test('author step capture allows natural descendant shutdown without extending its runtime', () => {
+  for (const bounded of [false, true]) {
+    const f = fixture(), ready = join(f.root, 'draining.pid'), natural = join(f.root, 'natural-exit');
+    const reader = `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));
+      setTimeout(()=>{fs.writeFileSync(${JSON.stringify(natural)},'closed naturally');process.exit(0)},${bounded ? 1200 : 200});`;
+    const leader = `const fs=require('node:fs');
+      require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(reader)}],{stdio:'ignore'}).unref();
+      const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(ready)})){clearInterval(timer);process.exit(0)}},5);`;
+    const result = mod.captureStepSync(process.execPath, ['-e', leader], { ...f, cwd: ROOT, runtimeMs: bounded ? 500 : 10000 });
+    if (bounded) {
+      assert.equal((result.error as NodeJS.ErrnoException)?.code, 'ERR_AUTHOR_STEP_TIMEOUT');
+      assert.equal(result.outputComplete, false, 'normal shutdown does not extend the original runtime');
+      assert.equal(existsSync(natural), false, 'runtime expiry still terminates the owned group');
+    } else {
+      assert.equal(result.status, 0);
+      assert.equal(result.error, undefined, result.error?.message);
+      assert.equal(result.outputComplete, true);
+      assert.equal(readFileSync(natural, 'utf8'), 'closed naturally');
+    }
+    assert.equal(pidClosed(Number(readFileSync(ready, 'utf8'))), true, 'the owned descendant must close before returning');
+  }
+});
+
 function resistantReader(readyPath: string) {
   const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{});
     const [ready,owner,helper]=process.argv.slice(1);

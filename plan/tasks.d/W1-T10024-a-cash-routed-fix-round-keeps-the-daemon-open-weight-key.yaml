@@ -14,7 +14,7 @@
     - src/lib/worker.ts
     - src/lib/worker-provider.ts
     - test/a-cash-routed-fix-round-keeps-the-daemon-open-weight-key.test.ts
-  status: queued
+  status: merged
   priority: 1  # while claude is below reserve and codex reads unreadable, the router's cash-fallback is the ONLY arm, so every fix round that carries a census snapshot dies before its worker runs and is counted as a refusal at its head
   attempts: 0
   rationale: |

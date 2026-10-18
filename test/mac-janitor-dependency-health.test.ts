@@ -33,7 +33,7 @@ function fixture(t: TestContext) {
   for (const name of ["npm", "npx", "pnpm", "yarn", "open", "osascript"]) {
     command(name, 'printf "%s\\n" "$0 $*" >> "$FIXTURE_INVOKED"; exit 97');
   }
-  for (const name of ["awk", "bash", "cksum", "cut", "date", "dirname", "du", "grep", "id", "mkdir", "readlink", "rmdir", "sed", "sort", "stat", "tee", "uname"]) {
+  for (const name of ["awk", "bash", "cksum", "cut", "date", "dirname", "du", "grep", "id", "mkdir", "python3", "readlink", "rmdir", "sed", "sort", "stat", "tee", "uname"]) {
     const native = spawnSync("/bin/bash", ["-c", `command -v ${name}`], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
     assert.equal(native.status, 0, name);
     symlinkSync(native.stdout.trim(), join(bin, name));
@@ -71,13 +71,17 @@ function fixture(t: TestContext) {
     }
     return [stat.mode, stat.mtimeMs, stat.ctimeMs, payload];
   };
-  const run = (nodeMode: "normal" | "absent" | "failed" = "normal") => {
-    if (nodeMode !== "normal") {
-      rmSync(join(bin, "node"));
-      if (nodeMode === "failed") command("node", "exit 97");
+  const run = (runtimeMode: "normal" | "absent" | "failed" | "node-absent" = "normal") => {
+    if (runtimeMode === "node-absent") rmSync(join(bin, "node"));
+    if (runtimeMode === "absent" || runtimeMode === "failed") {
+      rmSync(join(bin, "python3"));
+      if (runtimeMode === "failed") command("python3", "exit 97");
     }
     const path = bin;
-    if (nodeMode === "absent") assert.notEqual(spawnSync("/bin/bash", ["-c", "command -v node"], { env: { PATH: `${path}:/usr/sbin:/sbin` } }).status, 0);
+    if (runtimeMode === "absent" || runtimeMode === "node-absent") {
+      const name = runtimeMode === "absent" ? "python3" : "node";
+      assert.notEqual(spawnSync("/bin/bash", ["-c", `command -v ${name}`], { env: { PATH: `${path}:/usr/sbin:/sbin` } }).status, 0);
+    }
     const before = [existsSync(core) ? snapshot(core) : null, ...protectedFiles.map(snapshot)];
     const result = spawnSync("/bin/bash", [script, "--dry-run"], { encoding: "utf8", timeout: 20_000, env: {
       HOME: home, PATH: path, TMPDIR: scratch, NODE_OPTIONS: "", NODE_PATH: "",
@@ -211,7 +215,14 @@ test("Janitor dependency health: missing, non-file, oversized and unreadable man
   }
 });
 
-test("Janitor dependency health: unavailable Node or a failed probe never becomes a missing dependency claim", t => {
+test("Janitor dependency health: cron without Node still checks manifests without executing package code", t => {
+  const fx = fixture(t); fx.checkout(fx.core, { devDependencies: { vitest: "^3" } });
+  const output = fx.run("node-absent");
+  assert.match(output, /declared vitest runner missing/);
+  assert.doesNotMatch(output, /check unavailable|lacks vitest/);
+});
+
+test("Janitor dependency health: unavailable Python or a failed probe never becomes a missing dependency claim", t => {
   for (const kind of ["absent", "failed"] as const) {
     const fx = fixture(t); fx.checkout(fx.core, { devDependencies: { vitest: "^3" } });
     const output = fx.run(kind);
