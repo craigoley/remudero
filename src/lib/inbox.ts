@@ -3146,19 +3146,39 @@ function defaultRegistryLockSleep(ms: number): void {
 
 const ownedAsyncRegistryLocks = new Set<string>();
 
+/** A deadline keeps the words every earlier waiter threw, so an existing caller's diagnostic still reads. */
+function registryBusyMessage(outcome: string, lockPath: string, holder: RegistryLockInfo | undefined, budgetMs?: number): string {
+  const heldBy = `(held by pid ${holder?.pid ?? "unknown"})`;
+  return outcome === "deadline" && budgetMs !== undefined
+    ? `proposal registry deadline: timed out after ${budgetMs}ms waiting for ${lockPath} ${heldBy}`
+    : `proposal registry ${outcome}: ${lockPath} ${heldBy}`;
+}
+
 export class ProposalRegistryBusyError extends RmdError {
   constructor(readonly outcome: "same-process-busy" | "cancelled" | "deadline", readonly lockPath: string,
-    readonly holder: RegistryLockInfo | undefined) {
-    super("registry", GENERIC_EXIT_CODE, `proposal registry ${outcome}: ${lockPath} (held by pid ${holder?.pid ?? "unknown"})`,
+    readonly holder: RegistryLockInfo | undefined, budgetMs?: number) {
+    super("registry", GENERIC_EXIT_CODE, registryBusyMessage(outcome, lockPath, holder, budgetMs),
       { outcome, lockPath, holder: holder ?? null });
     this.name = "ProposalRegistryBusyError";
   }
 }
 
 function registryWaitRefusal(opts: UpdateProposalRegistryOpts, outcome: ProposalRegistryBusyError["outcome"],
-  lockPath: string, holder?: RegistryLockInfo): never {
+  lockPath: string, holder?: RegistryLockInfo, budgetMs?: number): never {
   opts.log?.("proposal_registry.lock_wait_refused", { outcome, lock_path: lockPath, holder: holder ?? null });
-  throw new ProposalRegistryBusyError(outcome, lockPath, holder);
+  throw new ProposalRegistryBusyError(outcome, lockPath, holder, budgetMs);
+}
+
+/** Whether `lockPath` still names the lock this process created: the identity and the bytes come from ONE
+ *  descriptor, so they cannot describe two different files (CodeQL js/file-system-race). No symlink is followed. */
+function registryLockStillOurs(lockPath: string, ours: { dev: number; ino: number }, bytesMatch: (raw: string) => boolean): boolean {
+  const fd = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const current = fs.fstatSync(fd);
+    return current.dev === ours.dev && current.ino === ours.ino && bytesMatch(fs.readFileSync(fd, "utf8"));
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function recordRegistryHold(registryPath: string, started: number, opts: UpdateProposalRegistryOpts): void {
@@ -3220,15 +3240,12 @@ export function updateProposalRegistry(
     }
   }
 
-  const started = systemClock.now();
+  // No hold is recorded here: only an async holder spans awaited reads, and the default synchronous writers keep
+  // their exact on-disk footprint (the registry and its shard directory, nothing else).
   try {
     return updateLockedProposalRegistry(registryPath, update);
   } finally {
-    try {
-      recordRegistryHold(registryPath, started, opts);
-    } finally {
-      try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
-    }
+    try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
   }
 }
 
@@ -3377,7 +3394,7 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
   let holder: RegistryLockInfo | undefined;
   let reportedIdentity: string | undefined;
   let measurement: { held_ms: number } | undefined;
-  let measurementState = { kind: "missing" };
+  let measurementState: { kind: "missing" | "observed" | "unreadable" };
   try {
     const value = JSON.parse(await fs.promises.readFile(`${registryPath}.lock-hold.json`, "utf8"));
     if (!Number.isFinite(value.held_ms) || value.held_ms < 0) throw new Error("invalid hold measurement");
@@ -3389,7 +3406,7 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
   const waitingAt = systemClock.now();
   const check = () => {
     if (opts.signal?.aborted) registryWaitRefusal(opts, "cancelled", lockPath, holder);
-    if (systemClock.now() >= deadline) registryWaitRefusal(opts, "deadline", lockPath, holder);
+    if (systemClock.now() >= deadline) registryWaitRefusal(opts, "deadline", lockPath, holder, maxWaitMs);
   };
   let acquired!: { dev: number; ino: number; contents: string };
   for (;;) {
@@ -3405,9 +3422,7 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
         // A failed publication is ours to clean only if the pathname still names our descriptor's file.
         // A reclaimer's replacement is not ours, even when writing the original lock failed.
         try {
-          const current = fs.statSync(lockPath);
-          const raw = fs.readFileSync(lockPath, "utf8");
-          if (current.dev === identity.dev && current.ino === identity.ino && (raw === "" || raw === contents)) fs.unlinkSync(lockPath);
+          if (registryLockStillOurs(lockPath, identity, raw => raw === "" || raw === contents)) fs.unlinkSync(lockPath);
         } catch (cleanup) {
           opts.log?.("proposal_registry.lock_creation_cleanup_failed", { lock_path: lockPath, reason: String(cleanup) });
         }
@@ -3450,9 +3465,7 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
     } finally {
       ownedAsyncRegistryLocks.delete(ownedPath);
       try {
-        const current = fs.lstatSync(lockPath);
-        if (current.dev === acquired.dev && current.ino === acquired.ino &&
-            fs.readFileSync(lockPath, "utf8") === acquired.contents) fs.unlinkSync(lockPath);
+        if (registryLockStillOurs(lockPath, acquired, raw => raw === acquired.contents)) fs.unlinkSync(lockPath);
       } catch (error) {
         if (!isEnoent(error)) opts.log?.("proposal_registry.lock_release_unavailable", { lock_path: lockPath, reason: String(error) });
       }

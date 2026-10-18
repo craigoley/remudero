@@ -290,11 +290,12 @@ test("W1-T9240: release preserves a replaced lock's inode and contents", async t
 
 test("W1-T9240: an unreadable release identity is reported without unlinking it", async t => {
   const path = join(ownedFixtureDir(t, "registry-release-unreadable").dir, "registry.json");
-  const lstat = fs.lstatSync;
+  const open = fs.openSync;
   const rows: string[] = [];
-  const probe = t.mock.method(fs, "lstatSync", (...args: Parameters<typeof lstat>) => {
+  // Release reads the lock's identity through one descriptor, so the identity read is the open of the lock.
+  const probe = t.mock.method(fs, "openSync", (...args: Parameters<typeof open>) => {
     if (String(args[0]) === `${path}.lock`) throw Object.assign(new Error("fixture identity unreadable"), { code: "EACCES" });
-    return lstat(...args);
+    return open(...args);
   });
   await updateProposalRegistryAsync(path, () => null, { maxWaitMs: 1000, log: step => rows.push(step) });
   probe.mock.restore();
