@@ -14,7 +14,7 @@
     - src/lib/garden-registry.ts
     - test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts
     - test/a-garden-is-running-only-after-its-process-starts.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
