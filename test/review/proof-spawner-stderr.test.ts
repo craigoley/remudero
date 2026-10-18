@@ -25,3 +25,17 @@ test("the real synchronous proof spawner keeps successful stdout separate from s
   ], dir, 5_000);
   assert.equal(output, "fixture result\n");
 });
+
+test("the real synchronous proof spawner bounds and redacts its public error message", t => {
+  const { dir } = ownedFixtureDir(t, "proof-spawner-error-tail");
+  assert.throws(() => defaultProofSpawner(process.execPath, ["-e",
+    'process.stderr.write("fixture earlier line\\n".repeat(80) + "api_key=fixture-not-a-real-credential\\nfixture final refusal\\n"); process.exit(2)',
+  ], dir, 5_000), (error: unknown) => {
+    const message = (error as Error).message;
+    assert.ok(message.length <= 3100, "the maintained tail includes only a bounded omission header");
+    assert.match(message, /earlier lines omitted/);
+    assert.match(message, /fixture final refusal/);
+    assert.doesNotMatch(message, /fixture-not-a-real-credential/);
+    return true;
+  });
+});
