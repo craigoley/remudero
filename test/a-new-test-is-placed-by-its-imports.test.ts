@@ -153,7 +153,7 @@ test("W1-T9874: rmd test-place prints the folder, confidence and reasons, and re
   assert.equal(testPlaceOutcome(["--bogus", "x"], REPO_ROOT, tree).code, 2);
   const missing = testPlaceOutcome(["test/no-such-file.test.ts"], REPO_ROOT, tree);
   assert.equal(missing.code, 1);
-  assert.match(missing.err, /does not exist/);
+  assert.match(missing.error, /does not exist/);
 });
 
 test("W1-T9874: the registered verb really runs end to end", () => {

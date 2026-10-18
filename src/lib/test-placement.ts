@@ -591,7 +591,7 @@ export function renderPlacement(f: PlacedFile): string {
 export interface TestPlaceOutcome {
   readonly code: number;
   readonly out: string;
-  readonly err: string;
+  readonly error: string;
 }
 
 /**
@@ -602,13 +602,13 @@ export interface TestPlaceOutcome {
 export function testPlaceOutcome(rest: readonly string[], repoRoot: string, treeSha: () => string): TestPlaceOutcome {
   const paths = rest.filter((a) => !a.startsWith("-"));
   const flags = rest.filter((a) => a.startsWith("-"));
-  if (paths.length === 0) return { code: 2, out: "", err: "rmd test-place: at least one test path is required" };
+  if (paths.length === 0) return { code: 2, out: "", error: "rmd test-place: at least one test path is required" };
   const unknown = flags.filter((f) => f !== "--json");
-  if (unknown.length > 0) return { code: 2, out: "", err: `rmd test-place: unknown flag ${unknown.join(" ")}` };
+  if (unknown.length > 0) return { code: 2, out: "", error: `rmd test-place: unknown flag ${unknown.join(" ")}` };
   try {
     const placed = placePaths(repoRoot, paths, treeSha());
-    return { code: 0, out: flags.includes("--json") ? JSON.stringify(placed) : placed.map(renderPlacement).join("\n"), err: "" };
+    return { code: 0, out: flags.includes("--json") ? JSON.stringify(placed) : placed.map(renderPlacement).join("\n"), error: "" };
   } catch (err) {
-    return { code: 1, out: "", err: err instanceof Error ? err.message : String(err) };
+    return { code: 1, out: "", error: err instanceof Error ? err.message : String(err) };
   }
 }

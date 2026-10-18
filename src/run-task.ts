@@ -7891,7 +7891,7 @@ export function hostAlertCommand(rest: string[], clock: Clock = systemClock): nu
 export function testPlaceCommand(rest: string[], root: string = repoRoot): number {
   const done = testPlaceOutcome(rest, root, () => hostWorktreeGit(root, ["rev-parse", "HEAD^{tree}"]).trim());
   if (done.out !== "") console.log(done.out);
-  if (done.err !== "") console.error(done.code === 2 ? `${done.err}\n${USAGE}` : done.err);
+  if (done.error !== "") console.error(done.code === 2 ? `${done.error}\n${USAGE}` : done.error);
   return done.code;
 }
 
