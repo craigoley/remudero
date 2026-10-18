@@ -13,6 +13,7 @@
   files:
     - src/run-task.ts
     - test/a-fix-commit-leaves-its-worktree-index-at-the-commit.test.ts
+    - test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts
   status: queued
   priority: 1  # every non-merge fix commit makes its own worktree read dirty, which W1-T7998's recovery then keeps forever
   attempts: 0
@@ -62,6 +63,11 @@
     Resetting the working tree as well loses the undeclared edit and fails the second. Deleting the fix gives
     `# fail N`, restoring it `# fail 0`.
   note: |
+    SCOPE AMENDMENT 2026-10-18 — W1-T4072 success-index assertion: the existing stale-index regression in
+    test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts asserts the worktree index is byte-identical after a
+    successful commit. That pins the defect this task repairs. Permit updating only that obsolete post-success
+    assertion to require index/tree agreement; retain the private-index commit-tree and refused-CAS guarantees.
+    No acceptance criterion, proof, risk, authority or runtime policy changes in this plan-only amendment.
     W1-T7998 still matters after this: a round that dies before its commit leaves real residue. EFFECT, measured after
     merge: sweep.fix.checkout_claim_declined rows with owner_recovery_reason dirty_worktree whose worktree HEAD equals
     its last implement.harness_commit sha. Healthy shape: none.
