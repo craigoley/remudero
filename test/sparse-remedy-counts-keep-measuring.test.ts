@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ciFrictionCauseState, judgeShareWindows, type ShareWindow } from "../src/lib/ci-friction-remedy.js";
-import { ciFrictionRoundsMetric, flakeIncidentMetric, prHoursMetric } from "../src/lib/remedy-effect.js";
+import { ciFrictionCauseState, judgeShareWindows, type ShareWindow } from "#src/lib/ci-friction-remedy.js";
+import { ciFrictionRoundsMetric, flakeIncidentMetric, prHoursMetric } from "#src/lib/remedy-effect.js";
 
 const label = { noun: "round", share: "share of fix rounds", sampleUnit: "count" } as const;
 const judge = (before: ShareWindow, after: ShareWindow) => judgeShareWindows(before, after, 1, "check:scan", label);
