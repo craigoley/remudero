@@ -10,7 +10,7 @@ import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js"
 import { buildInboxAttentionCensusRoute, buildInboxRoute, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { classificationSnapshotKey } from "../src/lib/read-page.js";
 import { appendThreadEvent, appendThreadMessage, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
-import { boundConsoleReadRoute, type ServeDeps } from "../src/lib/serve.js";
+import { boundConsoleReadRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -390,6 +390,81 @@ function retainedBodies(w: ReturnType<typeof world>, refreshed: InboxRefresh): I
   assert.ok(read);
   return { ...refreshed, bodies: inboxViewBodies(read.lanes(), { name: "inbox-store:core", asOf: read.generatedAt, state: "fresh" }, read.snapshotKey) };
 }
+
+async function assembledCoreInbox(t: Ctx, w: ReturnType<typeof world>, configure?: (deps: ServeDeps) => void) {
+  const { inboxAuditScope: _scope, inboxSourceIdentity: _identity, ...panel } = w.deps;
+  const deps: ServeDeps = {
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath: panel.ledgerPath, github: fakeGitHub() },
+    panelGraph: { ...panel, inboxMainSha: () => { throw new Error("assembled read classified"); } },
+    ledgerPath: panel.ledgerPath, fleetControlRoot: w.root, questionsRoot: w.root,
+    issues: { close() {} }, tokens: { read: "read", write: "write" }, assistantRepository: "owner/core",
+    consoleSha: "a".repeat(40), githubAppRefresh: { start: () => ({ armed: false }) },
+    readModel: { slowLane: { inbox: { root: panel.root, planPath: panel.planPath, ledgerPath: panel.ledgerPath,
+      inboxRoot: w.root, repository: "owner/core" } } },
+  };
+  assert.equal(deps.panelGraph.inboxAuditScope, undefined, "the real caller does not inject the slow lane's scope into panel deps");
+  assert.equal(deps.panelGraph.inboxSourceIdentity, undefined);
+  configure?.(deps);
+  const route = buildServeRoutes(deps).find(route => route.method === "GET" && route.path === "/v1/inbox");
+  assert.ok(route, "exercise the actual core assembler, not a hand-built panel dependency copy");
+  const server = createService({ tokens: deps.tokens, routes: [route] });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox?section=needsYou`, {
+    headers: { authorization: "Bearer read" },
+  });
+  assert.equal(response.status, 200);
+  return await response.json() as Record<string, any>;
+}
+
+test("actual core assembler preserves partial snapshot attention without panel scope injection", async t => {
+  const w = world(t, 2), initial = await w.refresh();
+  const native = (initial.bodies.find(body => body.key === "section=needsYou")!.data.items[0] as unknown as { snapshotAttention: unknown }).snapshotAttention;
+  assert.deepEqual(native, { state: "unknown", coverage: "partial", countSemantics: "observed_snapshot_not_verified" });
+  const legacy = await assembledCoreInbox(t, w);
+  assert.deepEqual(legacy.needsYou.notReady[0].snapshotAttention, native, "both paths read the same partial classification");
+});
+
+test("actual core assembler binds complete snapshot attention to its configured producer scope", async t => {
+  const w = world(t, 2), initial = await w.refresh(), snapshot = retainAttention(w);
+  const native = (retainedBodies(w, initial).bodies.find(body => body.key === "section=needsYou")!.data.items[0] as unknown as { snapshotAttention: unknown }).snapshotAttention;
+  assert.deepEqual(native, { state: "observed", coverage: "complete", countSemantics: "observed_snapshot_not_verified",
+    repository: "owner/core", instance: "core", snapshotKey: snapshot.snapshotKey, attention: "decision", waitingOn: "operator" });
+  const legacy = await assembledCoreInbox(t, w);
+  assert.deepEqual(legacy.needsYou.notReady[0].snapshotAttention, native);
+  await w.refresh();
+  retainAttention(w, content => { content.snapshotScope = { repository: "owner/foreign", instance: "elsewhere" }; });
+  const foreign = await assembledCoreInbox(t, w);
+  assert.equal(foreign.needsYou.notReady[0].snapshotAttention.state, "unknown", "stored scope cannot attest to itself when it differs from the configured producer");
+  assert.equal(foreign.needsYou.notReady[0].snapshotAttention.attention, undefined);
+});
+
+test("actual core assembler uses the fixed core producer scope rather than a gateway alias", async t => {
+  const w = world(t, 2); await w.refresh(); retainAttention(w);
+  const legacy = await assembledCoreInbox(t, w, deps => {
+    deps.instances = { coreInstance: "gateway-alias" };
+    deps.assistantRepository = "owner/assistant";
+  });
+  assert.equal(legacy.needsYou.notReady[0].snapshotAttention.state, "observed");
+  assert.equal(legacy.needsYou.notReady[0].snapshotAttention.instance, "core", "coreUnits fixes the producer name independently of the gateway alias");
+  assert.equal(legacy.needsYou.notReady[0].snapshotAttention.repository, "owner/core", "use the configured inbox producer, not another serve repository field");
+});
+
+test("actual core assembler preserves explicit audit and source identity precedence", async t => {
+  const w = world(t, 2); await w.refresh(); retainAttention(w);
+  const foreign = { instance: "foreign", repository: "owner/foreign" };
+  const explicitAudit = await assembledCoreInbox(t, w, deps => { deps.panelGraph.inboxAuditScope = foreign; });
+  assert.equal(explicitAudit.needsYou.notReady[0].snapshotAttention.state, "unknown", "the default cannot replace an explicit expected audit scope");
+  await w.refresh();
+  const identity = { instance: "core", repository: "owner/core", root: w.root, planPath: w.deps.planPath, ledgerPath: w.deps.ledgerPath, inboxRoot: w.root };
+  retainAttention(w, content => { content.sourceIdentity = identity; });
+  const explicitSource = await assembledCoreInbox(t, w, deps => {
+    deps.panelGraph.inboxSourceIdentity = identity; deps.panelGraph.inboxAuditScope = foreign;
+    deps.readModel!.slowLane!.inbox!.repository = "owner/different-default";
+  });
+  assert.equal(explicitSource.needsYou.notReady[0].snapshotAttention.state, "observed", "explicit source identity remains ahead of audit scope and default config");
+  assert.equal(explicitSource.needsYou.notReady[0].snapshotAttention.repository, "owner/core");
+});
 
 test("snapshot-owned attention shares exact retained scope and key across HTTP, views and restart", async (t) => {
   const w = world(t, 2), store = { threadStorePath: join(w.root, "state", "inbox-threads.jsonl") };
