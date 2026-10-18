@@ -556,7 +556,7 @@ export async function daemonCommand(
   // needs a change to worker.ts or git-push.ts, neither of which is in this task's declared
   // files. This refresher fixes the DAEMON's own calls and every FRESHLY-spawned worker; it does
   // not retrofit an already-running one.
-  //
+
   // W1-T2554 — AWAIT THE FIRST MINT BEFORE THE FIRST BOARD READ. `startInstallationTokenRefresh`
   // used to end on a bare, unawaited `tick()`, so `GH_TOKEN` was written on its own schedule while
   // this function fell straight through into the first sweep's `gh api` calls — MEASURED landing
