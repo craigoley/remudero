@@ -1647,6 +1647,12 @@ export function cashAllowanceFallbackRefusal(config: Config, prompt: string, dep
   }
 }
 
+function cashSonnetAlternatives(prompt: string): string[] {
+  return openWeightDeploymentReady("gpt-6.1-sol") &&
+    openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8")))
+    ? ["gpt-6.1-sol"] : [];
+}
+
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
  * deleting a declared bound must make its own lookup refuse, not silently resume unrestricted). */
 export function resolveGenericRouteToolBound(lane: string): readonly string[] {
@@ -2673,11 +2679,18 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         const refusal = cashFallbackRefusal(config, divertTools);
         // W1-T4785: a squeezed BALANCED task tries Foundry Sonnet 5.5 first; Luna stays the fallback.
         const sonnetEnv = args.env ?? process.env;
+        const canTrySonnet = requestedCapability === "balanced" &&
+          !!sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && !!sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV];
         if (refusal === undefined) {
-          const models = plainCashModels();
-          if (requestedCapability === "balanced" && sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV])
-            models.push("claude-sonnet-5-5", "gpt-6.1-sol");
-          const held = allowanceRefusal([...new Set(models)]);
+          let models: string[];
+          try { models = plainCashModels(); }
+          catch (selectionError) {
+            if (!canTrySonnet) throw selectionError;
+            // A refused plain ladder does not remove the independently eligible Sonnet arm.
+            models = [];
+          }
+          if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionPrompt));
+          const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
             publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
@@ -2685,8 +2698,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             throw error;
           }
         }
-        if (refusal === undefined && requestedCapability === "balanced" &&
-            sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV]) {
+        if (refusal === undefined && canTrySonnet) {
           console.error(JSON.stringify({
             event: "worker.provider.cash_sonnet_fallback",
             reason: "no subscription had readable headroom",
@@ -2931,9 +2943,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
       : args.cashSonnetEmergency === true
       ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced",
-        alternatives: openWeightDeploymentReady("gpt-6.1-sol") &&
-          openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(executionPrompt, "utf8")))
-          ? ["gpt-6.1-sol"] : [] }
+        alternatives: cashSonnetAlternatives(executionPrompt) }
       : selectOpenWeightModel(
       capabilities,
       args.model,

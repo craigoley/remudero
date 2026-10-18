@@ -207,3 +207,25 @@ test("a mid-loop cash cap preserves real unpublished edits through the default c
   assert.equal(readFileSync(path, "utf8"), "partial worker result");
   assert.match(repo.git("worktree", "list", "--porcelain"), /partial/);
 });
+
+test("allowance admission preserves a viable Sonnet arm when the plain ladder cannot select", async t => {
+  const f = fixture(t, 0); let cash = 0;
+  const args = blockedArgs(f, () => cash++);
+  args.model = "sonnet";
+  args.routingTrial!.models = ["not-a-deployment"];
+  args.env = { RMD_FOUNDRY_CLAUDE_API_KEY: "fixture-only", RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic" };
+  const result = await spawnWorker(args);
+  assert.equal(result.routedModel, "claude-sonnet-5-5");
+  assert.equal(cash, 1);
+  args.env = {};
+  await assert.rejects(() => spawnWorker(args));
+  assert.equal(cash, 1, "an unselectable plain ladder does not become a cash assignment");
+});
+
+test("allowance admission never counts a deployment the spawn must avoid", async t => {
+  const f = fixture(t, 0); let cash = 0;
+  const args = blockedArgs(f, () => cash++);
+  args.avoidModels = ["gpt-6-luna"];
+  await assert.rejects(() => spawnWorker(args), /no eligible cash deployment/);
+  assert.equal(cash, 0);
+});
