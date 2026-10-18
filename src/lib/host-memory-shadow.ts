@@ -92,7 +92,7 @@ import {
   publishMemoryForecast, readCalibrationState, type JointEstimate, type MemoryForecast,
 } from "./host-memory-calibration.js";
 import { readHostServeEvidence, type HostServeReading } from "./host-serve-evidence.js";
-import { readDaemonFootprint, type FootprintSample } from "./daemon-footprint.js";
+import { readDaemonFootprint, type BootGrowth, type FootprintSample } from "./daemon-footprint.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { DAEMON_PID_ENV, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -304,6 +304,8 @@ export interface ShadowInputs {
     lifetimePeakGrowthMib?: number; lifetimePeakBasis?: string;
     /** What the daemon's persisted footprint held for this verdict (daemon-footprint.ts), or why it was unread. */
     footprint?: string;
+    /** W1-T9982: "boot" while the daemon is inside the boot phase its earlier boots showed, else "steady", and why. */
+    phase?: "boot" | "steady"; phaseBasis?: string;
   }>;
   serve: { scenario: ServeScenario; basis: string };
   /** This container's OWN memory pressure now. Absent or unread: the static `containerReserveMib` below the ceiling
@@ -1626,10 +1628,60 @@ export function daemonGrowthOf(
 /** The same split over the daemon's persisted footprint: every sample of the last hour, across restarts (a restarted
  *  daemon climbs back toward the instance's footprint, so a prior pid's samples still say what is typical). */
 export function footprintGrowthOf(
-  samples: readonly FootprintSample[], now: number, minSamples: number,
+  samples: readonly FootprintSample[], now: number, minSamples: number, boot?: number,
 ): SeriesGrowth {
   const recent = samples.filter((s) => s.at <= now && now - s.at <= HOUR_MS);
-  return seriesGrowth(recent.map((s) => s.bytes), minSamples, "daemon footprint sample(s)");
+  // W1-T9982: once the current generation has the samples a split needs, an earlier generation's never size it.
+  const own = boot === undefined ? [] : recent.filter((s) => s.boot === boot);
+  return seriesGrowth((own.length >= minSamples ? own : recent).map((s) => s.bytes), minSamples, "daemon footprint sample(s)");
+}
+
+/** W1-T9982: the generation of the newest sample that names one: the daemon generation now running. */
+export function currentBootOf(samples: readonly FootprintSample[]): number | undefined {
+  return samples.filter((s) => s.boot !== undefined).sort((a, b) => a.at - b.at).at(-1)?.boot;
+}
+
+export type BootPhase =
+  | { phase: "boot"; growthMib: number; typicalMib: number; basis: string; typicalBasis: string; earlierBoots: number }
+  | { phase: "steady"; phaseBasis: string };
+
+const MIB_BYTES = 1024 * 1024;
+
+/**
+ * W1-T9982: what the daemon will still grow while it is inside the boot phase its earlier boots showed. The phase is
+ * LEARNED: this generation is in it while its uptime is below the largest peak_uptime_ms among the earlier generations.
+ * Within it, the growth is the largest earlier (peak - first) less what this generation has already grown (current
+ * rss+swap - its own first reading); the typical part is the median of the same remainders. Anything else is steady.
+ */
+export function bootPhaseOf(
+  store: { samples: readonly FootprintSample[]; boots: readonly BootGrowth[] } | { unread: string },
+  now: number, currentMib: number | undefined,
+): BootPhase {
+  if ("unread" in store) return { phase: "steady", phaseBasis: `steady: the boot record is unread (${store.unread})` };
+  const current = currentBootOf(store.samples);
+  if (current === undefined) return { phase: "steady", phaseBasis: "steady: no sample names its generation" };
+  const earlier = store.boots.filter((b) => b.boot < current);
+  if (earlier.length === 0) return { phase: "steady", phaseBasis: "steady: no earlier boot recorded" };
+  const uptimeMs = Math.max(0, now - current);
+  const phaseMs = Math.max(...earlier.map((b) => b.peak_uptime_ms));
+  if (uptimeMs >= phaseMs) {
+    return { phase: "steady", phaseBasis: `steady: uptime ${Math.round(uptimeMs / 1000)} s is past the ${Math.round(phaseMs / 1000)} s its ${earlier.length} earlier boot(s) peaked by` };
+  }
+  const first = store.boots.find((b) => b.boot === current)?.first_bytes ??
+    store.samples.filter((s) => s.boot === current).sort((a, b) => a.at - b.at)[0]?.bytes;
+  const latest = store.samples.filter((s) => s.boot === current).sort((a, b) => a.at - b.at).at(-1)?.bytes;
+  const now_ = currentMib ?? (latest === undefined ? undefined : latest / MIB_BYTES);
+  if (first === undefined || now_ === undefined) return { phase: "steady", phaseBasis: "steady: this generation has no reading yet" };
+  const grown = Math.max(0, now_ - first / MIB_BYTES);
+  const remainders = earlier.map((b) => Math.max(0, b.peak_bytes - b.first_bytes) / MIB_BYTES).sort((a, b) => a - b);
+  const mid = remainders.length >> 1;
+  const median = remainders.length % 2 === 1 ? remainders[mid]! : (remainders[mid - 1]! + remainders[mid]!) / 2;
+  const growthMib = Math.max(0, remainders.at(-1)! - grown);
+  return {
+    phase: "boot", earlierBoots: earlier.length, growthMib, typicalMib: Math.min(growthMib, Math.max(0, median - grown)),
+    basis: `boot-phase: ${earlier.length} earlier boots, +${Math.round(remainders.at(-1)!)} MiB by uptime ${Math.round(phaseMs / 1000)} s`,
+    typicalBasis: `median of ${earlier.length} earlier boot(s)' growth, +${Math.round(median)} MiB, less ${Math.round(grown)} MiB already grown`,
+  };
 }
 
 function seriesGrowth(bytes: readonly number[], minSamples: number, unit: string): SeriesGrowth {
@@ -1836,16 +1888,16 @@ export type SeriesGrowth = {
  */
 function daemonSeries(
   ports: ShadowMemoryPorts, tail: ReturnType<typeof readTailRows>, now: number, minSamples: number, root: string, pid?: number,
-): { series: SeriesGrowth; basis: string; footprint: string } {
+): { series: SeriesGrowth; basis: string; footprint: string; store: ReturnType<typeof readDaemonFootprint> } {
   const store = readDaemonFootprint(join(root, "state"), ports.readFile);
-  const fromStore = "unread" in store ? undefined : footprintGrowthOf(store.samples, now, minSamples);
+  const fromStore = "unread" in store ? undefined : footprintGrowthOf(store.samples, now, minSamples, currentBootOf(store.samples));
   const footprint = "unread" in store ? `unread: ${store.unread}` : `${store.source}: ${fromStore!.samples} sample(s) in the last hour`;
   const fromTail = "unread" in tail ? undefined : daemonGrowthOf(tail.rows, now, minSamples, pid);
   if (fromStore && (!fromTail || fromStore.samples >= fromTail.samples)) {
-    return { series: fromStore, basis: "daemon footprint", footprint };
+    return { series: fromStore, basis: "daemon footprint", footprint, store };
   }
-  if (fromTail) return { series: fromTail, basis: "daemon.alive rows", footprint };
-  return { series: { samples: 0, reason: `ledger tail unreadable: ${(tail as { unread: string }).unread}` }, basis: "none", footprint };
+  if (fromTail) return { series: fromTail, basis: "daemon.alive rows", footprint, store };
+  return { series: { samples: 0, reason: `ledger tail unreadable: ${(tail as { unread: string }).unread}` }, basis: "none", footprint, store };
 }
 
 /** This instance's daemon growth (W1-T9972): its last-hour series' peak less its current rss+swap (the proc's VmRSS +
@@ -1860,7 +1912,7 @@ function ownDaemonGrowth(
 ): Omit<ShadowInputs["daemonGrowth"][number], "instance"> {
   let procReason = "";
   const pid = ports.daemonPid();
-  const { series, basis, footprint } = daemonSeries(ports, tail, now, policy.daemonGrowthMinSamples, root, pid);
+  const { series, basis, footprint, store } = daemonSeries(ports, tail, now, policy.daemonGrowthMinSamples, root, pid);
   let proc: { growthMib: number; peakMib: number; residentMib: number; swapMib: number } | undefined;
   if (pid === undefined) procReason = "no daemon pid in this process";
   else {
@@ -1876,6 +1928,19 @@ function ownDaemonGrowth(
   }
   const lifetimeBasis = proc && `proc ${pid}: VmHWM ${Math.round(proc.peakMib)} MiB - VmRSS ${Math.round(proc.residentMib)} MiB`;
   const lifetime = proc ? { lifetimePeakGrowthMib: proc.growthMib, lifetimePeakBasis: lifetimeBasis! } : {};
+  // W1-T9982: inside the boot phase its earlier boots showed, the daemon is charged what they grew, less what it has.
+  const boot = bootPhaseOf(store, now, proc && proc.residentMib + proc.swapMib);
+  if (boot.phase === "boot") {
+    return {
+      samples: boot.earlierBoots, growthMib: Math.max(proc?.growthMib ?? 0, boot.growthMib), typicalMib: boot.typicalMib,
+      basis: boot.basis, typicalBasis: boot.typicalBasis, footprint, ...lifetime, phase: "boot",
+      phaseBasis: boot.basis,
+      currentBasis: proc
+        ? `proc ${pid}: VmRSS ${Math.round(proc.residentMib)} MiB + VmSwap ${Math.round(proc.swapMib)} MiB`
+        : "the latest sample",
+    };
+  }
+  const steady = { phase: "steady" as const, phaseBasis: boot.phaseBasis };
   if (series.peakMib !== undefined && series.medianMib !== undefined && series.latestMib !== undefined) {
     // The series is rss+swap, so the current reading is too: a swapped-out daemon does not raise its own tail.
     const current = proc ? proc.residentMib + proc.swapMib : series.latestMib;
@@ -1883,7 +1948,7 @@ function ownDaemonGrowth(
     const typicalMib = Math.min(growthMib, Math.max(0, series.medianMib - current));
     const unit = basis === "daemon footprint" ? "footprint sample(s)" : "sample row(s)";
     return {
-      samples: series.samples, growthMib, typicalMib, basis, footprint, ...lifetime,
+      samples: series.samples, growthMib, typicalMib, basis, footprint, ...lifetime, ...steady,
       currentBasis: proc
         ? `proc ${pid}: VmRSS ${Math.round(proc.residentMib)} MiB + VmSwap ${Math.round(proc.swapMib)} MiB`
         : "the latest sample",
@@ -1893,10 +1958,10 @@ function ownDaemonGrowth(
   if (proc) {
     return {
       samples: 1, growthMib: proc.growthMib, basis: `${lifetimeBasis} (the lifetime peak: ${series.reason})`,
-      typicalBasis: `all typical: ${series.reason}`, footprint, ...lifetime,
+      typicalBasis: `all typical: ${series.reason}`, footprint, ...lifetime, ...steady,
     };
   }
-  return { ...series, reason: `${procReason}; ${series.reason}`, footprint };
+  return { ...series, reason: `${procReason}; ${series.reason}`, footprint, ...steady };
 }
 
 // ── the recorder: never in the path ───────────────────────────────────────────────────────────────────────────────
