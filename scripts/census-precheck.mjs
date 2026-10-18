@@ -33,7 +33,6 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createRequire } from "node:module";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
@@ -41,6 +40,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
+// A static import keeps the codemod an ES module: require()-ing it under tsx compiles it as
+// CommonJS, which reports a synthetic scripts/<define:import.meta> coverage source.
+import { analyzeSource } from "./test-repo-root-codemod.mjs";
 import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
@@ -271,7 +273,6 @@ function testRepoRootViolations({ changed, readHead, readBase }) {
     const base = readBase(path);
     const derivesRoot = (text) => {
       if (text === null || !/import\s*\.\s*meta|__dirname/.test(text)) return false;
-      const { analyzeSource } = createRequire(import.meta.url)("./test-repo-root-codemod.mjs");
       return analyzeSource(text, path).computations.length > 0;
     };
     const headOwnsRoot = derivesRoot(head);
