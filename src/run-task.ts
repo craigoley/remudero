@@ -16093,11 +16093,15 @@ export function finishTransientRetry(
 ): RunResult | undefined {
   if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
   const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
-  try {
-    removeWorktree(repoDir, worktreePath);
-    log("worktree.remove", { on: "blocked_transient" });
-  } catch (e) {
-    log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+  if (driverResult.cashAllowanceExhausted) {
+    log("worktree.retained", { on: "cash_allowance_exhausted", reason: "a later tool turn may have left unpublished edits" });
+  } else {
+    try {
+      removeWorktree(repoDir, worktreePath);
+      log("worktree.remove", { on: "blocked_transient" });
+    } catch (e) {
+      log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+    }
   }
   log("verdict", {
     verdict: "blocked_transient",
