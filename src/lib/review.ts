@@ -8722,6 +8722,7 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
 export const INSTRUMENT_SURFACE: readonly string[] = [
   "^scripts/preflight-author\\.mjs$",
   "^scripts/calibrate-author-runtime\\.mjs$",
+  "^scripts/lib/author-step-capture\\.mjs$",
   "^src/lib/review\\.ts$",
   "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
