@@ -100,6 +100,7 @@ test("a throwing reclaim or post-reclaim reader keeps the pressure restart", () 
     assert.equal(f.rows[0].fields.outcome, "unavailable");
     assert.equal(f.rows[0].fields.relieved, false);
     assert.equal(f.rows[0].fields.recheck, where === "read" ? "unavailable" : "not-run");
+    assert.equal(f.rows[0].fields.reason, where === "read" ? "read refused" : "snapshot refused");
   }
 });
 

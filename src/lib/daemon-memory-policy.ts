@@ -913,8 +913,12 @@ export function reclaimBeforeMemoryRestart(
       }
     }
   } catch (error) {
-    outcome = "unavailable";
-    reason = String((error as Error)?.message ?? error).slice(0, 200);
+    log("daemon.memory_restart_reclaim", {
+      outcome: "unavailable", recheck, reason: String((error as Error)?.message ?? error).slice(0, 200),
+      prior_share: step.share, share: step.share,
+      budget_bytes: step.reading.budget_bytes, budget_source: step.reading.budget_source, relieved: false,
+    });
+    return step;
   }
   log("daemon.memory_restart_reclaim", {
     outcome, recheck, reason, prior_share: step.share, share: next.share,
