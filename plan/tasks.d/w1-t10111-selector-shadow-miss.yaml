@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,13 @@
       proof: "grep: test/resolver-divergence-detector\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/resolver-divergence-detector.test.ts for each recorded edge"
       proof: "grep: test/resolver-divergence-detector\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files are src/lib/affected-suites.ts and one test file. Both exist at base, and neither touches secrets, auth, deploy, merge or review policy."
+      - "The task adds a missing selector edge (a test-selection mapping) plus a regression test. It is not a deletion, and it is reversible and verifiable through grep acceptance and CI."
+      - "The author family (selector-shadow-miss) has 18 merged and 0 declined tasks, which is a clean track record. The task asks for no operator-only decision."
+    judged_at: "2026-10-18T08:05:13.715Z"
+    pin: "b81b5b000f13345cdaff290840726f512b5e9863d860a7d1bcbc9acd2d471a2f"

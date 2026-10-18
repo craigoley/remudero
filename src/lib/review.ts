@@ -9008,6 +9008,9 @@ export const ENFORCEMENT_DATA_EXCLUSIONS: Readonly<Record<string, string>> = {
   "plan/seeds/inbox-recommendations-2026-10-13.json":
     "W1-T8950's operator-session recommendations, imported once as the inbox items' suggested decisions; " +
     "no gate reads them, and every action they suggest still goes through the inbox route's own tier and auth",
+  "plan/seeds/test-restructure-2026-10-16/subsystem-map.json":
+    "the test-restructure design seed (W1-T9874): src/lib/test-placement.ts reads its COMMITTED COPY " +
+    "scripts/test-placement/subsystem-map.json, matched here only by shared basename; no gate reads the seed",
 };
 
 /** The enforcement-data paths a changed-file list touches, in diff order (W1-T427) — the OBSERVED EVIDENCE named on

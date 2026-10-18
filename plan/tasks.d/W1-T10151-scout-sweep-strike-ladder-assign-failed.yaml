@@ -1,0 +1,30 @@
+- id: W1-T10151
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — sweep.strike_ladder.assign_failed landed 2 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 3.55
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:sweep.strike_ladder.assign_failed"
+  files:
+    - test/scout-sweep-strike-ladder-assign-failed.test.ts
+  acceptance:
+    - claim: "sweep.strike_ladder.assign_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10151: sweep.strike_ladder.assign_failed no longer recurs\" in test/scout-sweep-strike-ladder-assign-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step sweep.strike_ladder.assign_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 1 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single new test file (test/scout-sweep-strike-ladder-assign-failed.test.ts). Nothing in the description or files list touches secrets, credentials, auth, permissions, deploy, merge or review policy, and no deletion or irreversible action is stated.; on the change's description/files alone, no diff was read — The task is a machine-filed fix for a recurring ledger symptom (2 rows). Its acceptance is a grep for a named test, which is verifiable from what is shown, and the PR still has to pass CI and review.; on the change's description/files alone, no diff was read — The family track record is weak (0 merged, 1 declined), and the rationale says the rows name no file, so the code that writes the step must be located first. That raises the chance the real fix lands outside the declared file, but that is a quality concern and does not fall under the escalation criteria."
+    judged_at: "2026-10-18T12:47:40.519Z"
+    pin: "370078800fb030efae1fe6783277f96cddc5ec65915f5d9eff2c1df07a174a1a"

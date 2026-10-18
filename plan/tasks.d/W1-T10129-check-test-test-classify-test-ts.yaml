@@ -1,0 +1,63 @@
+- id: W1-T10129
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/classify.test.ts cost 49.2 PR minute(s) across 9 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.14
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/classify.test.ts"
+  files:
+    - src/lib/classify.ts
+    - test/check-test-test-classify-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/classify.test.ts"
+      proof: "grep: test(\"W1-T10129: check:test:test/classify.test.ts is prevented, not retried\" in test/check-test-test-classify-test-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/classify.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/classify.test.ts cost 49.2 PR minute(s) (seven-day half-life) across 9 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/classify.ts: test/classify.test.ts imports it
+    - test/classify.test.ts: named by the failing check
+    - the rounds name a failing test: test/classify.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12703 (https://github.com/craigoley/remudero/pull/12703) at 2026-10-18T07:37:11.750Z: ci-log round — ci-shard (4/8): test/classify.test.ts
+        failing tests: W1-T108/R-42: positive control -- the real command really does name more than test/classify.test.ts; W1-T108/R-42: every test file stryker.conf.json's commandRunner.command runs is named in scripts/mutation-relevant-paths.json, W1-T108/R-42: positive control -- the real command really does name more than test/classify.test.ts
+        log excerpt:
+          | ...
+          | not ok 71 - W1-T108/R-42: positive control -- the real command really does name more than test/classify.test.ts
+          |   ---
+          |   duration_ms: 0.786586
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/mutation-trigger-covers-its-own-command.test.ts:1:1759'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     control: the command's own test-file set must match what R-42 measured
+          |     + actual - expected
+          | 
+          |       [
+          |         'test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts',
+          |         'test/block-reason.test.ts',
+    - PR #10954 at 2026-10-11T22:50:40.909Z: ci-log round — comment-load-ratchet; mutation-ratchet: test/classify.test.ts
+    - PR #10551 (https://github.com/craigoley/remudero/pull/10551) at 2026-10-10T03:53:01.484Z: ci-log round — mutation-ratchet: test/classify.test.ts
+        failing tests: W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its refusal surfaces too; W1-T2862: production consumes the summary before the first implementation verdict branch removes its worktree; MUTANT: the read is wired ONCE, and ABOVE every verdict branch that reclaims the worktree; the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files are src/lib/classify.ts and a new test file (test/check-test-test-classify-test-ts.test.ts). Nothing in the description or files list touches secrets, credentials, auth, permissions, deploy, merge or review policy, or deletes data."
+      - "The remedy targets a recurring test failure in CI. The described failing tests concern mutation-trigger and stryker config coverage, which is ordinary test-maintenance work, and the change still goes through CI and review."
+      - "The ci-friction family has a mixed track record (28 merged, 40 declined, Beta mean 0.64), and the rounds appear to span several distinct failure causes. This is a mild concern about whether the fix will work, not a danger signal, so I don't treat it as grounds for HIGH."
+      - "No operator-only decision is requested. The acceptance criterion is a grep for a test name in a new file, which is verifiable."
+    judged_at: "2026-10-18T08:54:31.131Z"
+    pin: "4bfdaa9b1a8707012b0766e8e23cef9a9681529a36e6154519dedb5d27e99ac3"
