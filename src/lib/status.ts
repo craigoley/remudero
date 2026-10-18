@@ -640,7 +640,7 @@ export interface CreditOverrideLoad {
 }
 
 /** Optional observation of the existing read; ordinary accelerator consumers retain their permissive contract. */
-export type CreditReadState = { state: "present" } | { state: "missing" | "unreadable" | "corrupt"; reason: string };
+export type CreditReadState = { state: "present" } | { state: "missing" | "unavailable" | "unreadable" | "corrupt"; reason: string };
 
 /** `<root>/plan/credit-overrides.yaml`, derived from `ledgerPath` as {@link defaultCreditStorePath}
  *  derives its own, so every existing caller consults this with no new required field. Under
@@ -717,7 +717,8 @@ export function creditOverrideFor(
  *  the sole route to a credit, so a read failure degrades to "nothing durable yet". */
 export function loadCreditStore(path: string, fsDeps: CreditStoreFsDeps = realCreditStoreFs, observe?: (state: CreditReadState) => void): CreditStore {
   if (!fsDeps.existsSync(path)) {
-    observe?.({ state: "missing", reason: "native merge credit store missing" });
+    // existsSync(false) cannot distinguish physical absence from inaccessible ancestors.
+    observe?.({ state: "unavailable", reason: "merge credit store missing or inaccessible" });
     return {};
   }
   let text: string;
