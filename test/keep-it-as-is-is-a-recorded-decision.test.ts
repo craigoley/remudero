@@ -11,10 +11,12 @@ import { buildPanelGraphRoutes, inboxLanes, inboxTriagePath, type PanelGraphDeps
 import { createService } from "#src/lib/service.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { SPEC, violations, type Schema } from "#test/helpers/openapi-strict.js";
 
 const ID = "verify-human:W3-T7";
 const NOW = Date.parse("2026-10-19T12:00:00Z");
 const proposal = { id: ID, summary: "A proposed change needs your decision.", evidenceAnchors: [] };
+const inboxViewDataSchema = (SPEC.components.schemas.InboxView!.properties as Record<string, Schema>).data!;
 
 function world(t: { after(fn: () => void): void }) {
   const root = makeTempDir("rmd-inbox-keep");
@@ -74,6 +76,7 @@ test("W1-T10078: picking keep records inbox.kept and takes the item out of needs
     const result = await api.request(keep.action.path, { ...keep.action.fields, reason: "Leave the current behaviour in place." });
     assert.equal(result.status, 200);
     assert.deepEqual(result.body, { ok: true, proposalId: ID, kept: true, keptAt: new Date(NOW).toISOString() });
+    assert.deepEqual(violations(result.body, SPEC.components.schemas.InboxKeepResult!), []);
     assert.deepEqual(await api.request(keep.action.path, keep.action.fields), result, "repeating keep preserves its instant");
     const mark = JSON.parse(readFileSync(inboxTriagePath(stateDir), "utf8"))[ID];
     assert.equal(mark.keptAt, result.body.keptAt);
@@ -86,6 +89,7 @@ test("W1-T10078: picking keep records inbox.kept and takes the item out of needs
     assert.equal(row.reason, "Leave the current behaviour in place.");
     assert.deepEqual(row.keptState, mark.keptState);
     const after = await pass(deps);
+    for (const body of after.result.bodies) assert.deepEqual(violations(JSON.parse(JSON.stringify(body.data)), inboxViewDataSchema), []);
     assert.deepEqual(after.ids("kept"), [ID]);
     assert.equal(after.counts.kept, 1);
     for (const lane of ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed"]) assert.deepEqual(after.ids(lane), [], lane);
@@ -94,7 +98,10 @@ test("W1-T10078: picking keep records inbox.kept and takes the item out of needs
     assert.equal(get.status, 200);
     assert.equal(get.body.kept[0].keptAt, mark.keptAt);
     assert.equal(get.body.page.total, 1);
-    assert.equal((await api.request("/v1/inbox")).body.counts.kept, 1);
+    assert.deepEqual(violations(get.body, SPEC.components.schemas.InboxSectionResult!), []);
+    const whole = await api.request("/v1/inbox");
+    assert.equal(whole.body.counts.kept, 1);
+    assert.deepEqual(violations(whole.body, SPEC.components.schemas.InboxResult!), []);
     for (let i = 0; i < 20; i++) appendLedger(deps.ledgerPath, { run_id: `fill-${i}`, task_id: "filler", step: "filler", pad: "x".repeat(200) });
     assert.notEqual(rotateLedger(deps.ledgerPath, { ceilingBytes: 1, smoothingWindowMs: 0 }).rotated, false);
     assert.ok(!readFileSync(deps.ledgerPath, "utf8").includes("inbox.kept"));
@@ -115,6 +122,9 @@ test("W1-T10078: a kept item returns when its observed state changes and says wh
     assert.deepEqual(changed.ids("kept"), []);
     assert.deepEqual(changed.ids("needsYou"), [ID]);
     assert.match(changed.items("needsYou")[0].keptChanged, /redrafted/);
+    for (const body of changed.result.bodies) assert.deepEqual(violations(JSON.parse(JSON.stringify(body.data)), inboxViewDataSchema), []);
+    const reopened = await api.request("/v1/inbox");
+    assert.deepEqual(violations(reopened.body, SPEC.components.schemas.InboxResult!), []);
     writeFileSync(registry, JSON.stringify({ proposals: [proposal] }));
     assert.deepEqual((await pass(deps, memo, NOW + 3602_000)).ids("kept"), [], "a lapsed keep cannot silently reactivate");
     assert.equal((await api.request("/v1/inbox/keep", { proposalId: ID })).status, 200);
