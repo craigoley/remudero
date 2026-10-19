@@ -3381,6 +3381,8 @@ const CI_LEARNING_SLUG_MAX = 72;
 export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string, population?: readonly number[]): string {
   const q = (v: string) => JSON.stringify(v); // YAML accepts JSON scalars, so this escapes correctly
   const lessonsFile = ciLearningLessonsFile(draft.findingId);
+  const fixtureDir = ciLearningGoldenFixtureDir(draft.findingId);
+  const files = [lessonsFile, `${fixtureDir}/criteria.yaml`];
   return [
     `- id: ${taskId}`,
     `  title: ${q(draft.title)}`,
@@ -3388,7 +3390,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     "  depends_on: []",
     "  type: implement",
     // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
-    ...machineShardHeaderLines([lessonsFile], draft.prs.length, population),
+    ...machineShardHeaderLines(files, draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052 — THE WATERMARK, so the lesson can later be judged on its OUTCOME. The origin names
     // only the cluster's FIRST pull request; efficacy needs the HIGHEST, because "did this gate
@@ -3398,11 +3400,15 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     // parser for a fact the record can simply carry.
     `  ci_learning_prs: [${draft.prs.join(", ")}]`,
     "  files:",
-    `    - ${lessonsFile}`,
+    ...files.map((f) => `    - ${f}`),
     "  acceptance:",
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
-    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
+    // Every learnings/** path is a PATH prompt surface, which prompt-surface-gate admits only beside a
+    // golden verdict: a lesson filed without one built a PR that gate refused (#12907, #12912).
+    `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
+    `      proof: ${q(`grep: ${draft.findingId} in ${files[1]}`)}`,
+    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — build it beside the entry, in the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
     "",
   ].join("\n");
 }
@@ -3413,6 +3419,11 @@ export const CI_LEARNING_LESSONS_FILE = "learnings/ci.yaml";
 /** A finding owns a new path, so independent lessons never append to the same file. */
 export function ciLearningLessonsFile(findingId: string): string {
   return `learnings/ci.d/${kebabSlug(findingId, CI_LEARNING_SLUG_MAX)}.yaml`;
+}
+
+/** The golden verdict a lesson's build must carry, on the lessons file's own stem. */
+export function ciLearningGoldenFixtureDir(findingId: string): string {
+  return `test/fixtures/golden-verdicts/${kebabSlug(findingId, CI_LEARNING_SLUG_MAX)}`;
 }
 
 /** Parse rendered shard bytes back and lint them. EXPORTED so BOTH arms are reachable: every draft
