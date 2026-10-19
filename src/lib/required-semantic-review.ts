@@ -12,7 +12,7 @@ export function requiredSemanticRefusal(input: {
 }): string | undefined {
   if (!input.required || input.planOnly) return undefined;
   if (input.outcome !== "success") return `required-semantic-${input.outcome}`;
-  if (input.criteriaCount <= 0 || input.verdicts?.length !== input.criteriaCount ||
+  if (input.criteriaCount <= 0 || input.verdicts === undefined || input.verdicts.length !== input.criteriaCount ||
       input.verdicts.some(value => typeof value !== "boolean")) return "required-semantic-incomplete-verdicts";
   return undefined;
 }
