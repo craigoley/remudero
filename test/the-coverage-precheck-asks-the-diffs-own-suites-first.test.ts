@@ -57,6 +57,73 @@ test("W1-T9483: a diff whose reach is over the ceiling is judged by its own and 
   assert.ok(calls[0]!.length <= CEILING);
 });
 
+test("an oversized narrow coverage pass is unavailable unless a valid reach decides", async () => {
+  const calls: string[][] = [];
+  const result = await judgeCoverage(judgement(2503, [ok], calls, { narrow: suites(41) }));
+  assert.deepEqual(calls, [], "neither oversized population may be spawned or truncated to fit");
+  assert.equal(result.outcome, "unavailable", "unmeasured is never a coverage PASS or an uncovered advisory");
+  if (result.outcome !== "unavailable") assert.fail("expected an unmeasured verdict");
+  assert.match(result.reason, /41 own and direct-importer suite\(s\).*not measured/);
+  assert.match(result.reason, /ceiling of 40/);
+  assert.deepEqual(coverageNarrowRowFields(result), {}, "an unexecuted pass supplies no gap or head evidence");
+});
+
+test("a narrow coverage pass at the existing forty-suite boundary runs every suite", async () => {
+  const calls: string[][] = [], narrow = suites(40);
+  const result = await judgeCoverage(judgement(2503, [ok], calls, { narrow }));
+  assert.deepEqual(calls, [narrow]);
+  assert.equal(result.outcome, "covered");
+  if (result.outcome !== "covered") assert.fail("expected the complete boundary measurement");
+  assert.equal(result.suites, 40);
+});
+
+test("an oversized narrow coverage pass still lets a smaller reach cover or refuse", async () => {
+  for (const [run, expected] of [[ok, "covered"], [blocked, "uncovered"]] as const) {
+    const calls: string[][] = [];
+    const result = await judgeCoverage(judgement(3, [run], calls, { narrow: suites(41) }));
+    assert.deepEqual(calls, [suites(3)], "the smaller reach must actually run, even when it is a narrow subset");
+    assert.equal(result.outcome, expected);
+    if (result.outcome === "covered" || result.outcome === "uncovered") assert.equal(result.suites, 3);
+    if (result.outcome === "uncovered") assert.equal(result.text, BLOCKED);
+  }
+});
+
+test("an oversized narrow coverage pass preserves full-run and empty-reach reasons without inventing evidence", async () => {
+  for (const [selection, reason] of [
+    [{ suites: [], fullRun: true, reasons: ["a workflow changed"] }, /a workflow changed/],
+    [{ suites: [], fullRun: false, reasons: [] }, /no suite reaches/],
+  ] as const) {
+    const calls: string[][] = [];
+    const result = await judgeCoverage(judgement(0, [blocked], calls, {
+      narrow: suites(41), selection: { suites: [...selection.suites], fullRun: selection.fullRun, reasons: [...selection.reasons] },
+      head: () => { assert.fail("an unmeasured narrow pass has no advisory head"); },
+    }));
+    assert.deepEqual(calls, []);
+    assert.equal(result.outcome, "unavailable");
+    if (result.outcome !== "unavailable") assert.fail("expected an unmeasured verdict");
+    assert.match(result.reason, reason);
+    assert.match(result.reason, /41 own and direct-importer suite\(s\).*not measured/);
+    assert.match(result.reason, /ceiling of 40/);
+  }
+});
+
+test("an oversized narrow coverage pass keeps a smaller reach's inability to measure explicit", async () => {
+  for (const [run, reason] of [
+    [{ status: null, output: "", timedOut: true }, /timed out/],
+    [{ status: null, output: "", timedOut: false, spawnError: "EACCES" }, /spawn failed: EACCES/],
+    [noSf, /no SF record even after widening/],
+    [{ status: 3, output: "diff-coverage-local: no lcov produced", timedOut: false }, /no lcov produced/],
+  ] as const) {
+    const calls: string[][] = [];
+    const result = await judgeCoverage(judgement(3, [run], calls, { narrow: suites(41) }));
+    assert.deepEqual(calls, [suites(3)]);
+    assert.equal(result.outcome, "unavailable");
+    if (result.outcome !== "unavailable") assert.fail("expected an unmeasured verdict");
+    assert.match(result.reason, reason);
+    assert.match(result.reason, /41 own and direct-importer suite\(s\).*not measured/);
+  }
+});
+
 test("W1-T9483: a narrow-pass gap over the ceiling is advisory, not a refusal", async () => {
   const calls: string[][] = [];
   const result = await judgeCoverage(judgement(2503, [blocked], calls));
