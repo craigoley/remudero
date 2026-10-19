@@ -51,7 +51,10 @@ function latched(t: TestContext, passMs = 0) {
   return {
     start, rows, daemon, row, at: (ms: number) => { now = start + ms; },
     async latch(ms: number) {
-      await until(() => running);
+      await until(() => {
+        for (const s of sleeps.splice(0)) s.resolve();
+        return running;
+      });
       now = start + ms; stale = true;
       for (let n = 0; n < 2; n++) {
         for (const s of sleeps.splice(0)) s.resolve();
