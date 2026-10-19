@@ -5887,6 +5887,38 @@ function finishWorktreeAdd(repoDir: string, worktreePath: string, deps: Worktree
   // tree's first `npm run typecheck` starts warm. Silent unless a seed existed and could not be written.
   const seed = refreshCanonicalSeed(worktreePath);
   if (seed === "mismatch" || seed === "unwritable") deps.log?.("worktree.typecheck_seed_failed", { worktreePath, outcome: seed });
+  routeFleetTscEntry(repoDir, worktreePath, deps.log);
+}
+
+/** W1-T9405: only a managed cut may change its linked, fleet-owned install; never an operator/CI donor. */
+function routeFleetTscEntry(repoDir: string, worktreePath: string, log: WorktreeAddDepsArg["log"]): void {
+  const fleetRoot = dirname(dirname(resolve(repoDir)));
+  if (basename(dirname(resolve(repoDir))) !== "repos" || dirname(resolve(worktreePath)) !== join(fleetRoot, "worktrees")) return;
+  let temporary: string | undefined;
+  try {
+    const source = join(worktreePath, "node_modules");
+    if (!lstatSync(source).isSymbolicLink()) return;
+    const modules = realpathSync(source), owner = dirname(modules), root = realpathSync(fleetRoot);
+    if (owner !== root && !owner.startsWith(root + sep)) return;
+    const entry = join(owner, "scripts", "tsc-entry.mjs");
+    if (!existsSync(entry)) { log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "install-entry-absent" }); return; }
+    const bin = join(modules, ".bin", "tsc"), current = realpathSync(bin);
+    if (current === realpathSync(entry)) return;
+    if (current !== realpathSync(join(modules, "typescript", "bin", "tsc"))) {
+      log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "unexpected-tsc-entry" }); return;
+    }
+    const next = join(modules, ".bin", `.rmd-tsc-${process.pid}-${randomUUID()}`);
+    symlinkSync(entry, next); temporary = next;
+    renameSync(next, bin); temporary = undefined;
+    log?.("worktree.typecheck_entry", { worktreePath, entry });
+  } catch (error) {
+    log?.("worktree.typecheck_entry_failed", { worktreePath, error: String(error) });
+  } finally {
+    if (temporary) {
+      try { unlinkSync(temporary); }
+      catch (error) { log?.("worktree.typecheck_entry_failed", { worktreePath, cleanup: true, error: String(error) }); }
+    }
+  }
 }
 
 const execFilePromise = promisify(execFile);
