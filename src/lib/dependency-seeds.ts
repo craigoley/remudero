@@ -199,7 +199,10 @@ export function observeDependencySeedReuse(root: string, maxRecords = 5000): Dep
           } catch (e) { report.unknownRegistrations++; report.state = "partial"; note((e as Error).message); }
         }
         if (sawFreshInstall) report.freshInstallGenerations++;
-      } catch (e) { report.state = "partial"; note((e as Error).message); }
+      } catch (e) {
+        report.state = "partial"; note((e as Error).message);
+        if ((e as Error).message === "registration inspection bound") break;
+      }
     }
     if (report.state === "complete" && report.knownProvisioningRegistrations > 0) report.reuseShare = report.reusedRegistrations / report.knownProvisioningRegistrations;
   } catch (e) { report.state = "unknown"; note((e as Error).message); }
