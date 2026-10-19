@@ -40579,6 +40579,7 @@ export function buildFixRungDispatchArgs(args: {
   evidence: FixDispatchEvidence;
   pr: {
     headSha: string;
+    reviewInputDigest?: string;
     reviewSummary?: string;
     pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
