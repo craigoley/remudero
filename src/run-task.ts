@@ -29771,7 +29771,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // Derived ONCE for the whole pass rather than per task: both are pure reads over objects
   // already resolved above (`plan.tasks`, and `projectPlan`'s batched `statusByTaskId`).
   const surfaceCorpus = surfaceCorpusFrom(plan);
-  const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
+  // Credit comes from the UNFILTERED projection: `statusByTaskId` is narrowed to the changed
+  // tasks, but the duplicate-surface corpus compares a changed task against shards the diff never
+  // touched, and those are exactly the ones whose merge credit must be visible. Credit only ever
+  // removes a warning, so the wider read cannot make the check fire on anything new.
+  const creditedMergedIds = creditedMergedIdsFrom(dependencyStatusByTaskId);
   // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
   let planOnlyFilingDiff: boolean | undefined;
   let doctrineCitations: DoctrineCitationFacts | undefined;
