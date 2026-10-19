@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { landingIdentity, sweepFeedbackLanding, type LandingRepository } from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { landingIdentity, sweepFeedbackLanding, type LandingRepository } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T9616: finishLanding skipped a push only when origin/<landing>'s TREE equalled main plus the
 // pending records, so any main commit between sweeps force-replaced an open landing PR's head with
