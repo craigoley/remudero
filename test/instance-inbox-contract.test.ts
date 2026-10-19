@@ -180,6 +180,31 @@ test("instance inbox advertises only its mounted conversation routes", (t) => {
   assert.deepEqual(mountInstanceInboxRoutes({ instance: "ghost", repository: "o/ghost", stateDir: f.siteState, routes: [] }), []);
 });
 
+test("scoped thread page protocol refuses an unpaged source and budgets the final identity envelope", async t => {
+  const f = fixture(t);
+  let payload: Body = { threads: [] }, probes = 0, context: Record<string, string> = {};
+  const source: Route = { method: "GET", path: "/v1/inbox/threads", scope: "read", handler: (_req, res, ctx) => {
+    context = ctx.params; sendJson(res, 200, payload);
+  } };
+  const call = await serve(t, mountInstanceInboxRoutes({ instance: "site", repository: "owner/site", stateDir: f.siteState,
+    contract: () => { probes++; return { mode: "read-write" }; }, routes: [source] }));
+  assert.equal((await call("GET", "/v1/i/site/inbox/threads")).status, 200, "unpaged legacy sources remain compatible");
+  assert.equal((await call("GET", "/v1/i/site/inbox/threads?limit=1")).status, 502, "an unpaged response cannot impersonate a complete page");
+  assert.deepEqual(context, { inboxThreadRepository: "owner/site", inboxThreadInstance: "site", inboxThreadContract: "read-write" });
+  const valid = { threads: [], threadListKey: "b".repeat(64), page: { total: 0 }, source: {} };
+  for (const bad of [{ ...valid, threadListKey: "bad" }, { ...valid, page: null }, { ...valid, page: { total: -1 } },
+    { ...valid, page: { total: 0, nextCursor: 7 } }, { ...valid, source: null }]) {
+    payload = bad; assert.equal((await call("GET", "/v1/i/site/inbox/threads?limit=1")).status, 502);
+  }
+  payload = { ...valid, padding: "" };
+  payload.padding = "x".repeat(131072 - Buffer.byteLength(JSON.stringify(payload)));
+  assert.equal(Buffer.byteLength(JSON.stringify(payload)), 131072, "the source alone fits exactly");
+  const refused = await call("GET", "/v1/i/site/inbox/threads?limit=1");
+  assert.equal(refused.status, 413, "repository, instance and contract bytes count too");
+  assert.equal(refused.body.error, "inbox_thread_page_too_large");
+  assert.equal(probes, 8, "each request probes the contract only once, not again for paging");
+});
+
 test("instance inbox refuses forged scope before side effects", async (t) => {
   const f = fixture(t);
   const set = { core: sources("core"), site: sources("site"), console: sources("console") };

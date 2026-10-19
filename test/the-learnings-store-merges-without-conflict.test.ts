@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { stringify } from "yaml";
 import * as learnings from "../src/lib/learnings.js";
 import { applyLearningActions, cheapFingerprint, knowledgeGardenSpec } from "../src/lib/knowledge-gardener.js";
-import { ciLearningRecordVerdict, ciLearningShardYaml, type CiLearningShardDraft } from "../src/lib/measurement-cadence.js";
+import {
+  ciLearningGoldenFixtureDir, ciLearningLessonsFile, ciLearningRecordVerdict, ciLearningShardYaml, type CiLearningShardDraft,
+} from "../src/lib/measurement-cadence.js";
+import { machineShardFilingRefusal } from "../src/lib/machine-filing.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -148,6 +151,23 @@ test("W1-T7954: a ci-learning filing writes its own entry file", () => {
   assert.equal(task.acceptance![0]!.proof, `grep: ci-learning:111:coverage-ratchet in ${task.files![0]}`);
   assert.equal(first.includes("learnings/ci.yaml"), false);
   assert.deepEqual(ciLearningRecordVerdict(first, "fixture"), { ok: true, reason: "" });
+});
+
+test("a ci-learning filing also asks for the golden verdict prompt-surface-gate needs beside a learnings path", () => {
+  const filing = ciLearningShardYaml(draft(111), "W1-T111");
+  const task = loadPlanFromYaml(filing, "golden filing").tasks[0]!;
+  const lessonsFile = ciLearningLessonsFile("ci-learning:111:coverage-ratchet");
+  const fixtureDir = ciLearningGoldenFixtureDir("ci-learning:111:coverage-ratchet");
+  assert.equal(basename(fixtureDir), basename(lessonsFile, ".yaml"));
+  // The fixture is asked for by a criterion, not declared: a ci-learning record admits exactly one file (W1-T10027).
+  assert.deepEqual(task.files, [lessonsFile]);
+  assert.deepEqual(task.acceptance![1], {
+    claim: "the lesson carries the golden verdict prompt-surface-gate admits for a learnings path",
+    proof: `grep: ci-learning:111:coverage-ratchet in ${fixtureDir}/criteria.yaml`,
+  });
+  assert.ok(task.note!.includes(`golden verdict under ${fixtureDir}/`), task.note);
+  assert.deepEqual(ciLearningRecordVerdict(filing, "golden filing"), { ok: true, reason: "" });
+  assert.equal(machineShardFilingRefusal(filing, "golden filing", { pathExists: () => false, pathExistsAtBase: () => false }), undefined);
 });
 
 test("W1-T7954: selection without a committed index matches the indexed selection", () => {

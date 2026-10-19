@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { linkSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { EMPTY_TASK_FINGERPRINTS, foldTaskFingerprints, sameTaskProjectionStamp, taskProjectionStamp } from "../src/lib/board.js";
 import { fixedClock } from "../src/lib/clock.js";
-import { openReadModel } from "../src/lib/read-model-db.js";
+import { flushReadModelTransactions, openReadModel } from "../src/lib/read-model-db.js";
 import { projectPlan, readLedgerLines, SERVE_KEEPS_CREDITS_IN_MEMORY, type StatusProjection } from "../src/lib/status.js";
 import { threadPlan } from "../src/lib/thread-plan.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -15,9 +15,15 @@ import { fakeGitHub } from "./helpers/fake-github.js";
 const NOW = Date.parse("2026-10-07T12:00:00Z");
 const PLAN = "- id: W1-T1\n  title: fixture\n  repo: remudero\n  type: implement\n  status: queued\n  depends_on: []\n";
 
-function fixture(t: { after(fn: () => void): void }): ReplayOptions {
+function fixture(
+  t: { after(fn: () => void | Promise<void>): void },
+  flushTransactions: typeof flushReadModelTransactions = flushReadModelTransactions,
+): ReplayOptions {
   const root = makeTempDir("view-replay");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(async () => {
+    await flushTransactions();
+    rmSync(root, { recursive: true, force: true });
+  });
   const copies = join(root, "copies");
   mkdirSync(join(copies, "plan"), { recursive: true });
   mkdirSync(join(copies, "state"));
@@ -63,6 +69,37 @@ function arm(stale = false, changed?: "body" | "sources" | "rows"): ReplayFactor
     };
   };
 }
+
+test("the replay fixture drains diagnostics before removing its private state", async (t) => {
+  let cleanup: (() => void | Promise<void>) | undefined;
+  let release!: () => void;
+  let entered = false;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const opts = fixture({ after: (fn) => { cleanup = fn; } }, async () => {
+    entered = true;
+    await pending;
+    await flushReadModelTransactions();
+  });
+  t.after(async () => {
+    release();
+    await flushReadModelTransactions();
+    rmSync(opts.directory, { recursive: true, force: true });
+  });
+  assert(cleanup);
+  const retired = Promise.resolve(cleanup());
+  try {
+    assert(entered, "the fixture must enter its diagnostic retirement barrier");
+    assert(existsSync(opts.directory), "the state must exist while diagnostic retirement is pending");
+    release();
+    await retired;
+    assert(!existsSync(opts.directory), "the state is removed only after diagnostic retirement");
+    await flushReadModelTransactions();
+    assert(!existsSync(opts.directory), "the default SQLite publisher cannot recreate retired fixture state");
+  } finally {
+    release();
+    await retired;
+  }
+});
 
 test("test/a-view-replay-finds-a-stale-reuse.test.ts: projection catches stale board reuse while unmodified, A/A and no-reuse bodies agree", async (t) => {
   const opts = fixture(t);

@@ -35,6 +35,7 @@
  * in the PSI record under the admission lock, so the bound learns from the starts it let through.
  */
 
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -57,6 +58,7 @@ import {
 import { LEDGER_FILENAME } from "./ledger-path.js";
 
 export const ENFORCE_WAIT_STEP = "memory_budget.enforce_wait";
+export const ENFORCE_QUEUE_STEP = "memory_budget.enforce_queue";
 export const ENFORCE_ADMIT_STEP = "memory_budget.enforce_admit";
 export const ENFORCE_ERROR_STEP = "memory_budget.enforce_error";
 /** A start that asked to be deferred rather than wait was deferred to its caller's next pass. */
@@ -272,6 +274,7 @@ export async function awaitMemoryAdmission(
   let reservationAttempted = false;
   let streakKey: string | undefined;
   let startedAt: number | undefined;
+  let finishQueueObservation: (() => void) | undefined;
   let attempt = 0;
   const abandoned = (): AdmissionOutcome => ({ kind: "abandoned", reason: "admission-abandoned",
     waitedMs: startedAt === undefined ? 0 : Math.max(0, ports.clock.now() - startedAt), attempts: attempt });
@@ -299,6 +302,33 @@ export async function awaitMemoryAdmission(
     const seededSince = open === undefined && due !== undefined ? Math.min(startedAt, due) : undefined;
     waiter = { instance: root, workerClass: request.workerClass, waitingSinceMs: since };
     waiting.push(waiter);
+    const ownRunId = typeof request.runId === "string" && request.runId.trim() ? request.runId : undefined;
+    const ownTaskId = typeof request.taskId === "string" && request.taskId.trim() ? request.taskId : undefined;
+    const ownClass = request.workerClass;
+    const missingIdentity = [...(ownRunId === undefined ? ["run_id"] : []), ...(ownTaskId === undefined ? ["task_id"] : [])];
+    let observationId: string | undefined;
+    let sampledAt = startedAt;
+    const observedPhases = new Set<"queued-behind-rank" | "evaluating-head" | "settled">();
+    const observeQueue = (phase: "queued-behind-rank" | "evaluating-head" | "settled", position: number | null,
+      size: number | null, ahead: WorkerClass | null): void => {
+      if (observedPhases.has(phase)) return;
+      observedPhases.add(phase);
+      try {
+        observationId ??= randomUUID();
+        const row = { step: ENFORCE_QUEUE_STEP, run_id: ownRunId ?? "unknown", task_id: ownTaskId ?? "unknown",
+          worker_class: ownClass, identity_state: missingIdentity.length === 0 ? "supplied" : "unknown",
+          missing_identity: missingIdentity, admission_id: observationId, phase, phase_basis: "first-observation-per-phase",
+          worker_assignment: "not-observed", queue_position: position, queue_size: size, ahead_worker_class: ahead,
+          wait_start_ms: since, observed_start_ms: startedAt, sampled_at_ms: sampledAt,
+          waited_ms: Math.max(0, sampledAt - startedAt!), timing_basis: "existing-admission-sample",
+          ...(phase === "settled" ? { cancelled: request.signal?.aborted === true } : {}) };
+        if (ports.write === undefined) ports.stderr(JSON.stringify(row));
+        else write(row);
+      } catch {
+        // Deliberate diagnostic loss: even allocation or a failing stderr fallback must not admit, reserve or block.
+      }
+    };
+    finishQueueObservation = () => { if (observationId !== undefined) observeQueue("settled", null, null, null); };
     let noted = false;
     let ledgeredKey: string | undefined;
     let lastKey = "queued";
@@ -306,8 +336,13 @@ export async function awaitMemoryAdmission(
     for (;;) {
       if (request.signal?.aborted) return abandoned();
       const now = clock.now();
-      const head = rankDemand(waiting, ports.priorityPolicy(), now)[0];
-      if (head !== waiter) lastKey = "queued";
+      const ranked = rankDemand(waiting, ports.priorityPolicy(), now);
+      const head = ranked[0];
+      sampledAt = now;
+      if (head !== waiter) {
+        lastKey = "queued";
+        observeQueue("queued-behind-rank", ranked.indexOf(waiter) + 1, ranked.length, head?.workerClass ?? null);
+      } else if (observationId !== undefined) observeQueue("evaluating-head", 1, ranked.length, null);
       if (head === waiter) {
         try {
           const { inputs, verdict, tier, admitAs, agedBlock, ownTail } = ports.withLock(() => {
@@ -417,5 +452,6 @@ export async function awaitMemoryAdmission(
     return { kind: "error", reason, ...(reservation ? { reservation } : reservationAttempted ? { reservationAttempted: true as const } : {}) };
   } finally {
     if (waiter) waiting.splice(waiting.indexOf(waiter), 1);
+    finishQueueObservation?.();
   }
 }
