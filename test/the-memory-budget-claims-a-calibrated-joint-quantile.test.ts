@@ -13,7 +13,7 @@ import {
 } from "../src/lib/host-memory-calibration.js";
 import { createDaemonFootprint, daemonFootprintPath } from "../src/lib/daemon-footprint.js";
 import {
-  CONTAINER_PRESSURE_FILE, SHADOW_STEP, gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy,
+  CONTAINER_PRESSURE_FILE, SHADOW_STEP, evaluateShadowMemory, gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy,
   parseHostMemoryBudgetPolicy, recordShadowMemoryVerdict, residentsOf, resetShadowMemoryStateForTests,
   type HostMemoryBudgetPolicy, type ShadowMemoryPorts,
 } from "../src/lib/host-memory-shadow.js";
@@ -59,6 +59,8 @@ test("W1-T8879: legacy residents keep their shape while the real calibration gat
   const start = { root: "/fixture/core", workerClass: "implement" as const, estimateMib: 512 };
   assert.deepEqual(gatherShadowInputs(start, ports, policy).entries.map(e => e.resident), expected,
     "the production gather opts in, not just the isolated reader test");
+  assert.equal(evaluateShadowMemory(gatherShadowInputs(start, ports, policy), policy).numbers.reservationRssMib, 300,
+    "the actual nested-tree gather supplies RSS attribution without counting a process twice or adding swap");
   files["/proc/12/status"] = "VmSwap: 102400 kB\n";
   assert.deepEqual(residentsOf(readFile, paths, undefined, { includeRss: true })[1], { mib: 100, complete: true },
     "a missing RSS reading stays missing, never measured zero");

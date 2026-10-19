@@ -401,3 +401,42 @@ test("unit test: default host serve publication and shadow gathering preserve no
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("physical memory attribution excludes swapped pages without changing legacy admission", () => {
+  const own = entry({ id: "start", resident: { mib: 1500, rssMib: 100, complete: true } });
+  const foreign = entry({ id: "other", status: "owner-verified", resident: { mib: 9000, rssMib: 9000, complete: true } });
+  const snapshot = inputs({ container: { currentMib: 1000, maxMib: 12_000 }, entries: [own, foreign] });
+  const verdict = evaluateShadowMemory(snapshot, POLICY);
+  assert.equal(verdict.numbers.legacyResidentBasis, "rss-plus-swap-footprint");
+  assert.equal(verdict.numbers.unreservedContainerMib, 0, "the historical footprint diagnostic is preserved");
+  assert.equal(verdict.numbers.reservationRssMib, 100, "foreign trees and swap are not this container's RSS");
+  assert.equal(verdict.numbers.unattributedContainerMibApprox, 900);
+  assert.equal(verdict.numbers.unattributedContainerBasis, "approximate-cgroup-current-minus-reservation-rss");
+  const legacy = evaluateShadowMemory({ ...snapshot, entries: snapshot.entries.map(e => ({ ...e,
+    resident: "mib" in e.resident ? { mib: e.resident.mib, complete: e.resident.complete } : e.resident })) }, POLICY);
+  const withoutAccounting = (v: typeof verdict) => {
+    const { legacyResidentBasis, reservationRssMib, unattributedContainerMibApprox, unattributedContainerBasis, ...numbers } = v.numbers;
+    return { ...v, numbers };
+  };
+  assert.deepEqual(withoutAccounting(verdict), withoutAccounting(legacy), "no decision, claim, threshold or mode changes");
+  const shared = evaluateShadowMemory(inputs({ container: { currentMib: 1000, maxMib: 12_000 },
+    entries: [entry({ id: "start", resident: { mib: 1500, rssMib: 1120, complete: true } })] }), POLICY);
+  assert.equal(shared.numbers.unattributedContainerMibApprox, -120, "sharing differences are not clamped into false zero");
+});
+
+test("physical memory attribution stays unknown when its actual population is incomplete", () => {
+  for (const resident of [{ mib: 1500, complete: true }, { mib: 1500, rssMib: 100, complete: false },
+    { unread: "fixture-unread" }, { mib: 1500, rssMib: NaN, complete: true }, { mib: 1500, rssMib: -1, complete: true }]) {
+    const verdict = evaluateShadowMemory(inputs({ entries: [entry({ id: "start", resident })] }), POLICY);
+    assert.equal(verdict.numbers.reservationRssMib, null);
+    assert.equal(verdict.numbers.unattributedContainerMibApprox, null);
+  }
+  const unwatched = evaluateShadowMemory(inputs({ entries: [entry({ id: "start", walkComplete: false,
+    resident: { mib: 1500, rssMib: 100, complete: true } })] }), POLICY);
+  assert.equal(unwatched.numbers.unattributedContainerMibApprox, null, "partial walks cannot certify the whole tree");
+  const absent = evaluateShadowMemory(inputs({ ledger: { state: "missing" }, entries: [] }), POLICY);
+  assert.equal(absent.numbers.reservationRssMib, null, "a missing ledger is not an empty ledger");
+  const empty = evaluateShadowMemory(inputs({ entries: [] }), POLICY);
+  assert.equal(empty.numbers.reservationRssMib, 0, "present and positively empty stays measurable zero");
+  assert.equal(empty.numbers.unattributedContainerMibApprox, 3000);
+});
