@@ -174,7 +174,7 @@ export function trackWorkerThreads(channel = diagnosticsChannel.channel(WORKER_T
     const id = thread.threadId; // an exited Worker reads threadId -1, so the key is taken now
     // String(CallSite) uses V8's raw clause, not Node's mapped Error formatter. Retain only the
     // primitive kind, never CallSite objects (which can reference functions and receivers).
-    live.set(id, { kind: spawnSite(`Error\n${sites.map(site => `    at ${String(site)}`).join("\n")}`).replace(/^anonymous-worker:<module>$/, "anonymous-worker:<anonymous>"), thread });
+    live.set(id, { kind: spawnSite(`Error\n${sites.map(site => `    at ${String(site)}`).join("\n")}`).replace(/^callback-worker:<module>$/, "callback-worker:<anonymous>"), thread });
     thread.once("exit", () => void live.delete(id));
   };
   channel.subscribe(onSpawn);
