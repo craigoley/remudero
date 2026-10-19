@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { buildFixProgressInput, resolveFixProgress, type FixProgressJudge, type FixProgressWitness } from "#src/lib/fix-progress-judge.js";
+import { runFixRung, buildFixRungDispatchArgs, type ReviewRunResult } from "../helpers/run-task-test.js";
 
 const TASK = "W1-T9502";
 const HEAD = "999a5dc";
@@ -137,4 +141,41 @@ test("W1-T9502: missing input witnesses and unavailable real defaults never beco
   const first = await resolveFixProgress(input, [], { ...witnesses, judge: async () => ({ verdict: "continue", reason: "unfiled PR" }) });
   const row = { ...first.receipt, ...first.decision, pr_number: 11559, head_sha: HEAD, ts: "2026-10-14T03:44:00Z" };
   assert.equal((await resolveFixProgress(input, [row], witnesses)).receipt.step, "fix.progress_reused", "explicit no-contract is readable");
+});
+
+test("W1-T9502: the real fix rung reuses its ledger answer and names the reused event", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-progress-reuse-"));
+  try {
+    const f = fixture(), pr = f.view(), mount = { model: "sonnet", effort: "medium", maxTurns: 1, contextBudget: 10000 };
+    const rows: Record<string, unknown>[] = [
+      { task_id: TASK, pr_number: pr.prNumber, step: "fix.dispatch", head_sha: HEAD, round_id: "prior", strike: 1 },
+      { task_id: TASK, pr_number: pr.prNumber, step: "fix.done", head_sha: HEAD, round_id: "prior", subtype: "success", fix_outcome: "NO_CHANGE" },
+    ];
+    let calls = 0, workers = 0;
+    const args = buildFixRungDispatchArgs({ task: { id: TASK, title: "reuse" } as never,
+      pr, evidence: { unmetCriteria: [{ claim: "criterion", proof: "unit test: criterion", reason: "unmet" }] },
+      runId: "reuse-rung", prUrl: pr.prUrl, branch: "run-W1-T9502-123", worktreePath: root, mount,
+      settingsFile: "settings/worker.json", config: {} as never, budgetUsd: 1, strikeCap: 2,
+      reviewBase: { owner: "fixture", repo: "repo", headCheckoutDir: root, reviewerMount: mount } });
+    assert.equal(args.progressReviewInputDigest, "body-A", "production dispatch threads its independently read input");
+    const options = { ...args, escalationJudge: async () => ({ decision: "deliver", reason: "fixture" } as const), deps: {
+      fixProgressJudge: async () => { calls++; return undefined; }, ledgerLines: () => rows,
+      spawn: async () => { workers++; return { text: "fixed", subtype: "success", costUsd: 0, blocks: [],
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, permissionDenials: [] } as never; },
+      runReview: async () => ({ ...args.initialReview, state: "success", criteria: [] } as ReviewRunResult),
+      waitForCiGreen: async () => "green" as const, fetchPrBody: async () => `Remudero-Task: ${TASK}`,
+      fetchPrDiffFiles: async () => [], push: () => {}, ledgerPath: join(root, "ledger.ndjson"),
+      issues: { create: () => { assert.fail("no escalation is permitted"); } },
+      log: (step: string, fields?: Record<string, unknown>) => { rows.push({ ...fields, step, ts: "2026-10-14T03:44:00Z" }); },
+      say: () => {}, account: <T>(result: T) => result,
+    } };
+    assert.equal((await runFixRung(options)).outcome, "handed_off");
+    assert.equal(calls, 1);
+    const judged = rows.findLast(row => row.step === "fix.progress_judged")!;
+    Object.assign(judged, { verdict: "continue", reason: "fixture's recorded answer permits this exact repair" });
+    assert.equal((await runFixRung(options)).outcome, "fixed");
+    assert.equal(calls, 1, "the second rung does not ask the model again");
+    assert.equal(workers, 1);
+    assert.equal(rows.findLast(row => row.step === "fix.progress_reused")?.judged_at, judged.ts);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

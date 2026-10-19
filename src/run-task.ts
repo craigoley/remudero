@@ -12025,7 +12025,7 @@ export async function runFixRung(opts: {
     try {
       const { decision, receipt } = await resolveFixProgress(input, persisted,
         { judge: progressJudge, reviewInputDigest: progressReviewInputDigest, contractRevision: currentContractRevision });
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
+      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
         parked_reason: parkedReason, former_ceiling: input.formerCeiling,
         round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       return decision;
@@ -12359,7 +12359,7 @@ export async function runFixRung(opts: {
       const { decision, receipt } = await resolveFixProgress(input, persisted,
         { judge: progressJudge, firstRound: true, reviewInputDigest: progressReviewInputDigest,
           contractRevision: currentContractRevision });
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
+      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
         parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
         round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
