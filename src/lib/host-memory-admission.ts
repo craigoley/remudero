@@ -41,8 +41,8 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { fixedClock } from "./clock.js";
 
-import { daemonOwnedProcess, openLearnedReservation, type LearnedReservation } from "./host-memory-learning.js";
-import { MEMORY_ADMISSION_LOCK_BUSY, withMemoryAdmissionLock, type WorkerClass } from "./host-memory-ledger.js";
+import { daemonOwnedProcess, openLearnedReservation, readValidationClassEstimate, type LearnedReservation, type ValidationClassEstimate } from "./host-memory-learning.js";
+import { MEMORY_ADMISSION_LOCK_BUSY, ownedMemoryRunBinding, withMemoryAdmissionLock, type HostMemoryReading, type WorkerClass } from "./host-memory-ledger.js";
 import { rankDemand, type HostMemoryPriorityPolicy } from "./host-memory-priority.js";
 import {
   defaultShadowMemoryPorts,
@@ -50,10 +50,12 @@ import {
   gatherShadowInputs,
   hostMemoryBudgetModeFor,
   markPsiStartAdmitted,
+  markStrictPsiStartAdmitted,
   type ShadowInputs,
   type ShadowMemoryPorts,
   type ShadowReason,
   type ShadowVerdict,
+  type StrictPsiStartMark,
 } from "./host-memory-shadow.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 
@@ -128,6 +130,70 @@ export interface AdmissionPorts extends ShadowMemoryPorts {
   enforceHere: () => boolean;
   withLock: <T>(action: () => T) => T;
   openReservation: (input: { workerClass: WorkerClass; root: string }) => LearnedReservation | undefined;
+}
+
+export type ValidationWorkerClass = Extract<WorkerClass, "test" | "check-proof" | "push-gate">;
+export type ValidationAdmissionRequest = Omit<AdmissionRequest, "workerClass" | "onShortfall" | "deferral" | "reserve"> & { workerClass: ValidationWorkerClass };
+export interface ValidationAdmissionPorts extends AdmissionPorts {
+  validationEstimate: (workerClass: ValidationWorkerClass) => ValidationClassEstimate;
+  ownedBinding: (id: string, root: string) => ReturnType<typeof ownedMemoryRunBinding>;
+}
+type ValidationPsiMark = StrictPsiStartMark | { kind: "not-attempted" };
+export type ValidationAdmissionOutcome =
+  | { kind: "ready"; tier: "fits"; reservation: LearnedReservation; waitedMs: number; attempts: number;
+      basis: "legacy-compatible-tree-peaks"; samples: number; psiMark: Extract<StrictPsiStartMark, { kind: "recorded" }> }
+  | { kind: "not-started"; reason: "budget-unavailable" | "unsafe-without-live-work" | "admission-error" | "abandoned";
+      details: string[]; waitedMs: number; attempts: number; cleanup: "none" | "release-requested" | "held-unknown"; psiMark: ValidationPsiMark }
+  | Extract<AdmissionOutcome, { kind: "not-enforced" }>;
+
+type ValidationPorts = Pick<ValidationAdmissionPorts, "validationEstimate" | "ownedBinding">;
+type ValidationFailure = Pick<Extract<ValidationAdmissionOutcome, { kind: "not-started" }>, "reason" | "details">;
+interface AdmissionEvaluation {
+  inputs: ShadowInputs; verdict: ShadowVerdict; tier: AdmissionTier;
+  admitAs?: Extract<AdmissionOutcome, { kind: "admitted" }>["tier"];
+  agedBlock?: AgedBlock; ownTail?: OwnTailRung;
+  validationFailure?: ValidationFailure; validationBasis?: ValidationClassEstimate;
+}
+/** Strict evidence is emitted by the maintained reader from actual tagged history, never reconstructed here. */
+function validationSnapshot(request: AdmissionRequest, root: string, ports: AdmissionPorts, validation: ValidationPorts,
+  policy: ReturnType<AdmissionPorts["policy"]>): {
+    inputs: ShadowInputs; issues: string[]; basis: ValidationClassEstimate;
+  } {
+  const issues: string[] = [];
+  const basis = validation.validationEstimate(request.workerClass as ValidationWorkerClass);
+  let ledger: HostMemoryReading | undefined;
+  const inputs = gatherShadowInputs({ ...request, root, ...(basis.kind === "measured" ? {
+    estimateMib: basis.estimateMib, estimateSource: { kind: "measured" as const, samples: basis.samples },
+  } : {}) }, { ...ports,
+    readLedger: r => { ledger = ports.readLedger(r); return ledger; },
+    typical: cls => cls === request.workerClass && basis.kind === "measured" ? basis.typicalMib : ports.typical(cls),
+  }, policy, { strictEvidence: true });
+  const evidence = inputs.strictEvidence;
+  if (!evidence) issues.push("strict-observation-unavailable");
+  else if (evidence.kind === "unavailable") issues.push(...evidence.reasons);
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  if (!ledger || ledger.state !== "present" || ledger.scope !== "host" || ledger.counts.uncertain !== 0 ||
+      ledger.counts.incompleteWalk !== 0 || ledger.counts.localScope !== 0 || ledger.counts.unreadable !== 0 ||
+      ledger.entries.some(e => e.status === "uncertain" || e.walkComplete !== true)) issues.push("ledger-incomplete");
+  if (basis.kind !== "measured") issues.push(basis.reason);
+  else if (!finite(basis.estimateMib) || basis.estimateMib === 0 || !finite(basis.typicalMib) ||
+      basis.typicalMib > basis.estimateMib || !Number.isSafeInteger(basis.samples) || basis.samples <= 0 ||
+      inputs.start.estimateSource?.kind !== "measured" || inputs.start.estimateSource.samples !== basis.samples) issues.push("class-basis-incomplete");
+  if (!("mib" in inputs.memAvailable) || !finite(inputs.memAvailable.mib)) issues.push("host-memory-unavailable");
+  if (!("pagesPerSec" in inputs.swapIn) || !finite(inputs.swapIn.pagesPerSec)) issues.push("host-swap-unavailable");
+  if ("unread" in inputs.psi || !finite(inputs.psi.someAvg10) || !finite(inputs.psi.someAvg60) ||
+      !finite(inputs.psi.fullAvg10) || !finite(inputs.psi.fullAvg60)) issues.push("host-pressure-incomplete");
+  if ("unread" in inputs.container || !finite(inputs.container.currentMib) || inputs.container.highMib === undefined ||
+      (inputs.container.maxMib !== null && !finite(inputs.container.maxMib)) ||
+      (inputs.container.highMib !== null && !finite(inputs.container.highMib)) || !finite(inputs.container.reclaimableMib)) issues.push("container-memory-incomplete");
+  const pressure = inputs.containerPressure;
+  if (!pressure || "unread" in pressure || "unread" in pressure.psi || !finite(pressure.psi.someAvg10) ||
+      !finite(pressure.psi.fullAvg10) || "unmeasured" in pressure.swapIn || !finite(pressure.swapIn.pagesPerSec) ||
+      !finite(pressure.ceilingCrossings)) issues.push("container-pressure-incomplete");
+  if (inputs.serve.scenario === "unknown") issues.push("serve-scenario-unknown");
+  if (inputs.daemonGrowth.length === 0 || inputs.daemonGrowth.some(g => g.samples < policy.daemonGrowthMinSamples ||
+      !finite(g.growthMib) || !finite(g.typicalMib) || !g.basis || !g.currentBasis || g.currentBasis === "the latest sample")) issues.push("daemon-allowance-incomplete");
+  return { inputs, issues, basis };
 }
 
 interface Waiter {
@@ -258,7 +324,22 @@ export async function awaitMemoryAdmission(
   request: AdmissionRequest,
   overrides: Partial<AdmissionPorts> = {},
 ): Promise<AdmissionOutcome> {
-  const ports: AdmissionPorts = { ...defaultAdmissionPorts(), ...overrides };
+  return admissionLoop(request, { ...defaultAdmissionPorts(), ...overrides });
+}
+
+/** Shared prerequisite ONLY: no launcher uses this entry and no policy mode is promoted here. */
+export async function awaitValidationMemoryAdmission(
+  request: ValidationAdmissionRequest, overrides: Partial<ValidationAdmissionPorts> = {},
+): Promise<ValidationAdmissionOutcome> {
+  const ports = { ...defaultAdmissionPorts(), enforceHere: () => process.env.GITHUB_ACTIONS !== "true" && daemonOwnedProcess(),
+    validationEstimate: readValidationClassEstimate,
+    ownedBinding: (id: string, root: string) => ownedMemoryRunBinding(id, { root }), ...overrides };
+  return admissionLoop(request, ports, ports);
+}
+
+function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts): Promise<AdmissionOutcome>;
+function admissionLoop(request: ValidationAdmissionRequest, ports: AdmissionPorts, validation: ValidationPorts): Promise<ValidationAdmissionOutcome>;
+async function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts, validation?: ValidationPorts): Promise<AdmissionOutcome | ValidationAdmissionOutcome> {
   let ledgerPath: string | undefined;
   const base = { run_id: request.runId ?? "memory-budget-enforce", task_id: request.taskId ?? "MEMORY-BUDGET" };
   const write = (row: { step: string } & Record<string, unknown>): void => {
@@ -266,7 +347,8 @@ export async function awaitMemoryAdmission(
       if (ledgerPath !== undefined) ports.write?.(ledgerPath, { ...base, ...row });
       else ports.stderr(JSON.stringify({ ...base, ...row }));
     } catch (error) {
-      ports.stderr(JSON.stringify({ event: row.step, error: reasonOf(error) }));
+      if (!validation) ports.stderr(JSON.stringify({ event: row.step, error: reasonOf(error) }));
+      else { try { ports.stderr(JSON.stringify({ event: row.step, error: reasonOf(error) })); } catch { /* Refusal survives a failed diagnostic. */ } }
     }
   };
   let waiter: Waiter | undefined;
@@ -276,22 +358,45 @@ export async function awaitMemoryAdmission(
   let startedAt: number | undefined;
   let finishQueueObservation: (() => void) | undefined;
   let attempt = 0;
-  const abandoned = (): AdmissionOutcome => ({ kind: "abandoned", reason: "admission-abandoned",
-    waitedMs: startedAt === undefined ? 0 : Math.max(0, ports.clock.now() - startedAt), attempts: attempt });
+  let lastAt: number | undefined;
+  let validationRoot: string | undefined;
+  const effects: { psiMark: ValidationPsiMark } = { psiMark: { kind: "not-attempted" } };
+  const refuse = (failure: ValidationFailure): Extract<ValidationAdmissionOutcome, { kind: "not-started" }> => {
+    let cleanup: Extract<ValidationAdmissionOutcome, { kind: "not-started" }>['cleanup'] = "none";
+    if (reservation) {
+      cleanup = "held-unknown";
+      try {
+        if (reservation.id && validationRoot && validation?.ownedBinding(reservation.id, validationRoot).state === "fresh") {
+          cleanup = "release-requested";
+          reservation.releaseOccupancy();
+        }
+      } catch { /* A failed best-effort request or unknown ownership is never verified release. */ }
+    }
+    const result = { kind: "not-started" as const, ...failure, waitedMs: startedAt === undefined || lastAt === undefined ? 0 : Math.max(0, lastAt - startedAt), attempts: attempt, cleanup, psiMark: effects.psiMark };
+    write({ step: "memory_budget.validation_not_started", worker_class: request.workerClass, admitted: false, ...result });
+    return result;
+  };
+  const abandoned = (): AdmissionOutcome | ValidationAdmissionOutcome => validation ? refuse({ reason: "abandoned", details: ["admission-abandoned"] })
+    : { kind: "abandoned", reason: "admission-abandoned", waitedMs: startedAt === undefined ? 0 : Math.max(0, ports.clock.now() - startedAt), attempts: attempt };
   try {
     if (request.signal?.aborted) return abandoned();
+    if (validation && !(["test", "check-proof", "push-gate"] as readonly string[]).includes(request.workerClass)) {
+      return refuse({ reason: "budget-unavailable", details: ["unsupported-validation-class"] });
+    }
     const policy = ports.policy();
     const mode = hostMemoryBudgetModeFor(policy, request.workerClass);
-    const defers = request.onShortfall === "defer";
+    const defers = !validation && request.onShortfall === "defer";
     if (mode !== "enforce") {
       if (defers) endDeferralStreak(request.runId ?? request.workerClass);
       return { kind: "not-enforced", why: `mode ${mode}` };
     }
     if (!ports.enforceHere()) return { kind: "not-enforced", why: "not a daemon-owned process" };
     const root = typeof request.root === "string" ? request.root : request.root();
+    validationRoot = root;
     ledgerPath = join(root, "state", LEDGER_FILENAME);
     const clock = ports.clock;
     startedAt = clock.now();
+    lastAt = startedAt;
     const runId = request.runId ?? request.workerClass;
     const key = streakKey = `${root}\u0000${runId}`;
     const due = request.deferral?.dueSinceMs;
@@ -336,6 +441,7 @@ export async function awaitMemoryAdmission(
     for (;;) {
       if (request.signal?.aborted) return abandoned();
       const now = clock.now();
+      lastAt = now;
       const ranked = rankDemand(waiting, ports.priorityPolicy(), now);
       const head = ranked[0];
       sampledAt = now;
@@ -343,16 +449,31 @@ export async function awaitMemoryAdmission(
         lastKey = "queued";
         observeQueue("queued-behind-rank", ranked.indexOf(waiter) + 1, ranked.length, head?.workerClass ?? null);
       } else if (observationId !== undefined) observeQueue("evaluating-head", 1, ranked.length, null);
+      // Diagnostic sinks may synchronously cancel this strict invocation before evaluation.
+      if (validation && request.signal?.aborted) return abandoned();
       if (head === waiter) {
         try {
-          const { inputs, verdict, tier, admitAs, agedBlock, ownTail } = ports.withLock(() => {
-            const inputs = gatherShadowInputs({ ...request, root }, ports, policy);
+          const { inputs, verdict, tier, admitAs, agedBlock, ownTail, validationFailure, validationBasis } = ports.withLock<AdmissionEvaluation>(() => {
+            const strict = validation ? validationSnapshot(request, root, ports, validation, policy) : undefined;
+            const validationBasis = strict?.basis;
+            let validationFailure: ValidationFailure | undefined;
+            const inputs = strict?.inputs ?? gatherShadowInputs({ ...request, root }, ports, policy);
             const verdict = evaluateShadowMemory(inputs, policy);
             const tier = admissionTier(verdict);
+            if (strict) {
+              const issues = [...strict.issues, ...verdict.uncertainty.filter(u =>
+                // The positively measured start is included by the evaluator BEFORE its atomic publication.
+                !(u.kind === "start-unrecorded" && u.count === 1 && u.marginMib === 0)).map(u => u.kind)];
+              if (policy.claimModel && policy.claimModel !== "legacy-one-tail") issues.push("unsupported-validation-claim-model");
+              if (issues.length > 0) validationFailure = { reason: "budget-unavailable", details: [...new Set(issues)] };
+              else if (tier !== "fits" && !reservedWorkRunning(inputs)) validationFailure = { reason: "unsafe-without-live-work", details: verdict.reasons };
+            }
             const agedBlock = defers && tier === "shortfall"
               ? agedRungBlock(key, waiter!, request.deferral, verdict, ports.priorityPolicy(), now, seededSince) : undefined;
             let ownTail: OwnTailRung | undefined;
-            const admitAs: AdmissionTier | "nothing-to-wait-for" | "aged" | "own-tail" | undefined = tier === "fits" ? "fits"
+            const admitAs: AdmissionTier | "nothing-to-wait-for" | "aged" | "own-tail" | undefined = validation
+              ? validationFailure === undefined && tier === "fits" ? "fits" : undefined
+              : tier === "fits" ? "fits"
               : tier === "uncertain" && attempt > 0 ? "uncertain"
                 : tier === "shortfall" && !reservedWorkRunning(inputs) ? "nothing-to-wait-for"
                   : defers && tier === "shortfall" && agedBlock === undefined ? "aged"
@@ -361,18 +482,46 @@ export async function awaitMemoryAdmission(
             if (admitAs !== undefined) {
               if (admitAs === "fits" && inputs.ledger.state !== "present") throw new Error(`admission-ledger-${inputs.ledger.state}`);
               reservationAttempted = true;
-              reservation = request.reserve ? request.reserve() : ports.openReservation({ workerClass: request.workerClass, root });
+              reservation = !validation && request.reserve ? request.reserve() : ports.openReservation({ workerClass: request.workerClass, root });
               if (reservation === undefined || reservation.id === undefined) throw new Error("admission-reservation-unavailable");
               if (reservation.published !== true) throw new Error("admission-reservation-unpublished");
               if (reservation.estimateMib !== inputs.start.estimateMib) throw new Error("admission-estimate-changed");
+              if (validation && (reservation.estimateSource.kind !== "measured" || validationBasis?.kind !== "measured" ||
+                  reservation.estimateSource.samples !== validationBasis.samples)) throw new Error("admission-measurement-changed");
               const visible = ports.readLedger(root);
               if (visible?.state !== "present") throw new Error(`admission-ledger-${visible?.state ?? "unreadable"}`);
               if (!visible.entries.some(entry => entry.id === reservation!.id)) throw new Error("admission-reservation-not-visible");
-              if (inputs.psiRecordAt !== undefined) markPsiStartAdmitted(ports, root, inputs.psiRecordAt);
+              if (validation && (visible.scope !== "host" || visible.counts.uncertain !== 0 || visible.counts.incompleteWalk !== 0 ||
+                  visible.counts.localScope !== 0 || visible.counts.unreadable !== 0 ||
+                  validation.ownedBinding(reservation.id, root).state !== "fresh")) throw new Error("admission-not-fresh-owned");
+              if (validation && request.signal?.aborted) validationFailure = { reason: "abandoned", details: ["admission-abandoned"] };
+              if (validationFailure) return { inputs, verdict, tier, admitAs: undefined, agedBlock, ownTail, validationFailure, validationBasis };
+              if (validation) {
+                if (inputs.strictEvidence?.kind !== "paired") validationFailure = { reason: "admission-error", details: ["psi-mark-missing"] };
+                else {
+                  const mark = markStrictPsiStartAdmitted(ports, root, inputs.strictEvidence.marker);
+                  effects.psiMark = mark;
+                  if (mark.kind !== "recorded") validationFailure = { reason: "admission-error", details: [`psi-mark-${mark.reason}`] };
+                }
+                if (request.signal?.aborted) validationFailure = { reason: "abandoned", details: ["admission-abandoned"] };
+              } else if (inputs.psiRecordAt !== undefined) markPsiStartAdmitted(ports, root, inputs.psiRecordAt);
             }
-            return { inputs, verdict, tier, admitAs, agedBlock, ownTail };
+            return { inputs, verdict, tier, admitAs, agedBlock, ownTail, validationFailure, validationBasis };
           });
+          if (validation && request.signal?.aborted) return abandoned();
+          if (validationFailure) return refuse(validationFailure);
           lastKey = verdict.reasons.join("+") || tier;
+          if (validation && admitAs !== undefined) {
+            const psiMark = effects.psiMark;
+            if (admitAs !== "fits" || !reservation || validationBasis?.kind !== "measured" || psiMark.kind !== "recorded") throw new Error("validation-admission-invariant");
+            if (noted) write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: "fits", validation: true,
+              waited_ms: now - startedAt, attempts: attempt, reasons: verdict.reasons, waited_ms_by_reason: waitedByReason, numbers: verdict.numbers });
+            // Settle diagnostics before the final strict check, not after a computed ready return.
+            finishQueueObservation?.();
+            if (request.signal?.aborted) return abandoned();
+            return { kind: "ready", tier: "fits", reservation, waitedMs: now - startedAt, attempts: attempt,
+              basis: validationBasis.basis, samples: validationBasis.samples, psiMark };
+          }
           if (admitAs !== undefined) {
             const streak = streaks.get(key);
             if (defers) streaks.delete(key);
@@ -421,6 +570,7 @@ export async function awaitMemoryAdmission(
           }
         } catch (error) {
           if ((error as NodeJS.ErrnoException)?.code !== MEMORY_ADMISSION_LOCK_BUSY) throw error;
+          if (validation) return refuse({ reason: "budget-unavailable", details: ["admission-lock-held"] });
           lastKey = "admission-lock-held";
           if (!noted) {
             noted = true;
@@ -447,6 +597,7 @@ export async function awaitMemoryAdmission(
   } catch (error) {
     if (request.signal?.aborted) return abandoned();
     const reason = reasonOf(error);
+    if (validation) return refuse({ reason: "admission-error", details: [reason] });
     if (streakKey !== undefined && request.onShortfall === "defer") streaks.delete(streakKey); // fail-open is an admission
     write({ step: ENFORCE_ERROR_STEP, worker_class: request.workerClass, reason, admitted: true });
     return { kind: "error", reason, ...(reservation ? { reservation } : reservationAttempted ? { reservationAttempted: true as const } : {}) };
