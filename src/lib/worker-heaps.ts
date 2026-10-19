@@ -167,10 +167,14 @@ export function trackWorkerThreads(channel = diagnosticsChannel.channel(WORKER_T
   const onSpawn = (message: unknown): void => {
     const thread = (message as { worker?: WorkerThread }).worker;
     if (!thread) return;
-    const site: { stack?: string } = {};
-    Error.captureStackTrace(site);
+    // Preserve the ambient worker-frame budget: only the shared helper adds a frame. Invalid
+    // nonnumeric limits previously captured no stack, so they still produce the literal unknown.
+    const limit = Error.stackTraceLimit;
+    const sites = rawCallSites(typeof limit === "number" ? limit + 1 : 0);
     const id = thread.threadId; // an exited Worker reads threadId -1, so the key is taken now
-    live.set(id, { kind: spawnSite(site.stack), thread });
+    // String(CallSite) uses V8's raw clause, not Node's mapped Error formatter. Retain only the
+    // primitive kind, never CallSite objects (which can reference functions and receivers).
+    live.set(id, { kind: spawnSite(`Error\n${sites.map(site => `    at ${String(site)}`).join("\n")}`), thread });
     thread.once("exit", () => void live.delete(id));
   };
   channel.subscribe(onSpawn);
