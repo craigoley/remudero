@@ -23,8 +23,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { coverageGateLockDir, coverageScratchDir, runCiParity, testWithCoverageLeaf, type CoverageResourcePort } from "../src/lib/ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
+import { CI_PARITY_TABLE, coverageGateLockDir, coverageScratchDir, runCiParity, testWithCoverageLeaf, type CoverageResourcePort } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { narrowNameFilteredArgs, parseWhitelistedProof } from "../src/lib/review.js";
 import { coverageParitySpawnResult, coverageResourceFixture } from "./helpers/coverage-parity-spawn.js";
@@ -198,6 +198,16 @@ test("parity fixture resources leave default coverage admission unchanged", () =
   const owned = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}parity-unreadable-`));
   try { assert.throws(() => testWithCoverageLeaf(join(owned, "never-created"), spawn, "unused"), /ENOENT/); }
   finally { rmSync(owned, { recursive: true, force: true }); }
+  const fixture = coverageResourceFixture();
+  try {
+    const entry = CI_PARITY_TABLE.find((e) => e.job === "coverage-ratchet")!;
+    // A Git-free owned root also makes the pre-fix real transport probe local-only, never a fetch.
+    const refused = entry.run!(fixture.root, defaultPreflightSpawn, () => 0, undefined, undefined, fixture.resources);
+    assert.equal(fixture.events.length, 0, "fixture resources must not admit the real default child transport");
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0]!.ok, false);
+    assert.match(refused[0]!.detail, /fixture resources require an explicitly injected child transport/);
+  } finally { fixture.cleanup(); }
 });
 
 test("parity fixture lease failures preserve refusal and owned cleanup", () => {
