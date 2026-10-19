@@ -88,7 +88,7 @@ test("applyDaemonMemoryPolicy sets the growth flag and strips only the heap ceil
   const result = applyDaemonMemoryPolicy({ ...DEFAULT_DAEMON_MEMORY_POLICY, heapGrowingPercent: 40 }, { setFlags: (f) => flags.push(f), env });
   assert.deepEqual(flags, ["--heap-growing-percent=40"]);
   assert.equal(env.NODE_OPTIONS, "--enable-source-maps");
-  assert.deepEqual(result, { heap_growing_percent: 40, node_options_before: "--max-old-space-size=8192 --enable-source-maps", node_options_children: "--enable-source-maps" });
+  assert.deepEqual(result, { heap_growing_percent: 40, child_node_args: ["--heap-growing-percent=40"], node_options_before: "--max-old-space-size=8192 --enable-source-maps", node_options_children: "--enable-source-maps" });
 
   const only: NodeJS.ProcessEnv = { NODE_OPTIONS: "--max-old-space-size=8192" };
   applyDaemonMemoryPolicy(DEFAULT_DAEMON_MEMORY_POLICY, { setFlags: () => {}, env: only });
