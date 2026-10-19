@@ -193,11 +193,13 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
   assert.ok(drive, "the real handle registered its shadow driver");
   drive();
   await until(() => (state()?.samples ?? 0) > 0, 60_000);
+  const committed = state();
+  assert.ok(committed, "the awaited committed counter is readable");
   assert.equal(sent, 1, "one driver offer produces one comparison without a request");
-  assert.equal(state().samples, 1);
-  assert.equal(state().requests, 0);
-  assert.equal(state().diffs.real, 0);
-  assert.equal(shadowReadiness("paired-worker", state(), Date.now()).ready, false);
+  assert.equal(committed.samples, 1);
+  assert.equal(committed.requests, 0);
+  assert.equal(committed.diffs.real, 0);
+  assert.equal(shadowReadiness("paired-worker", committed, Date.now()).ready, false);
   assert.equal(worker.autoMode?.("paired-worker"), "shadow");
   assert.deepEqual(worker.body("paired-worker")?.body.data, { value: 1 });
   assert.equal(logs.some((row) => row.step === "view.auto_promoted"), false, "actual default workers preserve the sustained readiness gate");
