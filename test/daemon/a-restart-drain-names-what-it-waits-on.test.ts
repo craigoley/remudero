@@ -30,7 +30,7 @@ function latched(t: TestContext, passMs = 0) {
   assert.equal(sweep.inFlightReviewCount(), 0);
   assert.equal(sweep.detachedSweepActionCount(), 0);
   const source = plan(t), start = Date.now();
-  let now = start, stale = false, exiting = false;
+  let now = start, stale = false, exiting = false, running = false;
   t.mock.method(Date, "now", () => now);
   const lane = deferred<Result>(), sleeps: Array<ReturnType<typeof deferred<void>>> = [], rows: Row[] = [];
   const material = { stale: true as const, oldSha: "a".repeat(40), newSha: "b".repeat(40), staleSinceMs: start - 7_200_000,
@@ -38,7 +38,7 @@ function latched(t: TestContext, passMs = 0) {
   const daemon = runDaemon(source, {
     now: () => new Date(now), refreshMerged: () => () => exiting,
     checkFreshness: () => stale ? material : { stale: false },
-    log: (step, extra = {}) => rows.push({ step, extra }), runOne: () => lane.promise,
+    log: (step, extra = {}) => rows.push({ step, extra }), runOne: () => { running = true; return lane.promise; },
     sleep: () => { const s = deferred<void>(); sleeps.push(s); return s.promise; },
     sleepUntilSweepWake: async () => {
       if (exiting) { await flush(); return "wake"; }
@@ -51,6 +51,7 @@ function latched(t: TestContext, passMs = 0) {
   return {
     start, rows, daemon, row, at: (ms: number) => { now = start + ms; },
     async latch(ms: number) {
+      await until(() => running);
       now = start + ms; stale = true;
       for (let n = 0; n < 2; n++) {
         for (const s of sleeps.splice(0)) s.resolve();
