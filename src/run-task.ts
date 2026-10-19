@@ -16912,8 +16912,7 @@ export interface RunTaskContext {
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
   workerStateSensor: WorkerStateSensor;
-  /** Drops the whole plan for one holding only this run's task, once the body has read the plan for the last time, so
-   *  the plan is collectable before the first agent wait. */
+  /** Swaps the whole plan for one of this run's task after the body's last plan read, before the first agent wait. */
   releasePlan?: () => void;
 }
 
@@ -17722,8 +17721,7 @@ async function runTask(
      * loads for itself exactly as it always has.
      */
     planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
-    /** A run child's collection at the start of each agent wait (src/lib/agent-wait-heap.ts). Each result is ledgered as
-     *  {@link RUN_AGENT_WAIT_HEAP_STEP}. Absent for an in-process run: the daemon's heap has its own governor. */
+    /** A run child's collection at each agent wait, ledgered as {@link RUN_AGENT_WAIT_HEAP_STEP}; absent in-process. */
     atAgentWait?: () => Promise<AgentWaitHeap>;
     /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
      *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
@@ -17976,8 +17974,7 @@ async function runTask(
   // adapter's structural boundary proof below.  Ordinary runs keep the existing per-spawn auction.
   const cashContainmentState = { contained: false };
   const cashContainmentBoundary = opts.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
-  // A run child collects at the start of every agent wait: a wait allocates almost nothing, so no GC would come to take
-  // the setup garbage before the kernel swapped it out. The row says what the heap held and kept. Never awaited.
+  // A wait allocates almost nothing, so no GC would take the setup garbage before the kernel swapped it (agent-wait-heap.ts).
   const observeAgentWait = (): void => {
     if (!opts.atAgentWait) return;
     const waitingOn = restartPhase.current;
@@ -18334,7 +18331,6 @@ async function runTask(
       workerAbandonMs,
       workerStateSensor,
       releasePlan: () => {
-        // `plan` is captured by this closure for the whole run, and `opts.planSnapshot` returned it; both let go here.
         plan = { tasks: [task], byId: new Map([[task.id, task]]) };
         ctx.plan = plan;
       },
@@ -19925,7 +19921,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // this is a `Map.get` rather than the walk-and-reparse-every-shard fallback — the cost this
     // task exists to stop paying once per dispatch prompt.
     const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, ctx.plan));
-    // The plan's last read: no local here holds it, so after this the whole plan is collectable before recon's wait.
     ctx.releasePlan?.();
     // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
     // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as

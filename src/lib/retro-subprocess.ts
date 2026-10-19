@@ -162,7 +162,6 @@ export async function runAutomatedRetroSubprocess(
     contained = spawn(
       {
         command: process.execPath,
-        // The daemon's growth percent as well as the ceiling: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
         args: [`--max-old-space-size=${AUTOMATED_RETRO_HEAP_LIMIT_MB}`, ...nodeArgs, "--import", "tsx", entrypoint, "retro"],
         env,
       },
