@@ -34,11 +34,12 @@ import {
   baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
   isMainGreenOnItsOwnHead, mainFailingTestFiles, mainFormerlyFailingTestFiles, RULE_CHECKS_CHECK,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
-  assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshClearanceKey,
+  assessRefreshClearance, GITHUB_COMPARE_FILES_LISTED, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshClearanceKey,
   refreshedOnSameRed, refreshRecordsFromLedger, refusedRefreshClearancesFromLedger,
   type ImportClosureRead, type RefreshArm, type RefreshClearance, type RefreshHistorySource,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
+import { proofTargetPaths } from "./task-linter.js";
 import { parse as parseYaml } from "yaml";
 import {
   armAutoMergeDetailedAsync,
@@ -261,6 +262,8 @@ import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type 
 import {
   CODEQL_CHECK_NAME,
   compareRestArgs,
+  fetchReviewReuseReachFacts,
+  type ReviewReuseReachFacts,
   prFilesRestArgs,
   rollupFromRest,
   needsWorkflowIdentity,
@@ -1897,6 +1900,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "fixProgressJudge", // W1-T7096
   "reproduceFailingTestsOnMain",
   "readTestImportClosure", // W1-T8396
+  "readReviewReuseReach", // W1-T9047
   "reproduceFailingTestsOnMerge", // W1-T8396
   "arm",
   "readArmFacts",
@@ -2046,6 +2050,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "fixProgressJudge"
   | "reproduceFailingTestsOnMain"
   | "readTestImportClosure"
+  | "readReviewReuseReach"
   | "reproduceFailingTestsOnMerge"
   | "arm"
   | "readArmFacts"
@@ -4260,6 +4265,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readRedBaseRefreshFacts: (pr) => redBaseRefreshFactsFromRest(owner, repo, pr.prNumber),
     reproduceFailingTestsOnMain: deps.reproduceFailingTestsOnMainImpl,
     readTestImportClosure: deps.readTestImportClosureImpl,
+    // W1-T9047 — two paced compares plus the proof tests' import closure.
+    readReviewReuseReach: reviewReuseReachReader({
+      plan,
+      readFacts: (reviewedMergeBaseSha, currentMergeBaseSha, headSha) =>
+        paceGhEntry(pacer, isGhRateLimitError, () =>
+          fetchReviewReuseReachFacts(owner, repo, reviewedMergeBaseSha, currentMergeBaseSha, headSha, ghJsonForBuild)),
+      readTestImportClosure: deps.readTestImportClosureImpl,
+    }),
     reproduceFailingTestsOnMerge: deps.reproduceFailingTestsOnMergeImpl,
 
     // W1-T3422/W1-T3577 — reached only after `selectStaleRedRelease` admits the cheap candidate; it shares the daemon REST pacer and has no retry/wait loop.
@@ -10151,6 +10164,97 @@ function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
   };
 }
 
+/** W1-T9047 — the review mode a disposition dispatches. The reuse rows need GREEN checks, so a
+ *  refreshed head's pending-CI `post-review` row fired first and ran a full review. The digest
+ *  carries no base, so that row now consults {@link reviewReuseVerdict} when the push orphaned a
+ *  review. */
+export function reviewDispatchModeFor(pr: OpenPrView, disposition: Disposition): ReviewDispatchMode {
+  const reuse = reviewReuseVerdict(reviewReuseInputsFrom(pr));
+  if (disposition === "review-reused" && reuse.kind === "reuse") return reuse;
+  if (disposition === "discriminate-only" && reuse.kind === "discriminate-only") return reuse;
+  if (disposition === "post-review" && pr.checksState === "pending" && pr.reviewOrphanedByPush === true) return reuse;
+  return { kind: "full-review" };
+}
+
+/** W1-T9047 — what main's move could reach, read when a review would otherwise be `discriminate-only`. */
+export interface ReviewReuseReach {
+  mainChangedFiles: readonly string[];
+  prFiles: readonly string[];
+  proofTargetPaths: readonly string[];
+  proofTestFiles: readonly string[];
+  /** Each proof test file's import closure, itself included. A file with no entry is unknown. */
+  closure: ReadonlyMap<string, ReadonlySet<string>> | undefined;
+  /** PR files whose digest part fell back to a blob sha (GitHub sent no patch). */
+  blobFallbackPaths?: readonly string[];
+}
+
+/** W1-T9047 — main's changed paths inside the PR's files, proof paths or proof tests' closure.
+ *  Only a `complete` read (untruncated, every closure known) lets an empty `counted` prove no reach. */
+export function mainDeltaReachingReview(reach: ReviewReuseReach): { counted: string[]; complete: boolean } {
+  const reached = new Set([...reach.prFiles, ...reach.proofTargetPaths, ...reach.proofTestFiles]);
+  for (const file of reach.proofTestFiles) for (const dep of reach.closure?.get(file) ?? []) reached.add(dep);
+  const counted = reach.mainChangedFiles.filter((path) => reached.has(path));
+  const complete = reach.mainChangedFiles.length < GITHUB_COMPARE_FILES_LISTED &&
+    reach.proofTestFiles.every((file) => reach.closure?.has(file) === true);
+  return { counted, complete };
+}
+
+/** W1-T9047 — operator ruling 2026-10-13: any overlap forces a full review; none, with complete
+ *  evidence, reuses the verdict; unread or incomplete keeps `discriminate-only`. */
+export function reviewModeAfterReach(
+  mode: ReviewDispatchMode,
+  reach: { counted: string[]; complete: boolean } | undefined,
+): { mode: ReviewDispatchMode; reason: string } {
+  if (mode.kind !== "discriminate-only") return { mode, reason: `mode ${mode.kind} is not decided by main's reach` };
+  if (reach === undefined) return { mode, reason: "main's delta since the reviewed merge base is unread" };
+  if (reach.counted.length > 0) {
+    return {
+      mode: { kind: "full-review" },
+      reason: `main changed ${reach.counted.length} path(s) the review judged (${reach.counted.slice(0, 5).join(", ")}) — a full review`,
+    };
+  }
+  if (!reach.complete) {
+    return { mode, reason: "main's delta is truncated or a proof test's import closure is unknown — discrimination only" };
+  }
+  return {
+    mode: { kind: "reuse", judgedHeadSha: mode.judgedHeadSha },
+    reason: "main changed none of the PR's files, proof target paths or proof tests' import closure — reusing the verdict",
+  };
+}
+
+/** W1-T9047 — proof paths that are test suites, plus the PR's own suites (a `unit test:` title
+ *  names no file). */
+export function reviewProofTestFiles(proofTargets: readonly string[], prFiles: readonly string[]): string[] {
+  const suite = (path: string): boolean => /^test\/.*\.test\.[cm]?[jt]sx?$/.test(path);
+  return [...new Set([...proofTargets, ...prFiles].filter(suite))].sort();
+}
+
+/** W1-T9047 — the production {@link SweepDeps.readReviewReuseReach}. Proofs come from
+ *  {@link fixRungTaskFor}; with no proof test, the empty closure is complete. */
+export function reviewReuseReachReader(input: {
+  plan: Plan;
+  readFacts: (reviewedMergeBaseSha: string, currentMergeBaseSha: string, headSha: string) => ReviewReuseReachFacts;
+  readTestImportClosure: ImportClosureRead | undefined;
+}): NonNullable<SweepDeps["readReviewReuseReach"]> {
+  return async (pr, reviewedMergeBaseSha, currentMergeBaseSha) => {
+    const facts = input.readFacts(reviewedMergeBaseSha, currentMergeBaseSha, pr.headSha);
+    const { task } = fixRungTaskFor(input.plan, pr, pr.body);
+    const proofTargets = proofTargetPaths(task as never);
+    const proofTestFiles = reviewProofTestFiles(proofTargets, facts.prFiles);
+    const closure = proofTestFiles.length === 0
+      ? new Map<string, ReadonlySet<string>>()
+      : await input.readTestImportClosure?.(pr, proofTestFiles, currentMergeBaseSha);
+    return {
+      mainChangedFiles: facts.mainChangedFiles,
+      prFiles: facts.prFiles,
+      proofTargetPaths: proofTargets,
+      proofTestFiles,
+      closure,
+      blobFallbackPaths: facts.blobFallbackPaths,
+    };
+  };
+}
+
 /**
  * THE POLICY TABLE — ordered rules mapping observed PR-state to a disposition. Each row carries its
  * own trap and citation; the per-row index is docs/forensics/sweep.md#second-pass-2026-09-06.
@@ -13042,6 +13146,10 @@ export interface SweepDeps {
   reproduceFailingTestsOnMerge?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
   ) => Promise<BaseProbeResult>;
+  /** W1-T9047 — main's reach for {@link reviewModeAfterReach}. Unwired keeps `discriminate-only`. */
+  readReviewReuseReach?: (
+    pr: OpenPrView, reviewedMergeBaseSha: string, currentMergeBaseSha: string,
+  ) => Promise<ReviewReuseReach | undefined>;
   strikeLadder?: StrikeLadderEffects;
   /** Arm GitHub auto-merge; idempotent at the GitHub level. RETURNS ITS OUTCOME: `armAutoMerge` does
    *  not throw, and most outcomes mean it armed NOTHING. The effect used to discard that value while
@@ -17495,6 +17603,41 @@ export async function runSweep(
     reviewKey: string;
     mode: ReviewDispatchMode;
   }> = [];
+  /** W1-T9047 — decides a `discriminate-only` mode by main's reach and ledgers one
+   *  `sweep.review_reuse_reach` row per decision, a failed read's reason included. */
+  const reviewModeWithReach = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<ReviewDispatchMode> => {
+    const from = pr.reviewedMergeBaseSha;
+    const to = pr.currentMergeBaseSha;
+    if (mode.kind !== "discriminate-only" || !deps.readReviewReuseReach || from === undefined || to === undefined) return mode;
+    let reach: ReviewReuseReach | undefined;
+    let readError: string | undefined;
+    try {
+      reach = await deps.readReviewReuseReach(pr, from, to);
+    } catch (error) {
+      // Unread is not "unreached": the reason is ledgered below and the mode stays discrimination.
+      readError = String((error as Error)?.message ?? error);
+      log("sweep.review_reuse_reach.read_error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: readError });
+    }
+    const counted = reach === undefined ? undefined : mainDeltaReachingReview(reach);
+    const decided = reviewModeAfterReach(mode, counted);
+    if (!deps.dryRun) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: pr.taskId ?? "SWEEP",
+        step: "sweep.review_reuse_reach",
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        reviewed_merge_base_sha: from,
+        current_merge_base_sha: to,
+        requested_review_mode: mode.kind,
+        effective_review_mode: decided.mode.kind,
+        reason: readError === undefined ? decided.reason : `${decided.reason}: ${readError}`,
+        ...(counted === undefined ? {} : { counted_paths: counted.counted, reach_complete: counted.complete }),
+        ...(reach?.blobFallbackPaths?.length ? { blob_fallback_paths: [...reach.blobFallbackPaths] } : {}),
+      });
+    }
+    return decided.mode;
+  };
   const quietContradictoryRows = new Set<number>();
   // W1-T7734: entries acting on a view read DURING this pass, and when each read happened.
   const rederivedIndices = new Set<number>();
@@ -20380,14 +20523,14 @@ export async function runSweep(
       // W1-T2771: discovery is not execution and therefore owns no mutex. Carry the stable key into
       // the pool, where `claimReview` atomically claims it immediately before the attempt.
       const reviewKey = reviewOutcomeKeyForPr(pr);
-      const reuse = reviewReuseVerdict(reviewReuseInputsFrom(pr));
-      const mode: ReviewDispatchMode =
-        disposition === "review-reused" && reuse.kind === "reuse"
-          ? reuse
-          : disposition === "discriminate-only" && reuse.kind === "discriminate-only"
-            ? reuse
-            : { kind: "full-review" };
-      pendingReviews.push({ index: prIndex, pr, reason, question, reviewKey, mode });
+      // W1-T9047: discriminate-only is then decided by main's reach.
+      const requested = reviewDispatchModeFor(pr, disposition);
+      const mode = await reviewModeWithReach(pr, requested);
+      const jobReason = mode.kind === "full-review" || disposition !== "post-review"
+        ? reason
+        : `${reason} — the head only took main since the verdict on ${mode.judgedHeadSha.slice(0, 7)}; ` +
+          `${mode.kind === "reuse" ? "reusing that verdict" : "re-running discrimination alone"} (W1-T9047)`;
+      pendingReviews.push({ index: prIndex, pr, reason: jobReason, question, reviewKey, mode });
       continue;
     }
 
