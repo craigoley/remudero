@@ -33,7 +33,7 @@ esac
     ...process.env,
     PATH: `${stubs}:${process.env.PATH}`,
     RMD_STATE_DIR: state,
-    RMD_CONTAINER_NAME: container,
+    RMD_DAEMON_CONTAINER: container,
     RMD_UNIT_DIR: join(dir, "systemd"),
     RMD_BIN_DIR: bin,
     RMD_LAUNCHER_PATH: launcher,
