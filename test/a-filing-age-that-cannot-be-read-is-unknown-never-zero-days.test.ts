@@ -8,7 +8,8 @@
  * as "filed today". An unknown age is now `null` with its reason, and a measured 0 stays a number.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -25,7 +26,7 @@ import {
   type VerifyHumanVerdict,
 } from "../src/lib/verify-human-judge.js";
 import { parkedVerifyHumanShards } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 const DAY_MS = 86_400_000;
 
@@ -129,4 +130,43 @@ test("#7911: the prompt and both proposals say an unknown age is unknown, never 
 test("#7911: an unknown age never earns an age-band re-ask", () => {
   assert.equal(verifyHumanAgeBandKey(unknownShard), undefined, "an unknown age sits in no age band");
   assert.ok(verifyHumanAgeBandKey({ ...unknownShard, ageDays: 61, ageUnknownReason: undefined }), "control: a 61-day age does");
+});
+
+/** Committers are explicit and deliberately need not have monotone timestamps. */
+function commitHistory(dir: string, when: string, message: string): void {
+  const { name, email } = GIT_REPO_FIXTURE_IDENTITY;
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email,
+    GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when };
+  for (const args of [["add", "-A"], ["commit", "--quiet", "--allow-empty", "-m", message]])
+    execFileSync("git", ["-C", dir, ...args], { env, stdio: "pipe" });
+}
+
+test("W1-T10210: exact record history survives embedded moves and renames", t => {
+  const repo = gitRepo({ kind: "exact-filing-history", seedCommit: false });
+  t.after(() => repo.cleanup());
+  const dir = repo.dir, id = "W1-T9003";
+  mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
+  const unrelated = ruling("W1-T90031") + ruling("W1-T8000").replace(
+    "A preference about how the operator's repo presents itself.", `dependency/prose reference ${id}, not its record`);
+  writeFileSync(join(dir, "plan", "tasks.yaml"), unrelated);
+  writeFileSync(join(dir, "plan", "tasks.d", "W1-T9001-control.yaml"), ruling("W1-T9001"));
+  commitHistory(dir, "2020-01-01T12:00:00Z", "plan exists before the exact record");
+  writeFileSync(join(dir, "plan", "tasks.yaml"), unrelated + ruling(id));
+  commitHistory(dir, "2020-01-11T12:00:00Z", "introduce the exact embedded record");
+  const now = Date.parse("2020-02-10T12:00:00Z");
+  assert.equal(parkedById(dir, now).get("W1-T9001")?.ageDays, 40, "readable-history positive control");
+  assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "date the record, not the earlier plan file or near-id");
+  commitHistory(dir, "2020-01-30T12:00:00Z", "unrelated later timestamp");
+  writeFileSync(join(dir, "plan", "tasks.yaml"), unrelated);
+  const oldPath = join(dir, "plan", "tasks.d", "odd-name.yaml");
+  writeFileSync(oldPath, ruling(id));
+  commitHistory(dir, "2020-01-15T12:00:00Z", "move the exact record into a shard");
+  assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a move preserves introduction");
+  renameSync(oldPath, join(dir, "plan", "tasks.d", "not-the-id.yml"));
+  commitHistory(dir, "2020-01-05T12:00:00Z", "rename with an older numeric timestamp");
+  assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "neither rename date nor oldest numeric timestamp is birth");
+  writeFileSync(join(dir, "plan", "tasks.d", `${id}-misleading.yaml`), ruling("W1-T9999"));
+  commitHistory(dir, "2020-02-07T12:00:00Z", "a matching filename holds a different identity");
+  assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a wrong-id filename cannot replace exact record provenance");
 });

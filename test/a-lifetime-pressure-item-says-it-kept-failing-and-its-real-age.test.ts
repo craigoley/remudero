@@ -54,7 +54,7 @@ function commitShard(dir: string, daysAgo: number): void {
     GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
   const git = (...args: string[]): void => void execFileSync("git", ["-C", dir, ...args], { env, stdio: "pipe" });
   mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
-  writeFileSync(join(dir, "plan", "tasks.d", `${ID}-old.yaml`), "- id: x\n");
+  writeFileSync(join(dir, "plan", "tasks.d", `${ID}-old.yaml`), `- id: ${ID}\n`);
   git("add", "plan");
   git("commit", "-q", "-m", "add shard");
 }
