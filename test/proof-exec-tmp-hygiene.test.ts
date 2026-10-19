@@ -17,15 +17,17 @@
 // caller (W1-T316's note), and how this leak survived three weeks of green suites.
 
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { runCiParity } from "../src/lib/ci-parity.js";
+import { coverageGateLockDir, coverageScratchDir, runCiParity, testWithCoverageLeaf, type CoverageResourcePort } from "../src/lib/ci-parity.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { narrowNameFilteredArgs, parseWhitelistedProof } from "../src/lib/review.js";
-import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { coverageParitySpawnResult, coverageResourceFixture } from "./helpers/coverage-parity-spawn.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HYGIENE = "./test/setup/tmp-hygiene.ts";
@@ -119,18 +121,126 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 
 test("ci-parity: the coverage-ratchet full-glob test run is spawned with the tmp-hygiene import — this step does NOT route through package.json's protected scripts", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
-  const coverage = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
-  assert.equal(coverage.length, 8, "expected a coverage-run invocation for every CI shard");
-  for (const shard of coverage) assertHygienePair(shard.args, "coverage-ratchet:test-with-coverage");
+  const fixture = coverageResourceFixture();
+  try {
+    const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => 0, coverageResources: fixture.resources });
+    const step = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage");
+    assert.equal(step?.ok, true, step?.detail);
+    const coverage = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
+    assert.equal(coverage.length, 8, "expected a coverage-run invocation for every CI shard");
+    for (const shard of coverage) assertHygienePair(shard.args, "coverage-ratchet:test-with-coverage");
+  } finally { fixture.cleanup(); }
 });
 
 test("ci-parity: the containment-probe test run (trigger REQUIRED) is spawned with the tmp-hygiene import", () => {
   const { spawn, calls } = recordingSpawn({
     "containment-diff-trigger.ts": { status: 0, stdout: "containment-probe: REQUIRED — touches .claude/settings.json\n" },
   });
-  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
-  const probe = calls.find((c) => c.args.some((a) => a.includes("containment.test.ts")));
-  assert.ok(probe, "expected the containment probe invocation");
-  assertHygienePair(probe!.args, "containment-probe:test");
+  const fixture = coverageResourceFixture();
+  try {
+    const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => 0, coverageResources: fixture.resources });
+    const step = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage");
+    assert.equal(step?.ok, true, step?.detail);
+    const probe = calls.find((c) => c.args.some((a) => a.includes("containment.test.ts")));
+    assert.ok(probe, "expected the containment probe invocation");
+    assertHygienePair(probe!.args, "containment-probe:test");
+  } finally { fixture.cleanup(); }
+});
+
+test("parity coverage argv fixtures use supplied scratch through the real table", () => {
+  const fixture = coverageResourceFixture(), recorded = recordingSpawn();
+  const sibling = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}parity-unowned-`));
+  writeFileSync(join(sibling, "keep"), "not this lease's bytes");
+  const spawn: PreflightSpawn = (file, args, opts) => {
+    if (args.includes("--experimental-test-coverage")) {
+      assert.equal(opts?.env?.TMPDIR, fixture.scratchDir);
+      assert.ok(opts?.env?.NODE_V8_COVERAGE?.startsWith(`${fixture.scratchDir}/raw-shards/`));
+      assert.equal(existsSync(fixture.scratchDir), true);
+    }
+    if (args.some((a) => a.endsWith("/coverage-ratchet.mjs") || a.endsWith("/diff-coverage.mjs"))) {
+      assert.equal(args[args.indexOf("--lcov") + 1], fixture.lcovPath);
+      assert.equal(existsSync(dirname(fixture.lcovPath)), true, "lease lives through both artifact consumers");
+    }
+    return recorded.spawn(file, args, opts);
+  };
+  try {
+    const result = runCiParity(REPO_ROOT, { spawn, coverageResources: fixture.resources, coverageFreeBytes: () => 0 });
+    const steps = result.steps.filter((s) => s.name.startsWith("coverage-ratchet:"));
+    assert.equal(steps.length, 4);
+    assert.ok(steps.every((s) => s.ok), JSON.stringify(steps));
+    const children = recorded.calls.filter((c) => c.args.includes("--experimental-test-coverage"));
+    assert.equal(children.length, 8);
+    for (const c of children) assertHygienePair(c.args, "real table shard");
+    assert.deepEqual(fixture.events, [`acquire:${REPO_ROOT}`, ...Array(8).fill("refresh"), "release"]);
+    assert.equal(existsSync(fixture.root), false);
+    assert.equal(existsSync(join(sibling, "keep")), true);
+  } finally { fixture.cleanup(); rmSync(sibling, { recursive: true, force: true }); }
+});
+
+test("parity fixture resources leave default coverage admission unchanged", () => {
+  const { spawn, calls } = recordingSpawn();
+  const result = testWithCoverageLeaf(REPO_ROOT, spawn, join(REPO_ROOT, "coverage", "lcov.info"), () => 0);
+  assert.equal(result.ok, false);
+  const scratch = coverageScratchDir(REPO_ROOT);
+  if (scratch.length > 60) assert.match(result.detail, /must be outside the checkout and at most 60 characters/);
+  else assert.match(result.detail, /scratch volume has 0 free bytes; need 21474836480 before starting coverage shards/);
+  assert.equal(calls.length, 0);
+  assert.match(coverageGateLockDir(REPO_ROOT), /^\/tmp\/rmd-c-[0-9a-f]{12}\.lock$/);
+  assert.equal(coverageGateLockDir(REPO_ROOT), coverageGateLockDir(REPO_ROOT), "default lock has no per-fixture identity");
+  assert.throws(() => testWithCoverageLeaf(join(tmpdir(), "missing-parity-repo", "absent"), spawn, "unused"), /ENOENT/);
+});
+
+test("parity fixture lease failures preserve refusal and owned cleanup", () => {
+  for (const mode of ["child", "raw", "compact", "metrics", "throw"] as const) {
+    const fixture = coverageResourceFixture(), recorded = recordingSpawn();
+    const spawn: PreflightSpawn = (file, args, opts) => {
+      if (mode === "throw" && args.includes("--experimental-test-coverage")) throw new Error("fixture transport unreadable");
+      const result = recorded.spawn(file, args, opts);
+      if (args.includes("--experimental-test-coverage")) {
+        if (mode === "child") return { status: 7, stdout: "# tests 1\n# pass 0\n# fail 1\n", stderr: "fixture child red" };
+        if (mode === "raw") rmSync(opts!.env!.NODE_V8_COVERAGE!, { recursive: true });
+      }
+      if (args.includes("--compact-output") && mode === "compact") rmSync(args[args.indexOf("--compact-output") + 1]!, { recursive: true });
+      if (args.includes("--output") && mode === "metrics") return { status: 0, stdout: "not measured", stderr: "" };
+      return result;
+    };
+    try {
+      const result = runCiParity(REPO_ROOT, { spawn, coverageResources: fixture.resources, coverageFreeBytes: () => 0 });
+      const step = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage");
+      assert.equal(step?.ok, false);
+      const reasons = { child: /fixture child red/, raw: /expected raw V8 coverage for shard 1/, compact: /expected compact V8 coverage for shard 1/, metrics: /merger reported no byte measurements/, throw: /fixture transport unreadable/ };
+      assert.match(step!.detail, reasons[mode]);
+      assert.equal(fixture.events.filter((e) => e === "release").length, 1);
+      assert.equal(existsSync(fixture.root), false);
+      assert.equal(result.steps.some((s) => s.name === "coverage-ratchet:ratchet"), false);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("parity fixture forwarding and hygiene imports are load-bearing", () => {
+  const fixture = coverageResourceFixture(), { spawn, calls } = recordingSpawn();
+  try {
+    const result = runCiParity(REPO_ROOT, { spawn, coverageResources: fixture.resources, coverageFreeBytes: () => 0 });
+    const step = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage");
+    assert.equal(step?.ok, true, step?.detail);
+    assert.equal(fixture.events[0], `acquire:${REPO_ROOT}`, "actual dependency reaches the real table");
+    const children = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
+    assert.equal(children.length, 8);
+    for (const c of children) assertHygienePair(c.args, "actual coverage argv");
+    assert.equal(existsSync(fixture.root), false);
+  } finally { fixture.cleanup(); }
+});
+
+test("parity fixture acquisition failures are named and do not authorize a shard", () => {
+  for (const resources of [
+    () => ({ ok: false as const, detail: "FAIL — fixture lease unavailable" }),
+    () => { throw new Error("fixture lease unreadable"); },
+  ] satisfies CoverageResourcePort[]) {
+    const { spawn, calls } = recordingSpawn();
+    const result = runCiParity(REPO_ROOT, { spawn, coverageResources: resources, coverageFreeBytes: () => 0 });
+    const step = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage");
+    assert.equal(step?.ok, false);
+    assert.match(step!.detail, /fixture lease (unavailable|unreadable)/);
+    assert.equal(calls.filter((c) => c.args.includes("--experimental-test-coverage")).length, 0);
+  }
 });
