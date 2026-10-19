@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assessReadMapPlatformOutcomes, isReadMapSingleEntryWrapper } from "../../scripts/lib/read-map-platform-outcomes.mjs";
+import { assessReadMapPlatformOutcomes, isReadMapSingleEntryWrapper } from "#scripts/lib/read-map-platform-outcomes.mjs";
 
 function outcomeInput() {
   const hash = "b".repeat(64), head = "a".repeat(40), entry = "/isolated/test/example.test.ts";
