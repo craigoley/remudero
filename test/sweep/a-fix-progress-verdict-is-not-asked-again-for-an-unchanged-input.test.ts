@@ -160,7 +160,9 @@ test("W1-T9502: the real fix rung reuses its ledger answer and names the reused 
     assert.equal(args.progressReviewInputDigest, "body-A", "production dispatch threads its independently read input");
     const options = { ...args, escalationJudge: async () => ({ decision: "deliver", reason: "fixture" } as const), deps: {
       fixProgressJudge: async () => { calls++; return undefined; }, ledgerLines: () => rows,
-      spawn: async () => { workers++; return { text: "fixed", subtype: "success", costUsd: 0, blocks: [],
+      spawn: async () => { workers++; return { sessionId: "fixture", numTurns: 1, text: "fixed", subtype: "success",
+        model: "sonnet", effort: "medium", costUsd: 0, blocks: [], stderr: "", isError: false, apiError: false,
+        childEnvKeys: [], modelUsage: {}, compactionEvents: [], qualitySuspect: false,
         tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, permissionDenials: [] } as never; },
       runReview: async () => ({ ...args.initialReview, state: "success", criteria: [] } as ReviewRunResult),
       waitForCiGreen: async () => "green" as const, fetchPrBody: async () => `Remudero-Task: ${TASK}`,
