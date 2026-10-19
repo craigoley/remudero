@@ -3,8 +3,8 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fixSeedRead, runSweep, type OpenPrView } from "../helpers/sweep-test.js";
-import { readLedgerLines } from "../../src/lib/status.js";
+import { fixSeedRead, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const HEAD = "6ed36e359c78e9bce1864fc05c5321457e5844a3";
 const OLD = "DAEMON-1792393697581";
