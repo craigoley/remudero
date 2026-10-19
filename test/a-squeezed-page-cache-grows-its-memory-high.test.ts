@@ -377,7 +377,7 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
       const argv = readFileSync(argvPath, "utf8").split("\0\0").filter(Boolean).map(command => command.split("\0"));
       assert.deepEqual(argv, [
         ["inspect", "--format", "{{.Id}}", row.current],
-        ...(row.fault === "short-inspect" ? [] : [["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"]),
+        ...(row.fault === "short-inspect" ? [] : [["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"]]),
       ], "the real shell must ask Docker for full IDs with the documented ps field");
       assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(row.target * MIB), run.stdout);
       assert.match(run.stdout, new RegExp(row.action === "hold" ? "hold" : row.action + " .*via systemd"));
