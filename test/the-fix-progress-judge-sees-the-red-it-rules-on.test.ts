@@ -8,9 +8,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildFixProgressInput as buildBase, failureEvidenceOf } from "../src/lib/fix-progress-judge.js";
-import { buildFixProgressInput, productionFixProgressJudge } from "../src/lib/sweep.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { buildFixProgressInput as buildBase, failureEvidenceOf } from "#src/lib/fix-progress-judge.js";
+import { buildFixProgressInput, productionFixProgressJudge } from "#src/lib/sweep.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const TAIL = [
   "2026-10-13T19:04:01.000Z # Subtest: coverage floor",
