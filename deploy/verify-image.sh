@@ -154,7 +154,7 @@ fi
 # No arrays: preserve Bash 3 + nounset and the default published Docker argv exactly.
 probe_run() {
   if [ "${LOCAL_MODE}" -eq 1 ]; then
-    docker run "$@"
+    docker run --pull=never --network=none "$@"
   else
     docker run "$@"
   fi
