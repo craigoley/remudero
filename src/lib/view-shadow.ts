@@ -23,9 +23,10 @@
  */
 import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { readFileIfExists } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
+import { readShadowCounters, saveShadowCounter, type ShadowKeyChange } from "./view-shadow-store.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
 export const VIEW_SHADOW_SUMMARY_STEP = "view.shadow_summary";
@@ -729,7 +730,7 @@ export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "s
 
 export interface ShadowStore {
   load(): Record<string, ViewShadowState>;
-  save(view: string, state: ViewShadowState): void;
+  save(view: string, state: ViewShadowState, keys?: ShadowKeyChange): void;
 }
 
 /** On the persistent state disk beside the switch file: the DB may live on scratch a deallocate wipes. */
@@ -742,15 +743,17 @@ export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelL
   const states = storedShadowStates(path, db);
   return {
     load: () => ({ ...states }),
-    save: (view, state) => {
+    save: (view, state, keys) => {
+      withWriteTransaction(db, lease, () => saveShadowCounter(path, states, view, state, keys));
       states[view] = state;
-      withWriteTransaction(db, lease, () => writeAtomic(path, JSON.stringify(states)));
     },
   };
 }
 
 /** The file; until its first save, the `view_shadow` table an older build kept in the DB, so a streak carries over. */
 function storedShadowStates(path: string, db: ReadModelDb): Record<string, ViewShadowState> {
+  const counters = readShadowCounters(path, true);
+  if (counters) return counters.states;
   const text = readFileIfExists(path);
   if (text !== undefined) return JSON.parse(text) as Record<string, ViewShadowState>;
   if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'view_shadow'").get() === undefined) return {};
@@ -759,20 +762,21 @@ function storedShadowStates(path: string, db: ReadModelDb): Record<string, ViewS
 
 /** Readiness as the persisted counters say, read-only: it shows from boot, before this process compared anything. */
 export function storedShadowReadiness(path: string, db: ReadModelDb, nowMs: number, qualifications: Readonly<Record<string, string>> = {}): ShadowReadiness[] {
-  return activeReadiness(new Map(Object.entries(storedShadowStates(path, db))), qualifications, nowMs);
+  const counters = readShadowCounters(path, false);
+  return activeReadiness(new Map(Object.entries(counters?.states ?? storedShadowStates(path, db))), qualifications, nowMs, counters?.keyCounts);
 }
 
 const qualifiedStateKey = (view: string, generation: string | undefined): string => generation === undefined ? view : `\u0000qualification:${JSON.stringify([view, generation])}`;
 
 /** Only the required generation is current; archived generations remain stored, never added or reset. */
-function activeReadiness(states: ReadonlyMap<string, ViewShadowState>, qualifications: Readonly<Record<string, string>>, now: number): ShadowReadiness[] {
+function activeReadiness(states: ReadonlyMap<string, ViewShadowState>, qualifications: Readonly<Record<string, string>>, now: number, keyCounts?: ReadonlyMap<string, number>): ShadowReadiness[] {
   const views = new Set([...states].map(([key, state]) => state.view ?? key));
   return [...views].sort().flatMap((view) => {
     const generation = qualifications[view];
     const stored = states.get(qualifiedStateKey(view, generation));
     const state = generation === undefined || stored?.qualificationGeneration === generation ? stored : undefined;
     if (state === undefined && generation === undefined) return [];
-    return [shadowReadiness(view, state ?? { ...emptyState(), qualificationGeneration: generation }, now)];
+    return [shadowReadiness(view, state ?? { ...emptyState(), qualificationGeneration: generation }, now, keyCounts?.get(qualifiedStateKey(view, generation)))];
   });
 }
 
@@ -789,9 +793,9 @@ function emptyState(): ViewShadowState {
  * or a stalled worker only delays it. Measured request traffic raises the floor to 3 x requests-per-day
  * (the rule of three), so a busy view needs more evidence than the cadence gives it.
  */
-export function shadowReadiness(view: string, state: ViewShadowState, nowMs: number): ShadowReadiness {
+export function shadowReadiness(view: string, state: ViewShadowState, nowMs: number, storedKeyCount?: number): ShadowReadiness {
   const { streakKeys, summary: _summary, view: _storedView, qualificationRefusal, ...s } = state;
-  const keys = Math.max(1, streakKeys?.length ?? 0);
+  const keys = Math.max(1, storedKeyCount ?? streakKeys?.length ?? 0);
   const spanMs = s.firstRequestMs === null ? 0 : nowMs - s.firstRequestMs;
   const requestsPerDay = spanMs >= DAY_MS ? (s.requests * DAY_MS) / spanMs : null;
   const requiredSamples = Math.max(keys * CADENCE_SAMPLES_PER_DAY, Math.ceil(RULE_OF_THREE * (requestsPerDay ?? 0)));
@@ -832,6 +836,7 @@ export interface ViewShadow {
 export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const clock = opts.clock ?? systemClock;
   const states = new Map<string, ViewShadowState>(Object.entries(opts.store?.load() ?? {}));
+  const streakKeys = new Map<string, Set<string>>();
   const qualifications = opts.qualifications ?? {};
   const stateOf = (view: string): ViewShadowState => {
     const generation = qualifications[view], key = qualifiedStateKey(view, generation);
@@ -864,7 +869,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       if (unready !== undefined) {
         Object.assign(state, { skipped: (state.skipped ?? 0) + 1, lastSkippedMs: now, lastSkipReason: unready });
         summarize(view, state, now, { skipped: true });
-        opts.store?.save(qualifiedStateKey(view, required), state);
+        opts.store?.save(qualifiedStateKey(view, required), state, { reset: false });
         return { view, key, diffs: [], skipped: unready };
       }
       state.samples++;
@@ -891,8 +896,17 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         return inputs ? { path: d.path, ...classifyDerived(inputs, judged) } : judged.find((j) => j.path === d.path)!;
       });
       for (const d of diffs) state.diffs[d.classification]++;
-      if (diffs.some((d) => d.classification === "real")) Object.assign(state, { streakSamples: 0, streakSinceMs: now, lastRealMs: now, streakKeys: [] });
-      else Object.assign(state, { streakSamples: state.streakSamples + 1, streakKeys: [...new Set([...state.streakKeys ?? [], key])] });
+      const stateKey = qualifiedStateKey(view, required);
+      const reset = diffs.some((d) => d.classification === "real");
+      if (reset) {
+        Object.assign(state, { streakSamples: 0, streakSinceMs: now, lastRealMs: now, streakKeys: [] });
+        streakKeys.delete(stateKey);
+      } else {
+        const keys = streakKeys.get(stateKey) ?? new Set(state.streakKeys ?? []);
+        streakKeys.set(stateKey, keys);
+        if (!keys.has(key)) { keys.add(key); (state.streakKeys ??= []).push(key); }
+        state.streakSamples++;
+      }
       if (diffs.some((d) => d.classification === "real")) {
         const classes = Object.fromEntries(SHADOW_CLASSIFICATIONS.map((c) => [c, diffs.filter((d) => d.classification === c).length]));
         const sides = (path: string): { legacy: string; view: string } => {
@@ -902,7 +916,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, ...(required === undefined ? {} : { qualificationGeneration: required }), classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), ...(legacy.paired ? { paired: legacy.paired } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       summarize(view, state, now, { diffs });
-      opts.store?.save(qualifiedStateKey(view, required), state);
+      opts.store?.save(stateKey, state, { reset, ...(reset ? {} : { add: key }) });
       return { view, key, diffs };
     },
     readiness: () => activeReadiness(states, qualifications, clock.now()),

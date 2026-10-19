@@ -418,7 +418,7 @@ test("worker generation binding qualifies first status build and preserves captu
   assert.equal(prepared?.paired?.qualificationGeneration, generation);
   assert.equal(prepared?.paired?.legacy.qualificationGeneration, generation);
   assert.equal(ticker.shadow(prepared!), true);
-  const current = () => Object.values(JSON.parse(readFileSync(path, "utf8")) as Record<string, ViewShadowState>).find((s) => s.qualificationGeneration === generation)!;
+  const current = () => storedShadowReadiness(path, {} as ReadModelDb, clock.now(), { qualified: generation })[0]!;
   assert.ok(current(), "the native comparator persists a receipt for the declared producer generation");
   assert.equal(current().samples, 1);
   const missing = { ...prepared!, paired: { ...prepared!.paired!, qualificationGeneration: undefined } };
@@ -547,7 +547,7 @@ test("counters an older build kept in the view_shadow table migrate to the state
   assert.deepEqual(storedShadowReadiness(path, db, T0).map((s) => [s.view, s.samples, s.streakSamples]), [["v", 5, 5]], "readiness reads the table until the file exists");
   const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: fileShadowStore(path, db, got.lease) });
   shadow.compare({ view: "v", key: "", requests: 1, legacy: { data: 1, asOfMs: T0 }, body: { data: 1, asOf: null } });
-  const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, { samples: number; streakSamples: number; requests: number }>;
+  const saved = fileShadowStore(path, db, got.lease).load();
   assert.deepEqual([saved.v!.samples, saved.v!.streakSamples, saved.v!.requests], [6, 6, 8], "the migrated streak continued and was written to the file");
   db.exec("DELETE FROM view_shadow");
   assert.deepEqual(storedShadowReadiness(path, db, T0).map((s) => [s.view, s.samples]), [["v", 6]], "the file wins once it exists");
