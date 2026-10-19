@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { ownedFixtureDir } from "../helpers/owned-fixture-dir.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const policySource = "deploy/resource-policy.sh";
 
