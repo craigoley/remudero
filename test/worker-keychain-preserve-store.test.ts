@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureWorkerKeychain, WorkerKeychainError, workerKeychainPaths } from "../src/lib/worker-home.js";
+import { ensureWorkerKeychain, WorkerKeychainError, workerKeychainPaths } from "#src/lib/worker-home.js";
 
 const LOGIN = "/fixture-only/login.keychain-db";
 const priorStore = "fixture-only-prior-store";
