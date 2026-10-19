@@ -281,6 +281,8 @@ export interface OwnerSearch {
   /** The checks `workflowOwner` resolved to no owner because a workflow could not be read or told apart, and why. */
   workflowGaps?: () => Array<{ family: string; reason: string }>;
   evidence?: (key: string, details: readonly string[], owner?: CiFrictionOwner) => CiFrictionOwnershipEvidence;
+  /** The pull request whose merge added `file`, from that commit's `(#N)` subject; undefined when history does not say. */
+  addedByPr?: (file: string) => number | undefined;
 }
 
 export interface CiFrictionOwnershipEvidence {

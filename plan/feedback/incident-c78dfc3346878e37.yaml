@@ -1,0 +1,28 @@
+id: incident-c78dfc3346878e37
+ts: 2026-10-19T11:17:48.093Z
+raw: >-
+  Incident c78dfc334687: invariant reconcile.unreadable
+
+  First seen: 2026-10-18T17:16:14.113Z
+
+  Last seen: 2026-10-18T17:16:14.113Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - fleet reconciliation history unreadable: /home/node/Remudero/state/ledger.2026-09-28T16-18-04-876Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-09-28T23-57-52-727Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T08-29-29-282Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T08-45-31-901Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T09-06-38-020Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T09-36-37-498Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T09-50-09-411Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T10-22-15-041Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T10-55-11-735Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T11-26-16-659Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T12-00-15-647Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T12-31-33-692Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T13-05-22-648Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T13-38-41-768Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T14-13-39-513Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T14-44-58-570Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T15-07-22-694Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T15-24-23-845Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T15-44-01-583Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T16-00-22-333Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T16-23-36-899Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T16-34-46-619Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T16-39-41-924Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T16-59-15-318Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-08-31-596Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-13-32-993Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-18-39-647Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-23-39-762Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-28-40-393Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-33-45-853Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-38-47-213Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-43-50-216Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-48-51-635Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-53-53-474Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T17-58-54-557Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-03-57-309Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-08-59-225Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-14-02-040Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-19-06-914Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-24-07-386Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-29-09-812Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-34-09-894Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-42-03-555Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-47-05-424Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-52-48-713Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T18-58-57-141Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T19-03-58-677Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T19-08-59-219Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-03T19-14-00-172Z.ndjson.gz — the fleet reconciler repairs nothing until it can read its history; move the named file out of the state dir (/home/node/Remudero/state)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c78dfc3346878e37bac52c66782283e2a0183a02d3cf521bf405a6664dc4cdc2
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

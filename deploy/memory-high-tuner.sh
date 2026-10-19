@@ -18,7 +18,8 @@
 #   RESTORE the learned value after a revive from policy or a reverted write.
 # The learned value lives in <state>/memory-high-tuned-<container>.json: resource-policy.sh starts the
 # next recycle from it and the W1-T4267 drift check accepts it. Every adjustment appends a
-# host.memory_high.adjusted ledger row. NEVER FATAL: an unreadable input holds and says why.
+# host.memory_high.adjusted ledger row. NEVER FATAL: unread own inputs hold; unknown peer ordering
+# withholds only tier-2 priority shrink, not the independent floor, severe or calm decisions.
 
 MHT_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./resource-policy.sh
@@ -69,7 +70,7 @@ memory_high_pressure_tier() {
 # Inputs (MiB unless named): MH_LIVE_MIB (live memory.high), MH_POLICY_MIB (resource-policy.sh's value,
 # the floor), MH_MAX_MIB (memory.max; empty = none), MH_LEARNED_MIB (recorded; empty = none),
 # MH_HIGH_EVENTS (memory.events high delta), MH_REFAULT_MIB (file refaults this interval, per 5 min),
-# MH_FURTHEST (1 when this container is the furthest above its policy among the daemon containers),
+# MH_FURTHEST (1 furthest above policy, 0 another peer is further, unknown ordering unavailable),
 # plus the tier inputs above. Sets MH_ACTION (grow|shrink|restore|floor|hold), MH_TARGET_MIB, MH_REASON.
 memory_high_decide() {
   local live="${MH_LIVE_MIB}" policy="${MH_POLICY_MIB}" cap="" headroom room step target excess
@@ -92,6 +93,9 @@ memory_high_decide() {
     fi
     if [ "${MH_TIER}" -ge 3 ]; then
       step="$(mht_round_up $(((excess + 1) / 2)))"
+    elif [ "${MH_FURTHEST:-0}" = unknown ]; then
+      MH_REASON="tier 2 (${MH_TIER_WHY}); peer ordering unavailable (${MH_PEER_WHY:-unreadable peer inputs})"
+      return 0
     elif [ "${MH_FURTHEST:-0}" = 1 ]; then
       step="$(mht_step)"
     else
@@ -164,6 +168,37 @@ mht_policy_mib() {
   printf '%s' "${RP_HIGH_POLICY}"
 }
 
+# Only tier 2 needs peer priority; unavailable discovery must not suppress the floor,
+# severe give-back or calm guards. Publish 1/0 only after the whole peer list is read.
+mht_peer_order() {
+  local container="$1" id="$2" others name oid extra ocg olive opol furthest=1 seen=0
+  MH_FURTHEST=unknown MH_PEER_WHY="peer discovery unavailable"
+  if ! others="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' 2>/dev/null)"; then return 0; fi
+  [ -n "${others}" ] || { MH_PEER_WHY="peer discovery empty"; return 0; }
+  while read -r name oid extra; do
+    case "${name}" in remudero-*daemon|"${RMD_SERVE_CONTAINER_NAME:-remudero-serve}") : ;; *) continue ;; esac
+    if [ "${#oid}" -ne 64 ] || [[ "${oid}" = *[!0-9a-f]* ]] || [ -n "${extra}" ]; then
+      MH_PEER_WHY="peer identity unavailable"; return 0
+    fi
+    if [ "${name}" = "${container}" ]; then
+      if [ "${oid}" != "${id}" ] || [ "${seen}" -ne 0 ]; then
+        MH_PEER_WHY="current peer identity unavailable"; return 0
+      fi
+      seen=1
+      continue
+    fi
+    if [ "${oid}" = "${id}" ]; then MH_PEER_WHY="peer identity aliases the current container"; return 0; fi
+    ocg="$(mht_cgroup_dir "${oid}")" || { MH_PEER_WHY="peer cgroup unreadable"; return 0; }
+    olive="$(mht_bytes_mib "$(cat "${ocg}/memory.high" 2>/dev/null)")" ||
+      { MH_PEER_WHY="peer memory.high unreadable"; return 0; }
+    opol="$(mht_policy_mib "${name}")" || { MH_PEER_WHY="peer policy unavailable"; return 0; }
+    case "${opol}" in ''|*[!0-9]*) MH_PEER_WHY="peer policy unreadable"; return 0 ;; esac
+    [ $((olive - opol)) -gt $((MH_LIVE_MIB - MH_POLICY_MIB)) ] && furthest=0
+  done <<< "${others}"
+  [ "${seen}" -eq 1 ] || { MH_PEER_WHY="current peer identity missing"; return 0; }
+  MH_FURTHEST="${furthest}" MH_PEER_WHY=""
+}
+
 mht_json_escape() { printf '%s' "$1" | tr -d '"\\' | tr '\n\t' '  '; }
 
 mht_record() {
@@ -213,12 +248,15 @@ memory_high_tune() {
   done
   [ -n "${container}" ] && [ -n "${state_root}" ] || { echo "memory-high-tuner: --container and --state-dir are required" >&2; return 2; }
   local state="${state_root}/state" id cg unit now high_b max_b events refault pswpin stall psi_full avail
-  local sample prev v pts pid pev prf psw pst prate rate interval others name oid ocg olive opol x
+  local sample prev v pts pid pev prf psw pst prate rate interval x
   # shellcheck disable=SC2034 # read by resource-policy.sh's resource_policy_tuned_file
   STATE_DIR="${state_root}"
   mkdir -p "${state}" 2>/dev/null || true
   id="$(docker inspect --format '{{.Id}}' "${container}" 2>/dev/null)" && [ -n "${id}" ] ||
     { echo "memory-high-tuner: ${container} — hold: no running container"; return 0; }
+  if [ "${#id}" -ne 64 ] || [[ "${id}" = *[!0-9a-f]* ]]; then
+    echo "memory-high-tuner: ${container} — hold: container identity unavailable"; return 0
+  fi
   cg="$(mht_cgroup_dir "${id}")" || { echo "memory-high-tuner: ${container} — hold: cgroup of ${id:0:12} unreadable"; return 0; }
   case "${cg}" in *.scope) unit="${cg##*/}" ;; *) unit="" ;; esac
   now="$(date -u +%s)"
@@ -257,17 +295,7 @@ memory_high_tune() {
   MH_SWAPIN_RATE="${rate}" MH_PREV_SWAPIN_RATE="${prate}"
   MH_ALLOCSTALL=$((stall - pst)); [ "${MH_ALLOCSTALL}" -ge 0 ] || MH_ALLOCSTALL=0
   MH_PSI_FULL10="${psi_full:-0}" MH_AVAIL_MIB="${avail}" MH_RESERVE_MIB="${RMD_HOST_RESERVE_MIB}"
-  # Which daemon container is furthest above its policy? Only a shrink asks.
-  MH_FURTHEST=1
-  others="$(docker ps --format '{{.Names}} {{.Id}}' 2>/dev/null)"
-  while read -r name oid; do
-    case "${name}" in remudero-*daemon) : ;; *) continue ;; esac
-    [ "${name}" != "${container}" ] || continue
-    ocg="$(mht_cgroup_dir "${oid}")" || continue
-    olive="$(mht_bytes_mib "$(cat "${ocg}/memory.high" 2>/dev/null)")" || continue
-    opol="$(mht_policy_mib "${name}")" || continue
-    [ $((olive - opol)) -gt $((MH_LIVE_MIB - MH_POLICY_MIB)) ] && MH_FURTHEST=0
-  done <<< "${others}"
+  mht_peer_order "${container}" "${id}"
   memory_high_decide
   if [ "${MH_ACTION}" = hold ]; then
     echo "memory-high-tuner: ${container} — hold at ${MH_LIVE_MIB} MiB (policy ${MH_POLICY_MIB}): ${MH_REASON}"
