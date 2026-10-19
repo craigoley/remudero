@@ -16324,9 +16324,18 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
+  // An unreadable contract is an unreadable witness (undefined → judged afresh, never reused); it must not
+  // abort the PR's disposition, which still owes the fix rung its dispatch.
+  const readWitnessContractRevision = (taskId: string): string | undefined => {
+    try { return deps.readTaskContractRevision?.(taskId); }
+    catch (error) {
+      log("sweep.progress_contract_unreadable", { task_id: taskId, error: String(error) });
+      return undefined;
+    }
+  };
   const progressWitness = (pr: OpenPrView): FixProgressWitness => ({ reviewInputDigest: pr.reviewInputDigest,
     contractRevision: pr.taskId === undefined || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`
-      ? null : deps.readTaskContractRevision?.(pr.taskId) });
+      ? null : readWitnessContractRevision(pr.taskId) });
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
   // W1-T9970: the running reviewer image, read at most once per pass and only when a blocked-fixable PR asks.
   let runningImage: { sha: string | undefined } | undefined;

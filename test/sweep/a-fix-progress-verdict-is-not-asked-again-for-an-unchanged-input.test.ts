@@ -153,7 +153,7 @@ test("W1-T9502: the real fix rung reuses its ledger answer and names the reused 
     ];
     let calls = 0, workers = 0;
     const args = buildFixRungDispatchArgs({ task: { id: TASK, title: "reuse" } as never,
-      pr, evidence: { unmetCriteria: [{ claim: "criterion", proof: "unit test: criterion", reason: "unmet" }] },
+      pr, evidence: { unmetCriteria: [{ claim: "criterion", proof: "unit test: criterion", met: false, reason: "unmet", proof_exec: "executed_fail" }] },
       runId: "reuse-rung", prUrl: pr.prUrl, branch: "run-W1-T9502-123", worktreePath: root, mount,
       settingsFile: "settings/worker.json", config: {} as never, budgetUsd: 1, strikeCap: 2,
       reviewBase: { owner: "fixture", repo: "repo", headCheckoutDir: root, reviewerMount: mount } });
