@@ -14721,6 +14721,7 @@ export function fixSeedRead(
     return { kind: fixRungStalledWithoutNewHead([...lines], taskId) ? "ended" : "live", seed };
   }
   if (fixRungStalledWithoutNewHead([...window], taskId)) return { kind: "ended", seed };
+  const handoffAt = window.findLastIndex((line) => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off");
   // A started in-process rung also loses its continuation when its daemon dies (#12904).
   // Re-enter the ordinary owner/checkout claim, never clear it here: a surviving worker,
   // dirty unpublished tree or unreadable process census must still refuse there. Require
@@ -14728,7 +14729,7 @@ export function fixSeedRead(
   const bootAt = lines.findLastIndex((line) => line.step === "daemon.boot");
   const adoption = lines.slice(seedAt + 1, bootAt).findLast((line) =>
     line.step === "run_child.adoption_pass" && line.run_id === runId);
-  if (seed.runId !== undefined && seed.runId !== runId && bootAt > seedAt && lines[bootAt].run_id === runId &&
+  if (handoffAt < 0 && seed.runId !== undefined && seed.runId !== runId && bootAt > seedAt && lines[bootAt].run_id === runId &&
       adoption !== undefined && ["live", "adopted", "unreadable", "misidentified"].every((key) => adoption[key] === 0) &&
       window.filter((line) => rung(line) && line.step === "fix.dispatch").every((line) => line.run_id === seed.runId) &&
       !lines.slice(bootAt + 1).some((line) => line.task_id === taskId &&
@@ -14736,7 +14737,6 @@ export function fixSeedRead(
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
-  const handoffAt = window.findLastIndex((line) => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off");
   const after = handoffAt < 0 ? [] : window.slice(handoffAt + 1);
   const received = handoffAt >= 0 && (window[handoffAt].sha === undefined || window[handoffAt].sha === pr.headSha) &&
     !after.some(rung) && after.some((line) => disposed(line) && line.head_sha === pr.headSha);

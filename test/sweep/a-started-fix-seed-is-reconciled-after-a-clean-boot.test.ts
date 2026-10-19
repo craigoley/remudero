@@ -64,6 +64,13 @@ test("a started fix seed still recognizes an explicit terminal outcome before bo
     head_sha: HEAD, worker_exit: "unobserved" }], pr, CURRENT)?.kind, "ended");
 });
 
+test("a started fix seed preserves a sweep hand-off until it is received", () => {
+  const rows = [seed, dispatch, { step: "fix.stood_down", task_id: TASK, run_id: OLD,
+    sha: HEAD, outcome: "handed_off" }, adoption, boot];
+  assert.equal(fixSeedRead(rows, pr, CURRENT)?.kind, "live");
+  assert.equal(fixSeedRead([...rows, { ...seed, run_id: CURRENT, acted: false }], pr, CURRENT)?.kind, "ended");
+});
+
 test("a started fix seed re-enters the normal checkout claim without waiving a live owner", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-started-fix-seed-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
