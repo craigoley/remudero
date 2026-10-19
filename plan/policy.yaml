@@ -934,6 +934,7 @@ sweep:
     # Operator ruling 2026-10-19: chronic host swap-in ~2,300 pages/s since 10-07 held every review start;
     # 8192 holds only severe spikes until the learned-relation fix lands. The loader requires the
     # row's origin to stay "proposal" (HOST_MEMORY_BUDGET_ORIGIN), so the ruling is named here.
+    # The loader caches the policy per process, so the daemon reads a new value at its next restart.
     swapInPagesPerSecMax:
       value: 8192
       origin: "proposal"
