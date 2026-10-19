@@ -22,6 +22,7 @@
 #   ./deploy/verify-image.sh                          # pull :latest and check it
 #   ./deploy/verify-image.sh --tag <sha>              # a specific tag instead of :latest
 #   ./deploy/verify-image.sh --expect sha256:<digest> # ALSO assert it is exactly the build's image
+#   ./deploy/verify-image.sh --local-image-id sha256:<64 lowercase hex> # offline local artifact
 #   REGISTRY=... IMAGE=... ./deploy/verify-image.sh    # retarget without editing this file
 #
 # The --expect form is the strongest available check and costs one paste: the ACR build workflow
@@ -34,18 +35,61 @@ REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
 EXPECT_DIGEST=""
+LOCAL_IMAGE_ID=""
+LOCAL_MODE=0
+EXPLICIT_REMOTE=0
+SHOW_HELP=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag)      TAG="${2:?--tag needs a value}"; shift 2 ;;
-    --expect)   EXPECT_DIGEST="${2:?--expect needs a sha256:... digest}"; shift 2 ;;
-    --registry) REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
-    --image)    IMAGE="${2:?--image needs a value}"; shift 2 ;;
-    -h|--help)  sed -n '1,30p' "$0"; exit 0 ;;
+    --local-image-id)
+      if [ "${LOCAL_MODE}" -eq 1 ] || [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "verify-image: --local-image-id needs one full image ID, once." >&2
+        exit 2
+      fi
+      LOCAL_IMAGE_ID="$2"; LOCAL_MODE=1; shift 2 ;;
+    --tag)      EXPLICIT_REMOTE=1; TAG="${2:?--tag needs a value}"; shift 2 ;;
+    --expect)   EXPLICIT_REMOTE=1; EXPECT_DIGEST="${2:?--expect needs a sha256:... digest}"; shift 2 ;;
+    --registry) EXPLICIT_REMOTE=1; REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
+    --image)    EXPLICIT_REMOTE=1; IMAGE="${2:?--image needs a value}"; shift 2 ;;
+    -h|--help)  SHOW_HELP=1; shift ;;
     *) echo "verify-image: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
 done
 
+# Validate before even a help/pin reader runs. Ambient remote defaults do not select local identity.
+if [ "${LOCAL_MODE}" -eq 1 ]; then
+  if [ "${EXPLICIT_REMOTE}" -ne 0 ]; then
+    echo "verify-image: --local-image-id conflicts with explicit remote image flags." >&2
+    exit 2
+  fi
+  case "${LOCAL_IMAGE_ID}" in
+    sha256:*) LOCAL_HEX="${LOCAL_IMAGE_ID#sha256:}" ;;
+    *) echo "verify-image: --local-image-id requires sha256: and 64 lowercase hex digits." >&2; exit 2 ;;
+  esac
+  case "${LOCAL_HEX}" in
+    ''|*[!0-9a-f]*) echo "verify-image: invalid local image ID." >&2; exit 2 ;;
+  esac
+  if [ "${#LOCAL_HEX}" -ne 64 ]; then
+    echo "verify-image: local image ID must contain exactly 64 hex digits." >&2
+    exit 2
+  fi
+fi
+if [ "${SHOW_HELP}" -eq 1 ]; then sed -n '1,31p' "$0"; exit 0; fi
+
+if [ "${LOCAL_MODE}" -eq 1 ]; then
+  REF="${LOCAL_IMAGE_ID}"
+  if ! LOCAL_INSPECTED_ID="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null)"; then
+    echo "verify-image: UNVERIFIED local image identity; refusing before probes." >&2
+    exit 1
+  fi
+  if [ "${LOCAL_INSPECTED_ID}" != "${LOCAL_IMAGE_ID}" ]; then
+    echo "verify-image: local image identity mismatch or unavailable; refusing before probes." >&2
+    exit 1
+  fi
+  AFTER="${LOCAL_INSPECTED_ID}"
+  echo "verify-image: local image ID under test: ${AFTER} (no registry or pull)"
+else
 REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"
 echo "verify-image: target ${REF}"
 
@@ -105,6 +149,16 @@ if [ -n "${EXPECT_DIGEST}" ]; then
   fi
   echo "verify-image: digest matches the expected build."
 fi
+fi
+
+# No arrays: preserve Bash 3 + nounset and the default published Docker argv exactly.
+probe_run() {
+  if [ "${LOCAL_MODE}" -eq 1 ]; then
+    docker run --pull=never --network=none "$@"
+  else
+    docker run "$@"
+  fi
+}
 
 # ── 5. THE CHECKS, RUN INSIDE THE IMAGE ──────────────────────────────────────────────────────
 # `--entrypoint /bin/sh` bypasses tini for the probe only; the image's own ENTRYPOINT is
@@ -162,7 +216,14 @@ fi
 # `docker inspect` renders an absent label as the literal `<no value>`, and an image built before
 # REQ 15 landed has no label at all. Both normalise to EMPTY here, and empty means the probe
 # reports UNKNOWN rather than a verdict - the same rule the declared-pin read above follows.
-LABEL_BUILD_SHA="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${REF}" 2>/dev/null || true)"
+if [ "${LOCAL_MODE}" -eq 1 ]; then
+  if ! LABEL_BUILD_SHA="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${REF}" 2>/dev/null)"; then
+    echo "verify-image: UNVERIFIED local image metadata; refusing before probes." >&2
+    exit 1
+  fi
+else
+  LABEL_BUILD_SHA="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${REF}" 2>/dev/null || true)"
+fi
 [ "${LABEL_BUILD_SHA}" = "<no value>" ] && LABEL_BUILD_SHA=""
 if [ -n "${LABEL_BUILD_SHA}" ]; then
   echo "verify-image: image LABEL declares build sha ${LABEL_BUILD_SHA}"
@@ -173,7 +234,7 @@ fi
 echo
 echo "verify-image: checks inside ${AFTER}"
 set +e
-docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CODEX_VERSION="${EXPECT_CODEX_VERSION}" -e EXPECT_BUILD_SHA="${LABEL_BUILD_SHA}" --entrypoint /bin/sh "${REF}" -c '
+probe_run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CODEX_VERSION="${EXPECT_CODEX_VERSION}" -e EXPECT_BUILD_SHA="${LABEL_BUILD_SHA}" --entrypoint /bin/sh "${REF}" -c '
   fail=0
   # W1-T2571: infrastructure faults are counted SEPARATELY from product failures so the two can
   # be told apart in the summary; both still exit non-zero (see `exit` at the end of this probe).
@@ -495,7 +556,7 @@ set -e
 # command. A broken entrypoint makes every invocation fail, so it is worth one extra container.
 echo
 echo "verify-image: entrypoint exec path (bootstrap skipped — no token needed)"
-if out="$(docker run --rm -e RMD_SKIP_BOOTSTRAP=1 "${REF}" \
+if out="$(probe_run --rm -e RMD_SKIP_BOOTSTRAP=1 "${REF}" \
            sh -c 'echo entrypoint-reached' 2>&1)"; then
   if printf '%s' "$out" | grep -q 'entrypoint-reached'; then
     echo "  PASS  entrypoint runs and execs the command"
@@ -540,7 +601,7 @@ fi
 echo
 echo "verify-image: a commit succeeds as uid 1000 (through the entrypoint, no GIT_* env)"
 set +e
-out="$(docker run --rm -e RMD_SKIP_BOOTSTRAP=1 --user 1000:1000 "${REF}" sh -c '
+out="$(probe_run --rm -e RMD_SKIP_BOOTSTRAP=1 --user 1000:1000 "${REF}" sh -c '
   set -e
   d=$(mktemp -d)
   cd "$d"
@@ -599,7 +660,7 @@ fi
 echo
 echo "verify-image: bootstrap currency (offline, against a throwaway origin — no token needed)"
 set +e
-out="$(docker run --rm --entrypoint /bin/sh "${REF}" -c '
+out="$(probe_run --rm --entrypoint /bin/sh "${REF}" -c '
   set -e
   export GIT_AUTHOR_NAME=v GIT_AUTHOR_EMAIL=v@v GIT_COMMITTER_NAME=v GIT_COMMITTER_EMAIL=v@v
   root=$(mktemp -d)
@@ -703,7 +764,7 @@ fi
 echo
 echo "verify-image: process-inspection binaries run as uid 1000 (ps/pgrep for the sweeps, lsof for the reapers)"
 set +e
-out="$(docker run --rm --entrypoint /bin/sh --user 1000:1000 "${REF}" -c '
+out="$(probe_run --rm --entrypoint /bin/sh --user 1000:1000 "${REF}" -c '
   fail=0
   # Each binary is INVOKED. Exit codes verified against Debian bookworm: `ps -eo pid=` is 0,
   # `pgrep --version` is 0, `lsof -v` is 0. A bare `pgrep <pattern>` would be 1 on no match, which
@@ -743,6 +804,10 @@ elif [ "${UNVERIFIED:-0}" -ne 0 ]; then
   echo "  Nothing above should be read as a statement about the image until it is re-run clean." >&2
 else
   echo "verify-image: FAILURES above, on ${AFTER}" >&2
-  echo "  This digest was pulled during THIS run, so a stale image is not the explanation." >&2
+  if [ "${LOCAL_MODE}" -eq 1 ]; then
+    echo "  The inspected local image ID was used without a pull; these are local probe findings." >&2
+  else
+    echo "  This digest was pulled during THIS run, so a stale image is not the explanation." >&2
+  fi
 fi
 exit "${RC}"
