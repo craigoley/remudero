@@ -817,6 +817,23 @@ test("W1-T10208: new validation never promotes a legacy memory escape to ready",
   if (legacyTail.kind === "admitted") { assert.equal(legacyTail.tier, "own-tail"); legacyTail.reservation?.releaseOccupancy(); }
 });
 
+test("W1-T10208: new validation refuses an unsupported worker class before any policy or reservation effect", async () => {
+  const f = validationFixture();
+  const stderr: string[] = [];
+  const refused = await memoryAdmission.awaitValidationMemoryAdmission(
+    { ...validationRequest, workerClass: "build" as unknown as typeof validationRequest.workerClass },
+    { ...f.options, policy: () => { throw new Error("policy must not be read for an unsupported class"); },
+      stderr: line => { stderr.push(line); } },
+  );
+  const result = validationRefused(refused, "budget-unavailable", "unsupported-validation-class");
+  assert.equal(result.cleanup, "none");
+  assert.equal(result.attempts, 0);
+  assert.equal(result.waitedMs, 0);
+  assert.equal(f.opens(), 0);
+  assert.equal(f.marked(), false);
+  assert.ok(stderr.some(line => line.includes("unsupported-validation-class")), stderr.join("\n"));
+});
+
 test("W1-T10208: an incomplete fit has no validation admission effects", async () => {
   const cases: Array<[Partial<memoryAdmission.ValidationAdmissionPorts>, string]> = [
     [{ validationEstimate: () => ({ kind: "unavailable", reason: "no-measured-samples" }) }, "no-measured-samples"],
