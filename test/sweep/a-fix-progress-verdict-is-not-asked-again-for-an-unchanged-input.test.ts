@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { buildFixProgressInput, resolveFixProgress, type FixProgressJudge, type FixProgressWitness } from "#src/lib/fix-progress-judge.js";
-import { runFixRung, buildFixRungDispatchArgs, type ReviewRunResult } from "../helpers/run-task-test.js";
+import { runFixRung, buildFixRungDispatchArgs, type ReviewRunResult } from "#test/helpers/run-task-test.js";
 
 const TASK = "W1-T9502";
 const HEAD = "999a5dc";
