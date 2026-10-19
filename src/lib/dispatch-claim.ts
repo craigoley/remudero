@@ -9,6 +9,7 @@ import { DISPATCH_VALUE_WINDOW_MS } from "./dispatch-value.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 
 /**
@@ -375,7 +376,7 @@ function claimAnchorMessage(): string {
 }
 
 function claimRenewer(): string {
-  return `${process.pid}@${hostname()} ${new Date().toISOString()}`;
+  return `${process.pid}@${hostname()} ${systemClock.iso()}`;
 }
 
 /** W1-T9432: the anchor's FIRST line verbatim, so {@link parseClaimAnchorMessage} still decodes the minter,
@@ -927,7 +928,7 @@ export async function readRunBranchActivity(taskId: string, run: ClaimGitDepsAsy
     const shown = await run(["log", "-1", "--format=%ct", m[1]!]);
     const atMs = Number(shown.stdout.trim()) * 1000;
     if (shown.status !== 0 || !Number.isFinite(atMs) || atMs <= 0) return failed(shown);
-    if (newest === undefined || atMs > newest.atMs) newest = { atMs, atIso: new Date(atMs).toISOString(), ref: m[2]! };
+    if (newest === undefined || atMs > newest.atMs) newest = { atMs, atIso: fixedClock(atMs).iso(), ref: m[2]! };
   }
   return newest === undefined ? { ok: true } : { ok: true, newest };
 }
@@ -970,12 +971,12 @@ export function decideClaimSilence(i: {
   return { verdict: "alive", silenceMs, reason: `${said} — keeping it` };
 }
 
-export interface ClaimSilenceJudgeDeps {
+export interface ClaimSilenceJudgeInputs {
   run: ClaimGitDepsAsync["run"];
   stateDir: string;
   log: (step: string, fields: Record<string, unknown>) => void;
   say?: (line: string) => void;
-  nowMs?: () => number;
+  clock?: Clock;
   readRows?: (sinceIso: string) => Promise<Array<Record<string, unknown>>>;
   mintedByThisInstance?: (anchor: ClaimAnchorIdentity) => boolean;
 }
@@ -994,11 +995,11 @@ export interface ClaimSilenceJudgement extends ClaimSilenceDecision {
 export async function reclaimSilentDispatchClaim(
   taskId: string,
   reserver: DispatchClaimReserverAsync,
-  deps: ClaimSilenceJudgeDeps,
+  deps: ClaimSilenceJudgeInputs,
 ): Promise<ClaimSilenceJudgement> {
-  const nowMs = (deps.nowMs ?? Date.now)();
+  const nowMs = (deps.clock ?? systemClock).now();
   const readRows = deps.readRows ?? ((since: string) => readLedgerUnionRecords(deps.stateDir, { since, step: CLAIM_SILENCE_LEDGER_STEPS }));
-  const rows = await readRows(new Date(nowMs - DISPATCH_VALUE_WINDOW_MS).toISOString());
+  const rows = await readRows(fixedClock(nowMs - DISPATCH_VALUE_WINDOW_MS).iso());
   const window = claimSilenceWindow(rows);
   const judged = window.samples > 0 ? await reserver.holder(taskId) : undefined;
   const message = judged ? await reserver.anchorMessage?.(taskId) : undefined;

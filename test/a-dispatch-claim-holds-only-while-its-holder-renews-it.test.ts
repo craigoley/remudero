@@ -12,7 +12,8 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test, mock } from "node:test";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   claimLastSignOfLife,
   claimRenewalMessage,
@@ -29,19 +30,19 @@ import {
   reclaimSilentDispatchClaim,
   renewDispatchClaim,
   renewDispatchClaimAsync,
-  type ClaimSilenceJudgeDeps,
+  type ClaimSilenceJudgeInputs,
   type DispatchClaimOutcome,
   type DispatchClaimReserver,
   type DispatchClaimReserverAsync,
-} from "../src/lib/dispatch-claim.js";
-import { claimCommand, claimHoldCommand, runTask, type RunResult } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { GitHub } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { spawnWorker } from "../src/lib/worker.js";
+} from "#src/lib/dispatch-claim.js";
+import { claimCommand, claimHoldCommand, runTask, type RunResult } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { GitHub } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { spawnWorker } from "#src/lib/worker.js";
 
 Object.assign(process.env, {
   GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
@@ -112,12 +113,12 @@ function measuredRows(n: number, durationMs: number, nowMs: number): Row[] {
   }).flat();
 }
 
-function judgeDeps(f: Fixture, rows: Row[], nowMs: number, logged: Array<{ step: string; fields: Row }>): ClaimSilenceJudgeDeps {
+function judgeDeps(f: Fixture, rows: Row[], nowMs: number, logged: Array<{ step: string; fields: Row }>): ClaimSilenceJudgeInputs {
   return {
     run: gitClaimRunnerAsync(f.work),
     stateDir: join(f.work, "no-state"),
     log: (step, fields) => void logged.push({ step, fields }),
-    nowMs: () => nowMs,
+    clock: fixedClock(nowMs),
     readRows: async () => [...rows, ...logged.map(({ step, fields }) => ({ step, ...fields }))],
     mintedByThisInstance: () => false,
   };
@@ -173,7 +174,7 @@ test("a reclaim whose lease is lost writes dropped: false and takes nothing", as
     run: async () => ({ status: 0, stdout: "", stderr: "" }),
     stateDir: "/nonexistent",
     log: (step, fields) => void logged.push({ step, fields }),
-    nowMs: () => nowMs,
+    clock: fixedClock(nowMs),
     readRows: async () => measuredRows(10, W, nowMs),
     mintedByThisInstance: () => false,
   });
@@ -195,7 +196,7 @@ test("W1-T9432: a claim silent past one window is reported once and kept", async
     const first = await reclaimSilentDispatchClaim(ID, asyncReserver(f.work), deps);
     assert.equal(first.verdict, "unrenewed");
     assert.equal(first.anchor, undefined);
-    const second = await reclaimSilentDispatchClaim(ID, asyncReserver(f.work), { ...deps, nowMs: () => nowMs + 5 * MIN });
+    const second = await reclaimSilentDispatchClaim(ID, asyncReserver(f.work), { ...deps, clock: fixedClock(nowMs + 5 * MIN) });
     assert.equal(second.verdict, "unrenewed");
     const reported = logged.filter((r) => r.step === "dispatch.claim_unrenewed");
     assert.equal(reported.length, 1, "reported once per judged anchor sha, not once per lane");
@@ -341,7 +342,7 @@ test("a renewal that loses the push lease is lost, and an unreachable origin is 
 
 test("the window is the p90 of paired claim-to-verdict durations and the renewal grammar round-trips", () => {
   const nowMs = Date.parse("2026-10-19T00:00:00Z");
-  const rows = Array.from({ length: 10 }, (_, i) => measuredRows(1, (i + 1) * MIN, nowMs + i * HOUR).map((r) => ({ ...r, run_id: `r${i}` }))).flat();
+  const rows: Row[] = Array.from({ length: 10 }, (_, i) => measuredRows(1, (i + 1) * MIN, nowMs + i * HOUR).map((r) => ({ ...r, run_id: `r${i}` }))).flat();
   rows.push({ step: "verdict", run_id: "r0", ts: new Date(nowMs + 99 * HOUR).toISOString() }, { step: "dispatch.claim", outcome: "taken", run_id: "rx", ts: "x" });
   assert.deepEqual(claimSilenceWindow(rows), { windowMs: 9 * MIN, samples: 10 });
   assert.equal(claimRenewalMessage("not a claim", "1@h 2026-10-19T00:00:00.000Z"), undefined);
@@ -410,7 +411,7 @@ test("a run's lease renews its claim on the pace and stop() hands back the sha t
     assert.equal(remoteTip(f, ID), held, "stop() returns the sha the ref now carries");
     assert.equal(lease.current(), held);
     assert.equal(await reserver.drop(ID, { expect: held }), true, "the holder release pinned to that sha drops it");
-    assert.deepEqual(logged, []);
+    assert.equal(logged.length, 0, "a healthy lease records nothing");
 
     const taken = await reserver.mintAnchor();
     assert.equal(await reserver.attempt(ID, taken), "created");
