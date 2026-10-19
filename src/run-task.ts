@@ -29,7 +29,7 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
-import { firstFixRoundVerdict, judgeFixProgress,
+import { judgeFixProgress, resolveFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -11406,6 +11406,8 @@ export async function runFixRung(opts: {
   retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
+  /** The sweep's independently read PR input; absent is not proof that the body stayed unchanged. */
+  progressReviewInputDigest?: string;
   initialCriterionIndices?: readonly number[];
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
   /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
@@ -11793,6 +11795,7 @@ export async function runFixRung(opts: {
   // into both the pre-strike probe's key and the false-block producer below, so the two can never
   // disagree about "current".
   const currentContractRevision = taskContractRevision(opts.task);
+  let progressReviewInputDigest = opts.progressReviewInputDigest;
   const admitFixTests = !(opts.task.files?.length && opts.task.files.every(isInPlanScope));
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
   // queue, no ledger step. The ten fix-rung sites below are the NEEDS ME board's largest class.
@@ -12020,10 +12023,11 @@ export async function runFixRung(opts: {
       operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap, parkedReason: forJudge ? parkedReason : undefined });
     standInEscalates = true;
     try {
-      const decision = await judgeFixProgress(input, progressJudge);
+      const { decision, receipt } = await resolveFixProgress(input, persisted,
+        { judge: progressJudge, reviewInputDigest: progressReviewInputDigest, contractRevision: currentContractRevision });
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
         parked_reason: parkedReason, former_ceiling: input.formerCeiling,
-        round_count: input.rounds.length, signals: input.signals, ...decision });
+        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       return decision;
     } finally {
       standInEscalates = false;
@@ -12352,11 +12356,13 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
+      const { decision, receipt } = await resolveFixProgress(input, persisted,
+        { judge: progressJudge, firstRound: true, reviewInputDigest: progressReviewInputDigest,
+          contractRevision: currentContractRevision });
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
         parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-        round_count: input.rounds.length, signals: input.signals, ...decision });
+        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
         const loop = `fix progress loop: ${decision.loop} — ${decision.reason}`;
@@ -14448,6 +14454,7 @@ export async function runFixRung(opts: {
       runId: opts.runId,
       openTaskIds: opts.openTaskIds,
     });
+    progressReviewInputDigest = reviewInputBody === undefined ? undefined : reviewInputDigest(review.headSha, reviewInputBody);
     if (review.verdictWithheld) {
       deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.verdictWithheld });
       return { outcome: "stood_down", review, strikes, retriggers, reason: review.verdictWithheld, standDownReason: review.verdictWithheld };
@@ -40676,6 +40683,7 @@ export function buildFixRungDispatchArgs(args: {
     budgetUsd: args.budgetUsd,
     strikeCap: args.strikeCap,
     initialReview,
+    progressReviewInputDigest: pr.reviewInputDigest,
     initialCriterionIndices,
     constraint: feedbackFixConstraint(pr.pendingAnswer),
     feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),

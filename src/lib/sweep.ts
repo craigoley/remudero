@@ -1,7 +1,8 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, firstFixRoundVerdict, fixRedClass, judgeFixProgress, parseFixProgressVerdict, unfiledScopeStandDown,
+import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, unfiledScopeStandDown,
+  type FixProgressWitness,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
@@ -483,7 +484,7 @@ export function hostGapProgressInput(
  *  repair, but a paced re-review of the same head, or an escalation once the fix-progress judge says so. */
 export async function planHostGapRereview(
   state: HostGapRereviewState,
-  opts: { judge?: FixProgressJudge; input: FixProgressInput;
+  opts: FixProgressWitness & { judge?: FixProgressJudge; input: FixProgressInput; ledger?: readonly Record<string, unknown>[];
     log?: (step: string, fields: Record<string, unknown>) => void },
 ): Promise<HostGapRereviewAction> {
   const prior = state.history.length;
@@ -497,8 +498,8 @@ export async function planHostGapRereview(
       `(${Math.ceil(waitMs / 60_000)}m derived from ${prior} prior host-gap re-review(s) and the observed review duration)` };
   }
   if (prior >= 1) {
-    const progress = await judgeFixProgress(opts.input, opts.judge);
-    opts.log?.("fix.progress_judged", { site: "host-gap-rereview", pr_number: opts.input.prNumber,
+    const { decision: progress, receipt } = await resolveFixProgress(opts.input, opts.ledger ?? [], opts);
+    opts.log?.(receipt.step, { ...receipt, site: "host-gap-rereview", pr_number: opts.input.prNumber,
       head_sha: opts.input.headSha, parked_reason: opts.input.parkedReason, round_count: opts.input.rounds.length,
       signals: opts.input.signals, ...failureEvidenceField(opts.input), ...progress });
     if (progress.verdict === "unavailable") return { kind: "hold", reason: progress.reason, progress };
@@ -16323,6 +16324,9 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
+  const progressWitness = (pr: OpenPrView): FixProgressWitness => ({ reviewInputDigest: pr.reviewInputDigest,
+    contractRevision: pr.taskId === undefined || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`
+      ? null : deps.readTaskContractRevision?.(pr.taskId) });
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
   // W1-T9970: the running reviewer image, read at most once per pass and only when a blocked-fixable PR asks.
   let runningImage: { sha: string | undefined } | undefined;
@@ -16578,12 +16582,13 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
-      const result = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
+      const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
+        { ...progressWitness(pr), judge: progressJudge, firstRound: true });
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
         step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
         site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
         parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-        round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result });
+        round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
       if (result.verdict === "escalate") {
         next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
         continue;
@@ -18093,6 +18098,7 @@ export async function runSweep(
         ...(paced ? { lastReviewAtMs: Math.max(facts.lastReviewAtMs ?? Number.NEGATIVE_INFINITY, hostGapRefusal.attemptedAt ?? Number.NEGATIVE_INFINITY) } : {}),
         nowMs: now, observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
       const hostGapPlan = await planHostGapRereview(hostGapState, {
+        ...progressWitness(pr), ledger: ledgerLines,
         judge: deps.fixProgressJudge,
         input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
         log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
@@ -18332,10 +18338,11 @@ export async function runSweep(
                   currentRed: redCheckNames(pr), ledger: ledgerLines, formerCeiling: 2,
                   parkedReason: `${parkedReason}; ${JSON.stringify(history)}` });
                 input.remedyHistory = history;
-                const progress = await judgeFixProgress(input, deps.fixProgressJudge);
+                const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
+                  { ...progressWitness(pr), judge: deps.fixProgressJudge });
                 appendLine(deps.ledgerPath, { ...row, step: "fix.progress_judged", site: "refused-twice",
                   parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-                  ...pendingChecksField(input), ...failureEvidenceField(input), ...progress });
+                  ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
                 if (progress.verdict === "unavailable") { repair.reason = progress.reason; return; }
                 if (progress.verdict === "escalate") {
                   repair.repaired = false;
@@ -18401,6 +18408,7 @@ export async function runSweep(
         const hostGapState = { history: facts.history, skips, lastReviewAtMs: facts.lastReviewAtMs, nowMs: now,
           observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
         const hostGap = await planHostGapRereview(hostGapState, {
+          ...progressWitness(pr), ledger: ledgerLines,
           judge: deps.fixProgressJudge,
           input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
           log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
@@ -18615,11 +18623,12 @@ export async function runSweep(
             formerCeiling: MAX_REARMS_AFTER_DISARM_PER_HEAD,
             parkedReason: `re-arm: ${rearms} merge queue ejections at this head`, operatorAnswer: pr.pendingAnswer?.constraint });
           input.remedyHistory = rearmRows;
-          const progress = await judgeFixProgress(input, deps.fixProgressJudge);
+          const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
+            { ...progressWitness(pr), judge: deps.fixProgressJudge });
           appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
             step: "fix.progress_judged", site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
             former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
-            round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress });
+            round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
           rearmExhausted = progress.verdict === "escalate";
           rearmUnavailable = progress.verdict === "unavailable";
           rearmReason = progress.verdict === "escalate" ? `fix progress loop: ${progress.loop} — ${progress.reason}`
@@ -19224,13 +19233,14 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const result = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
+                const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
+                  { ...progressWitness(pr), judge: progressJudge, firstRound: true });
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
                   step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
                   site: progressParkedReason?.split(":")[0] ?? "fix-strike",
                   parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
                   input_key: inputKey, red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
-                  ...pendingChecksField(input), ...failureEvidenceField(input), ...result });
+                  ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
                 if (result.verdict === "unavailable") {
                   acted = false;
                   standDownReason = result.reason;
