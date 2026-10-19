@@ -138,9 +138,10 @@ test("the default narrow selection is the diff's test files plus direct importer
     mkdirSync(join(dir, "test"), { recursive: true });
     writeFileSync(join(dir, "src/lib/a.ts"), "export const a = 1;\n");
     writeFileSync(join(dir, "src/lib/b.ts"), "export const b = 1;\n");
-    writeFileSync(join(dir, "test/a-direct.test.ts"), 'import { a } from "../src/lib/a.js";\nvoid a;\n');
-    writeFileSync(join(dir, "test/a-commented.test.ts"), '// import { a } from "../src/lib/a.js";\nvoid 1;\n');
-    writeFileSync(join(dir, "test/b-only.test.ts"), 'import { b } from "../src/lib/b.js";\nvoid b;\n');
+    const up = "..";
+    writeFileSync(join(dir, "test/a-direct.test.ts"), `import { a } from "${up}/src/lib/a.js";\nvoid a;\n`);
+    writeFileSync(join(dir, "test/a-commented.test.ts"), `// import { a } from "${up}/src/lib/a.js";\nvoid 1;\n`);
+    writeFileSync(join(dir, "test/b-only.test.ts"), `import { b } from "${up}/src/lib/b.js";\nvoid b;\n`);
     writeFileSync(join(dir, "test/own.test.ts"), "void 2;\n");
     repo.git("add", "-A");
     const got = await coverageNarrowSuites(dir, ["src/lib/a.ts", "test/own.test.ts", "test/deleted.test.ts"]);
