@@ -1,0 +1,73 @@
+- id: W1-T10191
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — fix_refusal:census-precheck cost 19.2 PR minute(s) across 10 round(s) on 9 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.26
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:fix_refusal:census-precheck"
+  files:
+    - scripts/census-precheck.mjs
+    - test/ci/gates/ci-friction-remedy-f9833e0a349fb48b.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on fix_refusal:census-precheck"
+      proof: "grep: test(\"W1-T10191: fix_refusal:census-precheck is prevented, not retried\" in test/ci/gates/ci-friction-remedy-f9833e0a349fb48b.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures fix_refusal:census-precheck's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: fix_refusal:census-precheck cost 19.2 PR minute(s) (seven-day half-life) across 10 fix round(s) on 9 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/census-precheck.mjs: names "census-precheck" (16 line(s))
+    - scripts/census-precheck-parity-baseline.json: names "census-precheck" (13 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #12830 (https://github.com/craigoley/remudero/pull/12830) at 2026-10-18T22:51:08.043Z: census-precheck: this branch grows 1 census count(s) CI will refuse:   census-suite: test/the-affected-suite-reach-ratchet.test.ts fails — , test/dispatch-is-not-held-behind-the-boot-cadence-gate.test
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/cli/commands/daemon.ts:1030
+          |   - src/cli/commands/daemon.ts:7
+    - PR #12700 (https://github.com/craigoley/remudero/pull/12700) at 2026-10-18T02:03:13.646Z: census-precheck: this branch grows 1 census count(s) CI will refuse:   census-suite: test/the-affected-suite-reach-ratchet.test.ts fails — test.ts, test/checkpoint-publication-contract.test.ts, test/d
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/the-affected-suite-reach-ratchet.test.ts:1:3747
+          | ✖ unit test: test/the-affected-suite-reach-ratchet.test.ts (1866.039422ms)
+          |   AssertionError [ERR_ASSERTION]: importerCount: 934 > 933; new importers: test/a-booting-daemon-adopts-its-live-run-children.test.ts, test/a-build-run-executes-in-a-detached-child.test.ts, test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts, test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts, test/a-commit-status-is-not-a-check-run.test.ts, test/a-conflicted-head-gets-its-conflict-round-on-the-light-pass.test
+    - PR #12390 (https://github.com/craigoley/remudero/pull/12390) at 2026-10-16T18:48:22.865Z: census-precheck: this branch grows 1 census count(s) CI will refuse:   comment-load: src/lib/repo-location.ts has 60 comment lines > ceiling 57 — trim them, or record "src/lib/repo-location.ts": 250 i
+        failing tests: only run-task.ts (the CLI entrypoint) pays the argv-at-import cost; no other src/lib module imports src/lib/repo-location.ts — only run-task.ts (the CLI entrypoint) pays the argv-at-import cost; ["every in-repo test fixture prefix is gitignored, so one test's fixture cannot read as another's dirt"]; every in-repo test fixture prefix is gitignored, so one test's fixture cannot read as another's dirt
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — leaf, no other src/lib module imports src/lib/repo-location.ts — only run-task.ts (the CLI entrypoint) pays the argv-at-import cost
+          | not ok 6 - no other src/lib module imports src/lib/repo-location.ts — only run-task.ts (the CLI entrypoint) pays the argv-at-import cost
+          |   ---
+          |   duration_ms: 144.189927
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/cli-plumbing-extraction.test.ts:96:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     an unrelated src/lib module imports repo-location.ts and would pay the argv-at-import cost on import: tick-
+    - PR #11852 (https://github.com/craigoley/remudero/pull/11852) at 2026-10-15T01:18:25.861Z: census-precheck: this branch grows 1 census count(s) CI will refuse:   comment-load: src/run-task.ts has 18255 comment lines > ceiling 18250 — trim them, or record "src/run-task.ts": 18500 in scripts/
+        failing tests: the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus); the CLI, run directly (no injected collaborators), exits 0 against the real repo now that W1-T2732 cleared it, and still prints blind spots; both the clean run and a violation run still print the blind-spots statement; STRUCTURAL: daemonCommand's runOne closure threads target.owner into runTask's opts — dropping just this line reproduces the partial-fix hazard; dropping just this line reproduces the partial-fix hazard"]
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/coverage-session-blanking.test.ts:1:3070
+          | ✖ the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus) (1490.059024ms)
+          |   AssertionError [ERR_ASSERTION]: W1-T2732 blanked every unblanked NODE_TEST_CONTEXT-strip finding
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   {
+          |   +     file: 'test/a-build-run-executes-in-a-detached-child.test.ts',
+          |   +     ident: 'env',
+          |   +     line: 143
+          |   +   }
+    - PR #11480 at 2026-10-13T20:56:59.048Z: census-precheck: this branch grows 3 census count(s) CI will refuse:   fixture-copy: gitInitSites 224 > baseline 223 — build the fixture with test/helpers/ (git-repo.ts, fake-github.ts, gh-shim.ts, le
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
