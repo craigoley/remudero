@@ -18,6 +18,7 @@ import { buildSweepHook, buildSweepLightHook } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
+// @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -386,7 +387,7 @@ test("the full sweep contains an injected main-health failure and continues its 
 });
 
 test("daemonCommand supplies the real REST and issue gateways to the one event-and-sweep observer", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/cli/commands/daemon.ts", import.meta.url), "utf8") + "\n" + readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   const observerStart = source.indexOf("const mainHealthRung = buildMainHealthRung(");
   const call = source.slice(observerStart, source.indexOf("sweepLight: buildSweepLightHook(", observerStart));
 

@@ -13,7 +13,7 @@
   files:
     - src/lib/daemon.ts
     - src/lib/sweep.ts
-    - test/a-restart-drain-names-what-it-waits-on.test.ts
+    - test/daemon/a-restart-drain-names-what-it-waits-on.test.ts
   status: queued
   priority: 2  # every freshness restart pays it; about 11 a day remain after the minimum lifetime lands
   attempts: 0
@@ -59,21 +59,26 @@
        absent, never 0.
     4. No count, bound, threshold or env var is added. The follow-up (bound, overlap or adopt) is filed from a week
        of these rows; its constants are OPERATOR DECISIONS.
-    5. TESTS in test/a-restart-drain-names-what-it-waits-on.test.ts, `test(` titles verbatim as in the proofs,
+    5. TESTS in test/daemon/a-restart-drain-names-what-it-waits-on.test.ts, `test(` titles verbatim as in the proofs,
        driving the drain with fake reviews and detached actions on an injected clock.
   acceptance:
     - claim: "a drain row names each review and detached action it waited on, and when each was admitted"
-      proof: 'grep: test("W1-T10057: a drain row names each review and detached action it waited on" in test/a-restart-drain-names-what-it-waits-on.test.ts'
+      proof: 'unit test: W1-T10057: a drain row names each review and detached action it waited on'
     - claim: "an item abandoned at the bound is named as abandoned, with its kind"
-      proof: 'grep: test("W1-T10057: an item abandoned at the bound is named as abandoned, with its kind" in test/a-restart-drain-names-what-it-waits-on.test.ts'
+      proof: 'unit test: W1-T10057: an item abandoned at the bound is named as abandoned, with its kind'
     - claim: "the exit row splits the restart into its phases"
-      proof: 'grep: test("W1-T10057: the exit row splits the restart into its phases" in test/a-restart-drain-names-what-it-waits-on.test.ts'
+      proof: 'unit test: W1-T10057: the exit row splits the restart into its phases'
     - claim: "the drain rows carry the inventory"
       proof: 'grep: waited_on in src/lib/daemon.ts'
   falsifier: |
     At origin/main the drain rows carry counts only, so the first two tests find no `waited_on` entries and the
     exit row has no `phases_ms`. Deleting the fix gives `# fail N`, restoring it `# fail 0`.
   note: |
+    Separate pre-build amendment 2026-10-18: use the computed daemon test folder (prospective direct imports
+    daemon.ts and sweep.ts at a1d99f319 place in daemon) and execute the three existing behavioral test titles
+    rather than merely grep their declarations. The final test's real imports must still pass rmd test-place.
+    No behavior, required assertion, measurement boundary, wait bound, admission rule or operator decision changes.
+    The build must not carry this amendment or edit its own acceptance; merge this plan-only prerequisite first.
     EFFECT, measured after merge: every daemon.freshness_drain.completed row names its items; a week of rows answers
     which kind holds a drain longest and how much of decision-to-exit each phase takes. Healthy shape: the follow-up
     task cites these rows. OPERATOR DECISIONS: none here; the follow-up's bound or overlap is one.

@@ -40,6 +40,7 @@ import {
 } from "../src/lib/drain.js";
 import { buildPlanFrontier } from "../src/lib/panel-graph.js";
 import type { Plan, Task } from "../src/lib/plan.js";
+// @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -136,7 +137,8 @@ test("W1-T2675: omitting the probe preserves today's behaviour exactly", () => {
 });
 
 test("W1-T2675: both dispatch lanes actually supply the probe — the seam is wired, not inert", () => {
-  const runTask = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const runTask =
+    readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8") + "\n" + readFileSync(join(REPO_ROOT, "src", "cli", "commands", "daemon.ts"), "utf8");
   const drain = readFileSync(join(REPO_ROOT, "src", "lib", "drain.ts"), "utf8");
   const daemon = readFileSync(join(REPO_ROOT, "src", "lib", "daemon.ts"), "utf8");
 
