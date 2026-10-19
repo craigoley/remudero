@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { boardSnapshotPath, createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
-import { configPath, loadConfig, type Config } from "#src/lib/config.js";
+import { FIXTURE_CONFIG_PATH_SEGMENTS, loadConfig, type Config } from "#src/lib/config.js";
 import { mapBoardPr, type RestPullRow } from "#src/lib/open-prs-rest.js";
 import { loadPolicy, policyPath } from "#src/lib/policy.js";
 import { saveMarker, type GitLogCommit, type ShippedGithub } from "#src/lib/retro.js";
@@ -25,11 +25,9 @@ function fixture(t: TestContext, seed: "valid" | "missing" | "invalid" = "valid"
   const config: Config = { root, claudeBin: "/bin/true" };
   // Isolate the real default config reader, too: no dependency on an installed Claude CLI
   // and no access to the operator's config/credentials when this file runs on its own.
-  const previousHome = process.env.HOME;
-  process.env.HOME = root;
-  t.after(() => { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; });
-  mkdirSync(join(configPath(), ".."), { recursive: true });
-  writeFileSync(configPath(), JSON.stringify(config));
+  const configFile = join(root, ...FIXTURE_CONFIG_PATH_SEGMENTS);
+  mkdirSync(join(configFile, ".."), { recursive: true });
+  writeFileSync(configFile, JSON.stringify(config));
   const ownerRepo = { owner: "retro-backoff", repo: `fixture-${++sequence}` };
   const url = (n: number) => `https://github.com/${ownerRepo.owner}/${ownerRepo.repo}/pull/${n}`;
   const rows: RestPullRow[] = Array.from({ length: 20 }, (_, i) => ({
@@ -45,7 +43,7 @@ function fixture(t: TestContext, seed: "valid" | "missing" | "invalid" = "valid"
   saveMarker(join(root, "state", "last-retro.json"), { ts: MARKER, learnings_count: 0, runs_seen: 0 });
   runTask.recordRetroAttempt(root, new Date("2026-10-02T12:00:00.000Z"), 5);
   // Real default snapshot IO at the configured (test-isolated) root: neither gateway receives snapshotFor.
-  const snapshotRoot = loadConfig().root;
+  const snapshotRoot = root;
   const snapshot = createBoardSnapshotCache(snapshotRoot, ownerRepo.owner, ownerRepo.repo);
   const snapshotPath = boardSnapshotPath(snapshotRoot, ownerRepo.owner, ownerRepo.repo);
   if (seed === "valid") assert.equal(snapshot.commitClosed(rows.map(mapBoardPr)), true);
@@ -55,6 +53,14 @@ function fixture(t: TestContext, seed: "valid" | "missing" | "invalid" = "valid"
 }
 
 async function check(f: ReturnType<typeof fixture>, mode: Mode, authoritative = f.rows, rewriteAfterCapture = false) {
+  const previousHome = process.env.HOME;
+  process.env.HOME = f.config.root;
+  try { return await checkAtHome(f, mode, authoritative, rewriteAfterCapture); }
+  finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; }
+}
+
+async function checkAtHome(f: ReturnType<typeof fixture>, mode: Mode, authoritative: RestPullRow[], rewriteAfterCapture: boolean) {
+  assert.equal(loadConfig().root, f.config.root);
   let probes = 0;
   const calls: string[][] = [];
   const exec = (args: readonly string[]) => {
@@ -101,7 +107,7 @@ test("retro backoff rechecks the authoritative count after a cached hint", async
     // Positive control discriminates against the old precheck, which would refuse both cases before reading.
     assert.equal((await check(fixture(t), mode)).decision?.fire, true);
     const f = fixture(t);
-    const changed = f.rows.map((row, i) => i < 3 ? { ...row, head: { ref: "run-foreign-1", sha: "b".repeat(40) } } : row);
+    const changed = f.rows.map((row, i) => i < 3 ? { ...row, updated_at: "2026-10-02T12:15:00.000Z", head: { ref: "run-foreign-1", sha: "b".repeat(40) } } : row);
     const result = await check(f, mode, changed);
     assert.equal(result.probes, 1, "the cached 30 admits a refresh");
     assert.ok(result.calls.length > 0);
@@ -112,7 +118,7 @@ test("retro backoff rechecks the authoritative count after a cached hint", async
 test("retro backoff evidence names the count that refused the retry", async t => {
   for (const mode of ["sync", "async"] as const) {
     const f = fixture(t);
-    const changed = f.rows.map((row, i) => i < 3 ? { ...row, head: { ref: "run-foreign-1", sha: "b".repeat(40) } } : row);
+    const changed = f.rows.map((row, i) => i < 3 ? { ...row, updated_at: "2026-10-02T12:15:00.000Z", head: { ref: "run-foreign-1", sha: "b".repeat(40) } } : row);
     assert.equal((await check(f, mode, changed)).decision, undefined);
     const rows = readFileSync(join(f.config.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
     const refusal = rows.findLast(row => row.step === "daemon.retro_trigger.backoff");
