@@ -54,7 +54,8 @@ test("W1-T9421: a prepared serve slot builds its worker bundles", async () => {
   const manifest = join(first.dir, "dist", "child-entries", "manifest.json");
   assert.ok(existsSync(manifest), "the prepared slot holds its child-entry manifest");
   assert.equal(JSON.parse(readFileSync(manifest, "utf8")).builtIn, first.dir, "the build ran with the slot as its working directory");
-  assert.deepEqual({ ...rows[0], ms: 0 }, { slot: first.dir, sha: first.sha, outcome: "built", ms: 0 });
+  // W1-T10058: the fixture's script exports no validators, so nothing qualifies its build for reuse and it is built.
+  assert.deepEqual({ ...rows[0], ms: 0 }, { slot: first.dir, sha: first.sha, outcome: "built", reused: false, stale: "check-unsupported", ms: 0 });
 
   // 2. A failing build is ledgered with its first line, and the slot is still returned.
   commitScript(origin, FAILS, "v2");
@@ -98,7 +99,8 @@ test("a build that throws a non-Error still reads failed, with its time", async 
   writeFileSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT), "\n");
   let at = 100;
   const verdict = await buildSlotChildEntries(dir, async () => { at += 40; throw "killed\nby a signal"; }, clockFromMillisFn(() => at));
-  assert.deepEqual(verdict, { outcome: "failed", reason: "killed", ms: 40 });
+  // W1-T10058: the time covers the failed reuse check (40) and the failed build (40).
+  assert.deepEqual(verdict, { outcome: "failed", reason: "killed", ms: 80 });
 });
 
 test("a failed child-entry build keeps stderr ahead of a long command context", async (t) => {

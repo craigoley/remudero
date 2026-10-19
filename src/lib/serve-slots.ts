@@ -17,6 +17,7 @@
  *
  * W1-T9421: after its install, a slot builds its precompiled child entries and worker bundles
  * (scripts/build-child-entries.mjs) in a child process, so serve's workers can start from them (W1-T9370).
+ * W1-T10058: unless that tree's existing build is verified current, in a child too, as a memory-deferred retry's is.
  */
 import { execFile } from "node:child_process";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -106,22 +107,75 @@ export interface SlotChildEntries {
   /** `absent`: the tree predates the script (an older sha). `failed`: the build exited non-zero; `reason` is its first line. */
   outcome: "built" | "absent" | "failed";
   reason?: string;
+  /** W1-T10058, on `built` only: true when the existing build was verified current and not rebuilt. */
+  reused?: boolean;
+  /** W1-T10058: why the existing build could not be reused, when it was rebuilt. */
+  stale?: string;
   ms: number;
 }
 
 /**
+ * W1-T10058: run in a child, in the tree, by its OWN build module. Every declared child entry and every declared worker
+ * bundle must be current against one source hash; `--check` alone judges the child entries and never the workers.
+ */
+const QUALIFY_SLOT_BUILD = `
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+const m = await import(pathToFileURL(resolve(${JSON.stringify(CHILD_ENTRY_BUILD_SCRIPT)})).href);
+const ok = typeof m.sourceHash === "function" && typeof m.childEntryIsCurrent === "function" && typeof m.workerBundle === "function" &&
+  Array.isArray(m.CHILD_ENTRIES) && m.CHILD_ENTRIES.length > 0 && Array.isArray(m.WORKER_ENTRIES) && m.WORKER_ENTRIES.length > 0;
+let verdict = { current: false, reason: "check-unsupported" };
+if (ok) {
+  const treeHash = m.sourceHash(".");
+  const judged = [
+    ...m.CHILD_ENTRIES.map((e) => ["child " + e.name, m.childEntryIsCurrent(".", e.name, { treeHash })]),
+    ...m.WORKER_ENTRIES.map((w) => ["worker " + w, m.workerBundle(".", w, { treeHash })]),
+  ];
+  const stale = judged.find(([, v]) => v?.current !== true);
+  verdict = stale ? { current: false, reason: stale[0] + ": " + stale[1]?.reason } : { current: true, children: m.CHILD_ENTRIES.length, workers: m.WORKER_ENTRIES.length };
+}
+process.stdout.write(JSON.stringify(verdict) + "\\n");
+`;
+
+const firstLine = (err: unknown): string => (err instanceof Error ? err.message : String(err)).split("\n")[0]!.slice(0, 200);
+
+/**
+ * W1-T10058: whether `dir`'s existing build may be reused. Only the child's positive, complete verdict qualifies: a failed
+ * or unsupported check, or output that is not that verdict, reads as not current, so the caller builds.
+ */
+export async function qualifySlotChildEntries(dir: string, run: RunCommand = runCommand): Promise<{ current: boolean; reason: string }> {
+  let stdout: string;
+  try {
+    stdout = await run(process.execPath, ["--input-type=module", "-e", QUALIFY_SLOT_BUILD], dir);
+  } catch (err) {
+    return { current: false, reason: `check-failed: ${firstLine(err)}` };
+  }
+  let verdict: { current?: unknown; reason?: unknown; children?: unknown; workers?: unknown };
+  try {
+    verdict = JSON.parse(stdout.trim().split("\n").at(-1) ?? "");
+  } catch (err) {
+    return { current: false, reason: `check-output-malformed: ${firstLine(err).slice(0, 80)}` };
+  }
+  const counted = (n: unknown) => Number.isSafeInteger(n) && (n as number) > 0;
+  if (verdict?.current === true && counted(verdict.children) && counted(verdict.workers)) return { current: true, reason: "current" };
+  return { current: false, reason: typeof verdict?.reason === "string" ? verdict.reason.slice(0, 200) : "check-output-malformed" };
+}
+
+/**
  * W1-T9421: builds `dir`'s child entries and worker bundles with its own build script, in a child process so its memory is
- * never serve's. Never throws: a tree without the script, or a failed build, leaves the workers on their .ts source, and the
+ * never serve's. W1-T10058: a build the tree's own validators find wholly current is reused, not rebuilt. Never throws: a tree without the script, or a failed build, leaves the workers on their .ts source, and the
  * build removes its manifest before it writes, so a failed build never leaves a stale bundle vouched for.
  */
 export async function buildSlotChildEntries(dir: string, run: RunCommand = runCommand, clock: Clock = systemClock): Promise<SlotChildEntries> {
   const started = clock.now();
   if (!existsSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT))) return { outcome: "absent", ms: clock.now() - started };
+  const qualified = await qualifySlotChildEntries(dir, run);
+  if (qualified.current) return { outcome: "built", reused: true, ms: clock.now() - started };
   try {
     await run(process.execPath, [CHILD_ENTRY_BUILD_SCRIPT], dir);
-    return { outcome: "built", ms: clock.now() - started };
+    return { outcome: "built", reused: false, stale: qualified.reason, ms: clock.now() - started };
   } catch (err) {
-    return { outcome: "failed", reason: (err instanceof Error ? err.message : String(err)).split("\n")[0]!.slice(0, 200), ms: clock.now() - started };
+    return { outcome: "failed", reason: firstLine(err), ms: clock.now() - started };
   }
 }
 
