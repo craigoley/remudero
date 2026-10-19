@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { fork, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -26,12 +26,13 @@ import {
   resetMemoryAdmissionStateForTests,
   waitingStarts,
   type AdmissionPorts,
+  type AdmissionRequest,
 } from "../src/lib/host-memory-admission.js";
 import type { HostMemoryReading, ReadingEntry } from "../src/lib/host-memory-ledger.js";
 import * as memoryLedger from "../src/lib/host-memory-ledger.js";
 import { childGardenPassSpawn } from "../src/lib/garden-registry.js";
-import { resetShadowMemoryStateForTests, type HostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
-import type { LedgerLine } from "../src/lib/ledger.js";
+import { defaultShadowMemoryPorts, installShadowMemorySink, resetShadowMemoryStateForTests, type HostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
+import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
@@ -683,4 +684,170 @@ test("worker and garden starts consume their admitted memory reservation exactly
     assert.equal(await garden("flow" as never, [], { stopped: false }), 0, "the named untracked start keeps its fail-open behavior");
     assert.equal(attempts, 1, "an unsuccessful reserve callback is not invoked twice");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const QUEUE_STEP = "memory_budget.enforce_queue";
+
+function observedQueue(
+  headInput: AdmissionRequest = { ...request, workerClass: "review", runId: "head-run" },
+  queuedInput: AdmissionRequest = { ...request, runId: "queued-run", taskId: "W1-T10209" },
+  overrides: Partial<AdmissionPorts> = {},
+  defaultSink = false,
+) {
+  resetShadowMemoryStateForTests(); resetMemoryAdmissionStateForTests();
+  const w = world();
+  w.state.availableMib = 2500; w.running.entries = [{ id: "other-owner" }];
+  const headAbort = new AbortController(), queuedAbort = new AbortController();
+  const ticks: Array<{ ms: number; wake: () => void }> = [];
+  const head = awaitMemoryAdmission({ ...headInput, signal: headAbort.signal }, ports(w, {
+    sleep: () => new Promise<void>(() => undefined),
+  }));
+  const selected = ports(w, { ...overrides, sleep: ms => new Promise<void>(wake => {
+    w.sleeps.push(ms); ticks.push({ ms, wake });
+  }) });
+  if (defaultSink) delete selected.write;
+  const input = { ...queuedInput, signal: queuedAbort.signal };
+  const queued = awaitMemoryAdmission(input, selected);
+  return { w, head, queued, input, headAbort, queuedAbort,
+    async tick() {
+      const next = ticks.shift(); assert.ok(next, "the actual request must be sleeping");
+      w.now.ms += next.ms; next.wake();
+      await new Promise<void>(resolve => setImmediate(resolve));
+    },
+    async stop() {
+      headAbort.abort(); queuedAbort.abort(); await Promise.all([head, queued]);
+      ticks.length = 0;
+      assert.deepEqual(waitingStarts(), []);
+    },
+  };
+}
+
+test("W1-T10209: a non-head memory waiter has attributable queue evidence before assignment", async () => {
+  const f = observedQueue();
+  try {
+    const head = f.w.rows.find(row => row.step === ENFORCE_WAIT_STEP);
+    assert.equal(head?.run_id, "head-run", "positive control: the evaluating head has measured refusal telemetry");
+    assert.ok(Array.isArray(head?.reasons) && head.reasons.length > 0);
+    const entry = f.w.rows.find(row => row.step === QUEUE_STEP);
+    assert.ok(entry, "the non-head request must expose evidence before any wake or worker assignment");
+    assert.equal(entry.run_id, "queued-run"); assert.equal(entry.task_id, "W1-T10209");
+    assert.equal(entry.worker_class, "implement"); assert.equal(entry.identity_state, "supplied");
+    assert.equal(entry.phase, "queued-behind-rank"); assert.equal(entry.queue_position, 2);
+    assert.equal(entry.queue_size, 2); assert.equal(entry.ahead_worker_class, "review");
+    assert.equal(entry.worker_assignment, "not-observed");
+    assert.equal(entry.wait_start_ms, NOW); assert.equal(entry.sampled_at_ms, NOW);
+    assert.match(String(entry.admission_id), /^[a-f0-9-]{36}$/);
+    for (const name of ["reasons", "numbers", "tier", "pid", "pr", "head_sha"]) assert.equal(entry[name], undefined);
+    assert.equal(f.w.running.entries.length, 1, "queued evidence reserves nothing");
+    f.input.runId = "later-relay"; f.input.taskId = "later-task";
+    await f.tick(); await f.tick();
+    assert.equal(f.w.rows.filter(row => row.step === QUEUE_STEP).length, 1, "backoff ticks are not new phases");
+    f.headAbort.abort(); await f.head; f.w.state.availableMib = 9000; await f.tick();
+    assert.equal((await f.queued).kind, "admitted");
+    const observations = f.w.rows.filter(row => row.step === QUEUE_STEP);
+    assert.deepEqual(observations.map(row => row.phase), ["queued-behind-rank", "evaluating-head", "settled"]);
+    assert.ok(observations.every(row => row.admission_id === entry.admission_id && row.run_id === "queued-run" && row.task_id === "W1-T10209"));
+    assert.equal(observations.at(-1)?.queue_position, null, "a settled row cannot pretend the stale rank is current");
+    assert.equal(observations.at(-1)?.timing_basis, "existing-admission-sample");
+  } finally { await f.stop(); }
+});
+
+test("W1-T10209: queue observation changes no admission decision or ordering", async () => {
+  for (const [headClass, nextClass, sinceMs] of [
+    ["review", "implement", NOW], ["implement", "review", NOW - 60 * 60_000],
+  ] as const) {
+    const f = observedQueue({ ...request, workerClass: headClass, runId: "ranked-head", sinceMs },
+      { ...request, workerClass: nextClass, runId: "ranked-next" });
+    try {
+      assert.equal(waitingStarts()[0]?.workerClass, headClass);
+      assert.equal(f.w.rows.find(row => row.step === QUEUE_STEP)?.ahead_worker_class, headClass);
+      assert.equal(f.w.running.entries.length, 1);
+      f.w.state.availableMib = 9000;
+      await f.tick();
+      assert.equal(f.w.running.entries.length, 1, "fitting memory alone cannot move a non-head ahead of its ranked owner");
+      f.headAbort.abort(); assert.equal((await f.head).kind, "abandoned");
+      await f.tick();
+      assert.deepEqual(decision(await f.queued), { kind: "admitted", tier: "fits", waitedMs: 15_000, attempts: 2 });
+      assert.equal(f.w.running.entries.length, 2, "only the existing head evaluation opens one reservation");
+      assert.deepEqual(f.w.sleeps, [5_000, 10_000]);
+    } finally { await f.stop(); }
+  }
+  for (const mode of ["shadow", "off", "enforce"] as const) {
+    const w = world(); let roots = 0;
+    const result = await awaitMemoryAdmission({ ...request, root: () => { roots++; throw Error("must not read root"); } }, ports(w, {
+      policy: () => ({ ...POLICY, mode }), enforceHere: () => false,
+      readLedger: () => { throw Error("must not read ledger"); },
+    }));
+    assert.deepEqual(result, { kind: "not-enforced", why: mode === "enforce" ? "not a daemon-owned process" : `mode ${mode}` });
+    assert.equal(roots, 0); assert.deepEqual(w.rows, []); assert.deepEqual(w.sleeps, []); assert.deepEqual(waitingStarts(), []);
+  }
+  const instant = world();
+  assert.deepEqual(decision(await awaitMemoryAdmission(request, ports(instant))), { kind: "admitted", tier: "fits", waitedMs: 0, attempts: 0 });
+  assert.deepEqual(instant.rows, [], "a start that never queues remains silent");
+});
+
+test("W1-T10209: queue evidence is bounded and telemetry failure cannot admit or block work", async () => {
+  const bounded = observedQueue();
+  try {
+    for (let i = 0; i < 128; i++) await bounded.tick();
+    assert.equal(bounded.w.rows.filter(row => row.step === QUEUE_STEP).length, 1);
+    assert.equal(bounded.w.running.entries.length, 1); assert.equal(waitingStarts().length, 2);
+  } finally { await bounded.stop(); }
+  assert.equal(bounded.w.rows.filter(row => row.step === QUEUE_STEP).length, 2, "one queue phase and one own settlement, never per tick");
+
+  const root = fixtureRoot("queue-evidence-");
+  const previous = defaultShadowMemoryPorts().write;
+  installShadowMemorySink(appendLedger);
+  try {
+    const healthyRoot = join(root, "healthy");
+    const healthy = observedQueue({ ...request, workerClass: "review" }, { ...request, root: healthyRoot }, {}, true);
+    try {
+      const rows = readFileSync(join(healthyRoot, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.equal(rows.filter(row => row.step === QUEUE_STEP).length, 1, "the maintained default installed writer really appends on private disk");
+      assert.equal(healthy.w.running.entries.length, 1);
+    } finally { await healthy.stop(); }
+    const brokenRoot = join(root, "broken");
+    mkdirSync(join(brokenRoot, "state", "ledger.ndjson"), { recursive: true });
+    for (const fallbackThrows of [false, true]) {
+      const errors: string[] = [];
+      const broken = observedQueue({ ...request, workerClass: "review" }, { ...request, root: brokenRoot }, {
+        stderr: line => { errors.push(line); if (fallbackThrows) throw Error("diagnostic fallback failed"); },
+      }, true);
+      try {
+        assert.ok(errors.some(line => /EISDIR/.test(line)), "real default writer failure, not an injected fake sink");
+        assert.equal(waitingStarts().length, 2); assert.equal(broken.w.running.entries.length, 1);
+        await broken.tick(); assert.equal(broken.w.running.entries.length, 1);
+        broken.headAbort.abort(); await broken.head; broken.w.state.availableMib = 9000;
+        await broken.tick(); assert.equal((await broken.queued).kind, "admitted");
+        assert.equal(broken.w.running.entries.length, 2);
+        assert.ok(!broken.w.rows.some(row => row.step === ENFORCE_ERROR_STEP), "telemetry cannot enter the admission error/fail-open path");
+      } finally { await broken.stop(); }
+    }
+    const absent: string[] = [];
+    const noSink = observedQueue(undefined, undefined, { write: undefined, stderr: line => void absent.push(line) });
+    try { assert.equal(JSON.parse(absent[0] ?? "{}").step, QUEUE_STEP); }
+    finally { await noSink.stop(); }
+  } finally { installShadowMemorySink(previous); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T10209: queue cancellation preserves other owners and clears only its own evidence", async () => {
+  const f = observedQueue();
+  const thirdAbort = new AbortController(), unknownAbort = new AbortController();
+  const third = awaitMemoryAdmission({ ...f.input, signal: thirdAbort.signal }, ports(f.w, { sleep: () => new Promise<void>(() => undefined) }));
+  const unknown = awaitMemoryAdmission({ workerClass: "implement", root: request.root, signal: unknownAbort.signal }, ports(f.w, { sleep: () => new Promise<void>(() => undefined) }));
+  try {
+    const before = waitingStarts(); assert.equal(before.length, 4);
+    const entries = f.w.rows.filter(row => row.step === QUEUE_STEP);
+    assert.equal(entries.length, 3); assert.equal(new Set(entries.map(row => row.admission_id)).size, 3, "same run/task are still distinct invocations");
+    const own = entries[0]!, missing = entries[2]!;
+    assert.equal(missing.identity_state, "unknown"); assert.equal(missing.run_id, "unknown"); assert.equal(missing.task_id, "unknown");
+    assert.deepEqual(missing.missing_identity, ["run_id", "task_id"]);
+    f.queuedAbort.abort(); assert.equal((await f.queued).kind, "abandoned");
+    assert.deepEqual(waitingStarts(), [before[0], before[2], before[3]]);
+    const terminal = f.w.rows.filter(row => row.step === QUEUE_STEP && row.phase === "settled");
+    assert.equal(terminal.length, 1); assert.equal(terminal[0]?.admission_id, own.admission_id); assert.equal(terminal[0]?.cancelled, true);
+    assert.equal(f.w.running.entries.length, 1, "another owner's reservation is untouched");
+  } finally {
+    thirdAbort.abort(); unknownAbort.abort(); await Promise.all([third, unknown]); await f.stop();
+  }
 });
