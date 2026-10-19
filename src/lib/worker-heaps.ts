@@ -20,6 +20,7 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Worker } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
+import { rawCallSites } from "./raw-call-sites.js";
 
 /** What a thread's parent says the thread holds, by holder (`board:<instance>`): entries and bytes kept. */
 export type ThreadHolds = Record<string, { entries: number; bytes?: number; unsized?: string; unit?: string; bytes_basis?: string }>;
@@ -142,8 +143,8 @@ function bundledModule(file: string, line: number): string | undefined {
 
 /**
  * `<module>:<function>` of the first frame outside node, this module and the spawn helper: the call that spawned the
- * thread. A frame inside a bundle names the SOURCE module its line came from, as a tsx-loaded frame does, so a
- * bundle-started worker's threads keep the names they had before W1-T9370 started workers from bundles.
+ * thread. Raw runtime frames use the unmapped module/function; a bundle's existing module header
+ * still names the module its runtime line belongs to. The public string/undefined parser is unchanged.
  */
 export function spawnSite(stack: string | undefined): string {
   for (const line of (stack ?? "").split("\n").slice(1)) {
@@ -166,10 +167,14 @@ export function trackWorkerThreads(channel = diagnosticsChannel.channel(WORKER_T
   const onSpawn = (message: unknown): void => {
     const thread = (message as { worker?: WorkerThread }).worker;
     if (!thread) return;
-    const site: { stack?: string } = {};
-    Error.captureStackTrace(site);
+    // Preserve the ambient worker-frame budget: only the shared helper adds a frame. Invalid
+    // nonnumeric limits previously captured no stack, so they still produce the literal unknown.
+    const limit = Error.stackTraceLimit;
+    const sites = rawCallSites(typeof limit === "number" ? limit + 1 : 0);
     const id = thread.threadId; // an exited Worker reads threadId -1, so the key is taken now
-    live.set(id, { kind: spawnSite(site.stack), thread });
+    // String(CallSite) uses V8's raw clause, not Node's mapped Error formatter. Retain only the
+    // primitive kind, never CallSite objects (which can reference functions and receivers).
+    live.set(id, { kind: spawnSite(`Error\n${sites.map(site => `    at ${String(site)}`).join("\n")}`), thread });
     thread.once("exit", () => void live.delete(id));
   };
   channel.subscribe(onSpawn);
