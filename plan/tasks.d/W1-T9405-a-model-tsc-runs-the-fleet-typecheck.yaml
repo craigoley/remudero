@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-14: worker memory investigation (operator approved filing the worker-typecheck memory task)"
   plan_refs: [W1-T7392, W1-T6155, W1-T5658, W1-T8776]
-  files: [src/lib/worker.ts, scripts/tsc-entry.mjs, test/a-model-tsc-runs-the-fleet-typecheck.test.ts]
+  files: [src/lib/worker.ts, scripts/tsc-entry.mjs, test/worker/spawn/a-model-tsc-runs-the-fleet-typecheck.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -34,6 +34,9 @@
     tree it cannot write exits 1 with TS5033 (measured: `Could not write file … read-only file system`), a false red
     for any sandboxed or read-only checker. A `checkers` key in tsconfig is accepted and ignored (4.78 GB).
   design: |
+    CREATES: scripts/tsc-entry.mjs
+    CREATES: test/worker/spawn/a-model-tsc-runs-the-fleet-typecheck.test.ts
+
     1. scripts/tsc-entry.mjs (node builtins only): a whole-project no-emit check — `--noEmit`, project `.` or
        `tsconfig.json` or none, cwd the root of a git worktree, and none of --incremental, --tsBuildInfoFile, --build,
        --watch, --listFiles* — runs `npm run typecheck` (the install-owning checkout's scripts/typecheck.mjs, i.e. typecheck-run.ts: the worktree buildinfo
@@ -51,7 +54,7 @@
        transcript shows why its tsc ran incremental.
   acceptance:
     - claim: "a whole-project no-emit tsc in a worktree runs the fleet's incremental, seeded check, and every other tsc argv runs the real compiler unchanged"
-      proof: 'grep: test("W1-T9405: a model tsc runs the fleet typecheck" in test/a-model-tsc-runs-the-fleet-typecheck.test.ts'
+      proof: 'unit test: test/worker/spawn/a-model-tsc-runs-the-fleet-typecheck.test.ts'
     - claim: "a delegated run is re-entrant through the environment, never through an argument"
       proof: 'grep: RMD_TSC_ENTRY in scripts/tsc-entry.mjs'
   falsifier: |
