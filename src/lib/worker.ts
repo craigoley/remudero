@@ -4854,6 +4854,8 @@ export function linkWorktreeNodeModules(
   worktreePath: string,
   deps: {
     resolveSource?: (repoDir: string) => string | undefined;
+    /** Pin the selected install outside private intermediate aliases before a worker's deny-read policy applies. */
+    realpath?: (path: string) => string;
     /** Throws when the path is absent. `lstat`, not `stat`, so a BROKEN symlink still counts as taken — linking over either
      * one would write INSIDE the existing target. */
     lstat?: (p: string) => unknown;
@@ -4877,18 +4879,22 @@ export function linkWorktreeNodeModules(
   }
   const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
   if (!source) return "no-source";
+  let physicalSource: string;
   try {
-    (deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir")))(source, dest);
+    // An engine lives under denied state/, even when its own link names a readable install.
+    // Link the resolved install directly; never broaden the worker's access to state or shared dependencies.
+    physicalSource = (deps.realpath ?? realpathSync)(source);
+    (deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir")))(physicalSource, dest);
   } catch {
-    // Symlink failed, so no lockfile compare is meaningful: there is nothing linked to compare against. Preserves the
+    // Resolution or symlink failed, so no lockfile compare is meaningful: nothing was linked. Preserves the
     // pre-W1-T2777 "failed" contract byte-identically.
     return "failed";
   }
   // LOCKFILE COMPARE AT SYMLINK TIME, the right moment: earlier misses that `resolveSource` may point at the install root,
-  // later runs after a worker has already seen "Cannot find module". Compared against `parentOf(source)`, not `repoDir`,
-  // because the hash inputs live beside `node_modules` (W1-T2777).
+  // later runs after a worker has already seen "Cannot find module". Compare against the physical install's parent,
+  // not `repoDir` or an engine alias: the installed hash inputs live beside node_modules (W1-T2777).
   const hashFn = deps.hashInstallInputs ?? ((d: string) => hashInstallInputs(d));
-  const nmSourceDir = dirname(source);
+  const nmSourceDir = dirname(physicalSource);
   let mismatch = false;
   try {
     // Both reads catch failures internally (see hashInstallInputs' contract). A missing file hashes as empty on both sides,
