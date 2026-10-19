@@ -170,7 +170,7 @@ export function trackWorkerThreads(channel = diagnosticsChannel.channel(WORKER_T
     // Preserve the ambient worker-frame budget: only the shared helper adds a frame. Invalid
     // nonnumeric limits previously captured no stack, so they still produce the literal unknown.
     const limit = Error.stackTraceLimit;
-    const sites = rawCallSites(typeof limit === "number" ? limit + 1 : 0);
+    const sites = rawCallSites(typeof limit === "number" ? Math.trunc(limit) + 1 : 0);
     const id = thread.threadId; // an exited Worker reads threadId -1, so the key is taken now
     // String(CallSite) uses V8's raw clause, not Node's mapped Error formatter. Retain only the
     // primitive kind, never CallSite objects (which can reference functions and receivers).
