@@ -165,7 +165,7 @@
   "src/lib/onboard/recon.ts": 167,
   "src/lib/onboard/session.ts": 121,
   "src/lib/onboard/synthesize.ts": 144,
-  "src/lib/open-prs-rest.ts": 461,
+  "src/lib/open-prs-rest.ts": 500,
   "src/lib/operator-message.ts": 90,
   "src/lib/operator-notes.ts": 77,
   "src/lib/operator-sync.ts": 98,
