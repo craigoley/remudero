@@ -1,7 +1,7 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
-import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
-  workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
+import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, denyMcpSuccessCredit, validateWorkerMcpIsolation,
+  workerMcpExposure, workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
   type WorkerPluginInventory, type WorkerMcpExposure, type WorkerMcpIsolation,
   type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead, securityMetadataGhArgs } from "./security-merge-admission.js";
@@ -3439,18 +3439,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       result.continuation = execution.receipt;
       if (args.mcpIsolation) {
         result.mcpIsolation = workerMcpIsolationEvidence(result.initSummary, !!args.ruleLookup);
-        // An opted-in run with unknown/leaked inventory must not earn successful worker credit.
-        if (result.mcpIsolation.inventory !== "observed-only") result.isError = true;
+        // An opted-in run with unknown/leaked inventory must not earn successful worker credit (W1-T9573: the subtype too).
+        if (result.mcpIsolation.inventory !== "observed-only") denyMcpSuccessCredit(result, result.mcpIsolation);
       }
       // W1-T9489: the tripwire at the producer. A worker offered anything outside its own server map is ledgered as exposed
       // and earns no success credit: the subtype changes too, because callers grade `{isError, subtype: "success"}` as clean.
       result.mcpBoundary = WORKER_MCP_STRICT;
       const exposure = workerMcpExposure(result.initSummary, boundaryServers);
-      if (exposure?.state === "exposed") {
-        exposure.original_subtype = result.subtype;
-        result.isError = true;
-        result.subtype = "error_mcp_exposure";
-      }
+      if (exposure?.state === "exposed") denyMcpSuccessCredit(result, exposure);
       if (exposure) result.mcpExposure = exposure;
       if (egressUnenforced) result.egressUnenforced = egressUnenforced;
       result.routedModel = routedClaudeModel;

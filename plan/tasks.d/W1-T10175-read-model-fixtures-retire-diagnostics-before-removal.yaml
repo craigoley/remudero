@@ -1,0 +1,54 @@
+- id: W1-T10175
+  title: "Read-model fixtures retire asynchronous diagnostics before removing their state"
+  repo: remudero
+  depends_on: [W1-T9501]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator follow-through 2026-10-18: finish W1-T9501 and its observed Mac fixture failure after PR #12817 merged"
+  plan_refs: [W1-T9501, W1-T5177, W1-T9937]
+  files: [test/read-model-readers-never-contend-with-the-writer.test.ts, test/scout-read-model-materialize-failed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    PR #12817 merged at 2026-10-18T20:29:51Z with head 50ddde2294c48f89ea9d627470f89de4660abd72.
+    Its bounded asynchronous diagnostic publisher can still write while older test after-hooks remove
+    private fixture directories. The standard five-suite Mac run on that exact head reports 62 tests,
+    61 passes and one real ENOTEMPTY failure in the scout criterion-3 removal hook. All behavioral
+    assertions passed. An independent reader-fixture experiment exposed the same lifecycle ordering.
+    Both current-main fixtures register directory removal before their connection/worker closers.
+    Risk is high under Rule 19 because the repair spans two existing named compatibility suites.
+    The executable lifecycle regression remains a required implementation control; the literal
+    cleanup-loop proof avoids falsely naming a not-yet-filed test as already present in this plan PR.
+    The original task is already merged; preserve its contract and credit, and carry the remaining
+    cleanup repair here. Patched copies of both fixtures on actual source 50ddde22 pass 13 cases,
+    including the real publisher-ACK and structured acquired-record controls. That prototype result
+    does not qualify this task or erase the original failure.
+  design: |
+    Keep every existing behavioral assertion in both suites. Register owned connection, cursor,
+    ticker and fixture-worker cleanup with the private state fixture. In its asynchronous teardown,
+    close resources in reverse registration order (await asynchronous closers), then await the
+    existing flushReadModelTransactions diagnostic barrier, then remove that fixture's directory.
+    Add a direct fixture-lifecycle regression case to the existing reader suite that observes
+    resource closure while the directory exists and confirms reverse order and final removal.
+    Exercise actual SQLite and the default diagnostic publisher. No production source, error
+    contract, SQL timeout, resource limit, retry, skip, scanner or safety guard changes belong here.
+  acceptance:
+    - claim: "The reader fixture closes its owned resources before removing its private directory"
+      proof: "grep: for (const close of closers[.]reverse()) await close(); in test/read-model-readers-never-contend-with-the-writer.test.ts"
+    - claim: "The reader suite awaits the existing diagnostic publication barrier before removal"
+      proof: "grep: await flushReadModelTransactions() in test/read-model-readers-never-contend-with-the-writer.test.ts"
+    - claim: "The scout suite awaits the existing diagnostic publication barrier before removal"
+      proof: "grep: await flushReadModelTransactions() in test/scout-read-model-materialize-failed.test.ts"
+  falsifier: |
+    Move the reader fixture's rmSync call ahead of its owned resource closures: the new lifecycle
+    case must fail while its database/diagnostic positive controls ran. Restore the exact source
+    and require that same case to pass. Removing either awaited diagnostic barrier must also
+    fail its literal acceptance proof. Run both physical existing suites with their original
+    assertions, real fixture worker and normal test hygiene; no missing-path, skipped, canceled,
+    retry-green or fixture-hook failure is a pass. Report exact commit and full hosted outcomes.
+
