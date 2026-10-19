@@ -2,11 +2,12 @@
   title: "An ordinary read-model tick failure retains its attached transaction observations"
   repo: remudero
   depends_on: [W1-T9501, W1-T10175]
+  plan_refs: [W1-T9501, W1-T10175]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 5.00
-  risk: medium
+  risk: high  # Existing cross-named fixture and worker are both admitted; no own-falsifier sizing discount.
   priority: 3
   status: queued
   attempts: 0
