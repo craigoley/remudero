@@ -132,3 +132,19 @@ test("the comparator closes its persistent writer and refuses a save after closu
   assert.throws(() => store.save("v", state(["bad"])), /closed/);
   assert.deepEqual(readShadowCounters(f.path, true)!.states.v!.streakKeys, ["x"]);
 });
+
+test("uncommitted in-memory shadow counters cannot authorize readiness after a save failure", () => {
+  let fail = true;
+  const measured = state(["k"]);
+  assert.equal(shadowReadiness("v", measured, NOW).ready, true, "positive old ready control");
+  const shadow = createViewShadow({ clock: fixedClock(NOW), log: () => {},
+    store: { load: () => ({ v: measured }), save: () => { if (fail) throw Error("owned fixture write failed"); } },
+    evidence: () => ({ legacyAsOfMs: null, viewAsOfMs: null, named: new Set(), namedBeforeHorizon: new Set(), namedInGap: new Set(), rowsInGap: 0, duplicateIds: new Set(), duplicateRows: 0 }) });
+  const sample = { view: "v", key: "k", requests: 0, legacy: { data: 1, asOfMs: null }, body: { data: 1, asOf: null } };
+  assert.throws(() => shadow.compare(sample), /owned fixture write failed/);
+  assert.equal(shadow.readiness()[0]!.ready, false);
+  assert.match(shadow.readiness()[0]!.reason, /not committed/);
+  fail = false;
+  shadow.compare(sample);
+  assert.equal(shadow.readiness()[0]!.ready, true, "only a successful commit resumes measured qualification");
+});

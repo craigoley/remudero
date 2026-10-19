@@ -1462,7 +1462,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     seedUnitCosts();
     sweepDemand();
     const home = slots[0]?.db;
-    const shadow = home ? comparator?.db === home ? comparator.shadow.readiness()
+    const shadow = home ? comparator?.db === home && slots[0]?.lease !== undefined ? comparator.shadow.readiness()
       : storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications) : undefined;
     const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);

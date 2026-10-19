@@ -846,7 +846,12 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const clock = opts.clock ?? systemClock;
   const states = new Map<string, ViewShadowState>(Object.entries(opts.store?.load() ?? {}));
   const streakKeys = new Map<string, Set<string>>();
+  const persistenceFailed = new Set<string>();
   const qualifications = opts.qualifications ?? {};
+  const persist = (key: string, state: ViewShadowState, keys: ShadowKeyChange): void => {
+    try { opts.store?.save(key, state, keys); persistenceFailed.delete(key); }
+    catch (error) { persistenceFailed.add(key); throw error; }
+  };
   const stateOf = (view: string): ViewShadowState => {
     const generation = qualifications[view], key = qualifiedStateKey(view, generation);
     return states.get(key) ?? states.set(key, { ...emptyState(), ...(generation === undefined ? {} : { view, qualificationGeneration: generation }) }).get(key)!;
@@ -878,7 +883,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       if (unready !== undefined) {
         Object.assign(state, { skipped: (state.skipped ?? 0) + 1, lastSkippedMs: now, lastSkipReason: unready });
         summarize(view, state, now, { skipped: true });
-        opts.store?.save(qualifiedStateKey(view, required), state, { reset: false });
+        persist(qualifiedStateKey(view, required), state, { reset: false });
         return { view, key, diffs: [], skipped: unready };
       }
       state.samples++;
@@ -925,10 +930,11 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, ...(required === undefined ? {} : { qualificationGeneration: required }), classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), ...(legacy.paired ? { paired: legacy.paired } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       summarize(view, state, now, { diffs });
-      opts.store?.save(stateKey, state, { reset, ...(reset ? {} : { add: key }) });
+      persist(stateKey, state, { reset, ...(reset ? {} : { add: key }) });
       return { view, key, diffs };
     },
-    readiness: () => activeReadiness(states, qualifications, clock.now()),
+    readiness: () => activeReadiness(new Map([...states].map(([key, state]) => [key, persistenceFailed.has(key)
+      ? { ...state, qualificationRefusal: "shadow persistence failed; current counters are not committed" } : state])), qualifications, clock.now()),
     close: () => opts.store?.close?.(),
   };
 }
