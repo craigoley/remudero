@@ -175,7 +175,7 @@ const closedCreditCases: Array<{
     reason: /host|repository|repo.*mismatch/i },
   { name: "stored OPEN is not positive merge credit", seed: f => f.store(nativeFixtureCredit("trailer", CREDIT_PR, "OPEN")),
     reason: /OPEN|non.?merged|invalid.*state/i },
-  { name: "malformed credit entry", seed: f => f.store({ [CREDIT_DEP]: { trailer: { source: "trailer" } } } as CreditStore),
+  { name: "malformed credit entry", seed: f => f.store({ [CREDIT_DEP]: { trailer: { source: "trailer" } } } as unknown as CreditStore),
     reason: /malformed|invalid|missing.*field/i },
   { name: "PR number and URL disagree", seed: f => f.store(nativeFixtureCredit("trailer", CREDIT_PR.replace("/17", "/18"))),
     reason: /number|mismatch|invalid/i },
@@ -195,7 +195,7 @@ const closedCreditCases: Array<{
   { name: "refused override row", seed: f => { f.store(nativeFixtureCredit()); f.overrides('[{"action":"grant-credit"}]'); }, reason: /override.*invalid|refused|malformed/i },
   { name: "unreadable nonmissing override", seed: f => { f.store(nativeFixtureCredit()); mkdirSync(f.overrideFile, { recursive: true }); }, reason: /override.*unreadable/i },
   { name: "malformed invalidation container", seed: f => f.store({ [CREDIT_DEP]: { ...nativeFixtureCredit()[CREDIT_DEP], invalidated: [] } } as unknown as CreditStore), reason: /invalidat|quarantin/i },
-  { name: "malformed invalidation mark", seed: f => f.store({ [CREDIT_DEP]: { ...nativeFixtureCredit()[CREDIT_DEP], invalidated: { trailer: { prUrl: CREDIT_PR } } } } as CreditStore), reason: /invalidat|quarantin/i },
+  { name: "malformed invalidation mark", seed: f => f.store({ [CREDIT_DEP]: { ...nativeFixtureCredit()[CREDIT_DEP], invalidated: { trailer: { prUrl: CREDIT_PR } } } } as unknown as CreditStore), reason: /invalidat|quarantin/i },
 ];
 
 function removedCreditYaml(): string {
