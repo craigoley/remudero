@@ -3,6 +3,7 @@ import { fork, spawnSync } from "node:child_process";
 import fs, { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import threads from "node:worker_threads";
@@ -20,6 +21,134 @@ async function fixture(t: TestContext, label = "fixture writer") {
   await adapter.flushReadModelTransactions();
   return { dir, db, closers };
 }
+
+function ordinaryTicker(f: Awaited<ReturnType<typeof fixture>>, ledgerDir = f.dir) {
+  let now = Date.now();
+  const clock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
+  const messages: ReadModelWorkerMessage[] = [];
+  const ticker = createReadModelTicker({ stateDir: f.dir, instances: [{ name: "core", ledgerDir }],
+    views: [], oracle: "off", tickMs: 100, clock, post: message => { messages.push(message); },
+  });
+  f.closers.push(() => { if (f.db.inTransaction()) f.db.exec("ROLLBACK"); ticker.release(); });
+  const state = () => {
+    const message = messages.findLast(message => message.type === "state");
+    assert.ok(message?.type === "state");
+    assert.ok(message.instances[0]);
+    return message.instances[0];
+  };
+  const failures = () => messages.flatMap(message => message.type === "log" && message.step === "read_model.tick_failed" ? [message.extra] : []);
+  const append = () => writeFileSync(join(ledgerDir, "ledger.ndjson"), `${JSON.stringify({ ts: clock.iso(), step: "run.start", task_id: "fixture-task", run_id: "ordinary-tick" })}\n`);
+  return { ticker, clock, state, failures, append, advance: (ms: number) => { now += ms; } };
+}
+
+async function ordinaryContention(t: TestContext, omitAttachment = false) {
+  const f = await fixture(t, "ordinary tick competing writer");
+  const o = ordinaryTicker(f);
+  o.append(); o.ticker.start();
+  assert.equal(o.state().lease, "held", "the real ticker acquired its lease before contention");
+  type SqliteFailure = Error & { code?: string; errcode?: number; readModelTransactions?: adapter.ReadModelTransactionInventory };
+  const nativeFailures: Array<{ error: SqliteFailure; code: string | undefined; errcode: number }> = [];
+  let omittedAttachments = 0;
+  const original = DatabaseSync.prototype.exec;
+  t.mock.method(DatabaseSync.prototype, "exec", function(this: DatabaseSync, sql: string) {
+    try { return original.call(this, sql); }
+    catch (error) {
+      const native = error as SqliteFailure;
+      if (typeof native.errcode === "number" && [5, 6].includes(native.errcode & 0xff)) {
+        nativeFailures.push({ error: native, code: native.code, errcode: native.errcode });
+        if (omitAttachment) {
+          // Model an older error transport by dropping only the attachment. SQLite really failed;
+          // its exception, message decoration and code still pass through the default adapter.
+          Object.defineProperty(native, "readModelTransactions", { configurable: true, set: () => {
+            omittedAttachments++; delete native.readModelTransactions;
+          } });
+        }
+      }
+      throw error;
+    }
+  });
+  f.db.exec("BEGIN IMMEDIATE");
+  await adapter.flushReadModelTransactions();
+  o.ticker.tick();
+  assert.equal(nativeFailures.length, 1, "one actual native BUSY/LOCKED exception reached failSlot");
+  const native = nativeFailures[0]!;
+  assert.equal(native.error.code, native.code);
+  assert.equal(native.error.errcode, native.errcode);
+  const row = o.failures()[0];
+  assert.ok(row);
+  assert.equal(row.error, native.error.message, "logging preserves the decorated SQLite message exactly");
+  assert.match(String(row.error), /database is locked.*\[operation=exec.begin-immediate\]$/);
+  assert.deepEqual([row.instance, row.failures, row.backoffMs], ["core", 1, 200]);
+  assert.equal(o.state().lease, "held", "ordinary contention does not drop the lease");
+  assert.equal(o.state().reason, `tick failed: ${native.error.message}`);
+  o.ticker.tick();
+  assert.equal(nativeFailures.length, 1, "the unchanged backoff prevents another SQLite attempt");
+  assert.equal(o.failures().length, 1);
+  return { f, o, native, row, omittedAttachments };
+}
+
+test("W1-T10207: an ordinary tick failure retains its attached transaction observations", { timeout: 30_000 }, async (t) => {
+  const { f, o, native, row } = await ordinaryContention(t);
+  const observations = native.error.readModelTransactions;
+  assert.ok(observations, "positive control: the default adapter attached its failure-time inventory");
+  assert.equal(row.transactions, observations, "failSlot projects the attached observation, without rereading or reinterpreting it");
+  assert.deepEqual(structuredClone(row.transactions), observations, "the full bounded inventory survives message serialization");
+  assert.equal(typeof observations.complete, "boolean");
+  assert.ok(observations.records.length <= 3);
+  const acquired = observations.records.find(record => record.recordedState === "recorded-acquired");
+  assert.equal(acquired?.label, "ordinary tick competing writer");
+  assert.equal(acquired?.lockOwnership, "unverified");
+  assert.ok(acquired && "recordAgeMs" in acquired);
+  assert.equal("heldMs" in acquired, false);
+  const waiting = observations.records.find(record => record.recordedState === "attempting");
+  assert.ok(waiting);
+  assert.notEqual(waiting.connection, acquired.connection);
+  assert.equal(waiting.acquiredAt, undefined);
+  f.db.exec("ROLLBACK"); await adapter.flushReadModelTransactions();
+  o.advance(200); o.ticker.tick();
+  assert.equal(o.state().failures, 0, "the successful real tick resets the existing failure counter");
+  assert.equal(o.state().lease, "held");
+  assert.ok(o.state().generation > 0);
+  assert.equal(o.failures().length, 1);
+});
+
+test("W1-T10207: an ordinary failure without attached observations invents no holder", { timeout: 35_000 }, async (t) => {
+  await t.test("a real SQLite error missing only the attachment preserves its outcome", async (t) => {
+    const { native, row, omittedAttachments } = await ordinaryContention(t, true);
+    assert.equal(omittedAttachments, 1, "only the default adapter's attachment was omitted");
+    assert.equal(Object.hasOwn(native.error, "readModelTransactions"), false);
+    assert.equal(Object.hasOwn(row, "transactions"), false, "missing evidence is not replaced by a new sidecar read or a no-holder claim");
+  });
+  await t.test("a real non-lock filesystem failure keeps its backoff and recovery", async (t) => {
+    const f = await fixture(t);
+    const ledgerDir = join(f.dir, "missing-ledger");
+    const o = ordinaryTicker(f, ledgerDir);
+    o.ticker.start(); o.ticker.tick();
+    const first = o.failures()[0];
+    assert.ok(first); assert.match(String(first.error), /ENOENT/);
+    assert.equal(Object.hasOwn(first, "transactions"), false);
+    assert.deepEqual([first.failures, first.backoffMs, o.state().lease], [1, 200, "held"]);
+    o.ticker.tick(); assert.equal(o.failures().length, 1);
+    o.advance(200); o.ticker.tick();
+    assert.deepEqual(o.failures().map(row => row.backoffMs), [200, 400]);
+    assert.ok(o.failures().every(row => !Object.hasOwn(row, "transactions")));
+    mkdirSync(ledgerDir); o.append(); o.advance(400); o.ticker.tick();
+    assert.equal(o.state().failures, 0);
+    assert.equal(o.state().reason, undefined);
+  });
+  await t.test("a real lease fence still drops the lease", async (t) => {
+    const f = await fixture(t);
+    const o = ordinaryTicker(f);
+    o.append(); o.ticker.start();
+    assert.equal(o.state().lease, "held");
+    f.db.prepare("UPDATE lease SET holder = 'replacement'").run();
+    o.ticker.tick();
+    const row = o.failures()[0];
+    assert.ok(row); assert.match(String(row.error), /lease_lost/);
+    assert.equal(Object.hasOwn(row, "transactions"), false);
+    assert.deepEqual([row.failures, row.backoffMs, o.state().lease], [1, 200, "none"]);
+  });
+});
 
 test("W1-T9501: a locked write names the connection holding the lock", { timeout: 30_000 }, async (t) => {
   const f = await fixture(t);
