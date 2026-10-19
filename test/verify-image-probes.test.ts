@@ -995,7 +995,7 @@ test("local image delivery observes no host payload effect and catches its delib
   const good = localVerifier();
   assertLocalCalls(good);
   const real = readFileSync(SCRIPT, "utf8");
-  const anchor = "\nset +e\nprobe_run --rm -e EXPECT_CLAUDE_VERSION=";
+  const anchor = "\nset +e\ndocker run --rm -e EXPECT_CLAUDE_VERSION=";
   assert.equal(real.split(anchor).length - 1, 1, "the host-effect control must target the real probe boundary once");
   const mutant = real.replace(anchor, "\nverify_image_host_payload_probe" + anchor);
   const path = join(makeTempDir("verify-image-local-host-effect-"), "verify-image.sh");
