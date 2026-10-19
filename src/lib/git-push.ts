@@ -513,7 +513,6 @@ export function prePushGateEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Pr
   return env;
 }
 
-/** Only this run's throwaway HOME and its private /tmp child are ephemeral writable binds. */
 export function prePushEphemeralBind(from: string | undefined, to: string | undefined, home: string): boolean {
   return (from === home && to === home) || (from === join(home, ".rmd-private-tmp") && to === "/tmp");
 }
