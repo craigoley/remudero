@@ -161,10 +161,16 @@ test("serve's memory ceiling fits an active generation and a booting standby dur
 test("serve is launched with a memory ceiling that bounds a leak and leaves room to swap", () => {
   const { args, out } = serveRunArgs();
   assert.ok(args.includes("--memory=7680m"), `a 7.5 GiB ceiling: an active generation (5.28 GB with swap) plus a booting standby (1.55 GB) during a handoff: ${args.join(" ")}`);
-  // Operator ruling 2026-10-19: swap.max 1 GiB -> 2 GiB; at 1 GiB serve's swap read 95% full.
-  assert.ok(args.includes("--memory-swap=9728m"), "2 GiB of swap before the kernel kills anything");
-  assert.ok(!args.some((a) => a.startsWith("--memory-reservation")), "no ineffective memory.low reservation");
+  assert.ok(args.some((a) => a.startsWith("--memory-swap=")), "room to swap before the kernel kills anything");
   assert.ok(!args.some((a) => a.startsWith("--cpus=")), "no CPU quota by default — the weight already wins contention");
+  assert.match(out, /memory ceiling 7680 MiB \(\+\d+ MiB swap\)/);
+});
+
+test("operator ruling 2026-10-19: serve gets 2 GiB of swap and no memory reservation", () => {
+  const { args, out } = serveRunArgs();
+  // swap.max 1 GiB -> 2 GiB: at 1 GiB serve's swap read 95% full.
+  assert.ok(args.includes("--memory-swap=9728m"), `2 GiB of swap over the 7.5 GiB ceiling: ${args.join(" ")}`);
+  assert.ok(!args.some((a) => a.startsWith("--memory-reservation")), "no ineffective memory.low reservation");
   assert.match(out, /memory ceiling 7680 MiB \(\+2048 MiB swap\)/);
 });
 
