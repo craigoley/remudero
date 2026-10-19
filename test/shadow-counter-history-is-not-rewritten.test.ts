@@ -22,7 +22,7 @@ test("shadow persistence retains historical keys without rewriting their JSON on
   const next = store.load().inbox!;
   next.samples++;
   store.save("inbox", next);
-  assert.deepEqual(readFileSync(path), before, "a counter increment must not rewrite the historical JSON");
+  assert.equal(readFileSync(path).equals(before), true, "a counter increment must not rewrite the historical JSON");
   const restored = fileShadowStore(path, db, lease.lease);
   try { assert.equal(restored.load().inbox!.samples, 101); assert.deepEqual(restored.load().inbox!.streakKeys, history.streakKeys); }
   finally { restored.close?.(); }

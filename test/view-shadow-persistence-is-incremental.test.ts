@@ -29,7 +29,7 @@ test("normalized shadow rows keep exact historical membership outside the hot co
   const bytes = readFileSync(f.path), before = statSync(f.path);
   const store = f.store(), current = store.load().inbox!;
   for (let n = 0; n < 12; n++) { current.samples++; current.streakSamples++; store.save("inbox", current, { reset: false, add: "new-cursor" }); }
-  assert.deepEqual(readFileSync(f.path), bytes);
+  assert.equal(readFileSync(f.path).equals(bytes), true, "historical JSON bytes remain identical");
   assert.equal(statSync(f.path).mtimeMs, before.mtimeMs, "old evidence is preserved, not rewritten");
   const loaded = f.store().load();
   assert.equal(loaded.inbox!.samples, old.samples + 12);
