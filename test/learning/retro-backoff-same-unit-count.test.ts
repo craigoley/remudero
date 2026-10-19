@@ -37,8 +37,9 @@ function fixture(t: TestContext, seed: "valid" | "missing" | "invalid" = "valid"
   }));
   const ledger = rows.flatMap((row, i) => [
     { ts: MERGED, run_id: `W1-T${i + 1}-1`, task_id: `W1-T${i + 1}`, step: "run.start" },
-    { ts: MERGED, run_id: `W1-T${i + 1}-1`, task_id: `W1-T${i + 1}`, step: "verdict", verdict: "merged", pr_url: row.html_url },
-  ]).map(row => JSON.stringify(row)).join("\n") + "\n";
+    { ts: MERGED, run_id: `W1-T${i + 1}-1`, task_id: `W1-T${i + 1}`, step: "verdict", verdict: i === 0 ? "blocked" : "merged", pr_url: row.html_url },
+  ]).concat([{ ts: MERGED, run_id: "W1-T900-1", task_id: "W1-T900", step: "run.start" }])
+    .map(row => JSON.stringify(row)).join("\n") + "\n";
   writeFileSync(join(root, "state", "ledger.ndjson"), ledger);
   saveMarker(join(root, "state", "last-retro.json"), { ts: MARKER, learnings_count: 0, runs_seen: 0 });
   runTask.recordRetroAttempt(root, new Date("2026-10-02T12:00:00.000Z"), 5);
@@ -142,13 +143,17 @@ test("retro backoff cached credit still refuses foreign heads and unknown merge 
     const f = fixture(t);
     const path = join(f.config.root, "state", "ledger.ndjson");
     const records = f.ledger.trim().split("\n").map(line => JSON.parse(line));
-    delete records[1].ts;
+    delete records[5].ts;
     writeFileSync(path, records.map(row => JSON.stringify(row)).join("\n") + "\n");
     const foreign = f.rows.map((row, i) => i === 1 ? { ...row, head: { ref: "run-other-1", sha: "c".repeat(40) } } : row);
     assert.equal(f.snapshot.commitClosed(foreign.map(mapBoardPr)), true);
     const result = await check(f, mode, foreign);
     assert.equal(result.decision, undefined);
     assert.equal(result.probes, 0, "18 owned/timed runs plus10 filings cannot open the floor30");
+    const refusal = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line))
+      .findLast(row => row.step === "daemon.retro_trigger.backoff");
+    assert.equal(refusal?.merges_since_marker, 28);
+    assert.equal(refusal?.count_basis, "cached-shipped-plus-runless");
   }
 });
 
