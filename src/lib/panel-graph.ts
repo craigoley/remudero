@@ -1859,6 +1859,7 @@ export type InboxSetAsideItem = (InboxReadyItem | InboxDraftingItem | InboxNotRe
   lane: "ready" | "drafting" | "notReady" | "declined";
   archivedAt?: string;
   snoozedUntil?: string;
+  keptAt?: string;
 };
 
 /** W1-T4086: one fleet-owned proposal in `GET /v1/inbox`'s `fleet` list, with the lane it sits in. */
@@ -1871,6 +1872,7 @@ export interface InboxFleetItem extends InboxSender {
   /** W1-T4089: the fleet lane's latest decision, when it has made one. */
   decision?: FleetLaneDecision;
   reason?: string;
+  keptChanged?: string;
 }
 
 /** The drafted fragment's task ids + titles. A ready fragment already passed classifyProposal's
@@ -2270,6 +2272,47 @@ export interface InboxStores {
 export interface InboxTriage {
   archivedAt?: string;
   snoozedUntil?: string;
+  keptAt?: string;
+  keptState?: InboxKeptState;
+  keptChanged?: string;
+}
+
+interface InboxKeptState {
+  lane: InboxOptionLane;
+  state: InboxClassification["state"];
+  reasons: InboxClassification["reasons"];
+  messageHash: string;
+}
+
+function inboxKeptState(proposal: Proposal, classification: InboxClassification, plain: PlainInboxMessage): InboxKeptState {
+  const { headline, whatHappened, whatWeNeed, ifNothingHappens, options } = plain;
+  return {
+    lane: classification.state === "not_ready" || classification.state === "deferred_with_trigger" ? "notReady" : classification.state as InboxOptionLane,
+    state: classification.state,
+    reasons: [...classification.reasons].sort((a, b) => a.predicate.localeCompare(b.predicate) || a.detail.localeCompare(b.detail)),
+    messageHash: createHash("sha256").update(JSON.stringify([proposal.summary, headline, whatHappened, whatWeNeed, ifNothingHappens, options.map(o => [o.label, o.consequence, o.intent])])).digest("hex"),
+  };
+}
+
+function keptStateChange(before: InboxKeptState, after: InboxKeptState): string | undefined {
+  const changes: string[] = [];
+  const stateReason: Record<InboxClassification["state"], string> = {
+    ready: "its proof is now ready", not_ready: "its proof needs another check",
+    drafting: "the proposal is now being drafted", deferred_with_trigger: "the proposal is now waiting for a trigger",
+    ratified: "the proposal was approved", declined: "the proposal was declined", retired: "the proposal no longer needs a decision",
+  };
+  if (before.state !== after.state || before.lane !== after.lane) changes.push(stateReason[after.state]);
+  if (JSON.stringify(before.reasons) !== JSON.stringify(after.reasons)) changes.push("its classification reasons changed");
+  if (before.messageHash !== after.messageHash) changes.push("the proposal was redrafted");
+  return changes.length > 0 ? changes.join("; ") : undefined;
+}
+
+function isInboxKeptState(raw: unknown): raw is InboxKeptState {
+  if (!isRecord(raw)) return false;
+  return ["ready", "drafting", "notReady", "declined"].includes(String(raw.lane)) &&
+    ["ready", "drafting", "not_ready", "deferred_with_trigger", "declined"].includes(String(raw.state)) &&
+    typeof raw.messageHash === "string" && /^[a-f0-9]{64}$/.test(raw.messageHash) &&
+    Array.isArray(raw.reasons) && raw.reasons.every(r => isRecord(r) && typeof r.predicate === "string" && typeof r.detail === "string");
 }
 
 /** W1-T8831: the operator's archive and snooze marks, kept where ledger rotation cannot shed them. */
@@ -2284,12 +2327,14 @@ function readTriage(stateDir: string): Record<string, InboxTriage> {
     const out: Record<string, InboxTriage> = {};
     for (const [id, raw] of Object.entries(parsed)) {
       if (raw === null || typeof raw !== "object") continue;
-      const { archivedAt, snoozedUntil } = raw as Record<string, unknown>;
+      const { archivedAt, snoozedUntil, keptAt, keptState, keptChanged } = raw as Record<string, unknown>;
       const entry: InboxTriage = {
         ...(typeof archivedAt === "string" && Number.isFinite(Date.parse(archivedAt)) ? { archivedAt } : {}),
         ...(typeof snoozedUntil === "string" && Number.isFinite(Date.parse(snoozedUntil)) ? { snoozedUntil } : {}),
+        ...(typeof keptAt === "string" && Number.isFinite(Date.parse(keptAt)) && isInboxKeptState(keptState) ? { keptAt, keptState } : {}),
+        ...(typeof keptChanged === "string" ? { keptChanged } : {}),
       };
-      if (entry.archivedAt !== undefined || entry.snoozedUntil !== undefined) out[id] = entry;
+      if (entry.archivedAt !== undefined || entry.snoozedUntil !== undefined || entry.keptAt !== undefined) out[id] = entry;
     }
     return out;
   } catch {
@@ -2299,7 +2344,7 @@ function readTriage(stateDir: string): Record<string, InboxTriage> {
 }
 
 function putTriage(stateDir: string, held: Record<string, InboxTriage>, id: string, entry: InboxTriage): InboxTriage | undefined {
-  if (entry.archivedAt === undefined && entry.snoozedUntil === undefined) delete held[id];
+  if (entry.archivedAt === undefined && entry.snoozedUntil === undefined && entry.keptAt === undefined) delete held[id];
   else held[id] = entry;
   writeAtomic(inboxTriagePath(stateDir), JSON.stringify(held) + "\n");
   return held[id];
@@ -2308,22 +2353,46 @@ function putTriage(stateDir: string, held: Record<string, InboxTriage>, id: stri
 /** Set (or clear) one item's archive mark. Idempotent: archiving an archived item keeps its first instant. Returns the entry now held. */
 export function setInboxArchived(stateDir: string, id: string, archived: boolean, nowIso: string): InboxTriage | undefined {
   const held = readTriage(stateDir);
-  const { archivedAt, ...rest } = held[id] ?? {};
+  const { archivedAt, keptAt: _keptAt, keptState: _keptState, keptChanged: _changed, ...rest } = held[id] ?? {};
   return putTriage(stateDir, held, id, archived ? { ...rest, archivedAt: archivedAt ?? nowIso } : rest);
 }
 
 /** Set one item's snooze instant, or wake it now with null. Idempotent. Returns the entry now held. */
 export function setInboxSnoozed(stateDir: string, id: string, until: string | null): InboxTriage | undefined {
   const held = readTriage(stateDir);
-  const { snoozedUntil: _dropped, ...rest } = held[id] ?? {};
+  const { snoozedUntil: _dropped, keptAt: _keptAt, keptState: _keptState, keptChanged: _changed, ...rest } = held[id] ?? {};
   return putTriage(stateDir, held, id, until === null ? rest : { ...rest, snoozedUntil: until });
 }
 
-/** Acting on an archived item un-archives it (W1-T8831); a snooze is left alone. Returns whether a mark was dropped. */
+function clearInboxKeep(stateDir: string, id: string): void {
+  const held = readTriage(stateDir);
+  if (held[id]?.keptAt === undefined) return;
+  const { keptAt: _keptAt, keptState: _keptState, keptChanged: _changed, ...rest } = held[id]!;
+  putTriage(stateDir, held, id, rest);
+}
+
+/** An existing decision verb clears archive and keep; a snooze is left alone. */
 export function clearInboxArchive(stateDir: string, id: string): boolean {
-  if (readTriage(stateDir)[id]?.archivedAt === undefined) return false;
+  const mark = readTriage(stateDir)[id];
+  if (mark?.archivedAt === undefined && mark?.keptAt === undefined) return false;
   setInboxArchived(stateDir, id, false, "");
   return true;
+}
+
+/** A changed observation permanently lapses the decision; reads can explain it without writing. */
+export function lapseInboxKeeps(stateDir: string, classified: Pick<ClassifiedInbox, "proposals" | "classifications">): void {
+  const held = readTriage(stateDir);
+  const plain = readPlainStore(plainStorePath(stateDir));
+  const byId = new Map(classified.proposals.map(p => [p.id, p]));
+  let changed = false;
+  for (const classification of classified.classifications) {
+    const mark = held[classification.proposalId];
+    const proposal = byId.get(classification.proposalId);
+    if (mark?.keptState === undefined || mark.keptChanged !== undefined || proposal === undefined) continue;
+    const reason = keptStateChange(mark.keptState, inboxKeptState(proposal, classification, plainInboxMessage(proposal, plain)));
+    if (reason) { mark.keptChanged = reason; changed = true; }
+  }
+  if (changed) writeAtomic(inboxTriagePath(stateDir), JSON.stringify(held) + "\n");
 }
 
 /** A proposal that leaves the registry drops its marks. Written only when something is dropped. Returns how many. */
@@ -2343,8 +2412,8 @@ function activeTriage(stateDir: string, ids: ReadonlySet<string>, nowMs: number)
   for (const [id, entry] of Object.entries(readTriage(stateDir))) {
     if (!ids.has(id)) continue;
     const snoozed = entry.snoozedUntil !== undefined && Date.parse(entry.snoozedUntil) > nowMs;
-    const active: InboxTriage = { ...(entry.archivedAt === undefined ? {} : { archivedAt: entry.archivedAt }), ...(snoozed ? { snoozedUntil: entry.snoozedUntil } : {}) };
-    if (active.archivedAt !== undefined || active.snoozedUntil !== undefined) out[id] = active;
+    const active: InboxTriage = { ...entry, ...(snoozed ? { snoozedUntil: entry.snoozedUntil } : { snoozedUntil: undefined }) };
+    if (active.archivedAt !== undefined || active.snoozedUntil !== undefined || active.keptAt !== undefined) out[id] = active;
   }
   return out;
 }
@@ -2526,11 +2595,23 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const triage = stores.triage ?? {};
   const archived: InboxSetAsideItem[] = [];
   const snoozed: InboxSetAsideItem[] = [];
-  const unsetAside = <T extends { proposalId: string }>(items: T[], lane: InboxSetAsideItem["lane"]): T[] => items.filter((item) => {
+  const kept: InboxSetAsideItem[] = [];
+  const classificationById = new Map(classifications.map(c => [c.proposalId, c]));
+  const unsetAside = <T extends { proposalId: string }>(items: T[], lane: InboxSetAsideItem["lane"]): (T & { keptChanged?: string })[] => items.flatMap((item) => {
     const mark = triage[item.proposalId];
-    if (mark === undefined) return true;
-    (mark.archivedAt === undefined ? snoozed : archived).push({ ...item, lane, ...mark } as unknown as InboxSetAsideItem);
-    return false;
+    if (mark === undefined) return [item];
+    if (mark.archivedAt !== undefined || mark.snoozedUntil !== undefined) {
+      (mark.archivedAt === undefined ? snoozed : archived).push({ ...item, lane, ...mark } as unknown as InboxSetAsideItem);
+      return [];
+    }
+    const proposal = byId.get(item.proposalId)!;
+    const classification = classificationById.get(item.proposalId)!;
+    const keptChanged = mark.keptChanged ?? (mark.keptState && keptStateChange(mark.keptState, inboxKeptState(proposal, classification, plainInboxMessage(proposal, plainStore))));
+    if (mark.keptAt && mark.keptState && !keptChanged) {
+      kept.push({ ...item, lane, keptAt: mark.keptAt } as unknown as InboxSetAsideItem);
+      return [];
+    }
+    return [{ ...item, ...(keptChanged ? { keptChanged } : {}) }];
   });
   const ready = unsetAside(allReady, "ready");
   const drafting = unsetAside(allDrafting, "drafting");
@@ -2554,10 +2635,10 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     declined: operatorItems(declined),
   };
   const fleet: InboxFleetItem[] = [
-    ...ready.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
-    ...drafting.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
-    ...notReady.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
-    ...declined.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
+    ...ready.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, keptChanged: i.keptChanged, lane: "ready" as const })),
+    ...drafting.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, keptChanged: i.keptChanged, lane: "drafting" as const })),
+    ...notReady.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, keptChanged: i.keptChanged, lane: "notReady" as const })),
+    ...declined.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, keptChanged: i.keptChanged, lane: "declined" as const })),
   ]
     .filter((i) => !isOperator(i))
     // W1-T4089: each fleet finding's latest fleet-lane decision and its plain reason.
@@ -2570,6 +2651,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     fleet: fleet.length,
     archived: archived.length,
     snoozed: snoozed.length,
+    kept: kept.length,
     needsYou: {
       ready: needsYou.ready.filter(isAsk).length, drafting: needsYou.drafting.filter(isAsk).length,
       notReady: needsYou.notReady.filter(isAsk).length, declined: needsYou.declined.filter(isAsk).length,
@@ -2579,7 +2661,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const project = <T extends { proposalId: string }>(items: T[]) => items.map(item => ({ ...item, ...(attention ? { snapshotAttention: attention(item.proposalId) } : {}) }));
   return { ready: project(ready), drafting: project(drafting), notReady: project(notReady), declined: project(declined),
     needsYou: { ready: project(needsYou.ready), drafting: project(needsYou.drafting), notReady: project(needsYou.notReady), declined: project(needsYou.declined) },
-    fleet: project(fleet), archived: project(archived), snoozed: project(snoozed), counts, humanGates };
+    fleet: project(fleet), archived: project(archived), snoozed: project(snoozed), kept: project(kept), counts, humanGates };
 }
 
 /**
@@ -2645,10 +2727,10 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
       if (deps.inboxFromSlowLane && !read.snapshotKey) {
         sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The maintained classification has no shared snapshot identity yet." }); return;
       }
-      const { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, counts } = read.lanes();
-      const lanes = { ready, drafting, notReady, declined, fleet, archived, snoozed };
+      const { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, kept, counts } = read.lanes();
+      const lanes = { ready, drafting, notReady, declined, fleet, archived, snoozed, kept };
       const at = { ...(read.snapshotKey ? { snapshotKey: read.snapshotKey } : {}), ...(deps.inboxFromSlowLane && read.classifiedAt !== undefined ? { classifiedAt: read.classifiedAt } : {}), ...withPlanSource(deps, {}) };
-      if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, counts, ...at });
+      if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, kept, counts, ...at });
       else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts, ...at });
       else {
         if (read.snapshotKey) {
@@ -2673,7 +2755,7 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
 /** GET /v1/inbox's sections. A bare GET is the whole body, as before; `?section=` answers one lane
  *  under its own key, so a console parser reading `body.fleet` or `body.needsYou` works unchanged,
  *  and a list lane pages by `?limit=` (default 100, at most 500) and `?cursor=`. */
-const INBOX_LIST_SECTIONS = ["ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed"] as const;
+const INBOX_LIST_SECTIONS = ["ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed", "kept"] as const;
 
 function inboxShapeOf(
   rawUrl: string | undefined,
@@ -3256,6 +3338,7 @@ export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
             sendJson(res, 409, { error: "reply_intent_conflict", delivery: "not_delivered", priorReplyId: replyId });
             return;
           }
+          clearInboxKeep(join(deps.inboxRoot, "state"), proposalId);
           const priorAudit = stored.kind === "existing" ? inboxReplyAuditState(deps.ledgerPath, replyId, stored.ts) : "absent";
           if (priorAudit === "unverified") {
             sendJson(res, 200, { ok: true, delivery: "delivered", audit: "unverified", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: true });
@@ -3557,6 +3640,38 @@ function validateSnoozeProposal(body: unknown): { error: string } | SnoozePropos
   return { proposalId: body.proposalId, until: body.until };
 }
 
+/** Record the current observation as a reversible keep decision, or clear that decision. */
+export function buildKeepProposalRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST", path: "/v1/inbox/keep", scope: "write", tier: "low",
+    handler: jsonAction<{ proposalId: string; kept: boolean; reason?: string }>((body: unknown) => {
+      const id = validateApproveProposal(body);
+      if ("error" in id) return id;
+      const fields = body as Record<string, unknown>;
+      if (fields.kept !== undefined && typeof fields.kept !== "boolean") return { error: "kept must be a boolean" };
+      if (fields.reason !== undefined && typeof fields.reason !== "string") return { error: "reason must be a string" };
+      return { ...id, kept: fields.kept !== false, reason: fields.reason as string | undefined };
+    }, (input, req, res) => {
+      const classified = classifyAllProposals(deps);
+      const proposal = classified.proposals.find(p => p.id === input.proposalId);
+      if (!proposal) { sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
+      const classification = classified.classifications.find(c => c.proposalId === input.proposalId);
+      if (!classification || classification.state === "ratified" || classification.state === "declined" || classification.state === "retired") {
+        sendJson(res, 409, { error: "not_decidable", detail: "The proposal is no longer awaiting a decision." }); return;
+      }
+      const stateDir = join(deps.inboxRoot, "state");
+      const held = readTriage(stateDir);
+      const { keptAt, keptState: prior, keptChanged, ...rest } = held[input.proposalId] ?? {};
+      const observed = inboxKeptState(proposal, classification, plainInboxMessage(proposal, readPlainStore(plainStorePath(stateDir))));
+      const at = keptAt && prior && !keptChanged && !keptStateChange(prior, observed) ? keptAt : (deps.inboxClock ?? systemClock).iso();
+      const entry = input.kept ? { keptAt: at, keptState: observed } : rest;
+      putTriage(stateDir, held, input.proposalId, entry);
+      appendPanelLedger(deps.ledgerPath, "inbox.kept", input.proposalId, bearerTokenId(req), { kept: input.kept, keptState: observed, ...(input.reason === undefined ? {} : { reason: input.reason }) });
+      sendJson(res, 200, { ok: true, proposalId: input.proposalId, kept: input.kept, ...(input.kept ? { keptAt: at } : {}) });
+    }),
+  };
+}
+
 /**
  * POST /v1/inbox/archive — write-scoped, LOW. Sets the item aside (`archived: true`) or brings it back
  * (`false`) without changing the proposal's state: approve, decline and restore still work on it, and acting
@@ -3818,6 +3933,7 @@ export function buildPanelWriteRoutes(deps: PanelGraphDeps): Route[] {
     buildRestoreProposalRoute(deps),
     buildArchiveProposalRoute(deps),
     buildSnoozeProposalRoute(deps),
+    buildKeepProposalRoute(deps),
     buildInboxThreadReplyRoute(deps),
     buildInboxThreadReadRoute(deps),
     buildSetDailyCostCeilingRoute(deps),

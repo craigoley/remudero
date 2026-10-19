@@ -7,9 +7,9 @@ import { fixedClock } from "../src/lib/clock.js";
 import { persistedInboxPath, readPersistedInbox, writePersistedInbox, type PersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification, type InboxRefresh } from "../src/lib/inbox-view.js";
 import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
-import { buildInboxAttentionCensusRoute, buildInboxRoute, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { buildInboxAttentionCensusRoute, buildInboxKeepRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadsRoute, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { classificationSnapshotKey } from "../src/lib/read-page.js";
-import { appendThreadEvent, appendThreadMessage, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
+import { appendThreadEvent, appendThreadMessage, inboxThreadId, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
 import { boundConsoleReadRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
@@ -39,7 +39,7 @@ function world(t: Ctx, count = 80) {
   return { root, deps, at, registry, proposals, write, refresh };
 }
 async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh,
-  options: { deps?: Partial<PanelGraphDeps>; mode?: "serve" | "off"; boundInbox?: boolean; emptyNative?: boolean } = {}) {
+  options: { deps?: Partial<PanelGraphDeps>; mode?: "serve" | "off"; boundInbox?: boolean; emptyNative?: boolean; withWrites?: boolean } = {}) {
   let reads = 0;
   const deps: PanelGraphDeps = { ...w.deps, inboxFromSlowLane: true,
     inboxMainSha: () => { throw new Error("request classified"); },
@@ -61,7 +61,9 @@ async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh
   const inbox = options.boundInbox === false ? originalInbox : boundConsoleReadRoute(originalInbox, { fleetControlRoot: w.root } as ServeDeps, 1000, { setTimer: () => undefined, clock: fixedClock(w.at) });
   const census = buildInboxAttentionCensusRoute(deps);
   const native = buildReadModelViewRoutes({ legacy: [inboxLegacyView(deps, fixedClock(w.at))], readModel: handle, readModelViews: [INBOX_VIEW_NAME], clock: fixedClock(w.at) });
-  const routes = [inbox, census, ...native, ...mountInstanceInboxRoutes({ instance: "core", repository: "owner/core", stateDir: join(w.root, "state"), routes: [inbox, census] })];
+  const threads = options.withWrites ? [buildInboxThreadsRoute(deps, undefined, { warm: false })] : [];
+  const writes = options.withWrites ? [buildInboxKeepRoute(w.deps), buildInboxThreadReplyRoute(w.deps)] : [];
+  const routes = [inbox, census, ...native, ...threads, ...writes, ...mountInstanceInboxRoutes({ instance: "core", repository: "owner/core", stateDir: join(w.root, "state"), routes: [inbox, census, ...threads] })];
   const server = createService({ tokens: { read: "read", write: "write" }, routes });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
@@ -71,7 +73,11 @@ async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh
     const text = await res.text();
     return { status: res.status, body: text ? JSON.parse(text) as Record<string, any> : {}, etag: res.headers.get("etag"), bytes: Buffer.byteLength(text) };
   };
-  return { get, put, reads: () => reads, entries };
+  const post = async (path: string, body: unknown) => {
+    const res = await fetch(base + path, { method: "POST", headers: { authorization: "Bearer write", "content-type": "application/json" }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json() as Record<string, any> };
+  };
+  return { get, post, put, reads: () => reads, entries };
 }
 
 test("equal-count inbox pages cannot mix classification snapshots", async (t) => {
@@ -125,7 +131,7 @@ test("all inbox sections retain one classification key without reader-triggered 
   }
   assert.ok(largestWirePage >= 52 * 1024, `near-ceiling page control: ${largestWirePage} bytes`);
   t.diagnostic(`largest complete native page: ${largestWirePage} bytes`);
-  for (const section of ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed"]) {
+  for (const section of ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed", "kept"]) {
     const page = await s.get(`/v1/inbox?section=${section}`);
     assert.equal(page.status, 200);
     assert.equal(page.body.snapshotKey, key);
@@ -571,4 +577,80 @@ test("snapshot-owned attention fits existing pages and unchanged restamps retain
   assert.equal(after.snapshotKey, before.snapshotKey); assert.notEqual(after.generatedAt, before.generatedAt);
   s.put(retainedBodies(w, initial));
   for (const [key, etag] of tags) assert.equal((await s.get(`/v1/views/inbox?${key}`, etag!)).status, 304);
+});
+
+test("kept and lapsed inbox pages share snapshot attention and invalidate equal-clock classification cursors", async t => {
+  const w = world(t);
+  w.deps.inboxClock = fixedClock(w.at);
+  const initial = await w.refresh(), before = readPersistedInbox(join(w.root, "state"))!;
+  const s = await served(t, w, initial, { withWrites: true });
+  const first = await s.get("/v1/inbox?section=notReady&limit=1");
+  const native = await s.get("/v1/views/inbox?section=notReady");
+  assert.equal(first.status, 200); assert.equal(native.status, 200);
+  assert.ok(first.body.page.nextCursor); assert.ok(native.body.data.page.next, "control: a physical native continuation exists");
+  assert.equal((await s.post("/v1/inbox/keep", { proposalId: "ruling:p0" })).status, 200);
+  const keptPass = await w.refresh(), kept = readPersistedInbox(join(w.root, "state"))!;
+  s.put(keptPass, true);
+  assert.equal(kept.generatedAt, before.generatedAt);
+  assert.notEqual(kept.snapshotKey, before.snapshotKey, "the keep mark is a semantic classification input, not a verification restamp");
+  assert.deepEqual(kept.classifications, before.classifications, "keep changes triage, never the underlying readiness ruling");
+  assert.equal(kept.stores!.triage!["ruling:p0"]!.keptAt, fixedClock(w.at).iso());
+  const legacyKept = await s.get("/v1/i/core/inbox?section=kept");
+  const nativeKept = await s.get("/v1/views/inbox?section=kept");
+  assert.equal(legacyKept.status, 200); assert.equal(nativeKept.status, 200);
+  assert.equal(legacyKept.body.snapshotKey, kept.snapshotKey);
+  assert.equal(nativeKept.body.data.snapshotKey, kept.snapshotKey);
+  assert.equal(legacyKept.body.kept[0].proposalId, "ruling:p0");
+  assert.equal(nativeKept.body.data.items[0].keptAt, fixedClock(w.at).iso());
+  const unknown = { state: "unknown", coverage: "partial", countSemantics: "observed_snapshot_not_verified" };
+  assert.deepEqual(nativeKept.body.data.items[0].snapshotAttention, unknown, "kept uses the same qualified projection without inventing complete archive evidence");
+  assert.deepEqual(legacyKept.body.kept[0].snapshotAttention, unknown);
+  assert.equal((await s.get(`/v1/inbox?section=notReady&limit=1&cursor=${encodeURIComponent(first.body.page.nextCursor)}`)).status, 409);
+  assert.equal((await s.get(`/v1/views/inbox?section=notReady&cursor=${encodeURIComponent(native.body.data.page.next)}`)).status, 409);
+  w.proposals[0]!.summary = `Materially redrafted: ${w.proposals[0]!.summary}`; w.write();
+  const lapsedPass = await w.refresh(), lapsed = readPersistedInbox(join(w.root, "state"))!;
+  s.put(lapsedPass, true);
+  assert.equal(lapsed.generatedAt, kept.generatedAt);
+  assert.notEqual(lapsed.snapshotKey, kept.snapshotKey);
+  assert.match(lapsed.stores!.triage!["ruling:p0"]!.keptChanged!, /redrafted/);
+  const reopened = await s.get("/v1/inbox?section=needsYou");
+  assert.equal(reopened.status, 200);
+  assert.match(reopened.body.needsYou.notReady.find((row: any) => row.proposalId === "ruling:p0").keptChanged, /redrafted/);
+  assert.equal((await s.get("/v1/views/inbox?section=kept")).body.data.items.length, 0);
+  assert.equal(s.reads(), 0, "all read routes consume the maintained snapshot, not a new classification or plan");
+});
+
+test("a real plain reply clears keep and invalidates classification and thread-page cursors at the same clock", async t => {
+  const w = world(t, 2);
+  w.deps.inboxClock = fixedClock(w.at);
+  const initial = await w.refresh(), s = await served(t, w, initial, { withWrites: true });
+  assert.equal((await s.post("/v1/inbox/keep", { proposalId: "ruling:p0" })).status, 200);
+  const keptPass = await w.refresh(), kept = readPersistedInbox(join(w.root, "state"))!;
+  s.put(keptPass);
+  const path = "/v1/i/core/inbox/threads?qualified=1&limit=1";
+  const first = await s.get(path);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.repository, "owner/core"); assert.equal(first.body.instance, "core");
+  assert.equal(first.body.page.total, 2); assert.ok(first.body.page.nextCursor);
+  assert.match(first.body.threadListKey, /^[a-f0-9]{64}$/);
+  const reply = await s.post("/v1/inbox/thread/reply", { threadId: inboxThreadId("ruling:p0"), text: "Please produce the missing evidence.", intentId: "composition-reply" });
+  assert.equal(reply.status, 200); assert.equal(reply.body.delivery, "delivered");
+  assert.equal(reply.body.waitingOn, "daemon");
+  const repliedPass = await w.refresh(), replied = readPersistedInbox(join(w.root, "state"))!;
+  s.put(repliedPass, true);
+  assert.equal(replied.generatedAt, kept.generatedAt);
+  assert.notEqual(replied.snapshotKey, kept.snapshotKey);
+  assert.equal(replied.stores!.triage!["ruling:p0"], undefined, "a delivered plain reply clears the keep mark");
+  assert.deepEqual(replied.classifications, kept.classifications, "a reply does not approve, reframe or rewrite readiness");
+  const attention = replied.attentionCensus!.items.find(row => row.proposalId === "ruling:p0")!;
+  assert.equal(attention.attention, "awaiting_daemon"); assert.equal(attention.waitingOn, "daemon");
+  const next = await s.get(path);
+  assert.equal(next.status, 200);
+  assert.notEqual(next.body.threadListKey, first.body.threadListKey, "actual stored reply content participates in the thread generation");
+  assert.equal((await s.get(`${path}&cursor=${encodeURIComponent(first.body.page.nextCursor)}`)).status, 409);
+  const all = await s.get("/v1/i/core/inbox/threads?qualified=1&limit=2");
+  const row = all.body.threads.find((item: any) => item.proposalId === "ruling:p0");
+  assert.equal(row.attention, "awaiting_daemon"); assert.equal(row.waitingOn, "daemon");
+  assert.equal((await s.get("/v1/views/inbox?section=kept")).body.data.items.length, 0);
+  assert.equal(s.reads(), 0);
 });
