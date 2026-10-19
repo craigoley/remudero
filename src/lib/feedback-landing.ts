@@ -204,6 +204,8 @@ export interface LandFeedbackResult {
   leaseMoved?: { expected?: string; observed?: string; by?: string };
   /** W1-T9753: what the build carried forward from the branch, and how many inherited copies it left at main's. */
   carry?: LandingCarry;
+  /** W1-T9616: set when the push was skipped because the branch already carries this exact change, though main moved. */
+  unchangedSinceMainMoved?: true;
 }
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
@@ -732,6 +734,18 @@ function* remoteBranchTree(net: LandingNet, branch: string): Generator<LandingAs
   }
 }
 
+/** W1-T9616: once main moves the trees never match, so compare the landing's OWN raw diff (from its merge base)
+ *  with the build's from main — equal means the same records, untouched by main. Staleness is W1-T5748's to judge. */
+function* branchCarries(net: LandingNet, kind: LandingKind, b: LandingTreeBuild): Generator<LandingAsk, "tree" | "change" | undefined, AskReply> {
+  if ((yield* remoteBranchTree(net, kind.branch)) === b.treeSha) return "tree";
+  if (!b.branchTipSha) return undefined;
+  const raw = (from: string, to: string): NetSteps =>
+    net.git(["diff-tree", "-r", "--raw", "--no-abbrev", "--no-renames", from, to, "--", kind.ownedDir]);
+  const base = (yield* net.git(["merge-base", b.mainSha, b.branchTipSha])).trim();
+  const own = (yield* raw(base, b.branchTipSha)).trim();
+  return own !== "" && own === (yield* raw(b.mainSha, b.treeSha)).trim() ? "change" : undefined;
+}
+
 function landingRepoArgs(identity: Pick<LandingIdentity, "targetRepository">): string[] {
   return identity.targetRepository ? ["--repo", repoKey(identity.targetRepository)] : [];
 }
@@ -1166,11 +1180,16 @@ function* finishLanding(
       catch (error) { next = steps.throw(error); }
     }
   };
+  const carriedAlready = function* (b: LandingTreeBuild): Generator<LandingAsk, LandFeedbackResult | undefined, AskReply> {
+    const carries = yield* branchCarries(net, kind, b);
+    if (carries === undefined) return undefined;
+    const { prUrl, error } = yield* ensurePrOpen(kind, net, yield* bodyOf(b), requestReview);
+    const unchanged = carries === "change" ? { unchangedSinceMainMoved: true as const } : {};
+    return withRefused({ landed: true, files: b.unlanded, prUrl, error, pushed: false, ...unchanged }, b);
+  };
   yield* observePublication(build);
-  if ((yield* remoteBranchTree(net, kind.branch)) === build.treeSha) {
-    const { prUrl, error } = yield* ensurePrOpen(kind, net, yield* bodyOf(build), requestReview);
-    return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build);
-  }
+  const initialCarried = yield* carriedAlready(build);
+  if (initialCarried) return initialCarried;
 
   const pushOnce = function* (b: LandingTreeBuild): Generator<LandingAsk, void, AskReply> {
     const message = kind.commitMessage(b.unlanded);
@@ -1229,10 +1248,8 @@ function* finishLanding(
     const retryNoop = yield* nothingToLand(retried);
     if (retryNoop) return moved(retryNoop);
     yield* observePublication(retried);
-    if ((yield* remoteBranchTree(net, kind.branch)) === retried.treeSha) {
-      const { prUrl, error } = yield* ensurePrOpen(kind, net, yield* bodyOf(retried), requestReview);
-      return moved(withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried));
-    }
+    const retryCarried = yield* carriedAlready(retried);
+    if (retryCarried) return moved(retryCarried);
     try {
       yield* pushOnce(retried);
     } catch (secondErr) {
@@ -1537,6 +1554,7 @@ function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedb
     const refusalEvidence = result.refused && result.refused.length > 0 ? { refused: result.refused } : {};
     const leaseEvidence = result.leaseMoved ? { lease_moved: result.leaseMoved } : {};
     const carryEvidence = result.carry ? { carried: result.carry.carried, inherited_skipped: result.carry.inheritedSkipped } : {};
+    const unchangedEvidence = result.unchangedSinceMainMoved ? { unchanged_since_main_moved: true } : {};
     const gitEvidence = {
       git_driver: meter.driver,
       git_calls: meter.calls,
@@ -1570,6 +1588,7 @@ function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedb
         ...refusalEvidence,
         ...leaseEvidence,
         ...carryEvidence,
+        ...unchangedEvidence,
         ...gitEvidence,
       });
     }

@@ -1,0 +1,30 @@
+id: incident-2b67be7340286d10
+ts: 2026-10-19T11:16:07.013Z
+raw: >-
+  Incident 2b67be734028: anomaly run.running_long:src
+
+  First seen: 2026-10-18T10:57:35.008Z
+
+  Last seen: 2026-10-19T10:07:15.563Z
+
+  Count: 34, burn: 1.47/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task W1-T9931 (run W1-T9931-1792301637480) has run 19315618ms against class "src"'s median 2383965ms (×8, n=113, excluded=36)
+    - task W1-T9931 (run W1-T9931-1792301637480) has run 19315702ms against class "src"'s median 2383965ms (×8, n=113, excluded=36)
+    - task W1-T9931 (run W1-T9931-1792301637480) has run 19315791ms against class "src"'s median 2383965ms (×8, n=113, excluded=36)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#2b67be7340286d10765bb1724cfae00a8a129cee844b4c486d0805dd1ee99c7d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

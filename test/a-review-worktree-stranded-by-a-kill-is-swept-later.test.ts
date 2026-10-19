@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -20,7 +20,7 @@ import test from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { fixedClock } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { worktreesDir } from "../src/lib/worker.js";
+import { newestActivityMs, reapStaleWorktrees, reapStaleWorktreesAsync, runWorktreeReapRung, worktreesDir } from "../src/lib/worker.js";
 import { daemonCommand, materializeReviewWorktree, withMaterializedWorktree } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import {
@@ -434,3 +434,57 @@ test("a worktree materializeReviewWorktree returns stays held for the whole with
     u.cleanup();
   }
 });
+
+for (const mode of ["sync", "async", "rung"] as const) {
+  test(`both review reapers retain the held physical checkout through ${mode} general reaping, then release permits cleanup`, async () => {
+    const u = reviewFixture();
+    let path: string | undefined;
+    try {
+      const sha = headSha(u.repoDir);
+      const prNumber = 12929;
+      execFileSync("git", ["-C", u.originDir, "update-ref", `refs/pull/${prNumber}/head`, sha], { encoding: "utf8" });
+      const made = materializeReviewWorktree(u.config, u.repoDir, prNumber, sha, {
+        fetch: () => {}, // The exact head already exists in this private clone and bare origin.
+        addWorktree: (repoDir, worktree, revision) => {
+          execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", worktree, revision], { encoding: "utf8", env: GIT_ENV });
+        },
+        revParseHead: (worktree) => headSha(worktree),
+      });
+      path = made.worktreePath;
+      assert.ok(path !== undefined, `materialized: ${JSON.stringify(made.failure)}`);
+      assert.equal(headSha(path), sha, "the real detached physical checkout is at the advertised PR head");
+      const name = path.slice(u.worktreesRoot.length + 1);
+      const now = Date.now();
+      const late = fixedClock(now + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 7 * 60_000);
+      // This fixture's commit is empty, so only the directory and .git pointer carry activity.
+      // The rung has no clock port: age these two PRIVATE entries, never a host clock or tree.
+      const oldSeconds = (now - DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS - 7 * 60_000) / 1000;
+      utimesSync(join(path, ".git"), oldSeconds, oldSeconds);
+      utimesSync(path, oldSeconds, oldSeconds);
+      const activity = newestActivityMs(path);
+      assert.equal(activity.complete, true, "the actual bounded activity walk saw the entire fixture");
+      assert.ok(activity.mtimeMs > 0 && now - activity.mtimeMs > DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS,
+        "recent activity cannot accidentally protect the live review from this regression");
+      const reaper = () => mode === "rung" ? runWorktreeReapRung(u.config, collector().log)
+        : mode === "async" ? reapStaleWorktreesAsync(u.worktreesRoot, { now: () => late.now() })
+        : reapStaleWorktrees(u.worktreesRoot, { now: () => late.now() });
+
+      const reviewHeld = sweepStrandedReviewWorktrees(u.config, collector().log, { clock: late });
+      assert.deepEqual(reviewHeld.reclaimed, []);
+      assert.deepEqual(reviewHeld.kept, [{ name, path, reason: "live-review" }]);
+      const genericHeld = await reaper();
+      assert.deepEqual(genericHeld.reaped, [], "the general reaper must honor the SAME active review hold");
+      assert.ok(existsSync(path), "the later deterministic proofs still have their physical head checkout");
+      assert.equal(headSha(path), sha);
+      assert.ok(genericHeld.kept.includes(name));
+
+      releaseReviewWorktree(path);
+      const released = await reaper();
+      assert.deepEqual(released.reaped, [name], "a released old detached review is genuine cleanup, not a permanent exception");
+      assert.equal(existsSync(path), false);
+    } finally {
+      if (path !== undefined) releaseReviewWorktree(path);
+      u.cleanup();
+    }
+  });
+}

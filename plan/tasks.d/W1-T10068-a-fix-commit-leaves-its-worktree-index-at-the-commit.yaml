@@ -14,7 +14,7 @@
     - src/run-task.ts
     - test/a-fix-commit-leaves-its-worktree-index-at-the-commit.test.ts
     - test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts
-  status: queued
+  status: merged
   priority: 1  # every non-merge fix commit makes its own worktree read dirty, which W1-T7998's recovery then keeps forever
   attempts: 0
   rationale: |

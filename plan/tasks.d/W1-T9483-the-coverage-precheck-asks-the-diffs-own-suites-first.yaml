@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: root cause of #11677 (W1-T9077) needing two fix rounds"
   plan_refs: [W1-T4797, W1-T6156, W1-T8833, W1-T5074, W1-T1074]
   files: [src/run-task.ts, test/the-coverage-precheck-asks-the-diffs-own-suites-first.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

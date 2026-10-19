@@ -1,0 +1,87 @@
+- id: W1-T10218
+  title: "Private image qualification binds an exact local image without registry or production lifecycle effects"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  priority: 1.2
+  status: queued
+  attempts: 0
+  origin: "operator-console-follow-up:approved-safe-serve-adoption-2026-10-19"
+  plan_refs: [W1-T2571, W1-T2867, W1-T10058]
+  files:
+    - deploy/verify-image.sh
+    - test/verify-image-probes.test.ts
+  rationale: |
+    OBSERVED source at 14f9184bca76ec586e8856d312d713400023581e: verify-image always
+    authenticates to ACR and pulls a registry tag before its five probes. The exact-revision,
+    refusal-safe serve adoption approved in this chat needs actual baked qualification without
+    publishing an artifact that normal image convergence might adopt. Existing ACR dispatch,
+    even with tag_latest=false, still publishes an image and shares build concurrency. It is
+    not a private qualifier. A source-only or fake Docker result cannot prove the real image.
+    The Mac has no Docker CLI; this observation is a NOT_RUN boundary, not authority to install
+    Docker, start a service, lower the disk reserve, or use production as a fixture.
+
+    Fresh 20:32 UTC subject sweep compared all seven captured OPEN advertised heads against
+    main from 436 advertised branches. Fourteen broad image-qualification plan records were
+    counted with W1-T2571 as a positive control; no open head changed those records or these
+    two implementation paths. W1-T2867 concerns a published daemon deploy, not this private
+    inlet. This is a bounded scope observation, not absence of unpublished work or a claim.
+  design: |
+    Add an explicit --local-image-id accepting only a full sha256:64-lowercase-hex image ID.
+    Refuse conflicting explicit registry/image/tag/expected-registry-digest inputs before
+    invoking tools. Inspect the local object's .Id and require exact equality before any
+    probe. No login, pull, push, tag, registry request, production container operation, bind
+    mount, host environment import, provider/model call, or production credential in this mode.
+    Every probe runs that immutable ID with pull=never and network=none; retain the real runtime
+    user and all five existing probe payloads and verdicts. Unknown/failed inspect refuses;
+    missing images cannot trigger an implicit pull. Image ID is not a registry manifest digest.
+    Keep the existing published-image path, declared tool pins and failure semantics unchanged.
+
+    Extend the existing whole physical suite, including positive delivery and command-trace
+    controls and invalid/mismatched/failed-inspect refusals before run. Record az as well as
+    Docker invocations. Retain old probe/failure/mutation assertions. Freeze new tests, remove
+    the local-only binding or containment cuts separately, and demonstrate functional failures;
+    restore exact production bytes. Syntax-only or missing-test success is not evidence.
+
+    A real private image positive and incompatible-image refusal are separately required
+    before claiming image qualification. Use an owned finite validation stage under unchanged
+    native pressure, slot, disk and scratch guards. No registry publication, production image
+    name, Git image tag, ACR dispatch, production mount/authentication or service control.
+    A missing runtime or denied capacity is explicitly NOT_RUN, not mocked-image PASS.
+    Preserve default hosted gates, normal review and stored acceptance. This task does not
+    implement a drain protocol, select a live target, authorize deployment or fix all memory
+    pressure. A normal reviewed source merge is permissible only after confirming these two
+    paths do not trigger the maintained automatic image/recycle chain.
+  acceptance:
+    - claim: "private qualification uses no registry or production lifecycle command"
+      proof: "unit test: private image qualification never invokes registry or production lifecycle commands"
+    - claim: "the exact inspected local ID is bound across all unchanged probes while published checks remain intact"
+      proof: "unit test: private image qualification binds the exact local image and retains published image checks"
+    - claim: "ambiguous, unavailable or conflicting local inputs refuse before any probe"
+      proof: "unit test: private image qualification refuses unknown identity before starting a probe"
+  falsifier: |
+    Retain all tests and remove only immutable local-ID verification or pull/network containment.
+    The corresponding command trace and mismatch refusal assertions must fail functionally.
+    Restore the entire exact source and rerun the whole physical suite. Real image absence or
+    resource refusal is NOT_RUN, not a behavioral falsifier or permission to waive qualification.
+  note: |
+    Native next-task-id reserved W1-T10218 at refs/rmd-id/W1-T10218, anchor
+    e2119f8fb13e736fdac1d07171e6b24c052686b6, for codex/serve-safe-adoption-plan-20261019
+    at 2026-10-19T20:35:13.098Z. The exact remote anchor and its holder were read back.
+    The user approved building and qualifying the safe adoption path in this chat; no live
+    deployment is authorized. This draft preserves verify:human until a native operator ruling
+    is actually recorded and rendered. No model judgment or release is fabricated.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The user approved BUILD+QUALIFY of the refusal-safe adoption path; actual native rmd approve records this two-file private-image qualification prerequisite. No deployment, registry authentication/pull/publication, production lifecycle, provider, billing, permission, service, threshold or hard-limit change is authorized. Actual image qualification, normal review/CI and separate live activation approval remain required. This is operator authority, not a model judgment."
+    judged_at: "2026-10-19T20:46:14.458Z"
+    pin: "cbb95b4c94646871ed350d8ff748341b7393a1b9d246159deb020aa318eafed7"

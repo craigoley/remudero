@@ -513,6 +513,10 @@ export function prePushGateEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Pr
   return env;
 }
 
+export function prePushEphemeralBind(from: string | undefined, to: string | undefined, home: string): boolean {
+  return (from === home && to === home) || (from === join(home, ".rmd-private-tmp") && to === "/tmp");
+}
+
 /** W1-T6138: branch-owned checks get the proof sandbox with every persistent bind read-only. */
 export function createPrePushSandboxRunner(cwd: string, {
   probe = probeProofSandbox,
@@ -530,7 +534,7 @@ export function createPrePushSandboxRunner(cwd: string, {
       const sandbox = proofSandboxArgv({ cwd, home, env: { HOME: home, GH_APP_PRIVATE_KEY_PATH: process.env.GH_APP_PRIVATE_KEY_PATH } });
       const realHome = realpathSync(home);
       for (let i = 0; i < sandbox.length; i++) {
-        if (sandbox[i] === "--bind" && sandbox[i + 1] !== realHome) sandbox[i] = "--ro-bind";
+        if (sandbox[i] === "--bind" && !prePushEphemeralBind(sandbox[i + 1], sandbox[i + 2], realHome)) sandbox[i] = "--ro-bind";
       }
       const spawnOptions: SpawnSyncOptionsWithStringEncoding = {
         cwd, env, encoding: "utf8", timeout: options.timeout ?? 60_000, maxBuffer: options.maxBuffer ?? GATE_MAX_BUFFER,

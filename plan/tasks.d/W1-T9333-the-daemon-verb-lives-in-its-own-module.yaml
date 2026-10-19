@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-13: the run-task.ts serialization finding; one step of the split, in measured-churn order W1-T9332 (run-task), W1-T9333 (daemon), W1-T9337 (fix), W1-T9338 (sweep) and W1-T9339 (review)"
   plan_refs: [W1-T9331, W1-T2893, W1-T2883, W1-T2892, W1-T2894, W1-T2325, W1-T3138, W1-T8502]
   files: [src/run-task.ts, src/cli/commands/daemon.ts, test/the-daemon-verb-lives-in-its-own-module.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

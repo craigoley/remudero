@@ -1470,6 +1470,19 @@ read_progress_verdict
 note_progress_verdict
 if hold_revive_on_verdict; then exit 0; fi
 
+# A watchdog revival creates the same build container as recycle-container.sh. Without its
+# resource-policy arguments, exhausting Docker's restart budget silently loses every cgroup
+# limit. Prefer current policy; keep an installed copy for a cold/missing checkout, like scratch.
+RESOURCE_POLICY_LIB="\$CHECKOUT/deploy/resource-policy.sh"
+[ -r "\$RESOURCE_POLICY_LIB" ] || RESOURCE_POLICY_LIB="${BIN_DIR}/rmd-resource-policy"
+if [ ! -r "\$RESOURCE_POLICY_LIB" ]; then
+  echo "rmd-relaunch: FATAL -- resource policy unreadable at \$RESOURCE_POLICY_LIB; refusing an ungoverned revival." >&2
+  exit 1
+fi
+. "\$RESOURCE_POLICY_LIB"
+resource_policy_build_args '${CONTAINER_NAME}'
+echo "rmd-relaunch: resource policy from \$RESOURCE_POLICY_LIB -- \$RESOURCE_POLICY_NOTE"
+
 # W1-T9627 -- THE DEAD CONTAINER'S LAST WORDS ARE KEPT BEFORE \`docker rm -f\` DELETES THEM. On
 # 2026-10-15 every revive removed a container that had died in deploy/entrypoint.sh about a second
 # in, so the only copy of "cannot check out main" went with it, 25 times. Its bounded log tail
@@ -1557,6 +1570,7 @@ $(render_instance_name_env)
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
 docker run -d --name ${CONTAINER_NAME} \\
   --restart=on-failure:5 \\
+  "\${RESOURCE_POLICY_BUILD_ARGS[@]}" \\
   --cap-drop ALL \\
   --security-opt seccomp=unconfined \\
   --security-opt apparmor=unconfined \\
@@ -1768,11 +1782,13 @@ effective_directives() {
 }
 
 render_scratch_lib() { cat "${SCRIPT_DIR}/scratch-mounts.sh"; }
+render_resource_policy_lib() { cat "${SCRIPT_DIR}/resource-policy.sh"; }
 
 # path : renderer : mode
 UNITS="
 ${LAUNCHER}:render_launcher:0755
 ${BIN_DIR}/rmd-scratch-mounts:render_scratch_lib:0755
+${BIN_DIR}/rmd-resource-policy:render_resource_policy_lib:0755
 ${UNIT_DIR}/${SERVICE_UNIT_NAME}:render_fleet_service:0644
 ${UNIT_DIR}/${WATCHDOG_SERVICE_NAME}:render_watchdog_service:0644
 ${UNIT_DIR}/${WATCHDOG_TIMER_NAME}:render_watchdog_timer:0644

@@ -15,7 +15,7 @@
     - src/lib/drain.ts
     - src/lib/daemon.ts
     - test/fan-out-slots-are-dealt-over-the-dispatchable-set.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: fan-out never jumps a tier; W1-T9968 alone leaves 1087 cross-tier inversions among eligible tasks
   attempts: 0
   rationale: |

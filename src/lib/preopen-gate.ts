@@ -34,6 +34,7 @@ import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { PROOF_ENV_ALLOWLIST, PROOF_SANDBOX_BINARY, proofChildEnv, proofLinkedModuleRoots, proofSandboxArgv } from "./review.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+import { parseGateSandboxMeasurement, type GateSandboxMeasurement } from "./gate-sandbox-metrics.js";
 
 export const PREOPEN_GATE_STEP = "implement.preopen_gate";
 
@@ -53,10 +54,11 @@ export interface PreopenPushGate {
   key?: { tree: string; head: string; base: string; recipe: string };
 }
 
-export type PreopenGateResult =
+export type PreopenGateResult = (
   | { kind: "pass"; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate }
   | { kind: "fail"; failedSteps: string[]; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate }
-  | { kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer; containment?: GateContainmentMode };
+  | { kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer; containment?: GateContainmentMode }
+) & { sandboxMetrics?: GateSandboxMeasurement };
 
 /**
  * W1-T9556 — who ended a gate at its backstop: coreutils `timeout` (needs no node loop), the deadline runner
@@ -74,9 +76,10 @@ export interface GateRun {
   containment?: GateContainmentMode;
   /** W1-T9619: the failing steps read from the harness-owned summary, or why it could not be read. */
   summary?: GateSummary;
+  sandboxMetrics?: GateSandboxMeasurement;
 }
 
-export type GateSummary = { failedSteps: string[] } | { unreadable: string };
+export type GateSummary = ({ failedSteps: string[] } | { unreadable: string }) & { sandboxMetrics?: GateSandboxMeasurement };
 
 export interface PreopenGateOptions {
   /** Runs the fast gate in `cwd`; resolves when the child exits, whatever its status. */
@@ -230,6 +233,16 @@ function within(path: string, root: string): boolean {
  * (W1-T9738), and W1-T9860 binds that middle hop. bwrap resolves the hop's source to the install but mounts onto
  * the hop's DESTINATION, which inside the sandbox is the harness's absolute symlink, so the mount fails ENOENT (PR 12595).
  */
+/** End of the shared sandbox's /tmp mount and parent-directory prefix. Mount /tmp before
+ * the extra harness binds, or a disk bind would hide a harness whose path is under /tmp. */
+export function preopenSandboxBindStart(base: readonly string[]): number {
+  const mount = base.findIndex((flag, i) => (flag === "--tmpfs" && base[i + 1] === "/tmp") || (flag === "--bind" && base[i + 2] === "/tmp"));
+  if (mount < 0) throw Error("the proof sandbox has no private /tmp mount");
+  let at = mount + (base[mount] === "--tmpfs" ? 2 : 3);
+  while (base[at] === "--dir") at += 2;
+  return at;
+}
+
 export function preopenGateSandboxArgv(input: GateContainInput, parentEnv: NodeJS.ProcessEnv = process.env): string[] {
   const base = proofSandboxArgv({ cwd: input.cwd, home: input.home, env: parentEnv });
   const harness = realpathSync(input.harnessRoot);
@@ -243,8 +256,7 @@ export function preopenGateSandboxArgv(input: GateContainInput, parentEnv: NodeJ
   const key = parentEnv.GH_APP_PRIVATE_KEY_PATH;
   const realKey = key && existsSync(key) ? realpathSync(key) : undefined;
   if (realKey !== undefined && [harness, ...(slots === undefined ? [] : [slots])].some((root) => within(realKey, root))) masks.push("--ro-bind", "/dev/null", realKey);
-  let at = base.indexOf("--tmpfs") + 2;
-  while (base[at] === "--dir") at += 2;
+  const at = preopenSandboxBindStart(base);
   const chdir = base.lastIndexOf("--chdir");
   const proofBinds: string[] = [];
   for (let i = at; i < chdir; i += 3) {
@@ -332,7 +344,9 @@ export function defaultRunGate(
   const run = (sandbox: GateContainment): Promise<GateRun> => {
     if (sandbox.mode !== "sandboxed") return Promise.resolve({ exitCode: null, error: `the gate could not be contained: ${sandbox.reason}`, containment: "unmeasured" });
     const summaryFile = join(home, GATE_SUMMARY_NAME);
-    const extraArgs = ["--summary-file", summaryFile];
+    // Only our maintained launcher promises the new option. A caller-selected legacy launcher
+    // keeps its existing argv contract and reports missing measurements explicitly.
+    const extraArgs = ["--summary-file", summaryFile, ...(harnessRmd === undefined ? ["--sandbox-metrics"] : [])];
     const { file, args } = harnessRmd === undefined
       ? preopenGateLaunch(cwd, log, join(harnessRoot, "bin", "rmd"), harnessRoot, {
         deadline_enforced_by: armedEnforcers(timeoutBin), launcher: "harness", containment: "sandboxed", env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME,
@@ -343,8 +357,10 @@ export function defaultRunGate(
       () => classifyGateExit(null, ""),
       (error: Error & { code?: unknown; killed?: boolean; stderr?: unknown }) => classifyGateExit(error, String(error.stderr ?? "")),
     ).then((exited) => {
-      const summary = exited.exitCode === 1 && exited.error === undefined ? readGateSummary(summaryFile, startedAt, containment.readFile) : undefined;
-      return { ...exited, containment: "sandboxed" as const, ...(summary ? { summary } : {}) };
+      const read = readGateSummary(summaryFile, startedAt, containment.readFile);
+      const summary = exited.exitCode === 1 && exited.error === undefined ? read : undefined;
+      const sandboxMetrics = read.sandboxMetrics ?? { sandbox_unmeasured: "unreadable" in read ? read.unreadable : "the child wrote no sandbox measurement" };
+      return { ...exited, containment: "sandboxed" as const, sandboxMetrics, ...(summary ? { summary } : {}) };
     });
   };
   let env: NodeJS.ProcessEnv = {};
@@ -369,16 +385,20 @@ export function readGateSummary(
   startedAt: number,
   readFile: (path: string) => string = (p) => readFileSync(p, "utf8"),
 ): GateSummary {
-  let parsed: { ok?: unknown; finishedAt?: unknown; steps?: unknown };
+  let parsed: { ok?: unknown; finishedAt?: unknown; steps?: unknown; sandboxMetrics?: unknown };
   try {
     parsed = JSON.parse(readFile(summaryFile)) as typeof parsed;
   } catch (e) {
     return { unreadable: `no readable preflight summary (${(e as Error).message})` };
   }
+  if (!parsed || typeof parsed !== "object") return { unreadable: "the preflight summary is not an object" };
   const finished = typeof parsed.finishedAt === "string" ? Date.parse(parsed.finishedAt) : NaN;
   if (!Number.isFinite(finished) || finished < startedAt) return { unreadable: "the preflight summary predates this gate run" };
   const steps = Array.isArray(parsed.steps) ? (parsed.steps as Array<{ name?: unknown; ok?: unknown }>) : [];
-  return { failedSteps: steps.filter((s) => s && s.ok === false).map((s) => (typeof s.name === "string" && s.name ? s.name : "(unnamed step)")) };
+  return {
+    failedSteps: steps.filter((s) => s && s.ok === false).map((s) => (typeof s.name === "string" && s.name ? s.name : "(unnamed step)")),
+    ...(parsed.sandboxMetrics === undefined ? {} : { sandboxMetrics: parseGateSandboxMeasurement(parsed.sandboxMetrics) }),
+  };
 }
 
 /** The step a failed gate is handed back under when its summary named none. */
@@ -407,7 +427,7 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   };
   if (asked.kind !== "refused") return { ...fast, pushGate };
   const failedSteps = [...(fast.kind === "fail" ? fast.failedSteps : []), `${PUSH_GATE_STEP_NAME}: ${asked.detail}`];
-  return { kind: "fail", failedSteps, durationMs: fast.durationMs, ...(fast.containment ? { containment: fast.containment } : {}), pushGate };
+  return { kind: "fail", failedSteps, durationMs: fast.durationMs, ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}), pushGate };
 }
 
 /** The failing step a push-gate refusal is handed back under, with the hook's own words after it. */
@@ -415,7 +435,7 @@ export const PUSH_GATE_STEP_NAME = "push-gate";
 
 /** Pass and fail are the child's exit status (0 and 1) as the harness observed it; anything else is unmeasured. */
 function classifyGateRun(run: GateRun, durationMs: number): PreopenGateResult {
-  const containment = run.containment ? { containment: run.containment } : {};
+  const containment = { ...(run.containment ? { containment: run.containment } : {}), ...(run.sandboxMetrics ? { sandboxMetrics: run.sandboxMetrics } : {}) };
   if (run.error !== undefined) {
     return { kind: "unmeasured", reason: run.error, durationMs, ...(run.deadlineEnforcedBy ? { deadlineEnforcedBy: run.deadlineEnforcedBy } : {}), ...containment };
   }
@@ -436,6 +456,7 @@ export function preopenGateLedgerFields(result: PreopenGateResult): Record<strin
   const push = "pushGate" in result && result.pushGate ? result.pushGate : undefined;
   return {
     ...containment,
+    ...(result.sandboxMetrics ?? (result.containment === "sandboxed" ? { sandbox_unmeasured: "the child wrote no sandbox measurement" } : {})),
     ...(push ? {
       push_gate: push.outcome,
       push_gate_ms: push.durationMs,

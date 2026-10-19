@@ -14,7 +14,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts
-  status: queued
+  status: merged
   priority: 1  # raised 2026-10-14: the second backlog-garden PR in 24 h, #11676 (backlog-garden-1791984634782), went dirty when the plan gardener retired W1-T9440 (#11673) and W1-T9441 (#11695) under it, and escalated as #11690; was 3 at about one a week
   attempts: 0
   rationale: |

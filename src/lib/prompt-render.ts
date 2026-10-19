@@ -1331,3 +1331,21 @@ export function reviewerUnmetRepeatPrevention(
   if (now === "[]" || now !== key(prior)) return { dispatch: true };
   return { dispatch: false, reason: "reviewer-unmet evidence is unchanged from the previous round" };
 }
+
+/**
+ * W1-T9839: keep only the tsc diagnostics that belong to `file`. A test that compiles itself with
+ * `--ignoreConfig` also type-checks its whole import graph, so a type error a PR introduces in an
+ * unrelated module reddened a shard that never asserted on it (40 fix rounds). The typecheck job
+ * owns those; the test asserts only on its own file.
+ */
+export function ownTscDiagnostics(output: string, file: string): string[] {
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const own = norm(file);
+  return output
+    .split("\n")
+    .filter((line) => /\berror TS\d+:/.test(line))
+    .filter((line) => {
+      const at = norm(line).split("(")[0];
+      return own.endsWith(at) || at.endsWith(own);
+    });
+}

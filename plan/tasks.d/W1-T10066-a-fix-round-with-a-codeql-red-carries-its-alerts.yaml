@@ -14,7 +14,7 @@
     - src/lib/sweep.ts
     - src/lib/tick-read-worker.ts
     - test/a-fix-round-with-a-codeql-red-carries-its-alerts.test.ts
-  status: queued
+  status: merged
   priority: 1  # a round sent to fix a source alert with no alert text can only fix the other members, so the alert outlives every round
   attempts: 0
   rationale: |
