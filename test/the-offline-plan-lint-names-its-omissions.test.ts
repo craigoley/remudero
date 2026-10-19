@@ -18,6 +18,7 @@ import { taskRulingPin } from "../src/lib/task-linter.js";
 import { withTempDir } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_IDENTITY = { name: "remudero offline lint fixture", email: "fixture@remudero.invalid" };
@@ -60,25 +61,26 @@ async function withDependencyCreditFixture(
   sharedSurface = false,
 ): Promise<void> {
   await withTempDir("offline-dependency-credit", async dir => {
-    const root = join(dir, "checkout"), home = join(dir, "home"), stateRoot = join(dir, "instance");
+    const checkout = gitRepo({ scope: t, seedCommit: false, kind: "offline-dependency-credit" });
+    const root = checkout.dir, home = join(dir, "home"), stateRoot = join(dir, "instance");
     for (const path of [join(root, "plan/tasks.d"), join(root, "src"), join(root, "test"), home, join(dir, "tmp")]) {
       mkdirSync(path, { recursive: true });
     }
-    const commands = ["gh", "which", "ssh", "curl"];
-    const tripwires = commands.map(command =>
-      ghShim([{ when: "", exit: 99 }], { kind: "lint-credit-tripwire", command }));
-    t.after(() => { for (const shim of tripwires) rmSync(shim.dir, { recursive: true, force: true }); });
+    const tripwires = [
+      { command: "GitHub CLI", shim: ghShim([{ when: "", exit: 99 }], { kind: "lint-credit-tripwire" }) },
+      ...["which", "ssh", "curl"].map(command => ({ command,
+        shim: ghShim([{ when: "", exit: 99 }], { kind: "lint-credit-tripwire", command }) })),
+    ];
+    t.after(() => { for (const { shim } of tripwires) rmSync(shim.dir, { recursive: true, force: true }); });
     const env: NodeJS.ProcessEnv = {
-      HOME: home, TMPDIR: join(dir, "tmp"), PATH: [...tripwires.map(s => s.dir), process.env.PATH ?? ""].join(":"),
+      HOME: home, TMPDIR: join(dir, "tmp"), PATH: [...tripwires.map(({ shim }) => shim.dir), process.env.PATH ?? ""].join(":"),
       LANG: "C", TZ: "UTC", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
       GIT_AUTHOR_NAME: FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: FIXTURE_IDENTITY.email,
       GIT_COMMITTER_NAME: FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: FIXTURE_IDENTITY.email,
       // Preserve only native coverage output routing, not credentials or admission-bypass variables.
       ...(process.env.NODE_V8_COVERAGE ? { NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE } : {}),
     };
-    const atGit = (args: string[]) => execFileSync("git", args, { cwd: root, env, encoding: "utf8" }).trim();
-    atGit(["init", "-q"]);
-    atGit(["remote", "add", "origin", "https://github.com/fixture-owner/remudero.git"]);
+    checkout.addRemote("origin", "https://github.com/fixture-owner/remudero.git");
     writeFileSync(join(root, "src/value.ts"), "export const fixtureValue = 1;\n");
     if (sharedSurface) {
       writeFileSync(join(root, "src/neighbor.ts"), "export const fixtureNeighbor = 1;\n");
@@ -93,8 +95,8 @@ async function withDependencyCreditFixture(
     const child = (depends: readonly string[], note = "changed fixture narrative") =>
       writeFileSync(join(root, "plan/tasks.d/ZZ-T2.yaml"), creditTaskYaml(CREDIT_CHILD, depends, note, true, files));
     child([CREDIT_DEP], "base fixture narrative");
-    atGit(["add", "plan", "src", "test"]); atGit(["commit", "-qm", "test: seed private dependency fixture"]);
-    const base = atGit(["rev-parse", "HEAD"]);
+    checkout.git("add", "plan", "src", "test"); checkout.git("commit", "-qm", "test: seed private dependency fixture");
+    const base = checkout.git("rev-parse", "HEAD");
     child([CREDIT_DEP]);
     const configFile = join(home, ".config/remudero/config.json");
     mkdirSync(dirname(configFile), { recursive: true });
@@ -110,7 +112,7 @@ async function withDependencyCreditFixture(
         cwd: root, env, encoding: "utf8", timeout: 20_000, maxBuffer: 2 * 1024 * 1024,
       });
       assert.equal(r.error, undefined, "the actual offline child must complete"); assert.equal(r.signal, null);
-      assert.deepEqual(tripwires.flatMap((shim, i) => shim.calls().map(call => commands[i] + " " + call)), [],
+      assert.deepEqual(tripwires.flatMap(({ command, shim }) => shim.calls().map(call => command + " " + call)), [],
         "offline default must not call network tools or which claude");
       assert.deepEqual([maybe(configFile), maybe(cacheFile), maybe(overrideFile)], before, "no default config/credit/override creation or mutation");
       const output = r.stdout + "\n" + r.stderr;
@@ -183,8 +185,9 @@ const closedCreditCases: Array<{
   { name: "configured root does not borrow another instance store", seed: f => {
     f.store(nativeFixtureCredit()); f.config(JSON.stringify({ root: join(f.root, "other-instance") }));
   }, reason: /missing|absent|not.*found|root/i },
-  { name: "missing config", seed: f => f.config(undefined), reason: /config|root|missing|absent/i },
-  { name: "corrupt config", seed: f => f.config("{"), reason: /config|root|corrupt|parse/i },
+  { name: "missing config", seed: f => f.config(undefined), reason: /instance config absent/i },
+  { name: "unreadable nonmissing config", seed: f => { f.config(undefined); mkdirSync(f.configFile); }, reason: /instance config unreadable/i },
+  { name: "corrupt config", seed: f => f.config("{"), reason: /instance config could not be decoded/i },
   { name: "relative configured root", seed: f => { f.store(nativeFixtureCredit()); f.config(JSON.stringify({ root: "relative-instance" })); }, reason: /config|root|absolute/i },
   { name: "same-PR remove-credit override", seed: f => { f.store(nativeFixtureCredit()); f.overrides(removedCreditYaml()); }, reason: /override|removed/i },
   { name: "malformed override YAML", seed: f => { f.store(nativeFixtureCredit()); f.overrides("{"); }, reason: /override.*corrupt|invalid.*YAML/i },
@@ -310,19 +313,15 @@ test("lint dependency credit: online projection includes transitive dependencies
 
 /** Controller integration: REAL projectPlan/readers/derivation, deterministic fake GitHub only.
  * These private MERGED PR rows are synthetic inputs, not live merge credit or a new authority. */
-function privateOnlineGithub() {
+async function nativeOnlineLint(f: DependencyCreditFixture) {
   const rows: PrRef[] = [CREDIT_GRANDPARENT, CREDIT_DEP].map((id, index) => ({
     number: 17 + index, url: CREDIT_PR.replace("/17", "/" + (17 + index)), state: "MERGED",
     headRefName: "run-" + id + "-1792350000000", body: "Remudero-Task: " + id,
   }));
-  return fakeGitHub({ listMergedHeadBranches: () => rows, listOpenHeadBranches: () => [],
+  const github = fakeGitHub({ listMergedHeadBranches: () => rows, listOpenHeadBranches: () => [],
     changedFiles: () => ["src/value.ts"],
     headRefName: url => rows.find(row => row.url === url)?.headRefName,
     prBody: url => rows.find(row => row.url === url)?.body });
-}
-
-async function nativeOnlineLint(f: DependencyCreditFixture) {
-  const github = privateOnlineGithub();
   const observed: { plan?: Plan; deps?: DeriveDeps; result?: Map<string, StatusProjection>; calls: number } = { calls: 0 };
   const result = await capturedLint(["--plan", join(f.root, "plan/tasks.yaml"), "--base", f.base], {
     repoRoot: f.root,

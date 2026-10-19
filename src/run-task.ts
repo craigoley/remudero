@@ -29717,7 +29717,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const configured = existingCliRootWithoutConfig();
       if (configured.state !== "present" || !configured.root || !configured.root.trim() ||
         !isAbsolute(configured.root) || configured.root.includes("\0")) {
-        offlineCredit = { reason: `instance config/root unavailable: ${configured.state}; an explicit usable absolute root is required` };
+        offlineCredit = { reason: `instance config/root unavailable: ${configured.state}${configured.reason ? ` (${configured.reason})` : ""}; an explicit usable absolute root is required` };
       } else {
         const ledgerPath = join(configured.root, "state", LEDGER_FILENAME);
         const creditRead: { value?: CreditReadState } = {};
@@ -53185,18 +53185,19 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
 
 /** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
  *  (`~/Remudero`). Never `loadConfig()`, which can create the config and call `resolveClaudeBin()`. */
-function existingCliRootWithoutConfig(): { state: "present" | "missing" | "unreadable" | "corrupt"; root?: string } {
+function existingCliRootWithoutConfig(): { state: "present" | "missing" | "unreadable" | "corrupt"; root?: string; reason?: string } {
   let text: string;
   try {
     text = readFileSync(instanceConfigPath(), "utf8");
   } catch (error) {
-    return { state: (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "missing" : "unreadable" };
+    const missing = (error as NodeJS.ErrnoException)?.code === "ENOENT";
+    return { state: missing ? "missing" : "unreadable", reason: missing ? "instance config absent" : "instance config unreadable" };
   }
   try {
     const parsed = JSON.parse(text) as { root?: unknown };
     return { state: "present", ...(typeof parsed.root === "string" && parsed.root !== "" ? { root: parsed.root } : {}) };
   } catch {
-    return { state: "corrupt" };
+    return { state: "corrupt", reason: "instance config could not be decoded" };
   }
 }
 
