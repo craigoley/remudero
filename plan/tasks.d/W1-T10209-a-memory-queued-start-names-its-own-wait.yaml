@@ -3,10 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   author_class: machine
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: span
   budget_usd: 5.00
   priority: 1.5
   status: queued
@@ -17,6 +18,10 @@
     - src/lib/host-memory-admission.ts
     - test/an-enforced-memory-budget-waits-in-priority-order.test.ts
   rationale: |
+    Machine-authored proposal, parked at verify:human until the operator or a ratified risk
+    judge releases it. High/span reflects the linter's three named subsystem tags across
+    these two files, not a change to the diagnostics-only authority or the USD 5 budget.
+
     OBSERVED source at 7733faf8163295b9ad9ae1e9156f683b6e362c5b: awaitMemoryAdmission
     joins its maintained ranked waiting array before worker assignment. Only the ranked head
     enters the evaluation/lock branch that emits enforce_wait. A non-head waiter changes
