@@ -9,7 +9,7 @@
   risk: high
   band_meaning: span
   origin: "operator-approved three-daemon recovery, 2026-10-19: read-only PR12929 ledger evidence and unchanged-source offline replay"
-  plan_refs: [W1-T7837, W1-T7850, W1-T8167, W1-T9732, W1-T9970, W1-T9502]
+  plan_refs: [W1-T7837, W1-T7850, W1-T8167, W1-T9732, W1-T9970, W1-T9502, W1-T100, W1-T9748]
   files:
     - src/lib/sweep.ts
     - src/run-task.ts
@@ -45,6 +45,11 @@
     W9970 owns a changed reviewer-image rerun, W9732 truthful owner-gone reasons, and W9502 shared reuse
     of an unchanged judgment. None makes a denied request a completed review. This filing is not a
     second implementation of those mechanisms.
+    The offline surface census also names W1-T100 and W1-T9748 because they declare the same two hot
+    files. Their full records were read: W100 routes red CI into the CI-log repair ladder; W9748 is
+    human-verified reconnaissance of declared-file provenance at staging. This task instead corrects
+    host-gap review-attempt attribution before pacing; it changes neither of those contracts. Keep
+    the necessary files and legacy controls declared instead of hiding the overlap by narrowing scope.
   design: |
     1. Keep the existing pre-admission request as the delivered-key release/idempotency demand. Do NOT
        move that release after admission: doing so can strand the delivered verdict that must be retried.
