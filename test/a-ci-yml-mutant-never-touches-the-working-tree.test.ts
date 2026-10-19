@@ -12,8 +12,11 @@ import * as workflowGuard from "../scripts/workflow-guard-mutation-ratchet.mjs";
 
 interface Guard { line: number; text: string }
 interface Scratch { root: string; cleanup(): void }
-const { main, enumerateSkipGuards, mutateGuardLine, createScratchCopy, scratchPrefix } = workflowGuard as {
+interface Verdict { failed: boolean | undefined }
+const { main, enumerateSkipGuards, mutateGuardLine, createScratchCopy, scratchPrefix, suitesFailTogether, suiteVerdicts } = workflowGuard as {
   main(argv: string[], io: Record<string, unknown>): number;
+  suitesFailTogether(suites: string[], root: string, width?: number): Array<Verdict | null>;
+  suiteVerdicts(suites: string[], root: string, width?: number): Promise<Array<Verdict | null>>;
   enumerateSkipGuards(text: string): Guard[];
   mutateGuardLine(text: string, guard: Guard): string;
   createScratchCopy(root: string, suites: string[], parent: string): Scratch;
@@ -156,6 +159,59 @@ test(`${PROOF}: the real suite process reads the scratch workflow and the workin
     delete process.env.NODE_TEST_CONTEXT;
     assert.equal(main(["--all"], { ...f.io, suites: () => ["test/reader.test.ts"], log: (m: string) => logs.push(m) }), 0);
     assert.equal(logs.filter(l => l.startsWith("COVERED")).length, enumerateSkipGuards(ORIGINAL).length);
+    f.unchanged();
+  } finally {
+    if (testContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = testContext;
+    f.cleanup();
+  }
+});
+
+test(`${PROOF}: each tree is measured in fresh batches and no verdict crosses from one mutant to the next`, () => {
+  const f = fixture();
+  const calls: Array<{ text: string; batch: string[] }> = [];
+  try {
+    const code = main(["--all"], {
+      ...f.io,
+      width: 2,
+      runBatch: (batch: string[], root: string) => {
+        f.unchanged();
+        const text = readFileSync(join(root, WORKFLOW), "utf8");
+        calls.push({ text, batch });
+        return batch.map(() => ({ failed: text !== ORIGINAL }));
+      },
+    });
+    assert.equal(code, 0);
+    const suites = f.io.suites();
+    assert.deepEqual(calls, [
+      { text: ORIGINAL, batch: suites },
+      ...enumerateSkipGuards(ORIGINAL).map((g) => ({ text: mutateGuardLine(ORIGINAL, g), batch: suites })),
+    ], "the control and every mutant each run their own batch, under their own tree");
+    f.unchanged();
+  } finally { f.cleanup(); }
+});
+
+test(`${PROOF}: a batch runs as real suite processes side by side, and a batch that cannot run proves nothing`, async () => {
+  const f = fixture();
+  const testContext = process.env.NODE_TEST_CONTEXT;
+  try {
+    f.write("test/pass.test.ts", 'import { test } from "node:test";\ntest("passes", () => {});\n');
+    f.write("test/fail.test.ts", 'import assert from "node:assert/strict";\nimport { test } from "node:test";\ntest("fails", () => assert.fail("red"));\n');
+    const started = join(f.parent, "slow-started");
+    f.write("test/slow.test.ts", `import { writeFileSync } from "node:fs";\nimport { test } from "node:test";\nwriteFileSync(${JSON.stringify(started)}, "");\ntest("slow", () => new Promise((done) => setTimeout(done, 60000)));\n`);
+    f.write("test/setup/tmp-hygiene.ts", "export {};\n");
+    // Node otherwise refuses a child test runner invoked from a test file.
+    delete process.env.NODE_TEST_CONTEXT;
+    assert.deepEqual(suitesFailTogether(["test/pass.test.ts", "test/fail.test.ts"], f.repo.dir), [{ failed: false }, { failed: true }]);
+    assert.deepEqual(await suiteVerdicts(["test/pass.test.ts", "test/fail.test.ts", "test/slow.test.ts"], f.repo.dir, 1),
+      [{ failed: false }, { failed: true }, null], "after the first failure a later suite cannot be the first catcher, so it never starts");
+    assert.equal(existsSync(started), false);
+    const t0 = Date.now();
+    assert.deepEqual(await suiteVerdicts(["test/fail.test.ts", "test/slow.test.ts"], f.repo.dir, 2), [{ failed: true }, null], "and one already running is stopped");
+    assert.ok(Date.now() - t0 < 30000, "the stopped suite's 60 s test did not hold the pool");
+    const missing = join(f.parent, "no-such-checkout");
+    assert.deepEqual(suitesFailTogether(["test/pass.test.ts"], missing), [{ failed: undefined }], "no verdict list");
+    assert.deepEqual(await suiteVerdicts(["test/pass.test.ts"], missing), [{ failed: undefined }], "a child that cannot start");
     f.unchanged();
   } finally {
     if (testContext === undefined) delete process.env.NODE_TEST_CONTEXT;
