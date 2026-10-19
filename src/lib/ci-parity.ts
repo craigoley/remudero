@@ -1921,6 +1921,11 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     job: "coverage-ratchet",
     mirrored: true,
     run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined, coverageResources = undefined) => {
+      if (coverageResources !== undefined && spawn === defaultPreflightSpawn) {
+        return [runStep("coverage-ratchet:test-with-coverage", () => ({
+          ok: false, detail: "FAIL — fixture resources require an explicitly injected child transport; real coverage uses default admission",
+        }))];
+      }
       let lease: CoverageResourceLease | undefined;
       let lcovPath = join(repoRoot, "coverage", "lcov.info");
       try {
