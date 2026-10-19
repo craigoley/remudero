@@ -17,6 +17,7 @@ import {
 } from "#src/lib/verify-human-judge.js";
 import type { Config } from "#src/lib/config-schema.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { hostWorktreeGit } from "#src/lib/worktree-git.js";
 import { routeAdaptiveLifetimePressure } from "#src/run-task.js";
 
 // W1-T8827: the adaptive lifetime-pressure path judged every task with `ageDays: 0` and the
@@ -185,4 +186,36 @@ test("W1-T10210: age consumers preserve fallback and judgment identity", async (
   assert.notEqual(observedStateKey(base), observedStateKey({ ...base, observationKey: "changed-source-evidence" }));
   assert.equal(proposalFromJudgedShard(base, { decision: "needs_operator", reason: "r" }).id,
     proposalFromJudgedShard({ ...base, ageDays: null }, { decision: "needs_operator", reason: "r" }).id);
+});
+
+test("W1-T10210: callers share one aggregate filing-history budget (lifetime route)", async () => {
+  const f = fixture(true), secondId = "T8827-SECOND";
+  try {
+    const second = { ...f.plan.byId.get(ID)!, id: secondId };
+    f.plan.tasks.push(second); f.plan.byId.set(secondId, second);
+    mkdirSync(join(f.dir, "plan", "tasks.d"), { recursive: true });
+    writeFileSync(join(f.dir, "plan", "tasks.d", `${secondId}-old.yaml`), `- id: ${secondId}\n`);
+    commitShard(f.dir, 30);
+    const rows = failedAttempts(2, 3);
+    writeLedger(f.ledgerPath, [...rows, ...rows.map(row => ({ ...row, task_id: secondId, run_id: `second:${row.run_id}` }))]);
+    const prompts: string[] = [], calls: string[][] = [];
+    const spawn: typeof spawnWorker = async (args: SpawnWorkerArgs) => {
+      prompts.push(String((args as { prompt?: string }).prompt ?? ""));
+      return { text: "VERIFY_HUMAN_DECISION: needs_operator\nVERIFY_HUMAN_REASON: fixture" } as WorkerResult;
+    };
+    const result = await routeAdaptiveLifetimePressure(f.plan.tasks, {
+      plan: f.plan, root: f.dir, config: f.config, ledgerPath: f.ledgerPath, runId: "RUN-T10210-SHARED",
+      clock: fixedClock(NOW_MS), shadowJudgeSpawns: { primary: spawn, shadow: spawn },
+      filingHistory: { limits: { blobReads: 1 }, readGit: (root, args, opts) => {
+        calls.push([...args]); return hostWorktreeGit(root, args, opts);
+      } },
+    });
+    assert.equal(result.judged, 2); assert.ok(prompts.length >= 2);
+    for (const prompt of prompts) assert.match(prompt, /AGE: 3 days since filing/,
+      "aggregate history exhaustion preserves the existing per-task ledger fallback");
+    assert.equal(calls.filter(a => a[0] === "rev-parse" && a[1] === "--verify").length, 1);
+    assert.equal(calls.filter(a => a[0] === "cat-file").length, 0, "both tasks share the pre-read refusal");
+    assert.deepEqual(loadProposalRegistry(join(f.dir, "state", "inbox-proposals.json")).map(p => p.id).sort(),
+      [`verify-human:${ID}`, `verify-human:${secondId}`].sort());
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });

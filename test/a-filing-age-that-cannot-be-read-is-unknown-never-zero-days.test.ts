@@ -25,6 +25,9 @@ import {
   type ShardUnderJudgement,
   type VerifyHumanVerdict,
 } from "../src/lib/verify-human-judge.js";
+import { createTaskFilingHistoryInvocation, resolveTaskFilingHistory, FILING_HISTORY_LIMITS,
+  type FilingHistoryOptions } from "../src/lib/task-filing-history.js";
+import { hostWorktreeGit } from "../src/lib/worktree-git.js";
 import { parkedVerifyHumanShards } from "../src/run-task.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
@@ -133,13 +136,16 @@ test("#7911: an unknown age never earns an age-band re-ask", () => {
 });
 
 /** Committers are explicit and deliberately need not have monotone timestamps. */
-function commitHistory(dir: string, when: string, message: string): void {
+function gitHistory(dir: string, when: string, args: string[]): string {
   const { name, email } = GIT_REPO_FIXTURE_IDENTITY;
   const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email,
     GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when };
-  for (const args of [["add", "-A"], ["commit", "--quiet", "--allow-empty", "-m", message]])
-    execFileSync("git", ["-C", dir, ...args], { env, stdio: "pipe" });
+  return execFileSync("git", ["-C", dir, ...args], { env, stdio: "pipe", encoding: "utf8" });
+}
+
+function commitHistory(dir: string, when: string, message: string): void {
+  for (const args of [["add", "-A"], ["commit", "--quiet", "--allow-empty", "-m", message]]) gitHistory(dir, when, args);
 }
 
 test("W1-T10210: exact record history survives embedded moves and renames", t => {
@@ -246,4 +252,131 @@ test("W1-T10210: unknown history is distinct from a measured same-day zero", asy
     rmSync(join(f.repo.dir, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
     assert.equal(f.readAge()?.ageDays, null); assert.ok(f.readAge()?.ageUnknownReason);
   });
+});
+
+test("W1-T10210: callers share one aggregate filing-history budget", async t => {
+  const { dir, addedAtMs } = seededRepo(); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const plan = loadPlan(join(dir, "plan", "tasks.yaml"));
+  commitHistory(dir, "2020-01-01T12:00:00Z", "a second commit consumes the same invocation allowance");
+  const positive = parkedVerifyHumanShards(plan, dir, clockAt(addedAtMs + 3 * DAY_MS));
+  assert.deepEqual(positive.map(s => s.ageDays), [3, 3], "both exact identities qualify without exhaustion");
+  for (const resource of ["commitVisits", "blobReads", "decodedBytes", "metadataBytes", "stateEntries"] as const) {
+    await t.test(resource, () => {
+      const calls: string[][] = [];
+      const options: FilingHistoryOptions = { limits: { [resource]: resource === "commitVisits" || resource === "blobReads" ? 1 : 0 },
+        readGit: (root, args, opts) => { calls.push([...args]); return hostWorktreeGit(root, args, opts); } };
+      const shards = parkedVerifyHumanShards(plan, dir, clockAt(addedAtMs + 3 * DAY_MS), undefined, options);
+      assert.equal(shards.length, 2);
+      for (const shard of shards) { assert.equal(shard.ageDays, null); assert.match(shard.ageUnknownReason ?? "", /budget/); }
+      const expectedPins = resource === "decodedBytes" || resource === "metadataBytes" ? 0 : 1;
+      assert.equal(calls.filter(a => a[0] === "rev-parse" && a[1] === "--verify").length, expectedPins,
+        "a second candidate must not reset or retry the exhausted invocation");
+      if (resource === "blobReads") assert.equal(calls.filter(a => a[0] === "cat-file").length, 0, "debit before object reads");
+    });
+  }
+});
+
+test("W1-T10210: provenance and reuse stay bound to one immutable revision", t => {
+  const f = historyCase(); t.after(() => f.repo.cleanup());
+  const revision = f.repo.git("rev-parse", "HEAD").trim();
+  const ctx = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]);
+  const birth = resolveTaskFilingHistory("W1-T9003", ctx);
+  assert.deepEqual(birth, { state: "qualified", revision, completeness: "complete", commit: revision,
+    path: "plan/tasks.yaml", source: "embedded", committerSeconds: Date.parse("2020-01-01T12:00:00Z") / 1000 });
+  const work = { ...ctx.usage };
+  writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
+  commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "remove record after pin");
+  assert.deepEqual(resolveTaskFilingHistory("W1-T9003", ctx), birth);
+  assert.equal(resolveTaskFilingHistory("OTHER", ctx).state, "unknown");
+  assert.deepEqual(ctx.usage, work, "neither reuse nor an out-of-population request creates more work");
+  assert.equal(resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"])).state, "unknown");
+  const invalid = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"], { limits: { commitVisits: FILING_HISTORY_LIMITS.commitVisits + 1 } });
+  assert.match((resolveTaskFilingHistory("W1-T9003", invalid) as { reason: string }).reason, /invalid/);
+  assert.equal(invalid.usage.commitVisits, 0, "the test seam cannot enlarge a production allowance");
+});
+
+test("W1-T10210: merges retain a common introduction and reject independent births", t => {
+  const common = historyCase(); t.after(() => common.repo.cleanup());
+  const first = common.repo.git("rev-parse", "HEAD").trim();
+  common.repo.git("branch", "other", first);
+  writeFileSync(join(common.repo.dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(common.repo.dir, "plan", "tasks.d", "moved.yml"), ruling("W1-T9003"));
+  commitHistory(common.repo.dir, "2020-01-02T12:00:00Z", "move on main");
+  common.repo.git("checkout", "--quiet", "other");
+  commitHistory(common.repo.dir, "2020-01-03T12:00:00Z", "same introduction on the other parent");
+  common.repo.git("checkout", "--quiet", "main");
+  gitHistory(common.repo.dir, "2020-01-04T12:00:00Z", ["merge", "--quiet", "--no-edit", "--no-ff", "-s", "ours", "other"]);
+  const commonResult = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(common.repo.dir, ["W1-T9003"]));
+  assert.equal(commonResult.state, "qualified");
+  if (commonResult.state === "qualified") assert.equal(commonResult.commit, first, "inspect all original parents without dating the merge or move");
+
+  const independent = gitRepo({ kind: "independent-filing-births", seedCommit: false }); t.after(() => independent.cleanup());
+  mkdirSync(join(independent.dir, "plan"));
+  writeFileSync(join(independent.dir, "plan", "tasks.yaml"), ruling("W1-T9001"));
+  commitHistory(independent.dir, "2020-01-01T12:00:00Z", "before either introduction");
+  independent.git("branch", "other");
+  for (const [branch, day] of [["main", "11"], ["other", "12"]]) {
+    independent.git("checkout", "--quiet", branch!);
+    writeFileSync(join(independent.dir, "plan", "tasks.yaml"), ruling("W1-T9001") + ruling("W1-T9003"));
+    commitHistory(independent.dir, `2020-01-${day}T12:00:00Z`, `independent introduction on ${branch}`);
+  }
+  independent.git("checkout", "--quiet", "main");
+  gitHistory(independent.dir, "2020-01-13T12:00:00Z", ["merge", "--quiet", "--no-edit", "--no-ff", "-s", "ours", "other"]);
+  const shards = parkedById(independent.dir, Date.parse("2020-02-10T12:00:00Z"));
+  assert.equal(shards.get("W1-T9001")?.ageDays, 40, "same-corpus positive control survives the merge");
+  assert.equal(shards.get("W1-T9003")?.ageDays, null);
+  assert.match(shards.get("W1-T9003")?.ageUnknownReason ?? "", /incomparable|ambiguous/);
+});
+
+test("W1-T10210: replacement refs cannot manufacture a later introduction", t => {
+  const f = historyCase(); t.after(() => f.repo.cleanup());
+  commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "child of the real introduction");
+  f.repo.git("replace", "--graft", "HEAD");
+  const result = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+  assert.equal(result.state, "qualified");
+  if (result.state === "qualified") assert.equal(result.committerSeconds, Date.parse("2020-01-01T12:00:00Z") / 1000);
+  f.repo.git("replace", "-d", "HEAD");
+  writeFileSync(join(f.repo.dir, ".git", "info", "grafts"), f.repo.git("rev-parse", "HEAD").trim() + "\n");
+  const grafted = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+  assert.equal(grafted.state, "unknown");
+});
+
+test("W1-T10210: unsupported historical encoding, aliases and oversized blobs remain unknown", async t => {
+  for (const [name, content, reason] of [
+    ["invalid UTF-8", Buffer.from([0xff]), /UTF-8/],
+    ["YAML aliases", "- &record {id: W1-T9003}\n- *record\n", /aliases/],
+    ["not a record list", "- just-a-string\n", /record shape/],
+    ["malformed YAML", "- id: [\n", /YAML/],
+    ["oversized blob", "- id: W1-T9003\n  rationale: " + "x".repeat(4 * 1024 ** 2 + 1) + "\n", /budget/],
+  ] as const) await t.test(name, child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), content);
+    commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", name);
+    const result = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+    assert.equal(result.state, "unknown");
+    if (result.state === "unknown") assert.match(result.reason, reason);
+  });
+});
+
+test("W1-T10210: finite defaults cover a production-shaped immutable history", t => {
+  const repo = gitRepo({ kind: "filing-history-population", seedCommit: false }); t.after(() => repo.cleanup());
+  const data = (value: string): string => `data ${Buffer.byteLength(value)}\n${value}\n`;
+  const { name, email } = GIT_REPO_FIXTURE_IDENTITY;
+  let stream = `commit refs/heads/main\ncommitter ${name} <${email}> 1577880000 +0000\n` + data("population root");
+  stream += "M 100644 inline plan/tasks.yaml\n" + data("[]\n");
+  for (let i = 0; i < 4096; i++) stream += `M 100644 inline plan/tasks.d/record-${i}.yaml\n` + data(ruling(`P${i}`));
+  stream += "\n";
+  for (let i = 1; i < 1024; i++) stream += `commit refs/heads/main\ncommitter ${name} <${email}> ${1577880000 + i} +0000\n` + data(`unchanged plan ${i}`) + "\n";
+  stream += "done\n";
+  execFileSync("git", ["-C", repo.dir, "fast-import", "--quiet"], { input: stream, stdio: "pipe" });
+  const ctx = createTaskFilingHistoryInvocation(repo.dir, ["P0", "P4095"]);
+  const started = performance.now();
+  assert.equal(resolveTaskFilingHistory("P0", ctx).state, "qualified");
+  const usage = { ...ctx.usage };
+  assert.equal(resolveTaskFilingHistory("P4095", ctx).state, "qualified");
+  assert.deepEqual(ctx.usage, usage, "a second candidate reuses the completed immutable scan");
+  assert.equal(ctx.usage.commitVisits, 1024); assert.equal(ctx.usage.blobReads, 4097);
+  for (const key of Object.keys(FILING_HISTORY_LIMITS) as (keyof typeof FILING_HISTORY_LIMITS)[])
+    assert.ok(ctx.usage[key] <= FILING_HISTORY_LIMITS[key]);
+  t.diagnostic(JSON.stringify({ population: { commits: 1024, containers: 4097 }, usage: ctx.usage, measuredMs: performance.now() - started }));
 });
