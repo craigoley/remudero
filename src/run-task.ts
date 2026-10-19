@@ -1091,7 +1091,6 @@ import { getHeapStatistics } from "node:v8";
 import {
   ledgerRotationEntries,
   resolveLedgerUnion,
-  resolveLedgerUnionAsync,
   rotationStampIso,
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
@@ -1134,7 +1133,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1566,7 +1565,7 @@ import {
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
-import { readyDraftPullRequest, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
+import { readyDraftPullRequest, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
@@ -31105,15 +31104,18 @@ export async function retroTriggerCheckAsync(
   now: Date = new Date(),
   deps: NonNullable<Parameters<typeof retroTriggerCheck>[1]> & {
     readMergedCommits?: () => Promise<GitLogCommit[]>;
-    /** The run ledger, read off the loop; production unions the rotations through `resolveLedgerUnionAsync`. */
+    /** The run ledger as NDJSON, in place of the default slice read through `runHistory` (W1-T10046). */
     readLedgerNdjson?: (config: Config) => Promise<string>;
+    runHistory?: EscalationTriageHistoryReader;
     /** The GitHub probe, awaited; production runs `probeGithubThrottleAsync`, an injected `github` its own. */
     probeUnavailable?: () => Promise<string | undefined>;
   } = {},
 ): Promise<RetroTriggerDecision | undefined> {
   const config = deps.config ?? loadConfig();
   if (retroMarkerIsCorrupt(config)) return undefined;
-  const ledgerNdjson = await (deps.readLedgerNdjson ?? readRetroTriggerLedgerAsync)(config);
+  const records = deps.readLedgerNdjson
+    ? parseLedger(await deps.readLedgerNdjson(config))
+    : await readRetroTriggerRunsAsync(config, deps.runHistory ?? retroTriggerRunHistory());
   // Constructed where the sync check constructs its gateway, so an unresolvable origin still fails the check here.
   const github = deps.github ?? (await retroShippedGithubGatewayAsync());
   let read: MergedCommitsRead;
@@ -31123,7 +31125,7 @@ export async function retroTriggerCheckAsync(
     // Carried, not erased: mergedCommitsSnapshotGateway re-throws it where the sync read threw.
     read = { error };
   }
-  const pre = retroTriggerPrelude(now, config, { policy: deps.policy, github: mergedCommitsSnapshotGateway(github, read) }, ledgerNdjson);
+  const pre = retroTriggerPrelude(now, config, { policy: deps.policy, github: mergedCommitsSnapshotGateway(github, read) }, records);
   if ("decided" in pre) return pre.decided;
   // Probed only past the back-off, as the sync check does, so a backed-off tick still spends no GitHub call.
   const probe = deps.probeUnavailable ?? (deps.github ? async () => github.unavailable?.() : () => probeGithubThrottleAsync());
@@ -31156,6 +31158,7 @@ export function mergedCommitsSnapshotGateway(github: ShippedGithub, read: Merged
  */
 const RUN_LEDGER_STEP_PATTERN =
   '"step":"run\\.start"|"step":"verdict"|"step":"pr\\.opened"|"step":"recon\\.done"|"step":"implement\\.done"|"step":"implement\\.resumed"|"step":"correction\\.provenance"';
+const RETRO_TRIGGER_RUN_STEPS: string[] = RUN_LEDGER_STEP_PATTERN.split("|").map((alt) => JSON.parse(alt.slice('"step":'.length).replaceAll("\\.", ".")));
 
 /** Last unavailable observation already reported by this process. `retroTriggerCheck` is a
  * self-target-only command, so one fixed-width record is sufficient. This is transition memory for
@@ -31337,7 +31340,7 @@ export function retroTriggerCheck(
 ): RetroTriggerDecision | undefined {
   const config = deps.config ?? loadConfig();
   if (retroMarkerIsCorrupt(config)) return undefined;
-  const pre = retroTriggerPrelude(now, config, deps, readRetroTriggerLedger(config));
+  const pre = retroTriggerPrelude(now, config, deps, parseLedger(readRetroTriggerLedger(config)));
   return "decided" in pre ? pre.decided : retroTriggerConcludeSync(now, pre, pre.github.unavailable?.());
 }
 
@@ -31354,12 +31357,78 @@ function readRetroTriggerLedger(config: Config): string {
   return ledgerUnion.ok ? ledgerUnion.matches.join("\n") : existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
 }
 
-/** {@link readRetroTriggerLedger} off the event loop: the same union through `resolveLedgerUnionAsync`, the same fallback. */
-async function readRetroTriggerLedgerAsync(config: Config): Promise<string> {
-  const stateDir = join(config.root, "state");
-  const ledgerUnion = await resolveLedgerUnionAsync(stateDir, RUN_LEDGER_STEP_PATTERN);
+// W1-T10046: OBSERVED 2026-10-17, each boot re-read the whole corpus twice (retro 288 MB, auto-triage 243 MB on the loop) for ~1 MB slices.
+export const RETRO_TRIGGER_RUN_SLICE: EscalationTriageSlice = { holder: "run-task.retro-trigger-runs", steps: RETRO_TRIGGER_RUN_STEPS, version: "1" };
+export const AUTO_TRIAGE_REFUSAL_SLICE: EscalationTriageSlice = {
+  holder: "run-task.auto-triage-refusals", steps: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP], version: "1",
+};
+
+let retroTriggerRunReader: EscalationTriageHistoryReader | undefined;
+let autoTriageRefusalReader: EscalationTriageHistoryReader | undefined;
+// One W1-T9710 slice reader each per process, built on first use: a restart loads each rotation's durable digest off the loop.
+const retroTriggerRunHistory = (): EscalationTriageHistoryReader =>
+  (retroTriggerRunReader ??= createEscalationTriageHistoryReader({ slice: RETRO_TRIGGER_RUN_SLICE }));
+const autoTriageRefusalHistory = (): EscalationTriageHistoryReader =>
+  (autoTriageRefusalReader ??= createEscalationTriageHistoryReader({ slice: AUTO_TRIAGE_REFUSAL_SLICE }));
+
+function sliceReadCost(reader: EscalationTriageHistoryReader, read: LedgerUnionRecordRead, startedMs: number): Record<string, number> {
+  const load = reader.lastLoad();
+  const pass = reader.lastPass();
+  return {
+    ms: Math.round(performance.now() - startedMs),
+    rotations: read.archiveCount,
+    unread: read.unread.length,
+    loaded_rotations: load.rotations,
+    digest_hits: load.digestHits,
+    digest_misses: load.digestMisses,
+    seeded_rotations: pass.seededRotations,
+    loop_read_bytes: pass.readBytes,
+    parsed_lines: pass.parsedLines,
+  };
+}
+
+/** Best-effort evidence: a failed append never changes what the read returns. */
+function appendSliceReadRow(
+  ledgerPath: string,
+  runId: string,
+  step: string,
+  extra: Record<string, unknown>,
+  append: typeof appendProducerLedger = appendProducerLedger,
+): void {
+  try {
+    append(ledgerPath, "daemon", { run_id: runId, step, ...extra });
+  } catch (e) {
+    process.stderr.write(`${step}: could not ledger the read's cost: ${String((e as Error)?.message ?? e)}\n`);
+  }
+}
+
+/** The run slice from `reader`, else (a rotation unread, or none yet) the whole live file, as the sync read falls back. */
+export async function readRetroTriggerRunsAsync(
+  config: Config,
+  reader: EscalationTriageHistoryReader,
+  append?: typeof appendProducerLedger,
+): Promise<ReturnType<typeof parseLedger>> {
+  const startedMs = performance.now();
   const ledgerPath = ledgerPathFor(config);
-  return ledgerUnion.ok ? ledgerUnion.matches.join("\n") : existsSync(ledgerPath) ? await readFileAsync(ledgerPath, "utf8") : "";
+  const read = await reader(join(config.root, "state"));
+  const union = read.ok && read.archiveCount > 0;
+  const records = union ? [...read.rows] : parseLedger(existsSync(ledgerPath) ? await readFileAsync(ledgerPath, "utf8") : "");
+  appendSliceReadRow(ledgerPath, "RETRO-TRIGGER", "retro_trigger.ledger_read",
+    { source: union ? "union" : "live-file", rows: records.length, ...sliceReadCost(reader, read, startedMs) }, append);
+  return records;
+}
+
+/** The refusal rows from `reader`; `undefined` when a rotation went unread. */
+export async function readAutoTriageRefusalRowsAsync(
+  config: Config,
+  reader: EscalationTriageHistoryReader,
+  append?: typeof appendProducerLedger,
+): Promise<Array<Record<string, unknown>> | undefined> {
+  const startedMs = performance.now();
+  const read = await reader(join(config.root, "state"));
+  appendSliceReadRow(ledgerPathFor(config), "AUTO-TRIAGE", "auto_triage.refusal_read",
+    { ok: read.ok, rows: read.rows.length, ...sliceReadCost(reader, read, startedMs) }, append);
+  return read.ok ? read.rows : undefined;
 }
 
 /** What the trigger knows once its local reads are done and only the GitHub-backed pass remains. */
@@ -31381,7 +31450,7 @@ function retroTriggerPrelude(
   now: Date,
   config: Config,
   deps: Pick<NonNullable<Parameters<typeof retroTriggerCheck>[1]>, "github" | "policy">,
-  ledgerNdjson: string,
+  records: ReturnType<typeof parseLedger>,
 ): { decided: RetroTriggerDecision | undefined } | RetroTriggerContext {
   const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
@@ -31405,11 +31474,8 @@ function retroTriggerPrelude(
   // `headRefName` credit pass), and computing it exactly ONCE here, rather than a second time
   // inside the back-off branch, keeps this file's one ledger-file read call site exactly one
   // (acceptance 7, test/intake-triggers-read-their-own-depth.test.ts).
-  // The read itself is the caller's (readRetroTriggerLedger, or its awaited twin): this parses it.
-  // ONE parse feeds every read below (W1-T2289 acceptance 7): `gatherRuns` for the fleet-activity
-  // signal this trigger already had, `mineFollowups` for the retro's OWN queue depth, and (W1-T4664)
-  // the back-off's own merges-floor pre-check — never a second `readFileSync`/`parseLedger`.
-  const records = parseLedger(ledgerNdjson);
+  // The caller reads (W1-T10046). ONE set of records feeds `gatherRuns`, `mineFollowups` (the retro's OWN queue
+  // depth) and (W1-T4664) the back-off's merges-floor pre-check — never a second `readFileSync`/`parseLedger`.
   const runs = gatherRuns(records);
   const taskIdsWithRuns = new Set(runs.map((r) => r.taskId));
 
@@ -31729,7 +31795,8 @@ export async function autoTriageCheck(
      *  {@link resolveOwnerRepo}. */
     resolveClaimRepo?: () => { repo: string };
     /** W1-T4203: injected read of the refused-triage-commit rows; `undefined` = unreadable. */
-    readRefusalRows?: () => Array<Record<string, unknown>> | undefined;
+    readRefusalRows?: () => Array<Record<string, unknown>> | undefined | Promise<Array<Record<string, unknown>> | undefined>;
+    refusalHistory?: EscalationTriageHistoryReader;
   } = {},
 ): Promise<AutoTriageDecision> {
   const config = opts.config ?? loadConfig();
@@ -31774,16 +31841,10 @@ export async function autoTriageCheck(
   const first = decideAutoTriage(inputs);
   if (!first.fire) return first;
   // W1-T4203: an entry whose triage commit was REFUSED is terminal until cleared. An unreadable
-  // ledger reads as no refusals (the entry is retried, today's behaviour) rather than starving the rung.
+  // ledger reads as no refusals (the entry is retried, today's behaviour) rather than starving the rung. W1-T10046: off the loop.
   const refused = refusedTriageIds(
-    (opts.readRefusalRows ??
-      (() => {
-        const read = readLedgerUnionRecordsSync(dirname(ledgerPathFor(config)), {
-          step: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP],
-          refuseIncomplete: true,
-        });
-        return read.ok ? read.rows : undefined;
-      }))() ?? [],
+    (await (opts.readRefusalRows ??
+      (() => readAutoTriageRefusalRowsAsync(config, opts.refusalHistory ?? autoTriageRefusalHistory())))()) ?? [],
   );
   const candidates = inputs.candidates.filter((c) => !refused.has(c));
   if (candidates.length === 0) {
