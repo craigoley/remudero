@@ -246,6 +246,7 @@ import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type Bina
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
+import { createGateSandboxMetrics } from "./lib/gate-sandbox-metrics.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -1556,7 +1557,7 @@ import {
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
-import { decideDispatchClaim, releaseDispatchClaim, releaseDispatchClaimAsync, gitDispatchClaimReserver, gitDispatchClaimReserverAsync, gitClaimRunnerAsync, dispatchClaimRef, claimDropRefusal, pidIsPresent, readNamespaceBootMs, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "./lib/dispatch-claim.js";
+import { decideDispatchClaim, releaseDispatchClaim, releaseDispatchClaimAsync, gitDispatchClaimReserver, gitDispatchClaimReserverAsync, gitClaimRunnerAsync, dispatchClaimRef, claimDropRefusal, pidIsPresent, readNamespaceBootMs, reclaimSilentDispatchClaim, holdDispatchClaim, renewDispatchClaim, DISPATCH_CLAIM_RENEW_INTERVAL_MS, type DispatchClaimRenewal, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
   readGithubPosture,
@@ -19579,7 +19580,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // AWAITED, never `spawnSync` (2026-10-06): runTask runs inside the daemon process, and this
   // claim's sync git was the loop's largest holder — 89 loop_lag rows, 1,506 s, up to 106 s each.
   const claimReserver = opts.claimReserver ?? dispatchClaimReserverAsyncFor(repoDir);
-  const claimAnchor = await claimReserver.mintAnchor();
+  let claimAnchor = await claimReserver.mintAnchor();
   const claimOutcome = await claimReserver.attempt(task.id, claimAnchor);
   const claimHolder = claimOutcome === "taken" ? await claimReserver.holder(task.id) : undefined;
   // W1-T2552: the failing attempt's OWN git stderr, threaded into the refusal so an unreachable
@@ -19597,6 +19598,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     reason: claimDecision.reason,
   });
   if (!claimDecision.proceed) {
+    let reclaimedAnchor: string | undefined;
     // CONTENTION CARRIES ITS OWN EVIDENCE: `isMerged(task)` is the SAME projection this run
     // already computed above (the W1-T319 already-merged guard) — exactly one of the three
     // signals (`isMerged`, `readLiveState`/`isLiveMergeCredited`, `closedUnmergedRunBranches`)
@@ -19637,21 +19639,26 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // peer might believe it holds, so the operator reading stdout must see it happen and see
       // which signals decided it — the ledger row alone is a record nobody is watching live.
       if (released.arm === "dead-claimant") say(`RELEASED a dead claim — ${released.reason}`);
+      if (!released.release)
+        reclaimedAnchor = (await reclaimSilentDispatchClaim(task.id, claimReserver, { run: gitClaimRunnerAsync(repoDir), stateDir: dirname(ledgerPath), log, say })).anchor;
     }
-    say(`REFUSED: ${claimDecision.reason}`);
-    // `unreachable` mirrors `blocked_git_fetch`'s own "cannot reach origin" refusal (this IS a
-    // git-connectivity failure, not a new failure mode); `taken` mirrors `blocked_inflight`'s
-    // own "another holder owns this run right now" (this IS that condition, cross-host instead
-    // of same-host) — no new RunResult verdict is introduced for either arm.
-    // W1-T4708: ledgered too, or the refused run read as in flight to every reader.
-    const refused: RunResult = {
-      taskId,
-      runId,
-      merged: false,
-      costUsd: 0,
-      verdict: claimOutcome === "unreachable" ? "blocked_git_fetch" : "blocked_inflight",
-    };
-    return endRefusedRun(log, verdictWritten, "dispatch.claim", refused, claimDecision.reason);
+    if (reclaimedAnchor === undefined) {
+      say(`REFUSED: ${claimDecision.reason}`);
+      // `unreachable` mirrors `blocked_git_fetch`'s own "cannot reach origin" refusal (this IS a
+      // git-connectivity failure, not a new failure mode); `taken` mirrors `blocked_inflight`'s
+      // own "another holder owns this run right now" (this IS that condition, cross-host instead
+      // of same-host) — no new RunResult verdict is introduced for either arm.
+      // W1-T4708: ledgered too, or the refused run read as in flight to every reader.
+      const refused: RunResult = {
+        taskId,
+        runId,
+        merged: false,
+        costUsd: 0,
+        verdict: claimOutcome === "unreachable" ? "blocked_git_fetch" : "blocked_inflight",
+      };
+      return endRefusedRun(log, verdictWritten, "dispatch.claim", refused, claimDecision.reason);
+    }
+    claimAnchor = reclaimedAnchor;
   }
 
   // ── Reclaim debris from crashed prior runs (WS-1: a max-turns death left its
@@ -19826,6 +19833,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     });
   }
 
+  const claimLease = holdDispatchClaim(task.id, claimReserver, claimAnchor, { log });
   try {
     const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
     if (checkpoint) {
@@ -22075,7 +22083,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // another lane's. Best-effort, matching `removeRunLock` immediately above: a throw here
     // must never replace whatever verdict this run actually reached.
     try {
-      const released = await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
+      const released = await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: await claimLease.stop() });
       log("dispatch.claim_released", {
         ref: dispatchClaimRef(task.id),
         arm: released.arm,
@@ -30156,7 +30164,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
 export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
-export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs", "--sandbox-metrics"] as const;
 
 /** W1-T3738 — what {@link runPreflightProofs} needs, all injected so a test drives it without a
  *  base worktree, a real test run or a git call. */
@@ -30674,14 +30682,20 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const from = flagValue(rest, "--from");
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
+  const metrics = rest.includes("--sandbox-metrics") ? createGateSandboxMetrics() : undefined;
+  const fullTier = rest.some(arg => ["--ci-parity", "--coverage", "--proofs"].includes(arg));
+  const spawn: PreflightSpawn | undefined = metrics && !fullTier
+    ? (file, args, opts) => metrics.observe(() => (deps.spawn ?? defaultPreflightSpawn)(file, args, opts))
+    : deps.spawn;
+  const boundary = <T>(run: () => T): T => metrics ? metrics.observe(run) : run();
 
-  const result = runPreflight(repoRoot, { ...deps, range });
+  const result = boundary(() => runPreflight(repoRoot, { ...deps, range, spawn }));
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
   // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
+  const fast = rest.includes("--no-fast") ? undefined : boundary(() => runPreflightFast(repoRoot, { spawn }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -30689,15 +30703,17 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
   const ciChecks = rest.includes("--no-fast")
     ? undefined
-    : preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn: deps.spawn }));
+    : boundary(() => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
-    : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn }));
-  const ciParity = rest.includes("--ci-parity") ? runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
-  const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
+    : boundary(() => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
+  // Full-suite routes key containment/deadlines on the ORIGINAL spawn identity. Observe their
+  // tier boundaries, never wrap their executor into the injected-spawn synchronous route.
+  const ciParity = rest.includes("--ci-parity") ? boundary(() => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const coverage = rest.includes("--coverage") ? boundary(() => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
-  const proofs = rest.includes("--proofs") ? runPreflightProofs(repoRoot, { spawn: deps.spawn }) : undefined;
+  const proofs = rest.includes("--proofs") ? boundary(() => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -30755,7 +30771,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // W1-T3017 — PEEK, never resolve. The pin belongs to whichever mode actually diffed; a run with
   // no diff-consuming step has no base, and resolving one here would put a sha on the line that no
   // step ever measured against.
-  const preflightSpawn = deps.spawn ?? defaultPreflightSpawn;
+  const preflightSpawn = spawn ?? defaultPreflightSpawn;
   const pin = peekPinnedBase(repoRoot, preflightSpawn);
   const runContext = detectRunContext({
     repoRoot,
@@ -30811,14 +30827,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // fall back to the default: that is the one call shape the orchestrator's own verdict comes
   // from.
   const summaryPath = preflightSummaryTarget(rest, deps);
-  const summary = buildPreflightSummary({
+  const summary = { ...buildPreflightSummary({
     steps,
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
     headSha,
     args: rest,
     runContext,
-  });
+  }), ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
   if (summaryPath === undefined) {
     console.log(
       `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(repoRoot)}) — pass --summary-file to write one anyway`,
@@ -52226,7 +52242,7 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("-")
     ? "rmd claim: a task id is required"
-    : unknownArgError("claim", rest.slice(1), [], ["--drop"]);
+    : unknownArgError("claim", rest.slice(1), [], ["--drop", "--renew"]);
   if (badArg !== null) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -52259,6 +52275,19 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
     console.log(`dropped ${ref}`);
     return 0;
   }
+  if (rest.includes("--renew")) {
+    const sha = reserver.holder(taskId);
+    if (!sha) {
+      console.error(`rmd claim: ${ref} is not held — nothing to renew`);
+      return 1;
+    }
+    const refusal = claimDropRefusal(ref, reserver.anchorMessage?.(taskId), opts.localHost ?? hostname(), "renew");
+    if (refusal !== undefined) {
+      console.error(`rmd claim: ${refusal}`);
+      return 1;
+    }
+    return reportClaimRenewal(ref, renewDispatchClaim(reserver, taskId, sha)) === undefined ? 1 : 0;
+  }
   const outcome = reserver.attempt(taskId, reserver.mintAnchor());
   const decision = decideDispatchClaim(outcome, {
     taskId,
@@ -52271,6 +52300,94 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
   }
   console.log(`claimed ${ref}`);
   return 0;
+}
+
+function reportClaimRenewal(ref: string, renewal: DispatchClaimRenewal): string | undefined {
+  if (renewal.outcome === "renewed") {
+    console.log(`renewed ${ref} ${renewal.sha} ${new Date().toISOString()}`);
+    return renewal.sha;
+  }
+  console.error(renewal.outcome === "lost"
+    ? `rmd claim: lost ${ref} — it is now held by ${renewal.holder ?? "nobody"}`
+    : `rmd claim: could not renew ${ref}: ${renewal.stderr}`);
+  return undefined;
+}
+
+export type ClaimHoldSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
+
+export interface ClaimHoldOpts extends ClaimVerbOpts {
+  signals?: {
+    once(event: ClaimHoldSignal, listener: () => void): unknown;
+    removeListener(event: ClaimHoldSignal, listener: () => void): unknown;
+  };
+}
+
+export async function claimHoldCommand(rest: string[], opts: ClaimHoldOpts = {}): Promise<number> {
+  const taskId = rest[0];
+  const badArg = taskId === undefined || taskId.startsWith("-")
+    ? "rmd claim: a task id is required"
+    : unknownArgError("claim", rest.slice(1), ["--interval-ms"], ["--hold"]);
+  if (badArg !== null) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const intervalMs = Number(flagValue(rest, "--interval-ms") ?? DISPATCH_CLAIM_RENEW_INTERVAL_MS);
+  if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId)) {
+    console.error(`rmd claim: '${taskId}' is not a task id, or --interval-ms is not a positive integer`);
+    return 2;
+  }
+  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
+    console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
+    return 1;
+  }
+  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const held = takeOrAdoptClaim(taskId, reserver, opts.localHost ?? hostname());
+  if (held === undefined) return 1;
+  console.log(`holding ${dispatchClaimRef(taskId)} ${held}`);
+  return await holdClaimUntilSignalled(taskId, reserver, held, intervalMs, opts.signals ?? process);
+}
+
+function takeOrAdoptClaim(taskId: string, reserver: DispatchClaimReserver, localHost: string): string | undefined {
+  const anchor = reserver.mintAnchor();
+  const outcome = reserver.attempt(taskId, anchor);
+  if (outcome === "created") return anchor;
+  const holder = outcome === "taken" ? reserver.holder(taskId) : undefined;
+  if (holder !== undefined && claimDropRefusal(dispatchClaimRef(taskId), reserver.anchorMessage?.(taskId), localHost, "renew") === undefined) return holder;
+  const stderr = outcome === "unreachable" ? reserver.lastAttemptStderr?.() : undefined;
+  console.error(`rmd claim: ${decideDispatchClaim(outcome, { taskId, holder, stderr }).reason}`);
+  return undefined;
+}
+
+function holdClaimUntilSignalled(
+  taskId: string,
+  reserver: DispatchClaimReserver,
+  anchor: string,
+  intervalMs: number,
+  signals: NonNullable<ClaimHoldOpts["signals"]>,
+): Promise<number> {
+  const ref = dispatchClaimRef(taskId);
+  const names: ClaimHoldSignal[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+  let held = anchor;
+  return new Promise((resolve) => {
+    const end = (code: number, drop: boolean): void => {
+      clearInterval(timer);
+      for (const name of names) signals.removeListener(name, onSignal);
+      if (drop && reserver.drop(taskId, { expect: held })) console.log(`dropped ${ref}`);
+      else if (drop) {
+        console.error(`rmd claim: could not drop ${ref} (it moved or origin is unreachable)`);
+        return resolve(1);
+      }
+      resolve(code);
+    };
+    const onSignal = (): void => end(0, true);
+    const timer = setInterval(() => {
+      const renewal = renewDispatchClaim(reserver, taskId, held);
+      const next = reportClaimRenewal(ref, renewal);
+      if (next !== undefined) held = next;
+      else if (renewal.outcome === "lost") end(1, false);
+    }, intervalMs);
+    for (const name of names) signals.once(name, onSignal);
+  });
 }
 
 export function capabilityInspectCommand(rest: string[], deps: Pick<AuthorityCommandDeps, "out" | "err"> = {}): number {
@@ -52371,7 +52488,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]",
+    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--sandbox-metrics]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
     detail:
       "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
@@ -52483,8 +52600,8 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "claim",
     syntax: "rmd claim <task-id> [--drop]",
-    summary: "Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.",
-    detail: "W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. A claim needs no release verb: the existing release arms drop it once the task has landed.",
+    summary: "Take, hold, renew or drop the dispatch claim the fleet honours, for a hand-build.",
+    detail: "W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. W1-T9432: a claim holds only while its holder renews it. --hold takes the claim (or adopts this host's existing one), stays in the foreground, renews it every 5 minutes (--interval-ms <n> overrides the pace) printing one `renewed` line each time, and drops it on SIGINT, SIGTERM or SIGHUP; run it in the background of a session so the claim dies with the session. A `lost` renewal exits 1 naming the new holder. --renew renews once, and only a claim whose anchor's host is this host. A renewal is a child commit of the claim pushed with --force-with-lease, so it never recreates a reclaimed claim. A lane that meets a claim whose holder has been silent (no renewal and no run-<id>-* branch commit) for twice W, the p90 of this instance's measured claim-to-verdict durations, reclaims it; a hand-build that neither holds nor renews its claim is reclaimed that way.",
   },
   {
     name: "routing-ab",
@@ -53591,7 +53708,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
   ["test-place", (rest) => testPlaceCommand(rest)],
-  ["claim", (rest) => claimCommand(rest)],
+  ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
