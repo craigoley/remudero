@@ -4459,9 +4459,10 @@ export async function runDaemon(
       return [...items].map(([work, row]) => ({ ...row, ...(completed && !row.released && row.settled_after_ms === undefined
         ? waiting!.has(work) ? { abandoned: true as const } : { released: true as const } : {}) }));
     };
-    const release = (action: { actionKind: string; taskId: string; phase: string }): void => {
-      for (const row of items.values()) if (row.what === "detached" && row.kind === action.actionKind && row.task_id === action.taskId) {
-        row.phase = action.phase;
+    const release = (work: Promise<void>, phase: string): void => {
+      const row = items.get(work);
+      if (row) {
+        row.phase = phase;
         row.released = true;
       }
     };
@@ -4572,8 +4573,8 @@ export async function runDaemon(
             boundMs: detachedBoundMs,
             freshness: true,
             onWait: observation.watch,
-            onRelease: (action) => {
-              observation.release(action);
+            onRelease: (action, work) => {
+              observation.release(work, action.phase);
               log("daemon.detached_action_released", {
                 action_kind: action.actionKind, task_id: action.taskId,
                 age_ms: action.ageMs, phase: action.phase, reason: action.reason,
@@ -5694,9 +5695,11 @@ export async function runDaemon(
         ticks,
       });
       // The same bounded drain a freshness restart takes: live fix workers and reviews finish first.
+      const memoryDrainStartedAtMs = daemonClock.now();
       await drainBeforeRestart("daemon.memory_drain");
-      const memoryDrainMs = Math.max(0, daemonClock.now() - memoryDecisionAtMs);
-      log("daemon.memory_exit", { phases_ms: { drain: memoryDrainMs, total: memoryDrainMs } });
+      const memoryExitAtMs = daemonClock.now();
+      log("daemon.memory_exit", { phases_ms: { drain: Math.max(0, memoryExitAtMs - memoryDrainStartedAtMs),
+        total: Math.max(0, memoryExitAtMs - memoryDecisionAtMs) } });
       return summary("heap_pressure", heapPressure);
     }
 

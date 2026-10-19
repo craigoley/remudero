@@ -201,11 +201,11 @@ test("a pushed fix released to CI is not misreported as abandoned or settled", a
   } finally { fix.resolve(); await h.finish(); }
 });
 
-test("a rejected lane still closes its measured holdout phase", async t => {
+test("a rejected lane preserves the error exit instead of claiming a freshness exit", async t => {
   const h = latched(t);
   try {
     await h.latch(10); await h.settle(30, true);
-    assert.equal((await h.daemon).stopReason, "stale");
-    assert.equal(h.row("daemon.freshness_exit")?.phases_ms.holdouts, 20);
+    assert.equal((await h.daemon).stopReason, "error");
+    assert.equal(h.row("daemon.freshness_exit"), undefined);
   } finally { await h.finish(); }
 });

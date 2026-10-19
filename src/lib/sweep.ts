@@ -15232,7 +15232,7 @@ export async function drainDetachedSweepActions(
     boundMs: number;
     freshness?: boolean;
     onWait?: (item: RestartDrainInventoryEntry) => void;
-    onRelease?: (action: DetachedSweepActionDescriptor & { phase: DetachedSweepActionRegistration["phase"]; reason: string }) => void;
+    onRelease?: (action: DetachedSweepActionDescriptor & { phase: DetachedSweepActionRegistration["phase"]; reason: string }, work: Promise<void>) => void;
   } = { boundMs: Number.POSITIVE_INFINITY },
 ): Promise<DetachedSweepActionDescriptor[]> {
   const detachedDrainBoundMs = Math.max(0, opts.boundMs);
@@ -15247,7 +15247,7 @@ export async function drainDetachedSweepActions(
         reason: action.phase === "best-effort"
           ? "best-effort cadence is redone after restart"
           : "pushed fix CI wait is re-derived after restart",
-      });
+      }, work);
     }
     return false;
   });
