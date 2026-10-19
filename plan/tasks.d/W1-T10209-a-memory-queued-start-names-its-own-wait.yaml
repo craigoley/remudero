@@ -10,7 +10,7 @@
   band_meaning: span
   budget_usd: 5.00
   priority: 1.5
-  status: queued
+  status: merged
   attempts: 0
   origin: "Operator-approved governed review-liveness qualification, 2026-10-19; native reserved refs/rmd-id/W1-T10209. No competing review or runtime intervention authorized."
   plan_refs: [W1-T3969, W1-T7095, W1-T8230, W1-T9780, W1-T9814, W1-T9969, W1-T10033, W1-T10208]

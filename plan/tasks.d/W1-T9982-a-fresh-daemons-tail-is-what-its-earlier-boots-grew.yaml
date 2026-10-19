@@ -14,7 +14,7 @@
     - src/lib/daemon-footprint.ts
     - src/lib/host-memory-shadow.ts
     - test/a-fresh-daemons-tail-is-what-its-earlier-boots-grew.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: admission was blind to the boot growth behind the 02:33Z host collapse
   attempts: 0
   rationale: |

@@ -15,7 +15,7 @@
     - src/lib/gate-sandbox-metrics.ts
     - src/run-task.ts
     - test/ci/gates/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   note: |

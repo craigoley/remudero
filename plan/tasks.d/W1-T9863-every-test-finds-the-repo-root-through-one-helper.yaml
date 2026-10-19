@@ -18,7 +18,7 @@
     - test/a-count-assertion-names-its-members.test.ts
     - "src/lib/rule-suites.ts"
     - "scripts/census-precheck.mjs"
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

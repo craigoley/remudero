@@ -14,7 +14,7 @@
     - src/lib/fix-progress-judge.ts
     - src/lib/sweep.ts
     - test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts
-  status: queued
+  status: merged
   priority: 1  # a round-0 escalation parks an own red behind a person: #11444 (10-13), and again #12542 (W1-T9864) on 2026-10-17, judged continue at 07:06Z then escalate at 07:10Z on the same input_key at round_count 0 ('the checkout is at main and does not contain the reported PR head'), held 'already escalated; awaiting new evidence or an operator answer' for 6 h+ (raised from 2 by the 10-17 PR-queue triage)
   attempts: 0
   rationale: |

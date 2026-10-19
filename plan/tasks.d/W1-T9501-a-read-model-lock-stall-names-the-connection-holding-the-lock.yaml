@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: triage of needs-human #11656 (READ-MODEL-CORE), fix every problem at the root"
   plan_refs: [W1-T5177, W1-T4568]
   files: [src/lib/read-model-db.ts, src/lib/read-model-worker.ts, test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -17,7 +17,7 @@
     - test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts
     - test/followup-routing-has-a-consumer.test.ts
     - test/the-followup-retirement-arm-has-a-call-site.test.ts
-  status: queued
+  status: merged
   priority: 1  # observed again in the failed 2026-10-18 automated retro; do not clear its existing backoff
   attempts: 0
   rationale: |

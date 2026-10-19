@@ -14,7 +14,7 @@
     - scripts/preflight-author.mjs
     - scripts/census-precheck.mjs
     - test/a-suite-child-timeout-on-a-loaded-host-does-not-refuse-the-author-run.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

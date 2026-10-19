@@ -17,7 +17,7 @@
     - scripts/test-placement/test-folders.tsv
     - test/a-new-test-is-placed-by-its-imports.test.ts
     - "docs/operator-guide.md"
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
