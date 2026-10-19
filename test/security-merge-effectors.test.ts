@@ -66,3 +66,15 @@ test('security UNKNOWN recovery rechecks the same head without a fresh SHA or an
  assert.equal(armFailureAction(new SecurityMergeRefused('blocked','new-high-alert').message),'retryable');
  assert.equal(armFailureIsRateLimited(new SecurityMergeRefused('blocked','new-high-alert').message),false);
 });
+test('all seven default merge effectors refuse a core URL case alias before any executable write',async t=>{
+ const shim=fixture(t),sync=realArmDeps(),asyncDeps=realArmDepsAsync(),alias='https://github.com/CRAIGOLEY/REMUDERO/pull/11468';
+ const errors:unknown[]=[];
+ await withLiveWritesAllowed(async()=>{
+  const syncCalls=[()=>sync.armAuto(alias),()=>sync.enqueue!(alias),()=>sync.mergeDirect(alias),()=>ghPrMergeSquash(alias,()=>({state:'clean',defused:[]}))];
+  for(const invoke of syncCalls)try{invoke();errors.push(null);}catch(error){errors.push(error);}
+  for(const invoke of [()=>asyncDeps.armAuto(alias),()=>asyncDeps.enqueue!(alias),()=>asyncDeps.mergeDirect(alias)])try{await invoke();errors.push(null);}catch(error){errors.push(error);}
+ });
+ assert.equal(errors.length,7,'positive control: every real boundary was called');
+ assert.equal(shim.calls().filter(call=>call.startsWith('pr merge ')||call.includes('PUT')).length,0,'no alias can escape the guard into an executable merge');
+ for(const error of errors)assert(error instanceof SecurityMergeRefused&&error.state==='unknown'&&error.reason==='noncanonical-pr-target');
+});

@@ -256,7 +256,7 @@ test("hosted tooling registration still refuses a newly unregistered executable 
   const tracked = new Set([...actual.tracked, workflow, helper]);
   const candidates = deriveInstrumentCandidates({
     tracked,
-    readText: path => path === workflow
+    readText: (path: string) => path === workflow
       ? "jobs:\n  author:\n    steps:\n      - run: node scripts/preflight-author.mjs\n      - run: node scripts/calibrate-author-runtime.mjs\n      - run: node scripts/lib/author-step-capture.mjs\n      - run: node " + helper + "\n"
       : path === helper ? "export const fixture = true;" : actual.readText(path),
   });
