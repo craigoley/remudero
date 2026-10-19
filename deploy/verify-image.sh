@@ -152,7 +152,7 @@ if [ "${LOCAL_MODE}" -eq 1 ]; then
   docker() {
     if [ "${1:-}" = run ]; then
       shift
-      command docker run "$@"
+      command docker run --pull=never --network=none "$@"
     else
       command docker "$@"
     fi
