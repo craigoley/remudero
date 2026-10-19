@@ -265,29 +265,33 @@ test("plan lane reserves its task ids BEFORE the paid worker spawns", async () =
 // not the worker-sandbox-local reservation directory the test above already covers.
 test("plan lane pushes ONE remote ref PER reserved id, not just the first", async () => {
   let seenAtSpawn: number[] = [];
+  let refsAtSpawn: string[] = [];
 
   const ledger = await withHarness(async ({ reservationsDir, bareOrigin }) => {
+    const remoteRefs = (): string[] =>
+      execFileSync("git", ["-C", bareOrigin, "for-each-ref", "--format=%(refname)", "refs/rmd-id/"], { encoding: "utf8" })
+        .split("\n")
+        .filter(Boolean);
     await planCommand(BRIEF, {
       spawn: async (args: { cwd: string }) => {
         seenAtSpawn = idsOnDisk(reservationsDir);
+        // W1-T9488: the refs are read while the worker runs — the run gives back what it did not file when it ends.
+        refsAtSpawn = remoteRefs();
         fileTaskAsShard(args.cwd, `W1-T${seenAtSpawn[0]}`, "filed by the fixture worker");
         return fakeWorker(`PROPOSED: file W1-T${seenAtSpawn[0]} for the plan-lane remote-mint fixture`);
       },
     }).catch(() => undefined);
 
-    const refs = execFileSync("git", ["-C", bareOrigin, "for-each-ref", "--format=%(refname)", "refs/rmd-id/"], {
-      encoding: "utf8",
-    })
-      .split("\n")
-      .filter(Boolean);
     assert.equal(
-      refs.length,
+      refsAtSpawn.length,
       PLAN_MAX_NEW_TASKS,
-      `expected one refs/rmd-id/* ref per reserved id (${PLAN_MAX_NEW_TASKS}), the shared remote saw ${JSON.stringify(refs)}`,
+      `expected one refs/rmd-id/* ref per reserved id (${PLAN_MAX_NEW_TASKS}), the shared remote saw ${JSON.stringify(refsAtSpawn)}`,
     );
     for (const n of seenAtSpawn) {
-      assert.ok(refs.includes(`refs/rmd-id/W1-T${n}`), `W1-T${n}'s own ref must have reached the shared origin`);
+      assert.ok(refsAtSpawn.includes(`refs/rmd-id/W1-T${n}`), `W1-T${n}'s own ref must have reached the shared origin`);
     }
+    // W1-T9488: this run died before its branch was pushed, so nothing declares any of the five and all are given back.
+    assert.deepEqual(remoteRefs(), [], "a plan run that pushed no branch releases every remote id it reserved");
   });
 
   assert.equal(ledger.filter((l) => l.step === "plan.id_minted").length, 1);
@@ -295,6 +299,12 @@ test("plan lane pushes ONE remote ref PER reserved id, not just the first", asyn
     Array.isArray((ledger.find((l) => l.step === "plan.id_minted") as { remote_refs?: unknown })?.remote_refs),
     "plan.id_minted must ledger the pushed refs, not just the local reservation",
   );
+  const released = ledger.filter((l) => l.step === "task_id.reservation_released");
+  assert.equal(released.length, PLAN_MAX_NEW_TASKS, "one release row per reserved id");
+  for (const row of released) {
+    assert.equal(row.lane, "plan");
+    assert.match(String(row.reason), /^plan: .*; no branch pushed$/, "the reason names the run's outcome");
+  }
 });
 
 test("plan lane releases EVERY reserved id, including the ones the worker declined to use", async () => {
