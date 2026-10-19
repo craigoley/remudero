@@ -26,7 +26,9 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, openShadowCounterDb, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
-import { readShadowCounters, saveShadowCounter, shadowCounterPath, type ShadowKeyChange } from "./view-shadow-store.js";
+import { readShadowCounters, saveShadowCounter, shadowCounterPath, type ShadowClassification, type ShadowKeyChange, type ViewShadowState } from "./view-shadow-store.js";
+
+export type { ShadowClassification, ViewShadowState } from "./view-shadow-store.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
 export const VIEW_SHADOW_SUMMARY_STEP = "view.shadow_summary";
@@ -63,7 +65,6 @@ export function unreadySources(sources: readonly ViewSource[] | undefined): stri
   return unready.length === 0 ? undefined : unready.map((s) => `${s.name} ${s.phase}`).join(", ");
 }
 
-export type ShadowClassification = "legacy_horizon" | "timing" | "dedupe" | "real";
 export const SHADOW_CLASSIFICATIONS: readonly ShadowClassification[] = ["legacy_horizon", "timing", "dedupe", "real"];
 
 export interface ShadowFieldDiff {
@@ -692,30 +693,6 @@ function classifyDerived(inputs: readonly string[], judged: ReadonlyArray<{ path
   }
   const top = SHADOW_CLASSIFICATIONS.find((c) => classes.includes(c))!;
   return { classification: top, reason: `computed from ${inputs.join(" ")}, each explained (${classes.join(", ")})` };
-}
-
-export interface ViewShadowState {
-  /** Qualified states coexist with the untouched, older per-view counters in the same native store. */
-  view?: string;
-  qualificationGeneration?: string;
-  /** A mismatched producer blocks current qualification without erasing any measured streak. */
-  qualificationRefusal?: string;
-  requests: number;
-  firstRequestMs: number | null;
-  samples: number;
-  diffs: Record<ShadowClassification, number>;
-  /** Samples since the last `real` diff, and when that run began. */
-  streakSamples: number;
-  streakSinceMs: number | null;
-  lastRealMs: number | null;
-  /** The keys sampled since the streak began; absent in a state persisted before it was counted. */
-  streakKeys?: string[];
-  /** Samples not compared because a side said it was not ready, and the latest one's reason. */
-  skipped?: number;
-  lastSkippedMs?: number;
-  lastSkipReason?: string;
-  /** What the next summary row reports: counts since `sinceMs`, the last one (or the first sample). */
-  summary?: { sinceMs: number; samples: number; skipped: number; diffs: Record<ShadowClassification, number> };
 }
 
 export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "summary" | "view" | "qualificationRefusal"> {

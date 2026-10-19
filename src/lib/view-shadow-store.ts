@@ -1,7 +1,32 @@
 /** Small transactional counter updates; historical cursor keys are stored once, not copied per sample. */
 import { statSync } from "node:fs";
 import { openShadowCounterDb, type ReadModelDb } from "./read-model-db.js";
-import type { ViewShadowState } from "./view-shadow.js";
+
+export type ShadowClassification = "legacy_horizon" | "timing" | "dedupe" | "real";
+
+export interface ViewShadowState {
+  /** Qualified states coexist with the untouched, older per-view counters in the same native store. */
+  view?: string;
+  qualificationGeneration?: string;
+  /** A mismatched producer blocks current qualification without erasing any measured streak. */
+  qualificationRefusal?: string;
+  requests: number;
+  firstRequestMs: number | null;
+  samples: number;
+  diffs: Record<ShadowClassification, number>;
+  /** Samples since the last `real` diff, and when that run began. */
+  streakSamples: number;
+  streakSinceMs: number | null;
+  lastRealMs: number | null;
+  /** The keys sampled since the streak began; absent in a state persisted before it was counted. */
+  streakKeys?: string[];
+  /** Samples not compared because a side said it was not ready, and the latest one's reason. */
+  skipped?: number;
+  lastSkippedMs?: number;
+  lastSkipReason?: string;
+  /** What the next summary row reports: counts since `sinceMs`, the last one (or the first sample). */
+  summary?: { sinceMs: number; samples: number; skipped: number; diffs: Record<ShadowClassification, number> };
+}
 
 export interface ShadowKeyChange { reset: boolean; add?: string }
 export const shadowCounterPath = (legacyPath: string): string => `${legacyPath}.sqlite`;
