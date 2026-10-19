@@ -25,6 +25,8 @@ test("a started fix seed is orphaned after a new boot records an empty adoption 
   assert.equal(read?.kind, "orphaned");
   assert.equal(read?.orphanReason, "owner-run-ended");
   assert.deepEqual(read?.seed, { ts: seed.ts, runId: OLD });
+  assert.equal(fixSeedRead([...timeline(), { step: "fix.progress_judged", task_id: TASK,
+    run_id: CURRENT }], pr, CURRENT)?.kind, "orphaned", "judgment alone is not a new worker dispatch");
 });
 
 test("a started fix seed stays held without a complete current boot adoption receipt", () => {

@@ -14691,7 +14691,7 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
 export const FIX_SEED_ORPHANED_STEP = "sweep.fix.seed_orphaned";
 
 export interface FixSeed { ts?: string; runId?: string }
-/** `orphaned`: seeded by an earlier daemon run and no rung row followed, so its detached dispatch died with that process. */
+/** `orphaned`: the earlier run no longer owns a continuation; ordinary checkout/worker claims still gate redispatch. */
 export type FixSeedRead = { kind: "live" | "ended" | "orphaned"; seed: FixSeed; orphanReason?: "owner-run-ended" };
 
 /** W1-T9999 — WHICH RUNG SPEAKS FOR THIS HEAD'S FIX SEED, and is it still live? The seed is the newest acted
@@ -14730,7 +14730,7 @@ export function fixSeedRead(
     line.step === "run_child.adoption_pass" && line.run_id === runId);
   if (seed.runId !== undefined && seed.runId !== runId && bootAt > seedAt && lines[bootAt].run_id === runId &&
       adoption !== undefined && ["live", "adopted", "unreadable", "misidentified"].every((key) => adoption[key] === 0) &&
-      window.filter(rung).every((line) => line.run_id === seed.runId) &&
+      window.filter((line) => rung(line) && line.step === "fix.dispatch").every((line) => line.run_id === seed.runId) &&
       !lines.slice(bootAt + 1).some((line) => line.task_id === taskId &&
         ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"].includes(String(line.step)))) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
