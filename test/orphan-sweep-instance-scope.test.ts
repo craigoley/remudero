@@ -106,7 +106,7 @@ test("W1-T2693: only a same-scope ended run is killed and its opaque scope reach
 });
 
 test("W1-T2693: daemonCommand supplies its root-derived scope while retaining the real process and signal primitives", () => {
-  const source = readFileSync(join(repoRoot, "src/run-task.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "src/cli/commands/daemon.ts"), "utf8");
   assert.match(source, /const orphanWorkerScope = workerInstallationScope\(config\.root\)/);
   assert.match(source, /expectedScope: orphanWorkerScope/);
   assert.match(source, /listCandidates: defaultListCandidates/);

@@ -1312,3 +1312,22 @@ export function reviewerUnmetPrevention(
   if ((evidence.review?.summary ?? "").trim().length > 0) return { dispatch: true };
   return { dispatch: false, reason: "reviewer-unmet evidence is empty: no unmet criterion and no review summary" };
 }
+
+/**
+ * W1-T10103: a `reviewer-unmet` round is also pointless when the unmet criteria (index + reason) are
+ * byte-identical to the previous round's: the last worker changed nothing the reviewer credited, so
+ * another round spends minutes on the same verdict. PURE; `prior` is the previous round's evidence.
+ */
+export function reviewerUnmetRepeatPrevention(
+  evidence: FixEvidence,
+  prior: FixEvidence | undefined,
+): { dispatch: true } | { dispatch: false; reason: string } {
+  if (!prior || deriveFixMode(evidence) !== "reviewer-unmet" || deriveFixMode(prior) !== "reviewer-unmet") {
+    return { dispatch: true };
+  }
+  const key = (e: FixEvidence): string =>
+    JSON.stringify((e.review?.unmetCriteria ?? []).map((c) => [c.criterionIndex ?? null, c.reason]).sort());
+  const now = key(evidence);
+  if (now === "[]" || now !== key(prior)) return { dispatch: true };
+  return { dispatch: false, reason: "reviewer-unmet evidence is unchanged from the previous round" };
+}

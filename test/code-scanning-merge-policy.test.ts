@@ -74,3 +74,31 @@ test('headerless CodeQL findings cannot launder security, incomplete evidence or
   const x=fixture();mutate(x);assert.equal(classify(x).state,'unknown');assert.equal(classify(x).mergeAllowed,false);
  }
 });
+
+function sectionedFindings() {
+ const x=clean();x.checks[0]!.conclusion='failure';x.checks[0]!.output.title='3 new alerts including 1 medium severity security vulnerability';
+ x.checks[0]!.output.summary='### New alerts in code changed by this pull request\n\nSecurity Alerts:\n * 1 low\n * 1 medium\n\nOther Alerts:\n * 1 note\n\nSee annotations below for details.\n\n'+x.checks[0]!.output.summary;
+ return x;
+}
+test('sectioned CodeQL findings require a complete matching alert total and severity title',()=>{
+ for(const title of ['4 new alerts','3 new alerts including 1 high severity security vulnerability',
+  '3 new alerts including 1 critical severity security vulnerability',
+  '3 new alerts including 2 medium severity security vulnerabilities','3 new alerts including unknown findings']){
+  const x=sectionedFindings();x.checks[0]!.output.title=title;
+  assert.equal(classify(x).state,'unknown',title);assert.equal(classify(x).mergeAllowed,false,title);
+ }
+});
+test('sectioned CodeQL findings refuse duplicate levels unsafe counts and contradictory title sections',()=>{
+ for(const mutate of [(x:any)=>{x.checks[0].output.title='4 new alerts';x.checks[0].output.summary=x.checks[0].output.summary.replace(' * 1 low\n',' * 1 low\n * 1 low\n');},
+  (x:any)=>{x.checks[0].output.title='4 new alerts';x.checks[0].output.summary=x.checks[0].output.summary.replace(' * 1 note\n',' * 1 note\n * 1 note\n');},
+  (x:any)=>{x.checks[0].output.title='9007199254740995 new alerts';x.checks[0].output.summary=x.checks[0].output.summary.replace(' * 1 low\n',' * 9007199254740993 low\n');},
+  (x:any)=>{x.checks[0].output.title='2 new alerts including 1 medium severity security vulnerability';x.checks[0].output.summary=x.checks[0].output.summary.replace(' * 1 medium\n','');}]){
+  const x=sectionedFindings();mutate(x);assert.equal(classify(x).state,'unknown');assert.equal(classify(x).mergeAllowed,false);
+ }
+});
+test('consistent sectioned CodeQL low medium and quality findings remain below the security threshold',()=>{
+ const x=sectionedFindings();assert.equal(classify(x).state,'safe');
+ x.checks[0]!.output.title='3 new alerts';assert.equal(classify(x).state,'safe');
+ x.checks[0]!.output.summary=x.checks[0]!.output.summary.replace('Other Alerts:','Non-security Alerts:');assert.equal(classify(x).state,'safe');
+ x.checks[0]!.output.summary=x.checks[0]!.output.summary.replace(' * 1 low\n',' * 1 high\n');assert.equal(classify(x).state,'blocked');
+});
