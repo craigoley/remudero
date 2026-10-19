@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.08
+  # refusal-amendment (W1-T9788, run W1-T9788-1792435556034, 2026-10-19T20:39:23.352Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: `check:ci-log` is an umbrella label covering many unrelated check failures, so no single change within `src/run-task.ts` prevents it; the task needs re-scoping to a specific sub-cause (for example `check:ci-log:coverage-ratchet`) or an operator decision on what "prevented" means.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
