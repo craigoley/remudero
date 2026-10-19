@@ -29758,8 +29758,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
         ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
       });
-      // Additional dependency evidence must not widen duplicate/post-merge credit semantics.
-      statusByTaskId = new Map([...dependencyStatusByTaskId].filter(([id]) => scope!.has(id)));
+      // Dependency-only evidence must not widen duplicate/post-merge credit; extra projection rows stay as before.
+      statusByTaskId = new Map([...dependencyStatusByTaskId].filter(([id]) => scope!.has(id) || !evidenceIds.has(id)));
       statusResolvable = true;
     } catch {
       statusByTaskId = undefined;
