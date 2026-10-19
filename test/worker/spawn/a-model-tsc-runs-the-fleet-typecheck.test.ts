@@ -54,6 +54,23 @@ test("W1-T9405: default delegation preserves the real compiler diagnostics and e
   assert.match(delegated.stdout, /TS2322/);
 });
 
+test("W1-T9405: compiler-owned option values route without a project flag while source filenames do not", (t) => {
+  const p = project(t);
+  const through = p.run(["--noEmit", "--lib", "es2022", "--pretty", "false"]);
+  assert.equal(through.status, 0, through.stdout + through.stderr);
+  assert.match(through.stderr, /typecheck.raw_routed/);
+  assert.ok(existsSync(p.info));
+  unlinkSync(p.info);
+  for (const args of [["--noEmit", "input.ts"], ["--noEmit", "-p", ".", "input.ts"], ["--noEmit", "--unknown-fixture-option"]]) {
+    const plain = spawnSync(process.execPath, [COMPILER, ...args], { cwd: p.dir, encoding: "utf8" });
+    const raw = p.run(args);
+    assert.equal(raw.status, plain.status, raw.stderr);
+    assert.equal(raw.stdout, plain.stdout);
+    assert.doesNotMatch(raw.stderr, /typecheck.raw_routed/);
+    assert.equal(existsSync(p.info), false);
+  }
+});
+
 test("W1-T9405: a child environment reentry passes raw argv straight to the real compiler", (t) => {
   const p = project(t);
   const result = p.run(["--noEmit", "--project", "tsconfig.json", "--pretty", "false"], true);
@@ -74,6 +91,7 @@ test("W1-T9405: argv ownership and non-root invocations stay with the real compi
     ["--noEmit", "--build"], ["--noEmit", "-b"], ["--noEmit", "--watch"], ["--noEmit", "-w"],
     ["--noEmit", "--listFiles"], ["--noEmit", "--listFilesOnly"], ["--noEmit", "false"],
     ["--noEmit", "--noEmit"], ["--noEmit", "--project=."], ["--noEmit", "--showConfig"],
+    ["--noEmit", "--generateCpuProfile", "profile.cpuprofile"], ["--noEmit", "--generateTrace", "trace"],
   ]) assert.equal(wholeProjectNoEmitArgs(args), undefined, JSON.stringify(args));
   const p = project(t);
   const child = join(p.dir, "subdir"); mkdirSync(child);
@@ -117,10 +135,10 @@ function managed(t: TestContext, managedLayout = true) {
   symlinkSync(modules, join(repo, "node_modules"));
   execFileSync("git", ["-C", repo, "fetch", "-q", "origin", "main"]);
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const cut = (name: string, async = false, fixtureInstall = true) => {
+  const cut = (name: string, async = false, fixtureInstall = true, typecheckRename?: (from: string, to: string) => void) => {
     const path = join(root.dir, managedLayout ? "worktrees" : "lanes", name);
     mkdirSync(dirname(path), { recursive: true });
-    const opts = { ...(fixtureInstall ? { typecheckInstallRoot: join(root.dir, "install") } : {}),
+    const opts = { ...(fixtureInstall ? { typecheckInstallRoot: join(root.dir, "install") } : {}), typecheckRename,
       log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, extra }); } };
     return async ? worktreeAddAsync(repo, path, name, "origin/main", opts) : worktreeAdd(repo, path, name, "origin/main", opts);
   };
@@ -162,4 +180,18 @@ test("W1-T9405: an install without the entry stays unchanged and a real filesyst
   const dir = dirname(broken.bin); rmdirSync(dir); writeFileSync(dir, "not a directory\n");
   broken.cut("filesystem-failure");
   assert.ok(broken.rows.some(r => r.step === "worktree.typecheck_entry_failed"), "the real filesystem failure is visible without refusing worktree creation");
+});
+
+test("W1-T9405: a failed atomic repoint cleans its temporary link and names an unreadable cleanup", (t) => {
+  const failed = managed(t);
+  let temporary: string | undefined;
+  failed.cut("rename-failure", false, true, (from) => { temporary = from; throw new Error("fixture rename failure"); });
+  assert.ok(temporary);
+  assert.equal(existsSync(temporary), false, "the real default unlink cleans the failed rename's temporary link");
+  assert.equal(realpathSync(failed.bin), failed.original);
+  assert.ok(failed.rows.some(r => r.step === "worktree.typecheck_entry_failed" && String(r.extra?.error).includes("fixture rename failure")));
+  const missing = managed(t);
+  missing.cut("cleanup-failure", false, true, (from) => { unlinkSync(from); throw new Error("fixture rename lost its source"); });
+  assert.equal(realpathSync(missing.bin), missing.original);
+  assert.ok(missing.rows.some(r => r.extra?.cleanup === true && String(r.extra?.error).includes("ENOENT")), "the real unlink failure is named, not reported as successful installation");
 });

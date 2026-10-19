@@ -5786,6 +5786,7 @@ export function worktreeAdd(
     refuseSamePackageLockfileMismatch?: boolean;
     /** Trusted harness install context; a private fixture may supply its own install, never task data. */
     typecheckInstallRoot?: string;
+    typecheckRename?: (from: string, to: string) => void;
     /** W1-T4260 seams for a CROSS-PACKAGE worktree's own dependency tree, each defaulting to the real thing: the deps root
      * (default `<config.root>/deps`, derived from `repoDir`), the installer (default `npm ci` under
      * {@link DEPS_INSTALL_TIMEOUT_MS}), the atomic rename, and the clock and sleep the lock wait reads. */
@@ -5914,7 +5915,7 @@ function routeFleetTscEntry(repoDir: string, worktreePath: string, deps: Worktre
     }
     const next = join(modules, ".bin", `.rmd-tsc-${process.pid}-${randomUUID()}`);
     symlinkSync(entry, next); temporary = next;
-    renameSync(next, bin); temporary = undefined;
+    (deps.typecheckRename ?? renameSync)(next, bin); temporary = undefined;
     log?.("worktree.typecheck_entry", { worktreePath, entry });
   } catch (error) {
     log?.("worktree.typecheck_entry_failed", { worktreePath, error: String(error) });
