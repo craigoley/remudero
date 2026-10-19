@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { GitHub } from "../src/lib/status.js";
 import { memoiseGatewayByRepo } from "../src/run-task.js";
+// @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 /**
  * W1-T2509 — THE DISPATCH FAN-OUT WAS THREE LANES WIDE AND ONE LANE DEEP.
@@ -87,7 +88,8 @@ test("a builder returning distinct instances is still collapsed to one per key �
 });
 
 test("THE WIRING: the daemon's runOne hands every lane the memoised factory", () => {
-  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "run-task.ts"), "utf8");
+  const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+  const src = readFileSync(join(srcDir, "cli", "commands", "daemon.ts"), "utf8") + "\n" + readFileSync(join(srcDir, "run-task.ts"), "utf8");
 
   // The lane factory exists and is memoised through the helper above — not rebuilt per lane.
   assert.match(
