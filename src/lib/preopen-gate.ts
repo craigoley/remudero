@@ -233,6 +233,16 @@ function within(path: string, root: string): boolean {
  * (W1-T9738), and W1-T9860 binds that middle hop. bwrap resolves the hop's source to the install but mounts onto
  * the hop's DESTINATION, which inside the sandbox is the harness's absolute symlink, so the mount fails ENOENT (PR 12595).
  */
+/** End of the shared sandbox's /tmp mount and parent-directory prefix. Mount /tmp before
+ * the extra harness binds, or a disk bind would hide a harness whose path is under /tmp. */
+export function preopenSandboxBindStart(base: readonly string[]): number {
+  const mount = base.findIndex((flag, i) => (flag === "--tmpfs" && base[i + 1] === "/tmp") || (flag === "--bind" && base[i + 2] === "/tmp"));
+  if (mount < 0) throw Error("the proof sandbox has no private /tmp mount");
+  let at = mount + (base[mount] === "--tmpfs" ? 2 : 3);
+  while (base[at] === "--dir") at += 2;
+  return at;
+}
+
 export function preopenGateSandboxArgv(input: GateContainInput, parentEnv: NodeJS.ProcessEnv = process.env): string[] {
   const base = proofSandboxArgv({ cwd: input.cwd, home: input.home, env: parentEnv });
   const harness = realpathSync(input.harnessRoot);
@@ -246,8 +256,7 @@ export function preopenGateSandboxArgv(input: GateContainInput, parentEnv: NodeJ
   const key = parentEnv.GH_APP_PRIVATE_KEY_PATH;
   const realKey = key && existsSync(key) ? realpathSync(key) : undefined;
   if (realKey !== undefined && [harness, ...(slots === undefined ? [] : [slots])].some((root) => within(realKey, root))) masks.push("--ro-bind", "/dev/null", realKey);
-  let at = base.indexOf("--tmpfs") + 2;
-  while (base[at] === "--dir") at += 2;
+  const at = preopenSandboxBindStart(base);
   const chdir = base.lastIndexOf("--chdir");
   const proofBinds: string[] = [];
   for (let i = at; i < chdir; i += 3) {
