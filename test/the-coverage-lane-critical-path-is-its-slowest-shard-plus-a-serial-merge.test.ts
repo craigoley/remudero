@@ -238,7 +238,7 @@ test("W1-T5923: ci.yml premaps each coverage shard, records its instrumented dur
   assert.match(collect, /--select-all --shard \$\{\{ matrix\.shard \}\}\/8 --base HEAD\^1 \\\n\s+--instrumented-manifest scripts\/test-tier-coverage-manifest\.json/);
   assert.match(collect, /--test-reporter=\.\/scripts\/test-duration-reporter\.mjs --test-reporter-destination=coverage\/test-durations\.json/);
   const stage = run("Stage this coverage shard");
-  assert.match(stage, /coverage-merge-ratchet\.mjs --premap-output coverage\/premapped coverage\/raw/);
+  assert.match(stage, /coverage-merge-ratchet\.mjs --premap-output coverage-artifact\/raw coverage\/raw/);
   assert.doesNotMatch(stage, /--compact-output/, "the shard ships premapped reports, never the untranslated corpus");
   const evidence = steps.find((step) => step.name?.startsWith("Upload this coverage shard's instrumented duration evidence"));
   assert.equal(evidence?.with?.name, "coverage-duration-shard-${{ matrix.shard }}");
