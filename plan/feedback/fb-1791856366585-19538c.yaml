@@ -58,10 +58,32 @@ raw: >-
   at current main first (they were read at origin/main efd226b50).
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/12887
+summary:
+  headline: Approve a receipt row for failed recycle and host-update runs,
+    touching deploy
+  what_happened: Recycle and host-update failures leave only stdout, so recovery
+    depends on a human rerunning the script. NanoClaw's bounded diagnosis
+    pattern suggests a per-run receipt plus one read-only diagnosis, but this
+    change touches deploy and needs your ruling before filing.
+  decision: Choose approve, reframe, or decline for the receipt-and-diagnosis task
+    before any filing.
+  options:
+    - label: Approve as written
+      consequence: "Files the full task: a receipt on every run, one staged ASK on
+        refusal, and feedback entries for script defects."
+      intent: approve
+    - label: Reframe to receipt row only
+      consequence: Files only the receipt row first and defers the diagnosis and
+        feedback steps until the row proves useful.
+      intent: reframe
+    - label: Decline
+      consequence: No receipt row is written, and recycle or host-update failures keep
+        requiring manual rerun recovery.
+      intent: decline
 expansion: null
 submission_key: nanoclaw-2026-10-13/deploy-failure-diagnosis
 thread_id: null
+answered_by: null
