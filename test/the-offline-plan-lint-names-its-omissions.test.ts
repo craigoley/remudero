@@ -5,8 +5,8 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
@@ -21,6 +21,8 @@ import { fakeGitHub } from "./helpers/fake-github.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+// Operator resource contract: a cold child must also finish within this bound.
+const OFFLINE_CHILD_TIMEOUT_MS = 20_000;
 const FIXTURE_IDENTITY = { name: "remudero offline lint fixture", email: "fixture@remudero.invalid" };
 
 // Native-format PRIVATE cache/release fixtures confer no live credit or authority.
@@ -48,6 +50,8 @@ function creditTaskYaml(id: string, depends: readonly string[], note: string, ma
   ].join("\n");
 }
 
+interface OfflineSpawnFailure { case: string; errorCode: string; signal: NodeJS.Signals | null; status: number | null }
+
 interface DependencyCreditFixture {
   root: string; env: NodeJS.ProcessEnv; base: string; configFile: string; cacheFile: string; overrideFile: string; ledgerFile: string;
   store: (value: CreditStore) => void; config: (value: string | undefined) => void;
@@ -59,12 +63,19 @@ interface DependencyCreditFixture {
 async function withDependencyCreditFixture(
   t: TestContext, run: (f: DependencyCreditFixture) => void | Promise<void>,
   sharedSurface = false,
+  onSpawnFailure?: (failure: OfflineSpawnFailure) => void,
+  transformCache?: string,
 ): Promise<void> {
   await withTempDir("offline-dependency-credit", async dir => {
     const checkout = gitRepo({ scope: t, seedCommit: false, kind: "offline-dependency-credit" });
     const root = checkout.dir, home = join(dir, "home"), stateRoot = join(dir, "instance");
     for (const path of [join(root, "plan/tasks.d"), join(root, "src"), join(root, "test"), home, join(dir, "tmp")]) {
       mkdirSync(path, { recursive: true });
+    }
+    // tsx 4.23.15 keys transformed code by source/options/version in TMPDIR/tsx-<euid>.
+    // Share only that cache inside this one proof; every child keeps its own process and scratch.
+    if (transformCache !== undefined) {
+      symlinkSync(transformCache, join(dir, "tmp", `tsx-${process.geteuid?.() ?? userInfo().username}`), "dir");
     }
     const tripwires = [
       { command: "GitHub CLI", shim: ghShim([{ when: "", exit: 99 }], { kind: "lint-credit-tripwire" }) },
@@ -107,12 +118,20 @@ async function withDependencyCreditFixture(
     const maybe = (path: string) => existsSync(path) ? statSync(path).isFile() ? readFileSync(path, "utf8") : "<private non-file fixture>" : undefined;
     const offline = () => {
       const before = [maybe(configFile), maybe(cacheFile), maybe(overrideFile)];
+      const startedAt = performance.now();
       const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"),
         join(REPO_ROOT, "scripts/lint-plan-offline.mjs"), "--base", base], {
-        // A fresh no-network sandbox compiles the whole tsx graph cold (~13s per child, measured
-        // 81s for part 4); 20s timed one child out. Generous so load, not a hang, never fails it.
-        cwd: root, env, encoding: "utf8", timeout: 120_000, maxBuffer: 2 * 1024 * 1024,
+        cwd: root, env, encoding: "utf8", timeout: OFFLINE_CHILD_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024,
       });
+      t.diagnostic(JSON.stringify({ offlineChildElapsedMs: Math.round(performance.now() - startedAt), sharedTransformCache: transformCache !== undefined }));
+      if (r.error !== undefined || r.signal !== null) {
+        const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
+        const failure: OfflineSpawnFailure = { case: t.name.slice(0, 128),
+          errorCode: typeof code === "string" && /^E[A-Z0-9_]{1,31}$/.test(code) ? code : "unknown",
+          signal: r.signal, status: r.status };
+        t.diagnostic(JSON.stringify({ offlineSpawnFailure: failure }));
+        onSpawnFailure?.(failure);
+      }
       assert.equal(r.error, undefined, "the actual offline child must complete"); assert.equal(r.signal, null);
       assert.deepEqual(tripwires.flatMap(({ command, shim }) => shim.calls().map(call => command + " " + call)), [],
         "offline default must not call network tools or which claude");
@@ -130,6 +149,26 @@ async function withDependencyCreditFixture(
     });
   });
 }
+
+test("lint dependency credit: transform reuse keeps child runtime and scratch independent", async t => {
+  assert.equal(OFFLINE_CHILD_TIMEOUT_MS, 20_000, "the operator's child budget is unchanged");
+  await withTempDir("offline-lint-transform-cache-control", async cache => {
+    const homes: string[] = [], temporaryRoots: string[] = [];
+    const run = async (credit: boolean) => withDependencyCreditFixture(t, f => {
+      homes.push(f.env.HOME!); temporaryRoots.push(f.env.TMPDIR!);
+      const link = join(f.env.TMPDIR!, `tsx-${process.geteuid?.() ?? userInfo().username}`);
+      assert.equal(realpathSync(link), realpathSync(cache));
+      if (credit) f.store(nativeFixtureCredit());
+      const result = f.offline();
+      assert.equal(result.code, credit ? 0 : 1, result.output);
+      if (!credit) assert.match(result.output, /credit.*(?:unknown|unavailable|unobservable)/i);
+      assert.ok(readdirSync(cache).length > 0, "the actual tsx child populated the proof-owned transform cache");
+    }, false, undefined, cache);
+    await run(true); await run(false);
+    assert.equal(new Set(homes).size, 2, "HOME/config authority is not reused");
+    assert.equal(new Set(temporaryRoots).size, 2, "runtime temp roots are not reused");
+  });
+});
 
 function nativeFixtureCredit(
   source: "trailer" | "head-branch" = "trailer", prUrl = CREDIT_PR, prState = "MERGED", id = CREDIT_DEP,
@@ -291,21 +330,26 @@ assert.equal(new Set(closedCreditCases.map(c => c.name)).size, closedCreditCases
 assert.deepEqual(closedCreditCaseParts.flat(), closedCreditCases.map(c => c.name), "the four proof parts cover every negative fixture exactly once in original order");
 
 async function assertClosedCreditCases(t: TestContext, names: readonly string[]): Promise<void> {
-  for (const name of names) {
-    const c = closedCreditCases.find(value => value.name === name)!;
-    await t.test(c.name, async child => {
-      await withDependencyCreditFixture(child, f => {
-        c.seed(f);
-        const result = f.offline();
-        assert.equal(result.code, 1, result.output);
-        const admission = result.output.split("\n").find(line => line.includes("[machine-filing-admission]")) ?? "";
-        assert.match(admission, /ZZ-T1/);
-        // Current boolean refusal exists; unavailable evidence must not assert an observed unmerged PR.
-        assert.match(admission, /credit.*(?:unknown|unavailable|unobservable)|(?:unknown|unavailable|unobservable).*credit/i);
-        assert.match(admission, c.reason);
+  const failures: OfflineSpawnFailure[] = [];
+  // Emit a bounded parent capsule after all children, where the native failure tail retains it.
+  t.after(() => { if (failures.length > 0) t.diagnostic(JSON.stringify({ offlineSpawnFailures: failures })); });
+  await withTempDir("offline-lint-transform-cache", async transformCache => {
+    for (const name of names) {
+      const c = closedCreditCases.find(value => value.name === name)!;
+      await t.test(c.name, async child => {
+        await withDependencyCreditFixture(child, f => {
+          c.seed(f);
+          const result = f.offline();
+          assert.equal(result.code, 1, result.output);
+          const admission = result.output.split("\n").find(line => line.includes("[machine-filing-admission]")) ?? "";
+          assert.match(admission, /ZZ-T1/);
+          // Current boolean refusal exists; unavailable evidence must not assert an observed unmerged PR.
+          assert.match(admission, /credit.*(?:unknown|unavailable|unobservable)|(?:unknown|unavailable|unobservable).*credit/i);
+          assert.match(admission, c.reason);
+        }, false, failure => { failures.push(failure); }, transformCache);
       });
-    });
-  }
+    }
+  });
 }
 
 test("lint dependency credit: absent or unusable evidence stays closed with honest UNKNOWN reasons part 1", async t => {
