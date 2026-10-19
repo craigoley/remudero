@@ -1,0 +1,2 @@
+- claim: the lane that trips the coverage-ledger gate is reached by a matched learnings entry rather than prose no dispatched worker reads
+  proof: "grep: ci-learning:12108:coverage-ledger in learnings/ci.yaml"
