@@ -145,7 +145,8 @@ test("retro backoff cached credit still refuses foreign heads and unknown merge 
     const records = f.ledger.trim().split("\n").map(line => JSON.parse(line));
     records[5].ts = "unknown-merge-time";
     writeFileSync(path, records.map(row => JSON.stringify(row)).join("\n") + "\n");
-    const foreign = f.rows.map((row, i) => i === 1 ? { ...row, head: { ref: "run-other-1", sha: "c".repeat(40) } } : row);
+    const foreign = f.rows.map((row, i) => i === 1 ? { ...row, head: { ref: "run-other-1", sha: "c".repeat(40) } }
+      : i === 2 ? { ...row, merged: true, merged_at: undefined } : row);
     assert.equal(f.snapshot.commitClosed(foreign.map(mapBoardPr)), true);
     const result = await check(f, mode, foreign);
     assert.equal(result.decision, undefined);
