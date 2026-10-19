@@ -156,7 +156,8 @@ test("source-reader native timeout preserves its started runaway and closed capt
     assert.equal(started, marker);
     assert.throws(() => process.kill(Number(pid), 0), { code: "ESRCH" }, "the SIGTERM-ignoring runaway outlived its capture");
     assert.equal(native.parentTracking.ownerPid, process.pid);
-    assert.equal(native.parentTracking.childPid, Number(pid));
+    assert.ok(Number.isSafeInteger(native.parentTracking.childPid) && native.parentTracking.childPid > 0);
+    assert.throws(() => process.kill(native.parentTracking.childPid, 0), { code: "ESRCH" }, "the owned test runner must close as well as its runaway test-file child");
     const retained = lstatSync(dir);
     assert.ok(retained.isDirectory() && !retained.isSymbolicLink() && retained.uid === process.getuid!());
     rmSync(dir, { recursive: true }); // Only this closed, verified expected timeout fixture; failed assertions retain it.
