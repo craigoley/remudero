@@ -15231,7 +15231,8 @@ export async function drainDetachedSweepActions(
   opts: {
     boundMs: number;
     freshness?: boolean;
-    onRelease?: (action: DetachedSweepActionDescriptor & { phase: DetachedSweepActionRegistration["phase"]; reason: string }) => void;
+    onWait?: (item: RestartDrainInventoryEntry) => void;
+    onRelease?: (action: DetachedSweepActionDescriptor & { phase: DetachedSweepActionRegistration["phase"]; reason: string }, work: Promise<void>) => void;
   } = { boundMs: Number.POSITIVE_INFINITY },
 ): Promise<DetachedSweepActionDescriptor[]> {
   const detachedDrainBoundMs = Math.max(0, opts.boundMs);
@@ -15246,7 +15247,7 @@ export async function drainDetachedSweepActions(
         reason: action.phase === "best-effort"
           ? "best-effort cadence is redone after restart"
           : "pushed fix CI wait is re-derived after restart",
-      });
+      }, work);
     }
     return false;
   });
@@ -15261,6 +15262,7 @@ export async function drainDetachedSweepActions(
     while (true) {
       const changed = new Promise<"changed">((resolve) => { wake = () => resolve("changed"); });
       const waiting = waitingActions();
+      for (const [work, action] of waiting) opts.onWait?.(detachedRestartItem(work, action));
       if (waiting.length === 0) return [];
       const settled = Promise.all(waiting.map(([work]) => work)).then(() => "settled" as const);
       if (!bound) {
@@ -15291,15 +15293,43 @@ export function detachedSweepActionCount(): number {
 
 /** Reviews in flight in this process. A freshness exit used to wait only for detached actions, so a
  *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
-const inFlightReviewRuns = new Set<Promise<void>>();
+interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string }
+const inFlightReviewRuns = new Map<Promise<void>, ReviewRegistration>();
+
+/** W1-T10057: a read-only view of the existing wait registries, not another owner of work.
+ * `settled` is an internal identity/settlement handle; ledger writers must omit it. */
+export interface RestartDrainInventoryEntry {
+  what: "review" | "detached";
+  kind: string;
+  task_id?: string;
+  pr?: number;
+  phase: string;
+  admitted_at_ms: number;
+  settled: Promise<void>;
+}
+function detachedRestartItem(settled: Promise<void>, action: DetachedSweepActionRegistration): RestartDrainInventoryEntry {
+  return { what: "detached", kind: action.actionKind, task_id: action.taskId,
+    phase: action.phase, admitted_at_ms: action.startedAtMs, settled };
+}
+function reviewRestartItem(settled: Promise<void>, review: ReviewRegistration): RestartDrainInventoryEntry {
+  return { what: "review", kind: review.kind ?? "review", phase: "review",
+    ...(review.taskId === undefined ? {} : { task_id: review.taskId }),
+    ...(review.prNumber === undefined ? {} : { pr: review.prNumber }),
+    admitted_at_ms: review.admittedAtMs, settled };
+}
+export function restartDrainInventory(): RestartDrainInventoryEntry[] {
+  return [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
+    [...detachedSweepActions].filter(([, action]) => action.phase === "worker" || action.phase === "admission")
+      .map(([work, action]) => detachedRestartItem(work, action)));
+}
 
 /** Hand one review attempt to {@link inFlightReviewRuns}; returns `work` unchanged for the caller to await. */
-export function trackInFlightReview(work: Promise<void>): Promise<void> {
+export function trackInFlightReview(work: Promise<void>, review?: Omit<ReviewRegistration, "admittedAtMs"> & { admittedAtMs?: number }): Promise<void> {
   const held: Promise<void> = work.then(
     () => undefined,
     () => undefined,
   );
-  inFlightReviewRuns.add(held);
+  inFlightReviewRuns.set(held, { ...review, admittedAtMs: review?.admittedAtMs ?? systemClock.now() });
   void held.finally(() => inFlightReviewRuns.delete(held));
   return work;
 }
@@ -15309,15 +15339,16 @@ export function inFlightReviewCount(): number {
 }
 
 export function inFlightReviewRunsNow(): Promise<void>[] {
-  return [...inFlightReviewRuns];
+  return [...inFlightReviewRuns.keys()];
 }
 
 /** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
-export async function drainInFlightReviews(opts: { boundMs: number }): Promise<number> {
+export async function drainInFlightReviews(opts: { boundMs: number; onWait?: (item: RestartDrainInventoryEntry) => void }): Promise<number> {
   // A drain is an exit: a freed lane must not refill behind it. The next light pass reopens refills.
   lightPassRefillsClosed = true;
-  const running = [...inFlightReviewRuns];
+  const running = [...inFlightReviewRuns.keys()];
+  for (const work of running) opts.onWait?.(reviewRestartItem(work, inFlightReviewRuns.get(work)!));
   if (running.length === 0) return 0;
   const settled = new Set<Promise<void>>();
   for (const review of running) void review.then(() => settled.add(review));
@@ -20787,7 +20818,10 @@ export async function runSweep(
           passReviewsInFlight++;
           fullReviews.started++;
         }
-        const tracked = trackInFlightReview(runReview(job));
+        const tracked = trackInFlightReview(runReview(job), {
+          taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind,
+          admittedAtMs: deps.now?.() ?? systemClock.now(),
+        });
         const work = !fullSurface ? tracked : tracked.finally(() => {
           fullPassReviewsInFlight--;
           passReviewsInFlight--;
