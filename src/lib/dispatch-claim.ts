@@ -4,7 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { sameHost } from "./host-identity.js";
-import { ledgerLivePath, ledgerRotationEntries, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecords, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
+import { DISPATCH_VALUE_WINDOW_MS } from "./dispatch-value.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
@@ -104,11 +105,11 @@ export function parseClaimAnchorMessage(message: string | undefined): ClaimAncho
   return { pid, host: m[2]!, mintedAtMs, mintedAtIso: m[3]! };
 }
 
-export function claimDropRefusal(ref: string, anchorMessage: string | undefined, localHost: string): string | undefined {
+export function claimDropRefusal(ref: string, anchorMessage: string | undefined, localHost: string, verb: "drop" | "renew" = "drop"): string | undefined {
   const identity = parseClaimAnchorMessage(anchorMessage);
   if (identity && sameHost(identity.host, localHost)) return undefined;
   const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
-  return `${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`;
+  return `${ref} is held by ${who}, not by this host (${localHost}) — refusing to ${verb} another host's claim`;
 }
 
 /** BACKSTOP: a day-old cross-host claim needs a human ruling; age never authorizes release. */
@@ -300,6 +301,8 @@ export interface DispatchClaimReserver {
    *  `dead-claimant` arm rather than releasing on a guess. Optional and last. */
   anchorMessage?(taskId: string): string | undefined;
   list?(): string[];
+  /** W1-T9432: extend the claim at `expect` by one renewal commit; see {@link DispatchClaimRenewal}. */
+  renew?(taskId: string, expect: string): DispatchClaimRenewal;
 }
 
 export interface ClaimGitDeps {
@@ -346,6 +349,22 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
       deps.run(claimFetchArgs(taskId));
       return messageFromCatFile(deps.run(["cat-file", "-p", sha]));
     },
+    renew(taskId, expect) {
+      const ref = dispatchClaimRef(taskId);
+      const listed = deps.run(["ls-remote", "origin", ref]);
+      if (listed.status !== 0) return renewalUnreachable(listed);
+      const tip = holderFromLsRemote(listed);
+      if (tip !== expect) return renewalLost(tip);
+      const fetched = deps.run(renewalFetchArgs(ref));
+      if (fetched.status !== 0) return renewalUnreachable(fetched);
+      const message = claimRenewalMessage(messageFromCatFile(deps.run(["cat-file", "-p", expect])), claimRenewer());
+      if (message === undefined) return { outcome: "unreachable", stderr: `${ref} anchor ${expect} is unreadable` };
+      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
+      const minted = deps.run(["commit-tree", tree, "-p", expect, "-m", message]);
+      if (minted.status !== 0) return renewalUnreachable(minted);
+      assertClaimRefPushAllowed(deps.run, ref);
+      return renewalOutcome(deps.run(renewalPushArgs(ref, expect, minted.stdout.trim())), minted.stdout.trim());
+    },
   };
 }
 
@@ -353,6 +372,65 @@ export type GitAnswer = { status: number; stdout: string; stderr: string };
 
 function claimAnchorMessage(): string {
   return `rmd-dispatch claim ${process.pid}@${hostname()} ${new Date().toISOString()}`;
+}
+
+function claimRenewer(): string {
+  return `${process.pid}@${hostname()} ${new Date().toISOString()}`;
+}
+
+/** W1-T9432: the anchor's FIRST line verbatim, so {@link parseClaimAnchorMessage} still decodes the minter,
+ *  plus `renewed <pid>@<host> <iso>`. `undefined` when the anchor does not decode — nothing to renew. */
+export function claimRenewalMessage(anchorMessage: string | undefined, renewer: string): string | undefined {
+  const first = (anchorMessage ?? "").trim().split("\n")[0] ?? "";
+  return parseClaimAnchorMessage(first) ? `${first}\nrenewed ${renewer}` : undefined;
+}
+
+/** The newest `renewed` line a claim's tip message carries, `undefined` when it was never renewed. */
+export function parseClaimRenewal(message: string | undefined): { by: string; renewedAtMs: number; renewedAtIso: string } | undefined {
+  let newest: { by: string; renewedAtMs: number; renewedAtIso: string } | undefined;
+  for (const m of (message ?? "").matchAll(/^renewed (\d+@\S+) (\S+)$/gm)) {
+    const renewedAtMs = Date.parse(m[2]!);
+    if (Number.isFinite(renewedAtMs) && (newest === undefined || renewedAtMs > newest.renewedAtMs)) newest = { by: m[1]!, renewedAtMs, renewedAtIso: m[2]! };
+  }
+  return newest;
+}
+
+/** W1-T9432: one renewal's outcome. `lost` means the ref no longer carries the sha this holder last
+ *  wrote — reclaimed, dropped or re-minted — and `holder` names what is there now, if anything. */
+export type DispatchClaimRenewal =
+  | { readonly outcome: "renewed"; readonly sha: string }
+  | { readonly outcome: "lost"; readonly holder?: string }
+  | { readonly outcome: "unreachable"; readonly stderr: string };
+
+function renewalLost(tip: string | undefined): DispatchClaimRenewal {
+  return tip === undefined ? { outcome: "lost" } : { outcome: "lost", holder: tip };
+}
+
+function renewalUnreachable(res: GitAnswer): DispatchClaimRenewal {
+  return { outcome: "unreachable", stderr: res.stderr.replace(/\s+/g, " ").trim().slice(0, 300) || `git exited ${res.status}` };
+}
+
+function renewalFetchArgs(ref: string): string[] {
+  return ["fetch", "--quiet", "--no-write-fetch-head", "origin", ref];
+}
+
+/** The lease is the whole point: a renewal can never recreate a dropped claim or overwrite a new holder's. */
+function renewalPushArgs(ref: string, expect: string, sha: string): string[] {
+  return ["push", `--force-with-lease=${ref}:${expect}`, "origin", `${sha}:${ref}`];
+}
+
+function renewalOutcome(res: GitAnswer, sha: string): DispatchClaimRenewal {
+  if (res.status === 0) return { outcome: "renewed", sha };
+  return classifyPushFailure(res.stderr) === "taken" ? { outcome: "lost" } : renewalUnreachable(res);
+}
+
+/** W1-T9432: renews the claim at `expect` through either reserver; one without `renew` cannot renew. */
+export function renewDispatchClaim(reserver: DispatchClaimReserver, taskId: string, expect: string): DispatchClaimRenewal {
+  return reserver.renew ? reserver.renew(taskId, expect) : { outcome: "unreachable", stderr: "this reserver cannot renew a claim" };
+}
+
+export async function renewDispatchClaimAsync(reserver: DispatchClaimReserverAsync, taskId: string, expect: string): Promise<DispatchClaimRenewal> {
+  return reserver.renew ? await reserver.renew(taskId, expect) : { outcome: "unreachable", stderr: "this reserver cannot renew a claim" };
 }
 
 function claimPushArgs(taskId: string, anchor: string): string[] {
@@ -404,6 +482,7 @@ export interface DispatchClaimReserverAsync {
   anchorMessage?(taskId: string): Awaitable<string | undefined>;
   list?(): Awaitable<string[]>;
   listHeld?(): Awaitable<DispatchClaimListing>;
+  renew?(taskId: string, expect: string): Awaitable<DispatchClaimRenewal>;
 }
 
 export interface ListedDispatchClaim {
@@ -461,6 +540,22 @@ export function gitDispatchClaimReserverAsync(deps: ClaimGitDepsAsync): Dispatch
       if (!sha) return undefined;
       await deps.run(claimFetchArgs(taskId));
       return messageFromCatFile(await deps.run(["cat-file", "-p", sha]));
+    },
+    async renew(taskId, expect) {
+      const ref = dispatchClaimRef(taskId);
+      const listed = await deps.run(["ls-remote", "origin", ref]);
+      if (listed.status !== 0) return renewalUnreachable(listed);
+      const tip = holderFromLsRemote(listed);
+      if (tip !== expect) return renewalLost(tip);
+      const fetched = await deps.run(renewalFetchArgs(ref));
+      if (fetched.status !== 0) return renewalUnreachable(fetched);
+      const message = claimRenewalMessage(messageFromCatFile(await deps.run(["cat-file", "-p", expect])), claimRenewer());
+      if (message === undefined) return { outcome: "unreachable", stderr: `${ref} anchor ${expect} is unreadable` };
+      const tree = (await deps.run(["hash-object", "-t", "tree", "/dev/null"])).stdout.trim();
+      const minted = await deps.run(["commit-tree", tree, "-p", expect, "-m", message]);
+      if (minted.status !== 0) return renewalUnreachable(minted);
+      await assertClaimRefPushAllowedAsync(deps.run, ref);
+      return renewalOutcome(await deps.run(renewalPushArgs(ref, expect, minted.stdout.trim())), minted.stdout.trim());
     },
   };
 }
@@ -755,6 +850,230 @@ export async function releaseLandedDispatchClaims(
     results.push({ ...claim, ...released });
   }
   return results;
+}
+
+// ── A CLAIM HOLDS ONLY WHILE ITS HOLDER RENEWS IT (W1-T9432) ─────────────────────────────────
+
+/** A WRITE cadence for holders, never a decision bound: {@link decideClaimSilence} never reads it. */
+export const DISPATCH_CLAIM_RENEW_INTERVAL_MS = 5 * 60_000;
+
+/** The ledger steps the silence judge reads: claim mints and verdicts for W, its own report for once-only. */
+export const CLAIM_SILENCE_LEDGER_STEPS: readonly string[] = ["dispatch.claim", "verdict", "dispatch.claim_unrenewed"];
+
+/** W is the p90 of this instance's claim-to-verdict durations; `samples` 0 means there is no W. */
+export interface ClaimSilenceWindow {
+  readonly windowMs?: number;
+  readonly samples: number;
+}
+
+/** PURE. Pairs each `dispatch.claim` `created` row with the same run_id's `verdict` row. */
+export function claimSilenceWindow(rows: Iterable<Record<string, unknown>>): ClaimSilenceWindow {
+  const claimedAt = new Map<string, number>();
+  const verdictAt = new Map<string, number>();
+  for (const row of rows) {
+    const runId = row.run_id;
+    const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (typeof runId !== "string" || !Number.isFinite(at)) continue;
+    const into = row.step === "dispatch.claim" && row.outcome === "created" ? claimedAt : row.step === "verdict" ? verdictAt : undefined;
+    const earlier = into?.get(runId);
+    if (into !== undefined && (earlier === undefined || at < earlier)) into.set(runId, at);
+  }
+  const durations: number[] = [];
+  for (const [runId, start] of claimedAt) {
+    const end = verdictAt.get(runId);
+    if (end !== undefined && end >= start) durations.push(end - start);
+  }
+  if (durations.length === 0) return { samples: 0 };
+  durations.sort((a, b) => a - b);
+  return { windowMs: durations[Math.ceil(0.9 * durations.length) - 1]!, samples: durations.length };
+}
+
+export interface ClaimSignOfLife {
+  readonly atMs: number;
+  readonly atIso: string;
+  readonly source: "minted" | "renewed" | "run-branch";
+  readonly ref?: string;
+}
+
+export interface RunBranchCommit {
+  readonly atMs: number;
+  readonly atIso: string;
+  readonly ref: string;
+}
+
+/** PURE. The newest of the mint, the tip's renewal, and the newest commit on a `run-<id>-*` branch. */
+export function claimLastSignOfLife(anchor: ClaimAnchorIdentity, message: string | undefined, branch?: RunBranchCommit): ClaimSignOfLife {
+  const renewal = parseClaimRenewal(message);
+  let newest: ClaimSignOfLife = renewal && renewal.renewedAtMs > anchor.mintedAtMs
+    ? { atMs: renewal.renewedAtMs, atIso: renewal.renewedAtIso, source: "renewed" }
+    : { atMs: anchor.mintedAtMs, atIso: anchor.mintedAtIso, source: "minted" };
+  if (branch && branch.atMs > newest.atMs) newest = { atMs: branch.atMs, atIso: branch.atIso, source: "run-branch", ref: branch.ref };
+  return newest;
+}
+
+export type RunBranchActivity = { ok: true; newest?: RunBranchCommit } | { ok: false; stderr: string };
+
+/** The newest commit time on any origin `run-<taskId>-<epochMs>` branch. Any failed read is `ok: false`. */
+export async function readRunBranchActivity(taskId: string, run: ClaimGitDepsAsync["run"]): Promise<RunBranchActivity> {
+  const failed = (res: GitAnswer): RunBranchActivity => ({ ok: false, stderr: res.stderr.replace(/\s+/g, " ").trim().slice(0, 300) || `git exited ${res.status}` });
+  const listed = await run(["ls-remote", "origin", `refs/heads/run-${taskId}-*`]);
+  if (listed.status !== 0) return failed(listed);
+  let newest: RunBranchCommit | undefined;
+  for (const line of listed.stdout.split("\n")) {
+    const m = /^([0-9a-f]{7,64})\s+(refs\/heads\/run-(\S+)-\d+)$/.exec(line.trim());
+    if (!m || m[3] !== taskId) continue;
+    const fetched = await run(["fetch", "--quiet", "--no-write-fetch-head", "origin", m[2]!]);
+    if (fetched.status !== 0) return failed(fetched);
+    const shown = await run(["log", "-1", "--format=%ct", m[1]!]);
+    const atMs = Number(shown.stdout.trim()) * 1000;
+    if (shown.status !== 0 || !Number.isFinite(atMs) || atMs <= 0) return failed(shown);
+    if (newest === undefined || atMs > newest.atMs) newest = { atMs, atIso: new Date(atMs).toISOString(), ref: m[2]! };
+  }
+  return newest === undefined ? { ok: true } : { ok: true, newest };
+}
+
+export type ClaimSilenceVerdict = "alive" | "unrenewed" | "reclaim" | "no-verdict";
+
+export interface ClaimSilenceDecision {
+  readonly verdict: ClaimSilenceVerdict;
+  readonly reason: string;
+  readonly silenceMs?: number;
+}
+
+/**
+ * PURE. Judges a foreign claim by how long its holder has been silent, measured against W, this
+ * fleet's own p90 build time: under W `alive`, from W `unrenewed` (report, keep), from 2W `reclaim`.
+ * Every input it cannot read is `no-verdict` — the caller then leaves the claim to the operator arm.
+ * FALSIFIER: test/a-dispatch-claim-holds-only-while-its-holder-renews-it.test.ts.
+ */
+export function decideClaimSilence(i: {
+  taskId: string;
+  anchor?: ClaimAnchorIdentity;
+  lastSignOfLife?: ClaimSignOfLife;
+  mintedByThisInstance: boolean;
+  window: ClaimSilenceWindow;
+  nowMs: number;
+}): ClaimSilenceDecision {
+  const ref = dispatchClaimRef(i.taskId);
+  const w = i.window.windowMs;
+  if (w === undefined || i.window.samples === 0 || !(w > 0))
+    return { verdict: "no-verdict", reason: `no-duration-evidence: this instance has no measured claim-to-verdict duration, so ${ref}'s silence cannot be judged` };
+  if (i.anchor === undefined) return { verdict: "no-verdict", reason: `${ref}'s anchor is unreadable, so its holder's silence cannot be judged` };
+  if (i.mintedByThisInstance)
+    return { verdict: "no-verdict", reason: `${ref} was minted by a fleet lane of this instance (its dispatch.claim created row), which the dead-claimant arm judges` };
+  if (i.lastSignOfLife === undefined) return { verdict: "no-verdict", reason: `${ref}'s run branches are unreadable, so its last sign of life is unknown` };
+  const silenceMs = Math.max(0, i.nowMs - i.lastSignOfLife.atMs);
+  const said = `${ref} is held by ${i.anchor.pid}@${i.anchor.host}, minted ${i.anchor.mintedAtIso}; its last sign of life ` +
+    `(${i.lastSignOfLife.source}) was ${i.lastSignOfLife.atIso}, ${silenceMs}ms ago, against W=${w}ms (p90 of ${i.window.samples} measured builds)`;
+  if (silenceMs >= 2 * w) return { verdict: "reclaim", silenceMs, reason: `${said} — silent for 2W or more; reclaiming` };
+  if (silenceMs >= w) return { verdict: "unrenewed", silenceMs, reason: `${said} — silent for W or more; keeping it` };
+  return { verdict: "alive", silenceMs, reason: `${said} — keeping it` };
+}
+
+export interface ClaimSilenceJudgeDeps {
+  run: ClaimGitDepsAsync["run"];
+  stateDir: string;
+  log: (step: string, fields: Record<string, unknown>) => void;
+  say?: (line: string) => void;
+  nowMs?: () => number;
+  readRows?: (sinceIso: string) => Promise<Array<Record<string, unknown>>>;
+  mintedByThisInstance?: (anchor: ClaimAnchorIdentity) => boolean;
+}
+
+export interface ClaimSilenceJudgement extends ClaimSilenceDecision {
+  readonly dropped?: boolean;
+  /** Set only when this lane reclaimed the claim AND its retried create took it: the anchor it now holds. */
+  readonly anchor?: string;
+}
+
+/**
+ * W1-T9432: runTask's `taken` arm, once arms 1-3 declined. Reports a claim silent for W once per
+ * judged sha (`dispatch.claim_unrenewed`); drops one silent for 2W, pinned to that sha
+ * (`dispatch.claim_reclaimed`), and retries the create once so the judging lane builds the task.
+ */
+export async function reclaimSilentDispatchClaim(
+  taskId: string,
+  reserver: DispatchClaimReserverAsync,
+  deps: ClaimSilenceJudgeDeps,
+): Promise<ClaimSilenceJudgement> {
+  const nowMs = (deps.nowMs ?? Date.now)();
+  const readRows = deps.readRows ?? ((since: string) => readLedgerUnionRecords(deps.stateDir, { since, step: CLAIM_SILENCE_LEDGER_STEPS }));
+  const rows = await readRows(new Date(nowMs - DISPATCH_VALUE_WINDOW_MS).toISOString());
+  const window = claimSilenceWindow(rows);
+  const judged = window.samples > 0 ? await reserver.holder(taskId) : undefined;
+  const message = judged ? await reserver.anchorMessage?.(taskId) : undefined;
+  const anchor = parseClaimAnchorMessage(message);
+  const mine = anchor !== undefined && (deps.mintedByThisInstance ?? ((a) => findClaimMintRow(deps.stateDir, taskId, a) !== undefined))(anchor);
+  const branches = anchor !== undefined && !mine ? await readRunBranchActivity(taskId, deps.run) : undefined;
+  const lastSignOfLife = anchor !== undefined && branches?.ok ? claimLastSignOfLife(anchor, message, branches.newest) : undefined;
+  const decision = decideClaimSilence({ taskId, anchor, lastSignOfLife, mintedByThisInstance: mine, window, nowMs });
+  if (decision.verdict === "no-verdict" || decision.verdict === "alive") return decision;
+  const fields = {
+    ref: dispatchClaimRef(taskId), sha: judged, holder: `${anchor!.pid}@${anchor!.host}`, minted: anchor!.mintedAtIso,
+    last_sign_of_life: lastSignOfLife!.atIso, last_sign_of_life_source: lastSignOfLife!.source,
+    ...(lastSignOfLife!.ref ? { last_sign_of_life_ref: lastSignOfLife!.ref } : {}),
+    silence_ms: decision.silenceMs, window_ms: window.windowMs, samples: window.samples, reason: decision.reason,
+  };
+  if (decision.verdict === "unrenewed") {
+    if (!rows.some((r) => r.step === "dispatch.claim_unrenewed" && r.sha === judged)) deps.log("dispatch.claim_unrenewed", fields);
+    return decision;
+  }
+  const dropped = await reserver.drop(taskId, { expect: judged! });
+  deps.log("dispatch.claim_reclaimed", { ...fields, dropped });
+  if (!dropped) return { ...decision, dropped };
+  deps.say?.(`RECLAIMED a silent claim — ${decision.reason}`);
+  const fresh = await reserver.mintAnchor();
+  const retried = await reserver.attempt(taskId, fresh);
+  return retried === "created" ? { ...decision, dropped, anchor: fresh } : { ...decision, dropped };
+}
+
+/** A run's own claim, renewed on {@link DISPATCH_CLAIM_RENEW_INTERVAL_MS} until `stop()` hands back the sha to release. */
+export interface DispatchClaimLease {
+  current(): string;
+  stop(): Promise<string>;
+}
+
+export function holdDispatchClaim(
+  taskId: string,
+  reserver: DispatchClaimReserverAsync,
+  anchor: string,
+  opts: { intervalMs?: number; log?: (step: string, fields: Record<string, unknown>) => void } = {},
+): DispatchClaimLease {
+  let held = anchor;
+  if (!reserver.renew) return { current: () => held, stop: async () => held };
+  let inFlight: Promise<void> | undefined;
+  let stopped = false;
+  const ref = dispatchClaimRef(taskId);
+  const renewOnce = async (): Promise<void> => {
+    const renewal = await renewDispatchClaimAsync(reserver, taskId, held);
+    if (renewal.outcome === "renewed") {
+      held = renewal.sha;
+      return;
+    }
+    opts.log?.("dispatch.claim_renew_failed", { ref, held, ...renewal });
+    if (renewal.outcome === "lost") {
+      stopped = true;
+      clearInterval(timer);
+    }
+  };
+  const timer = setInterval(() => {
+    if (stopped || inFlight !== undefined) return;
+    inFlight = renewOnce()
+      .catch((error: unknown) => opts.log?.("dispatch.claim_renew_failed", { ref, held, outcome: "error", error: String((error as Error)?.message ?? error) }))
+      .finally(() => {
+        inFlight = undefined;
+      });
+  }, opts.intervalMs ?? DISPATCH_CLAIM_RENEW_INTERVAL_MS);
+  timer.unref?.();
+  return {
+    current: () => held,
+    async stop() {
+      stopped = true;
+      clearInterval(timer);
+      await inFlight;
+      return held;
+    },
+  };
 }
 
 // ── PR REPAIR CLAIMS (W1-T2677) ─────────────────────────────────────────────────────────────
