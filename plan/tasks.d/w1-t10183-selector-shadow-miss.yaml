@@ -1,0 +1,18 @@
+- id: W1-T10183
+  title: "REPAIR THE SELECTOR EDGE INTO test/run-task.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/run-task.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 39182261499 for PR #12863 at 84a0c61e4b677f004ed6f629273868830bb1f814: docs/security-merge-policy.md, src/lib/security-merge-admission.ts, test/security-merge-admission.test.ts, test/security-merge-effectors.test.ts -> test/run-task.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/run-task.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the narrow selector includes test/run-task.test.ts when this edge is exercised"
+      proof: "grep: test/run-task\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/run-task.test.ts for each recorded edge"
+      proof: "grep: test/run-task\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
