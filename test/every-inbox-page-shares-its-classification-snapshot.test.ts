@@ -7,7 +7,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import { persistedInboxPath, readPersistedInbox, writePersistedInbox, type PersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification, type InboxRefresh } from "../src/lib/inbox-view.js";
 import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
-import { buildInboxAttentionCensusRoute, buildInboxKeepRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadsRoute, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { buildInboxAttentionCensusRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadsRoute, buildKeepProposalRoute, inboxTriagePath, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { classificationSnapshotKey } from "../src/lib/read-page.js";
 import { appendThreadEvent, appendThreadMessage, inboxThreadId, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
 import { boundConsoleReadRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
@@ -62,7 +62,7 @@ async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh
   const census = buildInboxAttentionCensusRoute(deps);
   const native = buildReadModelViewRoutes({ legacy: [inboxLegacyView(deps, fixedClock(w.at))], readModel: handle, readModelViews: [INBOX_VIEW_NAME], clock: fixedClock(w.at) });
   const threads = options.withWrites ? [buildInboxThreadsRoute(deps, undefined, { warm: false })] : [];
-  const writes = options.withWrites ? [buildInboxKeepRoute(w.deps), buildInboxThreadReplyRoute(w.deps)] : [];
+  const writes = options.withWrites ? [buildKeepProposalRoute(w.deps), buildInboxThreadReplyRoute(w.deps)] : [];
   const routes = [inbox, census, ...native, ...threads, ...writes, ...mountInstanceInboxRoutes({ instance: "core", repository: "owner/core", stateDir: join(w.root, "state"), routes: [inbox, census, ...threads] })];
   const server = createService({ tokens: { read: "read", write: "write" }, routes });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -594,7 +594,7 @@ test("kept and lapsed inbox pages share snapshot attention and invalidate equal-
   assert.equal(kept.generatedAt, before.generatedAt);
   assert.notEqual(kept.snapshotKey, before.snapshotKey, "the keep mark is a semantic classification input, not a verification restamp");
   assert.deepEqual(kept.classifications, before.classifications, "keep changes triage, never the underlying readiness ruling");
-  assert.equal(kept.stores!.triage!["ruling:p0"]!.keptAt, fixedClock(w.at).iso());
+  assert.equal(JSON.parse(readFileSync(inboxTriagePath(join(w.root, "state")), "utf8"))["ruling:p0"].keptAt, fixedClock(w.at).iso());
   const legacyKept = await s.get("/v1/i/core/inbox?section=kept");
   const nativeKept = await s.get("/v1/views/inbox?section=kept");
   assert.equal(legacyKept.status, 200); assert.equal(nativeKept.status, 200);
@@ -612,7 +612,7 @@ test("kept and lapsed inbox pages share snapshot attention and invalidate equal-
   s.put(lapsedPass, true);
   assert.equal(lapsed.generatedAt, kept.generatedAt);
   assert.notEqual(lapsed.snapshotKey, kept.snapshotKey);
-  assert.match(lapsed.stores!.triage!["ruling:p0"]!.keptChanged!, /redrafted/);
+  assert.match(JSON.parse(readFileSync(inboxTriagePath(join(w.root, "state")), "utf8"))["ruling:p0"].keptChanged, /redrafted/);
   const reopened = await s.get("/v1/inbox?section=needsYou");
   assert.equal(reopened.status, 200);
   assert.match(reopened.body.needsYou.notReady.find((row: any) => row.proposalId === "ruling:p0").keptChanged, /redrafted/);
@@ -640,7 +640,7 @@ test("a real plain reply clears keep and invalidates classification and thread-p
   s.put(repliedPass, true);
   assert.equal(replied.generatedAt, kept.generatedAt);
   assert.notEqual(replied.snapshotKey, kept.snapshotKey);
-  assert.equal(replied.stores!.triage!["ruling:p0"], undefined, "a delivered plain reply clears the keep mark");
+  assert.equal(JSON.parse(readFileSync(inboxTriagePath(join(w.root, "state")), "utf8"))["ruling:p0"], undefined, "a delivered plain reply clears the keep mark");
   assert.deepEqual(replied.classifications, kept.classifications, "a reply does not approve, reframe or rewrite readiness");
   const attention = replied.attentionCensus!.items.find(row => row.proposalId === "ruling:p0")!;
   assert.equal(attention.attention, "awaiting_daemon"); assert.equal(attention.waitingOn, "daemon");
