@@ -3728,8 +3728,26 @@ export interface components {
       kind: string;
       name: string;
     };
+    /** Snapshot-owned attention from the SAME validated persisted census as this lane item, not live thread coherence or write authority. Observed requires complete matching public scope and key; unknown omits attention and identity. Partial/missing/invalid evidence stays unknown. Lane counts are unchanged; countSemantics does not certify current human decisions. */
+    InboxSnapshotAttention: ({
+      state: "observed";
+      coverage: "complete";
+      countSemantics: "observed_snapshot_not_verified";
+      /** Exact public repository of an observed snapshot. */
+      repository: string;
+      /** Exact public instance of an observed snapshot. */
+      instance: string;
+      snapshotKey: string;
+      attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
+      waitingOn: "operator" | "daemon";
+    }) | ({
+      state: "unknown";
+      coverage: "partial" | "unavailable";
+      countSemantics: "observed_snapshot_not_verified";
+    });
     /** One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section, unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem. */
     InboxViewItem: {
+      snapshotAttention?: InboxSnapshotAttention;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4594,6 +4612,7 @@ export interface components {
     };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
+      snapshotAttention?: InboxSnapshotAttention;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4614,6 +4633,7 @@ export interface components {
     };
     /** One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's `InboxDraftingItem`). */
     InboxDraftingItem: {
+      snapshotAttention?: InboxSnapshotAttention;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4632,6 +4652,7 @@ export interface components {
     };
     /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      snapshotAttention?: InboxSnapshotAttention;
       retirement?: InboxRetirement;
       needsTriageReason?: string;
       from?: InboxSender;
@@ -4665,6 +4686,7 @@ export interface components {
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {
+      snapshotAttention?: InboxSnapshotAttention;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4690,6 +4712,7 @@ export interface components {
     };
     /** W1-T4086/W1-T4089: one fleet-owned proposal with the lane it sits in and the fleet lane's latest decision, when it has made one (src/lib/panel-graph.ts's `InboxFleetItem`). */
     InboxFleetItem: {
+      snapshotAttention?: InboxSnapshotAttention;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4793,11 +4816,37 @@ export interface components {
       /** The daemon wrote last and the read mark is behind that message. */
       unread: boolean;
     };
+    /** Classification evidence, not the HTTP read time or permission to write. Partial coverage never establishes a complete empty Inbox. */
+    InboxThreadListSource: {
+      state: "fresh" | "stale";
+      completeness: "complete" | "partial";
+      classifiedAt: string;
+      /** Null when the classification was not confirmed current. */
+      verifiedAt: string | null;
+      ageMs: number;
+      builtAt: string;
+      refreshError?: string;
+    };
+    /** Continuation over one exact threadListKey; terminal coverage requires unique rows totaling total. A prefix is not a verified complete list. */
+    InboxThreadListPage: {
+      total: number;
+      /** Opaque generation/scope/representation-bound continuation; absent only at the end. */
+      nextCursor?: string;
+    };
     /** GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity. */
     InboxThreadsResult: {
       planSource?: PlanSource;
+      source?: InboxThreadListSource;
+      /** Present with opt-in pages. Binds semantic classification/items, stored messages, marks, public scope and representation, not verification clocks. Not the proposal classification snapshot key. */
+      threadListKey?: string;
+      page?: InboxThreadListPage;
       threads: (InboxThreadSummary)[];
     };
+    InstanceInboxThreadsResult: (InboxThreadsResult) & ({
+      repository: string;
+      instance: string;
+      contract: "read-write" | "read-only";
+    });
     InboxAttentionCensusSourceState: "observed" | "partial" | "unavailable";
     InboxAttentionCensusFact: {
       source: string;
@@ -7113,8 +7162,11 @@ export interface paths {
     get: {
       responses: {
           "200": InboxThreadsResult;
+          "400": undefined;
           "401": Error;
           "403": Error;
+          "409": undefined;
+          "413": undefined;
           "500": InboxRefusal;
           "503": InboxRefusal;
         };
@@ -7188,6 +7240,21 @@ export interface paths {
             repository: string;
             instance: string;
           });
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/threads": {
+    get: {
+      responses: {
+          "200": InstanceInboxThreadsResult;
+          "400": undefined;
+          "401": Error;
+          "403": Error;
+          "409": undefined;
+          "413": undefined;
+          "500": undefined;
+          "502": undefined;
           "503": undefined;
         };
     };

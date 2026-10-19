@@ -4,11 +4,13 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
-import { persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js";
-import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, refreshInboxClassification, type InboxRefresh } from "../src/lib/inbox-view.js";
+import { persistedInboxPath, readPersistedInbox, writePersistedInbox, type PersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
+import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification, type InboxRefresh } from "../src/lib/inbox-view.js";
 import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
-import { buildInboxAttentionCensusRoute, buildInboxRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { boundConsoleReadRoute, type ServeDeps } from "../src/lib/serve.js";
+import { buildInboxAttentionCensusRoute, buildInboxRoute, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { classificationSnapshotKey } from "../src/lib/read-page.js";
+import { appendThreadEvent, appendThreadMessage, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
+import { boundConsoleReadRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -362,4 +364,211 @@ test("off and cold native fallbacks qualify maintained sources before a body or 
     assert.equal(pending.body.data, undefined);
     assert.equal(s.reads(), 0);
   }
+});
+
+/** Synthetic complete evidence, not a claim that the real archive census is complete. No new storage protocol. */
+function retainAttention(w: ReturnType<typeof world>, edit: (content: PersistedInboxContent) => void = () => {}, at = w.at): PersistedInbox {
+  const before = readPersistedInbox(join(w.root, "state"));
+  assert.ok(before?.attentionCensus);
+  const { identity: _identity, generatedAt: _at, whyMeFeedback: _oldFeedback, ...content } = structuredClone(before);
+  content.attentionCensus!.state = "complete";
+  const sources = content.attentionCensus!.sources;
+  for (const name of Object.keys(sources) as Array<keyof typeof sources>) sources[name] = "observed";
+  edit(content);
+  const census = content.attentionCensus!;
+  census.counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
+  for (const item of census.items) census.counts[item.attention]++;
+  census.verifiedCounts = census.state === "complete" ? { ...census.counts } : { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
+  const { snapshotKey: _key, attentionCensus: _census, ...inputs } = content;
+  const { snapshotKey: _censusKey, ...facts } = census;
+  content.snapshotKey = census.snapshotKey = classificationSnapshotKey(inputs, facts);
+  return writePersistedInbox(join(w.root, "state"), content, at);
+}
+
+function retainedBodies(w: ReturnType<typeof world>, refreshed: InboxRefresh): InboxRefresh {
+  const read = readSlowLaneInbox({ ...w.deps, inboxFromSlowLane: true });
+  assert.ok(read);
+  return { ...refreshed, bodies: inboxViewBodies(read.lanes(), { name: "inbox-store:core", asOf: read.generatedAt, state: "fresh" }, read.snapshotKey) };
+}
+
+async function assembledCoreInbox(t: Ctx, w: ReturnType<typeof world>, configure?: (deps: ServeDeps) => void) {
+  const { inboxAuditScope: _scope, inboxSourceIdentity: _identity, ...panel } = w.deps;
+  const deps: ServeDeps = {
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath: panel.ledgerPath, github: fakeGitHub() },
+    panelGraph: { ...panel, inboxMainSha: () => { throw new Error("assembled read classified"); } },
+    ledgerPath: panel.ledgerPath, fleetControlRoot: w.root, questionsRoot: w.root,
+    issues: { close() {} }, tokens: { read: "read", write: "write" }, assistantRepository: "owner/core",
+    consoleSha: "a".repeat(40), githubAppRefresh: { start: () => ({ armed: false }) },
+    readModel: { slowLane: { inbox: { root: panel.root, planPath: panel.planPath, ledgerPath: panel.ledgerPath,
+      inboxRoot: w.root, repository: "owner/core" } } },
+  };
+  assert.equal(deps.panelGraph.inboxAuditScope, undefined, "the real caller does not inject the slow lane's scope into panel deps");
+  assert.equal(deps.panelGraph.inboxSourceIdentity, undefined);
+  configure?.(deps);
+  const route = buildServeRoutes(deps).find(route => route.method === "GET" && route.path === "/v1/inbox");
+  assert.ok(route, "exercise the actual core assembler, not a hand-built panel dependency copy");
+  const server = createService({ tokens: deps.tokens, routes: [route] });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox?section=needsYou`, {
+    headers: { authorization: "Bearer read" },
+  });
+  assert.equal(response.status, 200);
+  return await response.json() as Record<string, any>;
+}
+
+test("actual core assembler preserves partial snapshot attention without panel scope injection", async t => {
+  const w = world(t, 2), initial = await w.refresh();
+  const native = (initial.bodies.find(body => body.key === "section=needsYou")!.data.items[0] as unknown as { snapshotAttention: unknown }).snapshotAttention;
+  assert.deepEqual(native, { state: "unknown", coverage: "partial", countSemantics: "observed_snapshot_not_verified" });
+  const legacy = await assembledCoreInbox(t, w);
+  assert.deepEqual(legacy.needsYou.notReady[0].snapshotAttention, native, "both paths read the same partial classification");
+});
+
+test("actual core assembler binds complete snapshot attention to its configured producer scope", async t => {
+  const w = world(t, 2), initial = await w.refresh(), snapshot = retainAttention(w);
+  const native = (retainedBodies(w, initial).bodies.find(body => body.key === "section=needsYou")!.data.items[0] as unknown as { snapshotAttention: unknown }).snapshotAttention;
+  assert.deepEqual(native, { state: "observed", coverage: "complete", countSemantics: "observed_snapshot_not_verified",
+    repository: "owner/core", instance: "core", snapshotKey: snapshot.snapshotKey, attention: "decision", waitingOn: "operator" });
+  const legacy = await assembledCoreInbox(t, w);
+  assert.deepEqual(legacy.needsYou.notReady[0].snapshotAttention, native);
+  await w.refresh();
+  retainAttention(w, content => { content.snapshotScope = { repository: "owner/foreign", instance: "elsewhere" }; });
+  const foreign = await assembledCoreInbox(t, w);
+  assert.equal(foreign.needsYou.notReady[0].snapshotAttention.state, "unknown", "stored scope cannot attest to itself when it differs from the configured producer");
+  assert.equal(foreign.needsYou.notReady[0].snapshotAttention.attention, undefined);
+});
+
+test("actual core assembler uses the fixed core producer scope rather than a gateway alias", async t => {
+  const w = world(t, 2); await w.refresh(); retainAttention(w);
+  const legacy = await assembledCoreInbox(t, w, deps => {
+    deps.instances = { coreInstance: "gateway-alias" };
+    deps.assistantRepository = "owner/assistant";
+  });
+  assert.equal(legacy.needsYou.notReady[0].snapshotAttention.state, "observed");
+  assert.equal(legacy.needsYou.notReady[0].snapshotAttention.instance, "core", "coreUnits fixes the producer name independently of the gateway alias");
+  assert.equal(legacy.needsYou.notReady[0].snapshotAttention.repository, "owner/core", "use the configured inbox producer, not another serve repository field");
+});
+
+test("actual core assembler preserves explicit audit and source identity precedence", async t => {
+  const w = world(t, 2); await w.refresh(); retainAttention(w);
+  const foreign = { instance: "foreign", repository: "owner/foreign" };
+  const explicitAudit = await assembledCoreInbox(t, w, deps => { deps.panelGraph.inboxAuditScope = foreign; });
+  assert.equal(explicitAudit.needsYou.notReady[0].snapshotAttention.state, "unknown", "the default cannot replace an explicit expected audit scope");
+  await w.refresh();
+  const identity = { instance: "core", repository: "owner/core", root: w.root, planPath: w.deps.planPath, ledgerPath: w.deps.ledgerPath, inboxRoot: w.root };
+  retainAttention(w, content => { content.sourceIdentity = identity; });
+  const explicitSource = await assembledCoreInbox(t, w, deps => {
+    deps.panelGraph.inboxSourceIdentity = identity; deps.panelGraph.inboxAuditScope = foreign;
+    deps.readModel!.slowLane!.inbox!.repository = "owner/different-default";
+  });
+  assert.equal(explicitSource.needsYou.notReady[0].snapshotAttention.state, "observed", "explicit source identity remains ahead of audit scope and default config");
+  assert.equal(explicitSource.needsYou.notReady[0].snapshotAttention.repository, "owner/core");
+});
+
+test("snapshot-owned attention shares exact retained scope and key across HTTP, views and restart", async (t) => {
+  const w = world(t, 2), store = { threadStorePath: join(w.root, "state", "inbox-threads.jsonl") };
+  appendThreadEvent("ruling:p0", { kind: "reframed", key: "fixture:performed-reframe" }, "Fixture direction already performed.", store, w.at - 100);
+  appendThreadEvent("ruling:p0", { kind: "redrafted", key: "fixture:older-redraft" }, "Fixture older daemon draft, backfilled later.", store, w.at - 100_000);
+  const initial = await w.refresh(), snapshot = retainAttention(w);
+  assert.equal(snapshot.attentionCensus!.items[0]!.attention, "awaiting_daemon", "an older backfilled redraft is not a new daemon ask");
+  const r = retainedBodies(w, initial), s = await served(t, w, r);
+  const legacy = await s.get("/v1/i/core/inbox?section=needsYou");
+  const expected = { state: "observed", repository: "owner/core", instance: "core", snapshotKey: snapshot.snapshotKey,
+    coverage: "complete", countSemantics: "observed_snapshot_not_verified", attention: "awaiting_daemon", waitingOn: "daemon" };
+  assert.deepEqual(legacy.body.needsYou.notReady[0].snapshotAttention, expected);
+  const native = await s.get("/v1/views/inbox?section=needsYou");
+  assert.deepEqual(native.body.data.items[0].snapshotAttention, expected);
+  assert.equal(native.body.data.items[1].snapshotAttention.attention, "decision", "a proper newer ask is not demoted by another row's wait");
+  assert.equal(JSON.stringify(expected).includes(w.root), false, "no private source path leaves the producer");
+  for (const stamp of [legacy.body.needsYou.notReady[0].snapshotAttention, native.body.data.items[0].snapshotAttention]) {
+    assert.deepEqual(Object.keys(stamp).sort(), Object.keys(expected).sort(), "only public lineage fields are projected on either read path");
+    assert.equal(JSON.stringify(stamp).includes(w.root), false, "actual HTTP/view lineage omits private source paths");
+  }
+  writeFileSync(join(w.root, "state", "inbox-threads.jsonl"), "unreadable live history after classification\n");
+  writeFileSync(w.deps.planPath, "invalid mutable plan after classification");
+  const restarted = await served(t, w, r, { mode: "off" });
+  assert.deepEqual((await restarted.get("/v1/views/inbox?section=needsYou")).body.data.items[0].snapshotAttention, expected);
+  assert.deepEqual((await restarted.get("/v1/inbox?section=needsYou")).body.needsYou.notReady[0].snapshotAttention, expected);
+  assert.equal(s.reads() + restarted.reads(), 0, "neither HTTP path classifies, loads a mutable plan or rescans history");
+});
+
+test("snapshot-owned attention cannot join equal-clock generations or override a newer daemon ask", async (t) => {
+  const w = world(t, 80), store = { threadStorePath: join(w.root, "state", "inbox-threads.jsonl"), now: () => w.at - 100 };
+  appendThreadMessage(inboxThreadIdentity("ruling:p0"), "reply", "Please produce another draft.", store);
+  const initial = await w.refresh(), before = retainAttention(w);
+  assert.equal(before.attentionCensus!.items[0]!.attention, "awaiting_daemon");
+  const s = await served(t, w, retainedBodies(w, initial));
+  const first = await s.get("/v1/views/inbox?section=needsYou");
+  const oldNext = `/v1/views/inbox?section=needsYou&cursor=${encodeURIComponent(first.body.data.page.next)}`;
+  appendThreadMessage(inboxThreadIdentity("ruling:p0"), "escalation", "A genuine new request for review.", { ...store, now: () => w.at - 50 });
+  await w.refresh();
+  const after = retainAttention(w);
+  assert.equal(before.generatedAt, after.generatedAt);
+  assert.notEqual(before.snapshotKey, after.snapshotKey);
+  s.put(retainedBodies(w, initial), true);
+  const current = await s.get("/v1/views/inbox?section=needsYou", first.etag!);
+  assert.equal(current.status, 200);
+  assert.equal(current.body.data.items[0].snapshotAttention.snapshotKey, after.snapshotKey);
+  assert.equal(current.body.data.items[0].snapshotAttention.attention, "decision");
+  assert.equal(current.body.data.items[0].snapshotAttention.waitingOn, "operator");
+  assert.equal((await s.get(oldNext)).status, 409, "old continuation metadata cannot join the new ask");
+});
+
+test("snapshot-owned attention keeps partial, absent, foreign and malformed evidence unknown", async (t) => {
+  const w = world(t, 2), initial = await w.refresh();
+  const partial = await served(t, w, initial);
+  const initialRow = (await partial.get("/v1/views/inbox?section=needsYou")).body.data.items[0];
+  assert.equal(initialRow.snapshotAttention.state, "unknown");
+  assert.equal(initialRow.snapshotAttention.coverage, "partial");
+  assert.equal(initialRow.snapshotAttention.attention, undefined);
+  const edits: Array<(content: PersistedInboxContent) => void> = [
+    content => { content.complete = false; },
+    content => { content.snapshotScope = { repository: "owner/foreign", instance: "elsewhere" }; },
+    content => { content.snapshotScope = { root: w.root }; },
+    content => { content.attentionCensus!.items[0]!.threadId = "foreign-thread"; },
+    content => { content.attentionCensus!.items.push({ ...content.attentionCensus!.items[0]! }); },
+    content => { (content.attentionCensus!.items[0] as unknown as Record<string, unknown>).waitingOn = "unknown"; },
+    content => { content.attentionCensus!.sources.registry = "partial"; },
+    content => { content.attentionCensus!.items = []; },
+  ];
+  for (const edit of edits) {
+    await w.refresh(); retainAttention(w, edit);
+    const r = retainedBodies(w, initial), s = await served(t, w, r, { boundInbox: false });
+    for (const path of ["/v1/inbox?section=needsYou", "/v1/views/inbox?section=needsYou"]) {
+      const read = await s.get(path);
+      const row = path.startsWith("/v1/views") ? read.body.data.items[0] : read.body.needsYou.notReady[0];
+      assert.equal(row.snapshotAttention.state, "unknown", path);
+      assert.equal(row.snapshotAttention.attention, undefined);
+    }
+  }
+  await w.refresh();
+  const path = persistedInboxPath(join(w.root, "state")), good = JSON.parse(readFileSync(path, "utf8"));
+  for (const bad of [{ ...good, snapshotKey: "f".repeat(64) }, { ...good, attentionCensus: undefined }]) {
+    writeFileSync(path, JSON.stringify(bad));
+    const s = await served(t, w, initial, { mode: "off", boundInbox: false });
+    assert.equal((await s.get("/v1/inbox?section=needsYou")).status, 503);
+    assert.equal((await s.get("/v1/views/inbox?section=needsYou")).status, 503);
+  }
+});
+
+test("snapshot-owned attention fits existing pages and unchanged restamps retain ETags", async (t) => {
+  const w = world(t, 80), initial = await w.refresh(), before = retainAttention(w, () => {}, w.at - 1);
+  const r = retainedBodies(w, initial), s = await served(t, w, r);
+  let seen = 0;
+  const tags = new Map<string, string | null>();
+  for (const body of r.bodies.filter(body => body.data.section === "needsYou")) {
+    const read = await s.get(`/v1/views/inbox?${body.key}`);
+    assert.equal(read.status, 200); assert.ok(read.bytes <= 64 * 1024);
+    for (const row of read.body.data.items) {
+      assert.equal(row.snapshotAttention.state, "observed");
+      assert.equal(row.snapshotAttention.snapshotKey, before.snapshotKey); seen++;
+    }
+    tags.set(body.key, read.etag);
+  }
+  assert.equal(seen, 80);
+  const after = retainAttention(w);
+  assert.equal(after.snapshotKey, before.snapshotKey); assert.notEqual(after.generatedAt, before.generatedAt);
+  s.put(retainedBodies(w, initial));
+  for (const [key, etag] of tags) assert.equal((await s.get(`/v1/views/inbox?${key}`, etag!)).status, 304);
 });
