@@ -253,7 +253,7 @@ console.log(JSON.stringify(result));
 });
 
 test("W1-T9821: worker frame budgets preserve native boundaries including invalid runtime limits", () => {
-  const result = runChild<{ rows: Array<{ limit: string; depth: number; expected: string; actual: string; count: number; restored: boolean }> }>(`
+  const result = runChild<{ rows: Array<{ limit: string; limitType: string; depth: number; expected: string; actual: string; count: number; restored: boolean }> }>(`
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 const { trackWorkerThreads, spawnSite } = await import(process.argv[2]);
@@ -285,7 +285,7 @@ try {
       const worker = Object.assign(new EventEmitter(), { threadId: ++id });
       publishDeep(channel, worker, depth);
       const live = book.live();
-      rows.push({ limit: String(value), depth, expected, actual: live[0]?.kind, count: live.length,
+      rows.push({ limit: String(value), limitType: typeof value, depth, expected, actual: live[0]?.kind, count: live.length,
         restored: Object.is(Error.stackTraceLimit, value) && Error.prepareStackTrace === prepare });
       assert.equal(live[0]?.thread, worker);
       worker.threadId = -1;
@@ -309,11 +309,11 @@ console.log(JSON.stringify({ rows }));
     ].join("\n"),
   });
   for (const row of result.rows) {
-    const context = `${row.limit}, excluded depth ${row.depth}`;
+    const context = `${row.limitType} ${row.limit}, excluded depth ${row.depth}`;
     assert.equal(row.count, 1, `${context}: unsupported capture must still book the worker`);
     assert.equal(row.actual, row.expected, `${context}: native frame budget and eligible order`);
     assert.equal(row.restored, true, `${context}: preserve exact ambient values`);
-    if (["undefined", "null", "7", "NaN", "-Infinity", "-1", "0", "0.8", "1", "1.8"].includes(row.limit)) {
+    if (row.limitType !== "number" || ["NaN", "-Infinity", "-1", "0", "0.8", "1", "1.8"].includes(row.limit)) {
       assert.equal(row.actual, "unknown", context);
     }
   }
