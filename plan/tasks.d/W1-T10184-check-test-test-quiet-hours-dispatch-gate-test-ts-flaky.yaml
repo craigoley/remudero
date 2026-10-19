@@ -1,0 +1,50 @@
+- id: W1-T10184
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/quiet-hours-dispatch-gate.test.ts:flaky cost 23.9 PR minute(s) across 3 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.23
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/quiet-hours-dispatch-gate.test.ts:flaky"
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/check-test-test-quiet-hours-dispatch-gate-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/quiet-hours-dispatch-gate.test.ts:flaky"
+      proof: "grep: test(\"W1-T10184: check:test:test/quiet-hours-dispatch-gate.test.ts:flaky is prevented, not retried\" in test/daemon/check-test-test-quiet-hours-dispatch-gate-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/quiet-hours-dispatch-gate.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/quiet-hours-dispatch-gate.test.ts:flaky cost 23.9 PR minute(s) (seven-day half-life) across 3 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/daemon.ts: test/quiet-hours-dispatch-gate.test.ts imports it
+    - test/quiet-hours-dispatch-gate.test.ts: named by the failing check
+    - the rounds name a failing test: test/quiet-hours-dispatch-gate.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12837 (https://github.com/craigoley/remudero/pull/12837) at 2026-10-18T22:23:26.142Z: ci-log round — coverage-shard (5/8): test/quiet-hours-dispatch-gate.test.ts
+        failing tests: W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that returns clear
+        log excerpt:
+          | not ok 2695 - W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that returns clear
+          | ✔ W1-T2655: quiet hours defers new dispatch while the daemon sweep still runs in that tick (29.244383ms)
+          | ✖ W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that returns clear (7.462695ms)
+          |   ---
+          |   duration_ms: 7.462695
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/quiet-hours-dispatch-gate.test.ts:75:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly deep-equal:
+          |     + actual - expected
+          |     ... Skipped lines
+    - PR #11390 at 2026-10-13T15:51:56Z: hand fix PR #11390: src/lib/daemon.ts; minutes are the pass median proxy (5.9502), not measured repair time
+    - PR #11213 (https://github.com/craigoley/remudero/pull/11213) at 2026-10-13T03:09:53.586Z: ci-log round — coverage-shard (6/8): test/quiet-hours-dispatch-gate.test.ts; coverage-shard (7/8): test/heavy-new-build-postsettlement-faults.test.ts
+        failing tests: W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that returns clear; post-settlement idle-window reporter refusal preserves all settled worker accounting
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
