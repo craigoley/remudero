@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease, openShadowCounterDb, releaseLease } from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { createViewShadow, fileShadowStore, shadowReadiness, storedShadowReadiness, viewShadowPath, type ViewShadowState } from "../src/lib/view-shadow.js";
-import { readShadowCounters, saveShadowCounter, shadowCounterPath } from "../src/lib/view-shadow-store.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { acquireLease, flushReadModelTransactions, openShadowCounterDb, releaseLease } from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { createViewShadow, fileShadowStore, shadowReadiness, storedShadowReadiness, viewShadowPath, type ViewShadowState } from "#src/lib/view-shadow.js";
+import { readShadowCounters, saveShadowCounter, shadowCounterPath } from "#src/lib/view-shadow-store.js";
 
 const NOW = Date.parse("2026-10-19T12:00:00Z");
 const state = (keys: string[] = []): ViewShadowState => ({ requests: 2, firstRequestMs: NOW - 172800000, samples: 3000,
@@ -19,7 +19,12 @@ function fixture(t: TestContext) {
   const stores: ReturnType<typeof fileShadowStore>[] = [];
   const path = viewShadowPath(dir);
   const store = () => { const s = fileShadowStore(path, db, got.lease); stores.push(s); return s; };
-  t.after(() => { for (const s of stores) s.close?.(); db.close(); rmSync(dir, { recursive: true, force: true }); });
+  t.after(async () => {
+    for (const s of stores) s.close?.();
+    db.close();
+    await flushReadModelTransactions();
+    rmSync(dir, { recursive: true, force: true });
+  });
   return { dir, path, db, lease: got.lease, clock, store };
 }
 

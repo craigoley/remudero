@@ -2,11 +2,11 @@
 import assert from "node:assert/strict";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease, flushReadModelTransactions } from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fileShadowStore, viewShadowPath, type ViewShadowState } from "../src/lib/view-shadow.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { acquireLease, flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fileShadowStore, viewShadowPath, type ViewShadowState } from "#src/lib/view-shadow.js";
 
 test("shadow persistence retains historical keys without rewriting their JSON on each sample", async t => {
   const dir = makeTempDir("shadow-counter-history"), clock = fixedClock(1792411200000);
