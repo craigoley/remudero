@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
+// @ts-expect-error The exercised gate is a plain .mjs script without a declaration file.
+import { computeBoundaryRanges } from "../scripts/diff-coverage.mjs";
 
 const BLOCKED_LOG = [
   "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:",
@@ -56,3 +58,20 @@ test("a ci-log red that is not a diff-coverage block gets no coverage targets", 
     "src/lib/daemon.ts",
   ]);
 });
+
+test("a script's direct-run guard is told the process-boundary remedy, and the gate honours exactly that advice", () => {
+  // #12740: the gate blocked a script's `isMainModule` body while the prompt forbade every directive.
+  const prompt = ciLogPrompt([BLOCKED_LOG.split("\n")[0], "  - scripts/test-repo-root-codemod.mjs:157", "  - scripts/test-repo-root-codemod.mjs:173"].join("\n"));
+  assert.ok(prompt.includes("  - scripts/test-repo-root-codemod.mjs: lines 157, 173"), prompt);
+  assert.match(prompt, /exported `main\(argv, deps\)` that returns an exit code/);
+  const directive = /`(\/\/ diff-cov: process-boundary — <reason>)`/.exec(prompt)?.[1];
+  const dispatch = /`(process\.exitCode = main\(process\.argv\.slice\(2\)\);)`/.exec(prompt)?.[1];
+  assert.ok(directive && dispatch, "the prompt names the directive and the one-line dispatch verbatim");
+  const advised = ["export function main(argv) { return argv.length; }", "",
+    directive.replace("<reason>", "the CLI entry only translates main()'s tested return into an exit code."),
+    "if (isMainModule(import.meta.url)) {", `  ${dispatch}`, "}", ""].join("\n");
+  const { ranges, errors } = computeBoundaryRanges(advised);
+  assert.deepEqual(errors, [], "the advised guard is a directive the gate accepts");
+  assert.deepEqual(ranges.map((r: { start: number; end: number }) => [r.start, r.end]), [[4, 6]]);
+});
+

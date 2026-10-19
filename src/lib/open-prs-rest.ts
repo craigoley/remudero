@@ -1430,13 +1430,14 @@ export function compareRestArgs(owner: string, repo: string, base: string, head:
  *  conflict-evidence producer above ignores them. `sha` is the BLOB sha of the file at the head of
  *  the compare, which is what makes the digest a statement about CONTENT rather than about commit
  *  history: a rebase, a force-push of identical bytes, or a merge of the base branch all leave
- *  every blob sha unchanged. */
+ *  every blob sha unchanged. W1-T9047: `patch` is read in preference to `sha`. */
 interface RestCompareFile {
   filename?: string;
   deletions?: number;
   status?: string;
   sha?: string;
   previous_filename?: string;
+  patch?: string;
 }
 
 /** One commit entry in a compare response — enough to build a `git log`-shaped one-liner. */
@@ -2024,13 +2025,34 @@ export interface ReviewReuseFacts {
   mergeBaseSha: string;
 }
 
+/** W1-T9047 — a patch with each hunk header cut to `@@`, dropping the line numbers and function
+ *  text that move when main edits elsewhere in the file (the idea behind `git patch-id`). */
+export function hunksWithoutLineNumbers(patch: string): string {
+  return patch
+    .split("\n")
+    .map((line) => (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line) ? "@@" : line))
+    .join("\n");
+}
+
+/** The own-diff digest, and the paths whose part of it came from a blob sha instead of a patch. */
+export interface OwnDiffDigestDetail {
+  digest: string;
+  /** Files GitHub sent no `patch` for (binary, or too large), sorted; their blob sha is used. */
+  blobFallbackPaths: string[];
+}
+
 /** A content hash of the pull request's OWN diff, folded from a compare response's file list.
  *
- *  WHAT IT IS A STATEMENT ABOUT: the bytes this PR contributes, and nothing else. Each entry
- *  contributes its path, its change status, its blob sha at head, and — for a rename — the path it
- *  came from. Commit shas, commit messages, authorship, ordering and timestamps are all deliberately
- *  excluded, which is exactly what makes the digest survive the three pushes that change nothing
- *  reviewable: a rebase, a force-push of identical content, and a merge of the base branch.
+ *  WHAT IT IS A STATEMENT ABOUT: the hunks this PR contributes, and nothing else. Each entry
+ *  contributes its path, its change status, its hunks with line numbers removed
+ *  ({@link hunksWithoutLineNumbers}), and, for a rename, the path it came from. Commit shas, commit
+ *  messages, authorship, ordering and timestamps are all excluded on purpose. That is what lets
+ *  the digest survive the pushes that change nothing reviewable: a rebase, a force-push of
+ *  identical content, and a merge of the base branch.
+ *
+ *  W1-T9047 — HUNKS, NOT BLOBS. A blob sha moves when main edits a file the PR shares, so every
+ *  refreshed head touching sweep.ts read "changed". With no patch, the blob sha stands in and
+ *  {@link OwnDiffDigestDetail.blobFallbackPaths} names the file.
  *
  *  SORTED BEFORE HASHING, because the compare endpoint does not promise an order and an unstable
  *  digest would read as "the diff changed" on every second pass — a false negative that costs a
@@ -2040,20 +2062,75 @@ export interface ReviewReuseFacts {
  *  entry can never make two genuinely different diffs digest identically; the digest degrades
  *  toward "different", never toward "same". The whole safety argument for reuse rests on that
  *  asymmetry: a false "changed" wastes a review, a false "unchanged" ships an unjudged diff. */
-export function ownDiffDigestFromCompareFiles(files: readonly RestCompareFile[] | undefined): string {
-  const rows = (files ?? []).map((f) =>
-    [
-      f.filename ?? "\u0000unnamed",
-      f.status ?? "\u0000unknown",
-      f.sha ?? "\u0000noblob",
-      f.previous_filename ?? "",
-    ].join("\u0000"),
-  );
+export function ownDiffDigestDetail(files: readonly RestCompareFile[] | undefined): OwnDiffDigestDetail {
+  const blobFallbackPaths: string[] = [];
+  const rows = (files ?? []).map((f) => {
+    const name = f.filename ?? "\u0000unnamed";
+    let content: string;
+    if (typeof f.patch === "string") {
+      content = `patch:${createHash("sha256").update(hunksWithoutLineNumbers(f.patch)).digest("hex")}`;
+    } else {
+      blobFallbackPaths.push(name);
+      content = `blob:${f.sha ?? "\u0000noblob"}`;
+    }
+    return [name, f.status ?? "\u0000unknown", content, f.previous_filename ?? ""].join("\u0000");
+  });
   rows.sort();
   // The COUNT is hashed alongside the rows so a list that folds to the same concatenation by a
   // different partition cannot collide — belt and braces on a value whose whole job is to be
   // trusted when it matches.
-  return createHash("sha256").update(`${rows.length}\n${rows.join("\n")}`).digest("hex");
+  const digest = createHash("sha256").update(`${rows.length}\n${rows.join("\n")}`).digest("hex");
+  return { digest, blobFallbackPaths: blobFallbackPaths.sort() };
+}
+
+/** {@link ownDiffDigestDetail}'s digest alone. Both sides of the reuse comparison record this. */
+export function ownDiffDigestFromCompareFiles(files: readonly RestCompareFile[] | undefined): string {
+  return ownDiffDigestDetail(files).digest;
+}
+
+/** W1-T9047 — what the sweep reads before upgrading a `discriminate-only` review to reuse. */
+export interface ReviewReuseReachFacts {
+  /** Paths main changed between the reviewed merge base and the current one. */
+  mainChangedFiles: string[];
+  /** The PR's own paths over the current merge base, a rename's source path included. */
+  prFiles: string[];
+  /** The PR's files whose own-diff digest part fell back to a blob sha (no patch from GitHub). */
+  blobFallbackPaths: string[];
+}
+
+/** {@link ReviewReuseReachFacts} over REST: two compares, `reviewed...current` merge base for main's
+ *  delta and `current merge base...head` for the PR's own files. Throws on a failed read. */
+export function fetchReviewReuseReachFacts(
+  owner: string,
+  repo: string,
+  reviewedMergeBaseSha: string,
+  currentMergeBaseSha: string,
+  headSha: string,
+  fetch: GhApiFetcher,
+): ReviewReuseReachFacts {
+  return runGhReadSteps(reviewReuseReachFactsSteps(owner, repo, reviewedMergeBaseSha, currentMergeBaseSha, headSha, fetch));
+}
+
+function* reviewReuseReachFactsSteps(
+  owner: string,
+  repo: string,
+  reviewedMergeBaseSha: string,
+  currentMergeBaseSha: string,
+  headSha: string,
+  fetch: GhApiFetcher,
+): GhReadSteps<ReviewReuseReachFacts> {
+  const main = (yield* ghRead(fetch, compareRestArgs(owner, repo, reviewedMergeBaseSha, currentMergeBaseSha))) as RestCompareResponse;
+  const own = (yield* ghRead(fetch, compareRestArgs(owner, repo, currentMergeBaseSha, headSha))) as RestCompareResponse;
+  if (!Array.isArray(main.files) || !Array.isArray(own.files)) {
+    throw new Error("review-reuse reach compare carried no files list");
+  }
+  const names = (files: readonly RestCompareFile[]): string[] =>
+    [...new Set(files.flatMap((f) => [f.filename, f.previous_filename]).filter((p): p is string => typeof p === "string"))].sort();
+  return {
+    mainChangedFiles: names(main.files),
+    prFiles: names(own.files),
+    blobFallbackPaths: ownDiffDigestDetail(own.files).blobFallbackPaths,
+  };
 }
 
 /** One PR's {@link ReviewReuseFacts}, over REST. Throws on a failed or malformed read — the same
@@ -2113,38 +2190,59 @@ export function tryFetchReviewReuseFacts(
   }
 }
 
-/** Current-head {@link ReviewReuseFacts} for a BOUNDED set of PRs, mirroring
- *  {@link hydrateSupersessionVerdicts} in shape, cap and failure direction.
+/** One orphaned PR the reuse hydrator asks about. `headRefName` orders fleet heads first under a cap. */
+export interface ReviewReuseHydrationTarget {
+  number: number;
+  headRefOid: string;
+  headRefName?: string;
+}
+
+/** Fleet heads (`run-*`), the ones a refresh re-points at main, first; otherwise input order. */
+export function reviewReuseHydrationOrder<T extends ReviewReuseHydrationTarget>(prs: readonly T[]): T[] {
+  const fleet = (pr: T): number => (pr.headRefName?.startsWith("run-") === true ? 0 : 1);
+  return prs.map((pr, index) => ({ pr, index }))
+    .sort((a, b) => fleet(a.pr) - fleet(b.pr) || a.index - b.index)
+    .map(({ pr }) => pr);
+}
+
+/** Current-head {@link ReviewReuseFacts} for the orphaned PRs, mirroring
+ *  {@link hydrateSupersessionVerdicts} in shape and failure direction.
  *
  *  SCOPED TO ALREADY-ORPHANED PRs, and that scoping is the whole cost argument. The sweep must not
  *  spend a compare on every open PR every pass — GitHub's SECONDARY limit counts request CADENCE,
  *  not volume, so a per-pass fan-out over the full board is precisely the shape that trips it while
  *  `rate_limit` still reads full. Only a PR whose review was orphaned by a push can reach the reuse
- *  rows at all, so only those are asked about, and the cap bounds even that. */
+ *  rows at all, so only those are asked about. W1-T9047: by default ALL of them, uncapped: past 25,
+ *  a refreshed head got a full LLM review for want of one compare. */
 export function hydrateReviewReuseFacts(
   owner: string,
   repo: string,
   targetBranch: string,
-  orphanedPrs: readonly { number: number; headRefOid: string }[],
+  orphanedPrs: readonly ReviewReuseHydrationTarget[],
   fetch: GhApiFetcher,
-  cap: number = MERGE_STATE_HYDRATION_CAP,
+  cap: number = Number.POSITIVE_INFINITY,
   /** Per-PR failure reason, forwarded from {@link tryFetchReviewReuseFacts}. */
   onUnreadable?: (prNumber: number, reason: string) => void,
+  /** W1-T9047 — each PR a cap left unasked. Its review cannot be reused this pass. */
+  onPastCap?: (prNumber: number, cap: number) => void,
 ): Map<number, ReviewReuseFacts> {
-  return runGhReadSteps(hydrateReviewReuseFactsSteps(owner, repo, targetBranch, orphanedPrs, fetch, cap, onUnreadable));
+  return runGhReadSteps(hydrateReviewReuseFactsSteps(owner, repo, targetBranch, orphanedPrs, fetch, cap, onUnreadable, onPastCap));
 }
 
 export function* hydrateReviewReuseFactsSteps(
   owner: string,
   repo: string,
   targetBranch: string,
-  orphanedPrs: readonly { number: number; headRefOid: string }[],
+  orphanedPrs: readonly ReviewReuseHydrationTarget[],
   fetch: GhApiFetcher,
-  cap: number = MERGE_STATE_HYDRATION_CAP,
+  cap: number = Number.POSITIVE_INFINITY,
   onUnreadable?: (prNumber: number, reason: string) => void,
+  onPastCap?: (prNumber: number, cap: number) => void,
 ): GhReadSteps<Map<number, ReviewReuseFacts>> {
   const out = new Map<number, ReviewReuseFacts>();
-  for (const p of orphanedPrs.slice(0, cap)) {
+  const ordered = reviewReuseHydrationOrder(orphanedPrs);
+  for (const p of ordered.slice(cap)) onPastCap?.(p.number, cap);
+  for (const p of ordered.slice(0, cap)) {
     // Best-effort per PR: an unreadable compare leaves `currentOwnDiffDigest` undefined, so the reuse
     // decision falls back to a full review; the reason goes to `onUnreadable` (see tryFetchReviewReuseFacts).
     try {

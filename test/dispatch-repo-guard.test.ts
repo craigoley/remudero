@@ -148,7 +148,7 @@ test("W1-T988: the daemon threads its target to the gate, and run-task threads i
   const opts = daemon.slice(optsStart, daemon.indexOf("\n    };", optsStart));
   assert.match(opts, /targetRepo: deps\.targetRepo/, "the tick's opts must carry the daemon's own target");
 
-  const runTask = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const runTask = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "daemon.ts"), "utf8");
   const callStart = runTask.indexOf("const summary = await runDaemonFn(");
   assert.ok(callStart >= 0, "control: run-task really does call runDaemon");
   const call = runTask.slice(callStart, callStart + 3000);
