@@ -28,6 +28,8 @@
     This is a plan-only prerequisite, not implementation credit. No test, source, threshold or runtime setting is
     changed here. The 04:55Z core memcg OOM had about 2.2 GB shmem, but no receipt attributes it to this sandbox;
     this task measures a known gap and does not claim that fixing it resolves that distinct OOM.
+    CREATES: src/lib/gate-sandbox-metrics.ts
+    CREATES: test/ci/gates/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts
   rationale: |
     READ at W1-T9619's build head ad81f6cfd (open PR #12122; symbols, not lines):
     - src/lib/preopen-gate.ts runs the gate child inside proofSandboxArgv (W1-T6124) plus its own binds. That argv
@@ -66,6 +68,8 @@
       proof: 'unit test: W1-T9739: a sandboxed gate row names its tmp peak, compile cache and child cost'
     - claim: "a gate whose child wrote no measurement says why and never reports zero"
       proof: 'unit test: W1-T9739: an unmeasured sandbox is named, never zero'
+    - claim: "the real preflight child constructs the sandbox sampler rather than leaving a test-only module"
+      proof: 'grep: createGateSandboxMetrics( in src/run-task.ts'
   falsifier: |
     At W1-T9619's head, run a gate whose fake child writes 5 MB to /tmp and exits 0: the implement.preopen_gate row
     has no sandbox field and the first test fails. Have the child die before writing its summary: a builder that
