@@ -24,9 +24,9 @@
 import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { READ_MODEL_DIRNAME, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
+import { READ_MODEL_DIRNAME, openShadowCounterDb, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
-import { readShadowCounters, saveShadowCounter, type ShadowKeyChange } from "./view-shadow-store.js";
+import { readShadowCounters, saveShadowCounter, shadowCounterPath, type ShadowKeyChange } from "./view-shadow-store.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
 export const VIEW_SHADOW_SUMMARY_STEP = "view.shadow_summary";
@@ -731,6 +731,7 @@ export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "s
 export interface ShadowStore {
   load(): Record<string, ViewShadowState>;
   save(view: string, state: ViewShadowState, keys?: ShadowKeyChange): void;
+  close?(): void;
 }
 
 /** On the persistent state disk beside the switch file: the DB may live on scratch a deallocate wipes. */
@@ -741,12 +742,19 @@ export function viewShadowPath(stateDir: string): string {
 /** Counters survive a restart and a scratch wipe in `path`, written only behind the home read model's lease. */
 export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease): ShadowStore {
   const states = storedShadowStates(path, db);
+  let connection: ReadModelDb | undefined;
+  let closed = false;
   return {
     load: () => ({ ...states }),
     save: (view, state, keys) => {
-      withWriteTransaction(db, lease, () => saveShadowCounter(path, states, view, state, keys));
+      if (closed) throw new Error("shadow store is closed");
+      withWriteTransaction(db, lease, () => {
+        connection ??= openShadowCounterDb(shadowCounterPath(path));
+        saveShadowCounter(path, states, view, state, keys, connection);
+      });
       states[view] = state;
     },
+    close: () => { closed = true; connection?.close(); connection = undefined; },
   };
 }
 
@@ -830,6 +838,7 @@ export interface ShadowComparison {
 export interface ViewShadow {
   compare(input: { view: string; key: string; requests: number; legacy: ShadowLegacy; body: { data: unknown; asOf: string | null; sources?: readonly ViewSource[] }; qualificationGeneration?: string }): ShadowComparison;
   readiness(): ShadowReadiness[];
+  close(): void;
 }
 
 /** The worker-side comparator: diff, classify, count, write the ledger row, persist the counters. */
@@ -920,6 +929,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       return { view, key, diffs };
     },
     readiness: () => activeReadiness(states, qualifications, clock.now()),
+    close: () => opts.store?.close?.(),
   };
 }
 

@@ -868,6 +868,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   /** Drops the connection, its projector and its lease; the next tick reopens the file by path. */
   function closeSlot(slot: Slot): void {
+    if (comparator && comparator.db === slot.db) { comparator.shadow.close(); comparator = undefined; }
     slot.db?.close();
     slot.db = undefined;
     slot.projector = undefined;

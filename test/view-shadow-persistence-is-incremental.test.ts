@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
@@ -16,19 +16,22 @@ function fixture(t: TestContext) {
   const dir = makeTempDir("shadow-incremental"), clock = fixedClock(NOW);
   const db = openProjectorReadModel(dir, "core", clock), got = acquireLease(db, { clock });
   assert(got.ok);
-  t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  return { dir, path: viewShadowPath(dir), db, lease: got.lease, clock };
+  const stores: ReturnType<typeof fileShadowStore>[] = [];
+  const path = viewShadowPath(dir);
+  const store = () => { const s = fileShadowStore(path, db, got.lease); stores.push(s); return s; };
+  t.after(() => { for (const s of stores) s.close?.(); db.close(); rmSync(dir, { recursive: true, force: true }); });
+  return { dir, path, db, lease: got.lease, clock, store };
 }
 
 test("shadow persistence retains historical keys without rewriting their JSON on each sample", t => {
   const f = fixture(t), old = state(Array.from({ length: 10000 }, (_, n) => `section=archived&cursor=${n}-${"x".repeat(140)}`));
   writeFileSync(f.path, JSON.stringify({ inbox: old, retired: state(["historical"]) }));
   const bytes = readFileSync(f.path), before = statSync(f.path);
-  const store = fileShadowStore(f.path, f.db, f.lease), current = store.load().inbox!;
+  const store = f.store(), current = store.load().inbox!;
   for (let n = 0; n < 12; n++) { current.samples++; current.streakSamples++; store.save("inbox", current, { reset: false, add: "new-cursor" }); }
   assert.deepEqual(readFileSync(f.path), bytes);
   assert.equal(statSync(f.path).mtimeMs, before.mtimeMs, "old evidence is preserved, not rewritten");
-  const loaded = fileShadowStore(f.path, f.db, f.lease).load();
+  const loaded = f.store().load();
   assert.equal(loaded.inbox!.samples, old.samples + 12);
   assert.deepEqual(loaded.inbox!.streakKeys, [...old.streakKeys!, "new-cursor"]);
   assert.deepEqual(loaded.retired, state(["historical"]));
@@ -39,7 +42,7 @@ test("shadow persistence retains historical keys without rewriting their JSON on
 
 test("shadow persistence preserves real-diff resets and generation refusals across a restart", t => {
   const f = fixture(t), evidence = { legacyAsOfMs: null, viewAsOfMs: null, named: new Set<string>(), namedBeforeHorizon: new Set<string>(), namedInGap: new Set<string>(), rowsInGap: 0, duplicateIds: new Set<string>(), duplicateRows: 0 };
-  const make = () => createViewShadow({ clock: f.clock, log: () => {}, evidence: () => evidence, store: fileShadowStore(f.path, f.db, f.lease), qualifications: { v: "new" } });
+  const make = () => createViewShadow({ clock: f.clock, log: () => {}, evidence: () => evidence, store: f.store(), qualifications: { v: "new" } });
   const sample = { view: "v", key: "k", requests: 1, qualificationGeneration: "new", legacy: { data: 1, asOfMs: null, qualificationGeneration: "new" }, body: { data: 1, asOf: null } };
   let shadow = make(); shadow.compare(sample); shadow.compare(sample);
   assert.equal(make().readiness()[0]!.keys, 1);
@@ -61,7 +64,7 @@ test("compact shadow readiness exactly matches full-key readiness, including qua
 });
 
 test("a lost home lease cannot create, migrate, or change shadow evidence", t => {
-  const f = fixture(t), store = fileShadowStore(f.path, f.db, f.lease);
+  const f = fixture(t), store = f.store();
   assert.equal(releaseLease(f.db, f.lease), true);
   assert.throws(() => store.save("v", state(["x"])), /lease_lost/);
   assert.equal(existsSync(shadowCounterPath(f.path)), false);
@@ -72,7 +75,7 @@ test("shadow evidence corruption is UNKNOWN rather than fallback to an older rea
   writeFileSync(f.path, JSON.stringify({ v: state(["old"]) }));
   writeFileSync(shadowCounterPath(f.path), "not a database");
   assert.throws(() => storedShadowReadiness(f.path, f.db, NOW));
-  assert.throws(() => fileShadowStore(f.path, f.db, f.lease));
+  assert.throws(() => f.store());
   assert.equal(readFileSync(shadowCounterPath(f.path), "utf8"), "not a database");
 });
 
@@ -87,13 +90,13 @@ test("shadow migration commits counters and exact membership together and keeps 
   const f = fixture(t), old = state(["old"]);
   f.db.exec("CREATE TABLE view_shadow(view TEXT PRIMARY KEY,state TEXT NOT NULL)");
   f.db.prepare("INSERT INTO view_shadow VALUES(?,?)").run("v", JSON.stringify(old));
-  const store = fileShadowStore(f.path, f.db, f.lease);
+  const store = f.store();
   assert.deepEqual(store.load().v, old);
   store.save("new", state(["new"]));
-  assert.deepEqual(fileShadowStore(f.path, f.db, f.lease).load(), { v: old, new: state(["new"]) });
+  assert.deepEqual(f.store().load(), { v: old, new: state(["new"]) });
   const current = state(); delete current.streakKeys;
   store.save("new", current);
-  assert.equal(fileShadowStore(f.path, f.db, f.lease).load().new!.streakKeys, undefined);
+  assert.equal(f.store().load().new!.streakKeys, undefined);
 });
 
 test("shadow migration and append failures do not manufacture an initialized store", t => {
@@ -108,7 +111,7 @@ test("shadow migration and append failures do not manufacture an initialized sto
 test("shadow counters are persistent siblings and never follow the scratch DB mapping", t => {
   const f = fixture(t), prior = process.env.RMD_READ_MODEL_DB_DIR;
   process.env.RMD_READ_MODEL_DB_DIR = `${f.dir}:${join(f.dir, "scratch")}`;
-  try { fileShadowStore(f.path, f.db, f.lease).save("v", state(["x"])); }
+  try { f.store().save("v", state(["x"])); }
   finally { if (prior === undefined) delete process.env.RMD_READ_MODEL_DB_DIR; else process.env.RMD_READ_MODEL_DB_DIR = prior; }
   assert(existsSync(shadowCounterPath(f.path)));
   assert.equal(existsSync(join(f.dir, "scratch", "view-shadow.json.sqlite")), false);
@@ -119,4 +122,13 @@ test("unusable shadow directories refuse without a success-shaped counter result
   writeFileSync(dirname(bad), "owned fixture");
   assert.throws(() => readShadowCounters(bad, true));
   assert.throws(() => saveShadowCounter(bad, {}, "v", state()));
+});
+
+test("the comparator closes its persistent writer and refuses a save after closure", t => {
+  const f = fixture(t), store = f.store();
+  store.save("v", state(["x"]));
+  const shadow = createViewShadow({ store, log: () => {}, evidence: () => { throw Error("unused"); } });
+  shadow.close(); shadow.close();
+  assert.throws(() => store.save("v", state(["bad"])), /closed/);
+  assert.deepEqual(readShadowCounters(f.path, true)!.states.v!.streakKeys, ["x"]);
 });

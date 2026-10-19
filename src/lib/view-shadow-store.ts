@@ -9,7 +9,8 @@ export const shadowCounterPath = (legacyPath: string): string => `${legacyPath}.
 /** Confirmed absence alone permits legacy migration; corrupt, unreadable and foreign stores throw. */
 export function readShadowCounters(path: string, includeKeys: boolean): { states: Record<string, ViewShadowState>; keyCounts: Map<string, number> } | undefined {
   const target = shadowCounterPath(path);
-  if (statSync(target, { throwIfNoEntry: false }) === undefined) return undefined;
+  try { statSync(target); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   const db = openShadowCounterDb(target, true);
   try {
     db.exec("BEGIN");
@@ -36,8 +37,8 @@ function addKey(db: ReadModelDb, view: string, key: string): void {
 }
 
 /** Caller holds the home projector's write fence before this opens or changes any persistent file. */
-export function saveShadowCounter(path: string, legacy: Record<string, ViewShadowState>, view: string, state: ViewShadowState, change?: ShadowKeyChange): void {
-  const db = openShadowCounterDb(shadowCounterPath(path));
+export function saveShadowCounter(path: string, legacy: Record<string, ViewShadowState>, view: string, state: ViewShadowState, change?: ShadowKeyChange, connection?: ReadModelDb): void {
+  const db = connection ?? openShadowCounterDb(shadowCounterPath(path));
   try {
     db.exec("BEGIN IMMEDIATE");
     if (db.meta("shadow_migrated") !== "1") {
@@ -56,5 +57,5 @@ export function saveShadowCounter(path: string, legacy: Record<string, ViewShado
   } catch (error) {
     if (db.inTransaction()) db.exec("ROLLBACK");
     throw error;
-  } finally { db.close(); }
+  } finally { if (connection === undefined) db.close(); }
 }

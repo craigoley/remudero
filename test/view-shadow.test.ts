@@ -84,6 +84,12 @@ function closesFirst(t: TestCtx, what: string, close: () => unknown): void {
   cleanupOf(t).closers.push([what, close]);
 }
 
+function persistentStore(t: TestCtx, ...args: Parameters<typeof fileShadowStore>) {
+  const store = fileShadowStore(...args);
+  closesFirst(t, "shadow store closed", () => store.close?.());
+  return store;
+}
+
 function steppedClock(start = T0): Clock & { advance(ms: number): void } {
   let ms = start;
   return { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString(), advance: (by) => void (ms += by) };
@@ -366,7 +372,7 @@ test("current generation shadow qualification preserves old history and requires
   const old: ViewShadowState = { requests: 7, firstRequestMs: T0 - 2 * DAY, samples: 3000, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 3000, streakSinceMs: T0 - 2 * DAY, lastRealMs: null, streakKeys: ["oldShape"] };
   assert.equal(shadowReadiness("agent", old, T0).ready, true, "positive old-generation control is genuinely qualified");
   writeFileSync(path, JSON.stringify({ agent: old }));
-  const make = () => createViewShadow({ clock, log: () => {}, evidence: () => NONE, qualifications, store: fileShadowStore(path, db, lease.lease) });
+  const make = () => createViewShadow({ clock, log: () => {}, evidence: () => NONE, qualifications, store: persistentStore(t, path, db, lease.lease) });
   let shadow = make();
   assert.deepEqual([shadow.readiness()[0]!.samples, shadow.readiness()[0]!.ready], [0, false], "boot cannot inherit old qualification");
   const data = { recordVersion: generation, records: [] }, body = { data, asOf: null };
@@ -524,9 +530,9 @@ test("counters persist in the state dir file across a restart", (t) => {
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   const path = viewShadowPath(stateDir);
-  const first = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: fileShadowStore(path, db, got.lease) });
+  const first = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: persistentStore(t, path, db, got.lease) });
   first.compare({ view: "v", key: "", requests: 4, legacy: { data: 1, asOfMs: T0 }, body: { data: 2, asOf: null } });
-  const again = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: fileShadowStore(path, db, got.lease) });
+  const again = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: persistentStore(t, path, db, got.lease) });
   const [r] = again.readiness();
   assert.equal(r!.requests, 4);
   assert.equal(r!.diffs.real, 1);
@@ -545,7 +551,7 @@ test("counters an older build kept in the view_shadow table migrate to the state
   const path = viewShadowPath(stateDir);
   assert.equal(existsSync(path), false);
   assert.deepEqual(storedShadowReadiness(path, db, T0).map((s) => [s.view, s.samples, s.streakSamples]), [["v", 5, 5]], "readiness reads the table until the file exists");
-  const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: fileShadowStore(path, db, got.lease) });
+  const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: persistentStore(t, path, db, got.lease) });
   shadow.compare({ view: "v", key: "", requests: 1, legacy: { data: 1, asOfMs: T0 }, body: { data: 1, asOf: null } });
   const saved = fileShadowStore(path, db, got.lease).load();
   assert.deepEqual([saved.v!.samples, saved.v!.streakSamples, saved.v!.requests], [6, 6, 8], "the migrated streak continued and was written to the file");
