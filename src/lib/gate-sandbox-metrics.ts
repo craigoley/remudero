@@ -32,7 +32,7 @@ export function privateTmpBytes(
   if (mounts.length > 256 * 1024) throw Error("mount table exceeds measurement budget");
   const mount = mounts.split("\n").find(line => line.split(" ")[4] === "/tmp");
   const [left, right] = (mount ?? "").split(" - ");
-  if (!left || left.split(" ")[3] !== "/" || !right?.startsWith("tmpfs ") || left.split(" ").slice(6).some(field => /^(shared|master|propagate_from):/.test(field))) {
+  if (!left || left.split(" ")[3] !== "/" || right === undefined || !right.startsWith("tmpfs ") || left.split(" ").slice(6).some(field => /^(shared|master|propagate_from):/.test(field))) {
     throw Error("/tmp is not a dedicated private tmpfs mount");
   }
   const stat = statistics();
@@ -86,10 +86,10 @@ export function createGateSandboxMetrics(sources: Partial<GateSandboxSources> = 
       const bytes = source.tmp();
       if (!finiteSize(bytes)) throw Error("invalid /tmp boundary sample");
       peak = Math.max(peak, bytes);
-    } catch (error) { unknown ??= reason(error); }
+    } catch (error) { const unreadable = reason(error); unknown ??= unreadable; }
   };
   sample();
-  try { start = source.cache(); } catch (error) { unknown ??= reason(error); }
+  try { start = source.cache(); } catch (error) { const unreadable = reason(error); unknown ??= unreadable; }
   return {
     boundary: sample,
     observe<T>(run: () => T): T { try { return run(); } finally { sample(); } },
@@ -106,7 +106,7 @@ export function createGateSandboxMetrics(sources: Partial<GateSandboxSources> = 
           compile_cache: { files_start: start.files, files_end: end.files, bytes_start: start.bytes, bytes_end: end.bytes, start_scope: "after-module-load" },
           max_rss_kb: usage.maxRSS, cpu_ms: (usage.userCPUTime + usage.systemCPUTime) / 1000, resource_scope: "preflight-process",
         } };
-      } catch (error) { return { sandbox_unmeasured: unknown ?? reason(error) }; }
+      } catch (error) { const unreadable = unknown ?? reason(error); return { sandbox_unmeasured: unreadable }; }
     },
   };
 }
