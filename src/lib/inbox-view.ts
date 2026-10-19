@@ -16,7 +16,7 @@ import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot
 import { deriveTaskReferent, parseProposalRegistryResult, pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { buildInboxDismissalAudit, inboxDismissalReceipts } from "./inbox-dismissal-audit.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, lapseInboxKeeps, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
 import { projectWhyMeFeedback, type WhyMeFeedback } from "./inbox-why-me.js";
 import { writeVerdictReceipts } from "./inbox-verdict-receipts.js";
 import { readSnapshotCursor, snapshotCursor } from "./read-page.js";
@@ -149,6 +149,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   recordInboxFirstSeen(stateDir, proposals.map((p) => p.id), fixedClock(now).iso());
   // W1-T8831: a proposal that left the registry drops its archive/snooze mark. An empty registry read prunes nothing: it may be a torn read.
   if (!deps.inboxSourceIdentity && proposals.length > 0) pruneInboxTriage(stateDir, proposals.map((p) => p.id));
+  lapseInboxKeeps(stateDir, classified);
   // A decline outlives the live ledger's per-step carry cap: the receipts of every proposal still registered are kept.
   if (classified.verdictReceipts && proposals.length > 0) writeVerdictReceipts(stateDir, classified.verdictReceipts, proposals.map((p) => p.id));
   // The pass's own instant judges every snooze, so the persisted stores say which are still ahead and the view reads no clock.
@@ -197,7 +198,7 @@ const INBOX_STORE_SOURCE = `inbox-store:${INBOX_VIEW_INSTANCE}`;
 function inboxStoreSource(generatedAt: string, state: ViewSource["state"] = "fresh"): ViewSource {
   return { name: INBOX_STORE_SOURCE, asOf: generatedAt, state };
 }
-export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed"] as const;
+export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed", "kept"] as const;
 export type InboxViewSection = (typeof INBOX_VIEW_SECTIONS)[number];
 
 type Lanes = ReturnType<typeof inboxLanes>;

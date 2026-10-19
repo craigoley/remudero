@@ -93,7 +93,7 @@ test("W1-T8826: a decline, reframe or reply option names its route and its input
   assert.equal(inboxThreadId(ID), `thread:${ID}::inbox::-::-`);
 });
 
-test("W1-T8826: keep and untagged options carry no action", (t) => {
+test("W1-T8826: keep records a decision and untagged options carry no action", (t) => {
   for (const state of ["ready", "drafting", "not_ready", "deferred_with_trigger", "declined"] as const) {
     const { byLabel } = served(t, state, [
       TAGGED[0]!,
@@ -101,7 +101,9 @@ test("W1-T8826: keep and untagged options carry no action", (t) => {
       TAGGED[1]!,
     ]);
     assert.equal(byLabel("Keep parked").intent, "keep");
-    assert.equal(Object.hasOwn(byLabel("Keep parked"), "action"), false, state);
+    assert.deepEqual(byLabel("Keep parked").action, {
+      method: "POST", path: "/v1/inbox/keep", fields: { proposalId: ID }, input: "reason",
+    }, state);
     assert.equal(byLabel("Ask the author").intent, "reply", "an untagged stored option is served as a reply");
     assert.equal(Object.hasOwn(byLabel("Ask the author"), "action"), false, state);
     assert.deepEqual(byLabel("Request clearer proof").action, {
@@ -190,7 +192,9 @@ test("W1-T8826: actions are recomputed from the current lane without trusting st
     ledgerLines: Object.assign([], { torn: 0, present: true }),
   };
   const ready = inboxLanes(classified, root).ready[0]!.plain.options;
-  assert.equal(ready[0]!.action, undefined, "keep never inherits a stored action");
+  assert.deepEqual(ready[0]!.action, {
+    method: "POST", path: "/v1/inbox/keep", fields: { proposalId: ID }, input: "reason",
+  }, "keep replaces the stale approval route with its own decision route");
   assert.deepEqual(ready[1]!.action, { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: ID }, input: "feedback" });
   assert.deepEqual(ready[2]!.action, { method: "POST", path: "/v1/inbox/approve", fields: { proposalId: ID } });
 
@@ -233,7 +237,9 @@ test("W1-T8826: a carried slow-lane message recomputes actions for a deferred it
   assert.equal(deferred.ready.length, 0);
   const options = deferred.notReady[0]!.plain.options;
   assert.equal(options[0]!.intent, "keep");
-  assert.equal(options[0]!.action, undefined);
+  assert.deepEqual(options[0]!.action, {
+    method: "POST", path: "/v1/inbox/keep", fields: { proposalId: ID }, input: "reason",
+  });
   assert.equal(options[2]!.intent, "approve");
   assert.equal(options[2]!.action, undefined);
   assert.deepEqual(options[1]!.action, {
