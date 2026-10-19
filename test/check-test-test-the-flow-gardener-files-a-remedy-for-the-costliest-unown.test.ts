@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 // shared measurement is unmeasurable. The assertion now expects 'measuring'; this guard runs
 // that exact test through a real node --test child so a regression to the old verdict (or an
 // ordering/clock dependence) fails here with the child's output, not as a surprise fix round.
-const childEnv: NodeJS.ProcessEnv = { ...process.env };
+const childEnv: NodeJS.ProcessEnv = { ...process.env, NODE_V8_COVERAGE: undefined };
 delete childEnv.NODE_TEST_CONTEXT;
 
 test("W1-T9832: check:test:test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts:flaky is prevented, not retried", () => {
