@@ -52,6 +52,12 @@ test("W1-T9739: a sandboxed gate row names its tmp peak, compile cache and child
   assert.equal(failed.kind, "fail");
   assert.deepEqual(failed.kind === "fail" && failed.failedSteps, ["fixture-check"]);
   assert.deepEqual(preopenGateLedgerFields(failed).sandbox, cost);
+  const pushRefused = await runPreopenGate("/fixture", {
+    runGate: async () => ({ exitCode: 0, containment: "sandboxed", sandboxMetrics: { sandbox: cost as never } }),
+    runPushGate: async () => ({ kind: "refused", detail: "fixture push refusal" }),
+  });
+  assert.equal(pushRefused.kind, "fail");
+  assert.deepEqual(preopenGateLedgerFields(pushRefused).sandbox, cost);
 });
 
 test("W1-T9739: an unmeasured sandbox is named, never zero", async () => {
@@ -172,4 +178,21 @@ test("W1-T9739: measurement does not turn an injected spawn into a default summa
     assert.equal(await preflightCommand(["--no-fast", "--sandbox-metrics"], { spawn }), 0);
   } finally { console.log = log; }
   assert.ok(lines.some(line => line.includes("summary NOT written: an injected spawn")));
+});
+
+test("W1-T9739: observing preflight preserves its check commands and verdict", async () => {
+  const run = async (measured: boolean) => {
+    const calls: unknown[] = [], log = console.log;
+    try {
+      console.log = () => {};
+      const exit = await preflightCommand(["--no-fast", ...(measured ? ["--sandbox-metrics"] : [])], {
+        spawn: (file, args, opts) => { calls.push([file, args, opts]); return { status: 0, stdout: "", stderr: "" }; },
+      });
+      return { exit, calls };
+    } finally { console.log = log; }
+  };
+  const plain = await run(false), observed = await run(true);
+  assert.equal(plain.exit, 0);
+  assert.ok(plain.calls.length > 0);
+  assert.deepEqual(observed, plain);
 });

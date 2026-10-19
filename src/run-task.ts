@@ -30676,18 +30676,19 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
   const metrics = rest.includes("--sandbox-metrics") ? createGateSandboxMetrics() : undefined;
-  const spawn: PreflightSpawn | undefined = metrics
+  const fullTier = rest.some(arg => ["--ci-parity", "--coverage", "--proofs"].includes(arg));
+  const spawn: PreflightSpawn | undefined = metrics && !fullTier
     ? (file, args, opts) => metrics.observe(() => (deps.spawn ?? defaultPreflightSpawn)(file, args, opts))
     : deps.spawn;
   const boundary = <T>(run: () => T): T => metrics ? metrics.observe(run) : run();
 
-  const result = runPreflight(repoRoot, { ...deps, range, spawn });
+  const result = boundary(() => runPreflight(repoRoot, { ...deps, range, spawn }));
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
   // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn });
+  const fast = rest.includes("--no-fast") ? undefined : boundary(() => runPreflightFast(repoRoot, { spawn }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -30695,10 +30696,10 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
   const ciChecks = rest.includes("--no-fast")
     ? undefined
-    : preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn }));
+    : boundary(() => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
-    : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn }));
+    : boundary(() => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
   // Full-suite routes key containment/deadlines on the ORIGINAL spawn identity. Observe their
   // tier boundaries, never wrap their executor into the injected-spawn synchronous route.
   const ciParity = rest.includes("--ci-parity") ? boundary(() => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
