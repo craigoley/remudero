@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -83,6 +83,20 @@ test("W1-T9405: argv ownership and non-root invocations stay with the real compi
   assert.equal(through.stdout, direct.stdout);
   assert.doesNotMatch(through.stderr, /typecheck.raw_routed/);
   assert.equal(existsSync(p.info), false);
+});
+
+test("W1-T9405: unreadable git metadata keeps compiler ownership and a real spawn failure is explicit", async (t) => {
+  const p = project(t);
+  renameSync(join(p.dir, ".git"), join(p.dir, ".git-kept"));
+  writeFileSync(join(p.dir, ".git"), "invalid gitdir fixture\n");
+  const result = p.run(["--noEmit", "-p", ".", "--pretty", "false"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stderr, /typecheck.raw_routed/);
+  // @ts-ignore executable builtins-only module.
+  const { runTscEntry } = await import("#scripts/tsc-entry.mjs");
+  assert.equal(runTscEntry(["--version"], join(p.dir, "absent")), 127, "the default native spawn really fails ENOENT");
+  assert.equal(runTscEntry(["--version"], p.dir, () => ({ status: null, signal: "SIGTERM" })), 143);
+  assert.equal(runTscEntry(["--version"], p.dir, () => ({ status: null })), 1);
 });
 
 function managed(t: TestContext, managedLayout = true) {
