@@ -167,7 +167,8 @@ test("the shipped worker budget waits through pressure and admits after headroom
   void _mode; void _classModes;
   const { mode: _fixtureMode, classModes: _fixtureClasses, ...expectedThresholds } = POLICY;
   void _fixtureMode; void _fixtureClasses;
-  assert.deepEqual(thresholds, { ...expectedThresholds, serveColdStartReserveMib: 6144 });
+  // Operator ruling 2026-10-19: the shipped swap-in bound is 8192 pages/s; the fixture keeps 256.
+  assert.deepEqual(thresholds, { ...expectedThresholds, serveColdStartReserveMib: 6144, swapInPagesPerSecMax: 8192 });
   for (const workerClass of ["implement", "fix", "review", "advisory"] as const) {
     resetShadowMemoryStateForTests();
     resetMemoryAdmissionStateForTests();
