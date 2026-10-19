@@ -687,7 +687,8 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
 
   const unreserved = containerCurrent === null ? null : Math.max(0, containerCurrent - residentOwn);
   const owned = inputs.entries.filter(entry => entry.status === "owned");
-  const rssKnown = inputs.ledger.state === "present" && owned.every(entry => entry.walkComplete === true &&
+  const rssKnown = inputs.ledger.state === "present" && !inputs.entries.some(entry => entry.status === "uncertain") &&
+    owned.every(entry => entry.walkComplete === true &&
     "mib" in entry.resident && entry.resident.complete && entry.resident.rssMib !== undefined &&
     Number.isFinite(entry.resident.rssMib) && entry.resident.rssMib >= 0);
   const reservationRss = rssKnown ? owned.reduce((sum, entry) =>

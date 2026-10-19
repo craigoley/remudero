@@ -434,6 +434,9 @@ test("physical memory attribution stays unknown when its actual population is in
   const unwatched = evaluateShadowMemory(inputs({ entries: [entry({ id: "start", walkComplete: false,
     resident: { mib: 1500, rssMib: 100, complete: true } })] }), POLICY);
   assert.equal(unwatched.numbers.unattributedContainerMibApprox, null, "partial walks cannot certify the whole tree");
+  const uncertain = evaluateShadowMemory(inputs({ entries: [entry({ id: "start", status: "uncertain",
+    resident: { mib: 1500, rssMib: 100, complete: true } })] }), POLICY);
+  assert.equal(uncertain.numbers.reservationRssMib, null, "unknown ownership cannot masquerade as no owned RSS");
   const absent = evaluateShadowMemory(inputs({ ledger: { state: "missing" }, entries: [] }), POLICY);
   assert.equal(absent.numbers.reservationRssMib, null, "a missing ledger is not an empty ledger");
   const empty = evaluateShadowMemory(inputs({ entries: [] }), POLICY);
