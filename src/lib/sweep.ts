@@ -16474,7 +16474,9 @@ export async function runSweep(
         !stageRows.some(row => row.step === "automerge.armed")) diagnoses.push("review loop");
     const lastFix = currentRows.findLast(row => belongs(row) && row.step === "fix.done" && row.pushed_head_sha === pr.headSha);
     if (pr.mergeState === "dirty" && Array.isArray(lastFix?.parents) && lastFix.parents.length === 1) diagnoses.push("failed merge");
-    if (pr.taskId && isDispatchedRunBranch(pr.headRefName) && (deps.stuckStagePeers ?? openPrs).some(other => other.prNumber !== pr.prNumber &&
+    // W1-T5866: `unfiled` is every ad-hoc PR's branch-shape id, never one task's, so it names no duplicate build (#12906).
+    if (pr.taskId && pr.taskId !== UNFILED_RUN_SENTINEL && isDispatchedRunBranch(pr.headRefName) &&
+        (deps.stuckStagePeers ?? openPrs).some(other => other.prNumber !== pr.prNumber &&
         other.taskId === pr.taskId && isDispatchedRunBranch(other.headRefName) && other.headRefName !== pr.headRefName)) {
       diagnoses.push("duplicate build");
     }
