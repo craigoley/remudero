@@ -17,7 +17,7 @@ const survey = (marker: string | null = null): maintenance.MaintenanceSurvey => 
 const fresh = () => ({ nextEligibleAt: 0, nextSurveyAt: 0, failures: 0, escalated: false });
 
 test("W1-T3116: boot and dispatch never start, await or survey repository maintenance", async () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/cli/commands/daemon.ts", import.meta.url), "utf8");
   const rung = source.slice(source.indexOf("export async function logDiskReclaimRung("),
     source.indexOf("export function planReloader("));
   assert.doesNotMatch(rung, /reapGitObjectsAsync|activeWorkerProbes/);

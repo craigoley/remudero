@@ -15,8 +15,10 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { once } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createServer, type Socket } from "node:net";
+import { basename, join } from "node:path";
 
 import type { execFileSync } from "node:child_process";
 
@@ -35,6 +37,39 @@ const BOUND_MS = 1_000;
 const blockFor = (ms: number) =>
   `const sab = new Int32Array(new SharedArrayBuffer(4));\nAtomics.wait(sab, 0, 0, ${ms});`;
 
+/** A pathname socket crosses the sandbox's cwd bind without sharing its network or PID namespace. */
+function grandchildSocket(dir: string): string {
+  return process.platform === "win32" ? join("\\\\.\\pipe", basename(dir)) : join(dir, "s");
+}
+
+/** The real call and original timing assertion precede this fixture-only cleanup wait.
+ *  A sandbox kill closes the peer early; an unsandboxed orphan must finish its original self-bound.
+ *  SPIN_MS * 2 caps fixture resource lifetime, not added slack for the production spawner. */
+async function withGrandchildCompletion(dir: string, assertBound: () => void): Promise<void> {
+  const peers = new Set<Socket>();
+  const server = createServer((peer) => { peers.add(peer); peer.resume(); });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(grandchildSocket(dir), resolve);
+  });
+  const completed = (async () => {
+    const [peer] = await once(server, "connection", { signal: AbortSignal.timeout(SPIN_MS * 2) });
+    if (!peer.closed) await once(peer, "close", { signal: AbortSignal.timeout(SPIN_MS * 2) });
+  })();
+  try {
+    assertBound();
+  } finally {
+    try {
+      await completed;
+      assert.equal(peers.size, 1, "the real grandchild must connect and close before fixture completion");
+    } finally {
+      // Close only this fixture's own IPC objects, even after an assertion or cleanup failure.
+      for (const peer of peers) peer.destroy();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  }
+}
+
 /** A child that IGNORES SIGTERM and BLOCKS ITS MAIN THREAD: the shape that stalled the fleet.
  *  `Atomics.wait` rather than a busy loop — a blocked thread cannot run a signal handler either way,
  *  and this one does it at ~zero CPU so a suite about runaway children never becomes a load problem
@@ -45,11 +80,18 @@ function spinnerDir(): string {
     join(dir, "spin.js"),
     `process.on("SIGTERM", () => {});\n${blockFor(SPIN_MS)}\n`,
   );
+  // Lifetime observation only: retain the blocked main thread, inherited stdout and original bound.
+  writeFileSync(
+    join(dir, "grandchild.js"),
+    `require("node:net").connect(${JSON.stringify(grandchildSocket(dir))}, () => {\n` +
+      `process.on("SIGTERM", () => {});\n${blockFor(SPIN_MS)}\nprocess.exit(0);\n` +
+      `});\n`,
+  );
   // A parent that spawns a grandchild inheriting the same stdout pipe, then spins itself.
   writeFileSync(
     join(dir, "parent.js"),
     `const { spawn } = require("node:child_process");\n` +
-      `spawn(process.execPath, [${JSON.stringify(join(dir, "spin.js"))}], { stdio: ["ignore", "inherit", "ignore"] });\n` +
+      `spawn(process.execPath, [${JSON.stringify(join(dir, "grandchild.js"))}], { stdio: ["ignore", "inherit", "ignore"] });\n` +
       `process.on("SIGTERM", () => {});\n${blockFor(SPIN_MS)}\n`,
   );
   writeFileSync(join(dir, "quick.js"), `process.stdout.write("done-quickly");\n`);
@@ -82,12 +124,14 @@ test("W1-T3266: a child that ignores SIGTERM and spins does not outlive its boun
   );
 });
 
-test("W1-T3266: a grandchild holding the pipe does not keep the orchestrator blocked", () => {
+test("W1-T3266: a grandchild holding the pipe does not keep the orchestrator blocked; its fixture awaits peer closure", async () => {
   // The failure one level down: kill the direct child and a surviving grandchild can still hold the
   // stdout pipe the synchronous read is draining.
   const dir = spinnerDir();
-  const { ms } = elapsedThrough(dir, "parent.js");
-  assertWallClockBound(ms, SPIN_MS / 2, `a grandchild must not hold the spawner open; it took ${ms}ms`);
+  await withGrandchildCompletion(dir, () => {
+    const { ms } = elapsedThrough(dir, "parent.js");
+    assertWallClockBound(ms, SPIN_MS / 2, `a grandchild must not hold the spawner open; it took ${ms}ms`);
+  });
 });
 
 test("W1-T3266: a child that finishes INSIDE its bound is never signalled, and its stdout is intact", () => {

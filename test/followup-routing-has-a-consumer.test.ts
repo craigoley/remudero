@@ -243,8 +243,26 @@ test("followupProposalId is stable across calls for the same candidate and names
 // beside the pre-existing `recordFollowupHarvest` call this task's recon confirmed IS reached
 // (the real-run-only, non-dry-run gate `recordFollowupHarvest`'s own comment names).
 
-test("retroCommand's real-run path calls routeFollowupsToRegistry right alongside recordFollowupHarvest", () => {
+test("retroCommand's real-run path awaits followup publication before acknowledging the harvest", () => {
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(src, /publishFollowupHarvest\(gather\.followups, \{ registryPath: followupRegistryPath, ledgerPath \}\);/);
-  assert.match(src, /const followupRegistryPath = join\(config\.root, "state", "inbox-proposals\.json"\);/);
+  const anchor = src.indexOf("await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,");
+  assert.notEqual(anchor, -1, "the real command must await its cancelable publication boundary");
+  const nearby = src.slice(anchor, anchor + 1000);
+  // W1-T2601 WIDENED, NOT WEAKENED: the path may now be carried in `followupRegistryPath` so the
+  // producer and the retirement arm beside it provably share ONE registry rather than two identical
+  // string literals free to drift. The claim is unchanged — the producer is called on
+  // `gather.followups` in the same real-run block — and the variable form is pinned to its own
+  // definition below, so this cannot admit a call aimed at some other registry.
+  assert.match(
+    nearby,
+    /publishFollowupHarvestAsync\(gather\.followups,\s*\{ registryPath: followupRegistryPath, ledgerPath \}, \{ signal,/,
+    "publication must use the gathered harvest, shared registry and ledger with the attempt's signal",
+  );
+  if (/registryPath: followupRegistryPath, ledgerPath/.test(nearby)) {
+    assert.match(
+      src,
+      /const followupRegistryPath = join\(config\.root, "state", "inbox-proposals\.json"\);/,
+      "the variable form must resolve to the SAME inbox-proposals.json this assertion has always pinned",
+    );
+  }
 });
