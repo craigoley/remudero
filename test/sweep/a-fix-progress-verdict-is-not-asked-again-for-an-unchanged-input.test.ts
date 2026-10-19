@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
-import type { FixProgressJudge } from "#src/lib/fix-progress-judge.js";
+import { buildFixProgressInput, resolveFixProgress, type FixProgressJudge, type FixProgressWitness } from "#src/lib/fix-progress-judge.js";
 
 const TASK = "W1-T9502";
 const HEAD = "999a5dc";
@@ -84,4 +84,57 @@ test("W1-T9502: a reused change of approach retains its exact instruction", asyn
   for (let i = 0; i < 3; i++) await f.pass();
   assert.equal(f.calls(), 1);
   assert.deepEqual(f.rows.filter(row => row.step === "fix.progress_reused").map(row => row.approach), [approach, approach]);
+});
+
+test("W1-T9502: the newest answer owns the exact question, never an older continue", async () => {
+  const input = buildFixProgressInput({ prNumber: 11559, headSha: HEAD, currentRed: ["ci"], ledger: [], strikesSpent: 1 });
+  const witnesses = { reviewInputDigest: "body-A", contractRevision: "contract-A" };
+  const first = await resolveFixProgress(input, [], { ...witnesses, judge: async () => ({ verdict: "continue", reason: "readable" }) });
+  const older = { ...first.receipt, ...first.decision, pr_number: 11559, head_sha: HEAD, ts: "2026-10-14T03:44:00Z" };
+  for (const changed of [
+    { verdict: "unavailable", reason: "provider unavailable" }, { verdict: "continue", reason: "" },
+    { verdict: "change-approach", reason: "incomplete instruction", approach: " " },
+    { verdict: "escalate", reason: "authority required", loop: "same failure" },
+    { judge_skipped: "first-round" }, { ts: "not a timestamp" },
+  ]) {
+    let calls = 0;
+    const result = await resolveFixProgress(input, [older, { ...older, ...changed }], { ...witnesses,
+      judge: async () => { calls++; return { verdict: "continue", reason: "new judgment" }; } });
+    assert.equal(calls, 1, JSON.stringify(changed));
+    assert.equal(result.receipt.step, "fix.progress_judged");
+  }
+  for (const changed of [{ pr_number: 42 }, { head_sha: "other" }, { input_key: "other-question" }]) {
+    const result = await resolveFixProgress(input, [older, { ...older, ...changed }], witnesses);
+    assert.equal(result.receipt.step, "fix.progress_reused", "another tuple does not shadow this question");
+    assert.equal(result.receipt.judged_at, older.ts);
+  }
+  const round = { step: "fix.dispatch", pr_number: 11559, head_sha: HEAD, round_id: "new-round", ci_failures: ["ci"] };
+  const nextInput = buildFixProgressInput({ prNumber: 11559, headSha: HEAD, currentRed: ["ci"], ledger: [round], strikesSpent: 1 });
+  assert.equal((await resolveFixProgress(nextInput, [older], witnesses)).decision.verdict, "unavailable", "a new round asks again");
+});
+
+test("W1-T9502: missing input witnesses and unavailable real defaults never become cached permission", async () => {
+  const input = buildFixProgressInput({ prNumber: 11559, headSha: HEAD, currentRed: ["ci"], ledger: [], strikesSpent: 1 });
+  const unreadable: FixProgressWitness[] = [{}, { reviewInputDigest: "body-A" },
+    { reviewInputDigest: "", contractRevision: "contract-A" }, { reviewInputDigest: "body-A", contractRevision: "" }];
+  for (const witnesses of unreadable) {
+    let calls = 0;
+    const judge: FixProgressJudge = async () => { calls++; return { verdict: "continue", reason: "current evidence" }; };
+    const first = await resolveFixProgress(input, [], { ...witnesses, judge });
+    const row = { ...first.receipt, ...first.decision, pr_number: 11559, head_sha: HEAD, ts: "2026-10-14T03:44:00Z" };
+    assert.equal((await resolveFixProgress(input, [row], { ...witnesses, judge })).receipt.step, "fix.progress_judged");
+    assert.equal(calls, 2);
+  }
+  const witnesses = { reviewInputDigest: "body-A", contractRevision: null };
+  const absent = await resolveFixProgress(input, [], witnesses); // REAL default: no wired model, not a fake success.
+  assert.equal(absent.decision.verdict, "unavailable");
+  const thrown = await resolveFixProgress(input, [], { ...witnesses, judge: async () => { throw Error("provider refused"); } });
+  assert.equal(thrown.decision.verdict, "unavailable");
+  assert.match(thrown.decision.reason, /provider refused/);
+  const firstInput = { ...input, strikesSpent: 0 };
+  const firstRound = await resolveFixProgress(firstInput, [], { ...witnesses, firstRound: true });
+  assert.equal(firstRound.decision.verdict, "continue", "the unchanged first-round skip stays deterministic");
+  const first = await resolveFixProgress(input, [], { ...witnesses, judge: async () => ({ verdict: "continue", reason: "unfiled PR" }) });
+  const row = { ...first.receipt, ...first.decision, pr_number: 11559, head_sha: HEAD, ts: "2026-10-14T03:44:00Z" };
+  assert.equal((await resolveFixProgress(input, [row], witnesses)).receipt.step, "fix.progress_reused", "explicit no-contract is readable");
 });

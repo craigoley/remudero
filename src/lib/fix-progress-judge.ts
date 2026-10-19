@@ -398,7 +398,8 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
   opts: FixProgressWitness & { judge?: FixProgressJudge; firstRound?: boolean } = {},
 ): Promise<{ decision: FixProgressResult; receipt: { step: "fix.progress_judged" | "fix.progress_reused";
   input_key: string; judged_at?: string } }> {
-  const inputKey = createHash("sha256").update(JSON.stringify([input, opts.reviewInputDigest, opts.contractRevision])).digest("hex");
+  const inputKey = createHash("sha256").update(JSON.stringify({ input,
+    reviewInputDigest: opts.reviewInputDigest, contractRevision: opts.contractRevision })).digest("hex");
   const readable = Boolean(opts.reviewInputDigest?.trim()) && opts.contractRevision !== undefined &&
     (opts.contractRevision === null || opts.contractRevision.trim().length > 0);
   const newest = ledger.findLast(row => row.step === "fix.progress_judged" && row.pr_number === input.prNumber &&
