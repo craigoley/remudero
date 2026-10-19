@@ -5,9 +5,9 @@ import { test } from "node:test";
 const SELECTOR = "../src/lib/" + "affected-suites.js";
 
 const FILES = new Map([
-  ["src/root.ts", 'export { a } from "#test/a.js";'],
+  ["src/root.ts", 'export { a } from "./a.js";'],
   ["src/a.ts", "export const a = 1;"],
-  ["test/old.test.ts", 'import "#src/root.js";'],
+  ["test/old.test.ts", 'import "../src/root.js";'],
 ]);
 
 test("W1-T9413: check:test:test/the-affected-suite-reach-ratchet.test.ts:flaky is prevented, not retried", async () => {
