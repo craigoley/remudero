@@ -30905,6 +30905,7 @@ export function retroShippedGithubGateway(
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
+    cachedMerged: () => retroCachedShippedGateway(owner, repo, snapshotCache),
     unavailable: () => probeGithubThrottle(),
     // W1-T2288: backs `runlessMergesSince` (retro.ts) — the retro TRIGGER's only route to a
     // merge that has no run at all (a plan/triage/feedback filing). Full history, unscoped,
@@ -30930,6 +30931,22 @@ function retroShippedSnapshot(owner: string, repo: string, snapshotFor?: (owner:
     commitClosed: () => false,
     commitIssues: () => false,
     commitOpen: () => false,
+  };
+}
+
+/** W1-T10185: reuse the captured seed with the existing body index and P9 reducer, not a second
+ *  credit parser. No live fetch or commit-index subprocess may escape this hint. An uncaptured
+ *  commit-only credit can be omitted here: the hint can admit a refresh, never authorize a retry. */
+function retroCachedShippedGateway(owner: string, repo: string, snapshot: BoardSnapshotCache): ShippedGithub | undefined {
+  const seed = snapshot.closedSeed();
+  if (seed === undefined) return undefined;
+  const cached = buildBatchedGithub(owner, repo, {
+    fetchAll: () => [...seed.values()],
+    commitTrailerIndex: () => null,
+  });
+  return {
+    findMergedByTrailer: (taskId) => cached.findMergedByTrailer(taskId),
+    headRefName: (prUrl) => cached.headRefName(prUrl),
   };
 }
 
@@ -31037,6 +31054,7 @@ export async function retroShippedGithubGatewayAsync(
   return {
     findMergedByTrailer: (taskId) => read((github) => github.findMergedByTrailer(taskId)),
     headRefName: (prUrl) => read((github) => github.headRefName(prUrl)),
+    cachedMerged: () => retroCachedShippedGateway(owner, repo, snapshotCache),
   };
 }
 
@@ -31104,6 +31122,7 @@ export function mergedCommitsSnapshotGateway(github: ShippedGithub, read: Merged
   return {
     findMergedByTrailer: (taskId) => github.findMergedByTrailer(taskId),
     headRefName: (prUrl) => github.headRefName(prUrl),
+    cachedMerged: () => github.cachedMerged?.(),
     unavailable: () => github.unavailable?.(),
     mergedCommits: () => {
       if ("error" in read) throw read.error;
@@ -31227,8 +31246,9 @@ function reportRetroTriggerBackoff(
   ledgerPath: string,
   marker: { ts: string } | undefined,
   backoff: Extract<RetroBackoffDecision, { eligible: false }>,
+  count: { mergesSinceMarker: number; basis: "attempt-or-runless-lower-bound" | "cached-shipped-plus-runless" | "authoritative-shipped-plus-runless" },
 ): void {
-  const fingerprint = `${marker?.ts ?? "absent"}\u0000backoff\u0000${backoff.streak}\u0000${backoff.nextEligibleAt}`;
+  const fingerprint = `${marker?.ts ?? "absent"}\u0000backoff\u0000${backoff.streak}\u0000${backoff.nextEligibleAt}\u0000${count.basis}\u0000${count.mergesSinceMarker}`;
   if (
     lastRetroTriggerDecline?.ledgerPath === ledgerPath &&
     lastRetroTriggerDecline.fingerprint === fingerprint
@@ -31247,6 +31267,8 @@ function reportRetroTriggerBackoff(
       streak: backoff.streak,
       next_eligible_at: backoff.nextEligibleAt,
       merges_floor: backoff.mergesFloor,
+      merges_since_marker: count.mergesSinceMarker,
+      count_basis: count.basis,
     });
     lastRetroTriggerDecline = { ledgerPath, fingerprint };
   } catch {
@@ -31333,6 +31355,8 @@ interface RetroTriggerContext {
   runs: ReturnType<typeof gatherRuns>;
   taskIdsWithRuns: Set<string>;
   github: ShippedGithub;
+  lastAttempt: RetroAttemptRecord | undefined;
+  backoffPolicy: RetroBackoffPolicy;
 }
 
 /** Every LOCAL step of {@link retroTriggerCheck} — marker, policy, ledger parse and the back-off — over an already-read
@@ -31375,6 +31399,8 @@ function retroTriggerPrelude(
 
   const backoffPolicy = retroBackoffPolicyFor(policy);
   const lastAttempt = loadRetroAttemptRecord(retroAttemptPath(config.root));
+  // One gateway and one captured seed feed both the hint and the refreshed pass.
+  const github = deps.github ?? retroShippedGithubGateway();
   if (lastAttempt !== undefined && lastAttempt.markerTs === (marker?.ts ?? null)) {
     // W1-T4664 design (ii): still on the SAME marker cycle as the last recorded attempt — widen
     // the merges reading BEFORE the expensive per-run GitHub credit pass below, so a busy window
@@ -31382,19 +31408,25 @@ function retroTriggerPrelude(
     // own `git log` (retro.ts's `runlessMergesSince`), never a GitHub round-trip, so this costs
     // nothing extra on the common "still not yet" answer — exactly what
     // test/retro-trigger-check.test.ts's "survives daemon restart" case measures via `githubReads`.
-    // `Math.max` with the attempt's own recorded count keeps this a conservative LOWER BOUND on the
-    // real (GitHub-credited) total: it omits `shippedSince`'s per-run crediting, so it can only
-    // ever DELAY an early exit, never grant one the real count below would refuse.
-    const githubEarly = deps.github ?? retroShippedGithubGateway();
-    const runlessMergesEarly = runlessMergesSince(githubEarly.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
-    const mergesProxy = Math.max(lastAttempt.mergesSinceMarker, runlessMergesEarly.length);
-    const backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
+    const commits = github.mergedCommits?.() ?? [];
+    const runlessMergesEarly = runlessMergesSince(commits, marker?.ts, taskIdsWithRuns);
+    let mergesProxy = Math.max(lastAttempt.mergesSinceMarker, runlessMergesEarly.length);
+    let basis: "attempt-or-runless-lower-bound" | "cached-shipped-plus-runless" = "attempt-or-runless-lower-bound";
+    let backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
     if (!backoff.eligible) {
-      reportRetroTriggerBackoff(ledgerPath, marker, backoff);
+      const cached = github.cachedMerged?.();
+      if (cached !== undefined) {
+        const cachedCount = shippedSince(runs, marker?.ts, { ...cached, mergedCommits: () => commits }).shipped.length + runlessMergesEarly.length;
+        if (cachedCount > mergesProxy) { mergesProxy = cachedCount; basis = "cached-shipped-plus-runless"; }
+        backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
+      }
+    }
+    if (!backoff.eligible) {
+      reportRetroTriggerBackoff(ledgerPath, marker, backoff, { mergesSinceMarker: mergesProxy, basis });
       return { decided: undefined };
     }
   }
-  return { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github: deps.github ?? retroShippedGithubGateway() };
+  return { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github, lastAttempt, backoffPolicy };
 }
 
 /** The GitHub-backed rest of {@link retroTriggerCheckAsync}, given the probe's answer (`undefined` when GitHub is usable):
@@ -31435,6 +31467,12 @@ function retroTriggerDecide(now: Date, ctx: RetroTriggerContext, shipped: Shippe
   const { marker, policy, records, taskIdsWithRuns, github } = ctx;
   const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
   const mergesSinceMarker = shipped.length + runlessMerges.length;
+  // A stale hint can open the refreshed read, never a retry. Shared by both trigger paths.
+  const backoff = evaluateRetroBackoff(ctx.lastAttempt, mergesSinceMarker, marker?.ts, now, ctx.backoffPolicy);
+  if (!backoff.eligible) {
+    reportRetroTriggerBackoff(ctx.ledgerPath, marker, backoff, { mergesSinceMarker, basis: "authoritative-shipped-plus-runless" });
+    return undefined;
+  }
   // THE RETRO'S OWN INPUT, NOT THE FLEET'S ACTIVITY (W1-T2289). `openTitles` is intentionally
   // omitted (defaults to none): the trigger only needs to know something is WAITING, and the full
   // dedup-against-open-titles pass belongs to the real harvest a fired retro performs moments
