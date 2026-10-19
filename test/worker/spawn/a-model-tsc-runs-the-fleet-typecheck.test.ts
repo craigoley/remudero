@@ -14,8 +14,9 @@ const COMPILER = join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
 function project(t: TestContext) {
   const repo = gitRepo({ kind: "raw-tsc-project" });
   t.after(() => repo.cleanup());
-  const modules = join(repo.dir, "node_modules");
+  const modules = join(repo.dir, "dependency-fixture");
   mkdirSync(join(modules, ".bin"), { recursive: true });
+  symlinkSync(modules, join(repo.dir, "node_modules"));
   symlinkSync(join(REPO_ROOT, "node_modules", "typescript"), join(modules, "typescript"));
   symlinkSync(ENTRY, join(modules, ".bin", "tsc"));
   writeFileSync(join(repo.dir, "tsconfig.json"), JSON.stringify({ compilerOptions: { types: [], strict: true, noEmit: true }, files: ["input.ts"] }));
@@ -90,7 +91,7 @@ function managed(t: TestContext, managedLayout = true) {
   const repo = join(root.dir, managedLayout ? "repos/remudero" : "operator");
   mkdirSync(dirname(repo), { recursive: true });
   root.git("clone", "-q", root.dir, repo);
-  const modules = join(root.dir, "install", "node_modules");
+  const modules = join(root.dir, "install", "dependency-fixture");
   mkdirSync(join(modules, ".bin"), { recursive: true });
   mkdirSync(join(modules, "typescript", "bin"), { recursive: true });
   const original = join(modules, "typescript", "bin", "tsc");
@@ -98,6 +99,7 @@ function managed(t: TestContext, managedLayout = true) {
   const bin = join(modules, ".bin", "tsc"); symlinkSync("../typescript/bin/tsc", bin);
   const entry = join(root.dir, "install", "scripts", "tsc-entry.mjs");
   mkdirSync(dirname(entry), { recursive: true }); writeFileSync(entry, "fixture entry\n");
+  symlinkSync(modules, join(root.dir, "install", "node_modules"));
   symlinkSync(modules, join(repo, "node_modules"));
   execFileSync("git", ["-C", repo, "fetch", "-q", "origin", "main"]);
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
