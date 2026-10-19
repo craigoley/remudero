@@ -78,9 +78,13 @@
     https://www.typescriptlang.org/tsconfig/rootDir.html
     https://www.typescriptlang.org/tsconfig/typeRoots.html
   acceptance:
+    - claim: All alias fixture roots use the actual supplied scratch construction
+      proof: 'grep: return mkdtempSync(join(tmpdir(), "rmd-alias-fixture-")); in test/a-test-imports-through-the-subpath-alias.test.ts'
     - claim: Alias package fixtures retain real maps and donors within supplied scratch
+      kind: guard
       proof: 'unit test: alias fixture package uses supplied scratch and real source bindings'
     - claim: Codemod fixture placement and cleanup do not depend on writable checkout state
+      kind: guard
       proof: 'unit test: alias codemod fixtures use supplied scratch without mutating donors'
   falsifier: |
     Restore only checkout-local fixture-root construction while preserving all new and
