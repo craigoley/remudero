@@ -38,6 +38,7 @@ fs.readFileSync=(path,...args)=>{
     if(!row.native.outputComplete&&mode.startsWith("fault-")&&!faulted){
       faulted=true;
       if(mode==="fault-malformed")fs.writeFileSync(path,"{not a native receipt");
+      else if(mode==="fault-mismatched")fs.writeFileSync(path,JSON.stringify({...row.native,finishedAt:"a different capture"}));
       else {fs.unlinkSync(path);if(mode==="fault-directory")fs.mkdirSync(path);}
     }
   }
@@ -129,11 +130,13 @@ test("census capture retention preserves healthy cleanup and explicit fixture cu
   assert.equal(shared.retainFixture, retainFixture, "the old typed API must re-export ONE actual production registry");
   assert.equal(shared.fixtureRetentionReason(Buffer.from(run.observation.legacyDir)), undefined, "another producer's retention is not this process's authority");
   assert.throws(() => shared.retainFixture(run.observation.legacyDir, " "), /reason/);
+  retainFixture(run.observation.legacyDir, "this parent independently retains its own nested control");
+  assert.equal(shared.fixtureRetentionReason(Buffer.from(run.observation.legacyDir)), "this parent independently retains its own nested control");
   run.done();
 });
 
 test("census capture custody failures stay unknown without widening author admission", (t) => {
-  for (const mode of ["fault-missing", "fault-malformed", "fault-directory"]) {
+  for (const mode of ["fault-missing", "fault-malformed", "fault-directory", "fault-mismatched"]) {
     const run = producer(t, mode), observation = run.observation;
     assert.equal(observation.faulted, true); assert.equal(observation.native?.outputComplete, false);
     assert.equal(observation.native?.signal, "SIGTERM"); assert.equal(observation.native?.error, null); assert.equal(observation.closed, true);
