@@ -357,7 +357,7 @@ console.log(JSON.stringify(result));
     "worktree-git.mjs": 'export function leaf(depth, read) { return depth > 0 ? leaf(depth - 1, read) : read(); }',
     "budget-owner.mjs": 'import { leaf } from "./worktree-git.mjs";\nexport function readOwner(depth, read) { return leaf(depth, read); }',
   });
-  assert.match(result.inside.caller ?? "", /^at Module\.readOwner \(.*budget-owner\.mjs:2:\d+\)$/);
+  assert.match(result.inside.caller ?? "", /^at readOwner \(.*budget-owner\.mjs:2:\d+\)$/);
   assert.equal(result.inside.leaf, "leaf");
   assert.equal(result.inside.callerIsLeaf, undefined);
   assert.equal(result.outside.callerIsLeaf, true, "the next caller lies beyond exactly 49 returned slots");
@@ -588,6 +588,9 @@ test("W1-T9821: pending, rejected and nested heap reads keep their existing acco
     publishOtherSite(channel, parent);
     const live = book.live();
     const first = readWorkerHeaps(live, 20);
+    // Let the immediately rejected native request settle before advancing only the deadline
+    // clock. Otherwise the mock timer beats even an already-rejected promise's microtasks.
+    await new Promise<void>(resolve => setImmediate(resolve));
     t.mock.timers.tick(20);
     const timedOut = await first;
     const sameName = `${WORKER_HEAP_PREFIX}${live[0].kind}`;
