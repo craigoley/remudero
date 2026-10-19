@@ -1,0 +1,21 @@
+- id: coverage-ledger-refusal-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - ".github/workflows/ci.yml"
+    - "scripts/test-tier-manifest.mjs"
+    - "test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts"
+  fact: >-
+    When changing the coverage-ledger workflow or its resolver, preserve one immutable ledger choice
+    for the whole run: resolve it once, bind it to the run id and source SHA, and make each shard
+    verify the named artifact and full content digest before setup. A shard must fail on a missing,
+    malformed, mismatched, or unreadable resolved artifact instead of choosing a replacement or
+    falling back to a different ledger. Before pushing, run the focused coverage-ledger regression
+    test `test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts`.
+  evidence: >-
+    PR #12108 repaired the coverage-ledger refusal by resolving and validating one run-bound ledger,
+    retaining its immutable artifact across reruns, and checking every shard's selected content and
+    partition. The regression test covers the workflow wiring, resolver, actual emitted shells, and
+    failure cases for missing, malformed, mismatched, and unreadable artifacts.
+  src: "ci-learning:12108:coverage-ledger"
+  cited: "2026-10-19"

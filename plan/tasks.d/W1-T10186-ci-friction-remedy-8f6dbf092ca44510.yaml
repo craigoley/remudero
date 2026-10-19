@@ -1,0 +1,46 @@
+- id: W1-T10186
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — hand_fix:scripts/coverage-merge-ratchet.mjs cost 21.1 PR minute(s) across 5 round(s) on 5 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.26
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:hand_fix:scripts/coverage-merge-ratchet.mjs"
+  files:
+    - scripts/coverage-merge-ratchet.mjs
+    - test/ci/coverage/ci-friction-remedy-8f6dbf092ca44510.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on hand_fix:scripts/coverage-merge-ratchet.mjs"
+      proof: "grep: test(\"W1-T10186: hand_fix:scripts/coverage-merge-ratchet.mjs is prevented, not retried\" in test/ci/coverage/ci-friction-remedy-8f6dbf092ca44510.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:scripts/coverage-merge-ratchet.mjs's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: hand_fix:scripts/coverage-merge-ratchet.mjs cost 21.1 PR minute(s) across 5 red run(s) within the measured window on 5 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/coverage-merge-ratchet.mjs: repaired by hand in multiple distinct merged PRs
+
+    RECENT ROUNDS (newest first):
+    - PR #12820 at 2026-10-18T19:39:48Z: hand fix PR #12820: scripts/coverage-batches.mjs, scripts/coverage-merge-ratchet.mjs, src/lib/workspace-usage.ts; minutes are the pass median proxy (5.9502), not measured repair time
+    - PR #12796 at 2026-10-18T19:02:27Z: hand fix PR #12796: scripts/coverage-merge-ratchet.mjs, scripts/lib/coverage-chunk-codec.mjs; minutes are the pass median proxy (5.9502), not measured repair time
+    - PR #11834 at 2026-10-14T23:23:33Z: hand fix PR #11834: scripts/coverage-merge-ratchet.mjs; minutes are the pass median proxy (5.9502), not measured repair time
+    - PR #11602 at 2026-10-14T08:24:19Z: hand fix PR #11602: scripts/coverage-merge-ratchet.mjs, src/lib/test-impact-map.ts; minutes are the pass median proxy (5.9502), not measured repair time
+    - PR #9855 at 2026-10-07T12:45:59Z: hand fix PR #9855: scripts/coverage-merge-ratchet.mjs; minutes are the pass median proxy (5.9502), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are a coverage ratchet script (scripts/coverage-merge-ratchet.mjs) and a new test file under test/ci/coverage; neither is named as touching secrets, credentials, auth, permissions, deploy, merge policy or review policy."
+      - "The change is a remedy for a measured CI friction cause (5 hand-fix rounds on 5 PRs). It needs no operator-only decision, and its effect is measurable afterward by the gardener's before/after share comparison."
+      - "Acceptance is a grep-verifiable test in a named file, so the finding can be verified. The change is not irreversible, and it still passes CI and review."
+      - "The family track record (28 merged, 40 declined) calls for stricter scrutiny, but nothing in the description shows drift from the plan or any unusual change shape. The ratchet script is a CI-tooling file and the change is bounded to it plus a test."
+    judged_at: "2026-10-19T04:11:41.592Z"
+    pin: "bf1c2ef2955fc84e4075a65a7b755f0fbae77c7ab532360db4bc4fc412a49613"

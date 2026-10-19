@@ -12,7 +12,12 @@ export class SecurityMergeRefused extends RmdError {
  }
 }
 function targetFor(prUrl: string): { owner: string; repo: string; prNumber: number } | undefined {
- if (!prUrl.startsWith("https://github.com/craigoley/remudero/pull/")) return undefined; // Approval is CORE-only.
+ // Recognize core URL aliases before deciding scope; refuse them rather than silently skipping the guard.
+ let parsed: URL, parts: string[];
+ try { parsed = new URL(prUrl); parts = decodeURIComponent(parsed.pathname).split("/"); }
+ catch { throw new SecurityMergeRefused("unknown", "noncanonical-pr-target"); }
+ if (parsed.hostname.toLowerCase().replace(/\.$/, "") !== "github.com" ||
+     parts[1]?.toLowerCase() !== "craigoley" || parts[2]?.toLowerCase() !== "remudero") return undefined; // Approval is CORE-only.
  const number = /^https:\/\/github\.com\/craigoley\/remudero\/pull\/([1-9][0-9]*)$/.exec(prUrl)?.[1];
  if (!number || !Number.isSafeInteger(Number(number))) throw new SecurityMergeRefused("unknown", "noncanonical-pr-target");
  return { owner: "craigoley", repo: "remudero", prNumber: Number(number) };

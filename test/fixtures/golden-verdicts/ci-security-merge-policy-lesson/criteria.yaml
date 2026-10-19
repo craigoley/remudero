@@ -1,0 +1,2 @@
+- claim: the lane that trips the security-merge-policy gate is reached by a matched learnings entry rather than prose no dispatched worker reads
+  proof: "grep: ci-learning:11660:security-merge-policy in learnings/ci.yaml"

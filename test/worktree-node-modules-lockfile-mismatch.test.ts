@@ -195,6 +195,7 @@ test("W1-T2777 (d): `failed` is unchanged — a symlink that threw is `failed`, 
       throw new Error("ENOENT");
     },
     resolveSource: () => "/src/node_modules",
+    realpath: (path) => path,
     symlink: () => {
       throw new Error("EPERM");
     },
@@ -217,6 +218,7 @@ test("W1-T2777 (d): a hasher that VIOLATES its documented non-throwing contract 
       throw new Error("ENOENT");
     },
     resolveSource: () => "/src/node_modules",
+    realpath: (path) => path,
     symlink: () => {
       /* succeeds — link is made */
     },
