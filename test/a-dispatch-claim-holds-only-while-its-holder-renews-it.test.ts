@@ -15,6 +15,8 @@ import { test, mock } from "node:test";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 import { fixedClock } from "#src/lib/clock.js";
 import {
+  CLAIM_SILENCE_FLOOR_MS,
+  DISPATCH_CLAIM_RENEW_INTERVAL_MS,
   claimLastSignOfLife,
   claimRenewalMessage,
   claimSilenceWindow,
@@ -360,6 +362,18 @@ test("the window is the p90 of paired claim-to-verdict durations and the renewal
   assert.equal(decideClaimSilence({ ...base, anchor: undefined, nowMs }).verdict, "no-verdict");
   assert.match(decideClaimSilence({ ...base, mintedByThisInstance: true, nowMs }).reason, /fleet lane of this instance/);
   assert.match(decideClaimSilence({ ...base, lastSignOfLife: undefined, nowMs }).reason, /run branches are unreadable/);
+});
+
+test("W1-T9432: a measured W below two renewal intervals never reclaims a holder that is still renewing", () => {
+  const msg = claimRenewalMessage("rmd-dispatch claim 5@mac 2026-10-18T00:00:00.000Z\nrenewed 6@mac 2026-10-18T01:00:00.000Z", "6@mac 2026-10-18T02:00:00.000Z")!;
+  const anchor = parseClaimAnchorMessage(msg)!;
+  const short = { taskId: ID, anchor, lastSignOfLife: claimLastSignOfLife(anchor, msg), mintedByThisInstance: false, window: { windowMs: MIN, samples: 3 } };
+  const at = (ms: number) => decideClaimSilence({ ...short, nowMs: Date.parse("2026-10-18T02:00:00.000Z") + ms });
+  // A measured 2W of two minutes would reclaim a healthy holder between its five-minute renewals.
+  assert.equal(at(DISPATCH_CLAIM_RENEW_INTERVAL_MS).verdict, "alive");
+  assert.deepEqual([CLAIM_SILENCE_FLOOR_MS - 1, CLAIM_SILENCE_FLOOR_MS, 2 * CLAIM_SILENCE_FLOOR_MS - 1, 2 * CLAIM_SILENCE_FLOOR_MS].map((ms) => at(ms).verdict),
+    ["alive", "unrenewed", "unrenewed", "reclaim"]);
+  assert.match(at(2 * CLAIM_SILENCE_FLOOR_MS).reason, /W=600000ms \(p90 of 3 measured builds, 60000ms raised to two renewal intervals\)/);
 });
 
 test("an unreadable run branch, an unreadable anchor or a fleet lane's own claim is never judged", async () => {

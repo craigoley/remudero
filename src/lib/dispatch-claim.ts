@@ -964,12 +964,18 @@ export function decideClaimSilence(i: {
     return { verdict: "no-verdict", reason: `${ref} was minted by a fleet lane of this instance (its dispatch.claim created row), which the dead-claimant arm judges` };
   if (i.lastSignOfLife === undefined) return { verdict: "no-verdict", reason: `${ref}'s run branches are unreadable, so its last sign of life is unknown` };
   const silenceMs = Math.max(0, i.nowMs - i.lastSignOfLife.atMs);
+  const judged = Math.max(w, CLAIM_SILENCE_FLOOR_MS);
   const said = `${ref} is held by ${i.anchor.pid}@${i.anchor.host}, minted ${i.anchor.mintedAtIso}; its last sign of life ` +
-    `(${i.lastSignOfLife.source}) was ${i.lastSignOfLife.atIso}, ${silenceMs}ms ago, against W=${w}ms (p90 of ${i.window.samples} measured builds)`;
-  if (silenceMs >= 2 * w) return { verdict: "reclaim", silenceMs, reason: `${said} — silent for 2W or more; reclaiming` };
-  if (silenceMs >= w) return { verdict: "unrenewed", silenceMs, reason: `${said} — silent for W or more; keeping it` };
+    `(${i.lastSignOfLife.source}) was ${i.lastSignOfLife.atIso}, ${silenceMs}ms ago, against W=${judged}ms (p90 of ${i.window.samples} measured builds` +
+    `${judged > w ? `, ${w}ms raised to two renewal intervals` : ""})`;
+  if (silenceMs >= 2 * judged) return { verdict: "reclaim", silenceMs, reason: `${said} — silent for 2W or more; reclaiming` };
+  if (silenceMs >= judged) return { verdict: "unrenewed", silenceMs, reason: `${said} — silent for W or more; keeping it` };
   return { verdict: "alive", silenceMs, reason: `${said} — keeping it` };
 }
+
+/** A holder renews only every {@link DISPATCH_CLAIM_RENEW_INTERVAL_MS}, so silence shorter than two renewal intervals is no
+ *  evidence it stopped: a measured W below this would let 2W reclaim a healthy holder before its first renewal. */
+export const CLAIM_SILENCE_FLOOR_MS = 2 * DISPATCH_CLAIM_RENEW_INTERVAL_MS;
 
 export interface ClaimSilenceJudgeInputs {
   run: ClaimGitDepsAsync["run"];
