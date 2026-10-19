@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # verify-image — pull the published image and PROVE the toolchain is actually in it.
-#
 # WHY THIS EXISTS, AND IT IS NOT CONVENIENCE. Verifying by hand produced a confidently wrong
 # answer on 2026-08-08. Two commands were run back to back; the FIRST failed with a registry
 # authentication error, so nothing new came down, and the SECOND then ran the STALE LOCAL image
@@ -17,7 +16,6 @@
 # PLAIN BASH AND DOCKER, deliberately — the same discipline as scripts/fleet-heartbeat.sh. This
 # runs on a host that may have no node, no rmd and no checkout, and it must keep working when the
 # thing it is inspecting is broken.
-#
 # USAGE
 #   ./deploy/verify-image.sh                          # pull :latest and check it
 #   ./deploy/verify-image.sh --tag <sha>              # a specific tag instead of :latest
@@ -57,7 +55,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Validate before even a help/pin reader runs. Ambient remote defaults do not select local identity.
 if [ "${LOCAL_MODE}" -eq 1 ]; then
   if [ "${EXPLICIT_REMOTE}" -ne 0 ]; then
     echo "verify-image: --local-image-id conflicts with explicit remote image flags." >&2
@@ -151,14 +148,16 @@ if [ -n "${EXPECT_DIGEST}" ]; then
 fi
 fi
 
-# No arrays: preserve Bash 3 + nounset and the default published Docker argv exactly.
-probe_run() {
-  if [ "${LOCAL_MODE}" -eq 1 ]; then
-    docker run --pull=never --network=none "$@"
-  else
-    docker run "$@"
-  fi
-}
+if [ "${LOCAL_MODE}" -eq 1 ]; then
+  docker() {
+    if [ "${1:-}" = run ]; then
+      shift
+      command docker run --pull=never --network=none "$@"
+    else
+      command docker "$@"
+    fi
+  }
+fi
 
 # ── 5. THE CHECKS, RUN INSIDE THE IMAGE ──────────────────────────────────────────────────────
 # `--entrypoint /bin/sh` bypasses tini for the probe only; the image's own ENTRYPOINT is
@@ -234,7 +233,7 @@ fi
 echo
 echo "verify-image: checks inside ${AFTER}"
 set +e
-probe_run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CODEX_VERSION="${EXPECT_CODEX_VERSION}" -e EXPECT_BUILD_SHA="${LABEL_BUILD_SHA}" --entrypoint /bin/sh "${REF}" -c '
+docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CODEX_VERSION="${EXPECT_CODEX_VERSION}" -e EXPECT_BUILD_SHA="${LABEL_BUILD_SHA}" --entrypoint /bin/sh "${REF}" -c '
   fail=0
   # W1-T2571: infrastructure faults are counted SEPARATELY from product failures so the two can
   # be told apart in the summary; both still exit non-zero (see `exit` at the end of this probe).
@@ -556,7 +555,7 @@ set -e
 # command. A broken entrypoint makes every invocation fail, so it is worth one extra container.
 echo
 echo "verify-image: entrypoint exec path (bootstrap skipped — no token needed)"
-if out="$(probe_run --rm -e RMD_SKIP_BOOTSTRAP=1 "${REF}" \
+if out="$(docker run --rm -e RMD_SKIP_BOOTSTRAP=1 "${REF}" \
            sh -c 'echo entrypoint-reached' 2>&1)"; then
   if printf '%s' "$out" | grep -q 'entrypoint-reached'; then
     echo "  PASS  entrypoint runs and execs the command"
@@ -601,7 +600,7 @@ fi
 echo
 echo "verify-image: a commit succeeds as uid 1000 (through the entrypoint, no GIT_* env)"
 set +e
-out="$(probe_run --rm -e RMD_SKIP_BOOTSTRAP=1 --user 1000:1000 "${REF}" sh -c '
+out="$(docker run --rm -e RMD_SKIP_BOOTSTRAP=1 --user 1000:1000 "${REF}" sh -c '
   set -e
   d=$(mktemp -d)
   cd "$d"
@@ -660,7 +659,7 @@ fi
 echo
 echo "verify-image: bootstrap currency (offline, against a throwaway origin — no token needed)"
 set +e
-out="$(probe_run --rm --entrypoint /bin/sh "${REF}" -c '
+out="$(docker run --rm --entrypoint /bin/sh "${REF}" -c '
   set -e
   export GIT_AUTHOR_NAME=v GIT_AUTHOR_EMAIL=v@v GIT_COMMITTER_NAME=v GIT_COMMITTER_EMAIL=v@v
   root=$(mktemp -d)
@@ -764,7 +763,7 @@ fi
 echo
 echo "verify-image: process-inspection binaries run as uid 1000 (ps/pgrep for the sweeps, lsof for the reapers)"
 set +e
-out="$(probe_run --rm --entrypoint /bin/sh --user 1000:1000 "${REF}" -c '
+out="$(docker run --rm --entrypoint /bin/sh --user 1000:1000 "${REF}" -c '
   fail=0
   # Each binary is INVOKED. Exit codes verified against Debian bookworm: `ps -eo pid=` is 0,
   # `pgrep --version` is 0, `lsof -v` is 0. A bare `pgrep <pattern>` would be 1 on no match, which
