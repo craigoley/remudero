@@ -79,6 +79,13 @@ test("shadow evidence corruption is UNKNOWN rather than fallback to an older rea
   assert.equal(readFileSync(shadowCounterPath(f.path), "utf8"), "not a database");
 });
 
+test("a visible but uninitialized shadow database is UNKNOWN, never an older ready receipt", t => {
+  const f = fixture(t);
+  writeFileSync(f.path, JSON.stringify({ v: state(["old"]) }));
+  writeFileSync(shadowCounterPath(f.path), "");
+  assert.throws(() => storedShadowReadiness(f.path, f.db, NOW), /no such table: meta/);
+});
+
 test("a foreign or future shadow schema is refused without recovery or legacy import", t => {
   const f = fixture(t), db = openShadowCounterDb(shadowCounterPath(f.path));
   db.prepare("UPDATE meta SET v='2' WHERE k='schema_version'").run(); db.close();

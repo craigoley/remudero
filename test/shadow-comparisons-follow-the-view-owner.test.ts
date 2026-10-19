@@ -174,7 +174,15 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
     worker.stop(); await book.stop(); rmSync(dir, { recursive: true, force: true });
   });
   worker.start();
-  const state = () => readShadowCounters(viewShadowPath(dir), true)?.states["paired-worker"];
+  const state = () => {
+    try { return readShadowCounters(viewShadowPath(dir), true)?.states["paired-worker"]; }
+    catch (error) {
+      // A reader can see the new SQLite file before its first schema transaction commits.
+      // This is UNKNOWN, never an old receipt or a sample. Wait for the real committed control.
+      if ((error as { code?: string }).code === "ERR_SQLITE_ERROR" && /no such table: meta/.test(String(error))) return undefined;
+      throw error;
+    }
+  };
   // Native threads load the application under the flake screen's CPU contention before building.
   await until(() => logs.some((row) => row.step === "read_model.view_lane_moved" && row.extra.view === "paired-worker" && row.extra.to === "heavy"), 60_000);
   await until(() => existsSync(marks) && readFileSync(marks, "utf8").includes('"lane":"heavy"'), 60_000);
