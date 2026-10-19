@@ -80,7 +80,7 @@ function corpus(): Array<Record<string, unknown>> {
   fallback(["report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
     "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
     "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
-    "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error"], "pr_url", 300);
+    "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error", "review.semantic_incomplete", "review.semantic_setup_refused"], "pr_url", 300);
   for (const step of ["review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized", "retro.preflight_repair",
     "fix.done", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done"]) {
     rows.push({ step, run_id: `brain-${step}`, cost_usd: 0.1, ...call(), ts: at(m++) });

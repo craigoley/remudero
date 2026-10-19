@@ -26,6 +26,15 @@ async function captureReview(
   body: string,
   mode: "manual" | "semantic" | "sweep",
 ): Promise<{ args: CapturedReview; ledger: Record<string, unknown>[] }> {
+  const out = await captureReviewAttempt(body, mode);
+  assert.ok(out.args, "the real review command must reach runReview");
+  return { args: out.args, ledger: out.ledger };
+}
+
+async function captureReviewAttempt(
+  body: string,
+  mode: "manual" | "semantic" | "sweep",
+): Promise<{ args: CapturedReview | undefined; ledger: Record<string, unknown>[]; exitCode: unknown }> {
   const root = mkdtempSync(join(tmpdir(), "rmd-event-semantic-review-"));
   let captured: CapturedReview | undefined;
   try {
@@ -60,10 +69,10 @@ async function captureReview(
       ...(mode !== "manual" ? { executionMode: "semantic" as const } : {}),
     };
 
-    if (mode === "sweep") await reviewCommand("9999", ["--repo", "craigoley/remudero"], deps as never);
-    else await reviewCommand("codex/event-review-test", ["--repo", "craigoley/remudero"], deps as never);
+    const exitCode: unknown = mode === "sweep"
+      ? await reviewCommand("9999", ["--repo", "craigoley/remudero"], deps as never)
+      : await reviewCommand("codex/event-review-test", ["--repo", "craigoley/remudero"], deps as never);
 
-    assert.ok(captured, "the real review command must reach runReview");
     const ledgerPath = join(root, "state", "ledger.ndjson");
     const ledger = existsSync(ledgerPath)
       ? readFileSync(ledgerPath, "utf8")
@@ -72,7 +81,7 @@ async function captureReview(
           .filter(Boolean)
           .map((line) => JSON.parse(line) as Record<string, unknown>)
       : [];
-    return { args: captured, ledger };
+    return { args: captured, ledger, exitCode };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -115,24 +124,30 @@ test("manual rmd review remains deterministic-only by default", async () => {
   assert.equal(args.settingsFile, "");
 });
 
-test("semantic mode with no head-resolved task metadata names its deterministic fallback and invents no mount or budget", async () => {
+test("semantic mode with no head-resolved task metadata refuses by name and invents no mount or budget", async () => {
   const body = [
     "## Acceptance",
     "- the deterministic floor still runs | grep: review in src/lib/review.ts",
     "",
     "Remudero-Task: W1-T999999",
   ].join("\n");
-  const { args, ledger } = await captureReview(body, "semantic");
+  const { args, ledger, exitCode } = await captureReviewAttempt(body, "semantic");
 
-  assert.equal(args.spawnReviewer, false);
-  assert.equal(args.budgetUsd, undefined);
-  assert.equal(args.reviewerMount, undefined);
-  assert.equal(args.settingsFile, "");
+  // An explicitly selected semantic review must not degrade into a deterministic PASS that could
+  // auto-arm: the command refuses (exit 2) before runReview, so no mount, budget or settings exist.
+  assert.equal(args, undefined, "a refused semantic setup must never reach runReview");
+  assert.equal(exitCode, 2);
   assert.ok(
     ledger.some(
       (row) => row.step === "review.reviewer.skipped" && row.reason === "head-task-metadata-unavailable",
     ),
     "the durable ledger must distinguish missing task metadata from a completed semantic review",
+  );
+  assert.ok(
+    ledger.some(
+      (row) => row.step === "review.semantic_setup_refused" && row.reason === "head-task-metadata-unavailable",
+    ),
+    "the durable ledger must record the refusal itself",
   );
 });
 
