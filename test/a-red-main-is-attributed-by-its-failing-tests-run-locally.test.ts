@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import type { Config } from "../src/lib/config.js";
 import type { AsyncIssueGateway } from "../src/lib/escalate.js";
 import {
   buildMainHealthRung,
@@ -31,6 +32,7 @@ import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { mainRepairLaneFor } from "../src/run-task.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -263,7 +265,10 @@ test("a local probe runs off the rung and one lost to a restart is planned again
       return running;
     };
     const daemon = rig(w, lane, ledgerPath);
-    const pass = await Promise.race([daemon.observe().then(() => "returned"), new Promise((resolve) => setTimeout(() => resolve("blocked"), 5_000))]);
+    let timer: NodeJS.Timeout | undefined;
+    const blocked = new Promise((resolve) => (timer = setTimeout(() => resolve("blocked"), 5_000)));
+    const pass = await Promise.race([daemon.observe().then(() => "returned"), blocked]);
+    clearTimeout(timer);
     assert.equal(pass, "returned", "the rung returns while its local probe runs");
     const [bisecting] = rowsOf(ledgerPath, "main.repair.bisecting");
     assert.equal(bisecting?.method, "local-test");
@@ -315,6 +320,8 @@ test("an inconclusive local probe falls to CI and a local proof names its files"
       w.finished.add(c2);
       await daemon.observe();
       assert.deepEqual(lane.local.map(([probed]) => probed), [c2, c1], "its parent is still probed locally");
+      // The red now names another file: the parent's local run proves nothing about it.
+      if (changed) w.failingFile = "test/a-different-suite-now-fails.test.ts";
       await daemon.observe();
       const [located] = rowsOf(path, "main.repair.located");
       assert.equal(located?.offending_sha, c2);
@@ -324,7 +331,6 @@ test("an inconclusive local probe falls to CI and a local proof names its files"
       assert.deepEqual([evidence[1]!.sha, evidence[1]!.verdict, evidence[1]!.method, evidence[1]!.test_files], [c1, "green", "local-test", [FAILING_FILE]]);
 
       // The fix attempt ends with no PR, so the revert is weighed against the local proof.
-      if (changed) w.failingFile = "test/a-different-suite-now-fails.test.ts";
       await daemon.observe();
       await flush();
       if (!changed) {
@@ -337,5 +343,35 @@ test("an inconclusive local probe falls to CI and a local proof names its files"
         assert.match(String(withheld?.reason), /test\/a-different-suite-now-fails\.test\.ts/);
       }
     }
+  }),
+);
+
+test("W1-T9927: the production lane runs a commit's failing tests through the sweep's base reproduction probe",
+  inScratchDir(async (ledgerPath) => {
+    const config = { root: join(ledgerPath, "..") } as Config;
+    const built: Array<[string, string]> = [];
+    const probed: Array<[number, string, string[], string]> = [];
+    const unused = async () => {
+      throw new Error("not exercised");
+    };
+    const lane = mainRepairLaneFor(OWNER, "fixture-repo", config, ledgerPath, "R", unused, unused, (cfg, repoDir, path, log) => {
+      assert.equal(cfg, config);
+      built.push([repoDir, path]);
+      log("sweep.base_reproduction.cleanup_failed", { reason: "fixture" });
+      return async (pr, files, mainSha) => {
+        probed.push([pr.prNumber, pr.headSha, [...files], mainSha]);
+        return files.map((file, i) => ({ file, outcome: i === 0 ? ("fails" as const) : ("unrunnable" as const), duration_ms: 1, cached: false, ...(i === 0 ? {} : { reason: "no tsx" }) }));
+      };
+    });
+    const c2 = sha("c02");
+    assert.deepEqual(await lane.reproduceAt!(c2, [FAILING_FILE, "test/b.test.ts"]), [
+      { file: FAILING_FILE, outcome: "fails" },
+      { file: "test/b.test.ts", outcome: "unrunnable", reason: "no tsx" },
+    ]);
+    await lane.reproduceAt!(sha("c01"), [FAILING_FILE]);
+    assert.deepEqual(built, [[join(config.root, "repos", "fixture-repo"), ledgerPath]], "one probe, over the target's managed checkout");
+    assert.deepEqual(probed.map(([, head, files, at]) => [head, files, at]), [[c2, [FAILING_FILE, "test/b.test.ts"], c2], [sha("c01"), [FAILING_FILE], sha("c01")]]);
+    const [logged] = rowsOf(ledgerPath, "sweep.base_reproduction.cleanup_failed");
+    assert.deepEqual([logged?.run_id, logged?.task_id, logged?.lane], ["R", "MAIN-HEALTH", "main-repair"]);
   }),
 );

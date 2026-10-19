@@ -588,7 +588,7 @@ import {
   type RestRollupEntry,
   fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
-import { mainCeilingLogReducer, mainRepairRecordsFromLedger, mainRepairMergesBrief, withMainHealthOnLightPass, type MainCeilingLogVerdict, type MainRatchetRecordOutcome, type MainRatchetRecordRequest, type MainRepairFixRequest, type MainRepairLane, type MainRepairRevertOutcome, type MainRepairRevertRequest } from "./lib/main-health-rung.js";
+import { MAIN_HEALTH_TASK_ID, mainCeilingLogReducer, mainRepairRecordsFromLedger, mainRepairMergesBrief, withMainHealthOnLightPass, type MainCeilingLogVerdict, type MainRatchetRecordOutcome, type MainRatchetRecordRequest, type MainRepairFixRequest, type MainRepairLane, type MainRepairRevertOutcome, type MainRepairRevertRequest } from "./lib/main-health-rung.js";
 import { emailChannel, imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -50850,10 +50850,21 @@ export function mainRepairLaneFor(
   owner: string, repo: string, config: Config, ledgerPath: string, runId: string,
   dispatchFix: typeof dispatchMainRepairFixRun = dispatchMainRepairFixRun,
   openRevert: typeof openMainRepairRevertPr = openMainRepairRevertPr,
+  buildProbe: typeof buildBaseReproductionProbe = buildBaseReproductionProbe,
 ): MainRepairLane {
   // W1-T8572: the failing test files each fix request carried, so the revert of the same merge proves itself with them.
   const testFilesBySha = new Map<string, readonly string[]>();
+  // W1-T9927: the red's failing tests run at an unattributed commit through the sweep's own base probe, over the
+  // target's managed checkout: one queue, one ledger cache, one host memory budget. Built on first use.
+  let probe: ReturnType<typeof buildBaseReproductionProbe> | undefined;
+  const reproduceAt = async (sha: string, testFiles: readonly string[]) => {
+    probe ??= buildProbe(config, repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo), ledgerPath,
+      (step, extra = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: MAIN_HEALTH_TASK_ID, step, lane: "main-repair", ...extra }));
+    const outcomes = await probe({ prNumber: 0, headSha: sha } as OpenPrView, testFiles, sha);
+    return outcomes.map((entry) => ({ file: entry.file, outcome: entry.outcome, ...(entry.reason ? { reason: entry.reason } : {}) }));
+  };
   return {
+    reproduceAt,
     openFixPr: (request) => {
       testFilesBySha.set(request.offendingSha, request.testFiles);
       return dispatchFix(owner, repo, config, request, ledgerPath, runId);

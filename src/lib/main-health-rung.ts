@@ -423,6 +423,26 @@ export interface MainRepairLane {
   closePr?(prUrl: string, comment: string): Awaitable<void>;
   /** W1-T7760: runs CI on commits whose own push run was cancelled. Defaults to GitHub's REST over `fetch`. */
   probes?: MainRepairProbes;
+  /** W1-T9927: runs the red's failing test files at `sha`, one outcome per file (the base reproduction
+   *  probe). Absent, a cancelled span is attributed by CI probes alone. */
+  reproduceAt?(sha: string, testFiles: readonly string[]): Promise<readonly MainLocalTestOutcome[]>;
+}
+
+/** W1-T9927 — one test file's outcome when run locally at a commit. */
+export interface MainLocalTestOutcome {
+  readonly file: string;
+  readonly outcome: "fails" | "passes" | "absent" | "unrunnable";
+  readonly reason?: string;
+}
+
+/** W1-T9927 — a local probe's ref: no git ref, only its ledger name, never a CI probe's `rmd-attribution/`. */
+export const MAIN_LOCAL_PROBE_REF_PREFIX = "local-test/";
+
+/** W1-T9927 — what a local run of the red's test files at a commit says: any file failing is red; every
+ *  file passing, or absent (the test did not exist there, so this red could not), is green; else nothing. */
+export function localTestVerdict(outcomes: readonly MainLocalTestOutcome[]): MainProbeVerdict {
+  if (outcomes.some((entry) => entry.outcome === "fails")) return "red";
+  return outcomes.length > 0 && outcomes.every((entry) => entry.outcome === "passes" || entry.outcome === "absent") ? "green" : "inconclusive";
 }
 
 /** W1-T7760 — the workflow a probe runs. It carries ci-gate's required checks, has a
@@ -568,6 +588,25 @@ export function planMainBisection(input: {
   return { state: "probe", shas, strategy: "split-points", open, estimatedProbes: split, alternativeProbes: linear };
 }
 
+/** A concluded probe's evidence. A local probe (W1-T9927) carries `method: "local-test"` and its per-file outcomes. */
+export interface MainProbeEvidence {
+  verdict: MainProbeVerdict;
+  runUrl?: string;
+  runId?: number;
+  failingChecks: string[];
+  method?: "local-test";
+  outcomes?: MainLocalTestOutcome[];
+}
+
+/** The per-file outcomes a `probe_concluded` row recorded, or undefined when it recorded none. */
+function localOutcomesOfRow(value: unknown): MainLocalTestOutcome[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const kinds = new Set(["fails", "passes", "absent", "unrunnable"]);
+  return (value as Array<Record<string, unknown>>)
+    .filter((entry) => typeof entry?.file === "string" && kinds.has(String(entry.outcome)))
+    .map((entry) => ({ file: String(entry.file), outcome: entry.outcome as MainLocalTestOutcome["outcome"] }));
+}
+
 /** One red's bisection, folded from `main.repair.bisecting` and `main.repair.probe_concluded` rows. */
 export interface MainBisectionState {
   /** Probes dispatched and not yet concluded, by commit. */
@@ -575,7 +614,11 @@ export interface MainBisectionState {
   /** Concluded probes that said green or red, by commit. */
   readonly verdicts: Map<string, MainProbeVerdict>;
   /** Their evidence, by commit. */
-  readonly evidence: Map<string, { verdict: MainProbeVerdict; runUrl?: string; runId?: number; failingChecks: string[] }>;
+  readonly evidence: Map<string, MainProbeEvidence>;
+  /** W1-T9927: commits whose local probe concluded, whatever it said: none is run locally again. */
+  readonly localTried: Set<string>;
+  /** W1-T9927: the test files the newest local probe ran, for a pass that read no CI log. */
+  readonly localTestFiles: readonly string[];
   /** True once the bisection was dispatched at all. */
   readonly started: boolean;
   /** The located row that closed it, if one was written. */
@@ -588,13 +631,16 @@ export interface MainBisectionState {
 export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[], firstRedSha: string): MainBisectionState {
   const inFlight = new Map<string, MainProbeHandle>();
   const verdicts = new Map<string, MainProbeVerdict>();
-  const evidence = new Map<string, { verdict: MainProbeVerdict; runUrl?: string; runId?: number; failingChecks: string[] }>();
+  const evidence = new Map<string, MainProbeEvidence>();
+  const localTried = new Set<string>();
+  let localTestFiles: string[] = [];
   let started = false;
   let located = false;
   for (const line of lines) {
     if (line.first_red_sha !== firstRedSha && line.bisection_of !== firstRedSha) continue;
     if (line.step === "main.repair.bisecting" && Array.isArray(line.probes)) {
       started = true;
+      if (line.method === "local-test" && Array.isArray(line.test_files)) localTestFiles = line.test_files.map(String);
       for (const probe of line.probes as Array<Record<string, unknown>>) {
         if (typeof probe?.sha !== "string" || typeof probe.ref !== "string") continue;
         inFlight.set(probe.sha, {
@@ -606,6 +652,8 @@ export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[
       }
     } else if (line.step === "main.repair.probe_concluded" && typeof line.probe_sha === "string") {
       inFlight.delete(line.probe_sha);
+      const local = line.method === "local-test";
+      if (local) localTried.add(line.probe_sha);
       const verdict = line.verdict === "green" || line.verdict === "red" ? line.verdict : undefined;
       if (verdict) {
         verdicts.set(line.probe_sha, verdict);
@@ -614,6 +662,7 @@ export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[
           ...(typeof line.run_url === "string" ? { runUrl: line.run_url } : {}),
           ...(typeof line.run_id === "number" ? { runId: line.run_id } : {}),
           failingChecks: Array.isArray(line.failing_checks) ? line.failing_checks.map(String) : [],
+          ...(local ? { method: "local-test" as const, outcomes: localOutcomesOfRow(line.outcomes) ?? [] } : {}),
         });
       } else {
         verdicts.delete(line.probe_sha);
@@ -622,7 +671,7 @@ export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[
       located = true;
     }
   }
-  return { inFlight, verdicts, evidence, started, located };
+  return { inFlight, verdicts, evidence, localTried, localTestFiles, started, located };
 }
 
 /**
@@ -724,7 +773,15 @@ export interface MainRepairRecord {
   revertWithheld?: string;
   /** W1-T7760: set when the merge was located by probing CI on the cancelled commits before it; the
    *  probe runs, not main's push run history, are then its proof. */
-  bisected?: { parentSha: string; evidence: string; failingChecks: string[] };
+  bisected?: {
+    parentSha: string;
+    evidence: string;
+    failingChecks: string[];
+    /** W1-T9927: the files each side was run on locally, and their outcomes; a side proven by CI has none. */
+    local?: { offending?: MainLocalTestOutcome[]; parent?: MainLocalTestOutcome[] };
+  };
+  /** W1-T9927: the failing test files the located row named for this red. */
+  testFiles?: string[];
   /** W1-T8042: set when the sweep handed this red over from open PRs sharing it; `offendingSha` is then
    *  the merge base every affected PR contains and no green one does. */
   inherited?: { prs: number[]; testFiles: string[]; logExcerpt: string };
@@ -735,6 +792,15 @@ export interface MainRepairAttempt {
   headSha?: string;
   outcome?: "opened" | "no_pr";
   reason?: string;
+}
+
+/** W1-T9927 — a located row's `local_proof`, folded onto the record it starts. */
+function localProofOfRow(value: unknown): { local?: NonNullable<MainRepairRecord["bisected"]>["local"] } {
+  if (typeof value !== "object" || value === null) return {};
+  const proof = value as Record<string, unknown>;
+  const offending = localOutcomesOfRow(proof.offending);
+  const parent = localOutcomesOfRow(proof.parent);
+  return offending || parent ? { local: { ...(offending ? { offending } : {}), ...(parent ? { parent } : {}) } } : {};
 }
 
 /** W1-T6403 — every offending merge this lane has acted on, keyed by its sha. The ledger, not
@@ -758,6 +824,7 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
           ...(typeof line.offending_pr === "number" ? { offendingPr: line.offending_pr } : {}),
           failingChecks: Array.isArray(line.failing_checks) ? line.failing_checks.map(String) : [],
           ...(red ? { red } : {}),
+          ...(Array.isArray(line.test_files) ? { testFiles: line.test_files.map(String) } : {}),
           ...(line.method === "bisected-first-red" && typeof line.parent_sha === "string"
             ? {
                 bisected: {
@@ -766,6 +833,7 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
                     ? (line.probe_runs as Array<Record<string, unknown>>).map((probe) => `${String(probe.sha)} ${String(probe.verdict)} ${String(probe.run_url ?? "")}`.trim()).join("; ")
                     : "",
                   failingChecks: Array.isArray(line.probe_failing_checks) ? line.probe_failing_checks.map(String) : [],
+                  ...localProofOfRow(line.local_proof),
                 },
               }
             : {}),
@@ -1687,6 +1755,7 @@ export function buildMainHealthRung(
     record: MainRepairRecord,
     red: MainRedSignature,
     evidence: RepairEvidence | undefined,
+    redFiles: readonly string[] = [],
   ): Promise<{ proven: true; detail: string } | { proven: false; reason: string } | { unreadable: string }> => {
     const sha = record.offendingSha;
     if (record.bisected) {
@@ -1695,6 +1764,11 @@ export function buildMainHealthRung(
       const probed = record.bisected.failingChecks;
       if (probed.length > 0 && !mainRedSignaturesMatch(mainRedSignature(probed, undefined), red)) {
         return { proven: false, reason: `\`${sha}\`'s probe run is red on ${probed.join(", ")}, not on this repair's ${describeMainRed(red)}` };
+      }
+      if (record.bisected.local) {
+        // A pass on a red the lane already owns reads no CI log: the files its located row named are this red's.
+        const named = redFiles.length > 0 ? redFiles : (record.testFiles ?? []);
+        return proveLocalCulprit(sha, record.bisected.parentSha, record.bisected.local, named, record.bisected.evidence);
       }
       return {
         proven: true,
@@ -1733,6 +1807,51 @@ export function buildMainHealthRung(
     } catch (error) {
       return { unreadable: String((error as Error)?.message ?? error) };
     }
+  };
+  /** W1-T9927 — a culprit located by running test files locally is proven only when each side run locally
+   *  ran exactly the files this repair's red names: the culprit fails one, and its first parent fails none. */
+  const proveLocalCulprit = (
+    sha: string,
+    parentSha: string,
+    local: NonNullable<NonNullable<MainRepairRecord["bisected"]>["local"]>,
+    redFiles: readonly string[],
+    evidence: string,
+  ): { proven: true; detail: string } | { proven: false; reason: string } | { unreadable: string } => {
+    const named = [...new Set(redFiles)].sort();
+    // The failing log was not read this pass: nothing to compare with, so the next observation asks again.
+    if (named.length === 0) return { unreadable: `\`${sha}\` was bisected locally, and this pass read no test file from this repair's red` };
+    const list = (outcomes: readonly MainLocalTestOutcome[]) => [...new Set(outcomes.map((entry) => entry.file))].sort();
+    const sameFiles = (outcomes: readonly MainLocalTestOutcome[]) => {
+      const files = list(outcomes);
+      return files.length === named.length && files.every((file, index) => file === named[index]);
+    };
+    const parts: string[] = [];
+    if (local.offending) {
+      if (!sameFiles(local.offending)) {
+        return { proven: false, reason: `\`${sha}\` was run locally on ${list(local.offending).join(", ")}, not on the ${named.join(", ")} this repair's red names` };
+      }
+      const failing = local.offending.filter((entry) => entry.outcome === "fails").map((entry) => entry.file);
+      if (failing.length === 0) return { proven: false, reason: `\`${sha}\` fails none of ${named.join(", ")} locally` };
+      parts.push(`\`${sha}\` fails ${failing.join(", ")} locally`);
+    } else {
+      parts.push(`\`${sha}\`'s probe run is red`);
+    }
+    if (local.parent) {
+      if (!sameFiles(local.parent)) {
+        return {
+          proven: false,
+          reason: `its first parent \`${parentSha}\` was run locally on ${list(local.parent).join(", ")}, not on the ${named.join(", ")} this repair's red names`,
+        };
+      }
+      const notPassing = local.parent.filter((entry) => entry.outcome !== "passes" && entry.outcome !== "absent");
+      if (notPassing.length > 0) {
+        return { proven: false, reason: `its first parent \`${parentSha}\` does not pass ${notPassing.map((entry) => `${entry.file} (${entry.outcome})`).join(", ")} locally` };
+      }
+      parts.push(`its first parent \`${parentSha}\` passes ${named.join(", ")} locally (${local.parent.map((entry) => `${entry.file}: ${entry.outcome}`).join(", ")})`);
+    } else {
+      parts.push(`its first parent \`${parentSha}\` is green`);
+    }
+    return { proven: true, detail: `\`${sha}\` was bisected: ${parts.join(" and ")} (${evidence})` };
   };
   /** The fix-progress judge's ruling on whether another attempt at this red is warranted, recorded
    *  once per ended attempt; undefined when it could not rule this pass (asked again next pass). */
@@ -1832,7 +1951,7 @@ export function buildMainHealthRung(
       stalled = `${stalled}; the fix-progress judge ruled no further attempt: ${ruling.reason}`;
     }
     const at = { offending_sha: record.offendingSha, offending_pr: record.offendingPr, head_sha: sha };
-    const proof = await proveCulprit(record, red, ctx.evidence);
+    const proof = await proveCulprit(record, red, ctx.evidence, baseReproductionFiles(ctx.failures));
     if ("unreadable" in proof) {
       deps.log("main.repair.proof_unreadable", { ...at, error: proof.unreadable });
       return true;
@@ -1864,6 +1983,45 @@ export function buildMainHealthRung(
     return false;
   };
   let restProbes: MainRepairProbes | undefined;
+  /** W1-T9927: local probes this process started, keyed `<first red>:<sha>`, and those that settled. A probe
+   *  the ledger shows in flight that is in neither was lost to a restart. */
+  const localRunning = new Set<string>();
+  const localSettled = new Map<string, { verdict: MainProbeVerdict; outcomes: MainLocalTestOutcome[] }>();
+  /** W1-T9927 — runs `testFiles` at `probeSha` off the rung: the pass that starts it never awaits it. */
+  const startLocalProbe = (
+    lane: MainRepairLane,
+    probeSha: string,
+    testFiles: readonly string[],
+    at: { first_red_sha: string; after_green_sha: string },
+    row: Record<string, unknown>,
+  ): void => {
+    const key = `${at.first_red_sha}:${probeSha}`;
+    const ref = `${MAIN_LOCAL_PROBE_REF_PREFIX}${probeSha}`;
+    localRunning.add(key);
+    repairRow("main.repair.bisecting", { ...at, ...row, method: "local-test", probe_shas: [probeSha], probes: [{ sha: probeSha, ref }], test_files: [...testFiles] });
+    void Promise.resolve()
+      .then(() => lane.reproduceAt!(probeSha, testFiles))
+      .then(
+        (read) => ({ outcomes: testFiles.map((file) => read.find((entry) => entry.file === file) ?? { file, outcome: "unrunnable" as const, reason: "the probe returned no outcome" }) }),
+        (error) => ({ outcomes: testFiles.map((file): MainLocalTestOutcome => ({ file, outcome: "unrunnable" })), error: String((error as Error)?.message ?? error) }),
+      )
+      .then((result) => {
+        const verdict = localTestVerdict(result.outcomes);
+        localSettled.set(key, { verdict, outcomes: result.outcomes });
+        repairRow("main.repair.probe_concluded", {
+          ...at,
+          probe_sha: probeSha,
+          ref,
+          method: "local-test",
+          verdict,
+          test_files: [...testFiles],
+          outcomes: result.outcomes.map((entry) => ({ file: entry.file, outcome: entry.outcome, ...(entry.reason ? { reason: entry.reason } : {}) })),
+          ...("error" in result ? { reason: result.error } : {}),
+        });
+      })
+      .catch((error) => deps.log("main.repair.error", { ...at, probe_sha: probeSha, error: String((error as Error)?.message ?? error) }))
+      .finally(() => localRunning.delete(key));
+  };
   const spanCache = new Map<string, readonly string[] | null>();
   /** The unattributed commits between the first red's last green and it, newest first; undefined when
    *  main's first-parent chain could not be read between them (named in the log, never guessed). */
@@ -1925,6 +2083,25 @@ export function buildMainHealthRung(
     const required = ctx.evidence?.required ?? new Set<string>();
     const at = { first_red_sha: first.headSha, after_green_sha: first.afterGreenSha };
     for (const probe of [...state.inFlight.values()]) {
+      if (probe.ref.startsWith(MAIN_LOCAL_PROBE_REF_PREFIX)) {
+        const key = `${first.headSha}:${probe.sha}`;
+        const settled = localSettled.get(key);
+        if (settled) {
+          // Settled after this pass read the ledger: its concluded row is written, so it is adopted, never re-run.
+          state.inFlight.delete(probe.sha);
+          state.localTried.add(probe.sha);
+          if (settled.verdict === "inconclusive") state.verdicts.delete(probe.sha);
+          else {
+            state.verdicts.set(probe.sha, settled.verdict);
+            state.evidence.set(probe.sha, { verdict: settled.verdict, failingChecks: [], method: "local-test", outcomes: settled.outcomes });
+          }
+        } else if (!localRunning.has(key)) {
+          // In flight in the ledger, run by no process here: lost to a restart, so it is planned again.
+          state.inFlight.delete(probe.sha);
+          deps.log("main.repair.local_probe_lost", { ...at, probe_sha: probe.sha, ref: probe.ref });
+        }
+        continue;
+      }
       let reading: MainProbeReading;
       try {
         reading = await probes.read(probe);
@@ -1969,12 +2146,18 @@ export function buildMainHealthRung(
       });
     let plan = planFor(1);
     if (plan.state === "proven") {
-      const evidenceOf = (probed: string, fallbackUrl?: string) => ({
-        sha: probed,
-        verdict: probed === first.headSha || probed === first.afterGreenSha ? (probed === first.headSha ? "red" : "green") : (state.evidence.get(probed)?.verdict ?? "unknown"),
-        run_url: state.evidence.get(probed)?.runUrl ?? fallbackUrl ?? null,
-      });
+      const evidenceOf = (probed: string, fallbackUrl?: string) => {
+        const local = state.evidence.get(probed)?.method === "local-test" ? state.evidence.get(probed) : undefined;
+        return {
+          sha: probed,
+          verdict: probed === first.headSha || probed === first.afterGreenSha ? (probed === first.headSha ? "red" : "green") : (state.evidence.get(probed)?.verdict ?? "unknown"),
+          run_url: state.evidence.get(probed)?.runUrl ?? fallbackUrl ?? null,
+          ...(local ? { method: "local-test", test_files: (local.outcomes ?? []).map((entry) => entry.file), outcomes: local.outcomes ?? [] } : {}),
+        };
+      };
       const proven = plan;
+      const localOf = (probed: string) => (state.evidence.get(probed)?.method === "local-test" ? state.evidence.get(probed)?.outcomes : undefined);
+      const localProof = { ...(localOf(proven.offendingSha) ? { offending: localOf(proven.offendingSha) } : {}), ...(localOf(proven.parentSha) ? { parent: localOf(proven.parentSha) } : {}) };
       return {
         kind: "named",
         sha: proven.offendingSha,
@@ -1991,9 +2174,35 @@ export function buildMainHealthRung(
             ...[...state.evidence.keys()].filter((probed) => probed !== proven.offendingSha && probed !== proven.parentSha).map((probed) => evidenceOf(probed)),
           ],
           probe_failing_checks: state.evidence.get(proven.offendingSha)?.failingChecks ?? [],
+          ...(Object.keys(localProof).length > 0 ? { local_proof: localProof } : {}),
         },
         probeVerdicts: new Map([...state.verdicts, [first.headSha, "red" as const]]),
       };
+    }
+    // W1-T9927: with the red's failing test files known, the open commits are run locally first, one at a
+    // time (the base probe's queue runs one anyway). A commit whose local verdict was inconclusive is handed
+    // to a CI probe, and only such a commit: none is run locally twice.
+    const readFiles = lane.reproduceAt ? baseReproductionFiles(ctx.failures) : [];
+    const testFiles = readFiles.length > 0 ? readFiles : lane.reproduceAt ? [...state.localTestFiles] : [];
+    let handedToCi: string[] | undefined;
+    if (testFiles.length > 0) {
+      if ([...state.inFlight.values()].some((probe) => probe.ref.startsWith(MAIN_LOCAL_PROBE_REF_PREFIX))) return { kind: "probing" };
+      const local = planMainBisection({ green: first.afterGreenSha, red: first.headSha, span, verdicts: state.verdicts, inFlight: new Set(), concurrency: 1 });
+      if (local.state === "probe") {
+        const fresh = local.shas.find((probeSha) => !state.inFlight.has(probeSha) && !state.localTried.has(probeSha));
+        if (fresh !== undefined) {
+          startLocalProbe(lane, fresh, testFiles, at, {
+            head_sha: ctx.sha,
+            span: [...span],
+            open: [...local.open],
+            strategy: local.strategy,
+            estimated_probes: local.estimatedProbes,
+            alternative_probes: local.alternativeProbes,
+          });
+          return { kind: "probing" };
+        }
+        handedToCi = local.shas.filter((probeSha) => !state.inFlight.has(probeSha));
+      }
     }
     let load: MainRunnerLoad | undefined;
     let loadUnread: string | undefined;
@@ -2009,7 +2218,7 @@ export function buildMainHealthRung(
       const medianMs = medianCiRunMs(history);
       const started: MainProbeHandle[] = [];
       const refused: string[] = [];
-      for (const probeSha of plan.shas) {
+      for (const probeSha of handedToCi ?? plan.shas) {
         try {
           let handle = await probes.dispatch(probeSha);
           try {
