@@ -279,7 +279,9 @@ const prepare = Error.prepareStackTrace;
 const rows = [];
 let id = 0;
 try {
-  for (const value of [undefined, null, "7", NaN, -Infinity, -1, 0, 0.8, 1, 1.8, 2, 2.8, 7, ambient, 51, Infinity]) {
+  for (const value of [undefined, null, "7", NaN, -Infinity, -1, -0.8, -0, 0, 0.8, 1, 1.8,
+    2, 2.8, 2.9999999999999996, 3.9999999999999996, 7, 7.999999999999999,
+    15.999999999999998, 63.99999999999999, ambient, 51, Infinity]) {
     for (const depth of [0, 12, 60]) {
       Error.stackTraceLimit = value;
       const worker = Object.assign(new EventEmitter(), { threadId: ++id });
