@@ -734,14 +734,8 @@ function* remoteBranchTree(net: LandingNet, branch: string): Generator<LandingAs
   }
 }
 
-/**
- * W1-T9616: how origin/<branch> already carries this build, or `undefined` when it must be pushed.
- * Equal trees say so outright (`"tree"`), but once main moves under an open landing they never are.
- * The landing's OWN change is then compared instead: its raw diff over `ownedDir` from its merge base
- * with main, against the build's from main. Equal lines (old blob, new blob, path) mean the same records,
- * none of which main has touched since the branch's base (`"change"`). Staleness is the direct-merge
- * preflight's to judge (W1-T5748), never this sweep's. Any difference pushes, under the W1-T3560 lease.
- */
+/** W1-T9616: once main moves the trees never match, so compare the landing's OWN raw diff (from its merge base)
+ *  with the build's from main — equal means the same records, untouched by main. Staleness is W1-T5748's to judge. */
 function* branchCarries(net: LandingNet, kind: LandingKind, b: LandingTreeBuild): Generator<LandingAsk, "tree" | "change" | undefined, AskReply> {
   if ((yield* remoteBranchTree(net, kind.branch)) === b.treeSha) return "tree";
   if (!b.branchTipSha) return undefined;
@@ -1186,7 +1180,6 @@ function* finishLanding(
       catch (error) { next = steps.throw(error); }
     }
   };
-  // W1-T9616: an unchanged landing is not re-pushed because main moved — its PR head, CI and review stay.
   const carriedAlready = function* (b: LandingTreeBuild): Generator<LandingAsk, LandFeedbackResult | undefined, AskReply> {
     const carries = yield* branchCarries(net, kind, b);
     if (carries === undefined) return undefined;
