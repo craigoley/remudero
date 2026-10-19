@@ -110,7 +110,7 @@ test("shadow migration and append failures do not manufacture an initialized sto
   const f = fixture(t), broken = state();
   Object.defineProperty(broken, "samples", { get() { throw Error("serialize failed"); } });
   assert.throws(() => saveShadowCounter(f.path, { broken }, "v", state()), /serialize failed/);
-  assert.equal(readShadowCounters(f.path, true), undefined);
+  assert.throws(() => readShadowCounters(f.path, true), /migration is not committed/);
   saveShadowCounter(f.path, {}, "v", state(["x"]));
   assert.deepEqual(readShadowCounters(f.path, true)!.states.v!.streakKeys, ["x"]);
 });

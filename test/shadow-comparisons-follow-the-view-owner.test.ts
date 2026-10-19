@@ -180,6 +180,7 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
       // A reader can see the new SQLite file before its first schema transaction commits.
       // This is UNKNOWN, never an old receipt or a sample. Wait for the real committed control.
       if ((error as { code?: string }).code === "ERR_SQLITE_ERROR" && /no such table: meta/.test(String(error))) return undefined;
+      if (String(error) === "Error: shadow counter migration is not committed") return undefined;
       throw error;
     }
   };

@@ -14,7 +14,7 @@ export function readShadowCounters(path: string, includeKeys: boolean): { states
   const db = openShadowCounterDb(target, true);
   try {
     db.exec("BEGIN");
-    if (db.meta("shadow_migrated") !== "1") return undefined;
+    if (db.meta("shadow_migrated") !== "1") throw new Error("shadow counter migration is not committed");
     const states = Object.fromEntries(db.prepare("SELECT view, state FROM shadow_counter").all()
       .map(row => [String(row.view), JSON.parse(String(row.state)) as ViewShadowState]));
     const keyCounts = new Map(db.prepare("SELECT view, count(*) AS n FROM shadow_key GROUP BY view").all().map(row => [String(row.view), Number(row.n)]));
