@@ -25,7 +25,7 @@ RMD_HOST_OVERHEAD_MIB="${RMD_HOST_OVERHEAD_MIB:-2048}"               # OS, cloud
 RMD_BUILD_SWAP_MIB="${RMD_BUILD_SWAP_MIB:-4096}"                     # a build container pages its OWN memory
 RMD_MIN_BUILD_CEILING_MIB="${RMD_MIN_BUILD_CEILING_MIB:-2048}"
 RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-7680}"     # 0 = no hard limit; see resource_policy_serve_args
-RMD_SERVE_SWAP_MIB="${RMD_SERVE_SWAP_MIB:-1024}"
+RMD_SERVE_SWAP_MIB="${RMD_SERVE_SWAP_MIB:-2048}"                     # operator ruling 2026-10-19 (was 1024: 95% full)
 RMD_SERVE_CPUS="${RMD_SERVE_CPUS:-}"                                 # empty = no CPU quota, weight only
 RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-4096}"
 RMD_BUILD_CPU_SHARES="${RMD_BUILD_CPU_SHARES:-512}"
@@ -57,6 +57,37 @@ RMD_MEMORY_WEIGHTS="${RMD_MEMORY_WEIGHTS:-remudero-daemon=16 remudero-serve=10 r
 RMD_MEMORY_HIGH_FLOORS="${RMD_MEMORY_HIGH_FLOORS:-remudero-daemon=8192 remudero-serve=5632 remudero-console-daemon=2048 remudero-site-daemon=2304}"
 RMD_MEMORY_WEIGHT_UNLISTED="${RMD_MEMORY_WEIGHT_UNLISTED:-2}"
 RMD_MEMORY_HIGH_MAX_PCT="${RMD_MEMORY_HIGH_MAX_PCT:-95}" # a high never reaches its own memory.max
+
+# ── the daemons' memory flags: OPERATOR RULING 2026-10-19 ───────────────────────────────────────
+# Every daemon (core, site, console and serve) and every node process it starts. OBSERVED offline on
+# 2026-10-19 (logs-8864/mempress-eff-bench-matrix*.jsonl; a serve-shaped main plus four workers):
+# --max-semi-space-size=16 cut busy RSS from 1.41-1.65 GB to 1.02-1.12 GB at an unchanged wall time,
+# and new_space from 128 to 32 MiB; glibc arena_max 2 with a 128 KiB trim threshold cut the memory
+# still held after the workers exit by 20-25%. The node flag rides NODE_OPTIONS, which V8 applies to
+# the whole process (worker threads included) and which every child inherits: the daemon removes
+# only its heap ceiling from it (src/lib/daemon-memory-policy.ts withoutHeapCeiling). GLIBC_TUNABLES
+# rides the launch arguments below, so the launcher, a recycle, its smoke and serve all carry it.
+RESOURCE_POLICY_NODE_MEMORY_FLAGS="--max-semi-space-size=16"
+RESOURCE_POLICY_GLIBC_TUNABLES="glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"
+
+# NODE_OPTIONS $1 with the ruled memory flags: every earlier semi-space flag removed (`=N` and the
+# two-word form, either spelling), every other word kept in order, the ruled flags last.
+resource_policy_node_options() {
+  local words=() word out="" skip_next=0
+  read -r -a words <<<"${1:-}"
+  for word in "${words[@]+"${words[@]}"}"; do
+    if [ "${skip_next}" -eq 1 ]; then
+      skip_next=0
+      case "${word}" in '' | *[!0-9]*) : ;; *) continue ;; esac
+    fi
+    case "${word}" in
+      --max[-_]semi[-_]space[-_]size) skip_next=1; continue ;;
+      --max[-_]semi[-_]space[-_]size=*) continue ;;
+    esac
+    out="${out:+${out} }${word}"
+  done
+  printf '%s' "${out:+${out} }${RESOURCE_POLICY_NODE_MEMORY_FLAGS}"
+}
 
 RESOURCE_POLICY_NOTE=""
 
@@ -165,8 +196,12 @@ resource_policy_probe_memory_high() {
   fi
 }
 
-# serve gets protected memory (memory.low), a high CPU weight, and a hard memory ceiling that
-# bounds a leak rather than squeezing the working set. W1-T4102 left serve unlimited ("an
+# serve gets a high CPU weight and a hard memory ceiling that bounds a leak rather than squeezing
+# the working set. NO memory.low (operator ruling 2026-10-19): --memory-reservation set serve's
+# memory.low to 5 GiB, but system.slice holds memory.low=0, and the kernel limits a cgroup's
+# effective low boundary by its ancestors' (Documentation/admin-guide/cgroup-v2.rst), so it
+# protected nothing. RMD_SERVE_MEMORY_RESERVE_MIB stays as serve's share in the BUILD ceiling's
+# arithmetic below, where it still sizes every build daemon's memory.max. W1-T4102 left serve unlimited ("an
 # OOM-killed console backend is worse than a slow one"); the 2026-09-30 architecture ruling
 # (DECISIONS) reverses that: serve grew from 1.0-1.2 GiB to 2.2-3.6 GiB in a week with nothing
 # bounding it. 5 GiB is 1.4x the highest reading (3.64 GiB, page cache included, under a
@@ -174,12 +209,14 @@ resource_policy_probe_memory_high() {
 # serve's own page cache, then swaps up to RMD_SERVE_SWAP_MIB, and only then kills; the container
 # restarts itself. No CPU quota by default: the weight already wins contention, and a quota would
 # slow serve's cold reads on an idle host. RMD_SERVE_CPUS adds one without a code change.
+# Serve has no other NODE_OPTIONS, so its whole value is the ruled memory flags.
 resource_policy_serve_args() {
   RESOURCE_POLICY_SERVE_ARGS=(
-    "--memory-reservation=${RMD_SERVE_MEMORY_RESERVE_MIB}m"
     "--cpu-shares=${RMD_SERVE_CPU_SHARES}"
+    -e "NODE_OPTIONS=$(resource_policy_node_options "")"
+    -e "GLIBC_TUNABLES=${RESOURCE_POLICY_GLIBC_TUNABLES}"
   )
-  RESOURCE_POLICY_NOTE="serve: memory.low ${RMD_SERVE_MEMORY_RESERVE_MIB} MiB, cpu-shares ${RMD_SERVE_CPU_SHARES}"
+  RESOURCE_POLICY_NOTE="serve: cpu-shares ${RMD_SERVE_CPU_SHARES}, no memory.low, NODE_OPTIONS $(resource_policy_node_options ""), GLIBC_TUNABLES ${RESOURCE_POLICY_GLIBC_TUNABLES}"
   if [ "${RMD_SERVE_MEMORY_LIMIT_MIB}" -gt "${RMD_SERVE_MEMORY_RESERVE_MIB}" ]; then
     RESOURCE_POLICY_SERVE_ARGS+=("--memory=${RMD_SERVE_MEMORY_LIMIT_MIB}m" "--memory-swap=$((RMD_SERVE_MEMORY_LIMIT_MIB + RMD_SERVE_SWAP_MIB))m")
     RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, memory ceiling ${RMD_SERVE_MEMORY_LIMIT_MIB} MiB (+${RMD_SERVE_SWAP_MIB} MiB swap)"
@@ -203,7 +240,7 @@ resource_policy_serve_args() {
 # THAT container (its largest process, a test runner) — never serve.
 # $1 names the container (default the core daemon): its memory.high is its own share, not a shared one.
 resource_policy_build_args() {
-  RESOURCE_POLICY_BUILD_ARGS=("--cpu-shares=${RMD_BUILD_CPU_SHARES}")
+  RESOURCE_POLICY_BUILD_ARGS=("--cpu-shares=${RMD_BUILD_CPU_SHARES}" -e "GLIBC_TUNABLES=${RESOURCE_POLICY_GLIBC_TUNABLES}")
   local total ceiling container="${1:-remudero-daemon}"
   # shellcheck disable=SC2034 # RP_HIGH_POLICY is read by the tuner and the drift check
   RP_HIGH="" RP_HIGH_POLICY="" RP_HIGH_LEARNED=""
