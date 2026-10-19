@@ -6,17 +6,17 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import type { HeapInfo } from "node:v8";
 import { Worker } from "node:worker_threads";
-import { fixedClock } from "../../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   askNestedThreadHeaps, readWorkerHeaps, spawnSite, trackWorkerThreads,
   THREAD_HEAPS_ANSWER, THREAD_HEAPS_REQUEST, WORKER_HEAP_PREFIX,
   type WorkerHeapReading, type WorkerThread,
-} from "../../src/lib/worker-heaps.js";
+} from "#src/lib/worker-heaps.js";
 
-const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const WORKER_HEAPS = pathToFileURL(join(REPO_ROOT, "src/lib/worker-heaps.ts")).href;
 const READ_PLANE = pathToFileURL(join(REPO_ROOT, "src/lib/read-plane.ts")).href;
 const EMPTY_WORKER = 'new Worker("require(\'node:worker_threads\').parentPort.on(\'message\', () => {});", { eval: true, execArgv: [] })';
@@ -203,7 +203,7 @@ console.log(JSON.stringify(result));
     "child-entry-argv.mjs": `import { Worker } from "node:worker_threads";\nexport async function asyncHelper() { await Promise.resolve(); return ${EMPTY_WORKER}; }`,
     "runtime-labels.mjs": mappedModule([
       'import { Worker } from "node:worker_threads";',
-      'import { asyncHelper } from "./child-entry-argv.mjs";',
+      `import { asyncHelper } from ${JSON.stringify("./child-entry-argv.mjs")};`,
       `export const aliasOwner = { alias: function actualName() { return ${EMPTY_WORKER}; } };`,
       `export class Receiver { method() { return ${EMPTY_WORKER}; } }`,
       `export class Owner { constructor() { this.worker = ${EMPTY_WORKER}; } }`,
@@ -324,7 +324,7 @@ console.log(JSON.stringify({ rows }));
 });
 
 test("W1-T9821: the shared helper preserves the read-plane's 49 returned frames", async () => {
-  const { rawCallSites } = await import("../../src/lib/raw-call-sites.js");
+  const { rawCallSites } = await import("#src/lib/raw-call-sites.js");
   const prepare = Error.prepareStackTrace;
   const limit = Error.stackTraceLimit;
   function deep(depth: number, requested?: number): NodeJS.CallSite[] {
@@ -355,7 +355,7 @@ try {
 console.log(JSON.stringify(result));
 `, {
     "worktree-git.mjs": 'export function leaf(depth, read) { return depth > 0 ? leaf(depth - 1, read) : read(); }',
-    "budget-owner.mjs": 'import { leaf } from "./worktree-git.mjs";\nexport function readOwner(depth, read) { return leaf(depth, read); }',
+    "budget-owner.mjs": `import { leaf } from ${JSON.stringify("./worktree-git.mjs")};\nexport function readOwner(depth, read) { return leaf(depth, read); }`,
   });
   assert.match(result.inside.caller ?? "", /^at readOwner \(.*budget-owner\.mjs:2:\d+\)$/);
   assert.equal(result.inside.leaf, "leaf");
@@ -366,7 +366,7 @@ console.log(JSON.stringify(result));
 });
 
 test("W1-T9821: raw call sites restore the formatter and limit after success and capture failures", async () => {
-  const { rawCallSites } = await import("../../src/lib/raw-call-sites.js");
+  const { rawCallSites } = await import("#src/lib/raw-call-sites.js");
   const NativeError = Error;
   const prepare = Error.prepareStackTrace;
   const limit = Error.stackTraceLimit;
@@ -405,7 +405,7 @@ test("W1-T9821: raw call sites restore the formatter and limit after success and
 });
 
 test("W1-T9821: raw call sites restore the formatter when setting the limit fails", async () => {
-  const { rawCallSites } = await import("../../src/lib/raw-call-sites.js");
+  const { rawCallSites } = await import("#src/lib/raw-call-sites.js");
   const NativeError = Error;
   const prepare = Error.prepareStackTrace;
   const limit = Error.stackTraceLimit;
