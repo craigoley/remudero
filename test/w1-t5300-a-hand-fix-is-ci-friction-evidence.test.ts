@@ -139,3 +139,17 @@ test("the live garden reports unreadable manual evidence while still producing i
     assert.equal(spec.scorecard(inv, { actions: [], acting: [] }).hand_fixes && inv.priced.length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("a hand fix merged before a cause's first observed round is not that cause's evidence", () => {
+  const priced = priceCiFrictionCauses(rounds);
+  // rounds[0] first saw changed-nothing at 2026-10-01T10:00Z: a repair of its owner merged a day earlier predates it.
+  const early = { ...fix, pr: 7, at: "2026-09-30T10:00:00Z" };
+  assert.deepEqual(ciFrictionHandFixRounds([early], rounds, priced, search), []);
+  // The same file repaired twice before the cause was ever seen is a repeated hand fix of that file instead.
+  const repeated = ciFrictionHandFixRounds([early, { ...early, pr: 8 }], rounds, priced, search);
+  assert.deepEqual(repeated.map((r) => [r.pr, r.cause]), [[7, { kind: "hand_fix", name: "src/worker.ts" }], [8, { kind: "hand_fix", name: "src/worker.ts" }]]);
+  // At or after the first observed round the owner match still holds, and an undated round dates its cause from always.
+  assert.deepEqual(ciFrictionHandFixRounds([{ ...early, at: rounds[0]!.at }], rounds, priced, search).map((r) => r.cause.name), ["changed-nothing"]);
+  const undated = [{ ...rounds[0]!, at: undefined }, rounds[1]!];
+  assert.deepEqual(ciFrictionHandFixRounds([early], undated, priceCiFrictionCauses(undated), search).map((r) => r.cause.name), ["changed-nothing"]);
+});

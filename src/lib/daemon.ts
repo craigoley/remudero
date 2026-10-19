@@ -146,7 +146,7 @@ import { getHeapStatistics } from "node:v8";
 import { defaultLaneGovernorPorts, LANE_TARGET_STEP, laneTarget, laneTargetPayload, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
 import type { LaneGovernorMode } from "./policy.js";
 import {
-  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
+  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
 } from "./daemon-memory-policy.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
@@ -5605,7 +5605,7 @@ export async function runDaemon(
     // 2026-10-10: the V8 fraction never fired (75% of 8.4 GB of one isolate, at 4.5 GB RSS + 3 GB swap).
     // The governor (daemon-memory-policy.ts) judges RSS+swap against the cgroup budget: tighten first,
     // restart only past the tightest factor. The V8 fraction stays as the backstop with no budget.
-    const memoryStep = memoryGovernor.step();
+    const memoryStep = reclaimBeforeMemoryRestart(memoryGovernor.step(), memoryGovernor, log);
     if (memoryStep.futileRestart) log("daemon.memory_restart_futile", memoryStep.futileRestart);
     if (memoryStep.changed || memoryStep.initialReading) {
       log("daemon.memory_pressure", {

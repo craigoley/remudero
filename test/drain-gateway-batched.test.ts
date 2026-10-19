@@ -10,6 +10,7 @@ import { drainCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { DrainDeps, DrainSummary } from "../src/lib/drain.js";
 import { ghShim } from "./helpers/gh-shim.js";
+// @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 /**
  * `drainCommand` WAS THE LAST DISPATCH-PATH HOLDOUT ON THE UNBATCHED GATEWAY.
@@ -348,7 +349,7 @@ test("the gateway is constructed ONCE per drain, and each pass clears its failur
 // ── 5. the two commands' factories must not drift apart again ───────────────────────────────
 
 test("drainCommand keeps its batched gateway while daemonCommand adds target-rooted trailer credit", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8") + "\n" + readFileSync(new URL("../src/cli/commands/daemon.ts", import.meta.url), "utf8");
   const factories = src.split("\n").filter((l) => l.includes("const githubFactory = deps.githubFactory ??"));
   assert.equal(factories.length, 2, "exactly two commands assign the status gateway factory");
   assert.equal(
@@ -358,5 +359,5 @@ test("drainCommand keeps its batched gateway while daemonCommand adds target-roo
   );
   assert.match(factories[1], /gatewayFor/, "daemonCommand routes through its target-aware gateway factory");
   assert.match(src, /targetCommitTrailerIndex/);
-  assert.match(src, /trailerIndexFor: \(o, r\) => \(o === target\.owner && r === target\.repo \? targetCommitTrailerIndex : undefined\)/);
+  assert.match(src, /trailerIndexFor: \(o(?:: string)?, r(?:: string)?\) => \(o === target\.owner && r === target\.repo \? targetCommitTrailerIndex : undefined\)/);
 });

@@ -105,12 +105,17 @@ test("W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that
   // W1-T4998: `daemon.tick_phases` carries real elapsed milliseconds, which differ run to run.
   // W1-T8235: `lane.idle_changed` stamps `at_ms` from the same wall clock.
   // W1-T9072: so does `daemon.boot_first_dispatch`, from boot to its first selection and lane start.
+  // #12826: `daemon.memory_pressure` now logs the first reading, and its bytes are this process's real
+  // RSS and swap, which move between the two runs; its tier and decision fields are still compared.
+  const unmeasured = <T,>(reading: T) =>
+    reading && typeof reading === "object" ? { ...reading, rss_bytes: 0, swap_bytes: 0, charged_bytes: 0, share: 0 } : reading;
   const untimed = (lines: typeof clear.lines) =>
     lines.map((l) =>
       l.step === "daemon.tick_phases" ? { ...l, extra: { ...l.extra, ms_to_admission: 0, ms_in_cadences: 0 } }
         : l.step === "lane.idle_changed" ? { ...l, extra: { ...l.extra, at_ms: 0 } }
           : l.step === "daemon.boot_first_dispatch" ? { ...l, extra: { ...l.extra, boot_at: 0, first_selection_ms: 0, first_run_start_ms: 0 } }
-            : l);
+            : l.step === "daemon.memory_pressure" ? { ...l, extra: { ...unmeasured(l.extra), baseline: unmeasured(l.extra.baseline) } }
+              : l);
   assert.deepEqual(untimed(clear.lines), untimed(absent.lines));
   assert.equal(clear.lines.some((l) => l.step === "daemon.quiet_hours"), false);
 });
