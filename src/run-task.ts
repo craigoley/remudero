@@ -942,7 +942,8 @@ import {
   type PlanCoherenceShardListing,
   probeGithubThrottle,
   probeGithubThrottleAsync,
-  publishFollowupHarvest,
+  publishFollowupHarvestAsync,
+  withRetroPublicationCancellation,
   renderGather,
   renderNetStateUnwiredAdvisories,
   renderPlanHealth,
@@ -33714,10 +33715,13 @@ async function retroCommand(
     }
   }
 
-  // W1-T105/W1-T2458: publish through the existing registry writer before acknowledging the
-  // harvest. A lock/write failure must not permanently suppress the next pass's candidates.
+  // W1-T9240: the real attempt owns cancellation; waiting yields to a live async holder.
+  // Publication precedes harvest acknowledgements and remains below the dry-run/integrity guards.
   const followupRegistryPath = join(config.root, "state", "inbox-proposals.json");
-  publishFollowupHarvest(gather.followups, { registryPath: followupRegistryPath, ledgerPath });
+  await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,
+    { registryPath: followupRegistryPath, ledgerPath }, { signal,
+      log: (step, detail) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...detail }),
+    }));
 
   // W1-T2559: retro ships no code and supervises no worker, so G-17's Tier Invariant — which
   // exists to keep a supervisor strictly above what it reviews — does not bind it to plan
