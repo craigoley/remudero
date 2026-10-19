@@ -1685,3 +1685,196 @@ test("W1-T10209: queue cancellation preserves other owners and clears only its o
     thirdAbort.abort(); unknownAbort.abort(); await Promise.all([third, unknown]); await f.stop();
   }
 });
+
+test("W1-T10208: evaluating queue telemetry cancellation precedes strict reservation effects", async () => {
+  for (const cancel of [false, true]) {
+    const f = validationFixture(); await f.prime(); // Resets happen before either actor exists.
+    const startedAt = f.w.now.ms;
+    const other = { id: "other-owner", workerClass: "implement" as const, estimateMib: 900 };
+    const otherBefore = { ...other };
+    f.w.state.availableMib = 2500; f.w.running.entries = [other];
+    const headAbort = new AbortController(), stop = new AbortController();
+    const actors: Promise<unknown>[] = [];
+    const headSleeps: Array<{ ms: number; wake: () => void }> = [];
+    const ticks: Array<{ ms: number; wake: () => void }> = [];
+    let result: memoryAdmission.ValidationAdmissionOutcome | undefined;
+    let strictEvaluations = 0, evaluatingCalls = 0, strictSettled = false;
+    let effectsAtEvaluation: { opens: number; marked: boolean } | undefined;
+    const write = f.options.write!;
+    try {
+      const head = awaitMemoryAdmission({ ...request, workerClass: "review",
+        runId: "telemetry-legacy-head", signal: headAbort.signal }, {
+        ...f.options, sleep: ms => new Promise<void>(wake => { headSleeps.push({ ms, wake }); }),
+      });
+      actors.push(head);
+      assert.deepEqual(headSleeps.map(tick => tick.ms), [5000]);
+      const strict = f.run({
+        sleep: ms => new Promise<void>(wake => { f.w.sleeps.push(ms); ticks.push({ ms, wake }); }),
+        withLock: action => { strictEvaluations++; return f.options.withLock!(action); },
+        write: (path, row) => {
+          write(path, row);
+          if (row.step === QUEUE_STEP && row.run_id === validationRequest.runId && row.phase === "evaluating-head") {
+            evaluatingCalls++;
+            effectsAtEvaluation = { opens: f.opens(), marked: f.marked() };
+            if (cancel) stop.abort();
+          }
+        },
+      }, stop.signal);
+      actors.push(strict);
+      void strict.then(() => { strictSettled = true; }, () => { strictSettled = true; });
+      const queued = f.w.rows.find(row => row.step === QUEUE_STEP && row.run_id === validationRequest.runId && row.phase === "queued-behind-rank");
+      assert.ok(queued, "the real strict invocation must first queue behind the review");
+      assert.equal(queued.queue_position, 2); assert.equal(queued.queue_size, 2);
+      assert.equal(queued.ahead_worker_class, "review"); assert.equal(queued.worker_class, "test");
+      assert.equal(queued.sampled_at_ms, startedAt);
+      assert.equal(strictEvaluations, 0); assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
+      assert.deepEqual(f.w.sleeps, [5000]); assert.equal(ticks.length, 1);
+      assert.deepEqual(waitingStarts().map(waiter => waiter.workerClass), ["review", "test"]);
+
+      headAbort.abort();
+      for (const tick of headSleeps.splice(0)) tick.wake();
+      assert.equal((await head).kind, "abandoned");
+      f.w.state.availableMib = 9000;
+      const tick = ticks.shift(); assert.ok(tick);
+      f.w.now.ms += tick.ms; tick.wake();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(strictSettled, true, "one promoted complete-fit evaluation must settle; do not hide another wait");
+      assert.equal(ticks.length, 0);
+      result = await strict;
+      if (result.kind === "not-enforced") assert.fail("the existing enforce fixture must exercise strict admission");
+      assert.equal(evaluatingCalls, 1);
+      assert.deepEqual(effectsAtEvaluation, { opens: 0, marked: false });
+      assert.equal(result.waitedMs, 5000); assert.equal(result.attempts, 1);
+      if (cancel) {
+        const refused = validationRefused(result, "abandoned", "admission-abandoned");
+        assert.deepEqual(refused.details, ["admission-abandoned"]);
+        assert.equal(refused.cleanup, "none");
+        assert.deepEqual(refused.psiMark, { kind: "not-attempted" });
+        assert.equal(strictEvaluations, 0, "an evaluating-sink abort must precede locked evaluation");
+        assert.equal(f.opens(), 0, "the later post-publication abort check cannot substitute for zero publication");
+        assert.equal(f.releases(), 0); assert.equal(f.marked(), false);
+      } else {
+        assert.equal(result.kind, "ready", JSON.stringify(result));
+        if (result.kind !== "ready") assert.fail("healthy twin must prove the otherwise complete fit");
+        assert.equal(result.tier, "fits"); assert.equal(result.basis, "legacy-compatible-tree-peaks");
+        assert.equal(result.samples, 30); assert.equal(result.reservation.id, "fixture-grant-1");
+        assert.equal(strictEvaluations, 1); assert.equal(f.opens(), 1);
+        assert.equal(f.releases(), 0); assert.equal(f.marked(), true);
+      }
+      const own = f.w.rows.filter(row => row.step === QUEUE_STEP && row.run_id === validationRequest.runId);
+      assert.deepEqual(own.map(row => row.phase), ["queued-behind-rank", "evaluating-head", "settled"]);
+      assert.ok(own.every(row => row.admission_id === queued.admission_id && row.worker_assignment === "not-observed"));
+      const settled = own.filter(row => row.phase === "settled");
+      assert.equal(settled.length, 1); assert.equal(settled[0]?.cancelled, cancel);
+      assert.deepEqual(other, otherBefore); assert.deepEqual(waitingStarts(), []);
+      assert.ok(f.w.running.entries.includes(other), "the other owner's entry must remain present");
+    } finally {
+      headAbort.abort(); stop.abort();
+      for (const tick of headSleeps.splice(0)) tick.wake();
+      for (const tick of ticks.splice(0)) tick.wake();
+      await Promise.allSettled(actors);
+      // Only a returned own fixture handle needs test cleanup; refusal cleanup was asserted above.
+      if (result?.kind === "ready") result.reservation.releaseOccupancy();
+      assert.deepEqual(other, otherBefore); assert.deepEqual(waitingStarts(), []);
+      assert.ok(f.w.running.entries.includes(other), "cleanup must retain the other owner's entry");
+    }
+    assert.equal(f.releases(), cancel ? 0 : 1);
+  }
+});
+
+test("W1-T10208: settled queue telemetry cancellation refuses readiness without erasing recorded effects", async () => {
+  for (const cancel of [false, true]) {
+    const f = validationFixture(); await f.prime(); // Never reset shared state after starting a waiter.
+    const startedAt = f.w.now.ms;
+    const other = { id: "other-owner", workerClass: "implement" as const, estimateMib: 900 };
+    const otherBefore = { ...other };
+    f.w.state.availableMib = 2500; f.w.running.entries = [other];
+    const headAbort = new AbortController(), stop = new AbortController();
+    const actors: Promise<unknown>[] = [];
+    const headSleeps: Array<{ ms: number; wake: () => void }> = [];
+    const ticks: Array<{ ms: number; wake: () => void }> = [];
+    let result: memoryAdmission.ValidationAdmissionOutcome | undefined;
+    let strictEvaluations = 0, settledCalls = 0, strictSettled = false;
+    let effectsAtSettlement: { opens: number; releases: number; marked: boolean; aborted: boolean } | undefined;
+    const write = f.options.write!;
+    try {
+      const head = awaitMemoryAdmission({ ...request, workerClass: "review",
+        runId: "telemetry-legacy-head", signal: headAbort.signal }, {
+        ...f.options, sleep: ms => new Promise<void>(wake => { headSleeps.push({ ms, wake }); }),
+      });
+      actors.push(head);
+      assert.deepEqual(headSleeps.map(tick => tick.ms), [5000]);
+      const strict = f.run({
+        sleep: ms => new Promise<void>(wake => { f.w.sleeps.push(ms); ticks.push({ ms, wake }); }),
+        withLock: action => { strictEvaluations++; return f.options.withLock!(action); },
+        write: (path, row) => {
+          write(path, row);
+          if (row.step === QUEUE_STEP && row.run_id === validationRequest.runId && row.phase === "settled") {
+            settledCalls++;
+            effectsAtSettlement = { opens: f.opens(), releases: f.releases(), marked: f.marked(), aborted: stop.signal.aborted };
+            if (cancel) stop.abort();
+          }
+        },
+      }, stop.signal);
+      actors.push(strict);
+      void strict.then(() => { strictSettled = true; }, () => { strictSettled = true; });
+      const queued = f.w.rows.find(row => row.step === QUEUE_STEP && row.run_id === validationRequest.runId && row.phase === "queued-behind-rank");
+      assert.ok(queued, "settlement must belong to a genuinely queued strict invocation");
+      assert.equal(queued.queue_position, 2); assert.equal(queued.queue_size, 2);
+      assert.equal(queued.ahead_worker_class, "review"); assert.equal(queued.worker_class, "test");
+      assert.equal(queued.sampled_at_ms, startedAt);
+      assert.equal(strictEvaluations, 0); assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
+      assert.deepEqual(f.w.sleeps, [5000]); assert.equal(ticks.length, 1);
+
+      headAbort.abort();
+      for (const tick of headSleeps.splice(0)) tick.wake();
+      assert.equal((await head).kind, "abandoned");
+      f.w.state.availableMib = 9000;
+      const tick = ticks.shift(); assert.ok(tick);
+      f.w.now.ms += tick.ms; tick.wake();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(strictSettled, true, "one promoted complete-fit evaluation must finish before assertions");
+      assert.equal(ticks.length, 0);
+      result = await strict;
+      if (result.kind === "not-enforced") assert.fail("the existing enforce fixture must exercise strict admission");
+      assert.equal(strictEvaluations, 1); assert.equal(f.opens(), 1);
+      assert.equal(settledCalls, 1, "finally must not invoke the settled sink a second time");
+      assert.deepEqual(effectsAtSettlement, { opens: 1, releases: 0, marked: true, aborted: false });
+      const stored = JSON.parse(f.files.get(join(request.root, "state", "container-pressure.json"))!);
+      const expectedMark = { kind: "recorded", at: f.w.now.ms, sampleId: stored.validationObservation.sampleId };
+      assert.deepEqual(result.psiMark, expectedMark);
+      assert.equal(stored.psi.filter((row: number[]) => row[0] === f.w.now.ms && row[2] === 1).length, 1);
+      assert.equal(result.waitedMs, 5000); assert.equal(result.attempts, 1);
+      if (cancel) {
+        const refused = validationRefused(result, "abandoned", "admission-abandoned");
+        assert.deepEqual(refused.details, ["admission-abandoned"]);
+        assert.equal(refused.cleanup, "release-requested");
+        assert.equal(f.releases(), 1, "only the fresh unbound own fixture handle receives a release request");
+      } else {
+        assert.equal(result.kind, "ready", JSON.stringify(result));
+        if (result.kind !== "ready") assert.fail("healthy twin must retain the otherwise identical measured fit");
+        assert.equal(result.tier, "fits"); assert.equal(result.basis, "legacy-compatible-tree-peaks");
+        assert.equal(result.samples, 30); assert.equal(result.reservation.id, "fixture-grant-1");
+        assert.equal(f.releases(), 0);
+      }
+      assert.equal(stop.signal.aborted, cancel); assert.equal(f.marked(), true);
+      const own = f.w.rows.filter(row => row.step === QUEUE_STEP && row.run_id === validationRequest.runId);
+      assert.deepEqual(own.map(row => row.phase), ["queued-behind-rank", "evaluating-head", "settled"]);
+      assert.ok(own.every(row => row.admission_id === queued.admission_id && row.worker_assignment === "not-observed"));
+      const settled = own.filter(row => row.phase === "settled");
+      assert.equal(settled.length, 1);
+      assert.equal(settled[0]?.cancelled, false, "a row sampled before its own sink abort is not rewritten as later evidence");
+      assert.deepEqual(other, otherBefore); assert.deepEqual(waitingStarts(), []);
+      assert.ok(f.w.running.entries.includes(other), "the other owner's entry must remain present");
+    } finally {
+      headAbort.abort(); stop.abort();
+      for (const tick of headSleeps.splice(0)) tick.wake();
+      for (const tick of ticks.splice(0)) tick.wake();
+      await Promise.allSettled(actors);
+      if (result?.kind === "ready") result.reservation.releaseOccupancy();
+      assert.deepEqual(other, otherBefore); assert.deepEqual(waitingStarts(), []);
+      assert.ok(f.w.running.entries.includes(other), "cleanup must retain the other owner's entry");
+    }
+    assert.equal(f.releases(), 1, "healthy test cleanup and abort release-requested are distinct assertions above");
+  }
+});
