@@ -209,3 +209,21 @@ test("a rejected lane preserves the error exit instead of claiming a freshness e
     assert.equal(h.row("daemon.freshness_exit"), undefined);
   } finally { await h.finish(); }
 });
+
+test("two same-task detached actions retain separate release and abandonment evidence", async t => {
+  const h = latched(t), ci = deferred<void>(), worker = deferred<void>();
+  const phase = sweep.detachSweepAction(ci.promise, { actionKind: "fix-dispatch", taskId: "SHARED", phase: "worker" });
+  h.at(1);
+  sweep.detachSweepAction(worker.promise, { actionKind: "fix-dispatch", taskId: "SHARED", phase: "worker" });
+  try {
+    await h.latch(10); phase("ci-wait"); await h.settle(1200);
+    assert.equal((await h.daemon).stopReason, "stale");
+    const items = h.row("daemon.freshness_drain.completed")?.waited_on;
+    assert.equal(items.length, 2);
+    const released = items.find((x: any) => x.admitted_at_ms === h.start);
+    const abandoned = items.find((x: any) => x.admitted_at_ms === h.start + 1);
+    assert.equal(released.released, true); assert.equal(released.abandoned, undefined);
+    assert.equal(abandoned.abandoned, true); assert.equal(abandoned.released, undefined);
+    assert.equal(sweep.detachedSweepActionCount(), 2);
+  } finally { ci.resolve(); worker.resolve(); await h.finish(); }
+});

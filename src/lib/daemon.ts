@@ -6960,6 +6960,7 @@ export async function runDaemon(
     const settledHoldouts = new Set<string>();
     const measuredHoldouts = new Set<string>();
     const observeLaneSettlement = (id: string): void => {
+      if (!measuredHoldouts.has(id)) return;
       settledHoldouts.add(id);
       if (latchDrain && measuredHoldouts.has(id) && [...measuredHoldouts].every(task => settledHoldouts.has(task))) {
         freshnessPhases.holdouts = Math.max(0, daemonClock.now() - latchDrain.latchAtMs);
