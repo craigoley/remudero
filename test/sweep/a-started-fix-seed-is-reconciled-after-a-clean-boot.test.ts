@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fixSeedRead, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { rotateLedger } from "#src/lib/ledger.js";
 
 const HEAD = "6ed36e359c78e9bce1864fc05c5321457e5844a3";
 const OLD = "DAEMON-1792393697581";
@@ -96,4 +97,26 @@ test("a started fix seed re-enters the normal checkout claim without waiving a l
   const admitted = await pass(false);
   assert.equal(claims, 2, "a later pass can recheck the owner rather than awaiting a dead continuation");
   assert.equal(admitted.findLast(row => row.step === "sweep.disposed")?.acted, true);
+});
+
+test("a started fix seed preserves both empty and uncertain adoption evidence through real rotation", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-started-fix-rotation-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const steps = [undefined, "run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"];
+  for (const [i, step] of steps.entries()) {
+    const own = join(dir, String(i));
+    mkdirSync(own);
+    const ledgerPath = join(own, "ledger.ndjson");
+    const rows = [...timeline(), ...(step ? [{ step, task_id: TASK, run_id: "surviving-child" }] : [])];
+    const core = rows.map(row => JSON.stringify(row)).join("\n") + "\n";
+    const bytes = Buffer.byteLength(core);
+    writeFileSync(ledgerPath, core + JSON.stringify({ step: "ci.polling", padding: "x".repeat(bytes * 4) }) + "\n");
+    assert.equal(rotateLedger(ledgerPath, { ceilingBytes: bytes * 2 }).rotated, true);
+    const after = readLedgerLines(ledgerPath);
+    for (const expected of ["run_child.adoption_pass", ...(step ? [step] : [])]) {
+      assert.ok(after.some(row => row.step === expected), `${expected} is a decision input, not disposable telemetry`);
+    }
+    assert.equal(fixSeedRead(after, pr, CURRENT)?.kind, fixSeedRead(rows, pr, CURRENT)?.kind,
+      "rotation cannot manufacture either a surviving child or its absence");
+  }
 });
