@@ -188,6 +188,20 @@ test("operator ruling 2026-10-19: the policy merges its semi-space flag into any
   assert.equal(merge("--max-semi-space-size --trace-warnings"), "--trace-warnings --max-semi-space-size=16", "a two-word form never swallows a following flag");
 });
 
+test("operator ruling 2026-10-19: the rollback lever — emptied ruled values add nothing and drop a carried semi-space flag", () => {
+  const r = spawnSync(BASH, ["-c", [
+    'set -u; source "$1"; RESOURCE_POLICY_NODE_MEMORY_FLAGS=; RESOURCE_POLICY_GLIBC_TUNABLES=',
+    'printf "merge=[%s]\\n" "$(resource_policy_node_options "--max-old-space-size=8192 --max-semi-space-size=16")"',
+    'resource_policy_serve_args; printf "serve=%s\\n" "${RESOURCE_POLICY_SERVE_ARGS[*]}"; printf "note=%s\\n" "$RESOURCE_POLICY_NOTE"',
+    'resource_policy_build_args; printf "build=%s\\n" "${RESOURCE_POLICY_BUILD_ARGS[*]}"',
+  ].join("\n"), "p", join(REPO_ROOT, "deploy", "resource-policy.sh")], { encoding: "utf8", env: { ...process.env, RMD_MEMINFO_PATH: "/nonexistent" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^merge=\[--max-old-space-size=8192\]$/m, "the heap ceiling alone, no trailing space");
+  assert.match(r.stdout, /^serve=--cpu-shares=4096 --memory=7680m --memory-swap=9728m$/m, "no -e at all");
+  assert.match(r.stdout, /^note=serve: cpu-shares 4096, no memory\.low, NODE_OPTIONS none, GLIBC_TUNABLES none/m);
+  assert.match(r.stdout, /^build=--cpu-shares=512$/m);
+});
+
 test("operator ruling 2026-10-19: every build daemon launch carries the glibc malloc tuning", () => {
   const { args } = recycle(HOST_MIB);
   assert.ok(args.includes("GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"), args.join(" "));

@@ -67,8 +67,17 @@ RMD_MEMORY_HIGH_MAX_PCT="${RMD_MEMORY_HIGH_MAX_PCT:-95}" # a high never reaches 
 # the whole process (worker threads included) and which every child inherits: the daemon removes
 # only its heap ceiling from it (src/lib/daemon-memory-policy.ts withoutHeapCeiling). GLIBC_TUNABLES
 # rides the launch arguments below, so the launcher, a recycle, its smoke and serve all carry it.
+# ROLLBACK LEVER: empty either value. An empty flag list still removes a carried semi-space flag at
+# the next launch, and an empty tuning adds no GLIBC_TUNABLES. Do not revert the recycle's acceptance
+# of GLIBC_TUNABLES (deploy/recycle-container.sh) while a running container still carries it.
 RESOURCE_POLICY_NODE_MEMORY_FLAGS="--max-semi-space-size=16"
 RESOURCE_POLICY_GLIBC_TUNABLES="glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"
+
+# The `-e GLIBC_TUNABLES=...` launch arguments, in RP_GLIBC_ARGS; none when the tuning is empty.
+resource_policy_glibc_args() {
+  RP_GLIBC_ARGS=()
+  [ -z "${RESOURCE_POLICY_GLIBC_TUNABLES}" ] || RP_GLIBC_ARGS=(-e "GLIBC_TUNABLES=${RESOURCE_POLICY_GLIBC_TUNABLES}")
+}
 
 # NODE_OPTIONS $1 with the ruled memory flags: every earlier semi-space flag removed (`=N` and the
 # two-word form, either spelling), every other word kept in order, the ruled flags last.
@@ -86,7 +95,8 @@ resource_policy_node_options() {
     esac
     out="${out:+${out} }${word}"
   done
-  printf '%s' "${out:+${out} }${RESOURCE_POLICY_NODE_MEMORY_FLAGS}"
+  if [ -n "${out}" ] && [ -n "${RESOURCE_POLICY_NODE_MEMORY_FLAGS}" ]; then out="${out} "; fi
+  printf '%s' "${out}${RESOURCE_POLICY_NODE_MEMORY_FLAGS}"
 }
 
 RESOURCE_POLICY_NOTE=""
@@ -211,12 +221,13 @@ resource_policy_probe_memory_high() {
 # slow serve's cold reads on an idle host. RMD_SERVE_CPUS adds one without a code change.
 # Serve has no other NODE_OPTIONS, so its whole value is the ruled memory flags.
 resource_policy_serve_args() {
-  RESOURCE_POLICY_SERVE_ARGS=(
-    "--cpu-shares=${RMD_SERVE_CPU_SHARES}"
-    -e "NODE_OPTIONS=$(resource_policy_node_options "")"
-    -e "GLIBC_TUNABLES=${RESOURCE_POLICY_GLIBC_TUNABLES}"
-  )
-  RESOURCE_POLICY_NOTE="serve: cpu-shares ${RMD_SERVE_CPU_SHARES}, no memory.low, NODE_OPTIONS $(resource_policy_node_options ""), GLIBC_TUNABLES ${RESOURCE_POLICY_GLIBC_TUNABLES}"
+  local serve_node_options
+  serve_node_options="$(resource_policy_node_options "")"
+  resource_policy_glibc_args
+  RESOURCE_POLICY_SERVE_ARGS=("--cpu-shares=${RMD_SERVE_CPU_SHARES}")
+  [ -z "${serve_node_options}" ] || RESOURCE_POLICY_SERVE_ARGS+=(-e "NODE_OPTIONS=${serve_node_options}")
+  RESOURCE_POLICY_SERVE_ARGS+=("${RP_GLIBC_ARGS[@]+"${RP_GLIBC_ARGS[@]}"}")
+  RESOURCE_POLICY_NOTE="serve: cpu-shares ${RMD_SERVE_CPU_SHARES}, no memory.low, NODE_OPTIONS ${serve_node_options:-none}, GLIBC_TUNABLES ${RESOURCE_POLICY_GLIBC_TUNABLES:-none}"
   if [ "${RMD_SERVE_MEMORY_LIMIT_MIB}" -gt "${RMD_SERVE_MEMORY_RESERVE_MIB}" ]; then
     RESOURCE_POLICY_SERVE_ARGS+=("--memory=${RMD_SERVE_MEMORY_LIMIT_MIB}m" "--memory-swap=$((RMD_SERVE_MEMORY_LIMIT_MIB + RMD_SERVE_SWAP_MIB))m")
     RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, memory ceiling ${RMD_SERVE_MEMORY_LIMIT_MIB} MiB (+${RMD_SERVE_SWAP_MIB} MiB swap)"
@@ -240,7 +251,8 @@ resource_policy_serve_args() {
 # THAT container (its largest process, a test runner) — never serve.
 # $1 names the container (default the core daemon): its memory.high is its own share, not a shared one.
 resource_policy_build_args() {
-  RESOURCE_POLICY_BUILD_ARGS=("--cpu-shares=${RMD_BUILD_CPU_SHARES}" -e "GLIBC_TUNABLES=${RESOURCE_POLICY_GLIBC_TUNABLES}")
+  resource_policy_glibc_args
+  RESOURCE_POLICY_BUILD_ARGS=("--cpu-shares=${RMD_BUILD_CPU_SHARES}" "${RP_GLIBC_ARGS[@]+"${RP_GLIBC_ARGS[@]}"}")
   local total ceiling container="${1:-remudero-daemon}"
   # shellcheck disable=SC2034 # RP_HIGH_POLICY is read by the tuner and the drift check
   RP_HIGH="" RP_HIGH_POLICY="" RP_HIGH_LEARNED=""
