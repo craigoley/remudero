@@ -16585,7 +16585,7 @@ export async function runSweep(
       const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
         { ...progressWitness(pr), judge: progressJudge, firstRound: true });
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
-        step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
+        pr_number: pr.prNumber, head_sha: pr.headSha,
         site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
         parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
         round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
@@ -18340,7 +18340,7 @@ export async function runSweep(
                 input.remedyHistory = history;
                 const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
                   { ...progressWitness(pr), judge: deps.fixProgressJudge });
-                appendLine(deps.ledgerPath, { ...row, step: "fix.progress_judged", site: "refused-twice",
+                appendLine(deps.ledgerPath, { ...row, site: "refused-twice",
                   parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
                   ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
                 if (progress.verdict === "unavailable") { repair.reason = progress.reason; return; }
@@ -18626,7 +18626,7 @@ export async function runSweep(
           const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
             { ...progressWitness(pr), judge: deps.fixProgressJudge });
           appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
-            step: "fix.progress_judged", site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
+            site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
             former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
             round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
           rearmExhausted = progress.verdict === "escalate";
@@ -19236,10 +19236,10 @@ export async function runSweep(
                 const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
                   { ...progressWitness(pr), judge: progressJudge, firstRound: true });
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
-                  step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
+                  pr_number: pr.prNumber, head_sha: pr.headSha,
                   site: progressParkedReason?.split(":")[0] ?? "fix-strike",
                   parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
-                  input_key: inputKey, red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
+                  red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
                   ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
                 if (result.verdict === "unavailable") {
                   acted = false;
