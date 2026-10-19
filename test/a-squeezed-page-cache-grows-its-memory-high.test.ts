@@ -278,11 +278,21 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
     { name: "empty discovery is unknown beside a successful inspect", current: core, live: 8320, peerLive: 6400, fault: "empty-list", action: "hold", target: 8320 },
     { name: "truncated peer identities are not guessed into a cgroup", current: core, live: 8320, peerLive: 6400, fault: "short-ids", action: "hold", target: 8320 },
     { name: "a list missing the inspected current identity holds tier 2", current: core, live: 8320, peerLive: 6400, fault: "missing-current", action: "hold", target: 8320 },
+    { name: "a changed current identity in the peer list holds tier 2", current: core, live: 8320, peerLive: 6400, fault: "changed-current", action: "hold", target: 8320 },
+    { name: "a duplicate current identity leaves peer ordering unknown", current: core, live: 8320, peerLive: 6400, fault: "duplicate-current", action: "hold", target: 8320 },
+    { name: "a nonhex peer identity is not used as a cgroup path", current: serve, live: 6400, peerLive: 8320, fault: "nonhex-peer", action: "hold", target: 6400 },
+    { name: "a short inspected identity holds before any cgroup or peer lookup", current: core, live: 8320, peerLive: 6400, fault: "short-inspect", action: "hold", target: 8320 },
     { name: "tier 1 stays a hold even for the largest peer", current: serve, live: 6400, peerLive: 8320, tier: "watch", action: "hold", target: 6400 },
     { name: "tier 3 still gives back despite a larger peer", current: core, live: 8320, peerLive: 6400, tier: "severe", action: "shrink", target: 8192 },
     { name: "the current policy floor still wins", current: serve, live: 5376, peerLive: 8320, action: "floor", target: 5632 },
     { name: "calm growth still respects the 95 percent hard cap", current: serve, live: 7168, peerLive: 8320, tier: "calm", action: "grow", target: 7296 },
     { name: "calm without squeeze still holds", current: serve, live: 6400, peerLive: 8320, tier: "no-squeeze", action: "hold", target: 6400 },
+    { name: "the policy floor still wins when peer discovery fails", current: serve, live: 5376, peerLive: 8320, fault: "list-error", action: "floor", target: 5632 },
+    { name: "tier 3 still gives back when a peer high is unreadable", current: core, live: 8320, peerLive: 6400, tier: "severe", fault: "missing-high", action: "shrink", target: 8192 },
+    { name: "tier 1 still holds when peer discovery fails", current: serve, live: 6400, peerLive: 8320, tier: "watch", fault: "list-error", action: "hold", target: 6400 },
+    { name: "calm capped growth still works when peer discovery fails", current: serve, live: 7168, peerLive: 8320, tier: "calm", fault: "list-error", action: "grow", target: 7296 },
+    { name: "calm restoration still works when peer discovery fails", current: serve, live: 6400, peerLive: 8320, tier: "calm", fault: "list-error", learned: 6912, action: "restore", target: 6912 },
+    { name: "calm without squeeze still holds when peer discovery fails", current: serve, live: 6400, peerLive: 8320, tier: "no-squeeze", fault: "list-error", action: "hold", target: 6400 },
   ];
   for (const row of cases) await t.test(row.name, () => {
     // Reuse the maintained host() fixture; no second builder or live Docker seam.
@@ -303,6 +313,9 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
       const peerBefore = readFileSync(join(peerCg, "memory.high"), "utf8");
       const short = row.fault === "short-ids";
       const rows: Array<[string, string]> = [[row.current, currentId], [peer, peerId]];
+      if (row.fault === "changed-current") rows[0] = [row.current, "feed".padEnd(64, "0")];
+      if (row.fault === "duplicate-current") rows.push([row.current, currentId]);
+      if (row.fault === "nonhex-peer") rows[1] = [peer, "g".repeat(64)];
       if (row.excluded) {
         const excludedId = "face".padEnd(64, "0");
         const excludedCg = join(h.root, "cg", "system.slice", `docker-${excludedId}.scope`);
@@ -325,7 +338,7 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
         "case \"$1\" in",
         " inspect)",
         "  [ \"$#\" -eq 4 ] && [ \"$2\" = --format ] && [ \"$3\" = '{{.Id}}' ] && [ \"$4\" = \"$TUNER_FIXTURE_CONTAINER\" ] || exit 64",
-        "  printf '%s\\n' \"$TUNER_FIXTURE_ID\" ;;",
+        "  if [ \"$TUNER_FIXTURE_FAULT\" = short-inspect ]; then printf '%.12s\\n' \"$TUNER_FIXTURE_ID\"; else printf '%s\\n' \"$TUNER_FIXTURE_ID\"; fi ;;",
         " ps)",
         "  truncated=0",
         "  if [ \"$#\" -eq 4 ] && [ \"$2\" = --no-trunc ] && [ \"$3\" = --format ]; then format=\"$4\"",
@@ -351,6 +364,8 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
         `v1 ${then} ${currentId} ${noSqueeze ? 1124 : 1000} ${noSqueeze ? 25000 : 7000} 5000 30 0\n`);
       if (row.fault === "missing-high") rmSync(join(peerCg, "memory.high"));
       if (row.fault === "malformed-high") writeFileSync(join(peerCg, "memory.high"), "unreadable-number\n");
+      if (row.learned) writeFileSync(join(h.root, "cfg", "state", `memory-high-tuned-${row.current}.json`),
+        JSON.stringify({ container: row.current, high_mib: row.learned }) + "\n");
       const peerInput = existsSync(join(peerCg, "memory.high")) ? readFileSync(join(peerCg, "memory.high"), "utf8") : undefined;
       const run = spawnSync("bash", [TUNER, "--container", row.current, "--state-dir", join(h.root, "cfg")], {
         encoding: "utf8", env: { ...h.env, TUNER_FIXTURE_ARGV: argvPath, TUNER_FIXTURE_CALLS: h.calls,
@@ -362,7 +377,7 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
       const argv = readFileSync(argvPath, "utf8").split("\0\0").filter(Boolean).map(command => command.split("\0"));
       assert.deepEqual(argv, [
         ["inspect", "--format", "{{.Id}}", row.current],
-        ["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"],
+        ...(row.fault === "short-inspect" ? [] : [["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"]),
       ], "the real shell must ask Docker for full IDs with the documented ps field");
       assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(row.target * MIB), run.stdout);
       assert.match(run.stdout, new RegExp(row.action === "hold" ? "hold" : row.action + " .*via systemd"));
@@ -373,8 +388,17 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
         assert.equal(existsSync(join(h.root, "cfg", "state", `memory-high-tuned-${row.current}.json`)), false);
       } else {
         assert.match(calls, new RegExp(`systemctl set-property --runtime docker-${currentId}\\.scope MemoryHigh=${row.target * MIB}`));
+        const ledger = readFileSync(join(h.root, "cfg", "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+        assert.equal(ledger.length, 1);
+        assert.deepEqual([ledger[0].container, ledger[0].action, ledger[0].before_mib, ledger[0].after_mib],
+          [row.current, row.action, row.live, row.target]);
       }
-      if (row.fault) assert.match(run.stdout, /hold.*peer.*(?:unread|unavailable|empty|identity)/i, "unknown peer evidence must be named");
+      if (row.fault === "short-inspect") assert.match(run.stdout, /hold: container identity unavailable/);
+      else if (row.fault && tier === "pressure" && row.action === "hold")
+        assert.match(run.stdout, /hold.*peer.*(?:unread|unavailable|empty|identity)/i, "unknown peer evidence must be named");
+      if (tier === "watch") assert.match(run.stdout, /tier 1/);
+      if (tier === "severe") assert.match(run.stdout, /tier 3/);
+      if (tier === "no-squeeze") assert.match(run.stdout, /no squeeze/);
       for (const boundary of boundaries) {
         assert.equal(readFileSync(join(boundary.cg, "memory.max"), "utf8"), boundary.max);
         assert.equal(readFileSync(join(boundary.cg, "memory.swap.max"), "utf8"), boundary.swapMax);
