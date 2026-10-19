@@ -1723,6 +1723,7 @@ components:
         fleet: {type: integer}
         archived: {type: integer, description: "W1-T8831 -- items the operator archived; counted here and in no other lane."}
         snoozed: {type: integer, description: "W1-T8831 -- items snoozed past the slow lane's last pass; counted here and in no other lane."}
+        kept: {type: integer, description: "Items held by a keep decision while their observed state is unchanged."}
         needsYou:
           type: object
           required: [ready, drafting, notReady, declined]
@@ -1778,6 +1779,11 @@ components:
             $ref: "#/components/schemas/InboxViewItem"
         needsYou:
           $ref: "#/components/schemas/InboxNeedsYou"
+        kept:
+          type: array
+          description: Items held by a keep decision; each carries keptAt and its original lane.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
         counts:
           $ref: "#/components/schemas/InboxCounts"
         page:
@@ -8836,6 +8842,9 @@ components:
         unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem.
       required: [proposalId]
       properties:
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -8893,6 +8902,10 @@ components:
               required: [proposalId]
               properties:
                 proposalId: {type: string}
+        keptAt:
+          type: string
+          format: date-time
+          description: When the operator recorded the current keep decision; present in the kept section.
         archivedAt:
           type: string
           format: date-time
@@ -8951,7 +8964,7 @@ components:
               description: One completed classification, reused by every section, continuation and attention census.
             section:
               type: string
-              enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
+              enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed, kept]
             items:
               type: array
               items:
@@ -10637,6 +10650,9 @@ components:
         - plain
         - draftedTasks
       properties:
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10680,6 +10696,9 @@ components:
         - plain
         - spawnedAt
       properties:
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10718,6 +10737,9 @@ components:
         - plain
         - reasons
       properties:
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         retirement:
           $ref: '#/components/schemas/InboxRetirement'
         needsTriageReason:
@@ -10784,6 +10806,9 @@ components:
         - plain
         - reason
       properties:
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10934,6 +10959,11 @@ components:
         snoozed:
           type: array
           description: W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
+        kept:
+          type: array
+          description: Items held by a keep decision; each carries keptAt and its original lane.
           items:
             $ref: "#/components/schemas/InboxViewItem"
         counts:
@@ -11972,6 +12002,24 @@ components:
         feedback:
           type: string
           description: The operator's feedback, captured verbatim; must be non-blank.
+
+    InboxKeepRequest:
+      type: object
+      description: Record the observed state as a keep decision, or clear it with kept false.
+      required: [proposalId]
+      properties:
+        proposalId: {type: string}
+        reason: {type: string, description: Optional operator reason recorded verbatim.}
+        kept: {type: boolean, default: true, description: False clears the decision immediately.}
+
+    InboxKeepResult:
+      type: object
+      required: [ok, proposalId, kept]
+      properties:
+        ok: {type: boolean, enum: [true]}
+        proposalId: {type: string}
+        kept: {type: boolean}
+        keptAt: {type: string, format: date-time, description: Present while kept; repeating an unchanged decision preserves its instant.}
 
     InboxArchiveRequest:
       type: object
@@ -16897,7 +16945,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
+            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed, kept]
         - name: cursor
           in: query
           required: false
@@ -18011,7 +18059,7 @@ paths:
             operator set aside, listed here and in no other lane or count).
           schema:
             type: string
-            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
+            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed, kept]
         - name: limit
           in: query
           required: false
@@ -18518,6 +18566,50 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/keep:
+    post:
+      summary: Record a reversible keep decision for the item's observed state.
+      description: >
+        Write tier LOW. Records inbox.kept with the observed lane, classification state and reasons,
+        and a hash of the summary and plain message. The durable state/inbox-triage.json mark moves
+        the item to kept, outside needsYou and its counts, on the slow lane's next pass. A material
+        state change reopens the item with keptChanged explaining why. Elapsed time alone does not.
+        Repeating an unchanged keep preserves keptAt; kept false clears it immediately. Other inbox
+        decision and triage verbs clear the mark.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxKeepRequest"
+      responses:
+        "200":
+          description: The keep decision is recorded or cleared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxKeepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No active proposal with this id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "409":
+          description: The proposal is ratified, declined, retired or no longer awaiting a decision.
           content:
             application/json:
               schema:

@@ -74,7 +74,7 @@ export function optionAction(intent: OptionIntent, lane: InboxOptionLane, propos
         ? { method: "POST", path: "/v1/inbox/thread/reply", fields: { threadId: inboxThreadId(proposalId) }, input: "text" }
         : undefined;
     case "keep":
-      return undefined;
+      return { method: "POST", path: "/v1/inbox/keep", fields: { proposalId }, input: "reason" };
   }
 }
 
