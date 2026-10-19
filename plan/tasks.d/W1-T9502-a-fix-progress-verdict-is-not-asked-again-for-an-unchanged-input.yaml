@@ -42,7 +42,7 @@
   design: |
     Operator rulings: no fixed threshold, age or count; the judge still rules on every new question.
     1. REUSE ON AN UNCHANGED KEY. Before spawning the judge, `askProgress` (and the other `judgeFixProgress` call
-       sites in src/lib/sweep.ts and src/run-task.ts) share one keyed lookup in src/lib/fix-progress-judge.ts over
+       automated repair judgment sites in src/lib/sweep.ts and the fix rung in src/run-task.ts) share one keyed lookup in src/lib/fix-progress-judge.ts over
        the newest `fix.progress_judged` row in the caller's already-read ledger lines with the same
        pr_number, head_sha and input_key. A continue verdict, or a change-approach verdict with its approach, is
        reused as the decision; the judge is not spawned. Ledger `fix.progress_reused` {pr_number, head_sha, input_key,
@@ -51,6 +51,7 @@
        contract revision) finds no match and asks the judge, as today. An `unavailable` verdict is never reused. An
        escalate verdict keeps its existing latch.
     3. No time bound on reuse: the input is the whole question, and an unchanged question has an answer.
+       The standalone diagnostic judge command is not an automatic repair caller and remains unchanged.
     Tests go in the computed test/sweep/ folder, with `test(` titles verbatim as in the proofs below, driving `runSweep` with a counting
     fake judge and an admission that refuses, replaying #11559's 999a5dc head over three passes.
   acceptance:
