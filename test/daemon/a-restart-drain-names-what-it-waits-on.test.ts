@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
-import { runDaemon, type DaemonDeps } from "../../src/lib/daemon.js";
-import { loadPlan } from "../../src/lib/plan.js";
-import * as sweep from "../../src/lib/sweep.js";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { loadPlan } from "#src/lib/plan.js";
+import * as sweep from "#src/lib/sweep.js";
 
 type Row = { step: string; extra: Record<string, any> };
 type Result = Awaited<ReturnType<DaemonDeps["runOne"]>>;
