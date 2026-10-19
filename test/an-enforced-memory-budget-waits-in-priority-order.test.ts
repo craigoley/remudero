@@ -704,7 +704,7 @@ function validationRefused(result: memoryAdmission.ValidationAdmissionOutcome,
   if (detail !== undefined) assert.ok(result.details.includes(detail), JSON.stringify(result));
   return result;
 }
-function validationFixture() {
+function validationFixture(root: string = request.root) {
   resetMemoryAdmissionStateForTests(); resetShadowMemoryStateForTests();
   const w = world();
   const files = new Map<string, string>();
@@ -744,13 +744,13 @@ function validationFixture() {
   };
   const run = (over: Partial<memoryAdmission.ValidationAdmissionPorts> = {}, signal?: AbortSignal) => {
     assert.equal(typeof memoryAdmission.awaitValidationMemoryAdmission, "function", "the validation entry is missing");
-    return memoryAdmission.awaitValidationMemoryAdmission({ ...validationRequest, ...(signal ? { signal } : {}) }, { ...options, ...over });
+    return memoryAdmission.awaitValidationMemoryAdmission({ ...validationRequest, root, ...(signal ? { signal } : {}) }, { ...options, ...over });
   };
   const prime = async () => {
     const first = await run();
     validationRefused(first, "budget-unavailable", "strict-observation-untagged");
     if (first.kind === "not-started") assert.ok(first.details.includes("host-swap-unavailable"));
-    const observed = JSON.parse(files.get(join(request.root, "state", "container-pressure.json"))!);
+    const observed = JSON.parse(files.get(join(root, "state", "container-pressure.json"))!);
     assert.equal(observed.prior.at, w.now.ms, "the first observation was actually written");
     assert.equal(observed.validationObservation.sampleAt, w.now.ms);
     assert.equal(opens, 0);
@@ -1877,4 +1877,224 @@ test("W1-T10208: settled queue telemetry cancellation refuses readiness without 
     }
     assert.equal(f.releases(), 1, "healthy test cleanup and abort release-requested are distinct assertions above");
   }
+});
+
+test("W1-T10208: strict queued telemetry uses the real private default writer without changing fit or progress", async () => {
+  assert.equal(gitWorkTreeAncestor(tmpdir()), undefined, "default append controls require a real temporary root outside Git");
+  const root = fixtureRoot("strict-queue-default-writer-");
+  const previous = defaultShadowMemoryPorts().write;
+  installShadowMemorySink(appendLedger);
+  try {
+    for (const outcome of ["fits", "unavailable"] as const) for (const mode of ["healthy", "eisdir", "eisdir-throwing-stderr"] as const) {
+      const ownRoot = join(root, outcome + "-" + mode), ledgerPath = join(ownRoot, "state", "ledger.ndjson");
+      const f = validationFixture(ownRoot); await f.prime(); // Initialize and seed history before actors.
+      const other = { id: "other-owner", workerClass: "implement" as const, estimateMib: 900 }, otherBefore = { ...other };
+      f.w.running.entries = [other]; f.w.state.availableMib = 2500;
+      if (mode !== "healthy") mkdirSync(ledgerPath, { recursive: true }); // The actual appender must hit EISDIR.
+      const fixtureWrite = f.options.write!;
+      delete f.options.write; // Omit the override entirely: defaultAdmissionPorts must choose the installed real sink.
+      assert.equal("write" in f.options, false); assert.equal(defaultShadowMemoryPorts().write, appendLedger);
+      const headAbort = new AbortController(), stop = new AbortController();
+      const actors: Promise<unknown>[] = [];
+      const headSleeps: Array<{ ms: number; wake: () => void }> = [], ticks: Array<{ ms: number; wake: () => void }> = [];
+      const errors: string[] = [];
+      const observed: { errorsBeforeLock?: string[] } = {};
+      let lockAttempts = 0, strictSettled = false, strictRejected = false;
+      let result: memoryAdmission.ValidationAdmissionOutcome | undefined;
+      try {
+        const head = awaitMemoryAdmission({ ...request, root: ownRoot, workerClass: "review",
+          runId: "default-writer-head", signal: headAbort.signal }, { ...f.options, write: fixtureWrite,
+          sleep: ms => new Promise<void>(wake => { headSleeps.push({ ms, wake }); }) });
+        actors.push(head); assert.deepEqual(headSleeps.map(tick => tick.ms), [5000]);
+        const strict = f.run({
+          validationEstimate: workerClass => outcome === "unavailable"
+            ? { kind: "unavailable", reason: "no-measured-samples" } : f.options.validationEstimate!(workerClass),
+          sleep: ms => new Promise<void>(wake => { f.w.sleeps.push(ms); ticks.push({ ms, wake }); }),
+          withLock: action => {
+            lockAttempts++; observed.errorsBeforeLock = [...errors];
+            return f.options.withLock!(action);
+          },
+          stderr: line => { errors.push(line); if (mode === "eisdir-throwing-stderr") throw Error("private diagnostic fallback failed"); },
+        }, stop.signal);
+        actors.push(strict); void strict.then(() => { strictSettled = true; }, () => { strictSettled = true; strictRejected = true; });
+        assert.equal(strictSettled, false); assert.equal(lockAttempts, 0); assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
+        assert.deepEqual(waitingStarts().map(waiter => waiter.workerClass), ["review", "test"]);
+        assert.deepEqual(f.w.sleeps, [5000]); assert.equal(ticks.length, 1);
+        const queuedErrors = [...errors];
+        if (mode === "healthy") {
+          assert.deepEqual(queuedErrors, []);
+          const rows: LedgerLine[] = readFileSync(ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+          const own = rows.filter(row => row.step === QUEUE_STEP && row.run_id === validationRequest.runId);
+          assert.equal(own.length, 1, "a real private append must exist before promotion");
+          assert.equal(own[0]?.phase, "queued-behind-rank");
+          assert.equal(own[0]?.queue_position, 2); assert.equal(own[0]?.queue_size, 2); assert.equal(own[0]?.ahead_worker_class, "review");
+        } else {
+          assert.equal(queuedErrors.length, 1, "the actual queued write must fail once while the invocation remains waiting");
+          const error = JSON.parse(queuedErrors[0]!); assert.equal(error.event, QUEUE_STEP); assert.match(String(error.error), /EISDIR/);
+        }
+
+        headAbort.abort(); for (const tick of headSleeps.splice(0)) tick.wake();
+        assert.equal((await head).kind, "abandoned");
+        f.w.state.availableMib = 9000;
+        const tick = ticks.shift(); assert.ok(tick); f.w.now.ms += tick.ms; tick.wake();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(strictSettled, true, "default telemetry failure cannot add another memory wait after the promoted evaluation");
+        assert.equal(strictRejected, false, "the default writer or fallback must not reject strict admission");
+        assert.equal(ticks.length, 0); result = await strict;
+        if (result.kind === "not-enforced") assert.fail("the existing enforce fixture must exercise strict admission");
+        assert.equal(result.waitedMs, 5000); assert.equal(result.attempts, 1); assert.equal(lockAttempts, 1);
+        assert.equal(f.releases(), 0);
+        if (outcome === "fits") {
+          assert.equal(result.kind, "ready", JSON.stringify(result));
+          if (result.kind !== "ready") assert.fail("telemetry failure must preserve the same positively measured fit");
+          assert.equal(result.tier, "fits"); assert.equal(result.basis, "legacy-compatible-tree-peaks"); assert.equal(result.samples, 30);
+          assert.equal(result.reservation.id, "fixture-grant-1"); assert.equal(f.opens(), 1); assert.equal(f.marked(), true);
+          const stored = JSON.parse(f.files.get(join(ownRoot, "state", "container-pressure.json"))!);
+          assert.deepEqual(result.psiMark, { kind: "recorded", at: f.w.now.ms, sampleId: stored.validationObservation.sampleId });
+          assert.equal(stored.psi.filter((row: number[]) => row[0] === f.w.now.ms && row[2] === 1).length, 1);
+        } else {
+          const refused = validationRefused(result, "budget-unavailable", "no-measured-samples");
+          assert.equal(refused.cleanup, "none"); assert.deepEqual(refused.psiMark, { kind: "not-attempted" });
+          assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
+        }
+        const errorsBeforeLock = observed.errorsBeforeLock;
+        assert.ok(errorsBeforeLock, "the real locked evaluation must be observed");
+        if (mode === "healthy") {
+          assert.deepEqual(errorsBeforeLock, []); assert.deepEqual(errors, []);
+          const rows: LedgerLine[] = readFileSync(ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+          const own = rows.filter(row => row.step === QUEUE_STEP && row.run_id === validationRequest.runId);
+          assert.deepEqual(own.map(row => row.phase), ["queued-behind-rank", "evaluating-head", "settled"]);
+          assert.equal(typeof own[0]?.admission_id, "string");
+          assert.ok(own.every(row => row.admission_id === own[0]?.admission_id && row.worker_assignment === "not-observed"));
+          assert.equal(own.filter(row => row.phase === "settled").length, 1); assert.equal(own.at(-1)?.cancelled, false);
+          assert.ok(!rows.some(row => row.step === ENFORCE_ERROR_STEP));
+          if (outcome === "unavailable") {
+            const refused = rows.find(row => row.step === "memory_budget.validation_not_started" && row.run_id === validationRequest.runId);
+            assert.ok(refused, "the real default writer must also persist the strict refusal");
+            assert.equal(refused.reason, "budget-unavailable"); assert.ok(Array.isArray(refused.details) && refused.details.includes("no-measured-samples"));
+            assert.equal(refused.waitedMs, 5000);
+          }
+        } else {
+          assert.equal(errorsBeforeLock.length, 2, "queued and evaluating writes fail before entering the locked action");
+          const parsed = errors.map(line => JSON.parse(line));
+          assert.deepEqual(parsed.map(error => error.event), outcome === "fits"
+            ? [QUEUE_STEP, QUEUE_STEP, QUEUE_STEP]
+            : [QUEUE_STEP, QUEUE_STEP, "memory_budget.validation_not_started", QUEUE_STEP]);
+          assert.equal(parsed.filter(error => error.event === QUEUE_STEP).length, 3, "settlement is attempted once after either real outcome");
+          for (const error of parsed) assert.match(String(error.error), /EISDIR/);
+        }
+        assert.ok(!f.w.rows.some(row => row.step === ENFORCE_ERROR_STEP));
+        assert.deepEqual(other, otherBefore); assert.ok(f.w.running.entries.includes(other)); assert.deepEqual(waitingStarts(), []);
+      } finally {
+        headAbort.abort(); stop.abort();
+        for (const tick of headSleeps.splice(0)) tick.wake(); for (const tick of ticks.splice(0)) tick.wake();
+        await Promise.allSettled(actors);
+        if (result?.kind === "ready") result.reservation.releaseOccupancy();
+        assert.deepEqual(other, otherBefore); assert.ok(f.w.running.entries.includes(other)); assert.deepEqual(waitingStarts(), []);
+      }
+      assert.equal(f.releases(), outcome === "fits" ? 1 : 0, "only returned own-handle test cleanup occurs after the preceding outcome assertions");
+    }
+  } finally { installShadowMemorySink(previous); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T10208: strict original refusals survive late settled telemetry abort and throw", async () => {
+  const root = fixtureRoot("strict-settled-refusal-");
+  try {
+    for (const reason of ["budget-unavailable", "admission-error"] as const) {
+      let baseline: Extract<memoryAdmission.ValidationAdmissionOutcome, { kind: "not-started" }> | undefined;
+      for (const effect of ["healthy", "abort", "throw", "abort-and-throw"] as const) {
+        const f = validationFixture(root); await f.prime(); // Never reset the queue after starting an actor.
+        const other = { id: "other-owner", workerClass: "implement" as const, estimateMib: 900 }, otherBefore = { ...other };
+        f.w.running.entries = [other]; f.w.state.availableMib = 2500;
+        const headAbort = new AbortController(), stop = new AbortController();
+        const actors: Promise<unknown>[] = [];
+        const headSleeps: Array<{ ms: number; wake: () => void }> = [], ticks: Array<{ ms: number; wake: () => void }> = [];
+        const errors: string[] = [];
+        let strictSettled = false, strictRejected = false, lockAttempts = 0, settledCalls = 0;
+        const settledEvidence: { decision?: LedgerLine } = {};
+        let effectsAtSettlement: { opens: number; marked: boolean; aborted: boolean } | undefined;
+        let result: memoryAdmission.ValidationAdmissionOutcome | undefined;
+        const write = f.options.write!;
+        try {
+          const head = awaitMemoryAdmission({ ...request, root, workerClass: "review",
+            runId: "refusal-legacy-head", signal: headAbort.signal }, { ...f.options,
+            sleep: ms => new Promise<void>(wake => { headSleeps.push({ ms, wake }); }) });
+          actors.push(head); assert.deepEqual(headSleeps.map(tick => tick.ms), [5000]);
+          const strict = f.run({
+            sleep: ms => new Promise<void>(wake => { f.w.sleeps.push(ms); ticks.push({ ms, wake }); }),
+            validationEstimate: workerClass => reason === "budget-unavailable"
+              ? { kind: "unavailable", reason: "no-measured-samples" } : f.options.validationEstimate!(workerClass),
+            withLock: action => {
+              lockAttempts++;
+              return reason === "admission-error"
+                ? memoryLedger.withMemoryAdmissionLock(action, { dir: join(root, "missing-lock-parent"), scope: "host" })
+                : f.options.withLock!(action);
+            },
+            write: (path, row) => {
+              write(path, row);
+              if (row.step === QUEUE_STEP && row.run_id === validationRequest.runId && row.phase === "settled") {
+                settledCalls++; settledEvidence.decision = f.w.rows.at(-2);
+                effectsAtSettlement = { opens: f.opens(), marked: f.marked(), aborted: stop.signal.aborted };
+                if (effect === "abort" || effect === "abort-and-throw") stop.abort();
+                if (effect === "throw" || effect === "abort-and-throw") throw Error("late settled diagnostic fixture");
+              }
+            },
+            stderr: line => {
+              errors.push(line);
+              if (effect === "throw" || effect === "abort-and-throw") throw Error("late settled stderr fixture");
+            },
+          }, stop.signal);
+          actors.push(strict); void strict.then(() => { strictSettled = true; }, () => { strictSettled = true; strictRejected = true; });
+          const queued = f.w.rows.find(row => row.step === QUEUE_STEP && row.run_id === validationRequest.runId && row.phase === "queued-behind-rank");
+          assert.ok(queued); assert.equal(queued.queue_position, 2); assert.equal(queued.queue_size, 2); assert.equal(queued.ahead_worker_class, "review");
+          assert.equal(strictSettled, false); assert.equal(lockAttempts, 0); assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
+          assert.deepEqual(f.w.sleeps, [5000]); assert.equal(ticks.length, 1);
+
+          headAbort.abort(); for (const tick of headSleeps.splice(0)) tick.wake();
+          assert.equal((await head).kind, "abandoned"); f.w.state.availableMib = 9000;
+          const tick = ticks.shift(); assert.ok(tick); f.w.now.ms += tick.ms; tick.wake();
+          await new Promise<void>(resolve => setImmediate(resolve));
+          assert.equal(strictSettled, true, "a refusal must not become another wait or an unhandled diagnostic rejection");
+          assert.equal(strictRejected, false, "late diagnostic failure must not reject the original typed refusal");
+          assert.equal(ticks.length, 0); result = await strict;
+          const refused = validationRefused(result, reason);
+          assert.equal(refused.waitedMs, 5000); assert.equal(refused.attempts, 1);
+          assert.equal(refused.cleanup, "none"); assert.deepEqual(refused.psiMark, { kind: "not-attempted" });
+          if (reason === "budget-unavailable") assert.ok(refused.details.includes("no-measured-samples"));
+          else assert.ok(refused.details.some(detail => detail.startsWith("admission-lock-unavailable:")),
+            "the maintained private missing-directory lock must produce the original error, not an injected callback throw");
+          assert.equal(lockAttempts, 1); assert.equal(f.opens(), 0); assert.equal(f.releases(), 0); assert.equal(f.marked(), false);
+          assert.equal(settledCalls, 1); assert.deepEqual(effectsAtSettlement, { opens: 0, marked: false, aborted: false });
+          const decisionBeforeSettlement = settledEvidence.decision;
+          assert.ok(decisionBeforeSettlement, "an actual refusal row must already precede the settled sink");
+          assert.equal(decisionBeforeSettlement.step, "memory_budget.validation_not_started");
+          assert.equal(decisionBeforeSettlement.run_id, validationRequest.runId);
+          assert.equal(decisionBeforeSettlement.kind, "not-started"); assert.equal(decisionBeforeSettlement.reason, reason);
+          assert.deepEqual(decisionBeforeSettlement.details, refused.details);
+          assert.equal(decisionBeforeSettlement.waitedMs, 5000); assert.equal(decisionBeforeSettlement.cleanup, "none");
+          assert.deepEqual(decisionBeforeSettlement.psiMark, refused.psiMark);
+          const own = f.w.rows.filter(row => row.step === QUEUE_STEP && row.run_id === validationRequest.runId);
+          assert.deepEqual(own.map(row => row.phase), ["queued-behind-rank", "evaluating-head", "settled"]);
+          assert.ok(own.every(row => row.admission_id === queued.admission_id && row.worker_assignment === "not-observed"));
+          assert.equal(own.filter(row => row.phase === "settled").length, 1); assert.equal(own.at(-1)?.cancelled, false);
+          assert.equal(stop.signal.aborted, effect === "abort" || effect === "abort-and-throw");
+          if (effect === "throw" || effect === "abort-and-throw") {
+            assert.equal(errors.length, 1);
+            const diagnostic = JSON.parse(errors[0]!); assert.equal(diagnostic.event, QUEUE_STEP);
+            assert.match(String(diagnostic.error), /late settled diagnostic fixture/);
+          } else assert.deepEqual(errors, []);
+          if (effect === "healthy") baseline = { ...refused, details: [...refused.details], psiMark: { ...refused.psiMark } };
+          else { assert.ok(baseline, "a quiet original-refusal control must exist"); assert.deepEqual(refused, baseline); }
+          assert.ok(!f.w.rows.some(row => row.step === ENFORCE_ERROR_STEP));
+          assert.deepEqual(other, otherBefore); assert.ok(f.w.running.entries.includes(other)); assert.deepEqual(waitingStarts(), []);
+        } finally {
+          headAbort.abort(); stop.abort();
+          for (const tick of headSleeps.splice(0)) tick.wake(); for (const tick of ticks.splice(0)) tick.wake();
+          await Promise.allSettled(actors);
+          if (result?.kind === "ready") result.reservation.releaseOccupancy();
+          assert.deepEqual(other, otherBefore); assert.ok(f.w.running.entries.includes(other)); assert.deepEqual(waitingStarts(), []);
+        }
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
