@@ -108,7 +108,6 @@
   "src/lib/daemon.ts": 2250,
   "src/lib/deployer.ts": 1000,
   "src/lib/digest.ts": 329,
-  "src/lib/dispatch-claim.ts": 130,
   "src/lib/dispatch-overlap.ts": 150,
   "src/lib/doctor.ts": 500,
   "src/lib/drain-lock.ts": 40,
