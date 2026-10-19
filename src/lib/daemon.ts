@@ -4442,7 +4442,12 @@ export async function runDaemon(
   const observeDrain = (startedAtMs: number, latchAtMs?: number) => {
     const items = new Map<Promise<void>, WaitedOn>();
     const watch = ({ settled, ...item }: RestartDrainInventoryEntry): void => {
-      if (items.has(settled)) { items.get(settled)!.phase = item.phase; return; }
+      if (items.has(settled)) {
+        const row = items.get(settled)!;
+        row.phase = item.phase;
+        delete row.released;
+        return;
+      }
       const row: WaitedOn = { ...item, ...(latchAtMs === undefined ? {} : {
         admitted: item.admitted_at_ms <= latchAtMs ? "before_latch" as const : "after_latch" as const,
       }) };
@@ -4451,10 +4456,16 @@ export async function runDaemon(
     };
     const snapshot = (completed = false): WaitedOn[] => {
       const waiting = completed ? new Set(restartDrainInventory().map(item => item.settled)) : undefined;
-      return [...items].map(([work, row]) => ({ ...row, ...(completed && row.settled_after_ms === undefined
+      return [...items].map(([work, row]) => ({ ...row, ...(completed && !row.released && row.settled_after_ms === undefined
         ? waiting!.has(work) ? { abandoned: true as const } : { released: true as const } : {}) }));
     };
-    return { watch, snapshot };
+    const release = (action: { actionKind: string; taskId: string; phase: string }): void => {
+      for (const row of items.values()) if (row.what === "detached" && row.kind === action.actionKind && row.task_id === action.taskId) {
+        row.phase = action.phase;
+        row.released = true;
+      }
+    };
+    return { watch, snapshot, release };
   };
   type LatchDrain = { latchAtMs: number; reviews: ReadonlySet<Promise<void>>; detached: number; started: boolean;
     observation: ReturnType<typeof observeDrain>; done?: true };
@@ -4561,10 +4572,13 @@ export async function runDaemon(
             boundMs: detachedBoundMs,
             freshness: true,
             onWait: observation.watch,
-            onRelease: (action) => log("daemon.detached_action_released", {
-              action_kind: action.actionKind, task_id: action.taskId,
-              age_ms: action.ageMs, phase: action.phase, reason: action.reason,
-            }),
+            onRelease: (action) => {
+              observation.release(action);
+              log("daemon.detached_action_released", {
+                action_kind: action.actionKind, task_id: action.taskId,
+                age_ms: action.ageMs, phase: action.phase, reason: action.reason,
+              });
+            },
           }),
           drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch }),
         ]);
@@ -6941,23 +6955,18 @@ export async function runDaemon(
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
     const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
     const settledHoldouts = new Set<string>();
+    const measuredHoldouts = new Set<string>();
     const observeLaneSettlement = (id: string): void => {
       settledHoldouts.add(id);
-      if (latchDrain && restartHoldouts.has(id) && [...restartHoldouts].every(task => settledHoldouts.has(task))) {
+      if (latchDrain && measuredHoldouts.has(id) && [...measuredHoldouts].every(task => settledHoldouts.has(task))) {
         freshnessPhases.holdouts = Math.max(0, daemonClock.now() - latchDrain.latchAtMs);
       }
     };
     const addRestartHoldout = (id: string): void => {
       restartHoldouts.add(id);
+      measuredHoldouts.add(id);
       settledHoldouts.delete(id);
       delete freshnessPhases.holdouts; // A child falling back in-process can reopen the measured phase.
-    };
-    const releaseRestartHoldout = (id: string): boolean => {
-      const removed = restartHoldouts.delete(id);
-      if (removed && latchDrain && restartHoldouts.size === 0) {
-        freshnessPhases.holdouts = Math.max(0, daemonClock.now() - latchDrain.latchAtMs);
-      }
-      return removed;
     };
     // Re-read at every decision, never latched: a refilled sibling can outlive the measured length AFTER a lane freed.
     const phaseBoundHolds = (): boolean => !inFlightFreshness && daemonClock.now() - dispatchPhaseStartedAtMs > refillBoundMs &&
@@ -7071,7 +7080,7 @@ export async function runDaemon(
       const child = batchChildren.get(finished);
       if (child) children.delete(child.runId);
       resetIdleLaneTick();
-      releaseRestartHoldout(finished.id);
+      restartHoldouts.delete(finished.id);
       if (inFlightFreshness) laneIdleSince.set(lane, daemonClock.now());
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
@@ -7490,14 +7499,14 @@ export async function runDaemon(
         childMode = true;
         children.set(child.runId, { ...child, taskId: id });
         batchChildren.set(task, child);
-        releaseRestartHoldout(id);
+        restartHoldouts.delete(id);
         pendingChildren.delete(id);
         if (inFlightFreshness) releaseChildren?.();
         if (childDrainDone) poolControl.detach?.(outOfProcess);
       }, onChildPending: (pending) => {
         childMode = true;
         pendingChildren.set(id, { ...pending, sinceMs: daemonClock.now(),
-          restore: { holdout: releaseRestartHoldout(id), underLatch: admittedUnderLatch.delete(id) } });
+          restore: { holdout: restartHoldouts.delete(id), underLatch: admittedUnderLatch.delete(id) } });
         refillExpectedFinish.delete(id);
         if (inFlightFreshness) releaseChildren?.();
         if (childDrainDone) poolControl.detach?.(outOfProcess);
@@ -7559,7 +7568,7 @@ export async function runDaemon(
             : reason === "estimate_elapsed" ? "yielded_on_estimate_elapsed" : `yielded_${reason}`);
         }
         yieldAsked.add(id);
-        releaseRestartHoldout(id);
+        restartHoldouts.delete(id);
         if (!childMode && !restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
         wakeParkedLanes(true);
         return inFlightFreshness;

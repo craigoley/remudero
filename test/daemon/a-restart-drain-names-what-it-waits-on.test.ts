@@ -12,8 +12,9 @@ type Row = { step: string; extra: Record<string, any> };
 type Result = Awaited<ReturnType<DaemonDeps["runOne"]>>;
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 async function until(predicate: () => boolean) {
   for (let i = 0; i < 2000; i++) { if (predicate()) return; await flush(); }
@@ -62,9 +63,10 @@ function latched(t: TestContext, passMs = 0) {
       }
       assert.ok(rows.some(r => r.step === "daemon.freshness_decision" && r.extra.action === "restart"));
     },
-    async settle(ms: number) {
+    async settle(ms: number, failed = false) {
       now = start + ms; exiting = true;
-      lane.resolve({ taskId: "A", runId: "A-run", verdict: "merged", merged: true, costUsd: 0 });
+      if (failed) lane.reject(new Error("fixture lane failure"));
+      else lane.resolve({ taskId: "A", runId: "A-run", verdict: "merged", merged: true, costUsd: 0 });
       for (const s of sleeps.splice(0)) s.resolve();
       for (let i = 0; i < 20; i++) await flush();
     },
@@ -167,4 +169,43 @@ test("an unlatched memory exit omits unmeasured latch and pass phases", async t 
   assert.ok(phases, "the post-drain memory exit has a complete observation");
   assert.equal(phases.total, 0); assert.equal(phases.drain, 0);
   for (const key of ["decision_to_latch", "holdouts", "pre_exit_pass"]) assert.ok(!(key in phases), key);
+});
+
+test("a review admitted after the latch is named and timed from that latch", async t => {
+  const h = latched(t), review = deferred<void>();
+  try {
+    await h.latch(10);
+    h.at(15); void reviewed(review.promise, "LATE", 103, h.start + 15);
+    await h.settle(30);
+    await until(() => !!h.row("daemon.freshness_drain.started"));
+    h.at(45); review.resolve();
+    assert.equal((await h.daemon).stopReason, "stale");
+    const item = h.row("daemon.freshness_drain.completed")?.waited_on[0];
+    assert.equal(item.task_id, "LATE"); assert.equal(item.admitted, "after_latch");
+    assert.equal(item.settled_after_ms, 35);
+    assert.equal(h.row("daemon.freshness_exit")?.phases_ms.drain, 15);
+  } finally { review.resolve(); await h.finish(); }
+});
+
+test("a pushed fix released to CI is not misreported as abandoned or settled", async t => {
+  const h = latched(t), fix = deferred<void>();
+  const phase = sweep.detachSweepAction(fix.promise, { actionKind: "fix-dispatch", taskId: "CI", phase: "worker" });
+  try {
+    await h.latch(10); phase("ci-wait"); await h.settle(30);
+    assert.equal((await h.daemon).stopReason, "stale");
+    const item = h.row("daemon.freshness_drain.completed")?.waited_on[0];
+    assert.equal(item.task_id, "CI"); assert.equal(item.phase, "ci-wait");
+    assert.equal(item.released, true); assert.equal(item.abandoned, undefined);
+    assert.equal(item.settled_after_ms, undefined);
+    assert.equal(sweep.detachedSweepActionCount(), 1, "the original dedup owner is preserved");
+  } finally { fix.resolve(); await h.finish(); }
+});
+
+test("a rejected lane still closes its measured holdout phase", async t => {
+  const h = latched(t);
+  try {
+    await h.latch(10); await h.settle(30, true);
+    assert.equal((await h.daemon).stopReason, "stale");
+    assert.equal(h.row("daemon.freshness_exit")?.phases_ms.holdouts, 20);
+  } finally { await h.finish(); }
 });
