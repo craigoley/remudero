@@ -67,6 +67,7 @@ export interface FixProgressCiFailure {
 
 /** BACKSTOP (W1-T9297): the failing titles and log characters the judge's input keeps per failing check. */
 export const FIX_PROGRESS_EVIDENCE_TESTS_CAP = 5;
+/** BACKSTOP (W1-T9297): the excerpt's own bound, beside {@link FIX_PROGRESS_EVIDENCE_TESTS_CAP}. */
 export const FIX_PROGRESS_EVIDENCE_EXCERPT_CAP = 600;
 
 const stripLogTimestamp = (l: string): string => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
