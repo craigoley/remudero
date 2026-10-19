@@ -449,6 +449,8 @@ async function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts, v
         lastKey = "queued";
         observeQueue("queued-behind-rank", ranked.indexOf(waiter) + 1, ranked.length, head?.workerClass ?? null);
       } else if (observationId !== undefined) observeQueue("evaluating-head", 1, ranked.length, null);
+      // Diagnostic sinks may synchronously cancel this strict invocation before evaluation.
+      if (validation && request.signal?.aborted) return abandoned();
       if (head === waiter) {
         try {
           const { inputs, verdict, tier, admitAs, agedBlock, ownTail, validationFailure, validationBasis } = ports.withLock<AdmissionEvaluation>(() => {
@@ -514,6 +516,8 @@ async function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts, v
             if (admitAs !== "fits" || !reservation || validationBasis?.kind !== "measured" || psiMark.kind !== "recorded") throw new Error("validation-admission-invariant");
             if (noted) write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: "fits", validation: true,
               waited_ms: now - startedAt, attempts: attempt, reasons: verdict.reasons, waited_ms_by_reason: waitedByReason, numbers: verdict.numbers });
+            // Settle diagnostics before the final strict check, not after a computed ready return.
+            finishQueueObservation?.();
             if (request.signal?.aborted) return abandoned();
             return { kind: "ready", tier: "fits", reservation, waitedMs: now - startedAt, attempts: attempt,
               basis: validationBasis.basis, samples: validationBasis.samples, psiMark };
