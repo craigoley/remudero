@@ -7,9 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { collectAtAgentWait } from "../src/lib/agent-wait-heap.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { planSnapshotHandOver } from "../src/run-child-main.js";
+import { collectAtAgentWait } from "#src/lib/agent-wait-heap.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { planSnapshotHandOver } from "#src/run-child-main.js";
 
 const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-hand-over-`));
 after(() => rmSync(dir, { recursive: true, force: true }));
