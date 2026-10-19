@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   author_class: machine
   principles: {tdd: strict}
   risk: high
@@ -18,9 +18,10 @@
     - src/lib/host-memory-admission.ts
     - test/an-enforced-memory-budget-waits-in-priority-order.test.ts
   rationale: |
-    Machine-authored proposal, parked at verify:human until the operator or a ratified risk
-    judge releases it. High/span reflects the linter's three named subsystem tags across
-    these two files, not a change to the diagnostics-only authority or the USD 5 budget.
+    Machine-authored proposal, initially parked at verify:human. The operator explicitly
+    approved this exact two-file diagnostics plan, high/span, USD 5 and four proofs for
+    normal validation, filing and implementation when ownership permits. High/span reflects
+    three named subsystem tags, not a change to diagnostics-only authority or the budget.
 
     OBSERVED source at 7733faf8163295b9ad9ae1e9156f683b6e362c5b: awaitMemoryAdmission
     joins its maintained ranked waiting array before worker assignment. Only the ranked head
@@ -98,3 +99,11 @@
     assertions fail. Make a failing writer alter the admission result: the failure-path control
     fails. Restore exact committed source and obtain complete verified-file summaries. Preserve
     every failed/setup receipt; unknown production causes remain unknown.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Operator explicitly approved this exact diagnostics-only two-file plan at high/span, USD 5, with four behavioral proofs; no admission or review-policy change, live activation, worker stop or owner-override change."
+    judged_at: "2026-10-19T15:12:35.317Z"
+    pin: "26f6b6a9e8d440e134d96463a099abba043bc067f02f002cc963856aca08f859"
