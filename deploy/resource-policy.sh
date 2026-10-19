@@ -58,7 +58,7 @@ RMD_MEMORY_HIGH_FLOORS="${RMD_MEMORY_HIGH_FLOORS:-remudero-daemon=8192 remudero-
 RMD_MEMORY_WEIGHT_UNLISTED="${RMD_MEMORY_WEIGHT_UNLISTED:-2}"
 RMD_MEMORY_HIGH_MAX_PCT="${RMD_MEMORY_HIGH_MAX_PCT:-95}" # a high never reaches its own memory.max
 
-# ── the daemons' memory flags: OPERATOR RULING 2026-10-19 ───────────────────────────────────────
+# ── the daemons' memory flags: OPERATOR RULING 2026-10-19 (#12982) ──────────────────────────────
 # Every daemon (core, site, console and serve) and every node process it starts. OBSERVED offline on
 # 2026-10-19 (logs-8864/mempress-eff-bench-matrix*.jsonl; a serve-shaped main plus four workers):
 # --max-semi-space-size=16 cut busy RSS from 1.41-1.65 GB to 1.02-1.12 GB at an unchanged wall time,
