@@ -98,6 +98,18 @@ test("an observed arm excludes the review-loop diagnosis and a sibling run diagn
   assert.equal(light.rows("pr.stuck")[0].diagnosis, "duplicate build");
 });
 
+test("two ad-hoc run-unfiled pull requests stalled together are never each other's duplicate build", async () => {
+  const adHoc: OpenPrView = { ...pr, taskId: "unfiled", headRefName: "run-unfiled-1792377776886" };
+  const sibling: OpenPrView = { ...adHoc, prNumber: 5901, prUrl: "url/5901", headRefName: "run-unfiled-1792413183534" };
+  for (const pass of [runSweep, runSweepLightPass]) {
+    const f = fixture();
+    await pass([adHoc, sibling], f.deps);
+    assert.equal(f.rows("pr.stuck").length, 1);
+    assert.equal(f.rows("pr.stuck")[0].diagnosis, "unknown signature");
+    assert.doesNotMatch(f.escalations[0], /duplicate build/);
+  }
+});
+
 test("each declared backstop fires only past its bound and fix activity suppresses repair-stage stalls", async () => {
   for (const [blocker, minutes, view] of [
     ["conflict", 30, { ...pr, mergeState: "dirty" as const }],

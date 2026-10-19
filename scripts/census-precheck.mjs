@@ -32,7 +32,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { loadavg, tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
@@ -506,6 +506,10 @@ const TMP_HYGIENE_URL = pathToFileURL(join(SCRIPT_REPO, "test", "setup", "tmp-hy
 const ADMISSION_TABLE = "src/lib/ci-parity.ts";
 // BACKSTOP only: the seven admitted suites take 6-10 s together on an 8-core host; this ends a hung child as not measured.
 const CENSUS_SUITE_CHILD_TIME_BOUND_MS = 60_000;
+/** W1-T9919: the label of a census whose ONLY unmeasured cause is a suite child stopped on the backstop above.
+ *  scripts/preflight-author.mjs reads this exact line and goes on (CI runs the suites); every other label refuses. */
+export const CENSUS_TIME_BOUND_LABEL = "census suites NOT MEASURED (time bound)";
+const TIME_BOUND_CODES = new Set(["ETIMEDOUT", "ERR_AUTHOR_STEP_TIMEOUT"]);
 // A hook's GIT_DIR family (W1-T3224), a parent runner's context (it turns the child's TAP into v8 frames), and
 // the lanes' read-only escape, which only flips checkCliFreshness — no census reads it — and makes the setup refuse.
 const CHILD_ENV_DROPPED = /^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/;
@@ -643,7 +647,8 @@ function runCensusChild(file, args, options) {
     maxBytes: options.maxBuffer, trackParent: true,
     stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
   if (result.outputComplete) rmSync(dir, { recursive: true, force: true });
-  else result.error = new Error(`${result.error?.message ?? "incomplete census capture"}; capture retained at ${dir}`);
+  // The code survives the rewrap, so a time-bound stop still reads as one (W1-T9919).
+  else result.error = Object.assign(new Error(`${result.error?.message ?? "incomplete census capture"}; capture retained at ${dir}`), { code: result.error?.code });
   return result;
 }
 
@@ -668,7 +673,7 @@ function censusReaderContext(root, child, options) {
 }
 
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
-  readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext }) {
+  readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0] }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
@@ -676,9 +681,17 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
   if (pathOverride !== undefined) options.env.PATH = pathOverride;
   const once = () => {
+    const startLoad = load1();
     const startedMs = now();
     const res = run(child.file, child.args, options);
     const finishedMs = now();
+    if (TIME_BOUND_CODES.has(res.error?.code) && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
+      // W1-T9919: the backstop fired; name what sizes it, so a loaded host reads differently from a hung child.
+      const loads = [startLoad, load1()].map((n) => (Number.isFinite(n) ? n.toFixed(2) : "unknown"));
+      throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message} - time bound: ` +
+        `${Math.round(finishedMs - startedMs)} ms elapsed of the ${CENSUS_SUITE_CHILD_TIME_BOUND_MS} ms bound, ${files.length} suite(s), ` +
+        `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true });
+    }
     assertChildFinished(res, "census suite");
     const stdout = String(res.stdout ?? "");
     const totals = [...stdout.matchAll(/^# tests (\d+)$/gm)];
@@ -1386,6 +1399,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
   let changed;
   const unmeasured = [];
   const snapshotUnmeasured = [];
+  const suiteErrors = [];
   try {
     const snapshot = readCensusSnapshot();
     if (snapshot && resolve(snapshot.root) !== root) throw new Error("census snapshot belongs to another worktree");
@@ -1435,7 +1449,14 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       ...readers,
       loadMembers: () => admitted(root),
       runSuites: (files, options = {}) => {
-        if (!snapshot) return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options });
+        if (!snapshot) {
+          try {
+            return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options });
+          } catch (e) {
+            suiteErrors.push(e);
+            throw e;
+          }
+        }
         if (options.readerRuntimePolicy !== undefined) throw new Error("source-reader runtime calibration is unavailable in git-free snapshot mode");
         const measured = runSnapshotSuites(snapshot, files, root);
         snapshotUnmeasured.push(...measured.notMeasured);
@@ -1444,7 +1465,13 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     });
     violations.push(...suites.violations);
     const suiteReasons = [...(suites.unmeasured === null ? [] : [suites.unmeasured]), ...snapshotUnmeasured];
-    if (suiteReasons.length > 0) unmeasured.push(`census suites NOT MEASURED - ${suiteReasons.join("; ")}`);
+    // W1-T9919: time-bound only when every unmeasured cause is a head child stopped on the backstop. A merge-base
+    // run's stop is rewrapped without the mark: its head already failed a suite, so that stays a refusal.
+    const timeBoundOnly = instrument.unmeasured === null && snapshotUnmeasured.length === 0 && suiteErrors.length > 0 &&
+      suiteErrors.every((e) => e?.censusTimeBound === true);
+    if (suiteReasons.length > 0) {
+      unmeasured.push(`${timeBoundOnly ? CENSUS_TIME_BOUND_LABEL : "census suites NOT MEASURED"} - ${suiteReasons.join("; ")}`);
+    }
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;
