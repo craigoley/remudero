@@ -756,6 +756,7 @@ import { discoverSourceTextReaders, readerJoins, type SourceTextReader } from ".
 // MECHANICAL remedy (a new file's baseline row, never a raised ceiling) before the implement
 // worker's final commit. See {@link commitWorkerEditsWithCensusFix} below for the call site.
 import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
+import { coverageNarrowRowFields, coverageNarrowSuites, judgeCoverage, type CoverageRun, type CoverageVerdict } from "./lib/coverage-narrow.js";
 // W1-T4108 — the same suite selector CI's shadow selector and `--coverage`'s report-only step
 // already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
 // default step can never independently derive a second notion of "which suites reach a changed
@@ -19190,15 +19191,10 @@ export async function pushFixRound(
  */
 export type CoveragePrecheck =
   | { outcome: "not-applicable"; repo: string; reason: string }
-  | { outcome: "covered"; reason: string; suites: number }
-  | { outcome: "uncovered"; text: string; suites: number }
-  /** W1-T9483: the diff's own and direct-importer suites leave lines uncovered and the reach is too wide to widen
-   *  to — ADVISORY, never a refusal. `head` is the sha judged, so CI's later verdict can be joined to it. */
-  | { outcome: "uncovered-narrow"; reason: string; text: string; suites: number; head: string }
-  | { outcome: "unavailable"; reason: string };
+  | CoverageVerdict;
 
 /** What one scoped `diff-coverage-local.mjs` run came back with. */
-export type CoverageRunResult = { status: number | null; output: string; timedOut: boolean; spawnError?: string };
+export type CoverageRunResult = CoverageRun;
 
 /** Everything the precheck reads or spawns, so a test can drive each arm without an instrumented suite. */
 export type CoveragePrecheckPorts = {
@@ -19218,7 +19214,6 @@ export type CoveragePrecheckPorts = {
 };
 
 const COVERAGE_SRC_FILE = /^src\/.*\.ts$/;
-const COVERAGE_TEST_FILE = /^test\/.*\.test\.ts$/;
 const COVERAGE_UNCOVERED_HEADLINE = /^diff-coverage: (?:BLOCKED -- this diff adds|INVALID process-boundary)/m;
 const COVERAGE_MISSING_SF = /no SF record in the coverage report/;
 const COVERAGE_TEXT_CAP = 4000;
@@ -19340,8 +19335,8 @@ export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts 
   if (!changed.some((f) => COVERAGE_SRC_FILE.test(f))) {
     return { outcome: "covered", reason: "no changed src file for diff-coverage to prove", suites: 0 };
   }
-  // W1-T9483: the diff's own test files and the direct importers of its changed src files run FIRST. An unreadable
-  // listing is no narrow pass, never a verdict: the reach passes below then decide exactly as they always did.
+  // W1-T9483: the diff's own test files and the direct importers of its changed src files run FIRST (lib/coverage-narrow.ts).
+  // An unreadable listing is no narrow pass, never a verdict: the reach passes then decide exactly as they always did.
   let narrow: string[] = [];
   let narrowUnreadable = "";
   try {
@@ -19359,72 +19354,21 @@ export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts 
     return { outcome: "unavailable", reason: `could not derive the affected-suite scope: ${reasonOf(e)}` };
   }
   const run = ports.run ?? ((w: string, suites: string[], timeoutMs: number) => realCoverageRun(w, suites, timeoutMs, ports.maxOutputBytes ?? COVERAGE_RUN_MAX_BUFFER));
-  const bounded = async (suites: string[]) => {
-    const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
-    const boundMs = Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number)));
-    return { predictedMs, boundMs, r: await run(wt, suites, boundMs) };
-  };
-  // The narrow pass's gap text, set only when it ran to a refusal-shaped verdict.
-  let narrowGap: string | undefined;
-  if (narrow.length > 0) {
-    const { r } = await bounded(narrow);
-    if (r.timedOut === false && r.spawnError === undefined) {
-      if (r.status === 0) return { outcome: "covered", reason: `${narrow.length} own and direct-importer suite(s) cover every added src line`, suites: narrow.length };
-      if (COVERAGE_UNCOVERED_HEADLINE.test(r.output)) narrowGap = coverageRefusalText(r.output);
-    }
-  }
-  const advisory = async (why: string): Promise<CoveragePrecheck | undefined> => {
-    if (narrowGap === undefined) return undefined;
-    let head: string;
-    try {
-      head = await (ports.head ?? ((w) => hostWorktreeGitAsync(w, ["rev-parse", "HEAD"]).then((t) => t.trim())))(wt);
-    } catch (e) {
-      head = `unreadable: ${reasonOf(e)}`;
-    }
-    return { outcome: "uncovered-narrow", reason: `${narrow.length} own and direct-importer suite(s) leave added src lines uncovered; ${why}`, text: narrowGap, suites: narrow.length, head };
-  };
-  if (selection.fullRun) return (await advisory(selection.reasons[0] ?? "a changed file forces the full suite")) ?? { outcome: "unavailable", reason: selection.reasons[0] ?? "a changed file forces the full suite" };
-  if (selection.suites.length === 0) return { outcome: "unavailable", reason: "no suite reaches the changed src files" };
   const tiers = tierFiles(selection.suites, manifest) as { fast: string[]; slow: string[] };
   const passes = [tiers.fast.length > 0 ? tiers.fast : tiers.slow];
   if (tiers.fast.length > 0 && tiers.slow.length > 0) passes.push([...tiers.fast, ...tiers.slow]);
-  for (const suites of passes) {
-    // A pass the narrow run already contained would repeat a run that left a gap: the verdict stands.
-    if (narrowGap !== undefined && suites.every((f) => narrow.includes(f))) return { outcome: "uncovered", text: narrowGap, suites: narrow.length };
-    if (suites.length > PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING) {
-      const tooWide = `${suites.length} suite(s) are too wide to precheck quickly (over preflight's scoped ceiling of ${PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING})`;
-      return (await advisory(tooWide)) ?? { outcome: "unavailable", reason: `${tooWide}${narrowUnreadable}` };
-    }
-    const { predictedMs, boundMs, r } = await bounded(suites);
-    if (r.timedOut) return { outcome: "unavailable", reason: `timed out over its ${boundMs}ms bound (manifest-measured ${predictedMs}ms for ${suites.length} suite(s))` };
-    if (r.spawnError !== undefined) return { outcome: "unavailable", reason: `spawn failed: ${r.spawnError.slice(0, 300)}` };
-    if (r.status === 0) return { outcome: "covered", reason: `${suites.length} scoped suite(s) cover every added src line`, suites: suites.length };
-    if (COVERAGE_UNCOVERED_HEADLINE.test(r.output)) return { outcome: "uncovered", text: coverageRefusalText(r.output), suites: suites.length };
-    if (!COVERAGE_MISSING_SF.test(r.output)) {
-      const why = /^diff-coverage-local: .*$/m.exec(r.output)?.[0] ?? `exited ${r.status}`;
-      return { outcome: "unavailable", reason: why.slice(0, 300) };
-    }
-  }
-  return { outcome: "unavailable", reason: "a changed src file has no SF record even after widening to the slow-tier siblings" };
-}
-
-/**
- * W1-T9483: the narrow pass's suites — the diff's own added or changed test files (still on disk) plus every
- * tracked test file whose import specifiers name a changed src file DIRECTLY. Built from the selector's own
- * comment-free import graph over the test tree only, so it costs one listing and the test files' reads.
- */
-export async function coverageNarrowSuites(wt: string, changed: string[]): Promise<string[]> {
-  const srcChanged = changed.filter((f) => COVERAGE_SRC_FILE.test(f));
-  const own = changed.filter((f) => COVERAGE_TEST_FILE.test(f) && existsSync(join(wt, f)));
-  if (srcChanged.length === 0 && own.length === 0) return [];
-  const files = new Map<string, string>();
-  for (const f of (await hostWorktreeGitAsync(wt, ["ls-files", "--", "test"], { maxBuffer: 1 << 26 })).split("\n").map((l) => l.trim())) {
-    if (!COVERAGE_TEST_FILE.test(f) || !existsSync(join(wt, f))) continue;
-    files.set(f, readFileSync(join(wt, f), "utf8"));
-  }
-  const { directImports } = buildAffectedSuitesGraph(files, srcChanged);
-  const importers = [...files.keys()].filter((f) => srcChanged.some((s) => directImports.get(f)?.has(s)));
-  return [...new Set([...own, ...importers])].sort();
+  return judgeCoverage({
+    narrow, narrowUnreadable, selection, passes, ceiling: PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING,
+    bounded: async (suites) => {
+      const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
+      const boundMs = Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number)));
+      return { predictedMs, boundMs, r: await run(wt, suites, boundMs) };
+    },
+    head: () => (ports.head ?? ((w) => hostWorktreeGitAsync(w, ["rev-parse", "HEAD"]).then((t) => t.trim())))(wt),
+    isUncovered: (output) => COVERAGE_UNCOVERED_HEADLINE.test(output),
+    refusalText: coverageRefusalText,
+    isMissingSf: (output) => COVERAGE_MISSING_SF.test(output),
+  });
 }
 
 /** W1-T4797: ledger the precheck's outcome and reason, then hand back a refusal only for `uncovered`. */
@@ -19441,7 +19385,7 @@ export function coveragePushRefusal(
     ...(result.outcome === "not-applicable" ? { repo: result.repo } : {}),
     ...(result.outcome === "uncovered" ? { refusal: result.text } : {}),
     // W1-T9483: advisory only — the lines to cover and the head they were judged on, never a refusal.
-    ...(result.outcome === "uncovered-narrow" ? { lines: result.text, head: result.head } : {}),
+    ...coverageNarrowRowFields(result),
   });
   if (result.outcome !== "uncovered") return undefined;
   return { text: `${COVERAGE_PUSH_CHECK}: CI's coverage-ratchet would refuse this head —\n${result.text}`, censuses: ["diff-coverage"], offeredBaselines: [] };
