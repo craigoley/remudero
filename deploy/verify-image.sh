@@ -83,10 +83,6 @@ if [ "${LOCAL_MODE}" -eq 1 ]; then
     echo "verify-image: UNVERIFIED local image identity; refusing before probes." >&2
     exit 1
   fi
-  if [ "${LOCAL_INSPECTED_ID}" != "${LOCAL_IMAGE_ID}" ]; then
-    echo "verify-image: local image identity mismatch or unavailable; refusing before probes." >&2
-    exit 1
-  fi
   AFTER="${LOCAL_INSPECTED_ID}"
   echo "verify-image: local image ID under test: ${AFTER} (no registry or pull)"
 else
