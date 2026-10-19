@@ -274,19 +274,52 @@ test("lint dependency credit: actual native store reads distinguish unreadable c
   });
 });
 
-test("lint dependency credit: absent or unusable evidence stays closed with honest UNKNOWN reasons", async t => {
-  for (const c of closedCreditCases) await t.test(c.name, async child => {
-    await withDependencyCreditFixture(child, f => {
-      c.seed(f);
-      const result = f.offline();
-      assert.equal(result.code, 1, result.output);
-      const admission = result.output.split("\n").find(line => line.includes("[machine-filing-admission]")) ?? "";
-      assert.match(admission, /ZZ-T1/);
-      // Current boolean refusal exists; unavailable evidence must not assert an observed unmerged PR.
-      assert.match(admission, /credit.*(?:unknown|unavailable|unobservable)|(?:unknown|unavailable|unobservable).*credit/i);
-      assert.match(admission, c.reason);
+// Keep every negative fixture in its original order, once, across independently executable proofs.
+const closedCreditCaseParts = [
+  ["missing store", "corrupt store", "unreadable nonmissing store", "malformed top-level store",
+    "unknown dependency", "unrelated cache entry", "wrong owner"],
+  ["wrong repository", "wrong host", "stored OPEN is not positive merge credit", "malformed credit entry",
+    "PR number and URL disagree", "quarantined native entry"],
+  ["configured root does not borrow another instance store", "missing config", "unreadable nonmissing config",
+    "corrupt config", "relative configured root", "same-PR remove-credit override"],
+  ["malformed override YAML", "malformed override shape", "refused override row", "unreadable nonmissing override",
+    "malformed invalidation container", "malformed invalidation mark"],
+] as const;
+assert.equal(new Set(closedCreditCases.map(c => c.name)).size, closedCreditCases.length, "negative fixture names are unique");
+assert.deepEqual(closedCreditCaseParts.flat(), closedCreditCases.map(c => c.name), "the four proof parts cover every negative fixture exactly once in original order");
+
+async function assertClosedCreditCases(t: TestContext, names: readonly string[]): Promise<void> {
+  for (const name of names) {
+    const c = closedCreditCases.find(value => value.name === name)!;
+    await t.test(c.name, async child => {
+      await withDependencyCreditFixture(child, f => {
+        c.seed(f);
+        const result = f.offline();
+        assert.equal(result.code, 1, result.output);
+        const admission = result.output.split("\n").find(line => line.includes("[machine-filing-admission]")) ?? "";
+        assert.match(admission, /ZZ-T1/);
+        // Current boolean refusal exists; unavailable evidence must not assert an observed unmerged PR.
+        assert.match(admission, /credit.*(?:unknown|unavailable|unobservable)|(?:unknown|unavailable|unobservable).*credit/i);
+        assert.match(admission, c.reason);
+      });
     });
-  });
+  }
+}
+
+test("lint dependency credit: absent or unusable evidence stays closed with honest UNKNOWN reasons part 1", async t => {
+  await assertClosedCreditCases(t, closedCreditCaseParts[0]);
+});
+
+test("lint dependency credit: absent or unusable evidence stays closed with honest UNKNOWN reasons part 2", async t => {
+  await assertClosedCreditCases(t, closedCreditCaseParts[1]);
+});
+
+test("lint dependency credit: absent or unusable evidence stays closed with honest UNKNOWN reasons part 3", async t => {
+  await assertClosedCreditCases(t, closedCreditCaseParts[2]);
+});
+
+test("lint dependency credit: absent or unusable evidence stays closed with honest UNKNOWN reasons part 4", async t => {
+  await assertClosedCreditCases(t, closedCreditCaseParts[3]);
 });
 
 test("lint dependency credit: online projection includes transitive dependencies without changing lint scope", async t => {
