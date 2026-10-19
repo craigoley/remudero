@@ -9,14 +9,14 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { plainTemplate } from "../src/lib/inbox-plain.js";
 import { verifyHumanAgeBandKey } from "../src/lib/measurement-cadence.js";
-import { loadPlan } from "../src/lib/plan.js";
+import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   automationProposalFromJudgedShard,
@@ -78,7 +78,7 @@ const unknownShard: ShardUnderJudgement = {
   citedInSrc: false,
 };
 
-test("#7911: a record embedded in plan/tasks.yaml has an unknown filing age, never 0 days", () => {
+test("#7911: a committed embedded record and a sharded record both retain measured filing ages", () => {
   const { dir, addedAtMs } = seededRepo();
   const byId = parkedById(dir, addedAtMs + 3 * DAY_MS);
 
@@ -86,8 +86,8 @@ test("#7911: a record embedded in plan/tasks.yaml has an unknown filing age, nev
   assert.equal(byId.get("W1-T9001")?.ageDays, 3, "the sharded record's add-commit is three days old");
   const embedded = byId.get("W1-T9003");
   assert.ok(embedded, "the embedded record must still be judged");
-  assert.equal(embedded.ageDays, null, "no add-commit for a shard file is an UNKNOWN age, not 0");
-  assert.match(embedded.ageUnknownReason ?? "", /no commit adds plan\/tasks\.d\/W1-T9003-\*\.yaml/);
+  assert.equal(embedded.ageDays, 3, "the exact embedded record has a readable introduction too");
+  assert.equal(embedded.ageUnknownReason, undefined);
 });
 
 test("#7911: a root git cannot read has an unknown filing age whose reason says git failed", () => {
@@ -169,4 +169,81 @@ test("W1-T10210: exact record history survives embedded moves and renames", t =>
   writeFileSync(join(dir, "plan", "tasks.d", `${id}-misleading.yaml`), ruling("W1-T9999"));
   commitHistory(dir, "2020-02-07T12:00:00Z", "a matching filename holds a different identity");
   assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a wrong-id filename cannot replace exact record provenance");
+});
+
+function historyCase(): { repo: ReturnType<typeof gitRepo>; plan: Plan; readAge: () => ShardUnderJudgement | undefined } {
+  const repo = gitRepo({ kind: "filing-history-unavailable", seedCommit: false });
+  mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, "plan", "tasks.yaml"), ruling("W1-T9003"));
+  writeFileSync(join(repo.dir, "plan", "tasks.d", "W1-T9001-control.yaml"), ruling("W1-T9001"));
+  commitHistory(repo.dir, "2020-01-01T12:00:00Z", "initial exact records");
+  const plan = loadPlan(join(repo.dir, "plan", "tasks.yaml"));
+  return { repo, plan, readAge: () => parkedVerifyHumanShards(plan, repo.dir, clockAt(Date.parse("2020-01-01T13:00:00Z")))
+    .find(shard => shard.id === "W1-T9003") };
+}
+
+test("W1-T10210: unknown history is distinct from a measured same-day zero", async t => {
+  await t.test("same-day embedded history is a measured zero", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    assert.equal(f.readAge()?.ageDays, 0); assert.equal(f.readAge()?.ageUnknownReason, undefined);
+  });
+  await t.test("uncommitted exact record is unknown despite readable history", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), ruling("W1-T9003") + ruling("W1-T9005"));
+    const shards = parkedById(f.repo.dir, Date.parse("2020-01-02T12:00:00Z"));
+    assert.equal(shards.get("W1-T9001")?.ageDays, 1, "positive control in the same repository");
+    assert.equal(shards.get("W1-T9005")?.ageDays, null);
+    assert.ok(shards.get("W1-T9005")?.ageUnknownReason);
+  });
+  await t.test("a matching filename containing only a different id is unknown", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
+    writeFileSync(join(f.repo.dir, "plan", "tasks.d", "W1-T9003-wrong.yaml"), ruling("W1-T90031"));
+    commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "remove exact record but keep a misleading filename");
+    assert.equal(f.readAge()?.ageDays, null);
+  });
+  await t.test("duplicate structured identity is unknown", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    writeFileSync(join(f.repo.dir, "plan", "tasks.d", "W1-T9003-copy.yaml"), ruling("W1-T9003"));
+    commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "ambiguous duplicated record");
+    assert.equal(f.readAge()?.ageDays, null); assert.match(f.readAge()?.ageUnknownReason ?? "", /duplicate|ambiguous/);
+  });
+  await t.test("deletion followed by reintroduction is unknown", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
+    commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "delete record");
+    writeFileSync(join(f.repo.dir, "plan", "tasks.d", "W1-T9003-again.yaml"), ruling("W1-T9003"));
+    commitHistory(f.repo.dir, "2020-01-03T12:00:00Z", "reintroduce record");
+    assert.equal(f.readAge()?.ageDays, null); assert.match(f.readAge()?.ageUnknownReason ?? "", /reintroduc|ambiguous/);
+  });
+  await t.test("unsupported plan-container shape is unknown", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "tasks: []\n");
+    commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "unsupported container");
+    assert.equal(f.readAge()?.ageDays, null); assert.match(f.readAge()?.ageUnknownReason ?? "", /unsupported|shape/);
+  });
+  await t.test("shallow ancestry is unknown", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "a later snapshot");
+    const shallow = gitRepo({ kind: "filing-history-shallow", seedCommit: false }); child.after(() => shallow.cleanup());
+    shallow.git("fetch", "--quiet", "--depth=1", f.repo.dir, "HEAD");
+    shallow.git("checkout", "--quiet", "--detach", "FETCH_HEAD");
+    assert.equal(shallow.git("rev-parse", "--is-shallow-repository").trim(), "true");
+    const age = parkedVerifyHumanShards(f.plan, shallow.dir, clockAt(Date.parse("2020-01-03T12:00:00Z")))
+      .find(shard => shard.id === "W1-T9003");
+    assert.equal(age?.ageDays, null); assert.match(age?.ageUnknownReason ?? "", /shallow|incomplete/);
+  });
+  await t.test("a missing original parent is unknown", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    const parent = f.repo.git("rev-parse", "HEAD").trim();
+    commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "child of missing parent");
+    rmSync(join(f.repo.dir, ".git", "objects", parent.slice(0, 2), parent.slice(2)));
+    assert.equal(f.readAge()?.ageDays, null); assert.ok(f.readAge()?.ageUnknownReason);
+  });
+  await t.test("an unreadable historical blob is unknown", child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    const blob = f.repo.git("rev-parse", "HEAD:plan/tasks.yaml").trim();
+    rmSync(join(f.repo.dir, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+    assert.equal(f.readAge()?.ageDays, null); assert.ok(f.readAge()?.ageUnknownReason);
+  });
 });

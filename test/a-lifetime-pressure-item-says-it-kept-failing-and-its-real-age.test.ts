@@ -11,6 +11,7 @@ import { loadPlan, type Plan } from "#src/lib/plan.js";
 import {
   automationProposalFromJudgedShard,
   proposalFromJudgedShard,
+  observedStateKey,
   type ShardUnderJudgement,
   type VerifyHumanVerdict,
 } from "#src/lib/verify-human-judge.js";
@@ -156,4 +157,32 @@ test("W1-T8827: a verify-human proposal keeps its wording and id", () => {
   const lifetime = automationProposalFromJudgedShard({ ...base, route: "lifetime-pressure", attributableDispatches: 3 }, verdict);
   assert.equal(lifetime.id, "verify-human-automate:W1-T216", "the id does not depend on the route");
   assert.match(lifetime.summary, /^W1-T216 kept failing to build \(3 attempts over 49 days\) and a judge reads it as safe to enter/);
+});
+
+test("W1-T10210: age consumers preserve fallback and judgment identity", async () => {
+  for (const inRepo of [true, false]) {
+    const f = fixture(inRepo);
+    try {
+      if (inRepo) commitShard(f.dir, 30);
+      writeLedger(f.ledgerPath, [
+        { ts: "not-a-date", task_id: ID, step: "earlier-unusable-evidence" },
+        { ts: new Date(NOW_MS - 50 * DAY_MS).toISOString(), task: ID, step: "first-seen-context-not-a-dispatch" },
+        { ts: new Date(NOW_MS - 80 * DAY_MS).toISOString(), task_id: "OTHER", step: "unrelated" },
+        ...failedAttempts(4, 3),
+      ]);
+      const result = await route(f);
+      const expected = inRepo ? 30 : 50;
+      assert.match(result.prompts[0]!, new RegExp(`AGE: ${expected} days since filing`),
+        "qualified Git wins; otherwise the earliest valid matching task alias row remains the fallback");
+      assert.match(result.summaries[0]!, new RegExp(`4 attempts over ${expected} days`));
+      assert.deepEqual(result.ids, [`verify-human:${ID}`]);
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  }
+  const base: ShardUnderJudgement = { id: ID, title: "t", rationale: "", acceptance: [], ageDays: 49,
+    observationKey: "source-bound-evidence", depsAllMerged: true, citedInSrc: false };
+  assert.equal(observedStateKey(base), observedStateKey({ ...base, ageDays: 79 }));
+  assert.equal(observedStateKey(base), observedStateKey({ ...base, ageDays: null, ageUnknownReason: "history unreadable" }));
+  assert.notEqual(observedStateKey(base), observedStateKey({ ...base, observationKey: "changed-source-evidence" }));
+  assert.equal(proposalFromJudgedShard(base, { decision: "needs_operator", reason: "r" }).id,
+    proposalFromJudgedShard({ ...base, ageDays: null }, { decision: "needs_operator", reason: "r" }).id);
 });
