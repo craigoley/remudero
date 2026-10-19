@@ -1,0 +1,93 @@
+- id: W1-T10185
+  title: "THE RETRO BACKOFF COUNTS THE SAME MERGES AS ITS TRIGGER — the cheap prelude sees 2451 and waits until October 22 while a same-corpus replay of shippedSince plus runlessMergesSince sees 2545, above the unchanged 2476 retry floor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, correct the backoff's merge-count input without changing its policy; both trigger paths and the shared credit interface must agree
+  band_meaning: span
+  origin: "operator-approved three-daemon recovery, read-only same-unit replay 2026-10-19T02:17Z"
+  plan_refs: [W1-T132, W1-T4664, W1-T9113, W1-T9119, W1-T10046, W1-T9240]
+  files:
+    - src/run-task.ts
+    - src/lib/retro.ts
+    - test/learning/retro-backoff-same-unit-count.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, not a projection from a distinct-PR count. The marker is 2026-10-06T10:45:50.161Z.
+    The last attempt, 2026-10-18T10:46:50.024Z, recorded mergesSinceMarker=2451, streak=5.
+    At loaded source 86c66ffb614c57d9375deed07882c1747a068fca, retroTriggerPrelude alone calls
+    evaluateRetroBackoff. Its proxy is max(lastAttempt.mergesSinceMarker, runlessMergesEarly.length).
+    It omits the shippedSince half. retroTriggerDecide computes both halves but never rechecks backoff.
+
+    Same-unit offline replay at 02:17:30Z: maintained gatherRuns, shippedSince (including P9),
+    runlessMergesSince and evaluateRetroBackoff over a captured complete run-step union yielded
+    shipped=545 + runless=2000 = 2545. The existing proxy yielded 2451. The unchanged policy's floor
+    is 2451+25=2476: proxy refuses until 2026-10-22T10:46:50.024Z; full count permits the merges exit.
+    This proves an omitted-input defect; it does not authorize a manual retro or changing its cadence.
+
+    Corpus controls: 359 gzip rotations, zero plain rotations, one initially opened live inode;
+    5,334,142 parsed rows, one malformed, 204,922 sweep controls, 14,081 exact-line-deduplicated
+    run-step rows, 4342 runs. The maintained closedSeed reader accepted 10266 rows, observed at
+    02:12:46Z. All 545 credited runs passed P9; 722 foreign-head claims were rejected. The replay
+    made zero GitHub requests and preserved HEAD as runless history and origin/main as the separate
+    commit-trailer fallback. This is recorded evidence, not a fresh GitHub eligibility verdict.
+
+    OWNERSHIP: 426 remote heads / 420 trees swept against b4077f8c on 2026-10-19, 11 main subject
+    matches and no additional head owner. W1-T4664 owns the unchanged doubling-delay/merges policy;
+    W1-T9113 owns the read-only durable seed and delta refresh; W1-T10046 owns reader I/O and explicitly
+    leaves counts/decisions unchanged; W1-T9119 owns resource-cost admission. None owns this count fix.
+    W1-T132 wires the shipped union into retroCommand's gather and names degraded GitHub reads;
+    this task reuses that credited union at the retry precheck and final backoff decision, not its gather wiring.
+  design: |
+    1. Reuse the existing once-captured validated closedSeed as a READ-ONLY cost-admission hint.
+       Compute cached credit with the existing shippedSince/P9 logic and the same runless units,
+       not unique PRs and not an old hybrid count plus a number of recent merges. Share the input
+       representation between sync and async gateways; keep the existing snapshot's board writer sole.
+       No new projection, supervisor, per-tick API request, full archive read or snapshot write.
+    2. A cached count may open the existing refreshed credit pass; it may NEVER certify a retry.
+       In both sync and async trigger paths, evaluate the unchanged backoff predicate on the final
+       authoritative shipped-plus-runless count before returning a trigger. A cached overestimate
+       must be refused after refresh. Reuse the existing candidate/P9/merge-time semantics, including
+       explicit unreadable/degraded behavior. Do not assume a later backoff gate already exists.
+    3. A missing or unreadable seed preserves the current backed-off zero-extra-GitHub-cost refusal.
+       Never turn an absent seed into permission to fetch or retry. Keep marker corruption,
+       GitHub degradation, resource admission, cadence, integrity, open-retro and dispatch locks intact.
+       Delay, doubling, mergesThreshold=25, daysThreshold=7, budgets and caps are unchanged.
+    4. The backoff row names the actual count and basis that produced its refusal, including a
+       final-count refusal after an optimistic cached hint. Evidence must not describe the cached
+       count as the authoritative outcome. No unbounded row payload or new ledger reader.
+    5. Tests use real maintained credit reducers and a real temporary snapshot read at least once;
+       cover default missing/invalid snapshot arms, missing merge times, foreign branch ownership,
+       changed marker, and both trigger paths. Prove deletion falsifiers for the new positive hint,
+       final authoritative refusal and decision evidence, without changing their assertions.
+       Preservation-only boundaries belong in the suite, not as base-passing acceptance proofs.
+  acceptance:
+    - claim: "cached shipped and runless credit open a due retro backoff without a GitHub read in the precheck"
+      proof: "unit test: retro backoff counts cached shipped and runless merges in the same units"
+    - claim: "a stale cached overestimate cannot bypass the final authoritative backoff in either trigger path"
+      proof: "unit test: retro backoff rechecks the authoritative count after a cached hint"
+    - claim: "the backoff row records the count and basis from the decision that refused the retry"
+      proof: "unit test: retro backoff evidence names the count that refused the retry"
+  falsifier: |
+    Remove cached shipped credit: the first new case still sees the old proxy and fails to reach the
+    existing refreshed pass. Remove only the final backoff check: the stale-cache case incorrectly
+    returns a trigger in the sync and async paths. Remove the decision's count/basis fields: the
+    evidence assertion fails. Preserve every assertion and show # fail N removed versus # fail 0
+    restored; preload/collection failures are not these falsifiers.
+  note: |
+    Reserved from the operator checkout through the maintained next-task-id command. The command
+    atomically won refs/rmd-id/W1-T10185 at b3e40d2722c94c4d313d395312ae3d65a9d32066; it reported
+    the local plan one id behind, so the filing branch fast-forwarded to current main before writing.
+    reservation hand-off: codex/file-retro-backoff-1792376413923 -> codex/file-retro-backoff-1792376413923
+    Replay receipt: retro-counter-replay-0220.json in the operator's recovery evidence directory;
+    normal-pressure one-slot / sealed256MiB / native write-and-network containment, 2.797 seconds,
+    all scratch released. This is replay evidence, not full local or hosted gate qualification.
+    EFFECT AFTER MERGE AND NATURAL ADOPTION: a normal retro trigger can take the merges-based exit
+    with unchanged policy, followed by a genuine subprocess terminal, successful follow-up publication
+    and retro.marker.advanced. A merged count fix alone does not prove retro recovery. Do not clear
+    the attempt fence, marks, claims or breakers and do not launch a manual production retro.

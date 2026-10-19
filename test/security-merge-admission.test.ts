@@ -33,3 +33,34 @@ test('core security admission rejects a changed expected head and carries the ob
  await assert.rejects(()=>securityMergeHeadAsync(url,async p=>reader()(p),oldHead),refused);
  assert.equal(securityMergeHead(url,reader(),head),head);
 });
+test('core URL identity aliases cannot become an out-of-scope security fallback',async()=>{
+ const aliases=[
+  'https://github.com/CRAIGOLEY/REMUDERO/pull/11468',
+  'https://GITHUB.COM/craigoley/remudero/pull/11468',
+  'http://github.com/craigoley/remudero/pull/11468',
+  'https://github.com:443/craigoley/remudero/pull/11468',
+  'https://github.com./craigoley/remudero/pull/11468',
+  'https://github.com/%63raigoley/remudero/pull/11468',
+  'https://github.com/craigoley/%72emudero/pull/11468',
+  'https://github.com/craigoley%2Fremudero/pull/11468',
+  'https://github.com/craigoley/%ZZ/pull/11468',
+  'https://github.com/craigoley/unused/../remudero/pull/11468',
+  'https://user@github.com/craigoley/remudero/pull/11468',
+  ' '+url+' ',url+'?view=files',url+'#discussion',
+ ];
+ const refused=(error:unknown)=>error instanceof SecurityMergeRefused&&error.state==='unknown'&&error.reason==='noncanonical-pr-target';
+ for(const alias of aliases){
+  assert.throws(()=>securityMergeHead(alias,()=>assert.fail('ambiguous core target must be refused before API reads')),refused,alias);
+  await assert.rejects(()=>securityMergeHeadAsync(alias,async()=>assert.fail('ambiguous core target must be refused before API reads')),refused,alias);
+ }
+});
+test('ambiguous CLI selectors are not proof that a merge target is outside core',async()=>{
+ for(const selector of ['11468','main','not a URL']){
+  assert.throws(()=>securityMergeHead(selector,()=>assert.fail('unresolved identity')),SecurityMergeRefused);
+  await assert.rejects(()=>securityMergeHeadAsync(selector,async()=>assert.fail('unresolved identity')),SecurityMergeRefused);
+ }
+ for(const other of ['https://github.com/acme/widgets/pull/1','https://github.com/CRAIGOLEY/another-repo/pull/1','https://git.example.com/craigoley/remudero/pull/1']){
+  assert.equal(securityMergeHead(other,()=>assert.fail('valid other repo remains outside approved policy')),undefined);
+  assert.equal(await securityMergeHeadAsync(other,async()=>assert.fail('valid other repo remains outside approved policy')),undefined);
+ }
+});
