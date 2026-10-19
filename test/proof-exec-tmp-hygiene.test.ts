@@ -108,6 +108,9 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
     if (file === "git" && args[0] === "rev-parse") {
       return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
     }
+    if (file === "git" && args[0] === "diff" && !args.includes("--name-only")) {
+      return { status: 0, stdout: "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -1 +1 @@\n-old\n+new\n", stderr: "" };
+    }
     if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
       const shard = args[args.indexOf("--shard") + 1]?.match(/^([1-8])\/8$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
@@ -171,7 +174,7 @@ test("parity coverage argv fixtures use supplied scratch through the real table"
     const children = recorded.calls.filter((c) => c.args.includes("--experimental-test-coverage"));
     assert.equal(children.length, 8);
     for (const c of children) assertHygienePair(c.args, "real table shard");
-    assert.deepEqual(fixture.events, [`acquire:${REPO_ROOT}`, ...Array(8).fill("refresh"), "release"]);
+    assert.deepEqual(fixture.events, [`acquire:${REPO_ROOT}`, ...Array(8).fill("refresh"), "release", "slot-release"]);
     assert.equal(existsSync(fixture.root), false);
     assert.equal(existsSync(join(sibling, "keep")), true);
   } finally { fixture.cleanup(); rmSync(sibling, { recursive: true, force: true }); }
@@ -186,7 +189,7 @@ test("parity fixture resources leave default coverage admission unchanged", () =
   else assert.match(result.detail, /scratch volume has 0 free bytes; need 21474836480 before starting coverage shards/);
   assert.equal(calls.length, 0);
   assert.match(coverageGateLockDir(REPO_ROOT), /^\/tmp\/rmd-c-[0-9a-f]{12}\.lock$/);
-  assert.equal(coverageGateLockDir(REPO_ROOT), coverageGateLockDir(REPO_ROOT), "default lock has no per-fixture identity");
+  assert.notEqual(coverageGateLockDir(REPO_ROOT), coverageGateLockDir(REPO_ROOT, "fixture"), "only an explicit discriminator changes default lock identity");
   assert.throws(() => testWithCoverageLeaf(join(tmpdir(), "missing-parity-repo", "absent"), spawn, "unused"), /ENOENT/);
 });
 
@@ -242,5 +245,53 @@ test("parity fixture acquisition failures are named and do not authorize a shard
     assert.equal(step?.ok, false);
     assert.match(step!.detail, /fixture lease (unavailable|unreadable)/);
     assert.equal(calls.filter((c) => c.args.includes("--experimental-test-coverage")).length, 0);
+  }
+});
+
+test("parity fixture slot refusal and refresh errors preserve NOT_RUN and release", () => {
+  for (const mode of ["not-run", "refresh"] as const) {
+    const fixture = coverageResourceFixture(), { spawn, calls } = recordingSpawn();
+    const resources: CoverageResourcePort = (root) => {
+      const acquired = fixture.resources(root);
+      assert.equal(acquired.ok, true);
+      if (!acquired.ok) return acquired;
+      if (mode === "not-run") acquired.lease.slot.executionAllowed = false;
+      else acquired.lease.slot.refresh = () => { throw new Error("fixture slot lost"); };
+      return acquired;
+    };
+    try {
+      const result = runCiParity(REPO_ROOT, { spawn, coverageResources: resources, coverageFreeBytes: () => 0 });
+      const step = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage");
+      assert.equal(step?.ok, false);
+      assert.match(step!.detail, mode === "not-run" ? /NOT_RUN/ : /fixture slot lost/);
+      assert.equal(calls.filter((c) => c.args.includes("--experimental-test-coverage")).length, 0);
+      assert.equal(fixture.events.filter((e) => e === "release").length, 1);
+      assert.equal(existsSync(fixture.root), false);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("parity fixture lease survives consumers and a cleanup error cannot become PASS", () => {
+  for (const mode of ["ratchet", "diff", "release"] as const) {
+    const fixture = coverageResourceFixture();
+    const { spawn } = recordingSpawn(mode === "release" ? {} : {
+      [mode === "ratchet" ? "/coverage-ratchet.mjs" : "/diff-coverage.mjs"]: { status: 9, stderr: `fixture ${mode} red` },
+    });
+    const resources: CoverageResourcePort = (root) => {
+      const acquired = fixture.resources(root);
+      if (acquired.ok && mode === "release") {
+        const release = acquired.lease.release;
+        acquired.lease.release = () => { release(); throw new Error("fixture release unconfirmed"); };
+      }
+      return acquired;
+    };
+    try {
+      const result = runCiParity(REPO_ROOT, { spawn, coverageResources: resources, coverageFreeBytes: () => 0 });
+      const step = result.steps.find((s) => s.name === (mode === "release" ? "coverage-ratchet:error" : `coverage-ratchet:${mode === "ratchet" ? "ratchet" : "diff-coverage"}`));
+      assert.equal(step?.ok, false);
+      assert.match(step!.detail, mode === "release" ? /fixture release unconfirmed/ : new RegExp(`fixture ${mode} red`));
+      assert.equal(fixture.events.filter((e) => e === "release").length, 1);
+      assert.equal(existsSync(fixture.root), false);
+    } finally { fixture.cleanup(); }
   }
 });
