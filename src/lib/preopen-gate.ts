@@ -335,7 +335,9 @@ export function defaultRunGate(
   const run = (sandbox: GateContainment): Promise<GateRun> => {
     if (sandbox.mode !== "sandboxed") return Promise.resolve({ exitCode: null, error: `the gate could not be contained: ${sandbox.reason}`, containment: "unmeasured" });
     const summaryFile = join(home, GATE_SUMMARY_NAME);
-    const extraArgs = ["--summary-file", summaryFile, "--sandbox-metrics"];
+    // Only our maintained launcher promises the new option. A caller-selected legacy launcher
+    // keeps its existing argv contract and reports missing measurements explicitly.
+    const extraArgs = ["--summary-file", summaryFile, ...(harnessRmd === undefined ? ["--sandbox-metrics"] : [])];
     const { file, args } = harnessRmd === undefined
       ? preopenGateLaunch(cwd, log, join(harnessRoot, "bin", "rmd"), harnessRoot, {
         deadline_enforced_by: armedEnforcers(timeoutBin), launcher: "harness", containment: "sandboxed", env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME,

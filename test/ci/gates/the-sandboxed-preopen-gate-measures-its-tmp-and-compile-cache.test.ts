@@ -18,19 +18,22 @@ const cost = {
   resource_scope: "preflight-process",
 };
 
-async function childGate(exit: number, measurement?: unknown, writeSummary = true) {
+async function childGate(exit: number, measurement?: unknown, writeSummary = true, maintainedLauncher = false) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w9739-child-"));
-  const launcher = join(dir, "rmd");
+  mkdirSync(join(dir, "bin"));
+  const launcher = join(dir, "bin", "rmd");
   const sandbox = join(dir, "sandbox");
   try {
     writeFileSync(launcher, `#!${process.execPath}\nconst fs=require('node:fs');const args=process.argv.slice(2);\n` +
+      (maintainedLauncher ? `if(!args.includes('--sandbox-metrics'))process.exit(23);\n` : "") +
       (writeSummary ? `fs.writeFileSync(args[args.indexOf('--summary-file')+1],JSON.stringify({finishedAt:new Date().toISOString(),steps:[{name:'fixture-check',ok:${exit === 0}}],sandboxMetrics:${JSON.stringify(measurement)}}));\n` : "") +
       `process.exit(${exit});\n`);
     writeFileSync(sandbox, `#!${process.execPath}\nconst cp=require('node:child_process');const a=process.argv.slice(2);const at=a.indexOf('--');const r=cp.spawnSync(a[at+1],a.slice(at+2),{stdio:'inherit'});process.exit(r.status??128);\n`);
     chmodSync(launcher, 0o755);
     chmodSync(sandbox, 0o755);
     return await runPreopenGate(dir, {
-      runGate: cwd => defaultRunGate(cwd, launcher, () => {}, {}, {
+      runGate: cwd => defaultRunGate(cwd, maintainedLauncher ? undefined : launcher, () => {}, {}, {
+        harnessRoot: dir,
         contain: () => ({ mode: "sandboxed", file: sandbox, argv: ["--"] }),
       }),
       runPushGate: async () => ({ kind: "skipped", reason: "fixture has no remote" }),
@@ -41,7 +44,7 @@ async function childGate(exit: number, measurement?: unknown, writeSummary = tru
 }
 
 test("W1-T9739: a sandboxed gate row names its tmp peak, compile cache and child cost", async () => {
-  const result = await childGate(0, { sandbox: cost });
+  const result = await childGate(0, { sandbox: cost }, true, true);
   assert.equal(result.kind, "pass");
   assert.deepEqual(preopenGateLedgerFields(result).sandbox, cost);
   assert.equal(preopenGateLedgerFields(result).sandbox_unmeasured, undefined);
