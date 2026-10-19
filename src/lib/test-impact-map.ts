@@ -30,8 +30,11 @@ import { fileURLToPath } from "node:url";
 
 export const IMPACT_MAP_FORMAT = "rmd-test-impact-map-v1";
 
-/** Characters after which a `/` can only begin a regex literal. */
+/** Legacy character-based goal; conservative callers use tokens and refuse ambiguous closes. */
 const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
+const CONSERVATIVE_REGEX_PRECEDERS = "(,=:[!&|?{;+-*%<>~^/";
+const CONTROL_KEYWORDS = /^(?:if|while|for|with|switch|catch)$/;
+const REGEX_KEYWORDS = new Set(["return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "else", "do", "new", "extends", "default", "break", "continue", "debugger"]);
 
 /** W1-T5701 — `content` with every comment blanked, STRING-AWARE: a `//` or `/*` inside a string,
  *  template or regex literal is kept, and so is every string's text (specifiers live in strings).
@@ -42,28 +45,30 @@ const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
  *  `keepLines`, a block comment keeps its newlines, so line N of the result is line N of `content`.
  *  (Moved here from affected-suites.ts by W1-T6083, which re-exports it: the impact arm reads it and
  *  the selector reads the arm, so one of them had to own it.) */
-export function stripComments(content: string, opts: { keepLines?: boolean } = {}): string {
-  return scanSource(content, false, opts.keepLines === true);
+export function stripComments(content: string, opts: { keepLines?: boolean; conservative?: boolean } = {}): string {
+  return scanSource(content, false, opts.keepLines === true, opts.conservative === true);
 }
 
 /** W1-T6089 — `content` (already comment-free) with every string, template and regex BODY blanked to
  *  spaces, delimiters and offsets kept: brackets inside a literal can no longer unbalance a walk. */
-export function maskLiterals(content: string): string {
-  return scanSource(content, true, false);
+export function maskLiterals(content: string, opts: { conservative?: boolean } = {}): string {
+  return scanSource(content, true, false, opts.conservative === true);
 }
 
 /** `scanSource` walks CODE; a template literal's text is a literal, but each `${...}` substitution inside
  *  it is code again (W1-T6158) — nested strings, templates, comments, regexes and braces are scanned until
- *  the matching `}`, so a backtick inside a substitution cannot close the outer template. */
-function scanSource(content: string, mask: boolean, keepLines: boolean): string {
+ *  the matching `}`, so a backtick inside a substitution cannot close the outer template.
+ *  Conservative mode is opt-in: unknown lexical contexts throw into the selector's existing full fallback.
+ *  Default output retains the legacy heuristic, including its known regex-context limitations. */
+function scanSource(content: string, mask: boolean, keepLines: boolean, conservative: boolean): string {
   const literal = (text: string) => (mask && text.length > 1 ? text[0] + text.slice(1, -1).replace(/[^\n]/g, " ") + text.slice(-1) : text);
   const blank = (text: string) => (mask ? text.replace(/[^\n]/g, " ") : text);
   let out = "";
-  let last = ""; // the last significant (non-space, non-comment) character emitted
+  let last = "";
   const n = content.length;
 
   /** Scan a template literal whose opening backtick is at `start`; returns the index after its close. */
-  const scanTemplate = (start: number): number => {
+  const scanTemplate = (start: number, generator: boolean | undefined): number => {
     out += "`";
     let i = start + 1;
     let text = "";
@@ -84,7 +89,7 @@ function scanSource(content: string, mask: boolean, keepLines: boolean): string 
         flush();
         out += "${";
         last = "{";
-        i = scanCode(i + 2, true);
+        i = scanCode(i + 2, true, generator);
         if (i < n) out += "}";
         i += 1;
       } else {
@@ -97,25 +102,58 @@ function scanSource(content: string, mask: boolean, keepLines: boolean): string 
   };
 
   /** Scan code from `from`; with `untilBrace`, stop at the `}` that closes the substitution (not consumed). */
-  const scanCode = (from: number, untilBrace: boolean): number => {
+  const scanCode = (from: number, untilBrace: boolean, inheritedGenerator: boolean | undefined): number => {
     let i = from;
     let depth = 0;
+    let generator = inheritedGenerator;
+    let pendingFunction: boolean | undefined;
+    let functionBody: boolean | undefined;
+    let arrowPending = false;
+    let lineBreak = false;
+    let expressionArrow: number | undefined;
+    const parens: { control: boolean | undefined; fn?: boolean }[] = [];
+    const scopes: { fn: boolean; generator?: boolean; arrow?: number }[] = [];
+    const unknown = () => new Error(`lexical context unknown at line ${content.slice(0, i).split("\n").length} after ${last}`);
     while (i < n) {
       const c = content[i]!;
       const next = content[i + 1];
       if (c === "/" && next === "/") {
-        while (i < n && content[i] !== "\n") i += 1;
+        while (i < n && (conservative ? !/[\r\n\u2028\u2029]/.test(content[i]!) : content[i] !== "\n")) i += 1;
         continue;
       }
       if (c === "/" && next === "*") {
         const end = content.indexOf("*/", i + 2);
         const stop = end < 0 ? n : end + 2;
+        if (conservative && /[\r\n\u2028\u2029]/.test(content.slice(i, stop))) lineBreak = true;
         out += keepLines ? content.slice(i, stop).replace(/[^\n]/g, "") || " " : " ";
         i = stop;
         continue;
       }
+      const afterLineBreak = lineBreak;
+      if (conservative) {
+        if (c.charCodeAt(0) > 127 || (c === "\r" && next !== "\n")) throw unknown();
+        if (content.startsWith("<!--", i) || content.startsWith("-->", i)) throw unknown();
+        if (/[\r\n]/.test(c)) lineBreak = true;
+        else if (!/\s/.test(c)) lineBreak = false;
+      }
+      if (conservative && arrowPending && !/\s/.test(c) && c !== "{") {
+        expressionArrow = parens.length;
+        arrowPending = false;
+      }
+      if (conservative && /[A-Za-z_$]/.test(c)) {
+        let end = i + 1;
+        while (end < n && /[\w$]/.test(content[end]!)) end++;
+        const word = content.slice(i, end), property = last === "." || last === "#";
+        if (!property && ((last === "*" && (word === "function" || CONTROL_KEYWORDS.test(word))) ||
+            (generator === true && CONTROL_KEYWORDS.test(word)))) throw unknown();
+        if (!property && word === "function") pendingFunction = false;
+        out += word;
+        last = property ? `.${word}` : word;
+        i = end;
+        continue;
+      }
       if (c === "`") {
-        i = scanTemplate(i);
+        i = scanTemplate(i, generator);
         last = "`";
         continue;
       }
@@ -131,7 +169,11 @@ function scanSource(content: string, mask: boolean, keepLines: boolean): string 
         last = c;
         continue;
       }
-      if (c === "/" && (last === "" || REGEX_PRECEDERS.includes(last))) {
+      if (conservative && functionBody === true && c === ":") throw unknown();
+      if (conservative && c === "/" && (last === "}" || last === "await" || last === "of" || last === "unknown)" ||
+          (last === "yield" && (generator === undefined || expressionArrow !== undefined)))) throw unknown();
+      if (c === "/" && (last === "" || (conservative ? CONSERVATIVE_REGEX_PRECEDERS : REGEX_PRECEDERS).includes(last) ||
+          (conservative && (REGEX_KEYWORDS.has(last) || last === "control)" || last === "=>" || (last === "yield" && generator === true))))) {
         let j = i + 1;
         let inClass = false;
         while (j < n && content[j] !== "\n") {
@@ -142,12 +184,65 @@ function scanSource(content: string, mask: boolean, keepLines: boolean): string 
           else if (d === "/" && !inClass) break;
           j += 1;
         }
+        if (conservative && (j >= n || content[j] !== "/" || inClass)) throw unknown();
         out += literal(content.slice(i, j + 1));
         i = j + 1;
-        last = "/";
+        last = conservative ? "literal" : "/";
         continue;
       }
-      if (untilBrace) {
+      if (conservative && c === "!" && next !== "=" && !REGEX_KEYWORDS.has(last) && last !== "await" &&
+          !(last === "yield" && generator !== false) && (last === ")" || last === "]" || /^[\w$."'`]/.test(last))) {
+        if (afterLineBreak) throw unknown();
+        out += c;
+        last = "postfix!";
+        i++;
+        continue;
+      }
+      if (conservative && (c === "+" || c === "-") && next === c) {
+        out += c + c;
+        last = c + c;
+        i += 2;
+        continue;
+      }
+      if (conservative && c === "*" && pendingFunction !== undefined) pendingFunction = true;
+      if (conservative && c === "(") {
+        parens.push({ control: last === "await" ? undefined : CONTROL_KEYWORDS.test(last), fn: pendingFunction });
+        pendingFunction = undefined;
+      } else if (conservative && c === ")") {
+        const frame = parens.pop();
+        if (frame?.fn !== undefined) functionBody = frame.fn;
+        if (expressionArrow !== undefined && parens.length < expressionArrow) expressionArrow = undefined;
+        out += c;
+        last = frame?.control === undefined ? "unknown)" : frame.control ? "control)" : ")";
+        i++;
+        continue;
+      } else if (conservative && c === "{") {
+        const body = arrowPending ? false : functionBody !== undefined && !/^(?::|<|\||&|\?|=)$/.test(last)
+          ? functionBody : last === ")" ? undefined : null;
+        const fn = body !== null;
+        scopes.push({ fn, generator, arrow: expressionArrow });
+        if (body !== null) {
+          generator = body;
+          expressionArrow = undefined;
+          functionBody = undefined;
+        }
+        arrowPending = false;
+      } else if (conservative && c === "}") {
+        if (untilBrace && scopes.length === 0) return i;
+        const frame = scopes.pop();
+        if (frame?.fn) {
+          generator = frame.generator;
+          expressionArrow = frame.arrow;
+        }
+      } else if (conservative && c === "=" && next === ">") {
+        out += "=>";
+        last = "=>";
+        arrowPending = true;
+        i += 2;
+        continue;
+      }
+      if (conservative && (c === ";" || c === ",") && expressionArrow !== undefined && parens.length <= expressionArrow) expressionArrow = undefined;
+      if (!conservative && untilBrace) {
         if (c === "{") depth += 1;
         else if (c === "}") {
           if (depth === 0) return i;
@@ -161,7 +256,7 @@ function scanSource(content: string, mask: boolean, keepLines: boolean): string 
     return n;
   };
 
-  scanCode(0, false);
+  scanCode(0, false, false);
   return out;
 }
 
