@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 import * as metrics from "#src/lib/gate-sandbox-metrics.js";
-import { preopenGateLedgerFields } from "#src/lib/preopen-gate.js";
+import * as preopen from "#src/lib/preopen-gate.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const diskMount = "44 20 8:2 /rmd-proof-home-fixture/.rmd-private-tmp /tmp rw - ext4 /dev/fixture rw\n";
@@ -34,8 +34,18 @@ test("private disk tmp byte scope survives the actual preopen transport", () => 
   assert.equal(result.sandbox.tmp_peak_bytes, 32);
   assert.equal(result.sandbox.tmp_peak_scope, fileScope);
   assert.deepEqual(metrics.parseGateSandboxMeasurement(result), result);
-  assert.deepEqual(preopenGateLedgerFields({ kind: "pass", durationMs: 1, sandboxMetrics: result }).sandbox, result.sandbox);
+  assert.deepEqual(preopen.preopenGateLedgerFields({ kind: "pass", durationMs: 1, sandboxMetrics: result }).sandbox, result.sandbox);
   assert.ok("sandbox_unmeasured" in metrics.parseGateSandboxMeasurement({ sandbox: { ...result.sandbox, tmp_peak_scope: "whole-volume" } }));
+});
+
+test("private disk tmp mounts precede the preopen harness binds", () => {
+  const tail = ["--dir", "/home", "--dir", "/home/runner", "--bind", "/checkout", "/checkout", "--chdir", "/checkout", "--"];
+  const disk = ["--unshare-net", "--bind", "/owned-home/.rmd-private-tmp", "/tmp", ...tail];
+  const tmpfs = ["--unshare-net", "--tmpfs", "/tmp", ...tail];
+  assert.equal(disk[preopen.preopenSandboxBindStart(disk)], "--bind");
+  assert.equal(preopen.preopenSandboxBindStart(disk), 8);
+  assert.equal(preopen.preopenSandboxBindStart(tmpfs), 7);
+  assert.throws(() => preopen.preopenSandboxBindStart(["--chdir", "/checkout", "--"]), /no private \/tmp mount/);
 });
 
 test("private disk tmp partial readings and changing byte bases never become zero", () => {
