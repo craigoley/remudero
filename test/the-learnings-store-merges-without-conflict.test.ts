@@ -11,6 +11,7 @@ import { applyLearningActions, cheapFingerprint, knowledgeGardenSpec } from "../
 import {
   ciLearningGoldenFixtureDir, ciLearningLessonsFile, ciLearningRecordVerdict, ciLearningShardYaml, type CiLearningShardDraft,
 } from "../src/lib/measurement-cadence.js";
+import { machineShardFilingRefusal } from "../src/lib/machine-filing.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -145,10 +146,7 @@ test("W1-T7954: a ci-learning filing writes its own entry file", () => {
   const first = ciLearningShardYaml(draft(111), "W1-T111");
   const second = ciLearningShardYaml(draft(222), "W1-T222");
   const task = loadPlanFromYaml(first, "first filing").tasks[0]!;
-  assert.deepEqual(task.files, [
-    "learnings/ci.d/ci-learning-111-coverage-ratchet.yaml",
-    "test/fixtures/golden-verdicts/ci-learning-111-coverage-ratchet/criteria.yaml",
-  ]);
+  assert.deepEqual(task.files, ["learnings/ci.d/ci-learning-111-coverage-ratchet.yaml"]);
   assert.notDeepEqual(task.files, loadPlanFromYaml(second, "second filing").tasks[0]!.files);
   assert.equal(task.acceptance![0]!.proof, `grep: ci-learning:111:coverage-ratchet in ${task.files![0]}`);
   assert.equal(first.includes("learnings/ci.yaml"), false);
@@ -161,13 +159,15 @@ test("a ci-learning filing also asks for the golden verdict prompt-surface-gate 
   const lessonsFile = ciLearningLessonsFile("ci-learning:111:coverage-ratchet");
   const fixtureDir = ciLearningGoldenFixtureDir("ci-learning:111:coverage-ratchet");
   assert.equal(basename(fixtureDir), basename(lessonsFile, ".yaml"));
-  assert.deepEqual(task.files, [lessonsFile, `${fixtureDir}/criteria.yaml`]);
+  // The fixture is asked for by a criterion, not declared: a ci-learning record admits exactly one file (W1-T10027).
+  assert.deepEqual(task.files, [lessonsFile]);
   assert.deepEqual(task.acceptance![1], {
     claim: "the lesson carries the golden verdict prompt-surface-gate admits for a learnings path",
     proof: `grep: ci-learning:111:coverage-ratchet in ${fixtureDir}/criteria.yaml`,
   });
   assert.ok(task.note!.includes(`golden verdict under ${fixtureDir}/`), task.note);
   assert.deepEqual(ciLearningRecordVerdict(filing, "golden filing"), { ok: true, reason: "" });
+  assert.equal(machineShardFilingRefusal(filing, "golden filing", { pathExists: () => false, pathExistsAtBase: () => false }), undefined);
 });
 
 test("W1-T7954: selection without a committed index matches the indexed selection", () => {
