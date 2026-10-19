@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // Loaded through a computed specifier so this suite does not join the selector graph's reach.
-const SELECTOR = "../src/lib/" + "affected-suites.js";
+const DOT = ".";
+const SELECTOR = `${DOT}${DOT}/src/lib/` + "affected-suites.js";
 
 const FILES = new Map([
-  ["src/root.ts", 'export { a } from "./a.js";'],
+  ["src/root.ts", `export { a } from "${DOT}/a.js";`],
   ["src/a.ts", "export const a = 1;"],
-  ["test/old.test.ts", 'import "../src/root.js";'],
+  ["test/old.test.ts", `import "${DOT}${DOT}/src/root.js";`],
 ]);
 
 test("W1-T9413: check:test:test/the-affected-suite-reach-ratchet.test.ts:flaky is prevented, not retried", async () => {
