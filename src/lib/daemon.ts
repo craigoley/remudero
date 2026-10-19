@@ -6940,8 +6940,16 @@ export async function runDaemon(
     const inProcessLaneInFlight = (): boolean => [...inFlightTasks].some((t) => !outOfProcess(t.id));
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
     const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
+    const settledHoldouts = new Set<string>();
+    const observeLaneSettlement = (id: string): void => {
+      settledHoldouts.add(id);
+      if (latchDrain && restartHoldouts.has(id) && [...restartHoldouts].every(task => settledHoldouts.has(task))) {
+        freshnessPhases.holdouts = Math.max(0, daemonClock.now() - latchDrain.latchAtMs);
+      }
+    };
     const addRestartHoldout = (id: string): void => {
       restartHoldouts.add(id);
+      settledHoldouts.delete(id);
       delete freshnessPhases.holdouts; // A child falling back in-process can reopen the measured phase.
     };
     const releaseRestartHoldout = (id: string): boolean => {
@@ -7556,9 +7564,13 @@ export async function runDaemon(
         wakeParkedLanes(true);
         return inFlightFreshness;
       } }).then((outcome) => {
+        observeLaneSettlement(id);
         const length = daemonClock.now() - startedAtMs;
         if (length > 0) { runLengths.totalMs += length; runLengths.samples++; measuredRuns.push({ taskId: id, ms: length }); }
         return outcome;
+      }, (error: unknown) => {
+        observeLaneSettlement(id);
+        throw error;
       });
     }, refillLane, lanes, admitAtStart, onStarted, poolControl);
     let poolOutcome: LanePoolOutcome<Task, RunResult>;
