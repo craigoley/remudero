@@ -81,8 +81,16 @@ const EXPECTED_PROBES: ReadonlyArray<{ key: string; identifiedBy: string; endsWi
  * that inference. argv is recorded NUL-separated because an argument here legitimately contains
  * newlines, quotes and `%` formats, and every other separator is inside the data.
  */
-function writeStubs(dir: string): void {
-  writeFileSync(join(dir, "az"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+function writeStubs(dir: string, guardHostTools = false): void {
+  writeFileSync(join(dir, "az"), [
+    "#!/usr/bin/env bash",
+    'n=$(( $(cat "$STUB_REC/az-seq" 2>/dev/null || echo 0) + 1 ))',
+    'printf %s "$n" > "$STUB_REC/az-seq"',
+    ': > "$STUB_REC/az-argv.$n"',
+    'for a in "$@"; do printf %s\'\\0\' "$a" >> "$STUB_REC/az-argv.$n"; done',
+    '[ "$STUB_MODE" = remote-login-fail ] && exit 7',
+    "exit 0", "",
+  ].join("\n"), { mode: 0o755 });
   const docker = [
     "#!/usr/bin/env bash",
     'n=$(( $(cat "$STUB_REC/seq" 2>/dev/null || echo 0) + 1 ))',
@@ -90,10 +98,23 @@ function writeStubs(dir: string): void {
     ': > "$STUB_REC/argv.$n"',
     'for a in "$@"; do printf %s\'\\0\' "$a" >> "$STUB_REC/argv.$n"; done',
     'case "$1" in',
+    '  image) if [ "${2:-}" = inspect ] && [ "${4:-}" = "{{.Id}}" ]; then',
+    '           case "$STUB_MODE" in',
+    '             local-id-unreadable) exit 1 ;;',
+    '             local-id-empty) exit 0 ;;',
+    '             local-id-malformed) echo sha256:bad; exit 0 ;;',
+    '             local-id-mismatch) printf "%s\\n" "sha256:' + "b".repeat(64) + '"; exit 0 ;;',
+    '             local-id-ambiguous) printf "%s\\n%s\\n" "$STUB_IMAGE_ID" "$STUB_IMAGE_ID"; exit 0 ;;',
+    '           esac',
+    '           printf "%s\\n" "$STUB_IMAGE_ID"; exit 0',
+    '         fi ;;',
+    '  inspect) [ "$STUB_MODE" = local-label-unreadable ] && exit 1; exit 0 ;;',
+    'esac',
+    'case "$1" in',
     // The first inspect predates the pull, so it must report NO local copy — otherwise the script
     // takes its "digest did not change" branch and this suite would be exercising a re-run.
     '  image) [ -e "$STUB_REC/pulled" ] && printf %s\\\\n "$STUB_DIGEST"; exit 0 ;;',
-    '  pull)  : > "$STUB_REC/pulled"; exit 0 ;;',
+    '  pull)  [ "$STUB_MODE" = remote-pull-fail ] && exit 7; : > "$STUB_REC/pulled"; exit 0 ;;',
     "  run)   ;;",
     "  *)     exit 0 ;;",
     "esac",
@@ -112,6 +133,7 @@ function writeStubs(dir: string): void {
     'printf %s\\\\n "$probe" >> "$STUB_REC/probes"',
     'case "$probe" in',
     '  checks)     [ "$STUB_MODE" = checks-fail ] && { echo "  FAIL  claude (not found)"; exit 1; }',
+    '              [ "$STUB_MODE" = checks-infra ] && { echo "  INFRA node (could not run: Cannot allocate memory)"; exit 2; }',
     // The build-sha defect is its own subject: the image carries BOTH carriers and they disagree,
     // which means one was written and the other was not. That is the only state this probe fails
     // on - an image with neither carrier is OLD, not broken, and must stay a WARN.
@@ -141,6 +163,17 @@ function writeStubs(dir: string): void {
   // mkdtemp honours the umask, so the mode above is a request. Make it a fact.
   chmodSync(join(dir, "az"), 0o755);
   chmodSync(join(dir, "docker"), 0o755);
+  const guard = (tool: string, record: string) => {
+    const path = join(dir, tool);
+    writeFileSync(path, `#!/usr/bin/env bash\nprintf '%s\\n' '${tool}' >> "$STUB_REC/${record}"\nexit 97\n`, { mode: 0o755 });
+    chmodSync(path, 0o755);
+  };
+  guard("verify_image_host_payload_probe", "host-payload-effects");
+  if (guardHostTools) {
+    for (const tool of ["sed", "head", "dirname", "cat", "grep", "find", "id", "git", "node", "claude", "codex", "python3", "ps", "pgrep", "lsof", "mktemp", "rm", "env"]) {
+      guard(tool, "host-tool-calls");
+    }
+  }
 }
 
 interface Run {
@@ -151,21 +184,34 @@ interface Run {
   argvs: string[][];
   /** The probe key the stub matched, per `docker run`. */
   probes: string[];
+  azArgvs: string[][];
+  hostToolCalls: string[];
+  hostPayloadEffects: string[];
+  signal: NodeJS.Signals | null;
+  error: Error | undefined;
 }
 
-function runVerifier(mode: string, scriptPath = SCRIPT): Run {
+interface VerifierOptions {
+  args?: readonly string[];
+  guardHostTools?: boolean;
+  remoteEnv?: { REGISTRY?: string; IMAGE?: string; TAG?: string };
+}
+
+function runVerifier(mode: string, scriptPath = SCRIPT, options: VerifierOptions = {}): Run {
   const dir = mkdtempSync(join(tmpdir(), "verify-image-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "verify-image-rec-"));
-  writeStubs(dir);
-  const r = spawnSync("bash", [scriptPath], {
+  writeStubs(dir, options.guardHostTools);
+  const r = spawnSync("bash", [scriptPath, ...(options.args ?? [])], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
       ...process.env,
+      ...options.remoteEnv,
       PATH: `${dir}:${process.env.PATH ?? ""}`,
       STUB_REC: rec,
       STUB_MODE: mode,
       STUB_DIGEST: "reg.azurecr.io/remudero@sha256:feed",
+      STUB_IMAGE_ID: "sha256:" + "a".repeat(64),
     },
   });
   const argvs = readdirSync(rec)
@@ -178,7 +224,14 @@ function runVerifier(mode: string, scriptPath = SCRIPT): Run {
   } catch {
     probes = [];
   }
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", argvs, probes };
+  const azArgvs = readdirSync(rec).filter(f => /^az-argv\.[0-9]+$/.test(f))
+    .sort((a, b) => Number(a.slice(8)) - Number(b.slice(8)))
+    .map(f => readFileSync(join(rec, f), "utf8").split("\0").slice(0, -1));
+  const recorded = (name: string) => readdirSync(rec).includes(name)
+    ? readFileSync(join(rec, name), "utf8").trimEnd().split("\n").filter(Boolean) : [];
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", argvs, probes,
+    azArgvs, hostToolCalls: recorded("host-tool-calls"), hostPayloadEffects: recorded("host-payload-effects"),
+    signal: r.signal, error: r.error };
 }
 
 /**
@@ -802,3 +855,156 @@ for (const { mode, why, says } of BROKEN) {
     );
   });
 }
+
+const LOCAL_IMAGE_ID = "sha256:" + "a".repeat(64);
+const REMOTE_CONTROL = { REGISTRY: "q-control", IMAGE: "candidate", TAG: "baseline" };
+const REMOTE_CONTROL_REF = "q-control.azurecr.io/candidate:baseline";
+const LOCAL_INSPECT = ["image", "inspect", "--format", "{{.Id}}", LOCAL_IMAGE_ID];
+const LABEL_INSPECT = ["inspect", "-f", '{{index .Config.Labels "org.opencontainers.image.revision"}}', LOCAL_IMAGE_ID];
+
+function localVerifier(mode = "good", options: VerifierOptions = {}): Run {
+  return runVerifier(mode, SCRIPT, { ...options, args: ["--local-image-id", LOCAL_IMAGE_ID], remoteEnv: REMOTE_CONTROL });
+}
+
+function assertLocalCalls(run: Run): void {
+  assert.ifError(run.error);
+  assert.equal(run.signal, null);
+  assert.deepEqual(run.azArgvs, [], "local mode must never invoke Azure, even for login");
+  assert.deepEqual(run.argvs.filter(a => a[0] !== "run"), [LOCAL_INSPECT, LABEL_INSPECT], "all non-probe Docker calls must be the two immutable-ID inspections");
+  const runs = run.argvs.filter(a => a[0] === "run");
+  assert.equal(runs.length, 5);
+  for (const args of runs) {
+    assert.deepEqual(args.slice(0, 4), ["run", "--pull=never", "--network=none", "--rm"]);
+    assert.equal(args.filter(a => a === LOCAL_IMAGE_ID).length, 1);
+    assert.ok(args.indexOf(LOCAL_IMAGE_ID) < args.indexOf("-c"));
+    for (let i = 1; i < args.indexOf(LOCAL_IMAGE_ID); i++) {
+      const arg = args[i]!;
+      if (arg === "-e") {
+        assert.match(args[++i]!, /^(EXPECT_CLAUDE_VERSION|EXPECT_CODEX_VERSION|EXPECT_BUILD_SHA)=|^RMD_SKIP_BOOTSTRAP=1$/);
+      } else if (arg === "--entrypoint") assert.equal(args[++i], "/bin/sh");
+      else if (arg === "--user") assert.equal(args[++i], "1000:1000");
+      else assert.ok(["--pull=never", "--network=none", "--rm"].includes(arg), `unexpected Docker option: ${arg}`);
+    }
+  }
+  assert.deepEqual(run.probes, EXPECTED_PROBES.map(p => p.key));
+  assert.deepEqual(deliveryDefects(run), []);
+  assert.deepEqual(run.hostPayloadEffects, []);
+}
+
+test("private image qualification never invokes registry or production lifecycle commands", () => {
+  const run = localVerifier();
+  assertLocalCalls(run);
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, new RegExp(`local image ID under test: ${LOCAL_IMAGE_ID}`));
+  assert.match(run.stdout, /OK — every check passed/);
+});
+
+test("private image qualification binds the exact local image and retains published image checks", () => {
+  const local = localVerifier();
+  const published = runVerifier("good", SCRIPT, { remoteEnv: REMOTE_CONTROL });
+  assertLocalCalls(local);
+  assert.ifError(published.error);
+  assert.equal(published.signal, null);
+  assert.equal(published.status, 0, published.stdout + published.stderr);
+  assert.deepEqual(published.azArgvs, [["acr", "login", "-n", "q-control"]]);
+  assert.deepEqual(published.argvs.filter(a => a[0] !== "run"), [
+    ["image", "inspect", "--format", "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}", REMOTE_CONTROL_REF],
+    ["pull", REMOTE_CONTROL_REF],
+    ["image", "inspect", "--format", "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}", REMOTE_CONTROL_REF],
+    ["inspect", "-f", LABEL_INSPECT[2]!, REMOTE_CONTROL_REF],
+  ]);
+  const publishedRuns = published.argvs.filter(a => a[0] === "run");
+  const localRuns = local.argvs.filter(a => a[0] === "run");
+  assert.equal(publishedRuns.length, 5);
+  for (let i = 0; i < publishedRuns.length; i++) {
+    assert.deepEqual(["run", ...localRuns[i]!.slice(3)], publishedRuns[i]!.map(a => a === REMOTE_CONTROL_REF ? LOCAL_IMAGE_ID : a), "only local safety flags and image identity may differ; every payload byte remains identical");
+  }
+});
+
+test("local image arguments refuse malformed identities and remote conflicts before any tool", () => {
+  const invalid = ["", "sha256:", "sha256:feed", "sha256:" + "a".repeat(63), "sha256:" + "a".repeat(65), "sha256:" + "A".repeat(64), LOCAL_IMAGE_ID + "\n", "candidate:latest", "registry/image@" + LOCAL_IMAGE_ID, "sha256:" + "g".repeat(64)];
+  const cases: string[][] = invalid.map(id => ["--local-image-id", id]);
+  cases.push(["--local-image-id"], ["--local-image-id", LOCAL_IMAGE_ID, "--local-image-id", LOCAL_IMAGE_ID]);
+  for (const flag of ["--tag", "--expect", "--registry", "--image"]) {
+    cases.push(["--local-image-id", LOCAL_IMAGE_ID, flag, "remote"], [flag, "remote", "--local-image-id", LOCAL_IMAGE_ID]);
+  }
+  cases.push(["--help", "--local-image-id", "bad"], ["--local-image-id", LOCAL_IMAGE_ID, "--registry", "remote", "--help"]);
+  for (const args of cases) {
+    const run = runVerifier("good", SCRIPT, { args, guardHostTools: true });
+    assert.ifError(run.error);
+    assert.equal(run.signal, null);
+    assert.equal(run.status, 2, JSON.stringify(args) + run.stdout + run.stderr);
+    assert.deepEqual(run.argvs, [], "invalid input must not even inspect Docker");
+    assert.deepEqual(run.azArgvs, []);
+    assert.deepEqual(run.hostToolCalls, [], "validation precedes sed/help, pin readers and every guarded host tool");
+    assert.deepEqual(run.probes, []);
+    assert.deepEqual(run.hostPayloadEffects, []);
+  }
+});
+
+test("private image qualification refuses unknown identity before starting a probe", () => {
+  for (const mode of ["local-id-unreadable", "local-id-empty", "local-id-malformed", "local-id-mismatch", "local-id-ambiguous", "local-label-unreadable"]) {
+    const run = localVerifier(mode);
+    assert.ifError(run.error);
+    assert.equal(run.signal, null);
+    assert.equal(run.status, 1, mode + run.stdout + run.stderr);
+    assert.deepEqual(run.azArgvs, []);
+    assert.deepEqual(run.argvs, mode === "local-label-unreadable" ? [LOCAL_INSPECT, LABEL_INSPECT] : [LOCAL_INSPECT]);
+    assert.deepEqual(run.probes, []);
+    assert.match(run.stderr, /refusing before probes/);
+    assert.doesNotMatch(run.stdout, /OK — every check passed/);
+  }
+});
+
+test("published image authentication and pull failures still refuse before probes", () => {
+  for (const mode of ["remote-login-fail", "remote-pull-fail"]) {
+    const run = runVerifier(mode, SCRIPT, { remoteEnv: REMOTE_CONTROL });
+    assert.ifError(run.error);
+    assert.equal(run.signal, null);
+    assert.notEqual(run.status, 0, mode);
+    assert.deepEqual(run.azArgvs, [["acr", "login", "-n", "q-control"]]);
+    assert.deepEqual(run.argvs, mode === "remote-login-fail" ? [] : [
+      ["image", "inspect", "--format", "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}", REMOTE_CONTROL_REF],
+      ["pull", REMOTE_CONTROL_REF],
+    ]);
+    assert.deepEqual(run.probes, []);
+    assert.doesNotMatch(run.stdout, /OK — every check passed/);
+  }
+  const labelUnknown = runVerifier("local-label-unreadable", SCRIPT, { remoteEnv: REMOTE_CONTROL });
+  assert.ifError(labelUnknown.error);
+  assert.equal(labelUnknown.status, 0, "published label inspection remains the existing best-effort warning");
+  assert.deepEqual(labelUnknown.probes, EXPECTED_PROBES.map(p => p.key));
+});
+
+test("local image probes retain every broken subject and infrastructure refusal", () => {
+  for (const { mode, says } of BROKEN) {
+    const run = localVerifier(mode);
+    assertLocalCalls(run);
+    assert.notEqual(run.status, 0, mode);
+    assert.match(run.stdout + run.stderr, says, mode);
+    assert.doesNotMatch(run.stderr, /This digest was pulled/);
+  }
+  const unavailable = localVerifier("checks-infra");
+  assertLocalCalls(unavailable);
+  assert.notEqual(unavailable.status, 0);
+  assert.match(unavailable.stderr, /UNVERIFIED/);
+  assert.doesNotMatch(unavailable.stdout, /OK — every check passed/);
+});
+
+test("local image delivery observes no host payload effect and catches its deliberate control", () => {
+  const good = localVerifier();
+  assertLocalCalls(good);
+  const real = readFileSync(SCRIPT, "utf8");
+  const anchor = "\nset +e\nprobe_run --rm -e EXPECT_CLAUDE_VERSION=";
+  assert.equal(real.split(anchor).length - 1, 1, "the host-effect control must target the real probe boundary once");
+  const mutant = real.replace(anchor, "\nverify_image_host_payload_probe" + anchor);
+  const path = join(makeTempDir("verify-image-local-host-effect-"), "verify-image.sh");
+  writeFileSync(path, mutant, { mode: 0o755 });
+  writeFileSync(join(dirname(path), "package.json"), readFileSync(join(REPO_ROOT, "deploy", "package.json")));
+  const run = runVerifier("good", path, { args: ["--local-image-id", LOCAL_IMAGE_ID] });
+  assert.ifError(run.error);
+  assert.equal(run.signal, null);
+  assert.equal(run.status, 97, "the deliberate host effect is observed, never silently accepted");
+  assert.deepEqual(run.hostPayloadEffects, ["verify_image_host_payload_probe"]);
+  assert.deepEqual(run.probes, []);
+});
