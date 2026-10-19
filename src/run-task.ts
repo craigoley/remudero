@@ -246,6 +246,7 @@ import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type Bina
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
+import { createGateSandboxMetrics } from "./lib/gate-sandbox-metrics.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -30156,7 +30157,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
 export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
-export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs", "--sandbox-metrics"] as const;
 
 /** W1-T3738 — what {@link runPreflightProofs} needs, all injected so a test drives it without a
  *  base worktree, a real test run or a git call. */
@@ -30674,14 +30675,20 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const from = flagValue(rest, "--from");
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
+  const metrics = rest.includes("--sandbox-metrics") ? createGateSandboxMetrics() : undefined;
+  const fullTier = rest.some(arg => ["--ci-parity", "--coverage", "--proofs"].includes(arg));
+  const spawn: PreflightSpawn | undefined = metrics && !fullTier
+    ? (file, args, opts) => metrics.observe(() => (deps.spawn ?? defaultPreflightSpawn)(file, args, opts))
+    : deps.spawn;
+  const boundary = <T>(run: () => T): T => metrics ? metrics.observe(run) : run();
 
-  const result = runPreflight(repoRoot, { ...deps, range });
+  const result = boundary(() => runPreflight(repoRoot, { ...deps, range, spawn }));
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
   // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
+  const fast = rest.includes("--no-fast") ? undefined : boundary(() => runPreflightFast(repoRoot, { spawn }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -30689,15 +30696,17 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
   const ciChecks = rest.includes("--no-fast")
     ? undefined
-    : preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn: deps.spawn }));
+    : boundary(() => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
-    : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn }));
-  const ciParity = rest.includes("--ci-parity") ? runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
-  const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
+    : boundary(() => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
+  // Full-suite routes key containment/deadlines on the ORIGINAL spawn identity. Observe their
+  // tier boundaries, never wrap their executor into the injected-spawn synchronous route.
+  const ciParity = rest.includes("--ci-parity") ? boundary(() => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const coverage = rest.includes("--coverage") ? boundary(() => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
-  const proofs = rest.includes("--proofs") ? runPreflightProofs(repoRoot, { spawn: deps.spawn }) : undefined;
+  const proofs = rest.includes("--proofs") ? boundary(() => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -30755,7 +30764,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // W1-T3017 — PEEK, never resolve. The pin belongs to whichever mode actually diffed; a run with
   // no diff-consuming step has no base, and resolving one here would put a sha on the line that no
   // step ever measured against.
-  const preflightSpawn = deps.spawn ?? defaultPreflightSpawn;
+  const preflightSpawn = spawn ?? defaultPreflightSpawn;
   const pin = peekPinnedBase(repoRoot, preflightSpawn);
   const runContext = detectRunContext({
     repoRoot,
@@ -30811,14 +30820,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // fall back to the default: that is the one call shape the orchestrator's own verdict comes
   // from.
   const summaryPath = preflightSummaryTarget(rest, deps);
-  const summary = buildPreflightSummary({
+  const summary = { ...buildPreflightSummary({
     steps,
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
     headSha,
     args: rest,
     runContext,
-  });
+  }), ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
   if (summaryPath === undefined) {
     console.log(
       `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(repoRoot)}) — pass --summary-file to write one anyway`,
@@ -52371,7 +52380,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]",
+    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--sandbox-metrics]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
     detail:
       "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
