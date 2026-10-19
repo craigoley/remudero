@@ -9,7 +9,7 @@ import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, 
 import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
 import { buildInboxAttentionCensusRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadsRoute, buildKeepProposalRoute, inboxTriagePath, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { classificationSnapshotKey } from "../src/lib/read-page.js";
-import { appendThreadEvent, appendThreadMessage, inboxThreadId, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
+import { appendThreadEvent, appendThreadMessage, inboxThreadId, inboxThreadIdentity, readThread } from "../src/lib/inbox-thread.js";
 import { boundConsoleReadRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
@@ -63,7 +63,7 @@ async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh
   const native = buildReadModelViewRoutes({ legacy: [inboxLegacyView(deps, fixedClock(w.at))], readModel: handle, readModelViews: [INBOX_VIEW_NAME], clock: fixedClock(w.at) });
   const threads = options.withWrites ? [buildInboxThreadsRoute(deps, undefined, { warm: false })] : [];
   const writes = options.withWrites ? [buildKeepProposalRoute(w.deps), buildInboxThreadReplyRoute(w.deps)] : [];
-  const routes = [inbox, census, ...native, ...threads, ...writes, ...mountInstanceInboxRoutes({ instance: "core", repository: "owner/core", stateDir: join(w.root, "state"), routes: [inbox, census, ...threads] })];
+  const routes = [inbox, census, ...native, ...threads, ...writes, ...mountInstanceInboxRoutes({ instance: "core", repository: "owner/core", stateDir: join(w.root, "state"), routes: [inbox, census, ...threads, ...writes] })];
   const server = createService({ tokens: { read: "read", write: "write" }, routes });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
@@ -653,4 +653,67 @@ test("a real plain reply clears keep and invalidates classification and thread-p
   assert.equal(row.attention, "awaiting_daemon"); assert.equal(row.waitingOn, "daemon");
   assert.equal((await s.get("/v1/views/inbox?section=kept")).body.data.items.length, 0);
   assert.equal(s.reads(), 0);
+});
+
+test("a real scoped HTTP reply clears durable keep and invalidates both thread list paths without replaying its action", async t => {
+  const w = world(t, 2);
+  w.deps.inboxClock = fixedClock(w.at);
+  w.deps.ratify = { approve: () => assert.fail("a plain reply cannot approve"), reframe: () => assert.fail("a plain reply cannot reframe") };
+  const initial = await w.refresh(), s = await served(t, w, initial, { withWrites: true });
+  const proposalId = "ruling:p0", threadId = inboxThreadId(proposalId);
+  const stateDir = join(w.root, "state"), store = { threadStorePath: join(stateDir, "inbox-threads.jsonl") };
+  const triagePath = inboxTriagePath(stateDir);
+  assert.equal((await s.post("/v1/inbox/keep", { proposalId })).status, 200);
+  const keptPass = await w.refresh(), kept = readPersistedInbox(stateDir)!;
+  s.put(keptPass);
+  assert.equal(JSON.parse(readFileSync(triagePath, "utf8"))[proposalId].keptAt, fixedClock(w.at).iso());
+  const paths = ["/v1/inbox/threads?qualified=1&limit=1", "/v1/i/core/inbox/threads?qualified=1&limit=1"];
+  const before = await Promise.all(paths.map(path => s.get(path)));
+  for (const read of before) {
+    assert.equal(read.status, 200); assert.equal(read.body.page.total, 2);
+    assert.match(read.body.threadListKey, /^[a-f0-9]{64}$/); assert.ok(read.body.page.nextCursor);
+    assert.ok(read.bytes <= 131072);
+  }
+  assert.notEqual(before[0]!.body.threadListKey, before[1]!.body.threadListKey, "public scope is part of page identity");
+  const path = "/v1/i/core/inbox/thread/reply";
+  const body = { repository: "owner/core", instance: "core", threadId, text: "Please supply the missing proof.", intentId: "composition-scoped-reply" };
+  const forged = await s.post(path, { ...body, repository: "owner/foreign", intentId: "composition-scoped-foreign" });
+  assert.equal(forged.status, 409); assert.equal(forged.body.delivery, "not_delivered");
+  assert.equal(JSON.parse(readFileSync(triagePath, "utf8"))[proposalId].keptAt, fixedClock(w.at).iso(), "a foreign request cannot clear keep");
+  const reply = await s.post(path, body);
+  assert.equal(reply.status, 200); assert.equal(reply.body.delivery, "delivered");
+  assert.equal(reply.body.repository, body.repository); assert.equal(reply.body.instance, body.instance);
+  assert.equal(reply.body.threadId, threadId); assert.equal(reply.body.waitingOn, "daemon");
+  assert.equal(reply.body.replayed, false); assert.equal(reply.body.receipt.status, "settled");
+  assert.equal(JSON.parse(readFileSync(triagePath, "utf8"))[proposalId], undefined, "the actual scoped source clears the durable triage mark");
+  const stored = readThread(threadId, store);
+  assert.ok(stored.status === "ok");
+  assert.deepEqual(stored.messages.filter(message => message.role === "reply").map(message => message.body), [body.text], "the real default thread store received exactly one reply");
+  const repliedPass = await w.refresh(), replied = readPersistedInbox(stateDir)!;
+  s.put(repliedPass, true);
+  assert.equal(replied.generatedAt, kept.generatedAt); assert.notEqual(replied.snapshotKey, kept.snapshotKey);
+  assert.deepEqual(replied.classifications, kept.classifications, "scoped reply changes neither readiness nor approval");
+  const attention = replied.attentionCensus!.items.find(row => row.proposalId === proposalId)!;
+  assert.equal(attention.attention, "awaiting_daemon"); assert.equal(attention.waitingOn, "daemon");
+  for (const [index, listPath] of paths.entries()) {
+    const current = await s.get(listPath);
+    assert.equal(current.status, 200); assert.ok(current.bytes <= 131072);
+    assert.notEqual(current.body.threadListKey, before[index]!.body.threadListKey);
+    const old = await s.get(`${listPath}&cursor=${encodeURIComponent(before[index]!.body.page.nextCursor)}`);
+    assert.equal(old.status, 409); assert.equal(old.body.error, "inbox_snapshot_changed");
+    const all = await s.get(listPath.replace("limit=1", "limit=2"));
+    const row = all.body.threads.find((item: any) => item.proposalId === proposalId);
+    assert.ok(row); assert.equal(row.attention, "awaiting_daemon"); assert.equal(row.waitingOn, "daemon");
+  }
+  assert.equal((await s.get("/v1/views/inbox?section=kept")).body.data.items.length, 0);
+  const storedBytes = readFileSync(store.threadStorePath, "utf8");
+  const restarted = await served(t, w, repliedPass, { withWrites: true });
+  const replay = await restarted.post(path, body);
+  assert.equal(replay.status, 200); assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.receipt.key, reply.body.receipt.key, "fresh route objects read the same durable intent receipt");
+  assert.equal(readFileSync(store.threadStorePath, "utf8"), storedBytes, "a receipt replay never re-appends the operator reply");
+  assert.equal(JSON.parse(readFileSync(triagePath, "utf8"))[proposalId], undefined);
+  const rows = readFileSync(w.deps.ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(rows.filter(row => row.step === "inbox.thread_replied" && row.thread_id === threadId).length, 1);
+  assert.equal(s.reads() + restarted.reads(), 0, "HTTP reads never reclassify or load the mutable plan");
 });

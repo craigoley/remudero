@@ -430,6 +430,50 @@ test("thread pages keep an oversized real legacy list whole while bounding every
   assert.deepEqual([...found].sort(), w.proposals.map(p => p.id).sort(), "no later-page ask was silently omitted");
 });
 
+test("unscoped HTTP thread pages traverse the oversized corpus and bind byte, scope and generation boundaries", async t => {
+  const w = await pagedThreadServer(t);
+  const bare = await w.get("/v1/inbox/threads");
+  assert.equal(bare.status, 200);
+  assert.equal(bare.body.threads.length, 356);
+  assert.ok(bare.bytes > 131072, `the unscoped legacy corpus really exceeds the page budget: ${bare.bytes}`);
+  assert.equal(bare.body.page, undefined, "opt-in paging does not truncate the legacy bare list");
+  const path = "/v1/inbox/threads?limit=500";
+  const found: string[] = [];
+  let cursor: string | undefined, firstCursor: string | undefined, key: string | undefined;
+  do {
+    const read = await w.get(`${path}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    assert.equal(read.status, 200);
+    assert.ok(read.bytes <= 131072, `the fully serialized unscoped page measured ${read.bytes} bytes`);
+    assert.equal(read.body.repository, undefined); assert.equal(read.body.instance, undefined);
+    assert.match(read.body.threadListKey ?? "", /^[a-f0-9]{64}$/);
+    key ??= read.body.threadListKey; assert.equal(read.body.threadListKey, key);
+    assert.equal(read.body.page?.total, 356);
+    assert.equal(read.body.source.completeness, "complete");
+    assert.ok(read.body.threads.length > 0);
+    found.push(...read.body.threads.map(row => row.proposalId));
+    cursor = read.body.page?.nextCursor;
+    firstCursor ??= cursor;
+    assert.ok(found.length <= 356, "unscoped continuations must make bounded progress");
+  } while (cursor);
+  assert.equal(found.length, 356); assert.equal(new Set(found).size, 356);
+  assert.deepEqual([...found].sort(), w.proposals.map(p => p.id).sort());
+  assert.ok(firstCursor, "the oversized positive control issues a real continuation");
+  const token = encodeURIComponent(firstCursor);
+  const unchanged = await w.get(`${path}&cursor=${token}`);
+  assert.equal(unchanged.status, 200); assert.equal(unchanged.body.threadListKey, key);
+  const scoped = await w.get("/v1/i/core/inbox/threads?limit=500");
+  assert.equal(scoped.status, 200); assert.notEqual(scoped.body.threadListKey, key);
+  assert.equal((await w.get(`/v1/i/core/inbox/threads?limit=500&cursor=${token}`)).status, 409);
+  assert.equal((await w.get(`/v1/inbox/threads?limit=499&cursor=${token}`)).status, 409);
+  writeFileSync(w.registry, JSON.stringify({ proposals: [...w.proposals, { id: "ruling:new-unscoped-ask", summary: "A new real question", evidenceAnchors: [] }] }));
+  const changed = await w.get(`${path}&cursor=${token}`);
+  assert.equal(changed.status, 409);
+  assert.equal(changed.body.error, "inbox_snapshot_changed");
+  const current = await w.get(path);
+  assert.equal(current.status, 200); assert.notEqual(current.body.threadListKey, key);
+  assert.equal(current.body.page?.total, 357);
+});
+
 test("thread pages reject a foreign generation rather than ignoring its bounded cursor", async t => {
   const w = await pagedThreadServer(t, 3);
   const cursor = snapshotCursor({ snapshotKey: "a".repeat(64), section: "threads", offset: 1 });

@@ -97,6 +97,18 @@ export function readCiFrictionHandFixes(
   }
 }
 
+/** A test file's red on the pull request that added that file is the PR's own development, not friction: W1-T9823
+ *  was filed on #12294's round, the PR that created its test. Every other round, and any round whose test has no
+ *  readable adding PR, is kept. */
+export function withoutBirthRounds(rounds: readonly CiFrictionRound[], search: Pick<OwnerSearch, "addedByPr">): CiFrictionRound[] {
+  const addedByPr = search.addedByPr;
+  if (!addedByPr) return [...rounds];
+  return rounds.filter((round) => {
+    const file = round.cause.kind === "check" ? /^test:(test\/[\w./-]+\.test\.[mc]?[jt]s)(?::flaky)?$/.exec(round.cause.name)?.[1] : undefined;
+    return file === undefined || addedByPr(file) !== round.pr;
+  });
+}
+
 /** The earliest time each cause was observed failing; a round with no readable `at` dates its cause from always. */
 function ciFrictionCauseFirstSeen(rounds: readonly CiFrictionRound[]): Map<string, number> {
   const first = new Map<string, number>();
@@ -1014,9 +1026,19 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   const workflowGaps = new Map<string, string>();
   let workflowDocs: Array<{ file: string; document: ReturnType<typeof parseDocument> }> | undefined;
   const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
+  const addedBy = new Map<string, number | undefined>();
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
     readSource: (file) => git(["show", `${pinned()}:${file}`]),
+    addedByPr: (file) => {
+      if (!addedBy.has(file)) {
+        // The oldest commit adding the path; a squash merge's subject ends `(#N)`.
+        const first = git(["log", "--diff-filter=A", "--format=%s", pinned(), "--", file]).trim().split("\n").at(-1) ?? "";
+        const pr = /\(#(\d+)\)\s*$/.exec(first)?.[1];
+        addedBy.set(file, pr === undefined ? undefined : Number(pr));
+      }
+      return addedBy.get(file);
+    },
     workflowGaps: () => [...workflowGaps].map(([family, reason]) => ({ family, reason })),
     workflowOwner: (family) => {
       const source = pinned();
@@ -1513,7 +1535,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const records = sources.ledgerRecords();
       const plan = sources.planState();
       const ownerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
-      const ledgerRounds = ciFrictionRoundsFromLedger(records);
+      const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch);
       const hand = sources.handFixes?.();
       if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
       const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
@@ -1575,9 +1597,10 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
       const taskId = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const records = sources.ledgerRecords();
+      const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), sources.ownerSearch);
       const contents = ciFrictionShardYaml(
         { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([
-          ...ciFrictionRoundsFromLedger(records), ...ciFrictionHandFixRounds(sources.handFixes?.().fixes ?? [], ciFrictionRoundsFromLedger(records),
+          ...ledgerRounds, ...ciFrictionHandFixRounds(sources.handFixes?.().fixes ?? [], ledgerRounds,
             action.priced ?? [], sources.ownerSearch),
         ]), prior: action.decision.prior },
         taskId,
