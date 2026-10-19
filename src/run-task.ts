@@ -29532,20 +29532,16 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
-  // W1-T324: matched as a standalone token, same discipline as every other boolean flag in
-  // this file — never a substring match against a proof body that could legitimately quote
-  // "--all". Meaningless (and silently ignored) in --base mode: --base's own scope already
-  // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
+  // W1-T324: a standalone token, never a substring match against a proof quoting "--all".
+  // Silently ignored in --base mode, whose own scope defines what is in-bounds.
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true;
   const checkoutRoot = deps.repoRoot ?? repoRoot;
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
-  // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
-  // here, BY NAME — before any --base/git-show plumbing gets a chance to mis-report it
-  // as a base-resolution failure (the #271 fixture's second false green: `relative(
-  // repoRoot, planPath)` used to yield a `../../..` path that `git show <base>:<that>`
-  // died on as though the BASE ref were the problem, never naming the real one).
+  // W1-T120: a --plan OUTSIDE the root is refused BY NAME here, before --base plumbing can
+  // mis-report it as a base failure (#271's second false green: `relative()` yielded a `../..`
+  // path that `git show <base>:<that>` died on as though the BASE ref were the problem).
   if (planPathArg !== undefined && isPathOutsideRoot(checkoutRoot, planPath)) {
     console.error(
       `### rmd lint-plan: --plan ${planPath} resolves OUTSIDE the repo root ${checkoutRoot} — ` +
@@ -29753,7 +29749,14 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
         if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
       }
-      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      // Duplicate-surface counterparts: a shard sharing a file with a changed task may have shipped
+      // while its `status:` still reads queued, so its credit must be projected too.
+      const scopeFiles = new Set<string>();
+      for (const id of scope) for (const f of plan.byId.get(id)?.files ?? []) scopeFiles.add(f);
+      const surfaceCounterpartIds = new Set(
+        plan.tasks.filter(t => t.status !== "merged" && t.status !== "done" &&(t.files ?? []).some(f => scopeFiles.has(f))).map(t => t.id),
+      );
+      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id) || surfaceCounterpartIds.has(t.id));
       const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
       dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
         ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
@@ -29834,7 +29837,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // Derived ONCE for the whole pass rather than per task: both are pure reads over objects
   // already resolved above (`plan.tasks`, and `projectPlan`'s batched `statusByTaskId`).
   const surfaceCorpus = surfaceCorpusFrom(plan);
-  const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
+  // Credit for duplicate-surface counterparts outside `scope` comes from the wider projection; it
+  // only ever removes warnings (credited shards are history), and post-merge credit above stays scoped.
+  const creditedMergedIds = creditedMergedIdsFrom(dependencyStatusByTaskId ?? statusByTaskId);
   // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
   let planOnlyFilingDiff: boolean | undefined;
   let doctrineCitations: DoctrineCitationFacts | undefined;
