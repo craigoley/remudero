@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { boardSnapshotPath, createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
-import { loadConfig, type Config } from "#src/lib/config.js";
+import { configPath, loadConfig, type Config } from "#src/lib/config.js";
 import { mapBoardPr, type RestPullRow } from "#src/lib/open-prs-rest.js";
 import { loadPolicy, policyPath } from "#src/lib/policy.js";
 import { saveMarker, type GitLogCommit, type ShippedGithub } from "#src/lib/retro.js";
@@ -23,6 +23,13 @@ function fixture(t: TestContext, seed: "valid" | "missing" | "invalid" = "valid"
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "state"));
   const config: Config = { root, claudeBin: "/bin/true" };
+  // Isolate the real default config reader, too: no dependency on an installed Claude CLI
+  // and no access to the operator's config/credentials when this file runs on its own.
+  const previousHome = process.env.HOME;
+  process.env.HOME = root;
+  t.after(() => { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; });
+  mkdirSync(join(configPath(), ".."), { recursive: true });
+  writeFileSync(configPath(), JSON.stringify(config));
   const ownerRepo = { owner: "retro-backoff", repo: `fixture-${++sequence}` };
   const url = (n: number) => `https://github.com/${ownerRepo.owner}/${ownerRepo.repo}/pull/${n}`;
   const rows: RestPullRow[] = Array.from({ length: 20 }, (_, i) => ({
