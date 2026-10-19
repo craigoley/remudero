@@ -107,7 +107,7 @@ test("W1-T8950: a ready item serves its recommendation with its route", (t) => {
   assert.equal(Object.hasOwn(changed.needsYou.ready.find((i) => i.proposalId === READY_ID)!, "recommendation"), false, "changed summary");
   assert.equal(Object.hasOwn(changed.needsYou.ready.find((i) => i.proposalId === OBSOLETE_ID)!, "recommendation"), false, "changed lane");
 
-  // approve is never routed off a ready item, and keep carries no route.
+  // approve is never routed off a ready item; keep records a decision in this lane too.
   writeFileSync(recommendationStorePath(stateDir), JSON.stringify({
     [READY_ID]: stored(ready, "declined", {}),
     [OBSOLETE_ID]: stored(obsolete, "notReady", { action: "keep" }),
@@ -116,7 +116,9 @@ test("W1-T8950: a ready item serves its recommendation with its route", (t) => {
   const declined = unrouted.needsYou.declined[0]!.recommendation!;
   assert.equal(declined.action, "approve");
   assert.equal(Object.hasOwn(declined, "route"), false);
-  assert.equal(Object.hasOwn(unrouted.needsYou.notReady[0]!.recommendation!, "route"), false);
+  assert.deepEqual(unrouted.needsYou.notReady[0]!.recommendation!.route, {
+    method: "POST", path: "/v1/inbox/keep", fields: { proposalId: OBSOLETE_ID }, input: "reason",
+  });
 });
 
 test("W1-T8950: the checker refuses unproven obsolete claims and unroutable actions", async () => {

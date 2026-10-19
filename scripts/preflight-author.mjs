@@ -177,6 +177,19 @@ export function partialSentence(ran, total, setAside) {
   return `full-fallback: PARTIAL — ran ${ran} of ${total} suite(s) chosen by reach and measured cost; CI's full run is the check for ${setAside.length > 0 ? setAside.join(', ') : 'the cause of the fallback'} and the other ${total - ran}`;
 }
 
+/** W1-T9919 — the line census-precheck prints when its suite child's time bound is the ONLY unmeasured cause
+ *  (CENSUS_TIME_BOUND_LABEL in scripts/census-precheck.mjs). That backstop fires on a loaded, healthy host. */
+export const CENSUS_TIME_BOUND_LINE = 'census-precheck: census suites NOT MEASURED (time bound) - ';
+
+/** Whether a census-precheck result is the one unmeasured census an author run goes on past, as pre-push does:
+ *  a complete exit 2 whose stderr has that line and no other NOT MEASURED or could-not-measure line. */
+export function censusTimeBoundOnly(result) {
+  if (result.status !== 2 || result.signal || result.error || result.outputComplete === false) return false;
+  const lines = String(result.stderr ?? '').split('\n');
+  return lines.some((line) => line.startsWith(CENSUS_TIME_BOUND_LINE)) &&
+    !lines.some((line) => /^census-precheck: (?:.* NOT MEASURED - |could not measure)/.test(line));
+}
+
 export function authorEnvironment(parent) {
   const env = { ...parent, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: '' };
   // Git's repository-local environment overrides cwd, including in test subprocesses.
@@ -344,7 +357,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         mayBeIncomplete: Boolean(result.error || result.signal || result.outputComplete === false) } });
     progress();
     // Keep terminal feedback small even for thousands of suites. Never rerun to recover output.
-    console.log(`${name}: ${ok ? 'PASS' : 'FAIL'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
+    console.log(`${name}: ${!ok ? 'FAIL' : metadata.notMeasured ? 'NOT MEASURED' : 'PASS'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
     const failures = stdout.split('\n').filter((line) => /^\s*not ok [0-9]+/.test(line));
     if (failures.length) console.log(failures.slice(0, 40).join('\n').slice(0, 4096));
     if (failures.length > 40) console.log(`additional failure titles in the saved log: ${failures.length - 40}`);
@@ -444,9 +457,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
-      const censusOk = census.status === 0 && !census.signal && !census.error;
-      report('census-precheck', census, censusOk);
-      if (census.status === 2 || census.signal || census.error || census.status === null) {
+      const censusTimeBound = censusTimeBoundOnly(census);
+      const censusOk = (census.status === 0 || censusTimeBound) && !census.signal && !census.error;
+      report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' } : {});
+      if (censusTimeBound) {
+        receipt.censusNotMeasured = { reason: 'time-bound', checkedBy: 'CI' };
+        console.log('census suites NOT MEASURED (time bound) — CI runs them');
+      } else if (census.status === 2 || census.signal || census.error || census.status === null) {
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
