@@ -809,8 +809,7 @@ export interface ShippedGithub {
    *  {@link runlessMergesSince}, the trigger's only route to a merge {@link shippedSince} cannot
    *  reach. OPTIONAL, degrading to zero added merges and never a throw (W1-T2288). */
   mergedCommits?(): GitLogCommit[];
-  /** Read-only captured closed-PR evidence, when available. Only a cost-admission hint:
-   *  it must never fetch, and the trigger still rechecks its refreshed authoritative count. */
+  /** Captured closed evidence is a no-fetch cost hint, never authority to retry. */
   cachedMerged?(): ShippedGithub | undefined;
 }
 

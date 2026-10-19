@@ -9,12 +9,13 @@ import { mapBoardPr, type RestPullRow } from "#src/lib/open-prs-rest.js";
 import { loadPolicy, policyPath } from "#src/lib/policy.js";
 import { saveMarker, type GitLogCommit, type ShippedGithub } from "#src/lib/retro.js";
 import * as runTask from "#test/helpers/run-task-test.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // All evidence and decision times are fixture times, never compared with today's clock.
 const MARKER = "2026-10-01T00:00:00.000Z";
 const MERGED = "2026-10-02T10:00:00.000Z";
 const NOW = new Date("2026-10-02T12:30:00.000Z");
-const POLICY = loadPolicy(policyPath(new URL("../../", import.meta.url).pathname));
+const POLICY = loadPolicy(policyPath(REPO_ROOT));
 type Mode = "sync" | "async";
 let sequence = 0;
 
