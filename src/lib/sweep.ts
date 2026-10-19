@@ -15329,7 +15329,7 @@ export function trackInFlightReview(work: Promise<void>, review?: Omit<ReviewReg
     () => undefined,
     () => undefined,
   );
-  inFlightReviewRuns.set(held, { ...review, admittedAtMs: review?.admittedAtMs ?? Date.now() });
+  inFlightReviewRuns.set(held, { ...review, admittedAtMs: review?.admittedAtMs ?? systemClock.now() });
   void held.finally(() => inFlightReviewRuns.delete(held));
   return work;
 }
@@ -20820,7 +20820,7 @@ export async function runSweep(
         }
         const tracked = trackInFlightReview(runReview(job), {
           taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind,
-          admittedAtMs: deps.now?.() ?? Date.now(),
+          admittedAtMs: deps.now?.() ?? systemClock.now(),
         });
         const work = !fullSurface ? tracked : tracked.finally(() => {
           fullPassReviewsInFlight--;
