@@ -1,0 +1,90 @@
+- id: W1-T10179
+  title: Alias fixtures use bounded scratch with real package imports
+  repo: remudero
+  depends_on: [W1-T9864]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low
+  band_meaning: blast-radius
+  origin: 'Operator-approved separate alias-fixture portability repair, 2026-10-18; normal reservation refs/rmd-id/W1-T10179.'
+  plan_refs: [W1-T9864, W1-T10154]
+  files: [test/a-test-imports-through-the-subpath-alias.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at W10154 source37f0ec5309 and actual pinned base e44e34837ca2:
+    the maintained bounded-scratch author route executes all151 named cases and fails
+    exactly three W9864 alias/codemod cases. Their ROOT/state/alias-probe and codemod-root
+    writes are outside the supplied writable scratch. All three exact titles and EPERM
+    classes reproduce on unchanged e44 with7tests/4pass/3fail, complete captured TAP,
+    normal host admission and closed/removed scratch. This is inherited fixture placement,
+    not a parser regression, author PASS or hosted waiver. The original failed receipts,
+    first parent-absent diagnostic and controlled parent-present comparison are retained.
+
+    W9864 already merged normally as PR12542; do not rebuild or claim it. Fresh main
+    ae7cfba1d073 and all three captured OPEN heads retain the same fixture bytes and three
+    original-title controls; no own fixture subject diff or newly filed portability plan
+    was observed. The parsed4160-task census distinguishes alias conversion, placement
+    census and environment fixtures from this narrow write-placement correction. The
+    complete97-merge search agrees with the raw two-page PR corpus through its cutoff.
+    These are bounded scope-time observations, not universal absence or worker-health proof.
+  design: |
+    1. Edit only the existing declared test file. Create disposable fixture roots under
+       the actually supplied tmpdir with rmd-prefixed names and precise finally cleanup.
+       No checkout/state, dependency payload or production writes. Construct a genuine
+       temporary package boundary using the actual package type and three imports maps;
+       use real read-only source, script and helper donors, never fake successful exports.
+       Do not install or copy dependencies during the contained test.
+    2. Preserve all seven original W9864 test titles and their substantive assertions:
+       package-map equality, actual nested Node/tsx static and dynamic imports, actual
+       TypeScript resolution of real Config/helper/source types, deliberate TS2307 for
+       the missing module, relative-import census, codemod dry-run/no-write and in-place
+       writes, absent placement-table degradation and actual folder-selection boundaries.
+       Adapt only fixture-local root/type path configuration; retain the real strict
+       NodeNext compiler settings and actual tsc executable. No skips, assertion deletion,
+       successful-exit stubs, module-resolution substitutes or new suppression/allowlist.
+    3. Add behavioral controls in this existing suite proving that both package and
+       codemod roots live under supplied temporary storage independently of checkout
+       writability, real package maps/donor identity remain intact, and cleanup does not
+       mutate donors. Exercise the original real effects under maintained write containment.
+       Prove a healthy writable-scratch control beside forbidden checkout/dependency writes;
+       containment remains unchanged. Source fixtures are not security enforcement themselves.
+    4. First retain the already measured original three-title contained failure and exact
+       actual-base reproduction. Delete only the real scratch-placement fix while keeping
+       new assertions intact: the portability controls and real contained effects must
+       fail; restore the exact committed tree and require a complete passing TAP inventory.
+       No unchanged failing-tree retry, unsandboxed fallback, timeout increase, baseline
+       widening, detector exemption, native-policy edit or reduced failing selection.
+    5. Before build and publication refresh merged trailer OR run-branch credit, all OPEN
+       subject heads with positive/window controls, maintained package selector and normal
+       owned dispatch claim. Commit before verified-path tests, type/census and one justified
+       maintained author entry. Reproduce every new native failure on that run's actual
+       unchanged pinned base; preserve unknown causes and every failed/setup receipt.
+       Validate canonical stored proofs and require full hosted CI/coverage/security,
+       normal remudero-review and actual protected merge. Filing is not implementation.
+    6. This separate prerequisite does not edit W10154's scope, budget, authority or four
+       proofs. Resume its same branch/claim only after this actual source merge, then
+       rebase normally and validate a distinct corrected tree. Preserve opt-in SHADOW ONLY,
+       independent owner/admin override and the complete public Apache implementation.
+       No live policy/configuration, worker stops/restarts, schedules or automatic cutover.
+       Ask separately before live cutover, including automatic build/recycle publication.
+    Research: Node package subpath imports are scoped to the importing package; TypeScript
+    rootDir controls path ownership, not inclusion. A scratch package must retain genuine
+    resolution and typechecks instead of substituting an out-of-package direct import.
+    https://nodejs.org/api/packages.html#subpath-imports
+    https://www.typescriptlang.org/tsconfig/rootDir.html
+    https://www.typescriptlang.org/tsconfig/typeRoots.html
+  acceptance:
+    - claim: Alias package fixtures retain real maps and donors within supplied scratch
+      proof: 'unit test: alias fixture package uses supplied scratch and real source bindings'
+    - claim: Codemod fixture placement and cleanup do not depend on writable checkout state
+      proof: 'unit test: alias codemod fixtures use supplied scratch without mutating donors'
+  falsifier: |
+    Restore only checkout-local fixture-root construction while preserving all new and
+    original assertions. The explicit scratch-location controls must fail, and unchanged
+    native write containment must again refuse the real three fixture effects. Restore
+    the correction and execute all original and new cases with zero omitted cases and
+    complete TAP. A loader/setup crash, skipped test or a relaxed sandbox is not this proof.
