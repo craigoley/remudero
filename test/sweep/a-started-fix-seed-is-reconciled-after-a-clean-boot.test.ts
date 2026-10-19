@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fixSeedRead } from "../../helpers/sweep-test.js";
+import { fixSeedRead } from "../helpers/sweep-test.js";
 
 const HEAD = "6ed36e359c78e9bce1864fc05c5321457e5844a3";
 const OLD = "DAEMON-1792393697581";
