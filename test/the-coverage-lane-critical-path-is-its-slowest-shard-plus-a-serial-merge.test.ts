@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -50,6 +50,39 @@ function mergedLcov(output: string, ...directories: string[]): string {
 }
 
 const SLICES = ["provider selector uses the subscription", "provider selector excludes an exhausted", "provider selector"];
+
+test("coverage staging generates directly into the upload corpus without a duplicate premapped copy", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}stage-direct-`));
+  try {
+    const coverage = join(root, "coverage"), raw = join(coverage, "raw"), artifact = join(root, "coverage-artifact");
+    mkdirSync(raw, { recursive: true });
+    const argv = pathToFileURL(join(REPO_ROOT, "scripts/lib/argv.mjs")).href;
+    execFileSync(process.execPath, ["--input-type=module", "-e", `import {parseArgv} from ${JSON.stringify(argv)}; parseArgv(['--owned','yes'],{owned:{type:'string'}});`],
+      { cwd: REPO_ROOT, env: coverageEnv(raw), stdio: "pipe" });
+    const reports = readdirSync(raw).filter(name => /^coverage-\d+-\d{13}-\d+\.json$/.test(name));
+    assert(reports.length > 0, "real V8 corpus positive control");
+    const inputHashes = reports.map(name => createHash("sha256").update(readFileSync(join(raw, name))).digest("hex"));
+    const reference = mergedLcov(join(root, "reference.info"), raw);
+    assert.match(reference, /^SF:.*scripts\/lib\/argv\.mjs$/m);
+    assert.match(reference, /^DA:\d+,[1-9]/m);
+    writeFileSync(join(coverage, "lcov.info"), reference);
+    const workflow = parse(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as { jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }> };
+    const stage = workflow.jobs["coverage-ratchet"]!.steps.find(s => s.name === "Stage this coverage shard for the required-check aggregator")?.run;
+    assert(stage, "execute the shipped staging step, not a fixture reconstruction");
+    const body = stage.replaceAll("${{ steps.classify.outputs.class }}", "SOURCE")
+      .replaceAll("coverage-artifact", artifact).replaceAll("coverage/", `${coverage}/`)
+      .replaceAll("coverage-selection.txt", join(root, "coverage-selection.txt"));
+    execFileSync("bash", ["--noprofile", "--norc", "-e", "-c", body], { cwd: REPO_ROOT, env: { ...process.env, GITHUB_EVENT_NAME: "pull_request" }, stdio: "pipe" });
+    assert.equal(existsSync(join(coverage, "premapped")), false, "no intermediate duplicate payload may be retained");
+    const staged = join(artifact, "raw"), pieces = readdirSync(staged);
+    assert(pieces.some(name => /^coverage-premapped-/.test(name)), "the sealed manifest travels with all chunks");
+    assert(pieces.reduce((n, name) => n + statSync(join(staged, name)).size, 0) > 0);
+    assert.equal(mergedLcov(join(root, "staged.info"), staged), reference, "all SF/FN/FNDA/BRDA/DA records remain byte-identical");
+    assert.equal(readFileSync(join(artifact, "lcov.info"), "utf8"), reference);
+    assert.equal(readFileSync(join(artifact, "selection"), "utf8").trim(), "all");
+    assert.deepEqual(reports.map(name => createHash("sha256").update(readFileSync(join(raw, name))).digest("hex")), inputHashes, "raw diagnostic evidence remains untouched");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function rawShards(root: string): string[] {
   return SLICES.map((pattern, index) => {
