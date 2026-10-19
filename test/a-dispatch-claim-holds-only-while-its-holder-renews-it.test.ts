@@ -396,16 +396,20 @@ test("an unreadable run branch, an unreadable anchor or a fleet lane's own claim
   }
 });
 
-test("a run's lease renews its claim on the pace and stop() hands back the sha to release", async () => {
+test("a run's lease renews its claim on the pace and stop() hands back the sha to release", async (t) => {
   const f = fixture();
+  const leases: Array<ReturnType<typeof holdDispatchClaim>> = [];
+  t.mock.timers.enable({ apis: ["setInterval"] });
   try {
     const reserver = asyncReserver(f.work);
     const anchor = await reserver.mintAnchor();
     assert.equal(await reserver.attempt(ID, anchor), "created");
     const logged: string[] = [];
     const lease = holdDispatchClaim(ID, reserver, anchor, { intervalMs: 20, log: (step) => void logged.push(step) });
-    const deadline = Date.now() + 20_000;
-    while (remoteTip(f, ID) === anchor && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    leases.push(lease);
+    t.mock.timers.tick(19);
+    assert.equal(remoteTip(f, ID), anchor, "the lease waits for its renewal pace");
+    t.mock.timers.tick(1);
     const held = await lease.stop();
     assert.notEqual(held, anchor, "the lease renewed the claim");
     assert.equal(remoteTip(f, ID), held, "stop() returns the sha the ref now carries");
@@ -415,21 +419,33 @@ test("a run's lease renews its claim on the pace and stop() hands back the sha t
 
     const taken = await reserver.mintAnchor();
     assert.equal(await reserver.attempt(ID, taken), "created");
-    const lost = holdDispatchClaim(ID, reserver, taken, { intervalMs: 20, log: (step, fields) => void logged.push(`${step}:${String(fields.outcome)}`) });
     assert.equal(await reserver.drop(ID, { expect: taken }), true);
-    while (logged.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    let recordFailure!: () => void;
+    const failure = new Promise<void>((resolve) => { recordFailure = resolve; });
+    const lost = holdDispatchClaim(ID, reserver, taken, { intervalMs: 20, log: (step, fields) => {
+      logged.push(`${step}:${String(fields.outcome)}`);
+      recordFailure();
+    } });
+    leases.push(lost);
+    t.mock.timers.tick(20);
+    await failure;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(100);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(await lost.stop(), taken);
     assert.deepEqual(logged, ["dispatch.claim_renew_failed:lost"], "a lost claim stops renewing and is recorded once");
     assert.equal(remoteTip(f, ID), "", "a lost lease never recreates the claim");
 
     const throwing: DispatchClaimReserverAsync = { ...reserver, renew: () => Promise.reject(new Error("git exploded")) };
     const errored = holdDispatchClaim(ID, throwing, "z", { intervalMs: 10, log: (step, fields) => void logged.push(`${step}:${String(fields.error)}`) });
-    while (logged.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 15));
+    leases.push(errored);
+    t.mock.timers.tick(10);
     await errored.stop();
     assert.equal(logged[1], "dispatch.claim_renew_failed:git exploded");
     const inert = holdDispatchClaim(ID, { mintAnchor: () => "q", attempt: () => "created", holder: () => undefined, drop: () => true }, "q");
     assert.equal(await inert.stop(), "q", "a reserver that cannot renew holds its anchor unchanged");
   } finally {
+    for (const lease of leases) await lease.stop();
     f.cleanup();
   }
 });
