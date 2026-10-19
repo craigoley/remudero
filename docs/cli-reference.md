@@ -41,7 +41,7 @@ usage:
   rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
   rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]   # Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
   rmd test-place <test-path...> [--json]   # Print the test/ folder each test file belongs in, computed from the src modules it imports.
-  rmd claim <task-id> [--drop]   # Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.
+  rmd claim <task-id> [--drop]   # Take, hold, renew or drop the dispatch claim the fleet honours, for a hand-build.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
@@ -399,13 +399,13 @@ W1-T9874: a test's folder is computed, not chosen. Extracts the test's value, ty
 
 ### `rmd claim`
 
-Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.
+Take, hold, renew or drop the dispatch claim the fleet honours, for a hand-build.
 
 ```
 rmd claim <task-id> [--drop]
 ```
 
-W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. A claim needs no release verb: the existing release arms drop it once the task has landed.
+W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. W1-T9432: a claim holds only while its holder renews it. --hold takes the claim (or adopts this host's existing one), stays in the foreground, renews it every 5 minutes (--interval-ms <n> overrides the pace) printing one `renewed` line each time, and drops it on SIGINT, SIGTERM or SIGHUP; run it in the background of a session so the claim dies with the session. A `lost` renewal exits 1 naming the new holder. --renew renews once, and only a claim whose anchor's host is this host. A renewal is a child commit of the claim pushed with --force-with-lease, so it never recreates a reclaimed claim. A lane that meets a claim whose holder has been silent (no renewal and no run-<id>-* branch commit) for twice W, the p90 of this instance's measured claim-to-verdict durations, reclaims it; a hand-build that neither holds nor renews its claim is reclaimed that way.
 
 ### `rmd routing-ab`
 
