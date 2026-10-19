@@ -49,6 +49,8 @@
     avoid rereading the same tree without extending the shared budget or asserting completeness.
     If normal engineering evidence requires an extra path, obtain a normal scope amendment first.
 
+    Export resolveTaskFilingHistory from the new module and call it from the existing
+    src/run-task.ts age adapter with the invocation's pinned revision and shared budget.
     Adapt shardAgeDays only at the age boundary while preserving its number-or-null and reason
     contract and the existing floor/clamp day calculation. Pin history once per caller invocation.
     Parked verification uses qualified Git history only. lifetimeShardAge still prefers that
@@ -81,6 +83,8 @@
     gate waiver, manual merge/arming, deployment/restart or live product write is authorized.
     Source merge and independent final natural adoption/benefit acceptance remain separate.
   acceptance:
+    - claim: "The existing production age adapter calls the new record-history resolver with its invocation context"
+      proof: "grep: resolveTaskFilingHistory( in src/run-task.ts"
     - claim: "Exact embedded task introduction survives shard moves and renames without treating a filename or reference as identity"
       proof: "unit test: W1-T10210: exact record history survives embedded moves and renames"
     - claim: "Incomplete, ambiguous or unreadable history remains unknown and a real same-day introduction remains zero"
