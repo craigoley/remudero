@@ -16,12 +16,12 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync, existsSync } from 
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
-import { REPO_ROOT } from "./helpers/repo-root.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // @ts-ignore the executable .mjs module has no declaration file.
-import * as census from "../scripts/census-precheck.mjs";
+import * as census from "#scripts/census-precheck.mjs";
 // @ts-ignore the executable .mjs module has no declaration file.
-import * as author from "../scripts/preflight-author.mjs";
+import * as author from "#scripts/preflight-author.mjs";
 
 type Member = { testFile: string; script: string; walks: string[]; structural?: boolean };
 type SpawnResult = { status: number | null; signal?: string | null; error?: Error; stdout?: string; stderr?: string };
@@ -97,18 +97,17 @@ function authorTree(t: TestContext, lines: string[], status: number) {
   writeFileSync(join(root, "test/setup/tmp-hygiene.ts"), "export {};\n");
   writeFileSync(join(root, "src/run-task.ts"),
     "import { mkdirSync, writeFileSync } from 'node:fs'; mkdirSync('coverage', { recursive: true }); writeFileSync('coverage/expensive-started', 'yes');\n");
-  writeFileSync(join(root, "src/leaf.ts"), "export const value = 1;\n");
-  writeFileSync(join(root, "test/leaf.test.ts"),
-    "import { test } from 'node:test'; import assert from 'node:assert/strict'; import { value } from '../src/leaf.js'; test('leaf', () => assert.ok(value > 0));\n");
+  const leaf = (n: number) => `import { test } from 'node:test'; import assert from 'node:assert/strict'; test('leaf', () => assert.equal(${n}, ${n}));\n`;
+  writeFileSync(join(root, "test/leaf.test.ts"), leaf(1));
   writeFileSync(join(root, "scripts/census-precheck.mjs"),
     `for (const line of ${JSON.stringify(lines)}) console.error(line);\nprocess.exitCode = ${status};\n`);
   tree.git("add", ".");
   tree.git("commit", "-m", "test: baseline");
   tree.git("remote", "add", "origin", root);
   tree.git("checkout", "-b", "run-unfiled-author-fixture");
-  writeFileSync(join(root, "src/leaf.ts"), "export const value = 2;\n");
+  writeFileSync(join(root, "test/leaf.test.ts"), leaf(2));
   tree.git("add", ".");
-  tree.git("commit", "-m", "fix: change the leaf");
+  tree.git("commit", "-m", "test: change the leaf");
   const out: string[] = [];
   const log = t.mock.method(console, "log", (...a: unknown[]) => void out.push(a.join(" ")));
   const error = t.mock.method(console, "error", (...a: unknown[]) => void out.push(a.join(" ")));
