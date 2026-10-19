@@ -572,6 +572,11 @@ export interface ScopeAmendmentRequest {
 export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "ineligible" } | { kind: "refused" }> |
   { kind: "refused"; reason: string; detail: string };
 
+/** W1-T2891's two Stryker registration files. Review admits them beside the product change they register, because a
+ *  new suite cannot be registered before it exists; refusing them as scope left a task that adds a classify.ts suite
+ *  unable to finish (#12776). Every other instrument, including the mutation score floor, is still refused. */
+export const SCOPE_GRANTABLE_INSTRUMENTS: ReadonlySet<string> = new Set(["stryker.conf.json", "scripts/mutation-relevant-paths.json"]);
+
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
   const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
   if (!Number.isSafeInteger(request.prNumber) || request.prNumber <= 0) return refuse("invalid-pr", "no implementation PR number");
@@ -589,7 +594,8 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
       return refuse("invalid-path", path);
     }
     if (path.startsWith("plan/")) return refuse("plan-path", path);
-    if (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path)) {
+    if (!SCOPE_GRANTABLE_INSTRUMENTS.has(path) &&
+        (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path))) {
       return refuse("instrument-path", path);
     }
     if (path.startsWith("test/")) return refuse("test-path", path);

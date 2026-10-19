@@ -12,7 +12,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import fsMarker from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
+import { updateProposalRegistry, updateProposalRegistryAsync, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { tryEscalate } from "./escalate.js";
 import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.js";
 import { promotionTaint } from "./learnings.js";
@@ -3439,6 +3439,38 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFo
     }
   }
 
+  return outcomes;
+}
+
+/** The real retro caller owns this signal for publication's lifetime, disposing both handlers on every terminal arm.
+ * There is no guessed lock timeout: terminating the attempt cancels its waiter instead of leaving an orphan write. */
+export async function withRetroPublicationCancellation<T>(run: (signal: AbortSignal) => Promise<T>,
+  signals: Pick<NodeJS.Process, "once" | "removeListener"> = process): Promise<T> {
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  signals.once("SIGINT", stop);
+  signals.once("SIGTERM", stop);
+  try { return await run(controller.signal); }
+  finally {
+    signals.removeListener("SIGINT", stop);
+    signals.removeListener("SIGTERM", stop);
+  }
+}
+
+/** Same routing predicates and locked writer as synchronous publication; only acquisition yields.
+ * Deferred routing outcomes and harvest marks remain private until the real writer has committed. */
+export async function publishFollowupHarvestAsync(harvest: FollowupHarvest,
+  deps: Omit<RouteFollowupsDeps, "updateRegistry"> & Parameters<typeof recordFollowupHarvest>[1],
+  wait: UpdateProposalRegistryOpts): Promise<FollowupRouteOutcome[]> {
+  const pending: LedgerLine[] = [];
+  recordFollowupHarvest(harvest, { ...deps, writeLedger: (_path, line) => { pending.push(line); } });
+  let update: ((current: Proposal[]) => Proposal[] | null) | undefined;
+  const outcomes = routeFollowupsToRegistry(harvest, { ...deps,
+    updateRegistry: (_path, operation) => { update = operation; return null; },
+  });
+  if (update) await updateProposalRegistryAsync(deps.registryPath, update, wait);
+  const write = deps.writeLedger ?? appendLedger;
+  for (const line of pending) write(deps.ledgerPath, line);
   return outcomes;
 }
 

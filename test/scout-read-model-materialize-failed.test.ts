@@ -5,13 +5,25 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { Worker } from "node:worker_threads";
 import { makeTempDir } from "#src/lib/tmp.js";
-import { acquireLease, openReadModel, READ_MODEL_BUSY_TIMEOUT_MS } from "#src/lib/read-model-db.js";
+import { acquireLease, flushReadModelTransactions, openReadModel, READ_MODEL_BUSY_TIMEOUT_MS } from "#src/lib/read-model-db.js";
 import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 
+const fixtureClosers = new WeakMap<TestContext, Array<() => unknown>>();
+function closeAfter(t: TestContext, close: () => unknown): void {
+  const closers = fixtureClosers.get(t);
+  assert.ok(closers, "the private state fixture must exist before registering its resources");
+  closers.push(close);
+}
 function state(t: TestContext): string {
   const path = makeTempDir("read-model-contention");
-  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const closers: Array<() => unknown> = [];
+  fixtureClosers.set(t, closers);
+  t.after(async () => {
+    for (const close of closers.reverse()) await close();
+    await flushReadModelTransactions();
+    rmSync(path, { recursive: true, force: true });
+  });
   return path;
 }
 
@@ -26,7 +38,7 @@ async function hold(t: TestContext, path: string, exclusive = false): Promise<()
   // Attach a rejection observer immediately, including setup failure before the release call.
   void done.catch(() => {});
   const release = async () => { Atomics.store(gate, 0, 1); Atomics.notify(gate, 0); await done; };
-  t.after(release);
+  closeAfter(t, release);
   await new Promise<void>((resolve, reject) => {
     worker.once("message", message => message.held ? resolve() : reject(new Error("writer did not acquire lock")));
     worker.once("error", reject);
@@ -42,7 +54,7 @@ function failure(fn: () => unknown): Error & { errcode?: number; code?: string }
 
 test("W1-T9937 criterion 1: read-model contention identifies the failing operation without SQL or bind values", async t => {
   const db = openReadModel({ stateDir: state(t), instance: "core", schemaVersion: 1, ddl: "CREATE TABLE secret_table(value TEXT);" });
-  t.after(() => db.close());
+  closeAfter(t, () => db.close());
   assert.equal(db.prepare("PRAGMA busy_timeout").get()?.timeout, READ_MODEL_BUSY_TIMEOUT_MS);
   db.prepare("INSERT INTO secret_table VALUES (?)").run("positive control");
   assert.equal(db.prepare("SELECT count(*) AS n FROM secret_table").get()?.n, 1);
@@ -68,7 +80,7 @@ test("W1-T9937 criterion 1: a blocked connect and a blocked iterate step name th
   const stateDir = state(t);
   const db = openReadModel({ stateDir, instance: "core", schemaVersion: 1, ddl: "CREATE TABLE secret_table(value TEXT);" });
   let closed = false;
-  t.after(() => { if (!closed) db.close(); });
+  closeAfter(t, () => { if (!closed) db.close(); });
   db.prepare("INSERT INTO secret_table VALUES (?)").run("positive control");
   const rows = () => [...db.prepare("SELECT value FROM secret_table").iterate()].map(row => row.value);
   assert.deepEqual(rows(), ["positive control"]);
@@ -92,7 +104,7 @@ test("W1-T9937 criterion 1: a blocked connect and a blocked iterate step name th
   assert.ok(open.message.endsWith("[operation=connect]"));
   await release();
   const reopened = openReadModel({ stateDir, instance: "core", schemaVersion: 1 });
-  t.after(() => reopened.close());
+  closeAfter(t, () => reopened.close());
   assert.deepEqual([...reopened.prepare("SELECT value FROM secret_table").iterate()].map(row => row.value), ["positive control"]);
 });
 
@@ -104,14 +116,14 @@ test("W1-T9937 criterion 2: actual projector and view writers retain fences thro
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "serve" } }));
   const common = { stateDir, instances: [{ name: "core", ledgerDir: stateDir }], holder: "fixture-owner", clock, views: [], oracle: "off" as const, tickMs: 1, post: (message: ReadModelWorkerMessage) => { messages.push(message); } };
   const projector = createReadModelTicker(common), views = createReadModelTicker({ ...common, viewsOnly: true });
-  t.after(() => { views.release(); projector.release(); });
+  closeAfter(t, () => { views.release(); projector.release(); });
   projector.start(); projector.tick();
   const observed = messages.filter(m => m.type === "state").at(-1)!;
   assert.equal(observed.type, "state");
   if (observed.type !== "state") return;
   assert.equal(observed.instances[0]?.lease, "held");
   views.start(); views.observe(observed.instances); views.tick();
-  const db = openProjectorReadModel(stateDir, "core", clock); t.after(() => db.close());
+  const db = openProjectorReadModel(stateDir, "core", clock); closeAfter(t, () => db.close());
   const accept = (value: string) => views.accept({ view: "inbox", version: 1, bodies: [{ key: "fixture", data: { value }, sources: [] }] });
   accept("positive");
   const body = () => String(db.prepare("SELECT body FROM view_body WHERE view='inbox' AND key='fixture'").get()?.body);
@@ -151,7 +163,7 @@ test("W1-T9937 criterion 2: actual projector and view writers retain fences thro
 test("W1-T9937 criterion 3: unclassified SQLite failures retain their original outcome", t => {
   const db = openReadModel({ stateDir: state(t), instance: "core", schemaVersion: 1 });
   const native = new DatabaseSync(":memory:");
-  t.after(() => { db.close(); native.close(); });
+  closeAfter(t, () => { db.close(); native.close(); });
   for (const sql of ["SELECT FROM", "SELECT * FROM absent_table"]) {
     const original = failure(() => native.prepare(sql)), actual = failure(() => db.prepare(sql));
     assert.deepEqual({ message: actual.message, code: actual.code, errcode: actual.errcode }, { message: original.message, code: original.code, errcode: original.errcode });
