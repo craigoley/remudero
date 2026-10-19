@@ -1924,35 +1924,35 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       let lease: CoverageResourceLease | undefined;
       let lcovPath = join(repoRoot, "coverage", "lcov.info");
       try {
-      const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => {
-        if (coverageResources === undefined) return testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot);
-        const acquired = coverageResources(repoRoot);
-        if (!acquired.ok) return { ok: false, detail: acquired.detail };
-        lease = acquired.lease;
-        lcovPath = lease.lcovPath;
-        if (!testSlotExecutionAllowed(lease.slot)) return { ok: false, detail: `coverage: NOT_RUN (${lease.slot.note})` };
-        const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, lease.scratchDir, join(lease.scratchDir, "raw-shards"), lease.slot, testSlot ?? {}, lease.note);
-        return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${lease.note})` };
-      });
-      if (!test.ok) return [refresh, test];
-      const ratchet = runStep("coverage-ratchet:ratchet", () =>
-        shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
-          cwd: repoRoot,
-        }),
-      );
-      const diffCoverage = runStep("coverage-ratchet:diff-coverage", () => {
-        // W1-T3013: the diff is CHECKED before it becomes stdin. An unchecked one turns a git
-        // failure into a green step, because diff-coverage.mjs is right to pass over an empty
-        // added-line set — the gate was asking it a question it cannot refuse.
-        const diff = mergeBaseDiffForCoverage(repoRoot, spawn);
-        if (!diff.ok) return { ok: false, detail: diff.detail };
-        return shellOut(spawn, "diff-coverage.mjs (origin/main...HEAD, refreshed base)", process.execPath, [join(repoRoot, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath], {
-          cwd: repoRoot,
-          input: diff.text,
+        const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
+        const test = runStep("coverage-ratchet:test-with-coverage", () => {
+          if (coverageResources === undefined) return testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot);
+          const acquired = coverageResources(repoRoot);
+          if (!acquired.ok) return { ok: false, detail: acquired.detail };
+          lease = acquired.lease;
+          lcovPath = lease.lcovPath;
+          if (!testSlotExecutionAllowed(lease.slot)) return { ok: false, detail: `coverage: NOT_RUN (${lease.slot.note})` };
+          const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, lease.scratchDir, join(lease.scratchDir, "raw-shards"), lease.slot, testSlot ?? {}, lease.note);
+          return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${lease.note})` };
         });
-      });
-      return [refresh, test, ratchet, diffCoverage];
+        if (!test.ok) return [refresh, test];
+        const ratchet = runStep("coverage-ratchet:ratchet", () =>
+          shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
+            cwd: repoRoot,
+          }),
+        );
+        const diffCoverage = runStep("coverage-ratchet:diff-coverage", () => {
+          // W1-T3013: the diff is CHECKED before it becomes stdin. An unchecked one turns a git
+          // failure into a green step, because diff-coverage.mjs is right to pass over an empty
+          // added-line set — the gate was asking it a question it cannot refuse.
+          const diff = mergeBaseDiffForCoverage(repoRoot, spawn);
+          if (!diff.ok) return { ok: false, detail: diff.detail };
+          return shellOut(spawn, "diff-coverage.mjs (origin/main...HEAD, refreshed base)", process.execPath, [join(repoRoot, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath], {
+            cwd: repoRoot,
+            input: diff.text,
+          });
+        });
+        return [refresh, test, ratchet, diffCoverage];
       } finally { lease?.release(); }
     },
   },
