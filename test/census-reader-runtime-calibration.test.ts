@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test, type TestContext } from "node:test";
@@ -155,6 +155,11 @@ test("source-reader native timeout preserves its started runaway and closed capt
     const [started, pid] = readFileSync(join(repo.dir, "started-control"), "utf8").split(" ");
     assert.equal(started, marker);
     assert.throws(() => process.kill(Number(pid), 0), { code: "ESRCH" }, "the SIGTERM-ignoring runaway outlived its capture");
+    assert.equal(native.parentTracking.ownerPid, process.pid);
+    assert.equal(native.parentTracking.childPid, Number(pid));
+    const retained = lstatSync(dir);
+    assert.ok(retained.isDirectory() && !retained.isSymbolicLink() && retained.uid === process.getuid!());
+    rmSync(dir, { recursive: true }); // Only this closed, verified expected timeout fixture; failed assertions retain it.
     return true;
   });
 });
