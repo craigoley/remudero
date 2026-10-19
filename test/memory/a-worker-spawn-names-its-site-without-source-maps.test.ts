@@ -14,7 +14,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   askNestedThreadHeaps, readWorkerHeaps, spawnSite, trackWorkerThreads,
   THREAD_HEAPS_ANSWER, THREAD_HEAPS_REQUEST, WORKER_HEAP_PREFIX,
-  type WorkerHeapReading, type WorkerThread,
+  type ThreadHoldsSnapshot, type WorkerHeapReading, type WorkerThread,
 } from "#src/lib/worker-heaps.js";
 
 const WORKER_HEAPS = pathToFileURL(join(REPO_ROOT, "src/lib/worker-heaps.ts")).href;
@@ -436,8 +436,9 @@ test("W1-T9821: raw call sites restore the formatter when setting the limit fail
   }
 });
 
-function fakeThread(threadId: number, read?: () => Promise<HeapInfo>): WorkerThread & EventEmitter {
-  return Object.assign(new EventEmitter(), { threadId, ...(read ? { getHeapStatistics: read } : {}) }) as WorkerThread & EventEmitter;
+type TestThread = Omit<WorkerThread, "threadId"> & EventEmitter & { threadId: number };
+function fakeThread(threadId: number, read?: () => Promise<HeapInfo>): TestThread {
+  return Object.assign(new EventEmitter(), { threadId, ...(read ? { getHeapStatistics: read } : {}) }) as TestThread;
 }
 
 function heap(total_heap_size: number, used_heap_size: number | undefined, external_memory: number): HeapInfo {
@@ -468,7 +469,7 @@ test("W1-T9821: labels retain distinct thread parts, grouping arithmetic, holds 
     assert.ok(live[0].kind.endsWith(":publishSameSite"));
     assert.ok(live[2].kind.endsWith(":publishOtherSite"));
     assert.deepEqual(Object.keys(live[0]).sort(), ["kind", "thread"], "no new DTO or retained call sites");
-    const readings = await readWorkerHeaps(live, 100, id => ({
+    const readings = await readWorkerHeaps(live, 100, (id): ThreadHoldsSnapshot => ({
       holds: id === first.threadId ? {
         "board:one": { entries: 2, bytes: 250, unit: "rows", bytes_basis: "insertion-accounted-payload-not-exclusive-v8" },
         "board:unknown": { entries: 1, unsized: "payload cannot be sized", unit: "rows" },
