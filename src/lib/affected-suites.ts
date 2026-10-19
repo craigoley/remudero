@@ -655,7 +655,12 @@ export function changedSymbols(diffText: string, readFile: (path: string) => str
         }) : [];
       } catch (err) {
         // Deleted in the new tree: it declares nothing now, and its importers are the graph's business.
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          if (err instanceof Error && err.message.startsWith("lexical context unknown at line ")) {
+            throw new Error(`changed-symbols ${JSON.stringify(file)}: ${err.message}`, { cause: err });
+          }
+          throw err;
+        }
         lines = [];
       }
       continue;
