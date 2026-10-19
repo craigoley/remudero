@@ -6575,6 +6575,24 @@ export function pruneStaleRuns(
  * name; this reaper has no such urgency (W1-T378). */
 export const DEFAULT_WORKTREE_REAP_GRACE_MS = loadDefaultPolicy().values.worktreeReapGraceMs;
 
+// One process-local hold serves BOTH reapers. The review-specific sweep must not keep
+// a checkout that this module's general sweep removes before its proofs execute.
+const heldReviewWorktrees = new Set<string>();
+
+/** Protect the exact checkout for the complete review scope, regardless of its age. */
+export function holdReviewWorktree(worktreePath: string): void {
+  heldReviewWorktrees.add(resolve(worktreePath));
+}
+
+/** Called by the existing owned review teardown, not by elapsed time or a reaper. */
+export function releaseReviewWorktree(worktreePath: string): void {
+  heldReviewWorktrees.delete(resolve(worktreePath));
+}
+
+export function reviewWorktreeIsHeld(worktreePath: string): boolean {
+  return heldReviewWorktrees.has(resolve(worktreePath));
+}
+
 /** Directory names never descended into by {@link newestActivityMs} — see its doc. */
 const ACTIVITY_SKIP_DIRS = new Set([".git", "node_modules"]);
 
@@ -6583,6 +6601,8 @@ export const ACTIVITY_WALK_ENTRY_CAP = 20_000;
 
 /** Why {@link reapStaleWorktrees} left an entry alone — the "and why" half of its ledger row. */
 export type WorktreeKeepReason =
+  /** This process still owns the review using this exact checkout. */
+  | "live-review"
   /** A run lock naming a pid that is currently alive. */
   | "live-pid"
   /** Registered on a branch still live upstream (an open, unmerged PR). */
@@ -6967,6 +6987,11 @@ function* worktreeReapPass(
     }
     if (!isDir) continue;
     yield entryPath;
+
+    if (reviewWorktreeIsHeld(entryPath)) {
+      keep(name, "live-review");
+      continue;
+    }
 
     const lockRead = readRunLock(entryPath);
     if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid, lockRead.info)) {
