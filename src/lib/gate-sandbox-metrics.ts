@@ -1,4 +1,4 @@
-import { closeSync, constants, lstatSync, openSync, opendirSync, readFileSync, statfsSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, opendirSync, readFileSync, statfsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -50,7 +50,7 @@ export function compileCacheSize(
   if (platform !== "linux") throw Error("cache measurement requires Linux descriptor-backed directories");
   const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
   let first: number;
-  try { first = openSync(root, flags); }
+  try { first = openSync(root, flags, 0o600); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { files: 0, bytes: 0 }; throw error; }
   const started = now(), pending = [first];
   const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
@@ -64,11 +64,16 @@ export function compileCacheSize(
         try {
           for (let entry = dir.readSync(); entry !== null; entry = dir.readSync()) {
             if (++entries > maxEntries || now() - started > 100) throw Error("compile cache enumeration exceeds measurement budget");
-            const path = join(fdPath(fd), entry.name), stat = lstatSync(path);
-            if (stat.isSymbolicLink()) throw Error("compile cache contains a symlink; enumeration incomplete");
-            if (stat.isDirectory()) pending.push(openSync(path, flags));
-            else if (stat.isFile()) { files++; bytes += stat.size; }
-            else throw Error("compile cache contains a non-file; enumeration incomplete");
+            if (entry.isSymbolicLink()) throw Error("compile cache contains a symlink; enumeration incomplete");
+            // Open once without creating or following links; nonblocking also bounds a replaced FIFO.
+            const child = openSync(join(fdPath(fd), entry.name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+            let queued = false;
+            try {
+              const stat = fstatSync(child);
+              if (stat.isDirectory()) { pending.push(child); queued = true; }
+              else if (stat.isFile()) { files++; bytes += stat.size; }
+              else throw Error("compile cache contains a non-file; enumeration incomplete");
+            } finally { if (!queued) closeSync(child); }
           }
         } finally { dir.closeSync(); }
       } finally { closeSync(fd); }

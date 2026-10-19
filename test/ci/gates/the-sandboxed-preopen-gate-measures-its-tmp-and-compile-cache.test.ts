@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -143,6 +144,39 @@ test("W1-T9739: the real cache walker is bounded and never follows a cache symli
     execFileSync("mkfifo", [join(dir, "pipe")]);
     assert.throws(() => compileCacheSize(dir), /non-file/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T9739: cache metadata and traversal stay on the same opened directory during replacement", (t) => {
+  if (process.platform !== "linux") return;
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w9739-replace-"));
+  const originalLstat = fs.lstatSync, originalFstat = fs.fstatSync;
+  try {
+    const cache = join(dir, "cache"), nested = join(cache, "nested"), outside = join(dir, "outside");
+    mkdirSync(nested, { recursive: true });
+    mkdirSync(outside);
+    writeFileSync(join(nested, "one"), "abc");
+    writeFileSync(join(outside, "other"), "x".repeat(100));
+    const inode = originalLstat(nested).ino;
+    let replaced = false;
+    const replace = (stat: fs.Stats) => {
+      if (!replaced && stat.isDirectory() && stat.ino === inode) {
+        replaced = true;
+        renameSync(nested, join(dir, "moved"));
+        symlinkSync(outside, nested);
+      }
+      return stat;
+    };
+    t.mock.method(fs, "lstatSync", ((...args: Parameters<typeof fs.lstatSync>) => replace(originalLstat(...args) as fs.Stats)) as typeof fs.lstatSync);
+    t.mock.method(fs, "fstatSync", ((...args: Parameters<typeof fs.fstatSync>) => replace(originalFstat(...args) as fs.Stats)) as typeof fs.fstatSync);
+    syncBuiltinESMExports();
+    assert.deepEqual(compileCacheSize(cache), { files: 1, bytes: 3 });
+    assert.equal(replaced, true, "the fixture must replace the directory after its metadata is read");
+    assert.equal(readFileSync(join(outside, "other"), "utf8"), "x".repeat(100));
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("W1-T9739: the transport parser refuses partial costs and copies only the measured schema", () => {
