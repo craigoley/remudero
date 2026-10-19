@@ -261,3 +261,152 @@ test("the drift check treats a learned memory.high as current, and a recycle sta
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 ordering", async t => {
+  const core = "remudero-daemon", serve = "remudero-serve";
+  const currentId = "c0ffee".padEnd(64, "0"), peerId = "bead".padEnd(64, "0");
+  const cases = [
+    { name: "core holds for serve's larger surplus", current: core, live: 8320, peerLive: 6400, action: "hold", target: 8320 },
+    { name: "serve gives back before core despite core's larger absolute high", current: serve, live: 6400, peerLive: 8320, action: "shrink", target: 6144 },
+    { name: "serve holds for core's larger surplus", current: serve, live: 5760, peerLive: 8352, action: "hold", target: 5760 },
+    { name: "core gives back before serve's smaller surplus", current: core, live: 8352, peerLive: 5696, action: "shrink", target: 8192 },
+    { name: "an unread ineligible cloudflared is not a tuner peer", current: serve, live: 6400, peerLive: 8320, excluded: true, action: "shrink", target: 6144 },
+    { name: "equal surpluses preserve the existing tie behavior", current: core, live: 8320, peerLive: 5760, action: "shrink", target: 8192 },
+    { name: "an advertised peer's missing high holds tier 2", current: core, live: 8320, peerLive: 6400, fault: "missing-high", action: "hold", target: 8320 },
+    { name: "an advertised peer's malformed high holds tier 2", current: serve, live: 6400, peerLive: 8320, fault: "malformed-high", action: "hold", target: 6400 },
+    { name: "failed peer discovery holds tier 2", current: core, live: 8320, peerLive: 6400, fault: "list-error", action: "hold", target: 8320 },
+    { name: "empty discovery is unknown beside a successful inspect", current: core, live: 8320, peerLive: 6400, fault: "empty-list", action: "hold", target: 8320 },
+    { name: "truncated peer identities are not guessed into a cgroup", current: core, live: 8320, peerLive: 6400, fault: "short-ids", action: "hold", target: 8320 },
+    { name: "a list missing the inspected current identity holds tier 2", current: core, live: 8320, peerLive: 6400, fault: "missing-current", action: "hold", target: 8320 },
+    { name: "a changed current identity in the peer list holds tier 2", current: core, live: 8320, peerLive: 6400, fault: "changed-current", action: "hold", target: 8320 },
+    { name: "a duplicate current identity leaves peer ordering unknown", current: core, live: 8320, peerLive: 6400, fault: "duplicate-current", action: "hold", target: 8320 },
+    { name: "a nonhex peer identity is not used as a cgroup path", current: serve, live: 6400, peerLive: 8320, fault: "nonhex-peer", action: "hold", target: 6400 },
+    { name: "a short inspected identity holds before any cgroup or peer lookup", current: core, live: 8320, peerLive: 6400, fault: "short-inspect", action: "hold", target: 8320 },
+    { name: "tier 1 stays a hold even for the largest peer", current: serve, live: 6400, peerLive: 8320, tier: "watch", action: "hold", target: 6400 },
+    { name: "tier 3 still gives back despite a larger peer", current: core, live: 8320, peerLive: 6400, tier: "severe", action: "shrink", target: 8192 },
+    { name: "the current policy floor still wins", current: serve, live: 5376, peerLive: 8320, action: "floor", target: 5632 },
+    { name: "calm growth still respects the 95 percent hard cap", current: serve, live: 7168, peerLive: 8320, tier: "calm", action: "grow", target: 7296 },
+    { name: "calm without squeeze still holds", current: serve, live: 6400, peerLive: 8320, tier: "no-squeeze", action: "hold", target: 6400 },
+    { name: "the policy floor still wins when peer discovery fails", current: serve, live: 5376, peerLive: 8320, fault: "list-error", action: "floor", target: 5632 },
+    { name: "tier 3 still gives back when a peer high is unreadable", current: core, live: 8320, peerLive: 6400, tier: "severe", fault: "missing-high", action: "shrink", target: 8192 },
+    { name: "tier 1 still holds when peer discovery fails", current: serve, live: 6400, peerLive: 8320, tier: "watch", fault: "list-error", action: "hold", target: 6400 },
+    { name: "calm capped growth still works when peer discovery fails", current: serve, live: 7168, peerLive: 8320, tier: "calm", fault: "list-error", action: "grow", target: 7296 },
+    { name: "calm restoration still works when peer discovery fails", current: serve, live: 6400, peerLive: 8320, tier: "calm", fault: "list-error", learned: 6912, action: "restore", target: 6912 },
+    { name: "calm without squeeze still holds when peer discovery fails", current: serve, live: 6400, peerLive: 8320, tier: "no-squeeze", fault: "list-error", action: "hold", target: 6400 },
+  ];
+  for (const row of cases) await t.test(row.name, () => {
+    // Reuse the maintained host() fixture; no second builder or live Docker seam.
+    const h = host(row.current), peer = row.current === core ? serve : core;
+    const peerCg = join(h.root, "cg", "system.slice", `docker-${peerId}.scope`);
+    const argvPath = join(h.root, "docker-argv.bin"), listPath = join(h.root, "peers.txt");
+    try {
+      mkdirSync(peerCg, { recursive: true });
+      for (const [cg, name, high] of [[h.cg, row.current, row.live], [peerCg, peer, row.peerLive]] as const) {
+        writeFileSync(join(cg, "memory.high"), `${high * MIB}\n`);
+        writeFileSync(join(cg, "memory.max"), `${(name === serve ? 7680 : CONSOLE_MAX_MIB) * MIB}\n`);
+        writeFileSync(join(cg, "memory.swap.max"), `${(name === serve ? 1024 : 4096) * MIB}\n`);
+      }
+      const boundaries = [h.cg, peerCg].map(cg => ({
+        cg, max: readFileSync(join(cg, "memory.max"), "utf8"),
+        swapMax: readFileSync(join(cg, "memory.swap.max"), "utf8"),
+      }));
+      const peerBefore = readFileSync(join(peerCg, "memory.high"), "utf8");
+      const short = row.fault === "short-ids";
+      const rows: Array<[string, string]> = [[row.current, currentId], [peer, peerId]];
+      if (row.fault === "changed-current") rows[0] = [row.current, "feed".padEnd(64, "0")];
+      if (row.fault === "duplicate-current") rows.push([row.current, currentId]);
+      if (row.fault === "nonhex-peer") rows[1] = [peer, "g".repeat(64)];
+      if (row.excluded) {
+        const excludedId = "face".padEnd(64, "0");
+        const excludedCg = join(h.root, "cg", "system.slice", `docker-${excludedId}.scope`);
+        mkdirSync(excludedCg, { recursive: true });
+        writeFileSync(join(excludedCg, "memory.high"), "not-a-tuner-input\n");
+        rows.push(["cloudflared", excludedId]);
+      }
+      writeFileSync(listPath, rows.filter(([name]) => row.fault !== "missing-current" || name !== row.current)
+        .map(([name, id]) => `${name} ${short ? id!.slice(0, 12) : id}\n`).join(""));
+      assert.equal(currentId.length, 64);
+      assert.equal(peerId.length, 64);
+      assert.equal(readFileSync(join(peerCg, "memory.high"), "utf8"), peerBefore, "physical full-ID peer positive control");
+
+      // The fake validates argv; it does not silently return a convenient peer for any format.
+      // inspect's .Id and ps's .ID are intentionally DIFFERENT contracts.
+      writeFileSync(join(h.root, "bin", "docker"), [
+        "#!/usr/bin/env bash",
+        "printf '%s\\0' \"$@\" >> \"$TUNER_FIXTURE_ARGV\"; printf '\\0' >> \"$TUNER_FIXTURE_ARGV\"",
+        "printf '%s\\n' \"docker $*\" >> \"$TUNER_FIXTURE_CALLS\"",
+        "case \"$1\" in",
+        " inspect)",
+        "  [ \"$#\" -eq 4 ] && [ \"$2\" = --format ] && [ \"$3\" = '{{.Id}}' ] && [ \"$4\" = \"$TUNER_FIXTURE_CONTAINER\" ] || exit 64",
+        "  if [ \"$TUNER_FIXTURE_FAULT\" = short-inspect ]; then printf '%.12s\\n' \"$TUNER_FIXTURE_ID\"; else printf '%s\\n' \"$TUNER_FIXTURE_ID\"; fi ;;",
+        " ps)",
+        "  truncated=0",
+        "  if [ \"$#\" -eq 4 ] && [ \"$2\" = --no-trunc ] && [ \"$3\" = --format ]; then format=\"$4\"",
+        "  elif [ \"$#\" -eq 3 ] && [ \"$2\" = --format ]; then format=\"$3\"; truncated=1",
+        "  else echo 'fixture: unexpected Docker ps argv' >&2; exit 64; fi",
+        "  if [ \"$format\" = '{{.Names}} {{.Id}}' ]; then echo \"fixture: can't evaluate field Id in type *formatter.ContainerContext\" >&2; exit 1; fi",
+        "  [ \"$format\" = '{{.Names}} {{.ID}}' ] || exit 64",
+        "  case \"$TUNER_FIXTURE_FAULT\" in list-error) echo 'fixture: peer list unavailable' >&2; exit 1 ;; empty-list) exit 0 ;; esac",
+        "  if [ \"$truncated\" -eq 1 ]; then while read -r name id; do printf '%s %.12s\\n' \"$name\" \"$id\"; done < \"$TUNER_FIXTURE_LIST\"",
+        "  else cat \"$TUNER_FIXTURE_LIST\"; fi ;;",
+        " *) exit 64 ;;",
+        "esac", "",
+      ].join("\n"));
+      const tier = row.tier ?? "pressure";
+      const availableMiB = tier === "severe" ? 1500 : tier === "watch" ? 3500
+        : tier === "calm" || tier === "no-squeeze" ? 9000 : 3000;
+      const swapin = tier === "watch" || tier === "calm" || tier === "no-squeeze" ? 5000 : 65000;
+      writeFileSync(join(h.root, "meminfo"), `MemTotal: ${HOST_KB} kB\nMemAvailable: ${availableMiB * 1024} kB\n`);
+      writeFileSync(join(h.root, "vmstat"), `pswpin ${swapin}\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n`);
+      const then = Math.floor(Date.now() / 1000) - 300;
+      const noSqueeze = tier === "no-squeeze";
+      writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${row.current}.txt`),
+        `v1 ${then} ${currentId} ${noSqueeze ? 1124 : 1000} ${noSqueeze ? 25000 : 7000} 5000 30 0\n`);
+      if (row.fault === "missing-high") rmSync(join(peerCg, "memory.high"));
+      if (row.fault === "malformed-high") writeFileSync(join(peerCg, "memory.high"), "unreadable-number\n");
+      if (row.learned) writeFileSync(join(h.root, "cfg", "state", `memory-high-tuned-${row.current}.json`),
+        JSON.stringify({ container: row.current, high_mib: row.learned }) + "\n");
+      const peerInput = existsSync(join(peerCg, "memory.high")) ? readFileSync(join(peerCg, "memory.high"), "utf8") : undefined;
+      const run = spawnSync("bash", [TUNER, "--container", row.current, "--state-dir", join(h.root, "cfg")], {
+        encoding: "utf8", env: { ...h.env, TUNER_FIXTURE_ARGV: argvPath, TUNER_FIXTURE_CALLS: h.calls,
+          TUNER_FIXTURE_CONTAINER: row.current, TUNER_FIXTURE_ID: currentId, TUNER_FIXTURE_LIST: listPath,
+          TUNER_FIXTURE_FAULT: row.fault ?? "" },
+      });
+      assert.equal(run.status, 0, run.stderr);
+      assert.equal(run.signal, null, "a signalled fixture is not a result");
+      const argv = readFileSync(argvPath, "utf8").split("\0\0").filter(Boolean).map(command => command.split("\0"));
+      assert.deepEqual(argv, [
+        ["inspect", "--format", "{{.Id}}", row.current],
+        ...(row.fault === "short-inspect" ? [] : [["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"]]),
+      ], "the real shell must ask Docker for full IDs with the documented ps field");
+      assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(row.target * MIB), run.stdout);
+      assert.match(run.stdout, new RegExp(row.action === "hold" ? "hold" : row.action + " .*via systemd"));
+      const calls = readFileSync(h.calls, "utf8");
+      if (row.action === "hold") {
+        assert.doesNotMatch(calls, /systemctl set-property/);
+        assert.equal(existsSync(join(h.root, "cfg", "state", "ledger.ndjson")), false);
+        assert.equal(existsSync(join(h.root, "cfg", "state", `memory-high-tuned-${row.current}.json`)), false);
+      } else {
+        assert.match(calls, new RegExp(`systemctl set-property --runtime docker-${currentId}\\.scope MemoryHigh=${row.target * MIB}`));
+        const ledger = readFileSync(join(h.root, "cfg", "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+        assert.equal(ledger.length, 1);
+        assert.deepEqual([ledger[0].container, ledger[0].action, ledger[0].before_mib, ledger[0].after_mib],
+          [row.current, row.action, row.live, row.target]);
+      }
+      if (row.fault === "short-inspect") assert.match(run.stdout, /hold: container identity unavailable/);
+      else if (row.fault && tier === "pressure" && row.action === "hold")
+        assert.match(run.stdout, /hold.*peer.*(?:unread|unavailable|empty|identity)/i, "unknown peer evidence must be named");
+      if (tier === "watch") assert.match(run.stdout, /tier 1/);
+      if (tier === "severe") assert.match(run.stdout, /tier 3/);
+      if (tier === "no-squeeze") assert.match(run.stdout, /no squeeze/);
+      for (const boundary of boundaries) {
+        assert.equal(readFileSync(join(boundary.cg, "memory.max"), "utf8"), boundary.max);
+        assert.equal(readFileSync(join(boundary.cg, "memory.swap.max"), "utf8"), boundary.swapMax);
+      }
+      assert.equal(existsSync(join(peerCg, "memory.high")), peerInput !== undefined);
+      if (peerInput !== undefined) assert.equal(readFileSync(join(peerCg, "memory.high"), "utf8"), peerInput);
+    } finally {
+      rmSync(h.root, { recursive: true, force: true });
+    }
+  });
+});

@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.26
   status: queued
@@ -33,3 +33,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are a coverage ratchet script (scripts/coverage-merge-ratchet.mjs) and a new test file under test/ci/coverage; neither is named as touching secrets, credentials, auth, permissions, deploy, merge policy or review policy."
+      - "The change is a remedy for a measured CI friction cause (5 hand-fix rounds on 5 PRs). It needs no operator-only decision, and its effect is measurable afterward by the gardener's before/after share comparison."
+      - "Acceptance is a grep-verifiable test in a named file, so the finding can be verified. The change is not irreversible, and it still passes CI and review."
+      - "The family track record (28 merged, 40 declined) calls for stricter scrutiny, but nothing in the description shows drift from the plan or any unusual change shape. The ratchet script is a CI-tooling file and the change is bounded to it plus a test."
+    judged_at: "2026-10-19T04:11:41.592Z"
+    pin: "bf1c2ef2955fc84e4075a65a7b755f0fbae77c7ab532360db4bc4fc412a49613"
