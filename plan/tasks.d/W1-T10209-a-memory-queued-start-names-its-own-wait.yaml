@@ -1,0 +1,95 @@
+- id: W1-T10209
+  title: "A memory-queued start names its own wait before worker assignment"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 5.00
+  priority: 1.5
+  status: queued
+  attempts: 0
+  origin: "Operator-approved governed review-liveness qualification, 2026-10-19; native reserved refs/rmd-id/W1-T10209. No competing review or runtime intervention authorized."
+  plan_refs: [W1-T3969, W1-T7095, W1-T8230, W1-T9780, W1-T9814, W1-T9969, W1-T10033, W1-T10208]
+  files:
+    - src/lib/host-memory-admission.ts
+    - test/an-enforced-memory-budget-waits-in-priority-order.test.ts
+  rationale: |
+    OBSERVED source at 7733faf8163295b9ad9ae1e9156f683b6e362c5b: awaitMemoryAdmission
+    joins its maintained ranked waiting array before worker assignment. Only the ranked head
+    enters the evaluation/lock branch that emits enforce_wait. A non-head waiter changes
+    lastKey to queued and sleeps without an attributable row for its own run. Its later admit
+    can split elapsed time by queued, but a still-pending start has no such terminal evidence.
+
+    A private controlled diagnostic through the shipped test-run admission acquired host slot
+    1/2 serially and completed 3 tests/3 pass/0 fail/skip/cancel/todo. It observed two entries in
+    the actual maintained queue, one positive head wait row, no row for the second request,
+    no reservation effects and exact own abort cleanup. Shadow and non-daemon controls left
+    roots and queue untouched. This diagnoses an observability gap, NOT the cause of a live
+    review delay, a committed regression fix or native/full-author assurance.
+
+    PR12930's first normal review materialized at 13:04 UTC without a worker assignment in
+    the bounded archive/live window. Normal daemon recovery reported its owner dead and
+    posted a replacement pending review at 14:18:38 UTC; that review materialized at 14:19.
+    Other runs have positive memory-pressure wait rows, but they do NOT establish either
+    PR12930 run's cause. Presence, D-state or a mounted checkout hash is not worker health
+    or proof of loaded code. Preserve the current normal review; never reclaim from age.
+
+    Subject research parsed all 4445 main plan records and inspected actual subject blobs at
+    main and all 12 captured OPEN heads with admission, spawn and W3969-title controls.
+    W3969 bounds the already-started semantic worker; W9780/W9814 detach/respect held actions;
+    W9969 identifies and cancels only a fix action's own admission; W10033 measures gardener
+    process start. W10208 separately governs new-validation readiness, not queue attribution.
+    Own source overlaps on PR12936 and PR12894 concern duplicate-unfiled classification and
+    dependency credit, not this gap. No source ownership or universal absence is inferred.
+    Refresh merged credit, every open-head subject and dispatch ownership before building.
+  design: |
+    Add diagnostic evidence at the EXISTING ranked admission transitions, not a new observer,
+    queue, poll, scanner, provider call or live setting. A queued non-head request must name
+    its own pre-spawn phase before sleeping, bound to real supplied run/task identity and a
+    stable per-invocation discriminator. Missing identity is explicit unknown; do not invent
+    a PR/head, credential or actor. Avoid prompts, content, secrets and extra host walks.
+
+    Distinguish queued-behind-rank from the evaluating head's measured refusal or lock wait.
+    Name only ordering facts available from the same existing rank calculation; do not copy
+    the head's pressure reasons onto another request. Preserve the original wait start and
+    existing reason-split accounting. Do not claim queueing means execution, provider work,
+    healthy progress, a known root cause or permission to run.
+
+    Emit once at entry/meaningful phase transition, not on every backoff tick; keep per-start
+    state bounded and remove it on all existing outcomes. Repeated queued ticks must not grow
+    a process-global history or produce unbounded duplicate rows. Telemetry failure remains
+    diagnostic only: it must not become a fits verdict, fail-open start, extra reservation,
+    changed wait or thrown admission failure. Exercise the maintained default private ledger
+    writer and its real failure path, not only an all-fake log sink.
+
+    Do not change class weights, ordering/aging, tiers, pressure estimates, backoff, locks,
+    reservations, cancellation/deadline, fairness, uncertainty/error semantics or any bounds.
+    Shadow/off and non-daemon starts retain their existing effects and no new root/queue read.
+    Existing human owner/admin override, service scopes and trusted flow remain unchanged.
+    No status posting, claim reclamation, duplicate review, worker stop/restart, latch clear,
+    deployment, policy activation, required-gate waiver or scheduler belongs to this task.
+
+    Freeze assertions and delete only the production queue-evidence change: actual non-head
+    attribution must fail while head/order controls continue passing. Restore exact bytes and
+    measure on a committed tree; verify every changed source SF and catch/default coverage.
+    Record actual author/hosted outcomes separately. A future live effect needs exact loaded
+    source and independent per-run evidence; merging this task alone cannot certify recovery.
+  acceptance:
+    - claim: "a non-head waiter exposes its own truthful pre-spawn queue evidence with a head telemetry control and without borrowed pressure reasons"
+      proof: "unit test: W1-T10209: a non-head memory waiter has attributable queue evidence before assignment"
+    - claim: "observation preserves ranked fairness, all existing outcomes and unchanged shadow/non-daemon effects"
+      proof: "unit test: W1-T10209: queue observation changes no admission decision or ordering"
+    - claim: "repeated ticks and diagnostic writer failures cannot grow unbounded state or change admission"
+      proof: "unit test: W1-T10209: queue evidence is bounded and telemetry failure cannot admit or block work"
+    - claim: "cancellation settles only the observed request and leaves other owners and the normal review untouched"
+      proof: "unit test: W1-T10209: queue cancellation preserves other owners and clears only its own evidence"
+  falsifier: |
+    Keep deterministic assertions and controlled rank unchanged; remove only production queue
+    attribution. The real non-head evidence assertion fails, not a loader or missing-file wrapper.
+    Emit the head's refusal reasons for the queued start or write every tick: truth/boundedness
+    assertions fail. Make a failing writer alter the admission result: the failure-path control
+    fails. Restore exact committed source and obtain complete verified-file summaries. Preserve
+    every failed/setup receipt; unknown production causes remain unknown.
