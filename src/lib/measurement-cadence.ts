@@ -3404,8 +3404,6 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     "  acceptance:",
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
-    // Every learnings/** path is a PATH prompt surface, which prompt-surface-gate admits only beside a
-    // golden verdict: a lesson filed without one built a PR that gate refused (#12907, #12912).
     `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${files[1]}`)}`,
     `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — build it beside the entry, in the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
@@ -3421,7 +3419,6 @@ export function ciLearningLessonsFile(findingId: string): string {
   return `learnings/ci.d/${kebabSlug(findingId, CI_LEARNING_SLUG_MAX)}.yaml`;
 }
 
-/** The golden verdict a lesson's build must carry, on the lessons file's own stem. */
 export function ciLearningGoldenFixtureDir(findingId: string): string {
   return `test/fixtures/golden-verdicts/${kebabSlug(findingId, CI_LEARNING_SLUG_MAX)}`;
 }
