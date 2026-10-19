@@ -1,7 +1,7 @@
 /** Account-owned dependency generations. Checkout workspaces and caches stay private. */
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { systemClock } from "./clock.js";
@@ -107,11 +107,103 @@ function writeJsonAtomic(file: string, value: unknown): void {
   renameSync(stage, file);
 }
 
-function registerConsumer(seed: string, checkout: string, modules: string, key: string, method: SeedMethod): void {
+function registerConsumer(seed: string, checkout: string, modules: string, key: string, method: SeedMethod, installed: boolean): void {
   writeJsonAtomic(join(modules, CONSUMER_MARKER), { version: VERSION, key, seed, checkout, method });
   const consumer = createHash("sha256").update(checkout).digest("hex");
   const mountNamespace = process.platform === "linux" ? readlinkSync("/proc/self/ns/mnt") : "host";
-  writeJsonAtomic(join(seed, "consumers", `${consumer}.json`), { checkout, mountNamespace });
+  writeJsonAtomic(join(seed, "consumers", `${consumer}.json`), {
+    checkout, mountNamespace, provisioning: { version: 1, method, installed },
+  });
+}
+
+export interface DependencySeedReuseReport {
+  version: 1;
+  assurance: "registered-provisioning-metadata-only";
+  state: "complete" | "partial" | "unknown";
+  observedGenerations: number;
+  readableRegistrations: number;
+  knownProvisioningRegistrations: number;
+  freshInstallGenerations: number;
+  reusedRegistrations: number;
+  unknownRegistrations: number;
+  reuseShare: number | null;
+  methods: Record<SeedMethod, number>;
+  reasons: string[];
+  cleanupAuthorized: false;
+}
+
+/** Bounded read-only registry observation, never a payload attestation or GC permit.
+ * Existing worker/reviewer/hand callers already reach registerConsumer through priming.
+ * Retain unknown legacy/namespace rows instead of calling missing observations zero use. */
+export function observeDependencySeedReuse(root: string, maxRecords = 5000): DependencySeedReuseReport {
+  const report: DependencySeedReuseReport = {
+    version: 1, assurance: "registered-provisioning-metadata-only", state: "complete",
+    observedGenerations: 0, readableRegistrations: 0, knownProvisioningRegistrations: 0,
+    freshInstallGenerations: 0, reusedRegistrations: 0, unknownRegistrations: 0, reuseShare: null,
+    methods: { "apfs-clone": 0, "readonly-links": 0, "private-copy": 0 }, reasons: [], cleanupAuthorized: false,
+  };
+  const note = (reason: string): void => { if (!report.reasons.includes(reason) && report.reasons.length < 8) report.reasons.push(reason); };
+  const entries = (path: string, limit: number, reason: string): string[] => {
+    const dir = opendirSync(path), names: string[] = [];
+    try {
+      for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
+        if (names.length === limit) throw new Error(reason);
+        names.push(entry.name);
+      }
+    } finally { dir.closeSync(); }
+    return names;
+  };
+  const read = (path: string): Record<string, unknown> => {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const before = fstatSync(fd);
+      if (!before.isFile() || before.uid !== process.getuid?.() || before.nlink !== 1 || (before.mode & 0o077) || before.size > 16384) throw new Error("unverified registry metadata");
+      const bytes = Buffer.alloc(before.size + 1);
+      let used = 0;
+      while (used < bytes.length) { const n = readSync(fd, bytes, used, bytes.length - used, used); if (!n) break; used += n; }
+      if (used !== before.size) throw new Error("registry changed while reading");
+      const value = JSON.parse(bytes.subarray(0, used).toString("utf8")) as Record<string, unknown>;
+      const after = fstatSync(fd), named = lstatSync(path);
+      if ([after, named].some(s => s.dev !== before.dev || s.ino !== before.ino || s.size !== before.size || s.mtimeMs !== before.mtimeMs || s.ctimeMs !== before.ctimeMs)) throw new Error("registry changed while reading");
+      return value;
+    } finally { closeSync(fd); }
+  };
+  try {
+    if (!Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 5000) throw new Error("invalid bounded observation size");
+    ownedDirectory(root);
+    if (realpathSync(root) !== resolve(root) || read(join(root, ROOT_MARKER)).version !== VERSION) throw new Error("unverified dependency store");
+    const namespace = process.platform === "linux" ? readlinkSync("/proc/self/ns/mnt") : "host";
+    const allNames = entries(root, 10000, "store directory inspection bound");
+    const generations = allNames.filter(name => /^[a-f0-9]{64}$/.test(name)).sort();
+    if (generations.length > 256) throw new Error("generation inspection bound");
+    let inspected = 0;
+    for (const key of generations) {
+      const seed = join(root, key), consumers = join(seed, "consumers");
+      try {
+        ownedDirectory(seed); ownedDirectory(consumers);
+        const names = entries(consumers, maxRecords - inspected, "registration inspection bound");
+        report.observedGenerations++;
+        let sawFreshInstall = false;
+        for (const name of names.sort()) {
+          inspected++;
+          try {
+            if (!/^[a-f0-9]{64}\.json$/.test(name)) throw new Error("unrecognized registry row");
+            const row = read(join(consumers, name));
+            if (typeof row.checkout !== "string" || !isAbsolute(row.checkout) || createHash("sha256").update(row.checkout).digest("hex") + ".json" !== name || row.mountNamespace !== namespace) throw new Error("unknown consumer path or mount namespace");
+            report.readableRegistrations++;
+            const p = row.provisioning as { version?: number; method?: SeedMethod; installed?: boolean } | undefined;
+            if (p?.version !== 1 || !["apfs-clone", "private-copy", "readonly-links"].includes(p.method ?? "") || typeof p.installed !== "boolean") throw new Error("legacy or incomplete provisioning observation");
+            report.knownProvisioningRegistrations++;
+            report.methods[p.method!]++;
+            if (p.installed) sawFreshInstall = true; else report.reusedRegistrations++;
+          } catch (e) { report.unknownRegistrations++; report.state = "partial"; note((e as Error).message); }
+        }
+        if (sawFreshInstall) report.freshInstallGenerations++;
+      } catch (e) { report.state = "partial"; note((e as Error).message); }
+    }
+    if (report.state === "complete" && report.knownProvisioningRegistrations > 0) report.reuseShare = report.reusedRegistrations / report.knownProvisioningRegistrations;
+  } catch (e) { report.state = "unknown"; note((e as Error).message); }
+  return report;
 }
 
 function workspaceLinks(checkout: string, modules: string, workspace = ""): void {
@@ -289,12 +381,12 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
         else copyModules(source, localStage, method === "apfs-clone");
         setWritable(localStage, true);
         workspaceLinks(checkout, localStage, workspace);
-        registerConsumer(seed, join(checkout, workspace), localStage, meta.key, method);
+        registerConsumer(seed, join(checkout, workspace), localStage, meta.key, method, installed);
         renameSync(localStage, local);
       } finally { if (existsSync(localStage)) { setWritable(localStage, true); rmSync(localStage, { recursive: true, force: true }); } }
     }
     // Register before publication, under the GC lock. A failed publication leaves a harmless stale reference.
-    registerConsumer(seed, checkout, targetStage, meta.key, method);
+    registerConsumer(seed, checkout, targetStage, meta.key, method, installed);
     writeJsonAtomic(join(seed, "ready.json"), { ...ready, lastUsed: opts.now ?? systemClock.now() });
     if (existsSync(dest)) throw new Error("dependency destination was occupied during provisioning");
     renameSync(targetStage, dest);
