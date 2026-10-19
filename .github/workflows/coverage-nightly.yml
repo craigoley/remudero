@@ -109,7 +109,13 @@ jobs:
           mkdir -p coverage/compact
           node --expose-internals scripts/coverage-merge-ratchet.mjs --compact-output coverage/compact coverage/raw
           cp coverage/lcov.info coverage-artifact/lcov.info
-          cp coverage/compact/coverage-*.json coverage-artifact/raw/
+          shopt -s nullglob
+          COMPACT_FILES=(coverage/compact/coverage-*.json coverage/compact/coverage-*.json.gz)
+          if [ "${#COMPACT_FILES[@]}" -eq 0 ]; then
+            echo "coverage-nightly: no completed compact coverage files" >&2
+            exit 1
+          fi
+          cp -- "${COMPACT_FILES[@]}" coverage-artifact/raw/
       - name: Upload coverage shard
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
