@@ -44,6 +44,7 @@ import { git } from "./lib/git.mjs";
 // CommonJS, which reports a synthetic scripts/<define:import.meta> coverage source.
 import { analyzeSource } from "./test-repo-root-codemod.mjs";
 import { captureStepSync } from "./lib/author-step-capture.mjs";
+import { retainFixture } from "./lib/retained-fixtures.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
   DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE,
@@ -647,8 +648,25 @@ function runCensusChild(file, args, options) {
     maxBytes: options.maxBuffer, trackParent: true,
     stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
   if (result.outputComplete) rmSync(dir, { recursive: true, force: true });
-  // The code survives the rewrap, so a time-bound stop still reads as one (W1-T9919).
-  else result.error = Object.assign(new Error(`${result.error?.message ?? "incomplete census capture"}; capture retained at ${dir}`), { code: result.error?.code });
+  else {
+    let custody = "capture retained at";
+    try {
+      const path = join(dir, "native.json"), stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("native receipt is not a regular file");
+      const native = JSON.parse(readFileSync(path, "utf8"));
+      if (native.version !== 1 || native.outputComplete !== false || native.status !== result.status ||
+          native.signal !== result.signal || !native.finishedAt || native.finishedAt !== result.finishedAt ||
+          native.startedAt !== result.startedAt || native.error?.code !== result.error?.code) {
+        throw new Error("native receipt does not bind this closed incomplete capture");
+      }
+    } catch (error) {
+      // Keeping partial bytes is not evidence that the native receipt remains readable or valid.
+      custody = `capture custody UNKNOWN (${error.message}); partial diagnostics retained at`;
+    }
+    retainFixture(dir, `${custody} ${dir}`);
+    // Custody changes neither the original native outcome nor W1-T9919's timeout disposition.
+    result.error = Object.assign(new Error(`${result.error?.message ?? "incomplete census capture"}; ${custody} ${dir}`), { code: result.error?.code });
+  }
   return result;
 }
 
@@ -1009,6 +1027,13 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/ci/gates/an-incomplete-census-capture-survives-its-producer-exit.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [
+      "scripts/census-precheck.mjs", "scripts/lib/retained-fixtures.mjs", "scripts/lib/retained-fixtures.d.mts",
+      "test/setup/retained-fixtures.ts", "test/setup/tmp-hygiene.ts",
+      "test/ci/gates/an-incomplete-census-capture-survives-its-producer-exit.test.ts",
+    ].includes(p)),
+    remedy: "retain the actual incomplete census capture through the shared fixture registry until its producer exits" },
   ...[
     { testFile: "test/baked-supervisor-inputs.test.ts", seed: "src/lib/serve-supervisor-main.ts",
       remedy: "catalog each module the closure gains or loses in BAKED_RUNTIME_SOURCE_PATHS (src/lib/baked-runtime-inputs.ts) and in .github/workflows/acr-build.yml's on.push.paths and drift loop" },
