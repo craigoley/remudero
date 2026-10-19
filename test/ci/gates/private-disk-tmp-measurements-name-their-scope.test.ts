@@ -100,7 +100,7 @@ test("the real private disk tree reader is bounded, private and read-only", (t) 
 test("private disk tmp enumeration retains its opened root during replacement", (t) => {
   const { dir } = ownedFixtureDir(t, "disk-tmp-root");
   if (process.platform !== "linux" || [0x01021994n, 0x858458f6n].includes(statfsSync(dir, { bigint: true }).type)) {
-    t.diagnostic("descriptor replacement case requires a Linux disk-backed fixture; positive execution belongs to hosted Linux");
+    t.skip("descriptor replacement case requires a Linux disk-backed fixture; positive execution belongs to hosted Linux");
     return;
   }
   const root = join(dir, "private"), other = join(dir, "outside");
