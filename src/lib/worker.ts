@@ -5784,6 +5784,8 @@ export function worktreeAdd(
     /** W1-T4193: set ONLY by runTaskBody's implement path. Refuses a same-package lockfile mismatch before linking;
      * absent, every caller keeps the warn-and-link baseline byte-identically. */
     refuseSamePackageLockfileMismatch?: boolean;
+    /** Trusted harness install context; a private fixture may supply its own install, never task data. */
+    typecheckInstallRoot?: string;
     /** W1-T4260 seams for a CROSS-PACKAGE worktree's own dependency tree, each defaulting to the real thing: the deps root
      * (default `<config.root>/deps`, derived from `repoDir`), the installer (default `npm ci` under
      * {@link DEPS_INSTALL_TIMEOUT_MS}), the atomic rename, and the clock and sleep the lock wait reads. */
@@ -5887,19 +5889,22 @@ function finishWorktreeAdd(repoDir: string, worktreePath: string, deps: Worktree
   // tree's first `npm run typecheck` starts warm. Silent unless a seed existed and could not be written.
   const seed = refreshCanonicalSeed(worktreePath);
   if (seed === "mismatch" || seed === "unwritable") deps.log?.("worktree.typecheck_seed_failed", { worktreePath, outcome: seed });
-  routeFleetTscEntry(repoDir, worktreePath, deps.log);
+  routeFleetTscEntry(repoDir, worktreePath, deps);
 }
 
 /** W1-T9405: only a managed cut may change its linked, fleet-owned install; never an operator/CI donor. */
-function routeFleetTscEntry(repoDir: string, worktreePath: string, log: WorktreeAddDepsArg["log"]): void {
+function routeFleetTscEntry(repoDir: string, worktreePath: string, deps: WorktreeAddDepsArg): void {
   const fleetRoot = dirname(dirname(resolve(repoDir)));
   if (basename(dirname(resolve(repoDir))) !== "repos" || dirname(resolve(worktreePath)) !== join(fleetRoot, "worktrees")) return;
+  const log = deps.log;
   let temporary: string | undefined;
   try {
     const source = join(worktreePath, "node_modules");
     if (!lstatSync(source).isSymbolicLink()) return;
     const modules = realpathSync(source), owner = dirname(modules), root = realpathSync(fleetRoot);
     if (owner !== root && !owner.startsWith(root + sep)) return;
+    const harnessModules = realpathSync(join(deps.typecheckInstallRoot ?? installRootDir(), "node_modules"));
+    if (modules !== harnessModules) { log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "not-harness-install" }); return; }
     const entry = join(owner, "scripts", "tsc-entry.mjs");
     if (!existsSync(entry)) { log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "install-entry-absent" }); return; }
     const bin = join(modules, ".bin", "tsc"), current = realpathSync(bin);

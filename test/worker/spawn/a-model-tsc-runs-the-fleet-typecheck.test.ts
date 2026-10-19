@@ -117,10 +117,11 @@ function managed(t: TestContext, managedLayout = true) {
   symlinkSync(modules, join(repo, "node_modules"));
   execFileSync("git", ["-C", repo, "fetch", "-q", "origin", "main"]);
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const cut = (name: string, async = false) => {
+  const cut = (name: string, async = false, fixtureInstall = true) => {
     const path = join(root.dir, managedLayout ? "worktrees" : "lanes", name);
     mkdirSync(dirname(path), { recursive: true });
-    const opts = { log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, extra }); } };
+    const opts = { ...(fixtureInstall ? { typecheckInstallRoot: join(root.dir, "install") } : {}),
+      log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, extra }); } };
     return async ? worktreeAddAsync(repo, path, name, "origin/main", opts) : worktreeAdd(repo, path, name, "origin/main", opts);
   };
   return { root, repo, modules, original, bin, entry, cut, rows };
@@ -147,6 +148,9 @@ test("W1-T9405: an operator checkout and an unexpected tsc wrapper are never ove
   unlinkSync(custom.bin); symlinkSync(other, custom.bin);
   custom.cut("custom-lane");
   assert.equal(realpathSync(custom.bin), other);
+  const foreign = managed(t); foreign.cut("foreign-lane", false, false);
+  assert.equal(realpathSync(foreign.bin), foreign.original, "the real default harness identity refuses a foreign install even inside a managed layout");
+  assert.ok(foreign.rows.some(r => r.extra?.reason === "not-harness-install"));
 });
 
 test("W1-T9405: an install without the entry stays unchanged and a real filesystem failure is named", (t) => {
