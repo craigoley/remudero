@@ -23,7 +23,7 @@ function fixture(t: TestContext) {
   return { dir, path, db, lease: got.lease, clock, store };
 }
 
-test("shadow persistence retains historical keys without rewriting their JSON on each sample", t => {
+test("normalized shadow rows keep exact historical membership outside the hot counter payload", t => {
   const f = fixture(t), old = state(Array.from({ length: 10000 }, (_, n) => `section=archived&cursor=${n}-${"x".repeat(140)}`));
   writeFileSync(f.path, JSON.stringify({ inbox: old, retired: state(["historical"]) }));
   const bytes = readFileSync(f.path), before = statSync(f.path);
