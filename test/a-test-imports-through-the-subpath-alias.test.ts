@@ -36,8 +36,7 @@ const imp = (spec: string, name = "x"): string => `import { ${name} } from ${JSO
 const dyn = (spec: string): string => `const m = await import(${JSON.stringify(spec)});`;
 
 function aliasFixtureRoot(): string {
-  mkdirSync(join(ROOT, "state"), { recursive: true });
-  return mkdtempSync(join(ROOT, "state", "rmd-alias-fixture-"));
+  return mkdtempSync(join(tmpdir(), "rmd-alias-fixture-"));
 }
 
 function populateAliasPackage(dir: string): void {
@@ -52,10 +51,10 @@ test("W1-T9864: package.json declares the three subpath aliases", () => {
 });
 
 test("W1-T9864: a nested test importing through the aliases runs and typechecks", () => {
-  // state/ is gitignored and inside the package scope, so the nearest package.json (and its `imports`) applies.
-  mkdirSync(join(ROOT, "state"), { recursive: true });
-  const dir = mkdtempSync(join(ROOT, "state", "alias-probe-"));
+  // Scratch has a real package scope; its aliases read the actual, unchanged source donors.
+  const dir = aliasFixtureRoot();
   try {
+    populateAliasPackage(dir);
     const nested = join(dir, "a", "b", "c");
     mkdirSync(nested, { recursive: true });
     const probe = join(nested, "probe.ts");
@@ -78,9 +77,10 @@ test("W1-T9864: a nested test importing through the aliases runs and typechecks"
     assert.equal(ran, "alias-ok", "the aliases resolve to the .ts sources under tsx, from a nested folder");
 
     const tsconfig = join(dir, "tsconfig.json");
+    const { rootDir: _rootDir, ...compilerOptions } = JSON.parse(readFileSync(join(ROOT, "tsconfig.json"), "utf8")).compilerOptions;
     writeFileSync(
       tsconfig,
-      JSON.stringify({ extends: join(ROOT, "tsconfig.json"), compilerOptions: { noEmit: true, rootDir: ROOT }, include: [probe], exclude: [] }),
+      JSON.stringify({ compilerOptions: { ...compilerOptions, noEmit: true, typeRoots: [join(ROOT, "node_modules", "@types")] }, include: [probe], exclude: [] }),
     );
     const tsc = join(ROOT, "node_modules", ".bin", "tsc");
     execFileSync(tsc, ["-p", tsconfig], { cwd: ROOT, encoding: "utf8" });
@@ -174,7 +174,7 @@ test("W1-T9864: the codemod rewrites relative specifiers to the aliases", () => 
 });
 
 test("W1-T9864: the codemod writes a file in place, and --folder degrades when the placement table is absent", () => {
-  const root = mkdtempSync(join(ROOT, "state", "codemod-root-"));
+  const root = aliasFixtureRoot();
   const out = process.stdout.write.bind(process.stdout);
   const err = process.stderr.write.bind(process.stderr);
   let stderr = "";
@@ -197,7 +197,7 @@ test("W1-T9864: the codemod writes a file in place, and --folder degrades when t
 });
 
 test("W1-T9864: --folder selects the tests the placement table maps to that folder", () => {
-  const root = mkdtempSync(join(ROOT, "state", "codemod-root-"));
+  const root = aliasFixtureRoot();
   const out = process.stdout.write.bind(process.stdout);
   let stdout = "";
   try {
