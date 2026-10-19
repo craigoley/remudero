@@ -22601,6 +22601,10 @@ export interface CreditBackfillSummary {
   /** Candidates suppressed by a durable backfill receipt. Summary-only so the fixed path remains
    * measurable without restoring the old per-candidate log loop. */
   durableReceiptSuppressions: number;
+  /** W1-T10048: rotations the walk loaded this pass, and how many came from a durable digest rather than the archive. */
+  creditScanRotationsLoaded: number;
+  creditScanDigestHits: number;
+  creditScanDigestMisses: number;
 }
 
 /** Credit-backfill-specific persistence seams. Production shares the existing atomic credit store;
@@ -22751,6 +22755,9 @@ export async function runCreditBackfill(
     creditScanFilesRead: creditScan.filesRead,
     creditScanUnknown,
     durableReceiptSuppressions,
+    creditScanRotationsLoaded: creditScan.rotationsLoaded,
+    creditScanDigestHits: creditScan.digestHits,
+    creditScanDigestMisses: creditScan.digestMisses,
   };
   log("sweep.credit_backfill.summary", {
     total: summary.total,
@@ -22761,6 +22768,9 @@ export async function runCreditBackfill(
     credit_scan_files_read: summary.creditScanFilesRead,
     credit_scan_unknown: summary.creditScanUnknown,
     durable_receipt_suppressions: summary.durableReceiptSuppressions,
+    credit_scan_rotations_loaded: summary.creditScanRotationsLoaded,
+    credit_scan_digest_hits: summary.creditScanDigestHits,
+    credit_scan_digest_misses: summary.creditScanDigestMisses,
   });
   return summary;
 }
