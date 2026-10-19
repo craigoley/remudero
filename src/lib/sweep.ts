@@ -14687,12 +14687,12 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   return stalled || !dispatched;
 }
 
-/** W1-T9999 — the ledger row a pass writes when it settles a fix seed whose daemon run ended before any rung row. */
+/** W1-T9999 — the ledger row a pass writes when it settles an orphaned fix seed. */
 export const FIX_SEED_ORPHANED_STEP = "sweep.fix.seed_orphaned";
 
 export interface FixSeed { ts?: string; runId?: string }
 /** `orphaned`: seeded by an earlier daemon run and no rung row followed, so its detached dispatch died with that process. */
-export type FixSeedRead = { kind: "live" | "ended" | "orphaned"; seed: FixSeed };
+export type FixSeedRead = { kind: "live" | "ended" | "orphaned"; seed: FixSeed; orphanReason?: "owner-run-ended" };
 
 /** W1-T9999 — WHICH RUNG SPEAKS FOR THIS HEAD'S FIX SEED, and is it still live? The seed is the newest acted
  *  `sweep.disposed` blocked-fixable/conflicted row at the head. Its rung is the task's `fix.*` rows after the PR's
@@ -14721,6 +14721,20 @@ export function fixSeedRead(
     return { kind: fixRungStalledWithoutNewHead([...lines], taskId) ? "ended" : "live", seed };
   }
   if (fixRungStalledWithoutNewHead([...window], taskId)) return { kind: "ended", seed };
+  // A started in-process rung also loses its continuation when its daemon dies (#12904).
+  // Re-enter the ordinary owner/checkout claim, never clear it here: a surviving worker,
+  // dirty unpublished tree or unreadable process census must still refuse there. Require
+  // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
+  const bootAt = lines.findLastIndex((line) => line.step === "daemon.boot");
+  const adoption = lines.slice(seedAt + 1, bootAt).findLast((line) =>
+    line.step === "run_child.adoption_pass" && line.run_id === runId);
+  if (seed.runId !== undefined && seed.runId !== runId && bootAt > seedAt && lines[bootAt].run_id === runId &&
+      adoption !== undefined && ["live", "adopted", "unreadable", "misidentified"].every((key) => adoption[key] === 0) &&
+      window.filter(rung).every((line) => line.run_id === seed.runId) &&
+      !lines.slice(bootAt + 1).some((line) => line.task_id === taskId &&
+        ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"].includes(String(line.step)))) {
+    return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
+  }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
   const handoffAt = window.findLastIndex((line) => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off");
   const after = handoffAt < 0 ? [] : window.slice(handoffAt + 1);
@@ -18702,7 +18716,8 @@ export async function runSweep(
           : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
         if (seedRead?.kind === "orphaned" && !deps.dryRun) {
           appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: FIX_SEED_ORPHANED_STEP,
-            pr_number: pr.prNumber, head_sha: pr.headSha, seed_ts: seedRead.seed.ts, seed_run_id: seedRead.seed.runId });
+            pr_number: pr.prNumber, head_sha: pr.headSha, seed_ts: seedRead.seed.ts, seed_run_id: seedRead.seed.runId,
+            reason: seedRead.orphanReason ?? "earlier-run-without-rung" });
         }
         if (alreadyDone) {
           const seed = seedRead?.seed;
