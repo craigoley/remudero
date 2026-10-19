@@ -113,6 +113,11 @@ test("W1-T9739: tmp readings require the dedicated private tmpfs rather than hos
 test("W1-T9739: the real cache walker is bounded and never follows a cache symlink", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w9739-cache-"));
   try {
+    assert.throws(() => compileCacheSize(dir, 10_000, () => 0, "darwin"), /requires Linux/);
+    if (process.platform !== "linux") {
+      assert.throws(() => compileCacheSize(dir), /requires Linux/);
+      return; // Named unsupported measurement, not a fabricated count; Linux CI exercises the real walker.
+    }
     assert.deepEqual(compileCacheSize(join(dir, "absent")), { files: 0, bytes: 0 });
     mkdirSync(join(dir, "nested"));
     writeFileSync(join(dir, "one"), "abc");

@@ -45,13 +45,15 @@ export function privateTmpBytes(
 /** Enumerate only this uid's tsx cache. A partial or symlinked tree is unknown, never a smaller total. */
 export function compileCacheSize(
   root = join(tmpdir(), `tsx-${process.geteuid?.() ?? 0}`), maxEntries = 10_000, now = () => performance.now(),
+  platform: NodeJS.Platform = process.platform,
 ): CacheSize {
+  if (platform !== "linux") throw Error("cache measurement requires Linux descriptor-backed directories");
   const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
   let first: number;
   try { first = openSync(root, flags); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { files: 0, bytes: 0 }; throw error; }
   const started = now(), pending = [first];
-  const fdPath = (fd: number) => `${process.platform === "linux" ? "/proc/self/fd" : "/dev/fd"}/${fd}`;
+  const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
   let entries = 0, files = 0, bytes = 0;
   try {
     while (pending.length) {
