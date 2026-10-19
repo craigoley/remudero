@@ -11,7 +11,7 @@
  * `reproduceAt` is a fake of the base reproduction probe.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -373,5 +373,72 @@ test("W1-T9927: the production lane runs a commit's failing tests through the sw
     assert.deepEqual(probed.map(([, head, files, at]) => [head, files, at]), [[c2, [FAILING_FILE, "test/b.test.ts"], c2], [sha("c01"), [FAILING_FILE], sha("c01")]]);
     const [logged] = rowsOf(ledgerPath, "sweep.base_reproduction.cleanup_failed");
     assert.deepEqual([logged?.run_id, logged?.task_id, logged?.lane], ["R", "MAIN-HEALTH", "main-repair"]);
+  }),
+);
+
+test("W1-T9927: a local probe that throws, or answers for fewer files, concludes inconclusive and names why",
+  inScratchDir(async (ledgerPath) => {
+    for (const mode of ["throws", "omits"] as const) {
+      const path = `${ledgerPath}.${mode}`;
+      const w = world(2);
+      const [, c2] = w.cancelled as [string, string];
+      const lane = localLane({});
+      lane.reproduceAt = async () => {
+        if (mode === "throws") throw new Error("git worktree add failed");
+        return [];
+      };
+      await rig(w, lane, path).observe();
+      const [concluded] = rowsOf(path, "main.repair.probe_concluded");
+      assert.equal(concluded?.probe_sha, c2);
+      assert.equal(concluded?.verdict, "inconclusive");
+      if (mode === "throws") assert.equal(concluded?.reason, "git worktree add failed");
+      else assert.deepEqual(concluded?.outcomes, [{ file: FAILING_FILE, outcome: "unrunnable", reason: "the probe returned no outcome" }]);
+    }
+  }),
+);
+
+test("W1-T9927: a local proof is refused unless each side ran exactly this red's files",
+  inScratchDir(async (ledgerPath) => {
+    const other = "test/another.test.ts";
+    const cases: Array<{ name: string; proof: Record<string, unknown>; testFiles?: string[]; expect: RegExp | "revert" | "unreadable" }> = [
+      { name: "offending-other-files", proof: { offending: [{ file: other, outcome: "fails" }] }, expect: /was run locally on test\/another\.test\.ts, not on/ },
+      { name: "offending-fails-none", proof: { offending: [{ file: FAILING_FILE, outcome: "passes" }] }, expect: /fails none of/ },
+      { name: "parent-unrunnable", proof: { parent: [{ file: FAILING_FILE, outcome: "unrunnable" }] }, expect: /does not pass .*\(unrunnable\) locally/ },
+      { name: "ci-green-parent", proof: { offending: [{ file: FAILING_FILE, outcome: "fails" }] }, expect: "revert" },
+      { name: "no-files-named", proof: { parent: [{ file: FAILING_FILE, outcome: "passes" }] }, testFiles: [], expect: "unreadable" },
+    ];
+    for (const c of cases) {
+      const path = `${ledgerPath}.${c.name}`;
+      const w = world(2);
+      const lane = localLane({ [w.cancelled[1]!]: "fails", [w.cancelled[0]!]: "passes" });
+      lane.openFixPr = async (request) => {
+        lane.fixes.push(request);
+        return undefined;
+      };
+      const logs: string[] = [];
+      const daemon = rig(w, lane, path, { log: (step) => logs.push(step) });
+      await daemon.observe();
+      await daemon.observe();
+      await daemon.observe();
+      // Rewrite the located row's local proof: the proof is read from the ledger, so this is what the next pass judges.
+      const rows = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      const located = rows.find((row) => row.step === "main.repair.located")!;
+      assert.ok(located, c.name);
+      located.local_proof = c.proof;
+      if (c.testFiles) located.test_files = c.testFiles;
+      writeFileSync(path, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+      await daemon.observe();
+      if (c.expect === "revert") {
+        assert.equal(lane.reverts.length, 1, c.name);
+        assert.match(lane.reverts[0]!.whyFixInsufficient, /fails test\/.* locally and its first parent `[0-9a-f]{40}` is green/);
+      } else if (c.expect === "unreadable") {
+        assert.equal(lane.reverts.length, 0, c.name);
+        assert.ok(logs.includes("main.repair.proof_unreadable"), "no file to compare with decides nothing");
+        assert.equal(rowsOf(path, "main.repair.revert_withheld").length, 0);
+      } else {
+        assert.equal(lane.reverts.length, 0, c.name);
+        assert.match(String(rowsOf(path, "main.repair.revert_withheld")[0]?.reason), c.expect, c.name);
+      }
+    }
   }),
 );
