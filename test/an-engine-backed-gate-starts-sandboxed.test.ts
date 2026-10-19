@@ -90,7 +90,11 @@ test("an engine whose node_modules links into the managed checkout's install sta
   assert.ok(!ro.some(([, to]) => to === join(f.engine, "node_modules")), "the engine's own link is never a bind destination");
   // W1-T9738: the install the modules resolve to is read-only, and no writable bind holds it.
   assert.ok(ro.some(([from, to]) => from === to && to === join(f.canonical, "node_modules")), "the managed checkout's install is bound read-only");
-  assert.ok(!pairs(argv, "--bind").some(([, to]) => join(f.canonical, "node_modules").startsWith(`${to}/`) || to === f.engine), "no writable bind holds the install or the engine");
+  // A private scratch source mounted at /tmp does not expose the host's /tmp tree.
+  const protectedRoots = [join(f.canonical, "node_modules"), f.engine];
+  assert.ok(!pairs(argv, "--bind").some(([from, to]) =>
+    protectedRoots.some(root => root === from || root.startsWith(`${from}/`) || root === to)),
+  "no writable bind holds the install or the engine");
   // W1-T9619: harness read-only with its .git and the App key masked, no network, and the argv still ends in --.
   assert.ok(ro.some(([from, to]) => from === to && to === f.engine), "the harness is bound read-only");
   assert.ok(ro.some(([from, to]) => from === "/dev/null" && to === join(f.engine, ".git")), "the harness's .git is masked");

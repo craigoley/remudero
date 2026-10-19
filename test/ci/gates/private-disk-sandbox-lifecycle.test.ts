@@ -69,7 +69,7 @@ test("a disk scratch setup failure never degrades a Linux proof to unsandboxed",
     }) as typeof fs.mkdirSync);
     t.mock.method(fs, "statfsSync", (() => { throw Error("fixture disk metadata unavailable"); }) as typeof fs.statfsSync);
     syncBuiltinESMExports();
-    const exec = (() => { spawned = true; return ""; }) as typeof execFileSync;
+    const exec = (() => { spawned = true; return ""; }) as unknown as typeof execFileSync;
     const status = review.probeProofSandbox("linux", exec);
     assert.equal(status.mode, "unavailable");
     assert.match(status.mode === "unavailable" ? status.reason : "", /private disk.*metadata unavailable/);
@@ -127,7 +127,7 @@ test("private disk scratch refuses RAM backing and a foreign uid", (t) => {
   for (const p of [cwd, home]) mkdirSync(p, { mode: 0o700 });
   const original = fs.fstatSync;
   try {
-    t.mock.method(fs, "statfsSync", (() => ({ type: 0x01021994n })) as typeof fs.statfsSync);
+    t.mock.method(fs, "statfsSync", (() => ({ type: 0x01021994n })) as unknown as typeof fs.statfsSync);
     syncBuiltinESMExports();
     assert.throws(() => review.proofSandboxArgv({ cwd, home, env: {} }), /RAM-backed/);
     t.mock.restoreAll();
@@ -147,7 +147,7 @@ test("a transient disk setup refusal is not cached as a boot verdict", (t) => {
   let unreadable = true, spawns = 0;
   try {
     Object.defineProperty(process, "platform", { ...platform, value: "linux" });
-    t.mock.method(fs, "statfsSync", (() => { if (unreadable) throw Error("fixture disk read failed"); return stats; }) as typeof fs.statfsSync);
+    t.mock.method(fs, "statfsSync", (() => { if (unreadable) throw Error("fixture disk read failed"); return stats; }) as unknown as typeof fs.statfsSync);
     t.mock.method(childProcess, "execFileSync", (() => { spawns++; return ""; }) as unknown as typeof execFileSync);
     syncBuiltinESMExports();
     review.setProofSandboxForTests();
@@ -225,7 +225,14 @@ test("real Linux proof scratch is disk-backed and isolated between runs", (t) =>
   for (const [index, home] of homes.entries()) {
     mkdirSync(home, { mode: 0o700 });
     const marker = `private-marker-${index}`;
-    const code = `const f=require('node:fs');f.writeFileSync('/tmp/'+process.argv[1],'x'.repeat(65536));process.stdout.write(JSON.stringify({type:String(f.statfsSync('/tmp',{bigint:true}).type),names:f.readdirSync('/tmp').filter(s=>s.startsWith('private-marker-')),net:f.readlinkSync('/proc/self/ns/net')}));`;
+    const code = `
+const f=require('node:fs');
+f.writeFileSync('/tmp/'+process.argv[1],'x'.repeat(65536));
+process.stdout.write(JSON.stringify({
+  type:String(f.statfsSync('/tmp',{bigint:true}).type),
+  names:f.readdirSync('/tmp').filter(s=>s.startsWith('private-marker-')),
+  net:f.readlinkSync('/proc/self/ns/net')
+}));`;
     const out = JSON.parse(execFileSync(status.binary, [...review.proofSandboxArgv({ cwd, home, env: {} }), process.execPath, "-e", code, marker], { cwd, env: review.proofChildEnv(home), encoding: "utf8", timeout: 10000 }));
     assert.notEqual(out.type, String(0x01021994n));
     assert.notEqual(out.type, String(0x858458f6n));
