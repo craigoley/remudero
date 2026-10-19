@@ -826,7 +826,8 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const persistenceFailed = new Set<string>();
   const qualifications = opts.qualifications ?? {};
   const persist = (key: string, state: ViewShadowState, keys: ShadowKeyChange): void => {
-    try { opts.store?.save(key, state, keys); persistenceFailed.delete(key); }
+    // A later delta cannot replay a lost append or reset. Reconcile exact membership once after failure.
+    try { opts.store?.save(key, state, persistenceFailed.has(key) ? undefined : keys); persistenceFailed.delete(key); }
     catch (error) { persistenceFailed.add(key); throw error; }
   };
   const stateOf = (view: string): ViewShadowState => {

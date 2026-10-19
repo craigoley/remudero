@@ -155,3 +155,21 @@ test("uncommitted in-memory shadow counters cannot authorize readiness after a s
   shadow.compare(sample);
   assert.equal(shadow.readiness()[0]!.ready, true, "only a successful commit resumes measured qualification");
 });
+
+for (const reset of [false, true]) test(`a successful shadow save reconciles a previously failed ${reset ? "real-diff reset" : "key append"}`, t => {
+  const f = fixture(t), store = f.store();
+  store.save("v", state(["persisted"]));
+  let fail = true;
+  const shadow = createViewShadow({ clock: f.clock, log: () => {},
+    store: { load: store.load, save: (view, value, keys) => { if (fail) throw Error("owned fixture transient save failure"); store.save(view, value, keys); } },
+    evidence: () => ({ legacyAsOfMs: null, viewAsOfMs: null, named: new Set(), namedBeforeHorizon: new Set(), namedInGap: new Set(), rowsInGap: 0, duplicateIds: new Set(), duplicateRows: 0 }) });
+  const sample = { view: "v", key: "lost", requests: 0, legacy: { data: 1, asOfMs: null }, body: { data: reset ? 2 : 1, asOf: null } };
+  assert.throws(() => shadow.compare(sample), /owned fixture transient save failure/);
+  assert.equal(shadow.readiness()[0]!.ready, false);
+  assert.deepEqual(readShadowCounters(f.path, true)!.states.v!.streakKeys, ["persisted"], "failed transaction did not change durable membership");
+  fail = false;
+  shadow.compare({ ...sample, key: "committed", body: { data: 1, asOf: null } });
+  const expected = reset ? ["committed"] : ["persisted", "lost", "committed"];
+  assert.deepEqual(readShadowCounters(f.path, true)!.states.v!.streakKeys, expected, "recovery reconciles every earlier append or reset before resuming incremental persistence");
+  assert.deepEqual(storedShadowReadiness(f.path, f.db, NOW), shadow.readiness(), "cold and current-owner readiness retain the same denominator");
+});
