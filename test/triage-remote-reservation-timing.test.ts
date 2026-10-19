@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { TRIAGE_MAX_NEW_TASKS, triageCommand } from "../src/run-task.js";
+import { triageCommand } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -213,7 +213,7 @@ function teardownFixture(f: Fixture, savedHome: string | undefined, savedPath: s
 // doctrine — nothing releases a reservation). This is no longer the zero-burn invariant W1-T1011
 // established; it is the bounded-burn invariant W1-T2326 replaced it with.
 
-test("W1-T2326: a triage run that fails before a verdict still takes the remote reservation (W1-T1011's zero-burn invariant is REOPENED)", async () => {
+test("W1-T2326: a triage run that fails before a verdict takes the remote reservation and gives it back when the run ends (W1-T9488)", async () => {
   const feedbackId = `fb-t1011-error-${Date.now()}`;
   const f = setupFixture(feedbackId, "t1011-error");
   const savedHome = process.env.HOME;
@@ -231,10 +231,10 @@ test("W1-T2326: a triage run that fails before a verdict still takes the remote 
       }),
     ).catch(() => undefined); // triageCommandLocked rethrows the error path — we only care about the ref
 
-    // The whole block is burned, not just the head id — reserveTaskIdBlockRemote reserves
-    // TRIAGE_MAX_NEW_TASKS ids in one call, and that call now runs unconditionally.
+    // W1-T9488: the whole block was taken (the ledger names every release below) and, the run having pushed no
+    // branch, every id is given back when it ends.
     const reserved = remoteReservedIds(f.bare);
-    assert.equal(reserved.length, TRIAGE_MAX_NEW_TASKS, `an errored-before-verdict run still burns the whole reserved block, got ${reserved.join(", ")}`);
+    assert.deepEqual(reserved, [], `an errored-before-verdict run releases the whole reserved block, got ${reserved.join(", ")}`);
 
     const ledger = readFileSync(join(f.configRoot, "state", "ledger.ndjson"), "utf8")
       .split("\n")
@@ -333,12 +333,10 @@ test("W1-T1011: a proposed verdict reserves the id before the shard is written",
     );
     assert.ok(orderLines.every((l) => l === "reservation-before-branch-push"), "every push after that stays ordered too");
 
-    // The lane reserves the WHOLE block remotely (TRIAGE_MAX_NEW_TASKS ids, unchanged by this
-    // task — see reserveTaskIdBlockRemote's own doc), starting at the filed id; the unused rest
-    // are held too, never released (task-id-reservation.ts's own doctrine).
+    // The lane reserves the WHOLE block remotely (TRIAGE_MAX_NEW_TASKS ids), starting at the filed id. W1-T9488: the
+    // pushed branch declares only the filed id, which keeps its ref; the unused rest are given back.
     const reserved = remoteReservedIds(f.bare);
-    assert.equal(reserved.length, TRIAGE_MAX_NEW_TASKS, `the whole reserved block holds a permanent ref, got ${reserved.join(", ")}`);
-    assert.ok(reserved.includes(`refs/rmd-id/${filedId}`), `the filed id ${filedId} holds a permanent remote ref: ${reserved.join(", ")}`);
+    assert.deepEqual(reserved, [`refs/rmd-id/${filedId}`], `only the id the pushed branch declares keeps its remote ref, got ${reserved.join(", ")}`);
 
     const ledger = readFileSync(join(f.configRoot, "state", "ledger.ndjson"), "utf8")
       .split("\n")
@@ -359,7 +357,7 @@ test("W1-T1011: a proposed verdict reserves the id before the shard is written",
 // whole block permanently. `triage.id_minted` remains gated on `decision.action === "propose"`
 // unchanged — only the REF is unconditional now, not the ledger row.
 
-test("W1-T2326: an already-decided verdict still takes the remote reservation (W1-T1011's zero-burn invariant is REOPENED)", async () => {
+test("W1-T2326: an already-decided verdict takes the remote reservation and gives it back when the run ends (W1-T9488)", async () => {
   const feedbackId = `fb-t1011-already-${Date.now()}`;
   const f = setupFixture(feedbackId, "t1011-already");
   const savedHome = process.env.HOME;
@@ -382,8 +380,9 @@ test("W1-T2326: an already-decided verdict still takes the remote reservation (W
     assert.ok(calls.some((call) => /\/commits\/[0-9a-f]{40}\/check-runs\?per_page=100$/.test(call)), "triage read checks for the actual pushed head");
     assert.ok(!calls.some((call) => /pr merge|remudero-review/.test(call)), "a refused check never advances to merge or review");
 
+    // W1-T9488: it files nothing, so the branch it pushed declares no id and the whole block is given back.
     const reserved = remoteReservedIds(f.bare);
-    assert.equal(reserved.length, TRIAGE_MAX_NEW_TASKS, `an already-decided verdict files nothing but still burns the whole reserved block, got ${reserved.join(", ")}`);
+    assert.deepEqual(reserved, [], `an already-decided verdict files nothing and releases the whole reserved block, got ${reserved.join(", ")}`);
 
     const ledger = readFileSync(join(f.configRoot, "state", "ledger.ndjson"), "utf8")
       .split("\n")

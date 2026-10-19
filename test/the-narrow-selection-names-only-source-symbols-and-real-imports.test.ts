@@ -9,6 +9,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 import * as affected from "../src/lib/affected-suites.js";
 
@@ -131,4 +134,57 @@ test("an import-only or deleted source file names no symbol, so a caller knows t
     affected.symbollessSourceFiles(["src/user.ts", "src/gone.ts", "src/heavy.ts", "test/x.test.ts", "docs/a.md"], diff, withHeavy),
     ["src/user.ts", "src/gone.ts"],
   );
+});
+
+test("a real source-template diff names its host owner, not child-program declarations", t => {
+  const fixture = gitRepo({ kind: "selector-template", scope: t });
+  const root = fixture.dir, git = (args: string[]) => fixture.git(...args);
+  mkdirSync(join(root, "src"));
+  const path = join(root, "src", "generated.ts");
+  const source = [
+    'export const CHILD_CHECK = `',
+    'const root = "child";',
+    'const build = await import("private-child-module");',
+    '${(() => {',
+    'const holeLocal = 1;',
+    'return `nested ${liveCall()}`;',
+    '})()}',
+    '`;',
+    'export function actualLater() { return 1; }',
+    '',
+  ].join("\n");
+  writeFileSync(path, source); git(["add", "src/generated.ts"]);
+  git(["commit", "-qm", "base"]);
+  writeFileSync(path, source.replace('"child"', '"changed child"').replace('holeLocal = 1', 'holeLocal = 2'));
+  const diff = git(["diff", "-U0", "--", "src/generated.ts"]);
+  assert.match(diff, /const root/); assert.match(diff, /holeLocal = 2/);
+  assert.deepEqual(affected.changedSymbols(diff, relative => readFileSync(join(root, relative), "utf8")), ["CHILD_CHECK"]);
+});
+
+test("source declarations keep real owners and line mappings past comments, regexes and nested scopes", () => {
+  const lines = ['/*', 'const commentName = 1;', '*/',
+    'export function Owner() {', 'const nestedLocal = 1;', 'return /`/.test(value);', '}',
+    'export class ActualClass {', 'method() { return 1; }', '}',
+    'export interface ActualInterface {', 'value: number;', '}',
+    'export type ActualType = {', 'value: number;', '};',
+    'export const raw = "const stringName = 1;";', ''];
+  const source = lines.join("\r\n");
+  for (const [line, expected] of [[5, "Owner"], [9, "ActualClass"], [12, "ActualInterface"], [15, "ActualType"], [17, "raw"]] as const) {
+    const diff = `+++ b/src/private.ts\n@@ -${line} +${line} @@\n`;
+    assert.deepEqual(affected.changedSymbols(diff, () => source), [expected]);
+  }
+});
+
+test("unknown lexical source causes the existing conservative full selection, not a success-shaped empty set", () => {
+  for (const source of ['if (ready) {} /`/.test(value);\nexport function actualLater() {}\n',
+    'await / liveCall() /g;\nexport function actualLater() {}\n']) {
+    const diff = '+++ b/src/private.ts\n@@ -2 +2 @@\n';
+    const result = affected.affectedSelectionOrFull(["src/private.ts"], () => {
+      affected.changedSymbols(diff, () => source);
+      return { files: new Map([["src/private.ts", source]]), pathReaders: [], symbolSuites: [] };
+    });
+    assert.equal(result.fullRun, true);
+    assert.match(result.reasons.join("\n"), /lexical context unknown/);
+    assert.deepEqual(result.suites, []);
+  }
 });
