@@ -109,7 +109,9 @@ async function withDependencyCreditFixture(
       const before = [maybe(configFile), maybe(cacheFile), maybe(overrideFile)];
       const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"),
         join(REPO_ROOT, "scripts/lint-plan-offline.mjs"), "--base", base], {
-        cwd: root, env, encoding: "utf8", timeout: 20_000, maxBuffer: 2 * 1024 * 1024,
+        // A fresh no-network sandbox compiles the whole tsx graph cold (~13s per child, measured
+        // 81s for part 4); 20s timed one child out. Generous so load, not a hang, never fails it.
+        cwd: root, env, encoding: "utf8", timeout: 120_000, maxBuffer: 2 * 1024 * 1024,
       });
       assert.equal(r.error, undefined, "the actual offline child must complete"); assert.equal(r.signal, null);
       assert.deepEqual(tripwires.flatMap(({ command, shim }) => shim.calls().map(call => command + " " + call)), [],

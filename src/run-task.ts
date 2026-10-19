@@ -29540,20 +29540,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
-  // W1-T324: matched as a standalone token, same discipline as every other boolean flag in
-  // this file — never a substring match against a proof body that could legitimately quote
-  // "--all". Meaningless (and silently ignored) in --base mode: --base's own scope already
-  // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
+  // W1-T324: a standalone token, never a substring match on a proof body quoting "--all".
+  // Ignored in --base mode, whose own scope already defines what is in-bounds.
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true;
   const checkoutRoot = deps.repoRoot ?? repoRoot;
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
-  // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
-  // here, BY NAME — before any --base/git-show plumbing gets a chance to mis-report it
-  // as a base-resolution failure (the #271 fixture's second false green: `relative(
-  // repoRoot, planPath)` used to yield a `../../..` path that `git show <base>:<that>`
-  // died on as though the BASE ref were the problem, never naming the real one).
+  // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
+  // plumbing can mis-report it as a base-resolution failure (the #271 fixture's false green).
   if (planPathArg !== undefined && isPathOutsideRoot(checkoutRoot, planPath)) {
     console.error(
       `### rmd lint-plan: --plan ${planPath} resolves OUTSIDE the repo root ${checkoutRoot} — ` +
@@ -29623,21 +29618,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       writeFileSync(tmpFile, oldRaw, "utf8");
       materializeOriginShards(checkoutRoot, dirname(relPath), tmpDir, undefined, scopeBase);
       // A BASE THAT DOES NOT PARSE IS NOT THIS PR'S DEFECT, AND MUST NOT BE ITS FAILURE.
-      // `loadPlan` refuses a tree carrying a duplicate id, and the base tree is whatever
-      // origin/main happens to be — so one bad merge to main turned this REQUIRED check red on
-      // every open PR at once, including the plan-repair PR that would have fixed it. That is a
-      // deadlock: the gate proving the plan loads cannot pass while the plan does not load, and
-      // the only exit was an admin merge (the W1-T488 repair, #1820, went out that way).
-      //
-      // So the PARSED comparison degrades and the RAW one carries on. Everything below that
-      // needs `oldPlan` is skipped — `oldById`, `newTaskIds` and `newMonolithIds` are all
-      // already `| undefined` and every consumer already guards them, so this is a state the
-      // code was built to hold rather than a new one. `rawChangedTaskIds` further down needs
-      // only the base's raw TEXT, which is on disk regardless of whether it parses, so the
-      // changed-tasks scope survives and the check still lints exactly this PR's own tasks.
-      //
-      // FAIL-CLOSED IS PRESERVED WHERE IT BELONGS: a broken HEAD plan still fails, loudly and
-      // earlier — `loadPlan(planPath)` above this block throws before any of it runs.
+      // `loadPlan` refuses a duplicate id, and the base tree is whatever origin/main is — one bad
+      // merge turned this REQUIRED check red on every open PR, including the repair PR (W1-T488,
+      // #1820, went out by admin merge). So the PARSED comparison degrades and the RAW one carries
+      // on: everything needing `oldPlan` is skipped (those sets are already `| undefined` and
+      // guarded), while `rawChangedTaskIds` needs only the base's raw TEXT, so the changed-tasks
+      // scope survives. A broken HEAD plan still fails loudly earlier, at `loadPlan(planPath)`.
       let oldPlan: Plan | undefined;
       try {
         oldPlan = loadPlan(tmpFile);
