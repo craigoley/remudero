@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ciFrictionLadder, gitCiFrictionOwnerSearch } from "../src/lib/ci-friction-gardener.js";
+import { ciFrictionLadder, gitCiFrictionOwnerSearch } from "#src/lib/ci-friction-gardener.js";
 
 const CAUSE = "check:test:test/a-generic-term-locates-no-owner.test.ts";
 
