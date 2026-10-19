@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 (approved \"go\"): read of #11666 and #11841 on main"
   plan_refs: [W1-T9489]
   files: [src/lib/worker.ts, src/lib/worker-mcp-isolation.ts, test/worker-mcp-isolation.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

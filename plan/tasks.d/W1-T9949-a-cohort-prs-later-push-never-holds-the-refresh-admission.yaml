@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-cohort-prs-later-push-never-holds-the-refresh-admission.test.ts
-  status: queued
+  status: merged
   priority: 1  # every base-red PR waits on the refresh admission once main recovers; one busy cohort PR stalls them all for a full pass at a time
   attempts: 0
   rationale: |

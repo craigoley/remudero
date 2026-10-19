@@ -17,7 +17,7 @@
     - test/keep-it-as-is-is-a-recorded-decision.test.ts
     - "openapi/daemon.yaml"
     - "packages/api-client/src/schema.d.ts"
-  status: queued
+  status: merged
   priority: 1  # operator 2026-10-17: a choice the console offers must do something
   attempts: 0
   rationale: |

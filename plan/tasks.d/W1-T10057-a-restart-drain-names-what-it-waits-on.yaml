@@ -14,7 +14,7 @@
     - src/lib/daemon.ts
     - src/lib/sweep.ts
     - test/daemon/a-restart-drain-names-what-it-waits-on.test.ts
-  status: queued
+  status: merged
   priority: 2  # every freshness restart pays it; about 11 a day remain after the minimum lifetime lands
   attempts: 0
   rationale: |

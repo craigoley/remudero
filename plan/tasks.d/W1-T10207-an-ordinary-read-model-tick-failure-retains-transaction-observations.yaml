@@ -9,7 +9,7 @@
   budget_usd: 5.00
   risk: high  # Existing cross-named fixture and worker are both admitted; no own-falsifier sizing discount.
   priority: 3
-  status: queued
+  status: merged
   attempts: 0
   author_class: operator
   origin: "operator continuation 2026-10-19: accepted bounded ordinary failSlot diagnostic disposition; normal fleet work behind safe critical work"

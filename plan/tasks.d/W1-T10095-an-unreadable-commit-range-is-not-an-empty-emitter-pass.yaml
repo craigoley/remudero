@@ -12,7 +12,7 @@
   origin: "operator followthrough 2026-10-17: distinguish a failed Git range read from a genuinely empty validator corpus"
   plan_refs: [W1-T416, W1-T421, W1-T8800, W1-T8945, W1-T9979]
   files: [src/lib/commit-message.ts, test/an-unreadable-commit-range-is-not-an-empty-emitter-pass.test.ts, test/commit-message.test.ts, test/preflight-spawn-failure.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED while preparing an owned unpublished history-only message correction:

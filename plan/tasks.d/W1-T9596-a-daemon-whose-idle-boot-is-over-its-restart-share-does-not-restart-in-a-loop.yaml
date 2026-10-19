@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: read-only investigation of the site daemon's restart loop (02:27-02:35Z); filing requested"
   plan_refs: [W1-T3335, W1-T8401, W1-T9031, W1-T9106, W1-T8889, W1-T6782]
   files: [src/lib/daemon-memory-policy.ts, src/lib/daemon.ts, test/the-daemon-heap-stays-proportional-to-its-live-set.test.ts, test/a-daemon-whose-idle-boot-is-over-its-restart-share-does-not-restart-in-a-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

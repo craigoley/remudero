@@ -17,7 +17,7 @@
     - src/run-task.ts
     - src/lib/sweep.ts
     - test/worker/spawn/provider-safe-continuation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at core origin/main 959a484ab, 2026-10-18. spawnWorker accepts only an opaque
