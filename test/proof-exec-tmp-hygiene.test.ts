@@ -188,9 +188,16 @@ test("parity fixture resources leave default coverage admission unchanged", () =
   if (scratch.length > 60) assert.match(result.detail, /must be outside the checkout and at most 60 characters/);
   else assert.match(result.detail, /scratch volume has 0 free bytes; need 21474836480 before starting coverage shards/);
   assert.equal(calls.length, 0);
+  const table = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => 0 });
+  const step = table.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage");
+  assert.equal(step?.ok, false);
+  assert.equal(step?.detail, `coverage-ratchet:test-with-coverage: ${result.detail}`);
+  assert.equal(calls.filter((c) => c.args.includes("--experimental-test-coverage")).length, 0);
   assert.match(coverageGateLockDir(REPO_ROOT), /^\/tmp\/rmd-c-[0-9a-f]{12}\.lock$/);
   assert.notEqual(coverageGateLockDir(REPO_ROOT), coverageGateLockDir(REPO_ROOT, "fixture"), "only an explicit discriminator changes default lock identity");
-  assert.throws(() => testWithCoverageLeaf(join(tmpdir(), "missing-parity-repo", "absent"), spawn, "unused"), /ENOENT/);
+  const owned = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}parity-unreadable-`));
+  try { assert.throws(() => testWithCoverageLeaf(join(owned, "never-created"), spawn, "unused"), /ENOENT/); }
+  finally { rmSync(owned, { recursive: true, force: true }); }
 });
 
 test("parity fixture lease failures preserve refusal and owned cleanup", () => {
