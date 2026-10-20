@@ -242,7 +242,7 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
+import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { realThreadDecider, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { realRecommendationWriter } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -720,7 +720,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
+import { INBOX_VERBS, inboxVerbCommand, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -49012,6 +49012,16 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
+export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
+  const { owner, repo } = deps ? { owner: "", repo: "" } : resolveOwnerRepo();
+  const actions = buildInboxVerbActions(deps ?? {
+    root: repoRoot, inboxRoot: config.root, planPath: join(repoRoot, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+    github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
+    ratify: ratifyCliGateway(repoRoot, join(config.root, "logs")),
+  });
+  return inboxVerbCommand(name, rest, actions);
+}
+
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
@@ -53374,6 +53384,11 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range",
   },
 
+  ...INBOX_VERBS.filter(verb => ["archive", "snooze", "keep", "reply"].includes(verb.name)).map(verb => ({
+    name: verb.name, syntax: verb.syntax, summary: verb.summary,
+    detail: `${verb.summary} Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.`,
+  })),
+
 ] as const;
 
 // W1-T2334: stated ONCE here, not pasted onto every "READ-ONLY"/"Read-only" line above (that
@@ -54168,32 +54183,15 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["plan", async (rest) => await planCommand(rest)],
   ["inbox", async (rest) => await inboxCommand(rest)],
   ["inbox-bakeoff", async (rest) => await inboxBakeoffCommand(rest)],
-  [
-    "approve",
-    async (rest) => {
-      const arg = rest[0];
-      if (!arg) {
-        console.error(USAGE);
-        return 2;
-      }
-      return await approveCommandMirrored(rest);
-    },
-  ],
-  ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
-  ["restore", (rest) => proposalVerdictCliCommand("restore", rest)],
   ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
   ["rule", async (rest) => await ruleCommand(rest)],
-  [
-    "reframe",
-    async (rest) => {
-      const arg = rest[0];
-      if (!arg) {
-        console.error(USAGE);
-        return 2;
-      }
-      return await reframeCommand(rest);
-    },
-  ],
+  ...INBOX_VERBS.map(verb => [verb.name, (rest: string[]) => {
+    if ((verb.name === "approve" || verb.name === "reframe") && !rest[0]) { console.error(USAGE); return 2; }
+    if (verb.name === "approve") return approveCommandMirrored(rest);
+    if (verb.name === "reframe") return reframeCommand(rest);
+    if (verb.name === "decline" || verb.name === "restore") return proposalVerdictCliCommand(verb.name, rest);
+    return inboxActionCliCommand(verb.name, rest);
+  }] as [string, CommandHandler]),
 ]);
 
 /**
