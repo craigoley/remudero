@@ -13,7 +13,7 @@
   attempts: 0
   author_class: operator
   origin: "operator continuation 2026-10-19: remaining issue7911 exact-record filing-history follow-up"
-  files: [src/lib/task-filing-history.ts, src/run-task.ts, test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts, test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts]
+  files: [src/lib/task-filing-history.ts, src/run-task.ts, test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts, test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts]
   rationale: |
     At main 7733faf8163295b9ad9ae1e9156f683b6e362c5b, shardAgeDays dates only a matching shard
     filename add-commit. A readable embedded task remains unknown and a later shard move can date
@@ -63,7 +63,7 @@
     current age bands and W1-T216/W1-T4242 protections. Do not force rejudgment or rewrite proposals
     solely because history becomes readable. Change no age/judge/cadence/capacity policy or hold.
 
-    Extend only the two declared existing fixtures. Replace the blanket committed-embedded unknown
+    Extend the two behavioral fixtures declared above. Replace the blanket committed-embedded unknown
     fixture with separate known-history positives and genuinely unavailable/uncommitted/shallow
     controls. Correct the lifetime Git-positive fixture's mismatched id:x record to its actual task
     identity while preserving all attempt/outcome/fallback/wording/id assertions and other controls.
@@ -71,6 +71,9 @@
     introduction after plan-file creation, moves/renames, same-day zero, near-ids/references/wrong-id
     filenames, missing parents, ambiguity and each aggregate resource limit across multiple tasks.
     Drive both production consumers and preserve age-excluded cache/provenance policy controls.
+    In the three declared exact Git/spawn census fixtures, remove only the obsolete shardAgeDays
+    baseline entries when its bare Git call is replaced. Those censuses reject stale entries as
+    well as increases. Add no allowance, ignore, new baseline site or higher ceiling.
 
     Use the normal fleet owner and file-overlap controls; coordinate PR12894 before editing
     src/run-task.ts and never hand-push its branch or start a competing writer. Recheck main, all open
