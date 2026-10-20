@@ -98,6 +98,24 @@ test("applyDaemonMemoryPolicy sets the growth flag and strips only the heap ceil
   assert.equal(withoutHeapCeiling(undefined), undefined);
 });
 
+test("operator ruling 2026-10-19: the memory policy row names the malloc tuning, and children keep the semi-space flag", () => {
+  const env: NodeJS.ProcessEnv = {
+    NODE_OPTIONS: "--max-old-space-size=8192 --max-semi-space-size=16",
+    GLIBC_TUNABLES: "glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072",
+  };
+  const result = applyDaemonMemoryPolicy(DEFAULT_DAEMON_MEMORY_POLICY, { setFlags: () => {}, env });
+  assert.equal(env.NODE_OPTIONS, "--max-semi-space-size=16", "only the heap ceiling leaves the children's NODE_OPTIONS");
+  assert.deepEqual(result, {
+    heap_growing_percent: DEFAULT_DAEMON_MEMORY_POLICY.heapGrowingPercent,
+    node_options_before: "--max-old-space-size=8192 --max-semi-space-size=16",
+    node_options_children: "--max-semi-space-size=16",
+    glibc_tunables: "glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072",
+  });
+  assert.equal(env.GLIBC_TUNABLES, "glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072", "the tuning is recorded, never removed");
+  const none = applyDaemonMemoryPolicy(DEFAULT_DAEMON_MEMORY_POLICY, { setFlags: () => {}, env: {} });
+  assert.equal("glibc_tunables" in none, false, "a launch that set none records none, never an empty string");
+});
+
 test("a child spawned after the entry no longer carries the 8192 MB ceiling, while the daemon keeps its own", () => {
   const moduleUrl = pathToFileURL(join(REPO_ROOT, "src", "lib", "daemon-memory-policy.ts")).href;
   const script = [

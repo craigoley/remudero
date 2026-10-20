@@ -139,7 +139,7 @@ describe("test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandb
       assert.equal(existsSync(env.HOME), false, "the temporary HOME was removed");
       assert.equal(env.TMPDIR, "/tmp");
       const writable = argv.flatMap((a, i) => a === "--bind" ? [argv[i + 1]] : []);
-      assert.deepEqual(writable, [env.HOME], "only the temporary HOME is a writable host bind");
+      assert.deepEqual(writable.sort(), [env.HOME, join(env.HOME, ".rmd-private-tmp")].sort(), "only the temporary HOME and its exact private tmp child are writable host binds");
       assert.ok(argv.includes("--unshare-net"));
       assert.ok(argv.some((a, i) => a === "--ro-bind" && argv[i + 1] === f.wt));
     }

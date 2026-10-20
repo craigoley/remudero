@@ -457,7 +457,7 @@ export interface CiParityEntry {
   workflow?: string;
   mirrored: boolean;
   reason?: string;
-  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string, testSlot?: TestSlotOptions) => CiParityStepResult[];
+  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string, testSlot?: TestSlotOptions, coverageResources?: CoverageResourcePort) => CiParityStepResult[];
 }
 
 /** Parse ci.yml's top-level job keys. Pure text-in/array-out, so a falsifier hands it a synthetic document. */
@@ -831,6 +831,18 @@ export interface CoverageScratchPolicy {
   /** Whether two directories sit on one device; defaults to comparing `st_dev`. */
   sameVolume?: (a: string, b: string) => boolean;
 }
+
+/** Explicit resource lifetime for an injected caller; omitted ports retain the real leaf's admission. */
+export interface CoverageResourceLease {
+  readonly scratchDir: string;
+  readonly lcovPath: string;
+  readonly slot: TestSlotLease;
+  readonly note: string;
+  release(): void;
+}
+
+export type CoverageResourceAcquisition = { ok: true; lease: CoverageResourceLease } | { ok: false; detail: string };
+export type CoverageResourcePort = (repoRoot: string) => CoverageResourceAcquisition;
 
 function sameDevice(a: string, b: string): boolean {
   try {
@@ -1908,28 +1920,45 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   {
     job: "coverage-ratchet",
     mirrored: true,
-    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined) => {
-      const lcovPath = join(repoRoot, "coverage", "lcov.info");
-      const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot));
-      if (!test.ok) return [refresh, test];
-      const ratchet = runStep("coverage-ratchet:ratchet", () =>
-        shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
-          cwd: repoRoot,
-        }),
-      );
-      const diffCoverage = runStep("coverage-ratchet:diff-coverage", () => {
-        // W1-T3013: the diff is CHECKED before it becomes stdin. An unchecked one turns a git
-        // failure into a green step, because diff-coverage.mjs is right to pass over an empty
-        // added-line set — the gate was asking it a question it cannot refuse.
-        const diff = mergeBaseDiffForCoverage(repoRoot, spawn);
-        if (!diff.ok) return { ok: false, detail: diff.detail };
-        return shellOut(spawn, "diff-coverage.mjs (origin/main...HEAD, refreshed base)", process.execPath, [join(repoRoot, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath], {
-          cwd: repoRoot,
-          input: diff.text,
+    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined, coverageResources = undefined) => {
+      if (coverageResources !== undefined && spawn === defaultPreflightSpawn) {
+        return [runStep("coverage-ratchet:test-with-coverage", () => ({
+          ok: false, detail: "FAIL — fixture resources require an explicitly injected child transport; real coverage uses default admission",
+        }))];
+      }
+      let lease: CoverageResourceLease | undefined;
+      let lcovPath = join(repoRoot, "coverage", "lcov.info");
+      try {
+        const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
+        const test = runStep("coverage-ratchet:test-with-coverage", () => {
+          if (coverageResources === undefined) return testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot);
+          const acquired = coverageResources(repoRoot);
+          if (!acquired.ok) return { ok: false, detail: acquired.detail };
+          lease = acquired.lease;
+          lcovPath = lease.lcovPath;
+          if (!testSlotExecutionAllowed(lease.slot)) return { ok: false, detail: `coverage: NOT_RUN (${lease.slot.note})` };
+          const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, lease.scratchDir, join(lease.scratchDir, "raw-shards"), lease.slot, testSlot ?? {}, lease.note);
+          return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${lease.note})` };
         });
-      });
-      return [refresh, test, ratchet, diffCoverage];
+        if (!test.ok) return [refresh, test];
+        const ratchet = runStep("coverage-ratchet:ratchet", () =>
+          shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
+            cwd: repoRoot,
+          }),
+        );
+        const diffCoverage = runStep("coverage-ratchet:diff-coverage", () => {
+          // W1-T3013: the diff is CHECKED before it becomes stdin. An unchecked one turns a git
+          // failure into a green step, because diff-coverage.mjs is right to pass over an empty
+          // added-line set — the gate was asking it a question it cannot refuse.
+          const diff = mergeBaseDiffForCoverage(repoRoot, spawn);
+          if (!diff.ok) return { ok: false, detail: diff.detail };
+          return shellOut(spawn, "diff-coverage.mjs (origin/main...HEAD, refreshed base)", process.execPath, [join(repoRoot, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath], {
+            cwd: repoRoot,
+            input: diff.text,
+          });
+        });
+        return [refresh, test, ratchet, diffCoverage];
+      } finally { lease?.release(); }
     },
   },
   {
@@ -2234,6 +2263,8 @@ export interface CiParityDeps {
   coverageLockDiscriminator?: string;
   /** Seams for the host-wide test slot the coverage run takes. Production omits this. */
   testSlot?: TestSlotOptions;
+  /** Explicit resources for already-mocked children, never an environment/CLI admission exception. */
+  coverageResources?: CoverageResourcePort;
   /** Test seam for ci.yml's half of the drift check — production reads it off disk. */
   ciYamlText?: string;
   /** Test seam for the standalone pull-request workflow half of the drift check. */
@@ -2328,7 +2359,7 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {
     if (!entry.mirrored) return [excludedStep(entry.job, entry.reason ?? "no reason recorded")];
     try {
-      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot);
+      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot, deps.coverageResources);
     } catch (e) {
       return [toolchainFailure(`${entry.job}:error`, e)];
     }

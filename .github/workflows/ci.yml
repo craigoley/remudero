@@ -1828,9 +1828,8 @@ jobs:
             # W1-T5923: source-map every process report HERE, in parallel (~70% of the serial merge);
             # the aggregator replays the recorded line state and range merge in order, byte-identically.
             mkdir -p coverage-artifact/raw
-            node --expose-internals scripts/coverage-merge-ratchet.mjs --premap-output coverage/premapped coverage/raw
+            node --expose-internals scripts/coverage-merge-ratchet.mjs --premap-output coverage-artifact/raw coverage/raw
             cp coverage/lcov.info coverage-artifact/lcov.info
-            cp coverage/premapped/coverage-*.json coverage-artifact/raw/
           else
             echo "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/skipped
           fi

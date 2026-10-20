@@ -383,9 +383,13 @@ export interface MachineFilingAdmissionContext {
   plan: Plan;
   releasedIds: ReadonlySet<string>;
   isMerged?: MergedResolver;
+  dependencyEvidence?: (task: Task) => DependencyMergeEvidence;
   pathExists?: (repoRelPath: string) => boolean;
   pathExistsAtBase?: (repoRelPath: string) => boolean;
 }
+
+/** Missing evidence is not an observed unmerged dependency; both still refuse admission. */
+export type DependencyMergeEvidence = { state: "merged" } | { state: "unmerged" } | { state: "unknown"; reason: string };
 
 const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 
@@ -1455,11 +1459,23 @@ export function machineFilingAdmissionViolations(
         `task ${task.id} is verify:human — not auto-runnable by the proto-runner`,
     );
   } else {
-    const unmet = unmetDependencies(context.plan, task, context.isMerged ?? yamlStatusMerged);
-    if (unmet.length > 0) {
+    const unknown = new Map<string, string>();
+    const unmet = unmetDependencies(context.plan, task, candidate => {
+      if (!context.dependencyEvidence) return (context.isMerged ?? yamlStatusMerged)(candidate);
+      const evidence = context.dependencyEvidence(candidate);
+      if (evidence.state === "unknown") unknown.set(candidate.id, evidence.reason);
+      return evidence.state === "merged";
+    });
+    if (context.dependencyEvidence) for (const id of unmet) {
+      if (!context.plan.byId.has(id)) unknown.set(id, "dependency task missing from plan");
+    }
+    if (unknown.size > 0) reasons.push(`task ${task.id} dependency credit unavailable (UNKNOWN): ` +
+      [...unknown].map(([id, reason]) => `${id}: ${reason}`).join("; "));
+    const unmerged = unmet.filter(id => !unknown.has(id));
+    if (unmerged.length > 0) {
       reasons.push(
         `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
-          `task ${task.id} has unmerged dependencies: ${unmet.join(", ")}`,
+          `task ${task.id} has unmerged dependencies: ${unmerged.join(", ")}`,
       );
     }
   }

@@ -1,5 +1,8 @@
 import { daemonCommand as daemonCommandFromModule, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
+import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
+  type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
+import type { DependencyMergeEvidence } from "./lib/plan.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
@@ -29,7 +32,7 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
-import { firstFixRoundVerdict, judgeFixProgress,
+import { judgeFixProgress, resolveFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -1059,6 +1062,7 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
+import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "./lib/required-semantic-review.js";
 import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
@@ -8244,6 +8248,8 @@ async function runReview(args: {
   account: (r: WorkerResult) => WorkerResult;
   /** false ⇒ deterministic floor only, no LLM spawn (used by the live proofs). */
   spawnReviewer?: boolean;
+  /** Explicit semantic mode must complete before the deterministic floor can publish or arm. */
+  requireSemanticReview?: boolean;
   /**
    * W1-T2205: injectable replacement for the SDK's own `query()`, threaded straight into the
    * advisory reviewer's `spawnWorker` call below — see {@link SpawnWorkerArgs.queryFn}'s own
@@ -8430,7 +8436,8 @@ async function runReview(args: {
     { maxRotations: 0, step: REVIEW_REQUEUED_STEP, keep: (line) => line.includes(headSha) })).rawLines.flatMap((line) => {
     try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; /* deliberate: a torn line requests nothing */ }
   });
-  const decisionDigest = reviewerImageDecisionDigest(preparedDecision.decisionDigest, { headSha, runtimeImageSha, requeues });
+  const decisionDigest = reviewerImageDecisionDigest(requiredSemanticDecisionDigest(preparedDecision.decisionDigest,
+    args.requireSemanticReview === true), { headSha, runtimeImageSha, requeues });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -8671,6 +8678,17 @@ async function runReview(args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
+  const semanticRefusal = requiredSemanticRefusal({ required: args.requireSemanticReview === true,
+    planOnly: planOnlySkip, outcome, criteriaCount: criteria.length, verdicts: semantic });
+  if (semanticRefusal !== undefined) {
+    log("review.semantic_incomplete", { reason: semanticRefusal, head_sha: headSha, pr_url: prUrl,
+      reviewer_outcome: outcome, review_decision_digest: decisionDigest });
+    say(`remudero-review: verdict WITHHELD — ${semanticRefusal}; no verdict publication or merge effect`);
+    return { state: "failure", criteria: [], cannotEvaluate: true, testTheater: false,
+      summary: semanticRefusal, floorDegraded: true, capped: true, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: outcome, verdictWithheld: semanticRefusal,
+      reviewDecisionDigest: decisionDigest, evaluatorProvenance };
+  }
   // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
   // advisory; a filesystem/telemetry problem cannot become a review failure.
   let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
@@ -11406,6 +11424,8 @@ export async function runFixRung(opts: {
   retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
+  /** The sweep's independently read PR input; absent is not proof that the body stayed unchanged. */
+  progressReviewInputDigest?: string;
   initialCriterionIndices?: readonly number[];
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
   /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
@@ -11793,6 +11813,7 @@ export async function runFixRung(opts: {
   // into both the pre-strike probe's key and the false-block producer below, so the two can never
   // disagree about "current".
   const currentContractRevision = taskContractRevision(opts.task);
+  let progressReviewInputDigest = opts.progressReviewInputDigest;
   const admitFixTests = !(opts.task.files?.length && opts.task.files.every(isInPlanScope));
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
   // queue, no ledger step. The ten fix-rung sites below are the NEEDS ME board's largest class.
@@ -12020,10 +12041,11 @@ export async function runFixRung(opts: {
       operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap, parkedReason: forJudge ? parkedReason : undefined });
     standInEscalates = true;
     try {
-      const decision = await judgeFixProgress(input, progressJudge);
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
+      const { decision, receipt } = await resolveFixProgress(input, persisted,
+        { judge: progressJudge, reviewInputDigest: progressReviewInputDigest, contractRevision: currentContractRevision });
+      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
         parked_reason: parkedReason, former_ceiling: input.formerCeiling,
-        round_count: input.rounds.length, signals: input.signals, ...decision });
+        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       return decision;
     } finally {
       standInEscalates = false;
@@ -12352,11 +12374,13 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
+      const { decision, receipt } = await resolveFixProgress(input, persisted,
+        { judge: progressJudge, firstRound: true, reviewInputDigest: progressReviewInputDigest,
+          contractRevision: currentContractRevision });
+      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
         parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-        round_count: input.rounds.length, signals: input.signals, ...decision });
+        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
         const loop = `fix progress loop: ${decision.loop} — ${decision.reason}`;
@@ -14448,6 +14472,7 @@ export async function runFixRung(opts: {
       runId: opts.runId,
       openTaskIds: opts.openTaskIds,
     });
+    progressReviewInputDigest = reviewInputBody === undefined ? undefined : reviewInputDigest(review.headSha, reviewInputBody);
     if (review.verdictWithheld) {
       deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.verdictWithheld });
       return { outcome: "stood_down", review, strikes, retriggers, reason: review.verdictWithheld, standDownReason: review.verdictWithheld };
@@ -23302,6 +23327,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         reason: "head-task-metadata-unavailable",
         missing: [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean),
       });
+      if (!ownTaskRecordMissing) {
+        log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+        console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
+        return 2;
+      }
     } else {
       try {
         reviewerMount = resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", taskRisk);
@@ -23320,6 +23350,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           reason: "semantic-setup-unavailable",
           error: String((e as Error)?.message ?? e),
         });
+        // An explicitly selected semantic review must not become a deterministic PASS that
+        // runReview can auto-arm. Refuse before either pending poster or materializer runs.
+        log("review.semantic_setup_refused", { reason: "semantic-setup-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+        console.error("rmd review: semantic setup unavailable; no pending status, verdict or merge effect");
+        return 2;
       }
     }
   }
@@ -23448,6 +23483,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           say: (m) => console.log(m),
           account: (r) => r,
           spawnReviewer,
+          requireSemanticReview: executionMode === "semantic",
           reviewerMount,
           // W1-T185 (Gap 2): the materialized worktree above when available — the
           // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
@@ -29537,20 +29573,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
-  // W1-T324: matched as a standalone token, same discipline as every other boolean flag in
-  // this file — never a substring match against a proof body that could legitimately quote
-  // "--all". Meaningless (and silently ignored) in --base mode: --base's own scope already
-  // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
+  // W1-T324: a standalone token, never a substring match on a proof body quoting "--all".
+  // Ignored in --base mode, whose own scope already defines what is in-bounds.
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true;
   const checkoutRoot = deps.repoRoot ?? repoRoot;
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
-  // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
-  // here, BY NAME — before any --base/git-show plumbing gets a chance to mis-report it
-  // as a base-resolution failure (the #271 fixture's second false green: `relative(
-  // repoRoot, planPath)` used to yield a `../../..` path that `git show <base>:<that>`
-  // died on as though the BASE ref were the problem, never naming the real one).
+  // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
+  // plumbing can mis-report it as a base-resolution failure (the #271 fixture's false green).
   if (planPathArg !== undefined && isPathOutsideRoot(checkoutRoot, planPath)) {
     console.error(
       `### rmd lint-plan: --plan ${planPath} resolves OUTSIDE the repo root ${checkoutRoot} — ` +
@@ -29620,21 +29651,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       writeFileSync(tmpFile, oldRaw, "utf8");
       materializeOriginShards(checkoutRoot, dirname(relPath), tmpDir, undefined, scopeBase);
       // A BASE THAT DOES NOT PARSE IS NOT THIS PR'S DEFECT, AND MUST NOT BE ITS FAILURE.
-      // `loadPlan` refuses a tree carrying a duplicate id, and the base tree is whatever
-      // origin/main happens to be — so one bad merge to main turned this REQUIRED check red on
-      // every open PR at once, including the plan-repair PR that would have fixed it. That is a
-      // deadlock: the gate proving the plan loads cannot pass while the plan does not load, and
-      // the only exit was an admin merge (the W1-T488 repair, #1820, went out that way).
-      //
-      // So the PARSED comparison degrades and the RAW one carries on. Everything below that
-      // needs `oldPlan` is skipped — `oldById`, `newTaskIds` and `newMonolithIds` are all
-      // already `| undefined` and every consumer already guards them, so this is a state the
-      // code was built to hold rather than a new one. `rawChangedTaskIds` further down needs
-      // only the base's raw TEXT, which is on disk regardless of whether it parses, so the
-      // changed-tasks scope survives and the check still lints exactly this PR's own tasks.
-      //
-      // FAIL-CLOSED IS PRESERVED WHERE IT BELONGS: a broken HEAD plan still fails, loudly and
-      // earlier — `loadPlan(planPath)` above this block throws before any of it runs.
+      // `loadPlan` refuses a duplicate id, and the base tree is whatever origin/main is — one bad
+      // merge turned this REQUIRED check red on every open PR, including the repair PR (W1-T488,
+      // #1820, went out by admin merge). So the PARSED comparison degrades and the RAW one carries
+      // on: everything needing `oldPlan` is skipped (those sets are already `| undefined` and
+      // guarded), while `rawChangedTaskIds` needs only the base's raw TEXT, so the changed-tasks
+      // scope survives. A broken HEAD plan still fails loudly earlier, at `loadPlan(planPath)`.
       let oldPlan: Plan | undefined;
       try {
         oldPlan = loadPlan(tmpFile);
@@ -29746,20 +29768,72 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // trap, `gh` unauthenticated/unavailable): `statusResolvable` stays false and the check
   // is skipped rather than redding a plan-only PR during a GitHub outage.
   let statusByTaskId: Map<string, StatusProjection> | undefined;
+  let dependencyStatusByTaskId: Map<string, StatusProjection> | undefined;
   let statusResolvable = false;
   if (!offline && scope && scope.size > 0) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
       const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
       const github = (deps.ghGateway ?? ghGateway)(owner, repo);
-      const scopedPlan: Plan = { tasks: plan.tasks.filter((t) => scope!.has(t.id)), byId: new Map() };
-      statusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, { ledgerPath: ledgerPathFor(config), github });
+      const evidenceIds = new Set(scope);
+      const pending = [...scope];
+      while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
+        if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
+      }
+      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
+      dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
+        ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
+      });
+      // Dependency-only evidence must not widen duplicate/post-merge credit; extra projection rows stay as before.
+      statusByTaskId = new Map([...dependencyStatusByTaskId].filter(([id]) => scope!.has(id) || !evidenceIds.has(id)));
       statusResolvable = true;
     } catch {
       statusByTaskId = undefined;
       statusResolvable = false;
     }
   }
+
+  // Read only for a changed machine task's non-retired dependency. Never enter loadConfig offline.
+  let offlineCredit: { store: CreditStore; repository: string; overrides: readonly CreditOverrideRow[] } | { reason: string } | undefined;
+  const dependencyEvidence = (candidate: Task): DependencyMergeEvidence => {
+    if (!offline) {
+      const projected = dependencyStatusByTaskId?.get(candidate.id);
+      return !projected || projected.indeterminate
+        ? { state: "unknown", reason: "online dependency credit projection unavailable or indeterminate" }
+        : { state: projected.merged ? "merged" : "unmerged" };
+    }
+    if (!offlineCredit) {
+      const configured = existingCliRootWithoutConfig();
+      if (configured.state !== "present" || !configured.root || !configured.root.trim() ||
+        !isAbsolute(configured.root) || configured.root.includes("\0")) {
+        offlineCredit = { reason: `instance config/root unavailable: ${configured.state}${configured.reason ? ` (${configured.reason})` : ""}; an explicit usable absolute root is required` };
+      } else {
+        const ledgerPath = join(configured.root, "state", LEDGER_FILENAME);
+        const creditRead: { value?: CreditReadState } = {};
+        const store = loadCreditStore(defaultCreditStorePath(ledgerPath), undefined, state => { creditRead.value = state; });
+        const overrideRead: { value?: CreditReadState } = {};
+        const overrides = loadCreditOverrides(() => readFileSync(defaultCreditOverridePath(ledgerPath), "utf8"), state => { overrideRead.value = state; });
+        if (creditRead.value?.state !== "present") offlineCredit = { reason: creditRead.value && "reason" in creditRead.value ? creditRead.value.reason : "native credit read unavailable" };
+        else if (!overrideRead.value || overrideRead.value.state !== "present" && overrideRead.value.state !== "missing" ||
+          overrides.refused.length > 0 || overrides.rows.some(row => !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(row.task) || !Number.isSafeInteger(row.pr) || row.pr <= 0)) {
+          offlineCredit = { reason: overrideRead.value && "reason" in overrideRead.value ? overrideRead.value.reason : "credit overrides malformed or contain invalid/refused rows" };
+        } else {
+          try {
+            const origin = hostWorktreeGit(checkoutRoot, ["remote", "get-url", "origin"]).trim();
+            const repository = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(origin)?.[1];
+            offlineCredit = !repository || repository.split("/").some(part => part === "." || part === "..")
+              ? { reason: "credit repository origin unavailable or not a canonical github.com repository" }
+              : { store, repository, overrides: overrides.rows };
+          } catch {
+            offlineCredit = { reason: "credit repository origin unavailable" };
+          }
+        }
+      }
+    }
+    return "reason" in offlineCredit ? { state: "unknown", reason: offlineCredit.reason }
+      : durableDependencyCredit(offlineCredit.store, candidate.id, offlineCredit.repository, offlineCredit.overrides);
+  };
 
   // W1-T1076: the duplicate corpus, resolved ONCE here and ONLY in changed-tasks scope — see the
   // section comment ahead of `openPlanShardSlugs` for why the whole-plan pass gets nothing. Its
@@ -29940,6 +30014,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         plan,
         releasedIds: releasedIdsForAdmission,
         isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
+        dependencyEvidence,
         pathExists: opts.moduleExists,
         pathExistsAtBase,
       };
@@ -40572,6 +40647,7 @@ export function buildFixRungDispatchArgs(args: {
   evidence: FixDispatchEvidence;
   pr: {
     headSha: string;
+    reviewInputDigest?: string;
     reviewSummary?: string;
     pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
@@ -40676,6 +40752,7 @@ export function buildFixRungDispatchArgs(args: {
     budgetUsd: args.budgetUsd,
     strikeCap: args.strikeCap,
     initialReview,
+    progressReviewInputDigest: pr.reviewInputDigest,
     initialCriterionIndices,
     constraint: feedbackFixConstraint(pr.pendingAnswer),
     feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),
@@ -53387,14 +53464,25 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
 
 /** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
  *  (`~/Remudero`). Never `loadConfig()`, which can create the config and call `resolveClaudeBin()`. */
-function cliLedgerPathWithoutConfig(): string {
-  let root = join(homedir(), "Remudero");
+function existingCliRootWithoutConfig(): { state: "present" | "missing" | "unreadable" | "corrupt"; root?: string; reason?: string } {
+  let text: string;
   try {
-    const parsed = JSON.parse(readFileSync(instanceConfigPath(), "utf8")) as { root?: unknown };
-    if (typeof parsed.root === "string" && parsed.root !== "") root = parsed.root;
-  } catch {
-    // deliberate: an absent or unreadable config names no root, so the documented default stands.
+    text = readFileSync(instanceConfigPath(), "utf8");
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException)?.code === "ENOENT";
+    return { state: missing ? "missing" : "unreadable", reason: missing ? "instance config absent" : "instance config unreadable" };
   }
+  try {
+    const parsed = JSON.parse(text) as { root?: unknown };
+    return { state: "present", ...(typeof parsed.root === "string" && parsed.root !== "" ? { root: parsed.root } : {}) };
+  } catch {
+    return { state: "corrupt", reason: "instance config could not be decoded" };
+  }
+}
+
+function cliLedgerPathWithoutConfig(): string {
+  // Keep the diagnostic sink's exact old fallback/string semantics; admission validates separately.
+  const root = existingCliRootWithoutConfig().root ?? join(homedir(), "Remudero");
   return join(root, "state", LEDGER_FILENAME);
 }
 
