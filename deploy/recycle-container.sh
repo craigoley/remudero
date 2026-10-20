@@ -857,10 +857,11 @@ CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}";
 # W1-T9500: RMD_INSTANCE_NAME is THIS script's own derived name, set from --instance at the
 # replacement `docker run` below and never captured: a container carrying it is one a recycle
 # named, not drift. It is not in deploy/runtime-env-vars.sh, whose lists are pass-through and
-# scratch-derived names.
+# scratch-derived names. GLIBC_TUNABLES is the same kind (operator ruling 2026-10-19): the resource
+# policy's build args set it at every launch, so it is never captured and carrying it is not drift.
 is_declared_runtime_var() {
   local needle="$1" candidate
-  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME; do
+  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME GLIBC_TUNABLES; do
     [ "${candidate}" = "${needle}" ] && return 0
   done
   return 1
@@ -1000,6 +1001,16 @@ if [ -n "${INSTANCE_NAME}" ]; then
     CAPTURED_set NODE_OPTIONS "${node_options_merged:+${node_options_merged} }--max-old-space-size=${max_old_space_mb}"
     CAPTURED_SOURCE_set NODE_OPTIONS registry
   fi
+fi
+
+# OPERATOR RULING 2026-10-19: the daemons' memory flags. A recycle CARRIES the outgoing container's
+# NODE_OPTIONS, so without this merge the flags would reach only a container the launcher creates.
+# deploy/resource-policy.sh replaces any earlier semi-space flag and keeps every other word, the heap
+# ceiling included. Absent (an isolated fixture copy), NODE_OPTIONS is carried exactly as before.
+if [ -f "${SCRIPT_DIR:-}/resource-policy.sh" ]; then
+  # shellcheck source=./resource-policy.sh
+  . "${SCRIPT_DIR}/resource-policy.sh"
+  CAPTURED_set NODE_OPTIONS "$(resource_policy_node_options "$(CAPTURED_get NODE_OPTIONS)")"
 fi
 
 # W1-T6160: THE ONE PLACE A SHELL AUTHOR SUPERSEDES THE OUTGOING CONTAINER'S. Only the explicit,
