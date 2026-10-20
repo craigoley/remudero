@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { CI_DEPENDENCY_EVIDENCE_SCHEMA, ciDependencyEvidenceForInvocation, readCiDependencyEvidence, type CiDependencyEvidenceContext } from '../../../scripts/lib/ci-dependency-evidence.mjs';
-import { ownedFixtureDir } from '../../helpers/owned-fixture-dir.js';
-import { gitRepo } from '../../helpers/git-repo.js';
+import { CI_DEPENDENCY_EVIDENCE_SCHEMA, ciDependencyEvidenceForInvocation, readCiDependencyEvidence, type CiDependencyEvidenceContext } from '#scripts/lib/ci-dependency-evidence.mjs';
+import { ownedFixtureDir } from '#test/helpers/owned-fixture-dir.js';
+import { gitRepo } from '#test/helpers/git-repo.js';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), producerSha = 'c'.repeat(40);
 const repository = 'fixture-owner/remudero';
@@ -20,15 +20,18 @@ function fixture(t: Parameters<typeof ownedFixtureDir>[0]) {
   const runnerTemp = join(root, 'runner'), checkout = join(root, 'checkout');
   mkdirSync(runnerTemp); mkdirSync(checkout);
   const path = join(runnerTemp, 'evidence.json');
-  const write = (value: unknown) => {
-    try { chmodSync(path, 0o600); } catch { /* The first write has no file yet. */ }
-    const bytes = Buffer.from(JSON.stringify(value)); writeFileSync(path, bytes, { mode: 0o400 }); chmodSync(path, 0o400);
+  // Replace only this fixture's named file. Its descriptor MODE is the policy input; no fixture
+  // relies on EACCES, uid, umask-based denial or changing host permissions after creation.
+  const raw = (text: string, mode = 0o400) => {
+    rmSync(path, { force: true });
+    const bytes = Buffer.from(text); writeFileSync(path, bytes, { mode });
     return createHash('sha256').update(bytes).digest('hex');
   };
+  const write = (value: unknown, mode = 0o400) => raw(JSON.stringify(value), mode);
   const expected: CiDependencyEvidenceContext = { actions: true, repository, head, base, producerSha,
     runId: '123', attempt: '2', producerJob: 'commitlint', digest: write(observation()),
     nowMs: 2000, maxAgeMs: 5000, runnerTemp, checkout };
-  return { path, expected, write, root, checkout };
+  return { path, expected, write, raw, root, checkout };
 }
 
 test('CI dependency receipt: canonical positive is private, immutable and closure scoped', t => {
@@ -50,6 +53,10 @@ test('CI dependency receipt: every independent invocation binding fails closed',
     assert.equal(result.state, 'unknown', key);
     assert.equal(result.dependencyEvidence({ id: 'ZZ-T1' }).state, 'unknown', key);
   }
+  for (const [key, value] of Object.entries({ runId: 123, attempt: 2, repository: '../remudero', nowMs: -1 })) {
+    const digest = f.write({ ...observation(), [key]: value });
+    assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, digest, [key]: value } as never).state, 'unknown', 'matching malformed ' + key);
+  }
 });
 
 test('CI dependency receipt: incomplete malformed or extra authority cannot supply a merged answer', t => {
@@ -57,7 +64,8 @@ test('CI dependency receipt: incomplete malformed or extra authority cannot supp
   const values = [null, [], {}, { ...observation(), complete: false },
     { ...observation(), taskIds: ['ZZ-T1', 'ZZ-T1'] }, { ...observation(), taskIds: Array.from({ length: 33 }, (_, i) => 'ZZ-T' + i) },
     { ...observation(), credits: { 'ZZ-T2': { trailer: credit } } },
-    { ...observation(), observedAtMs: '1000' }, { ...observation(), overrides: [{ task: 'ZZ-T1', pr: 17, action: 'grant-credit' }] }];
+    { ...observation(), observedAtMs: '1000' }, { ...observation(), observedAtMs: -1 },
+    { ...observation(), overrides: [{ task: 'ZZ-T1', pr: 17, action: 'grant-credit' }] }];
   for (const value of values) {
     const result = readCiDependencyEvidence(f.path, { ...f.expected, digest: f.write(value) });
     assert.equal(result.state, 'unknown', JSON.stringify(value));
@@ -87,10 +95,9 @@ test('CI dependency receipt: native override quarantine and identity checks rema
 test('CI dependency receipt: real filesystem rejects missing corrupt writable oversized checkout and symlink inputs', t => {
   const f = fixture(t);
   assert.equal(readCiDependencyEvidence(join(f.root, 'absent'), f.expected).state, 'unknown');
-  chmodSync(f.path, 0o600);
-  assert.equal(readCiDependencyEvidence(f.path, f.expected).state, 'unknown');
-  writeFileSync(f.path, '{'); chmodSync(f.path, 0o400);
-  const corruptDigest = createHash('sha256').update('{').digest('hex');
+  const writableDigest = f.write(observation(), 0o600);
+  assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, digest: writableDigest }).state, 'unknown');
+  const corruptDigest = f.raw('{');
   assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, digest: corruptDigest }).state, 'unknown');
   const huge = f.write('x'.repeat(65536));
   assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, digest: huge }).state, 'unknown');
@@ -100,7 +107,7 @@ test('CI dependency receipt: real filesystem rejects missing corrupt writable ov
   assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, checkout: f.expected.runnerTemp }).state, 'unknown');
   assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, runnerTemp: f.checkout }).state, 'unknown');
   const fifo = join(f.expected.runnerTemp, 'fifo');
-  execFileSync('mkfifo', [fifo]); chmodSync(fifo, 0o400);
+  execFileSync('mkfifo', [fifo]);
   assert.equal(readCiDependencyEvidence(fifo, f.expected).state, 'unknown', 'FIFO without a writer must not block');
 });
 

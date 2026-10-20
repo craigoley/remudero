@@ -18,7 +18,6 @@ import { taskRulingPin } from "../src/lib/task-linter.js";
 import { withTempDir } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { createHash } from "node:crypto";
-import { chmodSync } from "node:fs";
 import { CI_DEPENDENCY_EVIDENCE_SCHEMA } from "../scripts/lib/ci-dependency-evidence.mjs";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -200,7 +199,7 @@ test("CI dependency receipt: actual offline CLI accepts only same-run evidence w
       repository: "fixture-owner/remudero", head, base: f.base, producerSha: f.base,
       runId: "123", attempt: "1", producerJob: "commitlint", observedAtMs: Date.now(),
       taskIds: [CREDIT_DEP], credits: nativeFixtureCredit(), overrides: [] };
-    const bytes = Buffer.from(JSON.stringify(payload)); writeFileSync(path, bytes, { mode: 0o400 }); chmodSync(path, 0o400);
+    const bytes = Buffer.from(JSON.stringify(payload)); writeFileSync(path, bytes, { mode: 0o400 });
     Object.assign(f.env, { GITHUB_ACTIONS: "true", GITHUB_WORKSPACE: f.root, RUNNER_TEMP: runnerTemp,
       GITHUB_REPOSITORY: "fixture-owner/remudero", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1",
       RMD_CI_DEPENDENCY_EVIDENCE: path, RMD_CI_DEPENDENCY_PRODUCER_SHA: f.base,

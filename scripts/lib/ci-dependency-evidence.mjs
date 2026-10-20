@@ -24,10 +24,11 @@ export function readCiDependencyEvidence(path, expected) {
   try {
     if (!object(expected) || expected.actions !== true ||
         typeof expected.repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(expected.repository) ||
-        !SHA.test(expected.head) || !SHA.test(expected.base) || !SHA.test(expected.producerSha) ||
-        !/^[1-9][0-9]*$/.test(expected.runId) || !/^[1-9][0-9]*$/.test(expected.attempt) ||
+        expected.repository.split('/').some(part => part === '.' || part === '..') ||
+        ![expected.head, expected.base, expected.producerSha].every(value => typeof value === 'string' && SHA.test(value)) ||
+        ![expected.runId, expected.attempt].every(value => typeof value === 'string' && /^[1-9][0-9]*$/.test(value)) ||
         expected.producerJob !== 'commitlint' || !DIGEST.test(expected.digest) ||
-        !Number.isSafeInteger(expected.nowMs) || !Number.isSafeInteger(expected.maxAgeMs) || expected.maxAgeMs <= 0 ||
+        !Number.isSafeInteger(expected.nowMs) || expected.nowMs < 0 || !Number.isSafeInteger(expected.maxAgeMs) || expected.maxAgeMs <= 0 ||
         typeof path !== 'string' || !isAbsolute(path) || !isAbsolute(expected.runnerTemp) || !isAbsolute(expected.checkout)) {
       return refuse('invocation context unavailable or malformed');
     }
@@ -55,7 +56,7 @@ export function readCiDependencyEvidence(path, expected) {
         value.repository !== expected.repository || value.head !== expected.head || value.base !== expected.base ||
         value.runId !== expected.runId || value.attempt !== expected.attempt ||
         value.producerSha !== expected.producerSha || value.producerJob !== expected.producerJob ||
-        !Number.isSafeInteger(value.observedAtMs) || value.observedAtMs > expected.nowMs ||
+        !Number.isSafeInteger(value.observedAtMs) || value.observedAtMs < 0 || value.observedAtMs > expected.nowMs ||
         expected.nowMs - value.observedAtMs > expected.maxAgeMs ||
         !Array.isArray(value.taskIds) || value.taskIds.length > 32 || new Set(value.taskIds).size !== value.taskIds.length ||
         !value.taskIds.every(id => typeof id === 'string' && ID.test(id)) ||
