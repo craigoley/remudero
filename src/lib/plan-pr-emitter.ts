@@ -1,4 +1,4 @@
-import { CHECK_PROOF_CHILD_ENTRY } from "./check-proof.js";
+import { CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv } from "./check-proof.js";
 import { childEntryArgv } from "./child-entry-argv.js";
 /**
  * The shared gate-contract module for every machine flow that opens a plan PR (W1-T136: `rmd retro` and
@@ -24,7 +24,6 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
 import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
@@ -374,11 +373,10 @@ function authorBaseRef(cwd: string): string {
 }
 
 function checkProofAtAuthorTime(proof: string, baseRef: string, cwd: string): number | null {
-  // A consumer checkout has no tsx: use rmd's own launcher, but inspect the consumer's HEAD/base.
-  const rmdBin = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
+  // Resolve the narrow entry and tsx from the harness, while proving the consumer's HEAD/base.
   const result = spawnSync(
-    rmdBin,
-    ["check-proof", proof, "--base", baseRef],
+    process.execPath,
+    checkProofChildArgv(proof, baseRef),
     {
       cwd,
       encoding: "utf8",
