@@ -72,6 +72,9 @@ export function satisfiedByMainFromRows(rows: readonly Record<string, unknown>[]
 }
 
 const MARKER = /^ {2}# backlog gardener: band=(2|3|4) evidence=([a-f0-9]{16})$/m;
+/** W1-T9053: when the gardener last placed a band, so a re-band waits out a day. */
+const PLACED = /^ {2}# backlog gardener: placed=(\S+)[ \t]*$/m;
+const REBAND_FLOOR_MS = 24 * 3_600_000;
 const DECLARED_PRIORITY = /^ {2}priority: (-?\d+(?:\.\d+)?)[ \t]*$/m;
 const DECLARED_PRIORITY_LINE = /^ {2}priority: -?\d+(?:\.\d+)?[ \t]*\n/m;
 const STEP = /\b[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+\b/g;
@@ -169,7 +172,7 @@ export function judgeBacklog(e: BacklogEvidence): { disposition: BacklogDisposit
   if (e.satisfiedByMain) return { disposition: { kind: "retire", retirement: "closed" }, reason: `Its build on ${e.satisfiedByMain.branch} (${e.satisfiedByMain.headSha.slice(0, 12)}) changed only tests (${e.satisfiedByMain.files.join(", ")}) and its filed proof already passed at the merge base: main ships the behaviour.` };
   if (e.proofsHold) return { disposition: { kind: "retire", retirement: "closed" }, reason: "Acceptance proofs now hold on main and did not at filing." };
   if (e.overtaken) return { disposition: { kind: "retire", retirement: "withdrawn" }, reason: `Merged commit ${e.overtaken.sha} covered its declared surface: ${e.overtaken.files.join(", ")}, and every acceptance proof it filed holds on main.` };
-  if (e.fanout > 0 || e.symptoms.some((s) => s.recent > s.previousDay && s.recent > 0)) return { disposition: { kind: "band", band: 2 }, reason: e.fanout > 0 ? `Unblocks ${e.fanout} open dependent(s).` : "Its cited symptom is growing against the previous day." };
+  if (e.fanout > 0 || e.symptoms.some((s) => s.recent > 0 && s.recent >= 2 * s.previousDay)) return { disposition: { kind: "band", band: 2 }, reason: e.fanout > 0 ? `Unblocks ${e.fanout} open dependent(s).` : "Its cited symptom is growing against the previous day." };
   if (e.symptoms.some((s) => s.recent > 0)) return { disposition: { kind: "band", band: 3 }, reason: "Its cited symptom remains live." };
   return { disposition: { kind: "band", band: 4 }, reason: "No observed live symptom or open dependent; the task remains valid." };
 }
@@ -221,6 +224,9 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
     // A new evidence sample is not a new placement decision. In particular, rolling ledger
     // counts change every day even while the chosen band remains the same.
     if (marker && judged.disposition.kind === "band" && judged.disposition.band === Number(marker[1])) continue;
+    // W1-T9053: a band placed within the last day stands; routine volume does not re-band it.
+    const placedAt = PLACED.exec(readFileSync(join(sources.repoRoot, plan.shards.get(task.id)!), "utf8"));
+    if (marker && placedAt && judged.disposition.kind === "band" && (now.getTime() - Date.parse(placedAt[1]!)) >= 0 && now.getTime() - Date.parse(placedAt[1]!) < REBAND_FLOOR_MS) continue;
     examined++;
     candidates.push({ class: judged.disposition.kind === "retire" ? "retire" : "place", target: task.id, reason: judged.reason, disposition: judged.disposition, evidence });
   }
@@ -232,7 +238,7 @@ function describe(e: BacklogEvidence): string {
   return `fanout=${e.fanout}; symptoms=${symptoms}; files present=${e.presentFiles.join(", ") || "none"}; missing=${e.missingFiles.join(", ") || "none"}; symbols present=${e.presentSymbols.join(", ") || "none"}; missing=${e.missingSymbols.join(", ") || "none"}; merged surface=${e.overtaken?.sha ?? "none"}; proofs=${e.proofsHold ? "hold" : "not proven"}; satisfied by main=${e.satisfiedByMain ? `${e.satisfiedByMain.branch} changed only ${e.satisfiedByMain.files.join(", ")}` : "no"}; class value=${e.classValue ? `${e.classValue.mean} over ${e.classValue.attempts} attempts` : "unavailable"}`;
 }
 
-export function applyBacklogActions(root: string, shards: ReadonlyMap<string, string>, actions: readonly BacklogAction[]): string[] {
+export function applyBacklogActions(root: string, shards: ReadonlyMap<string, string>, actions: readonly BacklogAction[], now: Date = new Date()): string[] {
   const paths: string[] = [];
   for (const action of actions) {
     const rel = shards.get(action.target);
@@ -244,14 +250,17 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
     // W1-T6307: any numeric value is a declared priority — the machine-filing judge writes `2.5`.
     const priorities = text.match(/^ {2}(?:priority|["']priority["'])[ \t]*:[^\r\n]*$/gm) ?? [];
     const declared = DECLARED_PRIORITY.exec(text);
+    // W1-T9053: main already carries this band; new evidence alone is not a placement.
+    if (action.disposition.kind === "band" && oldBand === action.disposition.band) continue;
     if (!/^ {2}status: queued[ \t]*$/m.test(text) || /^ {2}retirement:/m.test(text)) continue;
     if (priorities.length && (priorities.length !== 1 || !declared)) continue;
     if (declared && (!old || Number(declared[1]) !== oldBand) && action.evidence.satisfiedByMain === undefined) continue;
     let next = old ? text.replace(/^ {2}# backlog gardener: band=(?:2|3|4) evidence=[a-f0-9]{16}\r?\n?/m, "") : text;
+    next = next.replace(/^ {2}# backlog gardener: placed=\S+[ \t]*\r?\n?/m, "");
     if (action.disposition.kind === "band") {
       const band = action.disposition.band;
       next = declared ? next.replace(DECLARED_PRIORITY, `  priority: ${band}`) : next.replace(/^ {2}status: queued[ \t]*$/m, `  priority: ${band}\n  status: queued`);
-      next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: queued\n  # backlog gardener: band=${band} evidence=${action.evidence.signature}`);
+      next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: queued\n  # backlog gardener: band=${band} evidence=${action.evidence.signature}\n  # backlog gardener: placed=${now.toISOString()}`);
     } else {
       next = next.replace(DECLARED_PRIORITY_LINE, "");
       next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: blocked\n  retirement: ${action.disposition.retirement}\n  # backlog gardener: retirement evidence=${action.evidence.signature}`);
@@ -337,7 +346,7 @@ export function backlogGardenSpec(
     scorecard: (i) => ({ open: i.plan.open.length, examined: i.examined, merge_budget: i.mergeBudget, proposed: i.candidates.length }),
     apply: (ws, plan) => {
       const shards = planShards(ws.root);
-      const paths = applyBacklogActions(ws.root, shards, plan.actions);
+      const paths = applyBacklogActions(ws.root, shards, plan.actions, clock.date());
       if (paths.length === 0) return undefined;
       const landed = plan.actions.filter((a) => paths.includes(shards.get(a.target) ?? ""));
       return {
