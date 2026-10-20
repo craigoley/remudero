@@ -23356,7 +23356,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
-  let ownTaskRecordMissing = false;
+  let ownTaskRecordMissing = false, headTaskResolved = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
   // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
@@ -23369,6 +23369,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     taskRisk = resolved.taskRisk;
     taskBudgetUsd = resolved.taskBudgetUsd;
     resolverDivergence = resolved.divergence;
+    headTaskResolved = resolved.divergence === undefined && resolved.criteria.length > 0;
     // W1-T9232: a head cut before its own shard merged is pending a refresh from main, not a plan fault. Only a task
     // origin/main HAS qualifies; one absent from both, or a TRIAGE-/main-repair/unfiled identity, keeps today's path.
     if (taskId !== UNFILED_RUN_SENTINEL && resolved.divergence === undefined && resolved.criteria.length === 0 &&
@@ -23401,13 +23402,16 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
       log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
     }
+    const missing = [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean);
+    if (headTaskResolved && missing.length > 0) {
+      taskRisk ??= DEFAULT_RISK;
+      taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
+      log("review.reviewer.metadata_defaults", { task: taskId, missing, task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
+    }
     if (taskRisk === undefined || taskBudgetUsd === undefined) {
-      // A task id WAS derived but its shard gave no risk/budget at this head, and that is a plan-resolution fault, not an untasked PR.
+      // Only a derived task id whose shard did not resolve at this head reaches here: a plan-resolution fault, not an untasked PR.
       // Its reason stays distinct from `semantic-setup-unavailable`.
-      log("review.reviewer.skipped", {
-        reason: "head-task-metadata-unavailable",
-        missing: [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean),
-      });
+      log("review.reviewer.skipped", { reason: "head-task-metadata-unavailable", missing });
       if (!ownTaskRecordMissing) {
         log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
         console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
