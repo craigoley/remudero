@@ -1,0 +1,30 @@
+- id: W1-T10227
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — board_snapshot.observation_refused landed 78 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:board_snapshot.observation_refused"
+  files:
+    - test/gardeners/scout-board-snapshot-observation-refused.test.ts
+  acceptance:
+    - claim: "board_snapshot.observation_refused stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10227: board_snapshot.observation_refused no longer recurs\" in test/gardeners/scout-board-snapshot-observation-refused.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step board_snapshot.observation_refused carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 76 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared files list contains only a single new test file (test/gardeners/scout-board-snapshot-observation-refused.test.ts), which does not touch secrets, auth, deploy, merge policy, or deletion according to the description.; on the change's description/files alone, no diff was read — The filed task is an implement task that asks for fixing the cause of a recurring ledger symptom; nothing in the description requires an operator-only decision or an irreversible action.; on the change's description/files alone, no diff was read — Weaknesses are noted: the rows name no file, so the code location is unknown and the actual fix scope could grow beyond the declared file. The scout family has 0 merged and 1 declined (Beta mean 0.33). These are worth flagging, but the PR still passes CI and review, and the escalation rule's criteria are not met.; on the change's description/files alone, no diff was read — The acceptance is a grep for a test name, which is a weak check. This is a quality concern for the review stage, not an escalation criterion under the stated rule."
+    judged_at: "2026-10-20T05:32:57.855Z"
+    pin: "8ec01bc07aa37510be7db2a2a05e4cf7a93c53349573bf36fc62e8ffcf6e97dd"
