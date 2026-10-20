@@ -3564,7 +3564,7 @@ export async function runDaemon(
       },
     },
   };
-  const emitLog = deps.log ?? (() => {});
+  const emitLog: (step: string, extra?: Record<string, unknown>) => void = deps.log ?? (() => {});
   type SettlementReporting = {
     report: typeof emitLog;
     faults: Array<{ phase: string; reason: unknown }>;
