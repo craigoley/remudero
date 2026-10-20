@@ -3,8 +3,9 @@ import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { CI_DEPENDENCY_EVIDENCE_SCHEMA, readCiDependencyEvidence, type CiDependencyEvidenceContext } from '../../../scripts/lib/ci-dependency-evidence.mjs';
+import { CI_DEPENDENCY_EVIDENCE_SCHEMA, ciDependencyEvidenceForInvocation, readCiDependencyEvidence, type CiDependencyEvidenceContext } from '../../../scripts/lib/ci-dependency-evidence.mjs';
 import { ownedFixtureDir } from '../../helpers/owned-fixture-dir.js';
+import { gitRepo } from '../../helpers/git-repo.js';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), producerSha = 'c'.repeat(40);
 const repository = 'fixture-owner/remudero';
@@ -97,4 +98,27 @@ test('CI dependency receipt: real filesystem rejects missing corrupt writable ov
   assert.equal(readCiDependencyEvidence(link, f.expected).state, 'unknown');
   assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, checkout: f.expected.runnerTemp }).state, 'unknown');
   assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, runnerTemp: f.checkout }).state, 'unknown');
+});
+
+test('CI dependency receipt: actual invocation binds git head base and clean plan without changing local defaults', t => {
+  const f = fixture(t), repo = gitRepo({ scope: t, kind: 'ci-receipt-checkout' });
+  const sha = repo.git('rev-parse', 'HEAD');
+  const value = { ...observation(), head: sha, base: sha, observedAtMs: Date.now() };
+  const env: NodeJS.ProcessEnv = { GITHUB_ACTIONS: 'true', GITHUB_WORKSPACE: repo.dir,
+    GITHUB_REPOSITORY: repository, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2', RUNNER_TEMP: f.expected.runnerTemp,
+    RMD_CI_DEPENDENCY_EVIDENCE: f.path, RMD_CI_DEPENDENCY_PRODUCER_SHA: producerSha,
+    RMD_CI_DEPENDENCY_DIGEST: f.write(value) };
+  assert.deepEqual(ciDependencyEvidenceForInvocation(['--base', 'HEAD'], env, repo.dir)!({ id: 'ZZ-T1' }), { state: 'merged' });
+  for (const args of [[], ['--base'], ['--base', 'missing-branch']]) {
+    assert.equal(ciDependencyEvidenceForInvocation(args, env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown');
+  }
+  assert.equal(ciDependencyEvidenceForInvocation([], {}, repo.dir), undefined);
+  assert.equal(ciDependencyEvidenceForInvocation([], { ...env, GITHUB_ACTIONS: 'false' }, repo.dir), undefined);
+  assert.equal(ciDependencyEvidenceForInvocation([], env, f.checkout), undefined, 'unrelated fixture checkouts receive no authority');
+  mkdirSync(join(repo.dir, 'plan')); writeFileSync(join(repo.dir, 'plan/tasks.yaml'), '[]\n');
+  repo.git('add', 'plan'); repo.git('commit', '-qm', 'test: changed plan');
+  const next = repo.git('rev-parse', 'HEAD');
+  env.RMD_CI_DEPENDENCY_DIGEST = f.write({ ...value, head: next, base: next });
+  writeFileSync(join(repo.dir, 'plan/tasks.yaml'), '# dirty\n[]\n');
+  assert.equal(ciDependencyEvidenceForInvocation(['--base', 'HEAD'], env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown');
 });
