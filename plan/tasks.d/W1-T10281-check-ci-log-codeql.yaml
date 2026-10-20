@@ -1,0 +1,68 @@
+- id: W1-T10281
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:codeql cost 13.9 PR minute(s) across 9 round(s) on 8 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.35
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:codeql"
+  files:
+    - src/lib/opportunity-outcomes.ts
+    - test/triage/check-ci-log-codeql.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:codeql"
+      proof: "grep: test(\"W1-T10281: check:ci-log:codeql is prevented, not retried\" in test/triage/check-ci-log-codeql.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:codeql's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:codeql cost 13.9 PR minute(s) (seven-day half-life) across 9 fix round(s) on 8 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/opportunity-outcomes.ts: names "codeql" (15 line(s))
+    - src/lib/project-init.ts: names "codeql" (6 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #13104 at 2026-10-20T16:05:02Z: hand fix PR #13104: src/lib/opportunity-outcomes.ts; minutes are the pass median proxy (5.946438888888888), not measured repair time
+    - PR #12827 (https://github.com/craigoley/remudero/pull/12827) at 2026-10-18T21:54:12.653Z: ci-log round — coverage-shard (2/8): test/adoption-debt-becomes-a-proposal.test.ts; coverage-shard (1/8): test/measurement-cadence.test.ts; coverage-shard (8/8): test/proof-debt-becomes-a-proposal.tes
+        failing tests: the registry is the ONLY write, and classifyProposal's ordinary gate still runs"]; minting a proposal files no task and approves nothing — the registry is the ONLY write, and classifyProposal's ordinary gate still runs; never a task, never a feedback entry"]; THE ESCALATING FORM, WHEN OPTED IN, ONLY EVER DRAFTS A PROPOSAL — never a task, never a feedback entry; minting a proposal files no task, edits no acceptance criterion, and approves nothing — the registry is the ONLY write, and classifyProposal's ordinary gate still runs
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — ["minting a proposal files no task and approves nothing — the registry is the ONLY write, and classifyProposal's ordinary gate still runs"]
+          | not ok 9 - minting a proposal files no task and approves nothing — the registry is the ONLY write, and classifyProposal's ordinary gate still runs
+          |   ---
+          |   duration_ms: 2.161391
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/adoption-debt-becomes-a-proposal.test.ts:325:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly deep-equal:
+          |     + actual - expected
+          | 
+          |       [
+          | 
+    - PR #12570 (https://github.com/craigoley/remudero/pull/12570) at 2026-10-17T13:45:03.775Z: ci-log round — coverage-ratchet: diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/e; CodeQL; Scan; security-merge-policy
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/test-slot-mutation.ts:141
+          |   - src/lib/test-slot-mutation.ts:183
+          |   - src/lib/test-slot-mutation.ts:184
+          |   - src/lib/test-slot-mutation.ts:185
+          |   - src/lib/test-slot-mutation.ts:186
+          |   - src/lib/test-slot-mutation.ts:198
+          |   - src/lib/test-slot-mutation.ts:199
+          |   - src/lib/test-slot-mutation.ts:213
+          |   - src/lib/test-slot-mutation.ts:214
+          |   - src/lib/test-slot-
+    - PR #11255 (https://github.com/craigoley/remudero/pull/11255) at 2026-10-13T09:34:18.612Z: ci-log round — CodeQL
+        failing tests: W1-T9153: two concurrent approves on one path and neither loses its cwd; W1-T9153: an approve whose add threw removes nothing
+    - PR #10863 (https://github.com/craigoley/remudero/pull/10863) at 2026-10-11T13:45:40.177Z: ci-log round — coverage-shard (4/8): test/serve-browser-teardown.test.ts; CodeQL
+        failing tests: every browser-launching test file awaits the launch PROMISE in teardown, never the resolved handle
+
+    WHAT THE LAST RUNG TRIED: W1-T5167 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:codeql in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
