@@ -34,7 +34,7 @@ import * as memoryAdmission from "../src/lib/host-memory-admission.js";
 import * as memoryLearning from "../src/lib/host-memory-learning.js";
 import * as memoryShadow from "../src/lib/host-memory-shadow.js";
 import { childGardenPassSpawn } from "../src/lib/garden-registry.js";
-import { defaultShadowMemoryPorts, gatherShadowInputs, installShadowMemorySink, markPsiStartAdmitted, resetShadowMemoryStateForTests,
+import { defaultShadowMemoryPorts, gatherShadowInputs, installShadowMemorySink, markPsiStartAdmitted, recordShadowMemoryVerdict, resetShadowMemoryStateForTests,
   type HostMemoryBudgetPolicy, type StrictPsiTarget } from "../src/lib/host-memory-shadow.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -220,6 +220,87 @@ test("a shortfall with no reserved work left to wait for is admitted at once and
   assert.deepEqual(decision(outcome), { kind: "admitted", tier: "nothing-to-wait-for", waitedMs: 0, attempts: 0 });
   assert.deepEqual(w.rows.map((row) => row.step), [ENFORCE_ADMIT_STEP], "the admission past a shortfall is on the record");
   assert.equal(w.rows[0]!.tier, "nothing-to-wait-for");
+});
+
+test("an empty reservation ledger never overrides observed host memory pressure", async () => {
+  for (const pressure of ["memory-available", "psi"] as const) {
+    resetShadowMemoryStateForTests();
+    resetMemoryAdmissionStateForTests();
+    const w = world();
+    if (pressure === "memory-available") w.state.availableMib = POLICY.hostReserveMib / 2;
+    const read = host(w.state);
+    const readFile = (path: string): string => path === "/proc/pressure/memory" && pressure === "psi"
+      ? "some avg10=20.00 avg60=20.00 avg300=20.00 total=1\nfull avg10=3.00 avg60=3.00 avg300=3.00 total=1\n"
+      : read(path);
+    const controller = new AbortController();
+    w.onSleep = () => controller.abort();
+    const result = await awaitMemoryAdmission({ ...request, signal: controller.signal }, ports(w, { readFile }));
+    assert.equal(result.kind, "abandoned", pressure);
+    assert.equal(w.sleeps.length, 1, "the caller can cancel the pressure wait without starting a child");
+    assert.equal(w.running.entries.length, 0, "no reservation or child was admitted");
+    assert(w.rows.some(row => row.step === ENFORCE_WAIT_STEP && (row.reasons as string[]).includes(pressure)));
+    assert(!w.rows.some(row => row.step === ENFORCE_ADMIT_STEP));
+    assert.deepEqual(waitingStarts(), []);
+  }
+});
+
+test("an observed shortfall stays deferred after its garden ages and recovers when pressure clears", async () => {
+  resetShadowMemoryStateForTests();
+  resetMemoryAdmissionStateForTests();
+  const w = world();
+  let pressed = true;
+  const read = host(w.state);
+  const readFile = (path: string): string => path === "/proc/pressure/memory" && pressed
+    ? "some avg10=20.00 avg60=20.00 avg300=20.00 total=1\nfull avg10=3.00 avg60=3.00 avg300=3.00 total=1\n"
+    : read(path);
+  const ask = { ...request, workerClass: "garden" as const, onShortfall: "defer" as const,
+    deferral: { cadenceMs: ADMISSION_BACKOFF.baseMs, cadenceBasis: "scheduled" as const } };
+  assert.equal((await awaitMemoryAdmission(ask, ports(w, { readFile }))).kind, "deferred");
+  w.now.ms += ask.deferral.cadenceMs;
+  assert.equal((await awaitMemoryAdmission(ask, ports(w, { readFile }))).kind, "deferred",
+    "age changes priority, not observed physical capacity");
+  assert.equal(w.rows.at(-1)!.aged_blocked, "psi");
+  assert.equal(w.running.entries.length, 0);
+  pressed = false;
+  const recovered = await awaitMemoryAdmission(ask, ports(w, { readFile }));
+  assert.equal(recovered.kind, "admitted", "the original work is not dropped");
+  if (recovered.kind === "admitted") assert.equal(recovered.tier, "fits");
+  assert.equal(w.running.entries.length, 1);
+  assert.deepEqual(w.sleeps, [], "defer callers never wait inline");
+});
+
+test("an empty reservation ledger never overrides observed container pressure or swap-in", async () => {
+  for (const pressure of ["container-ceiling", "swap-in"] as const) {
+    resetShadowMemoryStateForTests();
+    resetMemoryAdmissionStateForTests();
+    const w = world(), stored = new Map<string, string>();
+    let pressed = false;
+    const read = host(w.state);
+    const readFile = (path: string): string => {
+      const saved = stored.get(path);
+      if (saved !== undefined) return saved;
+      if (path === "/proc/vmstat") return `pswpin ${pressed && pressure === "swap-in" ? 10000 : 100}\n`;
+      if (path === "/sys/fs/cgroup/memory.stat") return "anon 1\nfile 1\npswpin 100\n";
+      if (path === "/sys/fs/cgroup/memory.events") return `low 0\nhigh ${pressed && pressure === "container-ceiling" ? 1 : 0}\nmax 0\noom 0\noom_kill 0\n`;
+      if (path === "/sys/fs/cgroup/memory.pressure") return pressed && pressure === "container-ceiling"
+        ? "some avg10=20.00 avg60=20.00 avg300=20.00 total=1\nfull avg10=3.00 avg60=3.00 avg300=3.00 total=1\n"
+        : "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n";
+      return read(path);
+    };
+    const writeFile = (path: string, text: string): void => { stored.set(path, text); };
+    assert.equal(recordShadowMemoryVerdict(request, ports(w, { readFile, writeFile })).kind, "recorded");
+    pressed = true;
+    w.now.ms += 1000;
+    const controller = new AbortController();
+    w.onSleep = () => controller.abort();
+    const result = await awaitMemoryAdmission({ ...request, signal: controller.signal }, ports(w, { readFile, writeFile }));
+    assert.equal(result.kind, "abandoned", pressure);
+    const waited = w.rows.find(row => row.step === ENFORCE_WAIT_STEP);
+    assert((waited?.reasons as string[]).includes(pressure), "the actual maintained reader named the pressure");
+    if (pressure === "container-ceiling") assert.equal((waited!.numbers as { containerSighted: boolean }).containerSighted, true);
+    assert.equal(w.running.entries.length, 0);
+    assert.deepEqual(waitingStarts(), []);
+  }
 });
 
 test("an uncertainty-only verdict gets one fresher reading and is then admitted", async () => {
@@ -470,6 +551,10 @@ test("memory admission publishes one reservation before a concurrent start can r
   w.onSleep = () => { w.running.entries[0]!.occupancyReleased = true; };
   const shared = ports(w, {
     policy: () => ({ ...POLICY, uncertaintyMarginMib: 0 }),
+    typical: () => 900,
+    survival: undefined,
+    readHostServe: undefined,
+    writeFile: () => undefined,
     readLedger: () => { snapshots.push(w.running.entries.filter(e => !e.occupancyReleased).length); return reading(w.running.entries); },
     withLock: action => action(),
   });
@@ -771,11 +856,13 @@ test("W1-T10208: new validation never promotes a legacy memory escape to ready",
     const refused = await memoryAdmission.awaitValidationMemoryAdmission({ ...validationRequest, workerClass }, f.options);
     validationRefused(refused, "unsafe-without-live-work");
     assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
-    const legacy = await awaitMemoryAdmission({ ...request, workerClass }, f.options);
-    assert.equal(legacy.kind, "admitted");
-    if (legacy.kind === "admitted") {
-      assert.equal(legacy.tier, "nothing-to-wait-for"); legacy.reservation?.releaseOccupancy();
-    }
+    // The separate physical-pressure correction deliberately closes this legacy escape too.
+    // Cancel its first wait explicitly: this control must neither admit nor spin without a bound.
+    const stop = new AbortController(); f.w.onSleep = () => stop.abort();
+    const legacy = await awaitMemoryAdmission({ ...request, workerClass, signal: stop.signal }, f.options);
+    assert.equal(legacy.kind, "abandoned");
+    assert.deepEqual(f.w.sleeps, [5000], "observed host pressure waits before the caller cancels");
+    assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
   }
   const f = validationFixture(); await f.prime();
   const unavailable = { withLock: () => { throw new Error("private-lock-unavailable"); } };

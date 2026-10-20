@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 11.50
   risk: high  # Rule 19: one concern — the retro check's own read cost decides whether it runs, and a persistent deferral is named; it spans the tick gate (daemon.ts), the check's ledger read and wiring (run-task.ts) and the new test
   band_meaning: span
   origin: "found 2026-10-13 by an operator session (the retro trigger never ran on 10-10..13); operator standing direction: fix at the root, no hard fixed thresholds, automated flow"

@@ -1,0 +1,54 @@
+- id: W1-T10298
+  title: "THE RETRO PREFLIGHT FAILURE ROW KEEPS THE FAILURES, NOT THE FIRST 16 KB — `boundedOutputs` (src/lib/retro-preflight.ts) keeps the HEAD of stdout, which in a ~690-suite run is always passing suites, so the 10-20 rows name 20 failing author-preflight tests and carry none of their error text; the same excerpt is what the repair worker is handed"
+  repo: remudero
+  depends_on: [W1-T10144]  # PR #13226 (W1-T10144, open at filing) also changes src/lib/retro-preflight.ts; build after it
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern, which bytes fill the existing excerpt budget; no bound, cap or row field changes
+  band_meaning: span
+  origin: "coordinator brief file1020c item 11 (2026-10-20); evidence from the W1-T10144 build (PR #13226, logs-8864/retro-*) and the core ledger"
+  plan_refs: [W1-T10144, W1-T2993, W1-T10300]
+  files:
+    - src/lib/retro-preflight.ts
+    - test/learning/the-retro-preflight-failure-row-keeps-the-failures.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main c89ef695b (symbols, not lines):
+    - src/lib/retro-preflight.ts `boundedOutputs(stdout, stderr)`: when the two exceed `RETRO_PREFLIGHT_CAPTURE_BYTES`
+      (16 KiB), stderr keeps up to a third and stdout keeps `stdoutBuffer.subarray(0, stdoutBudget)`, its FIRST bytes.
+    - `logAttempt` writes that as `stdout_excerpt` on `retro.preflight_failed`, and the repair prompt builder puts the
+      same `bounded.stdoutExcerpt` between its "stdout:" and "stderr:" lines. The failing test NAMES survive separately
+      (`failing_tests`, capped at `MAX_FAILING_TESTS` = 20); their error blocks do not.
+    OBSERVED, core ledger 2026-10-19..20 (37 rotations named 10-19/10-20 plus live, read-only): three
+    `retro.preflight_failed` rows (10-19T15:49Z RETRO-1792420573110, 10-20T06:31Z RETRO-1792473261921, 10-20T16:50Z
+    RETRO-1792510423439), each `process_timeout` at ~3,601 s over 686-695 suites, `output_truncated: true`, a
+    16,157-16,384-byte `stdout_excerpt` with no "not ok" line in it. The 06:31Z row's `failing_tests` lists 20 author
+    preflight titles (the cap); the coordinator brief counts 26 failures in test/author-preflight.test.ts and
+    test/author-workflow-contract-precheck.test.ts that day.
+    WHY IT MATTERS: W1-T10300 cannot diagnose a container-only failure whose error text the only container run threw away.
+    NOT COVERED ELSEWHERE: W1-T10144 (PR #13226, head read 22:16Z) changes retro-preflight.ts for the retro's own suites,
+    not `boundedOutputs`. Swept
+    origin/main plan/tasks.d and the open PR heads' plan trees for stdout_excerpt, RETRO_PREFLIGHT_CAPTURE_BYTES and
+    boundedOutputs: no shard.
+  design: |
+    1. SAME BUDGET, BETTER BYTES. Inside the unchanged 16 KiB (and the unchanged stderr share), stdout keeps, in order:
+       each failing test's TAP block (its "not ok" line through the end of its YAML diagnostic: error, stack, location),
+       as many as fit, then the output's TAIL (the summary lines). Passing suites are dropped first.
+    2. A failing block larger than its share is cut with a marker, never dropped whole, so every failing title the row
+       names has at least its error line when the budget allows.
+    3. `output_truncated` keeps its meaning; a new field is not needed. No bound, cap or row field changes.
+    4. TESTS in test/learning/the-retro-preflight-failure-row-keeps-the-failures.test.ts (computed by
+       `computedTestFolder`; re-run `rmd test-place` on the real file), `test(` titles verbatim as in the proofs; feed a
+       synthetic 300 KB TAP stream with passing suites first and failures late.
+  acceptance:
+    - claim: "a long run's excerpt keeps each failing test's error block and the summary tail within the same budget"
+      proof: "unit test: W1-T10298: the preflight excerpt keeps the failing blocks and the tail, not the first passing suites"
+    - claim: "an oversized failing block is cut with a marker, not dropped"
+      proof: "unit test: W1-T10298: an oversized failing block is cut with a marker inside the excerpt budget"
+  falsifier: |
+    At origin/main the excerpt of the synthetic stream is its first 16 KiB of passing suites, so the first test finds no
+    "not ok" in it and fails. Keep only the tail and the first test fails again when the failures sit mid-stream.

@@ -9,8 +9,9 @@
  *   - fits: admitted at once.
  *   - uncertain (only the widened margin tipped it): one back-off step for a fresher reading, then admitted and named.
  *   - shortfall (measured headroom, swap-in, PSI or the container ceiling): waits with exponential back-off while this
- *     instance or another still runs reserved work that can free memory. With NOTHING live to wait for, waiting cannot
- *     help, so the start is admitted and named: the budget never wedges the fleet on memory it does not account for.
+ *     instance or another still runs reserved work that can free memory. With NOTHING live to wait for, a projected
+ *     shortfall may admit one named progress start. Observed host pressure or a sighted container ceiling NEVER takes
+ *     that escape: defer callers stay due; wait callers remain cancellable by their caller's existing deadline.
  * PRIORITY: waiting starts in one process are evaluated one at a time, highest class weight times aged wait first
  *   (host-memory-priority.ts `rankDemand`), so an older build eventually outranks a newer review and nothing starves.
  * FAIL-OPEN AND NAMED: an error admits the start and writes memory_budget.enforce_error; it never holds work hostage.
@@ -104,7 +105,7 @@ export type AdmissionTier = "fits" | "uncertain" | "shortfall";
 
 /** Why the aged rung did not admit a deferred start; each defer row names one. */
 export type AgedBlock = "no-cadence" | "younger-than-cadence" | "unobserved-seed" | "outranked" | "aged-child-running"
-  | "memory-available" | "container-sighted";
+  | "memory-available" | "container-sighted" | "swap-in" | "psi";
 
 /** Why the starvation rung did not admit a shortfall. */
 export type StarvationBlock = "younger-than-starvation" | "hard-reason" | "starvation-start-running";
@@ -128,6 +129,18 @@ export function backoffMs(attempt: number, random: number, schedule: typeof ADMI
 /** True when some live reservation, here or in another container, still holds work whose end can free memory. Pure. */
 export function reservedWorkRunning(inputs: Pick<ShadowInputs, "entries">): boolean {
   return inputs.entries.some((entry) => !entry.occupancyReleased && entry.status !== "uncertain");
+}
+
+/** An observed pressure reason cannot become capacity merely because no reservation can be waited out.
+ * Projected container claims are deliberately excluded: the existing minimum-progress escape still applies. */
+function observedMemoryShortfall(verdict: Pick<ShadowVerdict, "reasons" | "numbers">):
+  "memory-available" | "container-sighted" | "swap-in" | "psi" | undefined {
+  // Keep the aged rung's existing measured-headroom/ceiling precedence when several reasons coexist.
+  if (verdict.reasons.includes("memory-available")) return "memory-available";
+  if (verdict.reasons.includes("container-ceiling") && verdict.numbers.containerSighted) return "container-sighted";
+  if (verdict.reasons.includes("swap-in")) return "swap-in";
+  if (verdict.reasons.includes("psi")) return "psi";
+  return undefined;
 }
 
 export interface AdmissionRequest {
@@ -311,9 +324,7 @@ function agedRungBlock(key: string, self: Waiter, deferral: AdmissionRequest["de
   const others = [...streaks].filter(([other]) => other !== key).map(([, streak]) => streak as Waiter);
   if (rankDemand([...others, self], ranking, now)[0] !== self) return "outranked";
   if (agedRunning !== undefined) return "aged-child-running";
-  if (verdict.reasons.includes("memory-available")) return "memory-available";
-  if (verdict.reasons.includes("container-ceiling") && verdict.numbers.containerSighted) return "container-sighted";
-  return undefined;
+  return observedMemoryShortfall(verdict);
 }
 
 interface OwnTailRung {
@@ -658,7 +669,8 @@ async function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts, v
               ? validationFailure === undefined && tier === "fits" ? "fits" : undefined
               : tier === "fits" ? "fits"
               : tier === "uncertain" && attempt > 0 ? "uncertain"
-                : tier === "shortfall" && !reservedWorkRunning(inputs) ? "nothing-to-wait-for"
+                : tier === "shortfall" && !reservedWorkRunning(inputs) && observedMemoryShortfall(verdict) === undefined
+                  ? "nothing-to-wait-for"
                   : defers && tier === "shortfall" && agedBlock === undefined ? "aged"
                     : tier === "shortfall" && (ownTail = ownTailRung(root, inputs, verdict, policy)).block === undefined ? "own-tail"
                       : tier === "shortfall" && (starvation = { ...clock,

@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,14 @@
       proof: "grep: test/a-deferred-garden-ages-against-its-own-due-interval\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/a-deferred-garden-ages-against-its-own-due-interval.test.ts for each recorded edge"
       proof: "grep: test/a-deferred-garden-ages-against-its-own-due-interval\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed remedy is bounded to adding selector edges for one named suite and regression coverage for each recorded edge in two existing files."
+      - "The note identifies a specific coverage run, PR, commit and three candidate edges; it explicitly distinguishes observed misses from guessed import relationships."
+      - "The supplied scope requests no sensitive, destructive, irreversible or operator-only action, and no merge, deploy, infrastructure or review policy change."
+      - "The supplied family track record reports 18 merged and 0 declined tasks; no concerning gate result is shown."
+    judged_at: "2026-10-20T22:42:40.598Z"
+    pin: "fb71a0efdaca0b5c97a2fd45f3c0265fec61156c071f255baed66434d5c6551f"

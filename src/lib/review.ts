@@ -430,7 +430,7 @@ export interface CriterionVerdict {
   /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
    *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
   proofFailureOutput?: string;
-  /** The output tail alone of an `executed_fail` proof (see {@link recordFailureTail}); absent for a pass. */
+  /** The redacted output tail of an executed failure or unevaluable proof; absent for a pass. */
   failureTail?: string;
   /** See {@link ProofSkipReason}. Absent when the proof executed. */
   proof_skip?: ProofSkipReason;
@@ -4225,6 +4225,7 @@ export function judgeCriterion(
             proofExec = "cannot_evaluate";
             proofSkip = "cannot-load";
             loadError = e.loadError;
+            failureTail = proofFailureTail(e.loadOutput ?? "") || "(the proof printed nothing)";
             met = false;
             reason = `proof cannot-evaluate: test files failed to load after one toolchain refresh (${e.loadError})`;
           } else if (e instanceof ProofCwdMissingError) {
@@ -4323,7 +4324,8 @@ export function judgeCriterion(
   return {
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
     ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}),
-    ...(proofExec === "executed_fail" && failureTail ? { failureTail } : {}), floorMet, holdout: !!criterion.holdout,
+    ...(proofExec === "executed_fail" || proofExec === "cannot_evaluate"
+      ? { failureTail: failureTail || "(the proof printed nothing)" } : {}), floorMet, holdout: !!criterion.holdout,
   };
 }
 
@@ -5420,7 +5422,9 @@ export interface ProofExecutionMemo {
 export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
   // Two maps rather than one sentinel-bearing map: a cached THROW and a cached "no-match" must not be distinguishable
   // only by a value that could itself be a legitimate result.
-  const returned = new Map<string, ReturnType<ProofExecutor>>();
+  const returned = new Map<string, {
+    outcome: ReturnType<ProofExecutor>; failureOutput?: string; failureTail?: string;
+  }>();
   const thrown = new Map<string, unknown>();
   let uniqueRuns = 0;
   let reuses = 0;
@@ -5436,12 +5440,15 @@ export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
       }
       if (returned.has(key)) {
         reuses += 1;
-        return returned.get(key) as ReturnType<ProofExecutor>;
+        const prior = returned.get(key)!;
+        whitelisted.failureOutput = prior.failureOutput;
+        whitelisted.failureTail = prior.failureTail;
+        return prior.outcome;
       }
       uniqueRuns += 1;
       try {
         const outcome = exec(whitelisted, cwd);
-        returned.set(key, outcome);
+        returned.set(key, { outcome, failureOutput: whitelisted.failureOutput, failureTail: whitelisted.failureTail });
         return outcome;
       } catch (e) {
         thrown.set(key, e);
@@ -8763,6 +8770,8 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * {@link INSTRUMENT_SURFACE_EXCLUSIONS} plus
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
+  "^plan/credit-overrides\\.yaml$",
+  "^scripts/lib/ci-dependency-evidence\\.mjs$",
   "^scripts/preflight-author\\.mjs$",
   "^scripts/calibrate-author-runtime\\.mjs$",
   "^scripts/lib/author-step-capture\\.mjs$",
