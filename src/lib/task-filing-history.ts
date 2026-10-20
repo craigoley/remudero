@@ -1,4 +1,5 @@
 import { parseDocument } from "yaml";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { hostWorktreeGit, type HostWorktreeGitOptions } from "./worktree-git.js";
 
 export interface FilingHistoryLimits {
@@ -35,7 +36,9 @@ const EMPTY: RecordState = Object.freeze({ count: 0, seen: false });
 const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const ZERO = /^0+$/;
 const CHUNK_BYTES = 4 * 1024 ** 2;
-class HistoryUnavailable extends Error {}
+class HistoryUnavailable extends RmdError {
+  constructor(reason: string) { super("git", GENERIC_EXIT_CODE, reason); }
+}
 function unavailable(reason: string): never { throw new HistoryUnavailable(reason); }
 
 function historyUtf8(bytes: Uint8Array): string {
