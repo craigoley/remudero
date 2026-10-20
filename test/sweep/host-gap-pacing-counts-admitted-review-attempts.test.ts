@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "#src/lib/config.js";
@@ -155,7 +155,11 @@ test("an admitted host-gap refusal remains attributable after real ledger rotati
     const before = hostGapRereviewFacts(pr(), readLedgerLines(path));
     assert.equal(before.history.length, 1, "the real writer's exact carrier joins the library refusal");
     assert.equal(before.history[0]?.completed, true);
-    assert.equal(rotateLedger(path, { ceilingBytes: 1, now: () => new Date(NOW) }).rotated, true,
+    const ceilingBytes = statSync(path).size * 4;
+    const noise = JSON.stringify({ step: "ci.polling", run_id: "noise", task_id: "noise", detail: "x".repeat(1024) }) + "\n";
+    appendFileSync(path, noise.repeat(Math.ceil(ceilingBytes / noise.length) + 1));
+    assert.ok(statSync(path).size > ceilingBytes, "padding crosses the ceiling without forcing retained-row shedding");
+    assert.equal(rotateLedger(path, { ceilingBytes, now: () => new Date(NOW) }).rotated, true,
       "the real default rotation runs in the same clock domain as its fixture rows");
     const retained = readLedgerLines(path);
     assert.equal(retained.filter(row => row.step === "sweep.review_admitted").length, 1,
