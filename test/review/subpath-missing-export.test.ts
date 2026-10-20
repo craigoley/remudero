@@ -29,7 +29,7 @@ test("verified local subpath exports discriminate actual Node head/base link out
   const f = fixture(t);
   const source = 'import {test} from "node:test";import assert from "node:assert/strict";import {added} from "#src/a.js";test("actual alias export",()=>assert.equal(added,3));\n';
   for (const root of [f.base, f.head]) f.put(root, "test/probe.test.ts", source);
-  const env = { ...process.env, TSX_DISABLE_CACHE: "1" };
+  const env: NodeJS.ProcessEnv = { ...process.env, TSX_DISABLE_CACHE: "1" };
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_V8_COVERAGE;
   const run = (cwd: string) => spawnSync(process.execPath, ["--import", join(process.cwd(), "node_modules/tsx/dist/loader.mjs"),
@@ -80,4 +80,12 @@ test("subpath export attribution keeps malformed metadata and mixed errors unkno
   f.pkg(f.head);
   assert.equal(baseLacksPrAddedExports(f.output() + "# Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/missing'\n", f.base, f.head), undefined);
   assert.equal(baseLacksPrAddedExports(f.output("#src/../a.js"), f.base, f.head), undefined);
+});
+
+test("subpath export attribution accepts an exact local mapping but refuses absent scope metadata", t => {
+  const f = fixture(t);
+  for (const root of [f.base, f.head]) f.pkg(root, { "#widget": "./src/a.js" });
+  assert.match(String(baseLacksPrAddedExports(f.output("#widget"), f.base, f.head)), /base lacks export/);
+  rmSync(join(f.base, "package.json"));
+  assert.equal(baseLacksPrAddedExports(f.output("#widget"), f.base, f.head), undefined);
 });

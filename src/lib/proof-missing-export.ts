@@ -59,7 +59,7 @@ function subpathModule(root: string, importerRel: string, specifier: string): { 
       if (!st.isFile() || st.isSymbolicLink() || st.size > 65536 || physical.startsWith("..") || isAbsolute(physical)) return undefined;
       const imports: unknown = JSON.parse(readFileSync(file, "utf8")).imports;
       if (typeof imports !== "object" || imports === null || Array.isArray(imports)) return undefined;
-      const matches = Object.entries(imports).flatMap(([key, target]) => {
+      const matches = Object.entries(imports).flatMap<{ key: string; target: unknown; middle: string | undefined }>(([key, target]) => {
         const pieces = key.split("*");
         if (pieces.length === 1) return key === specifier ? [{ key, target, middle: undefined }] : [];
         if (pieces.length !== 2 || !specifier.startsWith(pieces[0]!) || !specifier.endsWith(pieces[1]!) ||
@@ -97,7 +97,8 @@ function declaresExport(text: string, name: string): boolean {
 /** The reason a base-side proof run that could not LOAD is nonetheless a genuine miss, or `undefined`. True only when
  *  every failure is a missing named export whose module exists at the base WITHOUT that export (and with no
  *  `export *` that could supply it) and exports it at the head: the base simply lacks code this diff adds. Anything
- *  unproven — a relative path outside either tree, an unreadable module, a wildcard re-export — stays undefined, so
+ *  unproven — an escaped path, unreadable module, wildcard re-export, or anything other than an unchanged
+ *  unconditional local subpath binding in the nearest package scope — stays undefined, so
  *  the caller keeps its fail-closed base_unknown. */
 export function baseLacksPrAddedExports(output: string, baseCwd: string, headCwd: string): string | undefined {
   try {
