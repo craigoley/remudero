@@ -54258,7 +54258,6 @@ export async function main(
   // W1-T7094: every worker start this process makes writes its counterfactual `memory_budget.shadow` row to the
   // ledger of the root that start names. The recorder never throws and never delays the start; SHADOW ONLY.
   installShadowMemorySink((path, row) => appendLedger(path, row));
-  // OPERATOR RULING 2026-10-19 (3): a class starved past its hour raises one host alert, spooled for the daemon's drain.
   installStarvationAlertSink(spoolingStarvationAlert({ source: "memory-budget", host: hostname(), clock: systemClock }));
   // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
   // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
