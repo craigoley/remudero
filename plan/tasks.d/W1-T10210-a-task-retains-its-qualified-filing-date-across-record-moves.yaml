@@ -9,7 +9,7 @@
   budget_usd: 5.00
   risk: high
   priority: 3
-  status: queued
+  status: merged
   attempts: 0
   author_class: operator
   origin: "operator continuation 2026-10-19: remaining issue7911 exact-record filing-history follow-up"

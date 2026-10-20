@@ -15,7 +15,7 @@
     - src/lib/ledger.ts
     - src/run-task.ts
     - test/three-unmeasured-preopen-gates-raise-a-host-alert.test.ts
-  status: queued
+  status: merged
   priority: 1  # while the streak lasted every build PR opened with no local gate; #12575 opened importing a file its tree lacked
   attempts: 0
   rationale: |
