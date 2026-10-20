@@ -8,7 +8,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=a98843aedcde89f3
   attempts: 0
   files:
     - scripts/build-child-entries.mjs

@@ -1,19 +1,50 @@
 id: fb-1791916356285-50ef47
 ts: 2026-10-13T18:32:36.285Z
-raw: |
-  PR #11255 / W1-T8775 has a reproducible false-positive test assertion at test/a-check-proof-child-runs-the-precompiled-entry-when-current.test.ts:72. The current-bundle test rejects any argv item containing the substring "tsx", including a valid bundle path or proof argument. On head d86bfb8a5b5a, running the unchanged six-test suite with a private TMPDIR containing "tsx" gives # tests 6 / # fail 1, failing only "no tsx anywhere in the argv" after kind=bundle, reason=source-hash-match, exact argv, and no --import already pass. The same source under a control TMPDIR gives # tests 6 / # fail 0. CI job 115419529928 had the same assertion fail after 547 passing flake-screen iterations. Head 24274097213b only changes ADR prose and retains this assertion. Preserve the loader invariant by checking semantic loader options and exact argv rather than arbitrary path/proof text; retain a controlled-path regression. This is diagnostic evidence for W1-T8775's existing fleet repair, not authority to hand-push its branch or file a duplicate task. Ground triage against #11255 and its current fix status. Receipts: handoff-2026-10-13/next-steps-execution/adr-forced-tsx-component.tap and adr-control-component.tap.
+raw: >
+  PR #11255 / W1-T8775 has a reproducible false-positive test assertion at
+  test/a-check-proof-child-runs-the-precompiled-entry-when-current.test.ts:72.
+  The current-bundle test rejects any argv item containing the substring "tsx",
+  including a valid bundle path or proof argument. On head d86bfb8a5b5a, running
+  the unchanged six-test suite with a private TMPDIR containing "tsx" gives #
+  tests 6 / # fail 1, failing only "no tsx anywhere in the argv" after
+  kind=bundle, reason=source-hash-match, exact argv, and no --import already
+  pass. The same source under a control TMPDIR gives # tests 6 / # fail 0. CI
+  job 115419529928 had the same assertion fail after 547 passing flake-screen
+  iterations. Head 24274097213b only changes ADR prose and retains this
+  assertion. Preserve the loader invariant by checking semantic loader options
+  and exact argv rather than arbitrary path/proof text; retain a controlled-path
+  regression. This is diagnostic evidence for W1-T8775's existing fleet repair,
+  not authority to hand-push its branch or file a duplicate task. Ground triage
+  against #11255 and its current fix status. Receipts:
+  handoff-2026-10-13/next-steps-execution/adr-forced-tsx-component.tap and
+  adr-control-component.tap.
+
 
   Merged fix receipt: PR #11477 merged on 2026-10-13 at 20:29:42 UTC.
-  Squash commit: aae6e0f47d1c8c86b7fda1cbaed9a6d0c9fa9fd8.
-  The exact published head 9f28ef7f9a0921a66a96e6a4eb88ff93beb39eeb passed hosted checks and review. It replaces the substring assertion with exact argv checks and adds a real nested-runner regression under a tsx-named temporary path. The regression fails on the pinned base and with the fix deleted; both restored suites report seven tests and zero failures. Native author preflight passed 28 static checks and 1,544 tests. PR #11477 names this feedback id in its stored body.
 
-  Automatic triage should ground this diagnostic against the merged fix and use its existing already-decided path. The original failure above is historical evidence. The separate lifecycle-owner question remains in fb-1791908207465-93d619. This receipt does not claim measured production memory savings.
+  Squash commit: aae6e0f47d1c8c86b7fda1cbaed9a6d0c9fa9fd8.
+
+  The exact published head 9f28ef7f9a0921a66a96e6a4eb88ff93beb39eeb passed
+  hosted checks and review. It replaces the substring assertion with exact argv
+  checks and adds a real nested-runner regression under a tsx-named temporary
+  path. The regression fails on the pinned base and with the fix deleted; both
+  restored suites report seven tests and zero failures. Native author preflight
+  passed 28 static checks and 1,544 tests. PR #11477 names this feedback id in
+  its stored body.
+
+
+  Automatic triage should ground this diagnostic against the merged fix and use
+  its existing already-decided path. The original failure above is historical
+  evidence. The separate lifecycle-owner question remains in
+  fb-1791908207465-93d619. This receipt does not claim measured production
+  memory savings.
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
