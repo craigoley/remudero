@@ -63,6 +63,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "n
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
+import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
@@ -16991,6 +16992,8 @@ export interface RunTaskContext {
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
   workerStateSensor: WorkerStateSensor;
+  /** Swaps the whole plan for one of this run's task after the body's last plan read, before the first agent wait. */
+  releasePlan?: () => void;
 }
 
 /**
@@ -17798,6 +17801,8 @@ async function runTask(
      * loads for itself exactly as it always has.
      */
     planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
+    /** A run child's collection at each agent wait, ledgered as {@link RUN_AGENT_WAIT_HEAP_STEP}; absent in-process. */
+    atAgentWait?: () => Promise<AgentWaitHeap>;
     /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
      *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
      *  task the projection already reports merged refuses at zero cost, verdict
@@ -18047,8 +18052,18 @@ async function runTask(
   // adapter's structural boundary proof below.  Ordinary runs keep the existing per-spawn auction.
   const cashContainmentState = { contained: false };
   const cashContainmentBoundary = opts.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
+  // A wait allocates almost nothing, so no GC would take the setup garbage before the kernel swapped it (agent-wait-heap.ts).
+  const observeAgentWait = (): void => {
+    if (!opts.atAgentWait) return;
+    const waitingOn = restartPhase.current;
+    opts.atAgentWait().then(
+      (heap) => log(RUN_AGENT_WAIT_HEAP_STEP, { waiting_on: waitingOn, ...heap }),
+      (error: unknown) => log(RUN_AGENT_WAIT_HEAP_STEP, { waiting_on: waitingOn, error: String((error as Error)?.message ?? error) }),
+    );
+  };
   const spawn: typeof spawnWorker = (requestedSpawnArgs) => {
     noteRestartPhase(restartPhase.current);
+    observeAgentWait();
     // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
     const socketPath = runChildCredentialSocket(opts.gitCredentialSocketPath);
     const spawnArgs = chainAbortSignal(socketPath
@@ -18392,6 +18407,10 @@ async function runTask(
       taskId,
       workerAbandonMs,
       workerStateSensor,
+      releasePlan: () => {
+        plan = { tasks: [task], byId: new Map([[task.id, task]]) };
+        ctx.plan = plan;
+      },
     };
     return await runTaskBody(ctx);
   });
@@ -19206,7 +19225,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     openTaskIds,
     opts,
     owner,
-    plan,
     planPath,
     recordDecisionFn,
     repoRoot,
@@ -19276,7 +19294,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // (lib/retro.ts's aggregateByClass) reads alongside this line's cost/verdict.
     task_class: taskClass,
     mount_class: mountClass,
-    task_shape: dispatchTaskShape({ task, tasks: plan.tasks, ledgerPath, lane: "run-task", reconUnavailableReason: "recon-not-yet-run" }),
+    task_shape: dispatchTaskShape({ task, tasks: ctx.plan.tasks, ledgerPath, lane: "run-task", reconUnavailableReason: "recon-not-yet-run" }),
     provider: mount.provider,
     worker_role: "implementer",
     budget_usd: budgetUsd,
@@ -19979,7 +19997,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T2920: `plan` (loaded a few lines above) already carries every task's `sourcePath`, so
     // this is a `Map.get` rather than the walk-and-reparse-every-shard fallback — the cost this
     // task exists to stop paying once per dispatch prompt.
-    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, plan));
+    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, ctx.plan));
+    ctx.releasePlan?.();
     // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
     // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
     // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
