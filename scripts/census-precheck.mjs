@@ -31,7 +31,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -653,9 +653,14 @@ function runCensusChild(file, args, options) {
   else {
     let custody = "capture retained at";
     try {
-      const path = join(dir, "native.json"), stat = lstatSync(path);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("native receipt is not a regular file");
-      const native = JSON.parse(readFileSync(path, "utf8"));
+      const fd = openSync(join(dir, "native.json"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      let native;
+      try {
+        if (!fstatSync(fd).isFile()) throw new Error("native receipt is not a regular file");
+        native = JSON.parse(readFileSync(fd, "utf8"));
+      } finally {
+        closeSync(fd);
+      }
       if (native.version !== 1 || native.outputComplete !== false || native.status !== result.status ||
           native.signal !== result.signal || !native.finishedAt || native.finishedAt !== result.finishedAt ||
           native.startedAt !== result.startedAt || native.error?.code !== result.error?.code) {

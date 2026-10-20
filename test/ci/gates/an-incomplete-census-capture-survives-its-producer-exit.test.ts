@@ -23,8 +23,26 @@ import {createHash} from "node:crypto";
 const [root,fixture,mode]=process.argv.slice(1);
 const {runCensusSuitesViaChild,censusReaderBudget}=await import(pathToFileURL(join(root,"scripts/census-precheck.mjs")).href);
 const {retainFixture,fixtureRetentionReason}=await import(pathToFileURL(join(root,"test/setup/retained-fixtures.ts")).href);
-const originalMake=fs.mkdtempSync,originalRead=fs.readFileSync,created=[],observed=new Map();
-let faulted=false;
+const originalMake=fs.mkdtempSync,originalRead=fs.readFileSync,originalOpen=fs.openSync,originalStat=fs.fstatSync,originalLstat=fs.lstatSync,created=[],observed=new Map(),receipts=new Map();
+let faulted=false,swapped=false;
+fs.openSync=(path,...args)=>{
+  const fd=originalOpen(path,...args);
+  if(basename(String(path))==="native.json"&&observed.has(dirname(String(path))))receipts.set(fd,String(path));
+  return fd;
+};
+function replaceAfterValidation(path,stat){
+  if(mode==="fault-race"&&!swapped&&path&&basename(String(path))==="native.json"){
+    const row=observed.get(dirname(String(path)));
+    if(row?.native?.outputComplete===false){
+      fs.renameSync(path,path+".closed");
+      fs.writeFileSync(path,JSON.stringify({...row.native,finishedAt:"a replacement receipt"}));
+      swapped=true;
+    }
+  }
+  return stat;
+}
+fs.fstatSync=(fd,...args)=>replaceAfterValidation(receipts.get(fd),originalStat(fd,...args));
+fs.lstatSync=(path,...args)=>replaceAfterValidation(path,originalLstat(path,...args));
 fs.mkdtempSync=(...args)=>{
   const dir=originalMake(...args);
   if(basename(String(dir)).startsWith("rmd-census-capture-")){created.push(String(dir));observed.set(String(dir),{});}
@@ -35,10 +53,11 @@ fs.readFileSync=(path,...args)=>{
   if(row&&basename(String(path))==="stdout")row.stdout=String(bytes);
   if(row&&basename(String(path))==="native.json"&&!row.native){
     row.native=JSON.parse(String(bytes));row.hash=createHash("sha256").update(bytes).digest("hex");
-    if(!row.native.outputComplete&&mode.startsWith("fault-")&&!faulted){
+    if(!row.native.outputComplete&&mode.startsWith("fault-")&&mode!=="fault-race"&&!faulted){
       faulted=true;
       if(mode==="fault-malformed")fs.writeFileSync(path,"{not a native receipt");
       else if(mode==="fault-mismatched")fs.writeFileSync(path,JSON.stringify({...row.native,finishedAt:"a different capture"}));
+      else if(mode==="fault-symlink"){fs.renameSync(path,path+".closed");fs.symlinkSync(path+".closed",path);}
       else {fs.unlinkSync(path);if(mode==="fault-directory")fs.mkdirSync(path);}
     }
   }
@@ -70,7 +89,7 @@ if(mode!=="healthy"){
   assert.ok(closed,"only this fixture's runaway must be fully reaped before evidence is judged");
   if(mode==="explicit")retainFixture(dir,"explicit old API retains this same capture");
 }
-console.log("OBSERVATION:"+JSON.stringify({mode,healthyDir,legacyDir,error,dir,native,nativeHash,closed,faulted,reason:dir?fixtureRetentionReason(dir)??null:null}));
+console.log("OBSERVATION:"+JSON.stringify({mode,healthyDir,legacyDir,error,dir,native,nativeHash,closed,faulted,swapped,reason:dir?fixtureRetentionReason(dir)??null:null}));
 `;
 
 interface Observation {
@@ -83,6 +102,7 @@ interface Observation {
   native: { outputComplete: boolean; finishedAt: string; signal: string | null; error: { code: string } | null } | null;
   closed: boolean;
   faulted: boolean;
+  swapped: boolean;
   reason: string | null;
 }
 
@@ -136,7 +156,7 @@ test("census capture retention preserves healthy cleanup and explicit fixture cu
 });
 
 test("census capture custody failures stay unknown without widening author admission", (t) => {
-  for (const mode of ["fault-missing", "fault-malformed", "fault-directory", "fault-mismatched"]) {
+  for (const mode of ["fault-missing", "fault-malformed", "fault-directory", "fault-mismatched", "fault-symlink"]) {
     const run = producer(t, mode), observation = run.observation;
     assert.equal(observation.faulted, true); assert.equal(observation.native?.outputComplete, false);
     assert.equal(observation.native?.signal, "SIGTERM"); assert.equal(observation.native?.error, null); assert.equal(observation.closed, true);
@@ -145,6 +165,20 @@ test("census capture custody failures stay unknown without widening author admis
     assert.ok(observation.dir && existsSync(observation.dir));
     run.done();
   }
+});
+
+test("census receipt validation reads the opened file when its path is replaced", (t) => {
+  const run = producer(t, "fault-race"), observation = run.observation;
+  assert.equal(observation.swapped, true, "the receipt path must change after file validation");
+  assert.ok(observation.dir);
+  assert.equal(JSON.parse(readFileSync(join(observation.dir, "native.json"), "utf8")).finishedAt, "a replacement receipt");
+  assert.equal(createHash("sha256").update(readFileSync(join(observation.dir, "native.json.closed"))).digest("hex"), observation.nativeHash);
+  assert.match(observation.reason ?? "", /^capture retained at /);
+  assert.doesNotMatch(observation.error ?? "", /capture custody UNKNOWN/);
+  assert.equal(observation.native?.signal, "SIGTERM");
+  assert.equal(observation.native?.outputComplete, false);
+  assert.equal(observation.closed, true);
+  run.done();
 });
 
 test("actual census capture retention forwarding is load-bearing", async (t) => {
