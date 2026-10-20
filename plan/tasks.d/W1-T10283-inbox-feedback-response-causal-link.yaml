@@ -17,6 +17,8 @@
     - src/lib/inbox.ts
     - src/lib/panel-graph.ts
     - src/lib/instance-inbox-proposal.ts
+    - src/lib/instance-inbox-contract.ts
+    - openapi/daemon.yaml
     - src/run-task.ts
     - test/inbox/inbox-feedback-response-causal-link.test.ts
   status: queued
@@ -107,6 +109,14 @@
     completion outcome can cross the real daemon callback, rather than a test-only replacement.
     Retain the existing high-risk span, behavioral acceptance, action gates and single-writer
     coordination with W1-T10272. This is not a risk ruling, release or runtime activation.
+
+    The instance-inbox-contract deliver boundary currently calls the source write handler with
+    the original context, unlike its scoped read path. Include that wrapper to forward only its
+    already-validated repository/instance binding to capture; never trust a client's repository
+    label or recover scope from the account's selected repository. Preserve all existing scope,
+    actor, receipt, snapshot and confirmation refusals. Include openapi/daemon.yaml to document
+    the optional structured input/completion metadata on the existing thread message contract;
+    this does not authorize a new endpoint, permission or operational action.
 
     Recovery preserves the original completed native triage and its W1-T10283 reservation on
     run-TRIAGE-console-inbox-causal-response-20261020-1792527686941. Its first push was refused
