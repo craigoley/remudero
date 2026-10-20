@@ -1,0 +1,74 @@
+- id: W1-T10290
+  title: "SERVE'S READ-MODEL ORACLE CHILD STARTS UNDER THE HEAP GROWTH PERCENT — `oracleChildExecArgv` (PR #13207, merged) gives the per-slice child only its own heap ceiling, never `childHeapPolicyArgs()` (PR #13138); and a one-line call would still hand it [] in serve, because the growth percent is set by `applyDaemonMemoryPolicy`, which only the daemon runs, in a module variable private to the isolate that ran it, while the oracle child is forked from the read-model worker THREAD"
+  repo: remudero
+  depends_on: []  # PR #13207 and PR #13138 are both merged (origin/main faefe0655); neither carries a plan task id
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern, which node flags the oracle child starts with; what the slice reads and answers is unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020c item 1 (2026-10-20); follow-up named in PR #13207's body (logs-8864/c5-pr-body.md, Open PRs)"
+  plan_refs: [W1-T10276, W1-T9106, W1-T9754]
+  files:
+    - src/lib/read-model-worker.ts
+    - src/lib/daemon-memory-policy.ts
+    - src/lib/serve.ts
+    - test/console-api/read-model/the-oracle-child-starts-under-the-heap-growth-policy.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main faefe0655 (symbols, not lines):
+    - src/lib/read-model-worker.ts `oracleChildExecArgv(inherited)` returns the parent's execArgv with any
+      `--max-old-space-size=` replaced by `READ_MODEL_ORACLE_HEAP_MB`. `childOracle` passes it to `forkWorkerEntry`.
+      No heap growth flag is added.
+    - src/lib/daemon-memory-policy.ts `childHeapPolicyArgs()` returns `[--heap-growing-percent=<n>]` only after
+      `applyDaemonMemoryPolicy` set the module variable `childHeapGrowingPercent`. Its only caller is
+      src/cli/commands/daemon.ts. Serve never calls it, so in serve it returns [].
+    - TRAP, the isolate: a module variable lives per isolate. The oracle child is forked from inside the read-model
+      worker thread (`runReadModelWorker` builds `childOracle`), which has its own copy of daemon-memory-policy.ts.
+      Even a serve main thread that set the percent would leave the worker thread's copy unset.
+    - NODE_OPTIONS refuses `--heap-growing-percent`, so the flag must go on the child's own command line.
+    OBSERVED offline (PR #13207 bench, logs-8864/c5-bench/c5-oracle-bench.ndjson, 8 slices of 7.9k-15k rows on 10 real
+    10-19 core rotations): `child_max_rss_bytes` 194-222 MB per child under V8's default growth factor.
+    INFERRED, not measured: PR #13138's offline matrix measured growth 50 trimming a run child's setup high-water from
+    530/514 MB to 467/468 MB; a similar trim is expected on the oracle child's peak. The existing
+    `read_model.oracle_child_exited` row's `child_max_rss_bytes` makes the effect measurable after merge.
+    NOT COVERED ELSEWHERE: W1-T10276 (queued) puts the flag on the pre-open gate and shadow-probe children, both spawned
+    by the daemon or a run child; its design 1 (a process started with the flag passes it on) does not reach serve,
+    which is started without it. Swept origin/main plan/tasks.d and the plan trees of all 15 open PR heads
+    (2026-10-20 21:19Z) for oracleChildExecArgv, childOracle, oracle child and childHeapPolicyArgs: no shard on any head
+    covers the oracle child.
+  design: |
+    1. THE ISOLATE GETS THE FLAGS IN ITS DATA. Serve's main thread computes the children's node flags once and passes
+       them to the read-model worker in its workerData (`ReadModelWorkerData`). The worker hands them to `childOracle`.
+       No module variable is read across an isolate.
+    2. `oracleChildExecArgv(inherited, heapArgs)` appends the heap flags, replacing any `--heap-growing-percent=` the
+       parent carries, the same way it replaces the heap ceiling.
+    3. SERVE SETS ITS CHILDREN'S PERCENT, NOT ITS OWN. daemon-memory-policy.ts gains a call that records the children's
+       growth percent without `setFlagsFromString` on the caller, so serve's own heap is unchanged. Serve calls it at
+       boot with `readDaemonMemoryPolicy(<plan/policy.yaml>)`, the same row the daemon reads. No new constant.
+    4. OPERATOR DECISION (named, not taken): whether serve's per-pass children start under
+       `daemonMemory.heapGrowingPercent` (50 today), or serve stays out of that policy and this shard only adds the
+       plumbing with an empty flag list. The PR states the decision as open, gives the expected peak saving, and
+       ships whichever default the operator rules.
+    5. The `read_model.oracle_child_exited` row gains `node_args`, the flags the child was started with.
+    6. TESTS in test/console-api/read-model/the-oracle-child-starts-under-the-heap-growth-policy.test.ts (computed by
+       `computedTestFolder` from these files; re-run `rmd test-place` on the real file and use what it prints),
+       `test(` titles verbatim as in the proofs. One test forks a real child through `forkWorkerEntry` and reads the
+       flag from the child's own `process.execArgv`.
+  acceptance:
+    - claim: "the oracle child starts with the heap growth flag serve was given, and the exit row names it"
+      proof: "unit test: W1-T10290: the oracle child starts under the heap growth percent and its row names it"
+    - claim: "the flag reaches the read-model worker thread through its data, not a module variable"
+      proof: "unit test: W1-T10290: the read-model worker thread receives the children's heap flags in its data"
+    - claim: "serve records its children's growth percent without changing its own heap flags"
+      proof: "unit test: W1-T10290: serve sets its children's growth percent and leaves its own unchanged"
+  falsifier: |
+    At origin/main faefe0655 `oracleChildExecArgv` adds no growth flag, so the first test fails. Add a one-line
+    `childHeapPolicyArgs()` call inside `oracleChildExecArgv` instead of design 1: in the worker thread it returns [],
+    and the second test fails.
+  note: |
+    EFFECT, measured after merge: every `read_model.oracle_child_exited` row carries `node_args`; compare
+    `child_max_rss_bytes` p50/p90 for an equal window before and after, per serve generation.

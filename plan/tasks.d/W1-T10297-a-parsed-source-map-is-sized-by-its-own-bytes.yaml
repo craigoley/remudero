@@ -1,0 +1,62 @@
+- id: W1-T10297
+  title: "THE SOURCE-MAP HOLDER SIZES EACH PARSED MAP BY ITS OWN BYTES, NOT ONE PER-MODULE AVERAGE — `sourceMapCacheHolder` multiplies the maps parsed by the census's per-module 240,549 B; a bundled main (PR #13218) has ONE linked map, measured at about +145 MiB of heap once parsed, so `daemon.memory` would report ~0.23 MiB for it and under-report by about 145 MiB"
+  repo: remudero
+  depends_on: []  # needs the bundled-daemon-mains PR #13218 (no plan task id) merged first; see dispatch_hold
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern, how one census holder sizes what it counts; it spans the counter, the holder and the calibration script; the count, the row and the filing rule are unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020c item 10 (2026-10-20); 'Not in this PR' in PR #13218's body (logs-8864/bundlemain-pr-body.md)"
+  plan_refs: [W1-T9822, W1-T9091, W1-T9117]
+  files:
+    - src/lib/source-map-count.ts
+    - src/lib/daemon-memory-census.ts
+    - scripts/daemon-heap-census.mts
+    - test/memory/a-parsed-source-map-is-sized-by-its-own-bytes.test.ts
+  status: queued
+  dispatch_hold: true  # hold until the bundled-daemon-mains PR #13218 merges; a person removes this line then (see note)
+  priority: 2
+  attempts: 0
+  rationale: |
+    DEPENDS ON THE BUNDLED-DAEMON-MAINS PR MERGING: PR #13218 (open at filing, `Remudero-Task: PR-13218`, no plan task id)
+    is what starts a daemon from one bundle with one linked map. Under tsx every module has its own small map, which is
+    what the calibration measured. `depends_on` cannot name a PR, so `dispatch_hold` carries it.
+    READ at origin/main faefe0655 (symbols, not lines):
+    - src/lib/daemon-memory-census.ts `sourceMapCacheHolder`: `censusEstimate("source-maps.module", count, table)`,
+      where count is `sourceMapsParsed().parsed` (W1-T9822, src/lib/source-map-count.ts) and the calibration
+      `DAEMON_MEMORY_CALIBRATION["source-maps.module"]` is `per_entry_bytes: 240549` over 587 entries (census
+      27d1f36d8d59, 2026-10-15). Every parsed map is sized at that one figure.
+    - src/lib/source-map-count.ts counts DISTINCT mapped script files, and already calls `findSourceMap(file)` once per
+      new file after the formatter parsed it, so it holds each map's object without parsing anything new.
+    OBSERVED offline (PR #13218's builder, logs-8864/bundlemain-measure*.jsonl, node 24.21.0, n=3): the bundle as
+    shipped holds 43 MiB of heap after load and 188 MiB after one formatted stack, the bundle's one map parsed; so one
+    map is about +145 MiB. Under tsx, 626 module maps parsed took heap from 104 to 250 MiB.
+    INFERRED: on a bundled daemon the holder reads 1 x 240,549 B for a map that holds ~145 MiB, so the census filing
+    rule (`CENSUS_FILING_SHARE`, `CENSUS_FILING_BYTES`) can never see it.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and all 15 open PR heads' plan trees (21:19Z) for
+    sourceMapCacheHolder, source-maps.module and source map: no queued shard re-sizes the holder (W1-T9822 is merged).
+  design: |
+    1. SIZE EACH MAP BY ITS OWN BYTES. When the counter first sees a mapped file, it records that map's own size (the
+       linked map's byte count, or the length of its mappings), and the holder's bytes are the sum over parsed maps of
+       that size times a MEASURED parsed-bytes-per-map-byte ratio.
+    2. THE RATIO IS CALIBRATED, NOT CHOSEN. `scripts/daemon-heap-census.mts --write-calibration` measures it (heap after
+       a map parse against the map's bytes, tsx module maps and a bundle map both) and writes it beside the existing
+       per-module figure. A map with no readable size falls back to the per-module figure and says so in `parts`.
+    3. The row keeps `basis` and `parts`; a new part says how many maps were sized by their own bytes.
+    4. TESTS in test/memory/a-parsed-source-map-is-sized-by-its-own-bytes.test.ts (computed by `computedTestFolder`;
+       re-run `rmd test-place` on the real file), `test(` titles verbatim as in the proofs. One test parses a real
+       multi-megabyte linked map and checks the holder's bytes against the measured heap growth within the census spread.
+  acceptance:
+    - claim: "one large parsed map is sized by its own bytes, not the per-module figure"
+      proof: "unit test: W1-T10297: a single bundle map is sized by its own bytes"
+    - claim: "a map whose size cannot be read falls back to the per-module figure and says so"
+      proof: "unit test: W1-T10297: a map with no readable size falls back to the per-module calibration"
+  falsifier: |
+    At origin/main the holder sizes one parsed multi-megabyte map at 240,549 B, so the first test fails. Size every map
+    by bytes with no fallback and the second test reads a zero for a map it could not size.
+  note: |
+    ORDER: after the bundled-daemon-mains PR (#13218) merges; whoever sees it merge removes `dispatch_hold` in a
+    plan-only PR. EFFECT after merge: on a bundled daemon, `daemon.memory`'s source-map-cache holder against the
+    process's heap growth at its first formatted stack.
