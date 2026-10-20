@@ -225,7 +225,7 @@ test("a worktree whose git dir is gone, a locked worktree, and an oversized untr
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("a refused worktree removal keeps its parent repository", () => {
+test("a refused worktree removal keeps its parent repository and counts each held repository once", () => {
   const fx = setup();
   try {
     const parent = clone(fx, "Remudero/parent");
