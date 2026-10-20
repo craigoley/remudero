@@ -79,7 +79,7 @@ function debit(ctx: TaskFilingHistoryInvocation, resource: keyof FilingHistoryLi
 
 function readHistory(ctx: TaskFilingHistoryInvocation, args: string[], options: HostWorktreeGitOptions = {}): string {
   return ctx.readGit(ctx.root, args, { ...options, encoding: "latin1",
-    env: { GIT_NO_REPLACE_OBJECTS: "1", GIT_OPTIONAL_LOCKS: "0", GIT_GRAFT_FILE: undefined,
+    env: { GIT_NO_REPLACE_OBJECTS: "1", GIT_NO_LAZY_FETCH: "1", GIT_OPTIONAL_LOCKS: "0", GIT_GRAFT_FILE: undefined,
       GIT_SHALLOW_FILE: undefined, GIT_REPLACE_REF_BASE: undefined } });
 }
 
@@ -97,6 +97,11 @@ function metadata(ctx: TaskFilingHistoryInvocation, args: string[], input?: stri
 }
 
 function historyGraph(ctx: TaskFilingHistoryInvocation): Commit[] {
+  // Older Git ignores GIT_NO_LAZY_FETCH. Refuse promisor configuration before any
+  // object read on every version; inspect names only, never credential/remote values.
+  const configNames = metadata(ctx, ["config", "--null", "--name-only", "--list"]).split("\0");
+  if (configNames.some(key => /^remote\.[\s\S]+\.promisor$/.test(key) || key === "extensions.partialclone"))
+    unavailable("promisor repository filing history is unsupported without fetching missing objects");
   const pin = metadata(ctx, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
   if (!OID.test(pin)) unavailable("unreadable filing-history revision");
   ctx.revision = pin;
