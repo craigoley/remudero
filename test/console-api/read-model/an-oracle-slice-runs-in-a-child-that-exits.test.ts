@@ -6,11 +6,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { forkWorkerEntry } from "../../../src/lib/child-entry-argv.js";
-import { fixedClock } from "../../../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../../../src/lib/ledger-projector.js";
-import { readIngestMark } from "../../../src/lib/read-model-consistency.js";
-import { acquireLease } from "../../../src/lib/read-model-db.js";
+import { forkWorkerEntry } from "#src/lib/child-entry-argv.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { readIngestMark } from "#src/lib/read-model-consistency.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
 import {
   childOracle,
   oracleChildExecArgv,
@@ -20,8 +20,8 @@ import {
   runReadModelOracleChild,
   type OracleSliceRequest,
   type OracleSliceResult,
-} from "../../../src/lib/read-model-worker.js";
-import { makeTempDir } from "../../../src/lib/tmp.js";
+} from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 type Row = { step: string; extra: Record<string, unknown> };
