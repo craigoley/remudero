@@ -1,0 +1,53 @@
+- id: W1-T10300
+  title: "THE AUTHOR-PREFLIGHT TESTS FAIL ONLY INSIDE THE RETRO'S CONTAINER RUN — the automated retro's preflight lists 20 failing tests (the name cap) from test/author-preflight.test.ts and test/author-workflow-contract-precheck.test.ts on 10-19 and 10-20, 26 by the coordinator's count, and all 35 pass on the host, in the daemon image with tini as PID 1, and throttled to 0.4 CPU at concurrency 1; find what differs in the daemon's own run"
+  repo: remudero
+  depends_on: [W1-T10298]  # the error text of a container failure is what W1-T10298 keeps; diagnose with it
+  type: diagnose
+  verify: auto
+  risk: low  # an investigation record; no test, gate or image changes in this task
+  priority: 2
+  origin: "coordinator brief file1020c item 13 (2026-10-20); reproductions by the W1-T10144 builder (PR #13226, logs-8864/retro-author-*.log)"
+  plan_refs: [W1-T10144, W1-T10298, W1-T10299]
+  files:
+    - docs/forensics/author-preflight-tests-fail-in-the-retro-container.md
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger (read-only): `retro.preflight_failed` at 2026-10-19T15:49Z and 2026-10-20T06:31Z each list
+    20 `failing_tests`, all titled "author ..." (for example "author deadline admission refuses a too-small real slot
+    budget before starting static work", "author workflow precheck refuses a missing physical contract before heavy
+    admission"); the list stops at `MAX_FAILING_TESTS` (20). The 16:50Z row lists 1. None carries the error text
+    (W1-T10298).
+    OBSERVED, the W1-T10144 builder's runs of the two files on 2026-10-20 (logs-8864/, processes they started):
+    - retro-author-plain.log (host): `# tests 35 # pass 35 # fail 0`;
+    - retro-author-slotted.log (host, a real test slot, --test-concurrency=1): 35/35;
+    - retro-author-image-tini.log (daemon image, tini as PID 1): 35/35;
+    - retro-author-image-throttled.log (daemon image, 0.4 CPU): 35/35;
+    - retro-author-image.log (daemon image WITHOUT tini as PID 1): `# tests 35 # pass 23 # fail 12`, the 12 among the
+      retro's failing titles, with "native calibration failed or incomplete; evidence retained in
+      coverage/rmd-native-runtime-*". This is a lead, not a cause: whether the daemon's retro child runs under an init
+      that reaps its descendants is not yet read.
+    NOT COVERED ELSEWHERE: W1-T10144 (PR #13226) addresses the retro preflight's timeout. Swept origin/main plan/tasks.d
+    and the open PR heads' plan trees for author-preflight.test, author-workflow-contract-precheck and native
+    calibration: only blocked gardener shards from September mention the files.
+  design: |
+    Write docs/forensics/author-preflight-tests-fail-in-the-retro-container.md with these sections (headings verbatim):
+    1. "## Failure text" — the error block of each failing author test from a retro run after W1-T10298 merged (or from a
+       reproduction that matches the retro's environment), quoted with its row's ts.
+    2. "## Environment difference" — what the retro's preflight child runs under in the daemon container that the five
+       reproductions did not: PID 1 and zombie reaping, process tree depth, cgroup and CPU, environment, worktree path
+       (the reproductions printed "not a git repository" for a host worktree mounted in the image), test slot. Each item
+       read from the live container or the code, marked OBSERVED or READ.
+    3. "## Reproduction" — the one change that turns the 35/35 run into the retro's failures, and the run that
+       restores it, on the same sha (a positive control on each side).
+    4. "## Remedy proposal" — the fix as its own task (test, harness or image), never a skip of the tests.
+  acceptance:
+    - claim: "the record quotes each failing author test's error text from the container run"
+      proof: "grep: ## Failure text in docs/forensics/author-preflight-tests-fail-in-the-retro-container.md"
+    - claim: "the record names the environment difference with a reproduction on both sides"
+      proof: "grep: ## Reproduction in docs/forensics/author-preflight-tests-fail-in-the-retro-container.md"
+    - claim: "the record proposes a fix that keeps the tests running"
+      proof: "grep: ## Remedy proposal in docs/forensics/author-preflight-tests-fail-in-the-retro-container.md"
+  falsifier: |
+    At origin/main docs/forensics/author-preflight-tests-fail-in-the-retro-container.md does not exist, so all three
+    grep proofs read 0.

@@ -1,8 +1,9 @@
 /**
  * W1-T9761: a garden child deferred for memory gains priority the longer it waits, so it eventually runs. MEASURED
  * 2026-10-15 02:00-22:01Z: 5,984 garden deferrals against 90 admits, because each re-ask started its wait at zero.
- * Fixture (the design's): an enforced garden policy, a verdict short for unrealized-reservations and psi with 5,000 MiB
- * MemAvailable while one build reservation runs, and an injected clock.
+ * Fixture: an enforced garden policy, a projected-only unrealized-reservations shortfall with 5,000 MiB
+ * MemAvailable while one build reservation runs, healthy PSI, and an injected clock. Separate controls raise PSI
+ * above its bound: the age of a garden never turns that observed pressure into capacity.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -63,13 +64,13 @@ function reading(entries: Array<Partial<ReadingEntry>>): HostMemoryReading {
   };
 }
 
-/** A host under memory pressure (PSI some avg10 20) whose MemAvailable the test moves. */
-function host(state: { availableMib: number }): (path: string) => string {
+/** A measured host whose headroom and PSI the test can vary independently of its projected reservations. */
+function host(state: { availableMib: number; psiSomeAvg10: number }): (path: string) => string {
   return (path) => {
     const table: Record<string, string> = {
       "/proc/meminfo": `MemAvailable: ${state.availableMib * 1024} kB\n`,
       "/proc/vmstat": "pswpin 100\n",
-      "/proc/pressure/memory": "some avg10=20.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+      "/proc/pressure/memory": `some avg10=${state.psiSomeAvg10.toFixed(2)} avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n`,
       "/sys/fs/cgroup/memory.current": `${2000 * MIB}\n`,
       "/sys/fs/cgroup/memory.max": `${12_000 * MIB}\n`,
       "/sys/fs/cgroup/memory.swap.current": "0\n",
@@ -86,12 +87,12 @@ function host(state: { availableMib: number }): (path: string) => string {
 interface World {
   rows: LedgerLine[];
   now: { ms: number };
-  state: { availableMib: number };
+  state: { availableMib: number; psiSomeAvg10: number };
   running: { entries: Array<Partial<ReadingEntry>> };
 }
 
 function world(): World {
-  return { rows: [], now: { ms: NOW }, state: { availableMib: 5000 }, running: { entries: [{ id: "build", workerClass: "implement", estimateMib: BUILD_MIB }] } };
+  return { rows: [], now: { ms: NOW }, state: { availableMib: 5000, psiSomeAvg10: 0 }, running: { entries: [{ id: "build", workerClass: "implement", estimateMib: BUILD_MIB }] } };
 }
 
 function ports(w: World): Partial<AdmissionPorts> {
@@ -107,6 +108,10 @@ function ports(w: World): Partial<AdmissionPorts> {
     daemonPid: () => 777,
     listStateDir: () => [],
     estimate: () => 900,
+    typical: (workerClass) => workerClass === "implement" ? BUILD_MIB : 900,
+    survival: undefined,
+    readHostServe: undefined,
+    writeFile: () => undefined,
     readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
     enforceHere: () => true,
     withLock: (action) => action(),
@@ -152,7 +157,7 @@ test("W1-T9761: a garden deferred for its own pass cadence is admitted on the ag
     w.now.ms += CADENCE_MS / 2;
   }
   const defers = rowsOf(w, ENFORCE_DEFER_STEP, "gate");
-  assert.deepEqual(defers[0]!.reasons, ["psi", "unrealized-reservations"], "the fixture is short for the design's projected reasons");
+  assert.deepEqual(defers[0]!.reasons, ["unrealized-reservations"], "only projected reservations are short; measured pressure is healthy");
   assert.equal(defers.length, 2, "deferred while younger than its cadence");
   const admitted = outcomes.at(-1)!;
   assert.equal(admitted.kind, "admitted");
@@ -164,7 +169,7 @@ test("W1-T9761: a garden deferred for its own pass cadence is admitted on the ag
   assert.equal(row!.deferrals, 2);
   assert.equal(row!.cadence_ms, CADENCE_MS);
   assert.equal(row!.cadence_basis, "measured");
-  assert.deepEqual(row!.overrode, ["psi", "unrealized-reservations"]);
+  assert.deepEqual(row!.overrode, ["unrealized-reservations"]);
   assert.deepEqual(admission.openDeferralStreaks?.(), [], "the admission clears the streak");
 });
 
@@ -244,12 +249,14 @@ test("W1-T9761: only one aged garden child runs at a time", async () => {
 test("W1-T9761: measured headroom below the reserve still defers an aged garden", async () => {
   const w = fresh();
   w.state.availableMib = 1500;
+  w.state.psiSomeAvg10 = 20;
   assert.equal((await ask(w, "backlog")).kind, "deferred");
   w.now.ms += 5 * CADENCE_MS;
   const outcome = await ask(w, "backlog");
   assert.equal(outcome.kind, "deferred", "the memory is short now, not only projected short");
   const row = rowsOf(w, ENFORCE_DEFER_STEP, "backlog")[1]!;
   assert.ok((row.reasons as string[]).includes("memory-available"));
+  assert.ok((row.reasons as string[]).includes("psi"));
   assert.equal(row.aged_blocked, "memory-available");
   assert.equal(row.deferrals, 2);
   assert.equal(rowsOf(w, ENFORCE_ADMIT_STEP, "backlog").length, 0);
@@ -318,5 +325,41 @@ test("W1-T9761: an aged row reports its queueing wait apart from its seeded age"
   assert.equal(row!.seeded_ms, 10 * CADENCE_MS, "seeded_ms is the age the restart seed carried in before that ask");
   assert.equal(row!.deferred_since, new Date(NOW - 10 * CADENCE_MS).toISOString());
   assert.equal(row!.deferrals, 1);
-  assert.deepEqual(row!.reasons, ["psi", "unrealized-reservations"], "the aged row names its verdict's reasons like every admit row");
+  assert.deepEqual(row!.reasons, ["unrealized-reservations"], "the aged row names the projected-only verdict that actually admitted it");
+});
+
+test("an aged garden refuses observed PSI and recovers without losing its deferral streak", async () => {
+  const w = fresh();
+  assert.equal((await ask(w, "pressure-recovery")).kind, "deferred");
+  w.now.ms += CADENCE_MS;
+  w.state.psiSomeAvg10 = 20;
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await ask(w, "pressure-recovery")).kind, "deferred", "elapsed age does not erase observed PSI");
+    assert.equal(rowsOf(w, ENFORCE_DEFER_STEP, "pressure-recovery").at(-1)!.aged_blocked, "psi");
+    assert.equal(rowsOf(w, ENFORCE_ADMIT_STEP, "pressure-recovery").length, 0);
+    assert.equal(w.running.entries.length, 1, "no child reservation was opened under pressure");
+    w.now.ms += CADENCE_MS;
+  }
+  w.state.psiSomeAvg10 = 0;
+  const recovered = await ask(w, "pressure-recovery");
+  assert.equal(recovered.kind === "admitted" && recovered.tier, "aged");
+  const [row] = rowsOf(w, ENFORCE_ADMIT_STEP, "pressure-recovery");
+  assert.equal(row!.deferrals, 4);
+  assert.equal(row!.deferred_since, new Date(NOW).toISOString());
+  assert.deepEqual(row!.overrode, ["unrealized-reservations"]);
+});
+
+test("a restart seed never bypasses observed PSI on an aged garden", async () => {
+  const w = fresh();
+  w.state.psiSomeAvg10 = 20;
+  assert.equal((await ask(w, "restart-pressure", SEEDED(w))).kind, "deferred");
+  assert.equal(rowsOf(w, ENFORCE_DEFER_STEP, "restart-pressure")[0]!.aged_blocked, "unobserved-seed");
+  w.now.ms += 1000;
+  assert.equal((await ask(w, "restart-pressure", { cadenceMs: CADENCE_MS, cadenceBasis: "scheduled" })).kind, "deferred");
+  assert.equal(rowsOf(w, ENFORCE_DEFER_STEP, "restart-pressure")[1]!.aged_blocked, "psi");
+  assert.equal(rowsOf(w, ENFORCE_ADMIT_STEP, "restart-pressure").length, 0);
+  w.state.psiSomeAvg10 = 0;
+  const recovered = await ask(w, "restart-pressure", { cadenceMs: CADENCE_MS, cadenceBasis: "scheduled" });
+  assert.equal(recovered.kind === "admitted" && recovered.tier, "aged");
+  assert.equal(rowsOf(w, ENFORCE_ADMIT_STEP, "restart-pressure")[0]!.deferrals, 2);
 });

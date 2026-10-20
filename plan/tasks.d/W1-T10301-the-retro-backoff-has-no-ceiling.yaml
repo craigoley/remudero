@@ -1,0 +1,51 @@
+- id: W1-T10301
+  title: "THE RETRO BACKOFF'S TIME ARM DOUBLES WITHOUT A CEILING — after 11 failed attempts in one marker cycle the `daemon.retro_trigger.backoff` rows at 18:11Z and 20:10Z on 10-20 say \"eligible again at 2027-07-03\" (6 h x 2^10), while the merges arm reopens it within 25 merges; record which arm has opened each attempt and whether the time arm should be capped, the cap value being an OPERATOR DECISION"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: low  # an investigation record; the backoff, its policy rows and the trigger are unchanged in this task
+  priority: 3
+  origin: "coordinator brief file1020c item 14 (2026-10-20); core ledger rows (read-only)"
+  plan_refs: [W1-T4664, W1-T9119, W1-T10144, W1-T10298, W1-T10299, W1-T10300]
+  files:
+    - docs/forensics/the-retro-backoff-has-no-ceiling.md
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main c89ef695b (symbols, not lines):
+    - src/lib/retro.ts `evaluateRetroBackoff`: delay = `baseDelayMs * 2^(streak - 1)` from the last attempt, "no
+      ceiling" by design (W1-T4664); eligible again when that time passes OR `mergesSinceMarker` reaches the last
+      attempt's count plus `mergesThreshold`. `RetroBackoffPolicy.baseDelayMs` is `RETRO_ATTEMPT_RETRY_MS` (6 h) and
+      `mergesThreshold` is plan/policy.yaml `retro.mergesThreshold` (25).
+    - src/run-task.ts `reportRetroTriggerBackoff` writes the row's reason with both arms.
+    OBSERVED, core ledger (read-only; rotations named 2026-10-20 plus live, newest row 22:00:59Z): 10
+    `daemon.retro_trigger.backoff` rows on 10-20 carry "eligible again at". Streak 9 at 10:42Z and 11:56Z:
+    next_eligible_at 2026-12-23T05:06:06Z, merges_floor 2681 (merges_since_marker 2673, 2674). Streak 11 at
+    18:11:00Z and 20:10:20Z: next_eligible_at 2027-07-03T17:18:40Z, merges_floor 2746 (merges_since_marker 2734,
+    2744). The marker has been 2026-10-06T10:45:50Z throughout.
+    OBSERVED, `retro.start` rows 10-19..20: 05:23Z, 14:36Z, 22:34Z on 10-19; 05:14Z, 15:33Z, 17:29Z, 21:04Z on 10-20.
+    So retros keep starting every few hours, which the 2027 date cannot explain: INFERRED, the merges arm opens them.
+    WHY IT MATTERS: the row's date misleads every reader, and if merges ever slow (a frozen fleet, a holiday) the time
+    arm alone would hold the retro for months.
+    NOT COVERED ELSEWHERE: W1-T9119 (queued) gates the trigger on its own read cost and names a deferral that outlasts
+    the cadence; it does not touch the backoff's time arm. Swept origin/main plan/tasks.d and the open PR heads' plan
+    trees for evaluateRetroBackoff, retro_trigger.backoff and next_eligible_at: no shard.
+  design: |
+    Write docs/forensics/the-retro-backoff-has-no-ceiling.md with these sections (headings verbatim):
+    1. "## Which arm opened each attempt" — every automated retro attempt since W1-T4664 merged, with the streak, the
+       time arm's date, the merges floor and count at that tick, and which arm made it eligible. Name the window and a
+       positive control (the 18:11:00Z row).
+    2. "## What a cap would change" — replay the same attempts under a capped time arm (the cap as a parameter), and
+       state how many more or fewer attempts each candidate cap would have made.
+    3. "## Operator decision" — whether to cap the time arm, and at what value (for example the trigger's own
+       `retro.daysThreshold`, or a fixed number of base delays), with the replay for each answer. No value is chosen here.
+  acceptance:
+    - claim: "the record says which backoff arm opened each automated retro attempt, with a positive control"
+      proof: "grep: ## Which arm opened each attempt in docs/forensics/the-retro-backoff-has-no-ceiling.md"
+    - claim: "the record replays the attempts under candidate caps"
+      proof: "grep: ## What a cap would change in docs/forensics/the-retro-backoff-has-no-ceiling.md"
+    - claim: "the record asks the operator one question about the cap"
+      proof: "grep: ## Operator decision in docs/forensics/the-retro-backoff-has-no-ceiling.md"
+  falsifier: |
+    At origin/main docs/forensics/the-retro-backoff-has-no-ceiling.md does not exist, so all three grep proofs read 0.

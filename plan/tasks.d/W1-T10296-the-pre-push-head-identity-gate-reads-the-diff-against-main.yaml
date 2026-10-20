@@ -1,0 +1,62 @@
+- id: W1-T10296
+  title: "THE PRE-PUSH HEAD-IDENTITY GATE READS THE DIFF AGAINST MAIN — since W1-T9213 (#13011) a filing subject is exempt only when its diff is read and is non-code, but the gate's `main` calls `changedPathsAtHead(worktreePath)` with no base ref, and the hook sets none, so locally (no GITHUB_BASE_REF) the diff is never read and every plan-only filing push prints a false advisory REFUSED; with GITHUB_BASE_REF=main the same gate admits the same head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern, which base the local advisory run reads the diff against; the gate's verdict rule and CI run are unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020c item 7 (2026-10-20); evidence logs-8864/file1020b-push.log, file1020b-push2.log, file1020c-head-identity-repro.txt"
+  plan_refs: [W1-T9213, W1-T3388, W1-T3706, W1-T1004, W1-T4214]
+  files:
+    - scripts/head-identity-gate.mjs
+    - hooks/pre-push
+    - test/ci/gates/the-pre-push-head-identity-gate-reads-the-diff-against-main.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main faefe0655 (symbols, not lines):
+    - scripts/head-identity-gate.mjs `main` passes `changedPaths: changedPathsAtHead(worktreePath)`.
+      `changedPathsAtHead(worktreePath, baseRef, run, env)` resolves `baseRef ?? env.GITHUB_BASE_REF` and returns
+      `undefined` when neither is set. W1-T9213 made a filing subject exempt only when that diff is read and non-code,
+      so `undefined` refuses it ("its diff could not be read or is empty").
+    - hooks/pre-push's W1-T3388 ADVISORY block runs the gate with `--head-ref "$head_ref"` only. Every other precheck
+      in the hook passes `--base origin/main`. GITHUB_BASE_REF is set on a pull_request runner, never on a push.
+    - The W1-T4214 TRANSITION block calls `evaluateHeadIdentityGate` with no `changedPaths` either; the builder checks
+      whether it is affected the same way.
+    OBSERVED:
+    - logs-8864/file1020-push.log, PR #13132's push at 13:37Z on 10-20, BEFORE #13011 merged (15:26:50Z): "OK —
+      filing-shaped subject ... exempt".
+    - logs-8864/file1020b-push.log line 17 (PR #13157's first push, 16:20Z) and file1020b-push2.log line 13 (its second
+      commit): "REFUSED — ... a filing subject alone never identifies a head and its diff could not be read or is
+      empty", then "pre-push: head-identity-gate would REFUSE this head in CI — advisory here".
+    - logs-8864/file1020c-head-identity-repro.txt: the gate at origin/main faefe0655, run by hand on PR #13157's head
+      2d9e122c0, exits 1 (REFUSED) with GITHUB_BASE_REF unset and 0 ("whose entire diff is non-code ... exempt") with
+      GITHUB_BASE_REF=main. Same script, same head, same worktree.
+    WHY IT MATTERS: the advisory exists to name a CI red before CI does. A false REFUSED on every filing teaches the
+    reader to ignore it, which hides the true ones.
+    NOT COVERED ELSEWHERE: W1-T10152 (queued, machine-filed) targets CI fix rounds on head-identity-gate.yml, not the
+    local base; W1-T9376 is a 2026-09 audit. Swept origin/main plan/tasks.d and all 15 open PR heads' plan trees
+    (21:19Z) for changedPathsAtHead and GITHUB_BASE_REF: only merged shards match.
+  design: |
+    1. `main` takes `--base-ref <name>` and passes it to `changedPathsAtHead`; with no flag it keeps today's
+       GITHUB_BASE_REF fallback, so CI is unchanged.
+    2. The hook's advisory block passes the base the other prechecks use (main). The verdict rule (W1-T1004, W1-T9213) is
+       unchanged: a filing whose diff touches code is still refused.
+    3. Check the W1-T4214 TRANSITION block: if it judges a filing head without its diff, pass the same paths; if not,
+       say why in the PR.
+    4. TESTS in test/ci/gates/the-pre-push-head-identity-gate-reads-the-diff-against-main.test.ts (computed by
+       `computedTestFolder`; re-run `rmd test-place` on the real file), `test(` titles verbatim as in the proofs. Build a
+       fixture repo with an origin/main and a plan-only filing commit; run with GITHUB_BASE_REF removed from the env, and
+       set a git identity IN THE FIXTURE.
+  acceptance:
+    - claim: "with no GITHUB_BASE_REF, a plan-only filing head is admitted when the hook passes main as its base"
+      proof: "unit test: W1-T10296: a plan-only filing push is admitted locally without GITHUB_BASE_REF"
+    - claim: "a filing-worded head whose diff touches code is still refused"
+      proof: "unit test: W1-T10296: a filing subject over a code diff is still refused at push"
+  falsifier: |
+    At origin/main the gate run with no GITHUB_BASE_REF refuses the plan-only fixture head (the observed false REFUSED),
+    so the first test fails. Drop the code-diff check to make it pass and the second test fails.

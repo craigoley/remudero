@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 5.00
+  budget_usd: 11.50
   risk: medium  # one concern: the batch approve's teardown is gated on owning the worktree; src/run-task.ts (approveBatchCommand) and one new test
   band_meaning: span
   origin: "operator session 2026-10-13, reviewing W1-T9153 (#11392): the batch lane carries the same pre-add path assignment"
