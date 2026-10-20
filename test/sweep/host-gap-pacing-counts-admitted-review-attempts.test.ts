@@ -4,8 +4,8 @@ import {
   HOST_GAP_REREVIEW_STEP, REFUSED_POST_HOST_GAP_REREVIEW_STEP,
   hostGapProgressInput, hostGapRereviewFacts, hostGapRereviewWaitMs, planHostGapRereview, runSweep,
   type OpenPrView, type SweepDeps,
-} from "@/lib/sweep.js";
-import { reviewOptionFlags, reviewOptionsFromFlags } from "@/run-task.js";
+} from "#src/lib/sweep.js";
+import { reviewOptionFlags, reviewOptionsFromFlags } from "#test/helpers/run-task-test.js";
 
 const MIN = 60_000, NOW = Date.parse("2026-10-19T12:00:00Z");
 const at = (ago: number): string => new Date(NOW - ago * MIN).toISOString();
