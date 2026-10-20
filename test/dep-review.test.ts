@@ -602,7 +602,7 @@ function migrationCaptureRecorder(events: string[], opts: { fail?: boolean } = {
 
 function mutationRecorder(
   events: string[],
-  opts: { failComment?: boolean; failClose?: () => boolean; answer?: unknown[] | "throw" } = {},
+  opts: { failComment?: boolean; failClose?: () => boolean } = {},
 ) {
   const comments: Array<{ prUrl: string; body: string }> = [];
   const closes: Array<{ prUrl: string; comment: string; deleteBranch: false }> = [];
@@ -620,12 +620,6 @@ function mutationRecorder(
         closes.push({ prUrl, comment: closeOpts.comment, deleteBranch: closeOpts.deleteBranch });
         if (opts.failClose?.()) throw new Error("close boom");
       },
-      ...(opts.answer === undefined ? {} : {
-        comments() {
-          if (opts.answer === "throw") throw new Error("comments boom");
-          return opts.answer as never;
-        },
-      }),
     },
   };
 }
@@ -969,26 +963,6 @@ test("depReviewCommand migrate: capture completes before exact Dependabot ignore
   assert.equal(r.ledger.some((l) => String(l.step).startsWith("automerge.")), false);
   assert.equal(r.ledger.some((l) => l.step === "dep-review.migrate.completed"), true);
   rmSync(r.tmp, { recursive: true, force: true });
-});
-
-test("W1-T9994: depReviewCommand migrate ledgers a refused ignore command and still completes", async () => {
-  const refusal = { user: { login: "dependabot[bot]" }, created_at: new Date(Date.now() + 60_000).toISOString(),
-    body: "Sorry, only users with push access can use that command." };
-  const refused = await driveMigrationDepReview({ mutations: mutationRecorder([], { answer: [refusal] }) });
-  const row = refused.ledger.find((l) => l.step === "dep-review.refresh_refused");
-  assert.equal(row?.command, DEPENDABOT_IGNORE_MAJOR_COMMAND);
-  assert.equal(row?.cause, "migrate");
-  assert.equal(row?.reply, refusal.body);
-  assert.equal(refused.ledger.some((l) => l.step === "dep-review.migrate.completed"), true);
-  rmSync(refused.tmp, { recursive: true, force: true });
-  const unread = await driveMigrationDepReview({ mutations: mutationRecorder([], { answer: "throw" }) });
-  assert.equal(unread.ledger.some((l) => l.step === "dep-review.migrate.answer_unread"), true);
-  assert.equal(unread.ledger.some((l) => l.step === "dep-review.refresh_refused"), false);
-  assert.equal(unread.ledger.some((l) => l.step === "dep-review.migrate.completed"), true);
-  rmSync(unread.tmp, { recursive: true, force: true });
-  const quiet = await driveMigrationDepReview({ mutations: mutationRecorder([], { answer: [] }) });
-  assert.equal(quiet.ledger.some((l) => l.step === "dep-review.refresh_refused"), false);
-  rmSync(quiet.tmp, { recursive: true, force: true });
 });
 
 test("depReviewCommand migrate: capture failure leaves the PR open with no outward mutation", async () => {

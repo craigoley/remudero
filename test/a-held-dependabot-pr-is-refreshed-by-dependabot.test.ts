@@ -662,3 +662,49 @@ function rerunCommandFixture(t: TestContext, opts: { mergeStateStatus: string; a
       .filter((r) => r.step === step),
   };
 }
+
+test("W1-T9994: the migrate branch ledgers a refused ignore command and still completes", async (t) => {
+  const run = async (answer: DependabotIssueComment[] | "throw") => {
+    const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9994-migrate-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    const deps: DepReviewDeps = {
+      config: { root, ledger: ledgerPath } as never,
+      clock: clockFromMillisFn(() => NOW),
+      gh: () => ({
+        number: 3654, url: "https://github.com/craigoley/remudero/pull/3654",
+        title: "build(deps-dev): bump @types/node from 22.20.1 to 26.4.0",
+        body: "Bumps [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped/tree/HEAD/types/node) from 22.20.1 to 26.4.0.",
+        headRefOid: HEAD, author: { login: "app/dependabot" }, statusCheckRollup: [{ name: "ci-shard 1", conclusion: "FAILURE" }],
+      }),
+      prDiff: () => "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n",
+      captureMigrationFeedback: (({ id }: { id: string }) => ({ id })) as never,
+      prMutations: {
+        comment: () => {}, close: () => {},
+        comments: () => { if (answer === "throw") throw new Error("comments unavailable"); return answer; },
+      },
+      issues: { create: () => "https://github.com/craigoley/remudero/issues/999", listOpen: () => [], closeWithComment() {} },
+    };
+    const realLog = console.log;
+    console.log = () => {};
+    try {
+      assert.equal(await depReviewCommand("3654", ["--repo", "remudero"], deps), 0);
+    } finally {
+      console.log = realLog;
+    }
+    return readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  };
+  const refusal = { user: { login: "dependabot[bot]" }, created_at: new Date(NOW + 4_000).toISOString(),
+    body: "Sorry, only users with push access can use that command." };
+  const refused = await run([refusal]);
+  const row = refused.find((l) => l.step === "dep-review.refresh_refused");
+  assert.equal(row?.cause, "migrate");
+  assert.equal(row?.command, "@dependabot ignore this major version");
+  assert.equal(row?.reply, refusal.body);
+  assert.equal(refused.some((l) => l.step === "dep-review.migrate.completed"), true);
+  const unread = await run("throw");
+  assert.equal(unread.some((l) => l.step === "dep-review.migrate.answer_unread"), true);
+  assert.equal(unread.some((l) => l.step === "dep-review.refresh_refused"), false);
+  assert.equal(unread.some((l) => l.step === "dep-review.migrate.completed"), true);
+  assert.equal((await run([])).some((l) => l.step === "dep-review.refresh_refused"), false);
+});
