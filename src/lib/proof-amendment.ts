@@ -18,7 +18,7 @@
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -761,9 +761,14 @@ export function saveBuildScopeRecovery(input: {
     if (!safeRecoveryPath(path)) throw new Error(`unsafe recovery path: ${path}`);
     assertRecoveryParents(input.worktreePath, path);
     const fullPath = join(input.worktreePath, path);
-    const stat = lstatSync(fullPath);
-    if (!stat.isFile()) throw new Error(`companion is not a regular file: ${path}`);
-    return { path, bytes: readFileSync(fullPath).toString("base64"), mode: stat.mode & 0o111 ? 0o755 : 0o644 };
+    const fd = openSync(fullPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) throw new Error(`companion is not a regular file: ${path}`);
+      return { path, bytes: readFileSync(fd).toString("base64"), mode: stat.mode & 0o111 ? 0o755 : 0o644 };
+    } finally {
+      closeSync(fd);
+    }
   });
   const data: BuildScopeRecovery = { version: 1, taskId, branch, amendmentUrl, headSha, companions,
     patch: git(["diff", "--binary", `${headSha}^`, headSha]),
