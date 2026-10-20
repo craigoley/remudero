@@ -1,0 +1,175 @@
+- id: W1-T10279
+  title: "EVERY MAC SESSION SHARES ONE 180 S GH READ SLOT — about 20 reads an hour for every Claude session and agent together, so an interactive session waited over 5 min for a slot; read GitHub through one local broker that serves fresh cache hits free, coalesces identical reads, queues interactive callers first and paces from GitHub's own headers, with the deny floor left as a routing backstop"
+  repo: remudero
+  depends_on: [W1-T10271]  # both edit src/lib/github-transport.ts; the broker reuses W1-T10271's caller priority order
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern — how a Mac session's GitHub READS reach GitHub; writes, core's floor (W1-T10271) and the app-token identity (W1-T4085) are unchanged
+  band_meaning: span
+  priority: 1  # operator-2026-10-20: the shared read floor starves interactive sessions and agents on the Mac
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-20: the Mac-wide gh read floor starves sessions and agents; file a local GitHub read broker"
+  plan_refs: [W1-T3275, W1-T3297, W1-T4085, W1-T10271, W1-T999, W1-T1066]
+  files:
+    - src/lib/gh-read-broker.ts
+    - src/lib/github-transport.ts
+    - src/run-task.ts
+    - hooks/deny-floor.sh
+    - deploy/mac/install-gh-read-broker.sh
+    - docs/cli-reference.md
+    - test/github/every-mac-session-reads-github-through-one-broker.test.ts
+  rationale: |
+    READ 2026-10-20 at origin/main fe5ad726b, on the Mac as craigoleyagent.
+    OBSERVED 2026-10-20:
+    - hooks/deny-floor.sh rule 10 (W1-T3275) refuses any read-shaped `gh` call within 180 s of the last allowed one.
+      The stamp is the mtime of ~/.cache/remudero/gh-last-read, shared by every Claude session and agent of the account.
+    - So the whole account gets about 20 reads an hour, whatever the reads are and whoever needs them.
+    - With several sessions active, an interactive session waited more than 5 min without a free slot. Agents
+      repeatedly reported floor refusals and multi-minute waits, and the agent preamble now tells every agent to run a
+      gap check before each read and to leave 360 s between its own reads.
+    - ~/.cache/remudero/gh-last-read-app (W1-T4085's separate app-token stamp) was last touched 10-13, so interactive
+      Mac reads are not riding the app bucket in practice.
+    THE CODE:
+    - hooks/deny-floor.sh rule 10 classifies writes and exempts `gh api rate_limit` and `gh auth status`. A fixed
+      window, a mkdir lock with a 1 s fail-open wait, and a stamp written only on an allowed read. It is a
+      PreToolUse tripwire with "no network" in its header contract.
+    - src/lib/github-transport.ts applies the same 180 s floor to in-process reads (applyGhReadCadence,
+      DEFAULT_GH_READ_CADENCE_S, W1-T3297), with a 32-read burst per invocation and a 1.5 s shared gap.
+    - It already coalesces identical async reads, but only inside one process (asyncReadInFlight,
+      ghArgsAreCoalescibleRead).
+    - It parses x-ratelimit-* headers (parseGhRateLimitHeaders) and backs off on refusals
+      (DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS 60 s, defaultGhRetryAfterSeconds).
+    - Nothing caches a GitHub response across calls. `git grep -i -E 'etag|if-none-match'` over src/ finds only the
+      console's own server-side snapshot cache (src/lib/console-snapshot-cache.ts), which serves ETags; it never sends
+      one to GitHub.
+    WHAT A CACHE CAN AND CANNOT SAVE (W1-T999 rationale 7):
+    - GitHub documents a 304 to a conditional request as free against the PRIMARY limit only. A 304 is still a
+      request, and the secondary limit, which is what fires here, counts requests.
+    - So the secondary saving comes from reads that never go upstream: a hit inside GitHub's own advertised freshness
+      (`Cache-Control: max-age`), and identical reads coalesced across sessions. Conditional revalidation saves the
+      primary budget and bytes.
+    THE PAYOFF IS A HYPOTHESIS, NOT A MEASUREMENT. No log records which Mac reads repeat. Design 7 makes the broker
+    count hits, coalesces, 304s and upstream calls, so the gain is read from the broker, not assumed.
+    OVERLAP SWEEP (plan/tasks.d and open PRs, 2026-10-20):
+    - W1-T10271 (queued): FIFO tickets with operator priority for CORE's gated reads in the core container. That is
+      fairness on the stamp, on Azure. This task replaces the stamp as the Mac's read path, and reuses W1-T10271's
+      priority order. depends_on keeps the two off src/lib/github-transport.ts at the same time.
+    - W1-T3275, W1-T3297 (merged): the floors this task demotes to a backstop on the Mac. They are not changed on Azure.
+    - W1-T4085 (merged): the app-token route. The broker keeps it: a minted installation token is its own bucket,
+      paced on its own signals.
+    - W1-T999 (merged): scoped ETags out of the serve board, for the secondary-limit reason above.
+    - Open PRs: none adds a GitHub read cache, a cross-process coalescer or a broker.
+    THE MAC RUNTIME RULING. The operator ruled on 2026-10-09 that no remudero runtime runs on the Mac. This broker is
+    an account-local helper installed like the Mac janitor (deploy/mac, launchd), not serve, a daemon lane or a worker.
+    The operator asked for it on 2026-10-20. It makes only GitHub READS as that account's own `gh` identity.
+  design: |
+    No fixed bounds. Every number below is an initial guess that the broker adapts from GitHub's own signals, and the
+    status command prints its current value.
+    1. THE BROKER (src/lib/gh-read-broker.ts).
+       - One broker process per Mac account, on a unix socket under ${RMD_GH_CACHE_HOME:-~/.cache}/remudero/gh-broker/,
+         directory mode 0700. It serves only peers with its own uid (check the peer's credentials).
+       - It runs `gh` as the account's own identity, the same token a direct call would use. It never logs or stores
+         an Authorization header or token.
+       - It handles READS only. A write sent to it is refused by name; writes keep going straight to `gh`, unpaced, as
+         today.
+       - State is keyed by the GitHub login the token reads as (one `gh api user` per token, cached). Two Mac accounts
+         reading as the same login each run a broker; sharing one pacer across accounts is out of scope and named in
+         the status output.
+    2. CACHE WITH CONDITIONAL REQUESTS.
+       - `gh api` GET reads run upstream as `gh api -i` and store status, ETag, Last-Modified, Cache-Control and
+         x-ratelimit-* headers beside the body, keyed by (login, host, method, path with query, Accept and preview
+         headers, --paginate/--slurp).
+       - A hit inside the response's own `Cache-Control: max-age` is served with no upstream call.
+       - After that, the next read revalidates with `If-None-Match` (or `If-Modified-Since`). A 304 serves the stored
+         body and refreshes its age.
+       - Porcelain reads (`gh pr view`, `gh pr list`, `gh pr checks`, `gh run view`, `gh run list`, `gh issue view`)
+         are opaque to ETags. They are cached as a unit keyed by (login, resolved repo, argv), fresh for the max-age
+         GitHub advertised on its most recent REST response, and are coalesced.
+       - A completed run's log (`gh run view <id> --log` or `--log-failed`, once the run's status is completed) is
+         immutable and is kept until evicted.
+       - GraphQL query reads (`gh api graphql` with no `mutation`) are coalesced and cached for the same freshness.
+         A mutation is a write.
+       - `--fresh` on a call forces revalidation (conditional where possible) and still coalesces.
+       - Eviction is least-recently-used, sized by the cache's share of free disk measured at each write, never a fixed
+         byte cap.
+    3. COALESCING. Identical keys in flight share one upstream call and every waiter gets the same result, the
+       cross-process form of asyncReadInFlight. A failed upstream call is not cached; each waiter gets the failure.
+    4. FAIR QUEUE.
+       - Each request names a class: `interactive` (an operator's own session), `agent` (a subagent or a worker), or
+         `background`. The order is W1-T10271's: operator callers before agent and daemon callers.
+       - Within a class, callers are served round-robin by caller id (session or agent id), so one caller's burst
+         cannot starve a sibling. Within one caller, order is FIFO.
+       - A queued request reports its position and expected wait on stderr, at most once per change.
+    5. PACING FROM GITHUB'S SIGNALS, per (login, limiter: core, graphql, search, app).
+       - Upstream calls are serial per limiter, as GitHub's best-practice guide asks.
+       - The gap between calls starts at the transport's DEFAULT_GH_PACE_MIN_GAP_MS (1.5 s) as a guess. It widens
+         multiplicatively on each secondary-limit refusal and narrows additively after successful calls.
+       - A `retry-after` header holds that limiter for exactly that long.
+       - A secondary-limit 403 or 429 without `retry-after` holds it with exponential backoff, starting from GitHub's
+         documented "at least one minute" (the transport's DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS).
+       - From x-ratelimit-remaining and x-ratelimit-reset, primary spending is spread over the time left to reset, so
+         the budget is never spent before the reset.
+       - Classification reuses classifyGhLimitFailure, so primary and secondary are told apart the same way core
+         does.
+    6. CLIENTS.
+       - CLI: `rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>` prints exactly what `gh` would
+         print and exits with its exit code. It dispatches before bin/rmd's token refresh and self-sync, so it adds no
+         network call of its own.
+       - `rmd gh-broker serve|status|stop`. status prints queue depth by class, per-limiter gap and hold, and
+         counts of hit-fresh, coalesced, revalidated-304, upstream-200 and refused.
+       - In-process: when the broker's socket is live, github-transport.ts's read entry points (ghExec, ghJson,
+         ghJsonAsync, ghTextAsync, ghLinesAsync) send reads to it (brokerGhRead) instead of applying the 180 s floor.
+         The sync paths spawn the client synchronously, as they spawn `gh` today. With no live broker, every path is
+         unchanged.
+       - deploy/mac/install-gh-read-broker.sh installs a per-account launchd agent that keeps `rmd gh-broker serve`
+         running, in the janitor installer's style. It changes nothing on Azure.
+    7. THE DENY FLOOR BECOMES A ROUTING BACKSTOP (hooks/deny-floor.sh rule 10). The hook stays network-free.
+       - It reads broker liveness from a heartbeat file the broker rewrites on its own advertised interval. Live means
+         younger than twice that interval.
+       - When the broker is live, a raw read-shaped `gh` call is refused with one instruction: re-run it as
+         `rmd gh -- <same args>`. The class is `agent` when the tool call carries a subagent or worker marker, and
+         `interactive` otherwise.
+       - `rmd gh` calls are not floored, because the broker paces them. Rule 7 still refuses a polling loop around
+         `rmd gh`, exactly as around `gh`.
+       - When the broker is not live, rule 10 keeps today's 180 s floor unchanged. That is the fallback, not the
+         primary path.
+       - A `gh` WRITE the hook sees appends (repo, number) to the broker's invalidation file, a local append. The
+         broker drops cached reads for that pull request or issue before serving its next read, so a body edited with
+         `gh pr edit` is never served stale.
+    8. MEASURED, NOT ASSUMED. The broker appends one line per request (class, key hash, outcome, upstream latency,
+       limiter, gap) to a log it rotates by age. `rmd gh-broker status --since <dur>` summarises it. After merge, a Mac
+       session records one day of counts in the PR thread: reads served, upstream calls, the share served without
+       upstream, and the longest interactive wait. No threshold is gated on those numbers.
+    Tests go in test/github/every-mac-session-reads-github-through-one-broker.test.ts (or the folder `rmd test-place`
+    computes), with `test(` titles exactly as in the proofs. Use an injected `gh` executor, clock and socket path in a
+    private temp dir. No real `gh` and no network.
+  acceptance:
+    - claim: "the broker module has production callers in the transport and the CLI"
+      proof: 'grep: brokerGhRead( in src/lib/github-transport.ts'
+    - claim: "the CLI starts the broker server"
+      proof: 'grep: serveGhReadBroker( in src/run-task.ts'
+    - claim: "identical reads from several clients in flight cause one upstream call and every client gets its result"
+      proof: 'grep: test("W1-T10279: identical in-flight reads from several clients share one upstream call" in test/github/every-mac-session-reads-github-through-one-broker.test.ts'
+    - claim: "a read inside the response's max-age makes no upstream call, a stale read revalidates with If-None-Match and a 304 serves the stored body"
+      proof: 'grep: test("W1-T10279: a fresh hit costs no upstream call and a stale one revalidates with If-None-Match" in test/github/every-mac-session-reads-github-through-one-broker.test.ts'
+    - claim: "a queued interactive read is served before earlier agent reads, and agent callers are served round-robin"
+      proof: 'grep: test("W1-T10279: an interactive read goes before queued agent reads and agents take turns" in test/github/every-mac-session-reads-github-through-one-broker.test.ts'
+    - claim: "upstream pacing holds for retry-after, backs off on a secondary-limit 403 without it, spreads primary spending to the reset, and narrows the gap again after successes"
+      proof: 'grep: test("W1-T10279: pacing follows retry-after, x-ratelimit and secondary-limit refusals" in test/github/every-mac-session-reads-github-through-one-broker.test.ts'
+    - claim: "with a live broker the deny floor routes a raw gh read to `rmd gh` and does not floor `rmd gh`; with no live broker it keeps the 180 s floor"
+      proof: 'grep: test("W1-T10279: the deny floor routes raw reads to a live broker and keeps its floor without one" in test/github/every-mac-session-reads-github-through-one-broker.test.ts'
+    - claim: "a gh write seen by the hook invalidates the broker's cached reads for that pull request, and a write sent to the broker is refused"
+      proof: 'grep: test("W1-T10279: a write invalidates cached reads and is never brokered" in test/github/every-mac-session-reads-github-through-one-broker.test.ts'
+  falsifier: |
+    Drop the cross-process in-flight map: three clients reading one key cause three upstream calls, and the first test
+    fails.
+    Ignore max-age and always revalidate: the fresh-hit case makes an upstream call. Send no If-None-Match: the stale
+    case gets a 200 where the fake returns 304 only to a conditional request. Either way the second test fails.
+    Serve FIFO across classes: the interactive read waits behind the agents, and the third test fails.
+    Replace the adaptive pacer with a fixed gap: the retry-after hold and the narrowing after success are not
+    observed, and the fourth test fails.
+    Leave rule 10 flooring every `gh` token: `rmd gh` is refused 180 s after a read, and the fifth test fails.
+    Skip the invalidation append: a read after `gh pr edit` is served from cache, and the sixth test fails.

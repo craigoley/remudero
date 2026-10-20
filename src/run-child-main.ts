@@ -11,6 +11,7 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainThread } from "node:worker_threads";
 
+import { collectAtAgentWait, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { runsBundled } from "./lib/child-entry-argv.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { markRunChildProcessActor } from "./lib/ledger.js";
@@ -60,6 +61,8 @@ export interface RunChildMainPorts {
   env?: NodeJS.ProcessEnv;
   tokenRefresh?: Omit<Parameters<typeof startInstallationTokenRefresh>[0], "env" | "log">;
   startCredentialSocket?: typeof startRunChildGitCredentialSocket;
+  /** The collection at the start of each agent wait; the default is src/lib/agent-wait-heap.ts's. */
+  atAgentWait?: () => Promise<AgentWaitHeap>;
 }
 
 const defaultLoadRunPath = (): Promise<unknown> => import("./run-task.js");
@@ -79,6 +82,31 @@ function readPlanSnapshot(path: string): { tasks: number; list: Task[] } | { err
   }
   const tasks = (parsed as { tasks?: unknown } | null)?.tasks;
   return Array.isArray(tasks) ? { tasks: tasks.length, list: tasks as Task[] } : { error: `plan snapshot ${path} holds no tasks array` };
+}
+
+type PlanSnapshotSeam = (o: { allowStale?: boolean }) => { plan: Plan; staleDispatch: boolean };
+
+/**
+ * The run's plan-snapshot seam, holding the parsed snapshot only until runTask takes it. This entry lives as long as the
+ * run, so a plan it kept would outlive runTask's release of it before the first agent wait. A later ask reads the file
+ * again. The parse happens in this function, so no local of the long-lived caller ever holds the task list.
+ */
+export function planSnapshotHandOver(path: string): { planSnapshot: PlanSnapshotSeam } | { error: string } {
+  const first = readPlanSnapshot(path);
+  if ("error" in first) return first;
+  let handOver: Task[] | undefined = first.list;
+  return {
+    planSnapshot: () => {
+      let list = handOver;
+      handOver = undefined;
+      if (list === undefined) {
+        const reread = readPlanSnapshot(path);
+        if ("error" in reread) throw new Error(reread.error);
+        list = reread.list;
+      }
+      return { plan: { tasks: list, byId: new Map(list.map((task) => [task.id, task])) }, staleDispatch: false };
+    },
+  };
 }
 
 /** Runs the verb; resolves to the process exit code. NEVER rejects: every failure is written to the status first. */
@@ -135,16 +163,15 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     const spec = readSpec(dir);
     if (!spec.ok) throw new Error(`spec unreadable after it was read: ${spec.detail}`);
     const options = spec.value.options;
-    let planSnapshot: ((o: { allowStale?: boolean }) => { plan: Plan; staleDispatch: boolean }) | undefined;
+    let planSnapshot: PlanSnapshotSeam | undefined;
     if (!options.skipGitSync) {
-      const snapshot = readPlanSnapshot(spec.value.planSnapshotPath);
-      if ("error" in snapshot) {
+      const handOver = planSnapshotHandOver(spec.value.planSnapshotPath);
+      if ("error" in handOver) {
         await cleanup();
-        status("failed", "plan", {}, { class: "unknown", reasonClass: "plan_snapshot_unreadable", message: snapshot.error });
+        status("failed", "plan", {}, { class: "unknown", reasonClass: "plan_snapshot_unreadable", message: handOver.error });
         return 1;
       }
-      const plan: Plan = { tasks: snapshot.list, byId: new Map(snapshot.list.map((task) => [task.id, task])) };
-      planSnapshot = () => ({ plan, staleDispatch: false });
+      planSnapshot = handOver.planSnapshot;
     }
     status("starting", "load", {});
     const loaded = await (deps.loadRunPath ?? defaultLoadRunPath)() as { runTask?: RunChildRunTask } | undefined;
@@ -167,6 +194,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
           ...(options.handOffAtPrOpen !== undefined ? { handOffAtPrOpen: options.handOffAtPrOpen } : {}),
           ...(options.pairedTrialHost !== undefined ? { pairedTrialHost: options.pairedTrialHost } : {}),
           ...(planSnapshot ? { planSnapshot } : {}),
+          atAgentWait: deps.atAgentWait ?? (() => collectAtAgentWait()),
           abortSignal: abort.signal,
           onBackgroundWork: (work: Promise<unknown>) => { background.push(work); },
         })) };

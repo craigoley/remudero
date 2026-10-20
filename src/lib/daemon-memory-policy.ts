@@ -149,6 +149,21 @@ export interface DaemonMemoryEntryResult {
   /** Operator ruling 2026-10-19: the malloc tuning the launch set (GLIBC_TUNABLES), so a boot row shows
    *  it took effect. Absent when the launch set none. The node flags are in node_options_before. */
   glibc_tunables?: string;
+  /** The node flags a run child and an automated retro child start with: {@link childHeapPolicyArgs}. */
+  child_node_args?: string[];
+}
+
+/** The growth percent this process's run and retro children start with; set by {@link applyDaemonMemoryPolicy}. */
+let childHeapGrowingPercent: number | undefined;
+
+/**
+ * The node flags that start a run child or an automated retro child under the daemon's growth percent. NODE_OPTIONS
+ * refuses `--heap-growing-percent`, so before this a child grew at V8's default factor: OBSERVED 2026-10-19, a run child
+ * peaked at 915 MB and an automated retro child at 1.58 GB, then held 565 MB and 687 MB in swap while idle. The flag
+ * goes on the child's own command line. Empty in a process that never applied the policy.
+ */
+export function childHeapPolicyArgs(): string[] {
+  return childHeapGrowingPercent === undefined ? [] : [heapGrowingFlag(childHeapGrowingPercent)];
 }
 
 /** Daemon entry: set the growth factor and take the heap ceiling out of the inherited NODE_OPTIONS. This
@@ -160,8 +175,10 @@ export function applyDaemonMemoryPolicy(policy: DaemonMemoryPolicy, io: DaemonMe
   const after = withoutHeapCeiling(before);
   if (after === undefined) delete env.NODE_OPTIONS;
   else env.NODE_OPTIONS = after;
+  childHeapGrowingPercent = policy.heapGrowingPercent;
   return {
     heap_growing_percent: Math.round(policy.heapGrowingPercent),
+    child_node_args: childHeapPolicyArgs(),
     ...(before !== undefined ? { node_options_before: before } : {}),
     ...(after !== undefined ? { node_options_children: after } : {}),
     ...(env.GLIBC_TUNABLES !== undefined ? { glibc_tunables: env.GLIBC_TUNABLES } : {}),

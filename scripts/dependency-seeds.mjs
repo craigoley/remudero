@@ -8,7 +8,7 @@ import { registerHooks } from 'node:module';
 registerHooks({ resolve(specifier, context, next) {
   return next(specifier === './clock.js' && context.parentURL?.endsWith('/dependency-seeds.ts') ? './clock.ts' : specifier, context);
 } });
-const { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, materializeDependencySeed, sweepDependencySeeds } = await import('../src/lib/dependency-seeds.ts');
+const { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, materializeDependencySeed, observeDependencySeedReuse, sweepDependencySeeds } = await import('../src/lib/dependency-seeds.ts');
 
 export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync) {
   // User lsof cannot rule out other accounts; seed pruning requires an administrator view.
@@ -32,9 +32,12 @@ export function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify({ config: file, root }));
   } else if (command === 'prime' && checkout) {
     console.log(JSON.stringify(materializeDependencySeed(checkout, { root, sourceDir: flag('--source'), proof: args.includes('--proof') })));
+  } else if (command === 'report') {
+    if (args.includes('--apply')) throw new Error('report is read-only; --apply is not accepted');
+    console.log(JSON.stringify(observeDependencySeedReuse(root), null, 2));
   } else if (command === 'sweep') {
     console.log(JSON.stringify(sweepDependencySeeds(root, { apply: args.includes('--apply'), isOpen: seedIsOpen }), null, 2));
-  } else throw new Error('usage: dependency-seeds.mjs enable [--root PATH] | prime CHECKOUT [--source DONOR] [--proof] [--root PATH] | sweep [--root PATH] [--apply]');
+  } else throw new Error('usage: dependency-seeds.mjs enable [--root PATH] | prime CHECKOUT [--source DONOR] [--proof] [--root PATH] | report [--root PATH] | sweep [--root PATH] [--apply]');
     return 0;
   } catch (error) { console.error(`dependency-seeds: ${error.message}`); return 1; }
 }
