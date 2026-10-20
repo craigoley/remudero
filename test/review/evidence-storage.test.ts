@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync,
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync,
   readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -62,7 +62,9 @@ test('evidence policy refuses public, linked, oversized or escaping configuratio
   const policy = { schema: 'rmd-evidence-storage/v1', enabled: true, roots: [join(dir, 'closed')] };
   writeFileSync(path, JSON.stringify(policy), { mode: 0o600 });
   assert.equal(evidenceStorageConfig(dir).enabled, true);
-  chmodSync(path, 0o644); assert.throws(() => evidenceStorageConfig(dir), /private-json/); chmodSync(path, 0o600);
+  rmSync(path); writeFileSync(path, JSON.stringify(policy), { mode: 0o644 });
+  assert.throws(() => evidenceStorageConfig(dir), /private-json/);
+  rmSync(path); writeFileSync(path, JSON.stringify(policy), { mode: 0o600 });
   writeFileSync(path, JSON.stringify({ ...policy, roots: ['/outside'] })); assert.throws(() => evidenceStorageConfig(dir), /evidence-policy/);
   writeFileSync(path, ' '.repeat(16385)); assert.throws(() => evidenceStorageConfig(dir), /private-json/);
   rmSync(path); symlinkSync('/not/a/readable/credential', path); assert.throws(() => evidenceStorageConfig(dir));

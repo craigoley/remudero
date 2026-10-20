@@ -30,7 +30,9 @@ function privateParents(file) {
   if (resolve(file) !== file) throw Error('noncanonical-path');
   for (let p = dirname(file); p !== '/'; p = dirname(p)) {
     const s = lstatSync(p);
-    if (!s.isDirectory() || s.isSymbolicLink() || (s.mode & 0o022)) throw Error('unsafe-parent');
+    // A shared sticky directory (/tmp) owned by root or us cannot let another user rename or unlink our entries.
+    const sticky = (s.mode & 0o1000) !== 0 && (s.uid === 0 || s.uid === process.getuid());
+    if (!s.isDirectory() || s.isSymbolicLink() || ((s.mode & 0o022) && !sticky)) throw Error('unsafe-parent');
   }
 }
 function noOtherOpenFiles(file) {
