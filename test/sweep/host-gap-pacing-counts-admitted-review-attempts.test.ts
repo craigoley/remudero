@@ -107,6 +107,12 @@ test("host-gap history separates changed inputs and incomplete legacy evidence",
   assert.equal(hostGapRereviewFacts({ ...pr(), reviewInputDigest: "v2:different-input" }, rows).history.length, 0);
   assert.deepEqual(hostGapRereviewFacts(pr(), [...rows].reverse()), hostGapRereviewFacts(pr(), rows),
     "request append order is not attempt attribution");
+  const unreadableInput = hostGapRereviewFacts({ ...pr(), reviewInputDigest: undefined }, rows);
+  assert.equal(unreadableInput.attribution.state, "incomplete");
+  assert.equal(unreadableInput.attribution.currentInputKnown, false);
+  const ambiguousAdmission = hostGapRereviewFacts(pr(), [admitted(1, 20, true), admitted(1, 19, true), posted(1, 15)]);
+  assert.equal(ambiguousAdmission.history.length, 0, "a reused nonce with contradictory admission dates is unknown");
+  assert.equal(ambiguousAdmission.attribution.state, "incomplete");
   const legacy = hostGapRereviewFacts(pr(), [request(20), { ...admitted(1, 19, true), review_attempt_id: undefined }, posted(1, 15)]);
   assert.equal(legacy.history.length, 0);
   assert.equal((legacy as unknown as { attribution: { state: string } }).attribution.state, "incomplete");
@@ -115,6 +121,10 @@ test("host-gap history separates changed inputs and incomplete legacy evidence",
   assert.equal(input.rounds.filter(r => r.completed).length, 0);
   assert.equal(input.signals.noOpRounds, 0);
   assert.equal(input.signals.incompleteRounds, 1);
+  const baselineInFlight = hostGapRereviewFacts(pr(), [admitted(0, 20, false)]);
+  assert.equal(baselineInFlight.history.length, 0, "an initial review is never a host-gap re-review");
+  assert.equal(baselineInFlight.attribution.state, "incomplete");
+  assert.equal(baselineInFlight.attribution.incompleteAttempts, 1);
 
   const refused = { ...posted(1, 15), step: "review.post_refused", review_attempt_id: undefined,
     reviewer_code_host_gap: "cwd-missing" };

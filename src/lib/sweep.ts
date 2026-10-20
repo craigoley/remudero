@@ -426,6 +426,7 @@ export function isHostGapCriterion(
 export interface HostGapRereview { atMs: number; skips: readonly string[]; attemptId?: string; completed?: boolean }
 export interface HostGapAttribution {
   state: "complete" | "incomplete";
+  currentInputKnown: boolean;
   unattributedRequests: number;
   incompleteAttempts: number;
   unboundAdmissions: number;
@@ -12769,7 +12770,7 @@ export function hostGapRereviewFacts(
   pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha" | "reviewInputDigest">,
   lines: ReadonlyArray<Record<string, unknown>>,
 ): { history: HostGapRereview[]; lastReviewAtMs?: number; observedReviewMs?: number; attribution: HostGapAttribution } {
-  const attribution: HostGapAttribution = { state: "complete", unattributedRequests: 0, incompleteAttempts: 0,
+  const attribution: HostGapAttribution = { state: "complete", currentInputKnown: Boolean(pr.reviewInputDigest), unattributedRequests: 0, incompleteAttempts: 0,
     unboundAdmissions: 0, unboundTerminals: 0 };
   if (!pr.reviewInputDigest) return { history: [], attribution: { ...attribution, state: "incomplete" } };
   const idPattern = new RegExp(`^review-PR${pr.prNumber}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, "i");
@@ -12821,7 +12822,7 @@ export function hostGapRereviewFacts(
   }
   history.sort((a, b) => a.atMs - b.atMs || a.attemptId!.localeCompare(b.attemptId!));
   attribution.unattributedRequests = history.length === 0 ? requests : 0;
-  attribution.incompleteAttempts = history.filter(row => row.completed === false).length;
+  attribution.incompleteAttempts = [...admissions.keys()].filter(id => !terminals.has(id)).length;
   if (attribution.unattributedRequests + attribution.incompleteAttempts + attribution.unboundAdmissions + attribution.unboundTerminals > 0)
     attribution.state = "incomplete";
   return { history, lastReviewAtMs, observedReviewMs, attribution };
