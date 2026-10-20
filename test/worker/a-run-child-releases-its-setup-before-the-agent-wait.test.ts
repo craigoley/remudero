@@ -20,6 +20,7 @@ import type { ProbeExecResult } from "#src/lib/containment.js";
 import { applyDaemonMemoryPolicy, DEFAULT_DAEMON_MEMORY_POLICY } from "#src/lib/daemon-memory-policy.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { Plan } from "#src/lib/plan.js";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { runAutomatedRetroSubprocess } from "#src/lib/retro-subprocess.js";
 import { RUN_CHILD_SPAWNED_STEP, spawnRunChild, writePlanSnapshot, type SpawnRunChildPorts } from "#src/lib/run-child.js";
@@ -107,7 +108,7 @@ async function runToFirstAgentWait(
       ...options,
       config: fx.config, github: OFFLINE_GITHUB, containmentExec, isolationExec,
       planSnapshot: (o: { allowStale?: boolean }) => {
-        const synced = (options.planSnapshot as (o: { allowStale?: boolean }) => { plan: object; staleDispatch: boolean })(o);
+        const synced = (options.planSnapshot as (o: { allowStale?: boolean }) => { plan: Plan; staleDispatch: boolean })(o);
         planRef = new WeakRef(synced.plan);
         return synced;
       },
@@ -195,7 +196,7 @@ test("a run child and an automated retro child start under the daemon's heap gro
     plan: async () => ({ plan: { tasks: [TASK] } }), log: (step, extra) => { rows.push({ step, ...extra }); },
   }, ports);
   assert.ok(launched.started, JSON.stringify(launched));
-  launched.detach();
+  launched.detach?.();
   launched.settled.catch(() => {});
   assert.equal(argv[0], "--heap-growing-percent=50", `the run child's node flags lead its argv: ${JSON.stringify(argv)}`);
   assert.deepEqual(rows.find((row) => row.step === RUN_CHILD_SPAWNED_STEP)?.node_args, ["--heap-growing-percent=50"]);

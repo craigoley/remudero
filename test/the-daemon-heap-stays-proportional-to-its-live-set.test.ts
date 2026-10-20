@@ -107,6 +107,7 @@ test("operator ruling 2026-10-19: the memory policy row names the malloc tuning,
   assert.equal(env.NODE_OPTIONS, "--max-semi-space-size=16", "only the heap ceiling leaves the children's NODE_OPTIONS");
   assert.deepEqual(result, {
     heap_growing_percent: DEFAULT_DAEMON_MEMORY_POLICY.heapGrowingPercent,
+    child_node_args: [`--heap-growing-percent=${DEFAULT_DAEMON_MEMORY_POLICY.heapGrowingPercent}`],
     node_options_before: "--max-old-space-size=8192 --max-semi-space-size=16",
     node_options_children: "--max-semi-space-size=16",
     glibc_tunables: "glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072",
