@@ -33,3 +33,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The filing groups hand repairs by filename but supplies no shared failure mechanism or per-PR diagnosis; the finding that one preventable cause explains these rounds cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test title; it does not establish that fix-round dispatch is prevented or self-healed.; on the change's description/files alone, no diff was read — The cited repair times are explicitly median proxies, and the supplied evidence lists five distinct PR references against a claim of six affected PRs."
+    judged_at: "2026-10-20T07:57:55.393Z"
+    pin: "a62347ca39c16b7450a6621f252574654fdf1566d168a483e61e873d6ad6d855"

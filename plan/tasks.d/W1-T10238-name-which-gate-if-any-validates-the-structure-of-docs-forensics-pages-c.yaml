@@ -6,7 +6,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=82e8a110572ed127
   attempts: 0
   files:
     - docs/forensics/README.md
