@@ -12578,7 +12578,8 @@ function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined
 }
 
 /** W1-T7837: the ledger step that records one host-gap re-review request. {@link priorActionsFromLedger}
- *  reads it to release the delivered-review key, and {@link hostGapRereviewFacts} to pace the next. */
+ *  reads it to release the delivered-review key; {@link hostGapRereviewFacts} reports unattributed
+ *  demand but derives pacing only from admitted attempts and their terminals. */
 export const HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
 
 /** W1-T7850: the ledger step that records one re-review of a verdict whose POST was refused because its reviewer
