@@ -110,9 +110,9 @@ export const READ_MODEL_PASS_SHARE = 0.5;
 /** BACKSTOP: the oracle's heap, thread or child; a slice that outgrows it kills that runner, never serve. */
 export const READ_MODEL_ORACLE_HEAP_MB = 1_024;
 const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
-/** C5: the argument that makes this module, started as a process, run one oracle slice and exit. */
+/** C5 (#13207): the argument that makes this module, started as a process, run one oracle slice and exit. */
 const READ_MODEL_ORACLE_CHILD_ARG = "--remudero-read-model-oracle-child";
-/** C5: written as each oracle child exits: what it cost to start, and its peak resident size, all returned by its exit. */
+/** C5 (#13207): written as each oracle child exits: what it cost to start, and its peak resident size, all returned by its exit. */
 export const READ_MODEL_ORACLE_CHILD_STEP = "read_model.oracle_child_exited";
 /**
  * The share of each pass kept for view bodies, and of worker time they may take: a view that cost

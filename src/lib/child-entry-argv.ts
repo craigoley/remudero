@@ -222,7 +222,7 @@ export interface WorkerEntryFork {
 }
 
 /**
- * C5: start a module's worker entry as a SHORT-LIVED CHILD PROCESS rather than a thread, so everything its work
+ * C5 (#13207): start a module's worker entry as a SHORT-LIVED CHILD PROCESS rather than a thread, so everything its work
  * allocated returns to the OS when it exits; a thread that exits leaves much of its peak in the parent's allocator.
  * The entry is the one {@link startWorker} would start, by the same per-module decision, so a child is a bundle
  * exactly when that module's threads are. A bundle child that exits non-zero before its first message demotes the
