@@ -181,3 +181,22 @@ test("default review bridges and the real refusal logger preserve admitted attem
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("an admitted review throw records its own terminal without borrowing the daemon run", async () => {
+  const rows = baseline();
+  const deps: SweepDeps = { ledgerPath: "/unused/host-gap-attempt-throw", runId: "one-daemon-run", now: () => NOW,
+    readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: at(0), ...row }); },
+    postReview: async () => { throw Error("fixture reviewer transport failed after admission"); },
+    dispatchFix: () => { throw Error("a host gap must not dispatch body repair"); },
+    arm: () => { throw Error("a capped host gap must not arm"); }, close: () => {}, escalate: () => {},
+  };
+  const result = await runSweep([pr()], deps);
+  assert.equal(result.actions[0]?.acted, false, "the real catch still records failure, not a successful review");
+  const admission = rows.find(r => r.step === "sweep.review_admitted" && r.host_gap_rereview === true);
+  const terminal = rows.findLast(r => r.step === "review.post_refused");
+  assert.equal(terminal?.review_attempt_id, admission?.review_attempt_id);
+  assert.match(String(terminal?.reason), /fixture reviewer transport failed after admission/);
+  const facts = hostGapRereviewFacts(pr(), rows);
+  assert.equal(facts.history.length, 1);
+  assert.equal(facts.history[0]?.completed, true, "a witnessed terminal attempt is work, unlike a denied demand");
+});
