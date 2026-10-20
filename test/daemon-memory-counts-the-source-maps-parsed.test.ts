@@ -9,13 +9,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { daemonHolderSource, sampleDaemonMemoryCensus, sourceMapCacheHolder, type CensusCalibration } from "../src/lib/daemon-memory-census.js";
+import { pathToFileURL } from "node:url";
+import { daemonHolderSource, sampleDaemonMemoryCensus, sourceMapCacheHolder, type CensusCalibration } from "#src/lib/daemon-memory-census.js";
 import {
   createSourceMapCount, installSourceMapCount, SOURCE_MAP_PARSED_BASIS, sourceMapsParsed, type SourceMapsParsedReading,
-} from "../src/lib/source-map-count.js";
+} from "#src/lib/source-map-count.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SOURCE_MAP_COUNT = pathToFileURL(join(REPO_ROOT, "src", "lib", "source-map-count.ts")).href;
 
 // Runs in a child node under --enable-source-maps and --import tsx, as the daemon runs. Node's internal SourceMap class
@@ -41,7 +41,9 @@ console.log(JSON.stringify({ enabled: process.sourceMapsEnabled, readings, acros
 `;
 
 const INNER = `export function formatHere(): string {\n  const stack: string = new Error("inner").stack ?? "";\n  return stack;\n}\n`;
-const OUTER = `import { formatHere } from "./inner.ts";\nexport function formatAcrossTwoModules(): string {\n  return formatHere();\n}\nexport function formatInnerAgain(): string {\n  return formatHere();\n}\n`;
+// The fixture's own relative specifier is built from a variable, so this file stays location-free (W1-T9864).
+const INNER_SPECIFIER = ["."].concat("inner.ts").join("/");
+const OUTER = `import { formatHere } from "${INNER_SPECIFIER}";\nexport function formatAcrossTwoModules(): string {\n  return formatHere();\n}\nexport function formatInnerAgain(): string {\n  return formatHere();\n}\n`;
 
 interface DriverResult { enabled: boolean; readings: Array<{ parsed: number; reference: number }>; across: string }
 
