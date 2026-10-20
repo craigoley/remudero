@@ -4,9 +4,9 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { materializeDependencySeed, observeDependencySeedReuse } from '../../src/lib/dependency-seeds.js';
+import { materializeDependencySeed, observeDependencySeedReuse } from '#src/lib/dependency-seeds.js';
 // @ts-expect-error -- the standalone CLI has no declaration file.
-import { main } from '../../scripts/dependency-seeds.mjs';
+import { main } from '#scripts/dependency-seeds.mjs';
 
 function fixture(t: TestContext): { root: string; checkout: (name: string) => string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'rmd-provision-observation-')));
