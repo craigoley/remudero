@@ -14,7 +14,7 @@
     - src/lib/status.ts
     - src/lib/sweep.ts
     - test/a-restarted-daemon-credit-scan-reads-digests-not-archives.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

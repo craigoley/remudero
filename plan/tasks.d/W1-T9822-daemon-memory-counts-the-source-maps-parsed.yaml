@@ -14,7 +14,7 @@
     - src/lib/daemon-memory-census.ts
     - src/lib/source-map-count.ts
     - test/daemon-memory-counts-the-source-maps-parsed.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

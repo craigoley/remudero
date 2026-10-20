@@ -12,6 +12,7 @@ import { parseTasksFromYaml } from '#src/lib/plan.js';
 import { taskRulingPin } from '#src/lib/task-linter.js';
 import { recordFilingRiskRuling } from '#src/lib/risk-judge.js';
 import { stringify } from 'yaml';
+import { INSTRUMENT_SURFACE } from '#src/lib/review.js';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), producerSha = 'c'.repeat(40);
 const repository = 'fixture-owner/remudero';
@@ -19,6 +20,13 @@ const credit = { source: 'trailer', prUrl: 'https://github.com/fixture-owner/rem
 const observation = () => ({ schema: CI_DEPENDENCY_EVIDENCE_SCHEMA, complete: true,
   repository, head, base, producerSha, runId: '123', attempt: '2', producerJob: 'commitlint',
   observedAtMs: 1000, taskIds: ['ZZ-T1'], credits: { 'ZZ-T1': { trailer: credit } }, overrides: [] });
+
+test('CI dependency receipt: producer and subtractive rulings remain review instruments', () => {
+  const instruments = new RegExp(INSTRUMENT_SURFACE.join('|'));
+  assert.equal(instruments.test('scripts/lib/ci-dependency-evidence.mjs'), true);
+  assert.equal(instruments.test('plan/credit-overrides.yaml'), true);
+  assert.equal(instruments.test('plan/credit-overrides.yaml.extra'), false);
+});
 
 function fixture(t: Parameters<typeof ownedFixtureDir>[0]) {
   const root = ownedFixtureDir(t, 'ci-dependency-receipt').dir;

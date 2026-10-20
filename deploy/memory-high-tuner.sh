@@ -49,7 +49,7 @@ memory_high_pressure_tier() {
   MH_TIER=0 MH_TIER_WHY="calm: MemAvailable ${avail} MiB is over two ${reserve} MiB host reserves"
   [ "${avail}" -lt $((2 * reserve)) ] || return 0
   if [ "${MH_SWAPIN_RATE:-0}" -gt 0 ] && [ "${MH_SWAPIN_RATE:-0}" -gt "${MH_PREV_SWAPIN_RATE:-0}" ]; then
-    corroborated=$((corroborated + 1)); why="${why}, swap-in rising (${MH_PREV_SWAPIN_RATE:-0} -> ${MH_SWAPIN_RATE} KiB/s)"
+    corroborated=$((corroborated + 1)); why="${why}, swap-in rising (${MH_PREV_SWAPIN_RATE:-0} -> ${MH_SWAPIN_RATE} KiB/s, pswpin+zswpin; ${MH_SWAPIN_ZSWAP_BASIS:-zswpin})"
   fi
   if [ "${MH_PSI_FULL10:-0}" -gt 0 ]; then
     corroborated=$((corroborated + 1)); why="${why}, PSI memory full avg10 ${MH_PSI_FULL10}/100 %"
@@ -247,7 +247,7 @@ memory_high_tune() {
     esac
   done
   [ -n "${container}" ] && [ -n "${state_root}" ] || { echo "memory-high-tuner: --container and --state-dir are required" >&2; return 2; }
-  local state="${state_root}/state" id cg unit now high_b max_b events refault pswpin stall psi_full avail
+  local state="${state_root}/state" id cg unit now high_b max_b events refault pswpin zswpin stall psi_full avail
   local sample prev v pts pid pev prf psw pst prate rate interval x
   # shellcheck disable=SC2034 # read by resource-policy.sh's resource_policy_tuned_file
   STATE_DIR="${state_root}"
@@ -264,7 +264,12 @@ memory_high_tune() {
   max_b="$(cat "${cg}/memory.max" 2>/dev/null)"
   events="$(mht_stat high "${cg}/memory.events")"
   refault="$(mht_stat workingset_refault_file "${cg}/memory.stat")"
+  # OPERATOR RULING 2026-10-19 (4): a swap-in served from zswap's pool counts in zswpin, never pswpin; the counter
+  # is their sum. A kernel without zswap has no zswpin line: 0, and the reason names it.
   pswpin="$(mht_stat pswpin "${RMD_VMSTAT_PATH}")"
+  zswpin="$(mht_stat zswpin "${RMD_VMSTAT_PATH}")" && MH_SWAPIN_ZSWAP_BASIS="zswpin" ||
+    { zswpin=0; MH_SWAPIN_ZSWAP_BASIS="no zswpin line (zswap not compiled in): 0"; }
+  case "${pswpin}" in ''|*[!0-9]*) ;; *) case "${zswpin}" in ''|*[!0-9]*) pswpin="" ;; *) pswpin=$((pswpin + zswpin)) ;; esac ;; esac
   stall="$(awk '$1 ~ /^allocstall_/ { s += $2; found = 1 } END { if (found) print s; exit found ? 0 : 1 }' "${RMD_VMSTAT_PATH}" 2>/dev/null)"
   psi_full="$(awk '$1 == "full" { for (i = 2; i <= NF; i++) if ($i ~ /^avg10=/) { split($i, a, "="); printf "%d", a[2] * 100 } }' "${RMD_HOST_PSI_MEMORY_PATH}" 2>/dev/null)"
   avail="$(mht_meminfo_mib MemAvailable)"
