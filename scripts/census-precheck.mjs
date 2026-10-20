@@ -644,12 +644,62 @@ export function censusReaderBudget(measurement, context, policy, nowMs, margin =
   return Math.min(budgetMs, CENSUS_SUITE_CHILD_TIME_BOUND_MS);
 }
 
+const CENSUS_CAPTURE_DISPOSITION = Symbol("census capture disposition");
+
+function completeCensusCapture(dir, owner, result) {
+  const names = ["stdout", "stderr", "native.json"];
+  let pins, pinError;
+  try { pins = names.map((name) => lstatSync(join(dir, name))); }
+  catch (error) { pinError = error; }
+  return (accepted, reason) => {
+    try {
+      if (pinError) throw pinError;
+      const current = lstatSync(dir);
+      if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== owner.dev ||
+          current.ino !== owner.ino || current.uid !== owner.uid) throw new Error("capture directory ownership changed");
+      const bytes = names.map((name, index) => {
+        const path = join(dir, name), pin = pins[index];
+        const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const opened = fstatSync(fd), linked = lstatSync(path);
+          if (!opened.isFile() || !pin.isFile() || linked.isSymbolicLink() ||
+              [opened, linked].some((stat) => ["dev", "ino", "uid", "size", "mtimeMs", "ctimeMs"].some((key) => stat[key] !== pin[key]))) {
+            throw new Error(`capture ${name} was replaced or changed`);
+          }
+          return readFileSync(fd, "utf8");
+        } finally { closeSync(fd); }
+      });
+      const native = JSON.parse(bytes[2]);
+      if (bytes[0] !== result.stdout || bytes[1] !== result.stderr || native.version !== 1 ||
+          native.outputComplete !== true || native.status !== result.status || native.signal !== result.signal ||
+          !native.finishedAt || native.finishedAt !== result.finishedAt || native.startedAt !== result.startedAt ||
+          native.durationMs !== result.durationMs || native.error?.code !== result.error?.code) {
+        throw new Error("native receipt does not bind this closed complete capture");
+      }
+      if (accepted) rmSync(dir, { recursive: true, force: true });
+      else retainFixture(dir, `rejected complete census measurement: ${reason}`);
+    } catch (error) {
+      const reason = `capture custody UNKNOWN (${error.message})`;
+      retainFixture(dir, reason);
+      throw new Error(reason);
+    }
+  };
+}
+
 function runCensusChild(file, args, options) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
-  const result = captureStepSync(file, args, { cwd: options.cwd, env: options.env, runtimeMs: options.timeout,
-    maxBytes: options.maxBuffer, trackParent: true,
-    stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
-  if (result.outputComplete) rmSync(dir, { recursive: true, force: true });
+  const owner = lstatSync(dir);
+  let result;
+  try {
+    result = captureStepSync(file, args, { cwd: options.cwd, env: options.env, runtimeMs: options.timeout,
+      maxBytes: options.maxBuffer, trackParent: true,
+      stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
+  } catch (error) {
+    const reason = `capture custody UNKNOWN (${error.message})`;
+    retainFixture(dir, reason);
+    throw new Error(reason);
+  }
+  if (result.outputComplete) result[CENSUS_CAPTURE_DISPOSITION] = completeCensusCapture(dir, owner, result);
   else {
     let custody = "capture retained at";
     try {
@@ -710,98 +760,124 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   const options = childOptions(root, timeoutMs);
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
   if (pathOverride !== undefined) options.env.PATH = pathOverride;
-  const once = () => {
-    const startLoad = load1();
-    const startedMs = now();
-    const res = run(child.file, child.args, options);
-    const finishedMs = now();
-    if (TIME_BOUND_CODES.has(res.error?.code) && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
-      // W1-T9919: the backstop fired; name what sizes it, so a loaded host reads differently from a hung child.
-      const loads = [startLoad, load1()].map((n) => (Number.isFinite(n) ? n.toFixed(2) : "unknown"));
-      throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message} - time bound: ` +
-        `${Math.round(finishedMs - startedMs)} ms elapsed of the ${CENSUS_SUITE_CHILD_TIME_BOUND_MS} ms bound, ${files.length} suite(s), ` +
-        `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true });
-    }
-    if (TIME_BOUND_CODES.has(res.error?.code)) {
-      // Below the backstop the bound is a reader's measured budget: an overrun its qualification re-measures once.
-      throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message}`), { readerBudgetOverrun: true });
-    }
-    assertChildFinished(res, "census suite");
-    const stdout = String(res.stdout ?? "");
-    const totals = [...stdout.matchAll(/^# tests (\d+)$/gm)];
-    const total = totals.length === 1 ? totals[0] : null;
-    if (total === null) {
-      throw new Error(
-        `the census suite child printed no \`# tests\` summary (exit ${res.status}): ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`,
-      );
-    }
-    if (Number(total[1]) === 0) throw new Error("the census suite child ran 0 tests, which is a failed run, not a clean one");
-    const failing = failingSuitesFromTap(stdout, files);
-    if (res.status !== 0 && failing.length === 0) {
-      throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
-    }
-    const summary = Object.fromEntries(["pass", "fail", "cancelled", "skipped", "todo"].map((key) => {
-      const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
-      return [key, matches.length === 1 ? Number(matches[0][1]) : null];
-    }));
-    const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
-    const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
-      .map((match) => `${match[1].length}:${match[2]}`);
-    return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs };
+  const pending = new Set();
+  const dispose = (sample, accepted, reason) => {
+    if (!pending.delete(sample)) return;
+    sample[CENSUS_CAPTURE_DISPOSITION]?.(accepted, reason);
   };
-  if (readerRuntimePolicy === undefined) return once().failing;
-  if (files.length !== 1 || timeoutMs !== undefined) throw new Error("source-reader calibration requires one reader and no timeout override");
-  if (!lstatSync(join(root, files[0])).isFile()) throw new Error("source-reader calibration requires a physical test file");
-  if (!readerRuntimePolicy || ![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((n) => Number.isFinite(n) && n > 0) ||
-      !(readerRuntimePolicy.remeasureMargin >= 1 && Number.isFinite(readerRuntimePolicy.remeasureMargin))) {
-    throw new Error("source-reader runtime is UNKNOWN: invalid calibration policy");
-  }
-  const context = readContext(root, child, options);
-  const calibration = once();
-  if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during calibration");
-  if (calibration.failing.length > 0) return calibration.failing;
-  if (!calibration.passed) throw new Error("source-reader runtime is UNKNOWN: calibration has no complete unskipped pass");
-  console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: calibration.tests,
-    cases: calibration.identities, measuredMs: Math.ceil(calibration.elapsedMs), assurance: "observation-not-qualification" })}`);
-  const measurement = { ...calibration, context, complete: true, passed: true };
-  // As the fast gate judges a RUNAWAY (ci-parity.ts): a first overrun is re-measured once, against the budget
-  // times FAST_GATE_CENSUS_REMEASURE_MARGIN; only a second overrun refuses. Both budgets share one calibration age.
-  const budgetAtMs = now();
-  const budgets = [1, readerRuntimePolicy.remeasureMargin].map((margin) =>
-    censusReaderBudget(measurement, context, readerRuntimePolicy, budgetAtMs, margin));
-  const overruns = [];
-  let measured;
-  for (const budgetMs of budgets) {
-    options.timeout = budgetMs;
-    let sample;
-    try {
-      sample = once();
-    } catch (e) {
-      if (e?.readerBudgetOverrun !== true) throw e;
-      overruns.push(`stopped at its ${budgetMs}ms bound (${e.message})`);
-      continue;
+  try {
+    const once = () => {
+      const startLoad = load1();
+      const startedMs = now();
+      const res = run(child.file, child.args, options);
+      pending.add(res);
+      const finishedMs = now();
+      if (TIME_BOUND_CODES.has(res.error?.code) && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
+        // W1-T9919: the backstop fired; name what sizes it, so a loaded host reads differently from a hung child.
+        const loads = [startLoad, load1()].map((n) => (Number.isFinite(n) ? n.toFixed(2) : "unknown"));
+        throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message} - time bound: ` +
+          `${Math.round(finishedMs - startedMs)} ms elapsed of the ${CENSUS_SUITE_CHILD_TIME_BOUND_MS} ms bound, ${files.length} suite(s), ` +
+          `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true });
+      }
+      if (TIME_BOUND_CODES.has(res.error?.code)) {
+        // Below the backstop the bound is a reader's measured budget: an overrun its qualification re-measures once.
+        throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message}`), { readerBudgetOverrun: true });
+      }
+      assertChildFinished(res, "census suite");
+      const stdout = String(res.stdout ?? "");
+      const totals = [...stdout.matchAll(/^# tests (\d+)$/gm)];
+      const total = totals.length === 1 ? totals[0] : null;
+      if (total === null) {
+        throw new Error(
+          `the census suite child printed no \`# tests\` summary (exit ${res.status}): ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`,
+        );
+      }
+      if (Number(total[1]) === 0) throw new Error("the census suite child ran 0 tests, which is a failed run, not a clean one");
+      const failing = failingSuitesFromTap(stdout, files);
+      if (res.status !== 0 && failing.length === 0) {
+        throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
+      }
+      const summary = Object.fromEntries(["pass", "fail", "cancelled", "skipped", "todo"].map((key) => {
+        const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
+        return [key, matches.length === 1 ? Number(matches[0][1]) : null];
+      }));
+      const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+      const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
+        .map((match) => `${match[1].length}:${match[2]}`);
+      return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs,
+        [CENSUS_CAPTURE_DISPOSITION]: (accepted, reason) => dispose(res, accepted, reason) };
+    };
+    const finish = (sample, accepted, reason) => sample[CENSUS_CAPTURE_DISPOSITION](accepted, reason);
+    if (readerRuntimePolicy === undefined) {
+      const sample = once();
+      finish(sample, sample.passed && sample.failing.length === 0, "unsuccessful census result");
+      return sample.failing;
     }
-    if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during qualification");
-    if (sample.tests !== calibration.tests || JSON.stringify(sample.identities) !== JSON.stringify(calibration.identities)) {
-      throw new Error("source-reader runtime is UNKNOWN: qualification case inventory differs from calibration");
+    if (files.length !== 1 || timeoutMs !== undefined) throw new Error("source-reader calibration requires one reader and no timeout override");
+    if (!lstatSync(join(root, files[0])).isFile()) throw new Error("source-reader calibration requires a physical test file");
+    if (!readerRuntimePolicy || ![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((n) => Number.isFinite(n) && n > 0) ||
+        !(readerRuntimePolicy.remeasureMargin >= 1 && Number.isFinite(readerRuntimePolicy.remeasureMargin))) {
+      throw new Error("source-reader runtime is UNKNOWN: invalid calibration policy");
     }
-    if (!(sample.elapsedMs > 0 && Number.isFinite(sample.elapsedMs))) throw new Error("source-reader runtime is UNKNOWN: invalid native duration");
-    if (sample.elapsedMs <= budgetMs) {
-      measured = sample;
-      break;
+    const context = readContext(root, child, options);
+    const calibration = once();
+    if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during calibration");
+    if (calibration.failing.length > 0) {
+      finish(calibration, false, "failed calibration assertions");
+      return calibration.failing;
     }
-    overruns.push(`took ${Math.ceil(sample.elapsedMs)}ms against ${budgetMs}ms`);
+    if (!calibration.passed) throw new Error("source-reader runtime is UNKNOWN: calibration has no complete unskipped pass");
+    console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: calibration.tests,
+      cases: calibration.identities, measuredMs: Math.ceil(calibration.elapsedMs), assurance: "observation-not-qualification" })}`);
+    const measurement = { ...calibration, context, complete: true, passed: true };
+    // As the fast gate judges a RUNAWAY (ci-parity.ts): a first overrun is re-measured once, against the budget
+    // times FAST_GATE_CENSUS_REMEASURE_MARGIN; only a second overrun refuses. Both budgets share one calibration age.
+    const budgetAtMs = now();
+    const budgets = [1, readerRuntimePolicy.remeasureMargin].map((margin) =>
+      censusReaderBudget(measurement, context, readerRuntimePolicy, budgetAtMs, margin));
+    finish(calibration, true, "accepted calibration");
+    const overruns = [];
+    let measured;
+    for (const budgetMs of budgets) {
+      options.timeout = budgetMs;
+      let sample;
+      try {
+        sample = once();
+      } catch (e) {
+        if (e?.readerBudgetOverrun !== true) throw e;
+        overruns.push(`stopped at its ${budgetMs}ms bound (${e.message})`);
+        continue;
+      }
+      if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during qualification");
+      if (sample.tests !== calibration.tests || JSON.stringify(sample.identities) !== JSON.stringify(calibration.identities)) {
+        throw new Error("source-reader runtime is UNKNOWN: qualification case inventory differs from calibration");
+      }
+      if (!(sample.elapsedMs > 0 && Number.isFinite(sample.elapsedMs))) throw new Error("source-reader runtime is UNKNOWN: invalid native duration");
+      if (sample.elapsedMs <= budgetMs) {
+        measured = sample;
+        break;
+      }
+      overruns.push(`took ${Math.ceil(sample.elapsedMs)}ms against ${budgetMs}ms`);
+      finish(sample, false, overruns.at(-1));
+    }
+    if (measured === undefined) {
+      throw new Error(`source-reader runtime exceeded its ${budgets[0]}ms measured budget, then its one re-measure exceeded ` +
+        `${budgets[1]}ms (x${readerRuntimePolicy.remeasureMargin} margin): ${overruns.join("; then ")}`);
+    }
+    if (!measured.passed && measured.failing.length === 0) throw new Error("source-reader runtime is UNKNOWN: qualification has no complete unskipped result");
+    finish(measured, measured.passed && measured.failing.length === 0, "failed qualification assertions");
+    console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: measured.tests,
+      cases: measured.identities, calibrationMs: Math.ceil(calibration.elapsedMs), budgetMs: options.timeout,
+      measuredMs: Math.ceil(measured.elapsedMs), ...(overruns.length > 0 ? { remeasuredAfter: overruns[0] } : {}),
+      assurance: "fresh-timing-only-no-cached-verdict" })}`);
+    return measured.failing;
+  } catch (error) {
+    for (const sample of pending) {
+      try { dispose(sample, false, error.message); }
+      catch (custody) { error.message += `; ${custody.message}`; }
+    }
+    throw error;
   }
-  if (measured === undefined) {
-    throw new Error(`source-reader runtime exceeded its ${budgets[0]}ms measured budget, then its one re-measure exceeded ` +
-      `${budgets[1]}ms (x${readerRuntimePolicy.remeasureMargin} margin): ${overruns.join("; then ")}`);
-  }
-  if (!measured.passed && measured.failing.length === 0) throw new Error("source-reader runtime is UNKNOWN: qualification has no complete unskipped result");
-  console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: measured.tests,
-    cases: measured.identities, calibrationMs: Math.ceil(calibration.elapsedMs), budgetMs: options.timeout,
-    measuredMs: Math.ceil(measured.elapsedMs), ...(overruns.length > 0 ? { remeasuredAfter: overruns[0] } : {}),
-    assurance: "fresh-timing-only-no-cached-verdict" })}`);
-  return measured.failing;
 }
 
 const STEP_LITERAL_RE = /(?:\bstep\s*===|\bcase|\blog\w*\s*\(|\bstep\s*:)\s*(["'`])([^"'`\r\n$]+)\1/g;
@@ -1069,6 +1145,13 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/ci/a-rejected-census-measurement-retains-its-complete-capture.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [
+      "scripts/census-precheck.mjs", "scripts/lib/author-step-capture.mjs", "scripts/lib/retained-fixtures.mjs",
+      "test/setup/retained-fixtures.ts", "test/setup/tmp-hygiene.ts",
+      "test/ci/a-rejected-census-measurement-retains-its-complete-capture.test.ts",
+    ].includes(p)),
+    remedy: "retain rejected complete census evidence through qualification and the actual producer exit" },
   { testFile: "test/ci/gates/an-incomplete-census-capture-survives-its-producer-exit.test.ts",
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/census-precheck.mjs", "scripts/lib/retained-fixtures.mjs", "scripts/lib/retained-fixtures.d.mts",

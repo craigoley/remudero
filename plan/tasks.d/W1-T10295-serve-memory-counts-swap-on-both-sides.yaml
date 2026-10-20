@@ -1,0 +1,53 @@
+- id: W1-T10295
+  title: "`serve.memory`'s `unattributed_bytes` GOES NEGATIVE WHEN SERVE'S HEAPS ARE SWAPPED — it is `rss - heapTotal - external - sum(worker heaps)`, where rss counts only resident pages and heapTotal counts committed pages wherever they live, so swapped heap is subtracted from a total that never held it; 107 of 764 rows (10-18 23:23Z..10-20 15:15Z) read negative, down to -1,032 MiB; count both sides in the same units"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern, the arithmetic of one row field; no relief, refusal or incident rule changes
+  band_meaning: span
+  origin: "coordinator brief file1020c item 6 (2026-10-20); evidence logs-8864/c5-measure/serve-memory-1019-20.ndjson and serve-memory-live.ndjson"
+  plan_refs: [W1-T5175, W1-T5355, W1-T7092, W1-T9404, W1-T10293]
+  files:
+    - src/lib/serve-memory.ts
+    - test/memory/serve-memory-counts-swap-on-both-sides.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main faefe0655 (symbols, not lines):
+    - src/lib/serve-memory.ts `sampleServeMemory`: `unattributed_bytes: usage.rss - usage.heapTotal - usage.external -
+      workerBytes`. `process.memoryUsage().rss` is resident only; `heapTotal` is the main isolate's COMMITTED heap,
+      resident or swapped; `workerBytes` sums the worker-heap readings, also committed sizes. The row carries no swap.
+    - The daemon's equivalent already avoids this: src/lib/daemon-memory-telemetry.ts subtracts each isolate's
+      PHYSICAL heap size (`unattributed_bytes_approx`, W1-T7092) and reads VmSwap from /proc/self/status
+      (`sampleProcSwap`, absent when unreadable, never a zero).
+    OBSERVED, 764 `serve.memory` rows 2026-10-18T23:23Z..2026-10-20T15:15Z, 25 generations (core ledger, read-only):
+    107 rows have unattributed_bytes < 0, median of those -119 MiB, minimum -1,032 MiB. The 7 newest live rows
+    (14:57-15:15Z) include 4 negatives (-39 to -234 MiB). No row has a swap field (control: the field list was read
+    from every row).
+    INFERRED, not measured: the negatives are swapped heap. The row cannot prove it today; the fix's swap field will.
+    WHY IT MATTERS: incident-invariants.ts prints `unattributed=` from this field on the sustained-low-headroom finding,
+    and W1-T10293 attributes serve's non-heap growth from it; a figure that goes negative cannot rank anything.
+    NOT COVERED ELSEWHERE: W1-T9404 (queued) adds swap to the DAEMON's reclaim rows, not serve's sample. Swept origin/main
+    plan/tasks.d and all 15 open PR heads' plan trees (21:19Z) for unattributed_bytes, VmSwap and swap_bytes: no other.
+  design: |
+    1. THE ROW CARRIES SWAP. `sampleServeMemory` reads VmSwap from /proc/self/status (reuse the daemon's reader, moved
+       to a shared helper if it must be) and writes `swap_bytes`; absent with a reason when unreadable, never zero.
+    2. BOTH SIDES IN ONE UNIT. Either subtract resident heap sizes (`total_physical_size`, per isolate where the reading
+       has it) from rss, as the daemon does, or add swap to rss before subtracting committed sizes. Pick one, write it
+       to `unattributed_basis` on the row, and use it for every term; a term that cannot be read on that basis makes
+       the field absent with a reason, never a mixed figure.
+    3. No relief tier, headroom fraction or incident rule changes.
+    4. TESTS in test/memory/serve-memory-counts-swap-on-both-sides.test.ts (computed by `computedTestFolder`; re-run
+       `rmd test-place` on the real file), `test(` titles verbatim as in the proofs, with injected usage and status reads.
+  acceptance:
+    - claim: "a sample whose heap is partly swapped reads a non-negative unattributed figure and names its basis"
+      proof: "unit test: W1-T10295: a swapped heap no longer drives unattributed bytes negative"
+    - claim: "the row carries swap_bytes, and an unreadable status leaves it absent with a reason"
+      proof: "unit test: W1-T10295: the serve memory row carries its swap, and an unreadable status is not a zero"
+  falsifier: |
+    At origin/main a sample with rss 3 GiB, heapTotal 1 GiB of which 0.6 GiB swapped, and 2.5 GiB of committed worker
+    heaps reads unattributed -0.5 GiB and no swap field, so both tests fail.

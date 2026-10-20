@@ -1,34 +1,34 @@
 - id: W1-T9265
-  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — inbox.draft_escalated landed 172 ledger rows across the trailing window and no task cites it"
+  title: The scout distinguishes expected Inbox draft recovery from a recurring failure
   repo: remudero
   depends_on: []
   type: implement
   verify: human
   risk: low
   priority: 1.55
-  # refusal-amendment (W1-T9265, run DAEMON-1792519019872@eb9b1b5559a89f4ef98b80225d84d7bbdb0da969, 2026-10-20T18:53:32.868Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
-  #   worker evidence: The test requires suppressing scout classification, while acceptance requires fixing recurrence without hiding rows.
+  # refusal-amendment (W1-T9265, run DAEMON-1792526038631@0dad88f06ad007683d7190c9684b9940d87ebb0e, 2026-10-20T22:40:14.783Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Acceptance requires fixing recurrence without hiding rows, but the test requires excluding the event from scout classification.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
-  author_class: machine
-  origin: "scout:inbox.draft_escalated"
+  acceptance:
+    - claim: Expected inbox.draft_escalated transitions remain in the ledger and do not produce a recurring-failure task
+      proof: 'grep: test("W1-T9265: expected draft escalation stays in the ledger but is not a recurring failure" in test/scout-inbox-draft-escalated.test.ts'
+    - claim: Actual draft and escalation errors, draft_failed and pr.escalated remain visible to the scout
+      proof: 'grep: test("W1-T9265: actual draft and escalation failures remain recurring scout symptoms" in test/scout-inbox-draft-escalated.test.ts'
+  note: "Operator decision: correct the task and repair the false alarm. Preserve Inbox emitters, ledger rows and failure alerts. This corrects the contradictory recurrence criterion; it does not claim a reduction in recovery events or earn scout survival credit."
+  rationale: The original scout counted 54 older and 118 newer inbox.draft_escalated rows without diagnosing their cause. In src/lib/inbox.ts, draftOne records that event only after the escalation worker returns a result; it is an intentional recovery transition, not a failed escalation. Actual transport and final draft errors are inbox.draft_escalation_error and inbox.draft_error. Distinguish those meanings in scout classification, preserve the raw observations and genuine failure controls, and prove the recurring population from both halves of a window. No Inbox emitter change is authorized.
+  origin: "operator 2026-10-20: correct the scout false alarm in PR13039 after explicit user decision"
+  author_class: operator
+  risk_ruling:
+    verdict: operator
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Explicit user decision on 2026-10-20: Correct the task and repair the false alarm; preserve ledger rows and genuine failure alerts."
+    judged_at: 2026-10-20T20:37:57.042Z
+    pin: 58d0d0cd051ca9b708dc60fdc16d5f6be4540b486b52c1f1065d45577165fba9
+  prompt: "The user explicitly resolved the needs-operator-input refusal on 2026-10-20: Correct the task and repair the false alarm. Replace the obsolete no-longer-recurs test with both behavior tests below. Treat only inbox.draft_escalated as expected recovery; recognize the exact actual draft error steps as failures and preserve existing failure-shaped classifications. Exercise scoutSymptoms with both-window positive controls and unchanged input ledger rows. Do not suppress ledger writes, hide real failures, alter a bound or infer live success from a unit test."
   files:
     - src/lib/scout-gardener.ts
     - test/scout-inbox-draft-escalated.test.ts
-  acceptance:
-    - claim: "inbox.draft_escalated stops recurring: its cause is fixed rather than its rows hidden"
-      proof: "grep: test(\"W1-T9265: inbox.draft_escalated no longer recurs\" in test/scout-inbox-draft-escalated.test.ts"
-  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
-  rationale: |
-    The ledger step inbox.draft_escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 54 in the older half, 118 in the newer.
-    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
-    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
-  risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.96
-    reasons:
-      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The filing supplies recurrence counts but no diagnosed cause; it explicitly asks the builder to locate the emitter first. The supplied evidence cannot establish that these escalation rows represent a defect.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that cannot verify the claimed causal fix or cessation of live recurrence. This meets the gate’s escalation condition that the finding cannot be verified from what is shown."
-    judged_at: "2026-10-20T16:35:44.660Z"
-    pin: "210e450f1f58a5e894d6e0965b5e577571723aa7d4f26b47eafc52ab18235d19"

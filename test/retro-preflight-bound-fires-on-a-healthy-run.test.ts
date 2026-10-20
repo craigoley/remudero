@@ -109,7 +109,8 @@ test("W1-T2803: no repair on a bound failure — a terminated run carries no fai
     repair: async (prompt) => { repairs.push(prompt); },
     regenerateHarnessArtifacts: () => {},
     log: (step) => { steps.push(step); },
-    deps: { run: () => (call++ === 0 ? enumerated : timedOut), now: () => 0 },
+    deps: { run: () => (call++ === 0 ? enumerated : timedOut), now: () => 0,
+      changedFiles: async () => ({ unreadable: "fixture has no PR diff" }) },
   });
   assert.deepEqual(repairs, [], "a bound failure must not resume the producing Architect session");
   assert.equal(outcome.attempts, 1, "and must not spend a second full attempt against an unchanged bound");
@@ -131,7 +132,8 @@ test("W1-T2803: an ordinary tests_failed STILL repairs and still re-runs — the
     repair: async (prompt) => { repairs.push(prompt); },
     regenerateHarnessArtifacts: () => {},
     log: () => {},
-    deps: { run: () => (call++ % 2 === 0 ? enumerated : failed), now: () => 0 },
+    deps: { run: () => (call++ % 2 === 0 ? enumerated : failed), now: () => 0,
+      changedFiles: async () => ({ unreadable: "fixture has no PR diff" }) },
   });
   assert.equal(repairs.length, 1, "an ordinary suite failure still resumes the Architect");
   assert.equal(outcome.attempts, 2, "and still runs the second attempt");
@@ -150,6 +152,7 @@ async function interruptedEvidence(stdout: string) {
     log: (step, fields) => { events.push({ step, fields }); },
     deps: {
       now: () => 0,
+      changedFiles: async () => ({ unreadable: "fixture has no PR diff" }),
       run: () => ++calls === 1
         ? { status: 0, signal: null, stdout: "test/fixture.test.ts\n", stderr: "" }
         : { status: null, signal: "SIGTERM", stdout, stderr: "",
@@ -207,7 +210,7 @@ test("retro bound evidence: an ordinary completed assertion failure still gets i
     repair: async () => { repairs++; },
     regenerateHarnessArtifacts: () => { regenerations++; },
     log: step => { events.push(step); },
-    deps: { now: () => 0, run: () => {
+    deps: { now: () => 0, changedFiles: async () => ({ unreadable: "fixture has no PR diff" }), run: () => {
       calls++;
       if (calls % 2 === 1) return { status: 0, signal: null, stdout: "test/fixture.test.ts\n", stderr: "" };
       return calls === 2

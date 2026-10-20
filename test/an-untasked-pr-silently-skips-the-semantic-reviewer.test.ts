@@ -9,6 +9,7 @@ import type { Config } from "../src/lib/config.js";
 import { reviewCommand, UNTASKED_REVIEW_BUDGET_USD } from "../src/run-task.js";
 import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "../src/lib/required-semantic-review.js";
 import { loadPlanAtRef } from "../src/lib/plan.js";
+import { usesUntaskedReviewMetadata } from "../src/lib/tick-read-worker.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
@@ -91,6 +92,32 @@ test("a resolved shard without budget_usd runs the semantic reviewer under the d
 });
 
 const unfiledHead = "run-unfiled-1791211800000";
+
+test("generated triage and main-repair ids receive required semantic review without fictional plan shards", async () => {
+  for (const id of ["TRIAGE-evidence-coverage-inbox-response-served-model", "main-repair-ratchet-105b1219ee15"]) {
+    const { args, ledger, code } = await review(`## Acceptance\n- x | grep: review in src/lib/review.ts\n\nRemudero-Task: ${id}`, `run-${id}-1791211800000`);
+    assert.equal(code, 0, id);
+    assert.equal(args.task.id, id, "retain the generated identity for attribution");
+    assert.equal(args.spawnReviewer, true);
+    assert.equal(args.requireSemanticReview, true);
+    assert.equal(args.task.risk, "medium");
+    assert.equal(args.budgetUsd, UNTASKED_REVIEW_BUDGET_USD);
+    assert.ok(args.reviewerMount);
+    assert.equal(ledger.filter(row => row.step === "review.reviewer.untasked_defaults").length, 1);
+    assert.ok(!ledger.some(row => row.step === "review.semantic_setup_refused"));
+  }
+});
+
+test("generated review defaults require the exact generated branch and never cover missing filed task records", () => {
+  for (const id of ["RETRO", "RETRO-1", "TRIAGE-feedback", "PLAN-repair", "APPROVE-feedback", "main-repair-105b1219ee15", "main-repair-revert-105b1219ee15"]) {
+    assert.equal(usesUntaskedReviewMetadata(id, `run-${id}-1791211800000`), true, id);
+    assert.equal(usesUntaskedReviewMetadata(id, "codex/foreign"), false, id);
+    assert.equal(usesUntaskedReviewMetadata(id, `run-${id}-other-1791211800000`), false, id);
+  }
+  for (const id of ["W1-T999999", "main-repair-ratchet-not-a-sha", "unknown-lane"]) {
+    assert.equal(usesUntaskedReviewMetadata(id, `run-${id}-1791211800000`), false, id);
+  }
+});
 
 test("a canonical unfiled run receives bounded semantic review under its own PR identity", async () => {
   const { args, ledger } = await review("## Acceptance\n- x | grep: review in src/lib/review.ts\n", unfiledHead);
