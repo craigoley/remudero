@@ -93,7 +93,13 @@ test('inherited reservation fixtures require the real ancestor start, nonce, poo
   const f=fixture(t),slots=join(f.home,'fixture-slots');mkdirSync(slots);const path=join(slots,'slot-1.json'),start=testSlotProcessFacts(process.pid)!.start;
   const held={pid:process.pid,ownerNonce:'fixture-nonce',processStart:start,concurrency:1};writeFileSync(path,JSON.stringify(held),{mode:0o600});
   const claim={pid:process.pid,nonce:held.ownerNonce,start,concurrency:1,path},probe="import{borrowedWorkspaceWorker}from'./scripts/lib/shared-workspace.mjs';try{console.log(JSON.stringify(await borrowedWorkspaceWorker()));}catch(e){console.log(JSON.stringify({admitted:false,reason:e.message}));}";
-  const read=(value:unknown)=>{const p=spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',probe],{encoding:'utf8',timeout:10000,env:{...process.env,RMD_TEST_SLOT_DIR:slots,RMD_TEST_SLOT_PARENT:typeof value==='string'?value:JSON.stringify(value)}});assert.equal(p.status,0,p.stderr);return JSON.parse(p.stdout);};
+  const read=(value:unknown)=>{
+    const fixtureEnv={...process.env,RMD_TEST_SLOT_DIR:slots,RMD_TEST_SLOT_PARENT:typeof value==='string'?value:JSON.stringify(value)};
+    // Model a standalone CLI over ONLY this owned fixture pool. The node-test
+    // context otherwise deliberately substitutes a different private test pool.
+    delete fixtureEnv.NODE_TEST_CONTEXT;
+    const p=spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',probe],{encoding:'utf8',timeout:10000,env:fixtureEnv});assert.equal(p.status,0,p.stderr);return JSON.parse(p.stdout);
+  };
   const positive=read(claim);assert.equal(positive.admitted,true,JSON.stringify(positive));
   for(const value of[{...claim,nonce:'wrong'},{...claim,start:'wrong'},{...claim,concurrency:2},{...claim,path:join(f.home,'not-a-slot')},'x'.repeat(16385),'{'])assert.equal(read(value).admitted,false);
   writeFileSync(path,JSON.stringify({...held,pid:process.pid+1000000}));assert.equal(read(claim).admitted,false);
