@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import {
+  buildDepReviewEscalation,
   DEPENDABOT_REBASE_COMMAND,
   dependabotCommandAnswer,
   reconcileDependabotRefresh,
@@ -144,6 +145,15 @@ test("W1-T9994: an interrupted update-branch record is retried and a thrown upda
   });
   assert.equal(throwing, "none", "a hold on pending checks has nothing to refresh");
   assert.equal(await h.run(), "requested");
+});
+
+test("W1-T9994: the hold escalation quotes a refused command when no update-branch was attempted", () => {
+  const base = { prUrl: "https://github.com/craigoley/remudero/pull/11968", prNumber: 11968, title: "bump x", body: "", semverLevel: "patch" as const };
+  const refresh = { headSha: HEAD, command: DEPENDABOT_REBASE_COMMAND, cause: "base-red-recovered" as const, requestedAtMs: REQUESTED, delivered: true, answer: "refused" as const, reply: REFUSAL };
+  const esc = buildDepReviewEscalation({ ...base, hold: { headSha: HEAD, redChecks: ["commitlint"], refresh } });
+  assert.match(esc.detail, new RegExp(`Refresh refused: Dependabot answered \`${DEPENDABOT_REBASE_COMMAND}\` \\(posted 2026-10-16T20:45:13.500Z, base-red-recovered\\) with "${REFUSAL.replace(/\./g, "\\.")}"\\.`));
+  const noReply = buildDepReviewEscalation({ ...base, hold: { headSha: HEAD, redChecks: ["commitlint"], refresh: { ...refresh, reply: undefined } } });
+  assert.match(noReply.detail, /with ""\./);
 });
 
 test("W1-T9994: a throwing update-branch and an undelivered escalation are failures that retry", async (t) => {
