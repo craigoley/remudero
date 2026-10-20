@@ -11,7 +11,7 @@ import {
   HOST_GAP_REREVIEW_STEP, REFUSED_POST_HOST_GAP_REREVIEW_STEP,
   hostGapProgressInput, hostGapRereviewFacts, hostGapRereviewWaitMs, planHostGapRereview, runSweep,
   type OpenPrView, type SweepDeps,
-  buildSweepEffects as libraryEffects, DEFAULT_SWEEP_POLICY, type BuildSweepEffectsDeps,
+  buildSweepEffects as libraryEffects, DEFAULT_SWEEP_POLICY,
 } from "#src/lib/sweep.js";
 import { buildSweepEffects as entrypointEffects, reviewCommand, reviewOptionFlags, reviewOptionsFromFlags } from "#test/helpers/run-task-test.js";
 
@@ -137,7 +137,7 @@ test("default review bridges and the real refusal logger preserve admitted attem
   try {
     const ledgerPath = join(root, "state", "ledger.ndjson"), calls: Record<string, unknown>[] = [];
     const config = { root, claudeBin: "/bin/true" } as Config;
-    const deps: BuildSweepEffectsDeps = { owner: "acme", repo: "remudero", localRepoName: "remudero", config,
+    const deps: Parameters<typeof entrypointEffects>[0] = { owner: "acme", repo: "remudero", localRepoName: "remudero", config,
       ledgerPath, runId: "one-daemon-run", plan: { tasks: [], byId: new Map() } as Plan,
       log: () => {}, policy: DEFAULT_SWEEP_POLICY,
       reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: HEAD, originMainSha: HEAD, advance: "none" }),
