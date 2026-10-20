@@ -23,7 +23,7 @@
     "diagnostics for every file, ~35% of the check's allocation, ~2 GB of its 5.1-5.3 GB peak and about half",
     "its wall time. Nothing consumes tsc's .d.ts output: dist/child-entries is esbuild-built and",
     "packages/api-client's .d.ts files are generated or hand-written. Accepted cost: declaration-only",
-    "diagnostics (TS2742, TS4xxx) are no longer reported, locally and in CI alike."
+    "diagnostics (TS2742, TS4xxx) are no longer reported, locally and in CI alike. Measurements: PR 13113."
   ],
   "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
