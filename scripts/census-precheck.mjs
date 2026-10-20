@@ -549,8 +549,10 @@ export function listAdmittedCensusMembers(root, run = spawnSync) {
     (existsSync(readers) ?
       'if (members.length === 0) throw new Error("the admission table lists no admitted member");' +
       `const r = await import(${JSON.stringify(pathToFileURL(readers).href)});` +
-      "const readerRuntimePolicy = { floorMs: m.FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, multiple: m.FAST_GATE_CENSUS_RUNAWAY_MULTIPLE };" +
-      'if (![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((x) => Number.isFinite(x) && x > 0)) throw new Error("no measured census runtime policy");' +
+      "const readerRuntimePolicy = { floorMs: m.FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, multiple: m.FAST_GATE_CENSUS_RUNAWAY_MULTIPLE," +
+      " remeasureMargin: m.FAST_GATE_CENSUS_REMEASURE_MARGIN };" +
+      'if (![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((x) => Number.isFinite(x) && x > 0) ||' +
+      ' !(readerRuntimePolicy.remeasureMargin >= 1 && Number.isFinite(readerRuntimePolicy.remeasureMargin))) throw new Error("no measured census runtime policy");' +
       `members.push(...r.discoverSourceTextReaders(${JSON.stringify(root)}).filter((x) => x.censusShaped && x.walks.length > 0)` +
       '.map((x) => ({ testFile: x.testFile, script: "", walks: [...x.walks], structural: true, readerRuntimePolicy })));' : "") +
     "console.log(JSON.stringify(members));";
@@ -623,12 +625,12 @@ async function defaultImportTestSlot() {
 const TEST_PRIORITY = await loadTestPriority();
 
 /**
- * Runs `files` (repo-relative suite paths) once, in ONE `node --test` child over `root`, and returns the ones
- * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
- * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
+ * The reader's qualification budget: `multiple` times its calibration (floored), capped at the backstop. `margin`
+ * (> 1 only for the one re-measure) is the fast gate's FAST_GATE_CENSUS_REMEASURE_MARGIN, applied as ci-parity does.
  */
-export function censusReaderBudget(measurement, context, policy, nowMs) {
+export function censusReaderBudget(measurement, context, policy, nowMs, margin = 1) {
   if (!policy || ![policy.floorMs, policy.multiple].every((n) => Number.isFinite(n) && n > 0) ||
+      !(margin >= 1 && Number.isFinite(margin)) ||
       !measurement || measurement.context !== context || measurement.complete !== true || measurement.passed !== true ||
       !Number.isFinite(measurement.elapsedMs) || measurement.elapsedMs <= 0 ||
       !Number.isSafeInteger(measurement.tests) || measurement.tests <= 0 ||
@@ -637,7 +639,7 @@ export function censusReaderBudget(measurement, context, policy, nowMs) {
     throw new Error("source-reader runtime is UNKNOWN: missing, stale, mismatched or incomplete calibration");
   }
   if (measurement.elapsedMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) throw new Error("source-reader calibration exceeded the existing backstop");
-  const budgetMs = Math.ceil(Math.max(policy.floorMs, measurement.elapsedMs) * policy.multiple);
+  const budgetMs = Math.ceil(Math.max(policy.floorMs, measurement.elapsedMs) * policy.multiple * margin);
   if (!Number.isSafeInteger(budgetMs)) throw new Error("source-reader runtime is UNKNOWN: invalid derived budget");
   return Math.min(budgetMs, CENSUS_SUITE_CHILD_TIME_BOUND_MS);
 }
@@ -690,6 +692,11 @@ function censusReaderContext(root, child, options) {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
 
+/**
+ * Runs `files` (repo-relative suite paths) once, in ONE `node --test` child over `root`, and returns the ones
+ * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
+ * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
+ */
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
   readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0] }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
@@ -709,6 +716,10 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message} - time bound: ` +
         `${Math.round(finishedMs - startedMs)} ms elapsed of the ${CENSUS_SUITE_CHILD_TIME_BOUND_MS} ms bound, ${files.length} suite(s), ` +
         `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true });
+    }
+    if (TIME_BOUND_CODES.has(res.error?.code)) {
+      // Below the backstop the bound is a reader's measured budget: an overrun its qualification re-measures once.
+      throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message}`), { readerBudgetOverrun: true });
     }
     assertChildFinished(res, "census suite");
     const stdout = String(res.stdout ?? "");
@@ -736,7 +747,8 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   if (readerRuntimePolicy === undefined) return once().failing;
   if (files.length !== 1 || timeoutMs !== undefined) throw new Error("source-reader calibration requires one reader and no timeout override");
   if (!lstatSync(join(root, files[0])).isFile()) throw new Error("source-reader calibration requires a physical test file");
-  if (!readerRuntimePolicy || ![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((n) => Number.isFinite(n) && n > 0)) {
+  if (!readerRuntimePolicy || ![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((n) => Number.isFinite(n) && n > 0) ||
+      !(readerRuntimePolicy.remeasureMargin >= 1 && Number.isFinite(readerRuntimePolicy.remeasureMargin))) {
     throw new Error("source-reader runtime is UNKNOWN: invalid calibration policy");
   }
   const context = readContext(root, child, options);
@@ -747,18 +759,43 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: calibration.tests,
     cases: calibration.identities, measuredMs: Math.ceil(calibration.elapsedMs), assurance: "observation-not-qualification" })}`);
   const measurement = { ...calibration, context, complete: true, passed: true };
-  options.timeout = censusReaderBudget(measurement, context, readerRuntimePolicy, now());
-  const measured = once();
-  if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during qualification");
-  if (measured.tests !== calibration.tests || JSON.stringify(measured.identities) !== JSON.stringify(calibration.identities)) {
-    throw new Error("source-reader runtime is UNKNOWN: qualification case inventory differs from calibration");
+  // As the fast gate judges a RUNAWAY (ci-parity.ts): a first overrun is re-measured once, against the budget
+  // times FAST_GATE_CENSUS_REMEASURE_MARGIN; only a second overrun refuses. Both budgets share one calibration age.
+  const budgetAtMs = now();
+  const budgets = [1, readerRuntimePolicy.remeasureMargin].map((margin) =>
+    censusReaderBudget(measurement, context, readerRuntimePolicy, budgetAtMs, margin));
+  const overruns = [];
+  let measured;
+  for (const budgetMs of budgets) {
+    options.timeout = budgetMs;
+    let sample;
+    try {
+      sample = once();
+    } catch (e) {
+      if (e?.readerBudgetOverrun !== true) throw e;
+      overruns.push(`stopped at its ${budgetMs}ms bound (${e.message})`);
+      continue;
+    }
+    if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during qualification");
+    if (sample.tests !== calibration.tests || JSON.stringify(sample.identities) !== JSON.stringify(calibration.identities)) {
+      throw new Error("source-reader runtime is UNKNOWN: qualification case inventory differs from calibration");
+    }
+    if (!(sample.elapsedMs > 0 && Number.isFinite(sample.elapsedMs))) throw new Error("source-reader runtime is UNKNOWN: invalid native duration");
+    if (sample.elapsedMs <= budgetMs) {
+      measured = sample;
+      break;
+    }
+    overruns.push(`took ${Math.ceil(sample.elapsedMs)}ms against ${budgetMs}ms`);
   }
-  if (!(measured.elapsedMs > 0 && Number.isFinite(measured.elapsedMs))) throw new Error("source-reader runtime is UNKNOWN: invalid native duration");
-  if (measured.elapsedMs > options.timeout) throw new Error(`source-reader runtime exceeded its ${options.timeout}ms measured budget`);
+  if (measured === undefined) {
+    throw new Error(`source-reader runtime exceeded its ${budgets[0]}ms measured budget, then its one re-measure exceeded ` +
+      `${budgets[1]}ms (x${readerRuntimePolicy.remeasureMargin} margin): ${overruns.join("; then ")}`);
+  }
   if (!measured.passed && measured.failing.length === 0) throw new Error("source-reader runtime is UNKNOWN: qualification has no complete unskipped result");
   console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: measured.tests,
     cases: measured.identities, calibrationMs: Math.ceil(calibration.elapsedMs), budgetMs: options.timeout,
-    measuredMs: Math.ceil(measured.elapsedMs), assurance: "fresh-timing-only-no-cached-verdict" })}`);
+    measuredMs: Math.ceil(measured.elapsedMs), ...(overruns.length > 0 ? { remeasuredAfter: overruns[0] } : {}),
+    assurance: "fresh-timing-only-no-cached-verdict" })}`);
   return measured.failing;
 }
 

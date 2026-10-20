@@ -1,0 +1,114 @@
+- id: W1-T10271
+  title: "A WAITING GH READ GETS A FAIR TURN — W1-T7957's wait mode measures the 180 s floor from the newest stamp, and core's advisory reads restamp it about three times a second, so an operator's `rmd review` in the core container waited 30 min without a slot; take a FIFO ticket with operator priority, and stop counting the daemon's advisory reads against a gated caller's window"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern — ordering of gated reads on the shared gh read floor
+  band_meaning: span
+  budget_usd: 10.00
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-20: a manual rmd review in core with RMD_GH_TRANSPORT_FLOOR=wait timed out after 30 min (rc 124)"
+  plan_refs: [W1-T7957, W1-T3297, W1-T3275, W1-T4970, W1-T4085, W1-T2697, W1-T10269]
+  files:
+    - src/lib/github-transport.ts
+    - src/lib/daemon.ts
+    - test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts
+  rationale: |
+    READ on origin/main 04ed915a7 (2026-10-20).
+
+    OBSERVED 2026-10-20. During the reviewer outage (W1-T10269), the operator ran `rmd review <n>`
+    in the core container with RMD_GH_TRANSPORT_FLOOR=wait. It waited 30 min and never got a read
+    slot (rc 124). `enforce` refuses at once. The automation could not recover, and the operator's
+    own way out was starved.
+
+    THE MECHANISM, read from src/lib/github-transport.ts.
+      - planGhReadCadence (:1135) computes a wait-mode caller's remaining wait from the NEWEST
+        stamp on the shared `gh-last-read` file. floorWaitRemainingMs re-reads that stamp after
+        every sleep.
+      - Every read stamps the file, including the daemon's advisory reads
+        (withDaemonGhTransportFloor, :891). Advisory mode never waits; it only honours the
+        1.5 s shared gap.
+      - applyGhReadCadence (:1231) sleeps INSIDE withGhCadenceLock (:1058). Other processes give up
+        on the lock after GH_CADENCE_LOCK_MAX_WAIT_MS (1 s) and fail open, or reclaim it as stale
+        after 30 s (:705-707). Then they read and restamp.
+    So the waiter's window restarts on every daemon read. It is admitted only after 180 s with no
+    read at all, and core never leaves a gap that long.
+
+    MEASURED from the ledger. No row records individual gh reads, so the cadence is derived from
+    `daemon.quota` (core bucket, installation token) remaining-count deltas between consecutive
+    polls within one reset window, 10-18..10-20, 13 pairs:
+      - median 2.94 requests/s; p10 2.45; p90 3.57; minimum 2.43;
+      - so the mean gap between reads is about 0.34 s against a 180 s window.
+    The figure covers the installation bucket, so it is an upper bound on core's own stamping rate.
+    It still puts the chance of a 180 s quiet stretch at zero in practice.
+
+    THE FLOOR'S OWN DOCUMENTED PURPOSE. DEFAULT_GH_READ_BURST's doc (:710-739) says the 180 s
+    floor exists to space INVOCATIONS, which is what defeats a polling loop. The daemon's
+    multi-read sweeps are paced by GhCallPacer and the 1.5 s shared gap, by design (:700-703).
+    Counting those reads against a gated invocation's window serves neither limiter. It only makes
+    the window unreachable.
+
+    REJECTED ALTERNATIVE. Pausing the daemon's reads until a waiter's 180 s elapse would delay
+    about 530 daemon reads (180 s at ~2.9/s) for every operator invocation. That trades one
+    starvation for another.
+  design: |
+    1. TWO STAMPS FOR TWO RULES, ON THE SAME LIMITER.
+       - The shared `gh-last-read` stamp keeps its role: every read waits the shared gap after the
+         newest stamp, and the hook (hooks/deny-floor.sh) and the transport still share it.
+       - A gated invocation's first read (enforce or wait) also stamps `<stamp>.gated`.
+       - The 180 s floor for a gated first read is measured from the newer of two things:
+         `<stamp>.gated`, and the shared stamp when it is not marked advisory.
+       - The advisory path writes a marker into the shared stamp's content. The hook's `: >`
+         truncation leaves it unmarked, so a session's hook-paced read still counts against the
+         floor, unchanged.
+       - The daemon's advisory reads no longer restart a gated caller's window.
+       - The floor still holds: at most one gated invocation's first read per window, and every
+         read still at least the shared gap after the last. This changes ordering, not the number
+         of reads.
+    2. A FIFO TICKET, OPERATOR FIRST.
+       - A gated first read that must wait takes a ticket file under `<stamp>.tickets/`. It holds
+         its priority, a monotonic sequence and its pid.
+       - Priority comes from deriveLedgerActor (src/lib/ledger.ts:184). operator_human,
+         operator_ai and unknown non-daemon callers rank before daemon, run_child and worker
+         callers. Within a priority, order is FIFO.
+       - The waiter sleeps OUTSIDE the cadence lock. It takes the lock only when its ticket is at
+         the head and the gated window has elapsed.
+       - Tickets whose pid is gone, or which are older than one window plus the lock-stale bound,
+         are reclaimed by any reader. A dead waiter cannot hold the queue.
+    3. A RESERVED SLOT. A reader that takes the lock while a due head ticket exists yields: it
+       releases the lock and waits one shared gap, so the ticket holder gets the next slot. At most
+       one daemon read is delayed by one shared gap per gated invocation.
+    4. MEASURED, NOT ASSUMED. `daemon.quota` (src/lib/daemon.ts:6264) gains reads_stamped (by mode), gated_admitted and
+       slots_yielded since the previous poll. The cadence that sized this is then readable from the
+       ledger, not inferred from quota deltas.
+    Async (applyGhReadCadenceAsync) and sync paths share the ticket logic, as they already share
+    planGhReadCadence. W1-T7957's wait-mode tests and the cadence, burst and interactive-read
+    suites must stay green.
+    Tests go in the new file test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts, with `test(` titles
+    exactly as in the proofs below. Use injected clock, stamp, sleep and actor seams, and no real
+    gh. One test simulates the measured cadence: an advisory reader stamping every 340 ms.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts"
+    - claim: "a wait-mode caller is admitted one window after the last gated read while an advisory reader stamps every 340 ms, where today it never is"
+      proof: 'grep: test("W1-T10271: a waiting read is admitted while the daemon keeps reading" in test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts'
+    - claim: "two gated reads are still at least one window apart, and every read is still at least the shared gap after the last"
+      proof: 'grep: test("W1-T10271: the floor still spaces gated invocations by its window" in test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts'
+    - claim: "an operator ticket is served before an earlier daemon-child ticket, FIFO within a priority"
+      proof: 'grep: test("W1-T10271: an operator ticket goes first and equal tickets are served in order" in test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts'
+    - claim: "a reader that finds a due ticket yields one shared-gap slot, and a dead waiter's ticket is reclaimed"
+      proof: 'grep: test("W1-T10271: a due ticket gets the next slot and a dead ticket is reclaimed" in test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts'
+    - claim: "a hook-written stamp still counts against a gated caller's window"
+      proof: 'grep: test("W1-T10271: a hook stamp still holds the gated window" in test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts'
+    - claim: "daemon.quota reports reads stamped by mode, gated reads admitted and slots yielded since the previous poll"
+      proof: 'grep: test("W1-T10271: daemon.quota reports the read cadence it sized the floor by" in test/github/a-waiting-gh-read-gets-a-fair-turn.test.ts'
+  falsifier: |
+    Keep the wait measured from the newest shared stamp. With an advisory reader stamping every
+    340 ms the waiter is never admitted, as in the 30-minute 10-20 run, and the first test times
+    out its injected clock. Drop the `.gated` stamp entirely. Two operator invocations then read
+    inside one window, and the second test fails. Sleep inside the cadence lock. The advisory
+    reader's 1 s give-up then fails open and the reserved-slot test fails.

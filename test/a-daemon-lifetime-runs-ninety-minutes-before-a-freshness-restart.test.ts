@@ -19,7 +19,11 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 const MINUTE = 60_000;
 const START = Date.parse("2026-10-17T00:00:00Z");
 const window = { value: 10 * MINUTE, reason: "measured follow-on boots were 1–10 minutes apart" };
-const DAEMON_CHANGE = [{ sha: "self", files: ["src/lib/daemon.ts"] }];
+// W1-T9089: the daemon's own code weighs the source floor of 1, so a weight-18 advance is the threshold's worth of commits.
+const DAEMON_CHANGE = [
+  ...Array.from({ length: judge.DEPLOY_RESTART_SCORE_THRESHOLD.value - 1 }, (_, index) => ({ sha: `self-pad-${index}`, files: ["src/lib/daemon.ts"] })),
+  { sha: "self", files: ["src/lib/daemon.ts"] },
+];
 const LOCKFILE = [{ sha: "lock", files: ["package-lock.json"] }];
 
 function decide(nowMs: number, options: Partial<Parameters<typeof judge.decideFreshnessRestart>[0]> = {}) {
@@ -82,12 +86,13 @@ test("B1/B2: an image-only or a scope-only test commit scores by its files for a
   assert.equal(judge.deterministicDeployWorth({ sha: "5", files: ["deploy/Dockerfile"] }).score, 18,
     "the control: the recycle's own scoring still weighs the image in full");
   assert.equal(judge.deterministicDeployWorth({ sha: "6", files: ["plan/tasks.d/x.yaml"] }).score, 0);
-  for (const files of [["src/lib/inbox.ts"], ["bin/rmd"], ["package.json"], ["package-lock.json"], ["tsconfig.json"], []]) {
-    assert.equal(judge.freshnessAdvanceWorth({ sha: "7", subject: "fix(sweep): x", files }).score, 18, files.join(",") || "unread");
+  // W1-T9089: no path is full weight any more — src/ and scripts/ weigh the floor, everything else the source rules weigh 0.
+  for (const [files, score] of [[["src/lib/inbox.ts"], 1], [["bin/rmd"], 0], [["package.json"], 0], [["package-lock.json"], 0], [["tsconfig.json"], 0], [[], 0]] as const) {
+    assert.equal(judge.freshnessAdvanceWorth({ sha: "7", subject: "fix(sweep): x", files: [...files] }).score, score, files.join(",") || "unread");
   }
   assert.equal(judge.freshnessAdvanceWorth({ sha: "8", subject: "fix(drain): x", files: ["docs/tsconfig.json"] }).score, 0,
-    "only the root tsconfig is runtime");
-  assert.equal(judge.freshnessAdvanceWorth({ sha: "9", files: ["src/lib/daemon.ts", "deploy/Dockerfile"] }).score, 18);
+    "only a src/ or scripts/ path reaches the runtime");
+  assert.equal(judge.freshnessAdvanceWorth({ sha: "9", files: ["src/lib/daemon.ts", "deploy/Dockerfile"] }).score, 1);
 });
 
 type Row = { step: string; atMs: number; extra: Record<string, unknown> };

@@ -16,6 +16,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
 import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
+import { typecheckEnv } from "./typecheck-buildinfo.js";
 
 /**
  * Post-spawn containment probe (WS-0 verdict 7; W1-T2 acceptance #2). Spawns a worker under the
@@ -1495,7 +1496,7 @@ export function defaultTypeCheckRunner(cwd: string, timeoutMs: number): EditType
     const stdout = execFileSync(
       tsc,
       ["--noEmit", "--pretty", "false", "--incremental", "--tsBuildInfoFile", buildInfo, "-p", "tsconfig.json"],
-      { cwd, timeout: timeoutMs, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 },
+      { cwd, timeout: timeoutMs, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024, env: typecheckEnv(process.env) },
     );
     return { output: stdout, timedOut: false };
   } catch (err) {

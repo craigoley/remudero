@@ -18,8 +18,16 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const MINUTE = 60_000;
 const START = Date.parse("2026-10-10T18:05:00Z");
 const window = { value: 10 * MINUTE, reason: "measured follow-on boots were 1–10 minutes apart" };
-const LOCKFILE = [{ sha: "lock", files: ["package.json", "package-lock.json", "src/lib/sweep.ts"] }];
-const ORDINARY = [{ sha: "code", files: ["src/lib/daemon.ts"] }];
+// W1-T9089: every source commit weighs the floor of 1 (the daemon's own code no longer weighs 18), so the change
+// pressure that makes a restart a window-held "change" is the threshold's worth of source commits.
+const THRESHOLD_WORTH = judge.DEPLOY_RESTART_SCORE_THRESHOLD.value;
+const sourceCommits = (tag: string, count: number) =>
+  Array.from({ length: count }, (_, index) => ({ sha: `${tag}-${index}`, files: ["src/lib/daemon.ts"] }));
+const LOCKFILE = [
+  ...sourceCommits("lock-pad", THRESHOLD_WORTH - 1),
+  { sha: "lock", files: ["package.json", "package-lock.json", "src/lib/sweep.ts"] },
+];
+const ORDINARY = sourceCommits("code", THRESHOLD_WORTH);
 
 test("an advance that changes the install inputs is released from the quiet window at once", () => {
   assert.equal(judge.changesInstallInputs(LOCKFILE), true);
