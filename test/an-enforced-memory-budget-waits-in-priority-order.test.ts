@@ -551,6 +551,10 @@ test("memory admission publishes one reservation before a concurrent start can r
   w.onSleep = () => { w.running.entries[0]!.occupancyReleased = true; };
   const shared = ports(w, {
     policy: () => ({ ...POLICY, uncertaintyMarginMib: 0 }),
+    typical: () => 900,
+    survival: undefined,
+    readHostServe: undefined,
+    writeFile: () => undefined,
     readLedger: () => { snapshots.push(w.running.entries.filter(e => !e.occupancyReleased).length); return reading(w.running.entries); },
     withLock: action => action(),
   });
