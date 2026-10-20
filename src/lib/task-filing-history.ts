@@ -43,7 +43,7 @@ function unavailable(reason: string): never { throw new HistoryUnavailable(reaso
 
 function historyUtf8(bytes: Uint8Array): string {
   try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-  catch { return unavailable("unsupported historical plan UTF-8 encoding"); }
+  catch { throw new HistoryUnavailable("unsupported historical plan UTF-8 encoding"); }
 }
 
 export interface TaskFilingHistoryInvocation {
@@ -204,7 +204,7 @@ function historyBlobs(ctx: TaskFilingHistoryInvocation, changes: Map<string, Cha
       if (doc.errors.length) unavailable("unsupported historical plan YAML");
       let value: unknown;
       try { value = doc.toJS({ maxAliasCount: 0 }); }
-      catch { unavailable("unsupported historical plan aliases"); }
+      catch { throw new HistoryUnavailable("unsupported historical plan aliases"); }
       if (!Array.isArray(value)) unavailable("unsupported historical plan container shape");
       const counts = new Map<string, number>();
       for (const record of value) {
