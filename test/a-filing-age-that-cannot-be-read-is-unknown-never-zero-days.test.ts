@@ -346,15 +346,12 @@ test("W1-T10210: replacement refs cannot manufacture a later introduction", t =>
 
 test("W1-T10210: incomplete promisor history cannot fetch objects during an age read", async t => {
   const f = historyCase(); t.after(() => f.repo.cleanup());
-  const origin = join(f.repo.dir, "origin.git");
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", origin], { stdio: "pipe" });
-  f.repo.git("push", "--quiet", origin, "HEAD:refs/heads/main");
-  execFileSync("git", ["--git-dir", origin, "config", "uploadpack.allowFilter", "true"], { stdio: "pipe" });
+  f.repo.git("config", "uploadpack.allowFilter", "true");
   const blob = f.repo.git("rev-parse", "HEAD:plan/tasks.yaml").trim();
   const commit = f.repo.git("rev-parse", "HEAD").trim();
   const clone = (name: string): string => {
     const dir = join(f.repo.dir, name);
-    execFileSync("git", ["clone", "--quiet", "--no-checkout", "--filter=blob:none", `file://${origin}`, dir], { stdio: "pipe" });
+    execFileSync("git", ["clone", "--quiet", "--no-checkout", "--filter=blob:none", `file://${f.repo.dir}`, dir], { stdio: "pipe" });
     return dir;
   };
   const localObjects = (dir: string): string => hostWorktreeGit(dir,
