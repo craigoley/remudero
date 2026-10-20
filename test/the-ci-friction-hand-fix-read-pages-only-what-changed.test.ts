@@ -47,7 +47,7 @@ function withState(body: (state: string) => void) {
 test("W1-T9100: a read with a cursor stops at the cursor and merges into the cached fixes", () => {
   withState((state) => {
     const cache = seed(state, Date.parse("2026-10-20T12:00:00Z"), [row(10, "2026-10-20T10:00:00Z", "2026-10-20T09:00:00Z")], SHA_A);
-    assert.equal(cache.cursor, "2026-10-20T10:00:00.000Z");
+    assert.equal(cache.cursor, "2026-10-20T10:00:00Z");
     const github = fakeGithub({
       1: [...filler(200, 99, "2026-10-20T13:00:00Z"), row(20, "2026-10-20T13:30:00Z", "2026-10-20T13:00:00Z")],
       2: [...filler(400, 99, "2026-10-20T10:30:00Z"), row(401, "2026-10-20T09:00:00Z")],
@@ -58,7 +58,7 @@ test("W1-T9100: a read with a cursor stops at the cursor and merges into the cac
     assert.equal(result.state, "observed");
     assert.deepEqual(result.fixes.map((fix) => fix.pr), [10, 20]);
     const written = JSON.parse(readFileSync(cacheFile(state), "utf8"));
-    assert.equal(written.cursor, "2026-10-20T13:30:00.000Z");
+    assert.equal(written.cursor, "2026-10-20T13:30:00Z");
     assert.equal(written.mainSha, SHA_B);
   });
 });
@@ -112,7 +112,7 @@ test("W1-T9100: a cache with no cursor walks the window once and writes one", ()
     assert.equal(result.state, "observed");
     assert.deepEqual(result.fixes.map((fix) => fix.pr), [30]);
     const written = JSON.parse(readFileSync(cacheFile(state), "utf8"));
-    assert.equal(written.cursor, "2026-10-20T13:00:00.000Z");
+    assert.equal(written.cursor, "2026-10-20T13:00:00Z");
     assert.equal(written.mainSha, SHA_A);
   });
 });
@@ -130,6 +130,6 @@ test("W1-T9100: a failed page leaves the cursor where it was", () => {
     assert.match(result.state === "unmeasured" ? result.reason : "", /page 2 unavailable/);
     assert.equal(github.calls.length, 2);
     assert.equal(readFileSync(cacheFile(state), "utf8"), before);
-    assert.equal(JSON.parse(before).cursor, "2026-10-20T10:00:00.000Z");
+    assert.equal(JSON.parse(before).cursor, "2026-10-20T10:00:00Z");
   });
 });

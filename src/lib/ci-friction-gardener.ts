@@ -90,13 +90,14 @@ export function readCiFrictionHandFixes(
     // A cursor stops the walk at the first page older than it; the window edge still bounds a very old cache.
     const stopAt = Math.max(cursor ?? -Infinity, since);
     let newest = cursor ?? -Infinity;
+    let newestAt: string | undefined = cursor === undefined ? undefined : cached.cursor;
     for (let page = 1; ; page++) {
       const rows = JSON.parse(run("gh", ["api", `repos/${owner}/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`]));
       if (!Array.isArray(rows)) throw new Error("hand-fix PR list is not an array");
       for (const row of rows) {
         if (!Number.isSafeInteger(row.number) || typeof row.updated_at !== "string" || !Number.isFinite(Date.parse(row.updated_at)))
           throw new Error("hand-fix PR list has an invalid identity or timestamp");
-        newest = Math.max(newest, Date.parse(row.updated_at));
+        if (Date.parse(row.updated_at) > newest) { newest = Date.parse(row.updated_at); newestAt = row.updated_at; }
         if (!/^run-unfiled-/.test(row.head?.ref ?? "") || !/^fix(?:\([^)]*\))?!?:/.test(row.title ?? "") || !row.merged_at) continue;
         const at = Date.parse(row.merged_at); // expiring-fixture: exempt -- tests inject Clock and exercise both window boundaries
         if (!Number.isFinite(at) || at < since || at > clock.now()) continue;
@@ -112,7 +113,7 @@ export function readCiFrictionHandFixes(
     }
     const result: CiFrictionHandFixRead = { state: "observed", fixes: [...fixes.values()].sort((a, b) => a.pr - b.pr), asOf: clock.iso(), source: "api" };
     // The cursor moves only here, after every page was read; a throw above leaves the cache as it was.
-    writeAtomic(path, JSON.stringify({ ...result, repository: `${owner}/${repo}`, byPr, cursor: new Date(Number.isFinite(newest) ? newest : clock.now()).toISOString(), ...(mainSha === undefined ? {} : { mainSha }) }) + "\n");
+    writeAtomic(path, JSON.stringify({ ...result, repository: `${owner}/${repo}`, byPr, cursor: newestAt ?? clock.iso(),...(mainSha === undefined ? {} : { mainSha }) }) + "\n");
     return result;
   } catch (error) {
     return { state: "unmeasured", reason: String((error as Error)?.message ?? error), fixes: [] };
