@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/the-fleets-dependabot-commands-are-refused.test.ts
     - test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts
-  status: queued
+  status: merged
   priority: 1  # every Dependabot head the lane tries to refresh waits for a human, #11968 today, and the ledger says it is in hand
   attempts: 0
   rationale: |

@@ -1,0 +1,58 @@
+- id: W1-T10272
+  title: "Diagnose and close the inbox-response served-model evidence gap without inventing model identity"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-inbox-response-served-model
+  plan_refs: ["§7B", "W1-T4580", "W1-T4650", "W1-T4707", "W1-T8374", "W1-T8947"]
+  files:
+    - src/lib/inbox-responder.ts
+    - src/lib/benchmark-run.ts
+    - test/inbox/inbox-responder-served-model.test.ts
+  rationale: |
+    Rule 19 / #588: one integration test must drive inbox-responder through benchmark-run and verify the same attempt receipt; isolated subsystem tests cannot prove this cross-file invariant.
+    The captured feedback reports 23/42 joined inbox-response calls with servedModel
+    (54.8%, trailing seven days), below the 90% floor, first seen 2026-10-14T05:59:56.253Z.
+    This is a reported measurement, not a fresh ledger audit by this triage.
+    inbox-responder.ts uses benchmarkNonDispatchSpawn("inbox-response"); benchmark-run.ts
+    already copies served_model and served_model_reason into attempt resources. Therefore
+    the percentage alone does not establish a dropped field. benchmark-evidence.ts counts
+    only a nonempty terminal.servedModel as observed. W1-T4650 and W1-T4707 establish that
+    a provider-declared inability to report model identity must remain distinct from an
+    unchecked or lost value. Existing daemon/isolation tasks cover their own lanes, not
+    this inbox-response path.
+  design: |
+    Diagnose the missing inbox-response population before changing code: use the complete
+    ledger union, state the audited window and source freshness, and count reported models,
+    recognized provider-unreportable reasons, unexplained omissions and failed attempts.
+    Include a positive control with a retained served model. Do not infer the provider mix
+    or root cause from 23/42 alone.
+    Drive the inbox responder through its production non-dispatch receipt wrapper with a
+    controlled worker and isolated ledger sink. Cover a response whose served model differs
+    from the requested model, a provider-declared unreportable model, and a failed attempt.
+    Preserve selection-assignment joins and each attempt's own model or reason. Repair an
+    evidenced loss at this boundary; if the rows already retain legitimate provider reasons,
+    document the measured explanation in the implementation PR rather than manufacture a fix.
+    Use the existing benchmark evidence reader to demonstrate that a real model is observed
+    and an unreportable model is not falsely presented as observed. Report the legitimate
+    unreportable population separately from unexplained missingness. Global changes to the
+    coverage reader's reason classification belong with W1-T8374/W1-T8947, not a second
+    competing implementation here. Keep the gardener advisory and the 90% floor unchanged.
+    The new integration test directly imports inbox-responder as its primary subject; use
+    test-place to confirm its inbox/ placement from the final imports before implementation.
+  acceptance:
+    - claim: "The inbox-response production receipt path retains the response's actual served model and assignment join, preserves a provider's named unreportable reason, and preserves evidence on failed attempts; the evidence reader counts only actual model identity as observed"
+      proof: "unit test: test/inbox/inbox-responder-served-model.test.ts"
+  falsifier: |
+    Supply a worker response naming a model different from the request and a separate response
+    with only the provider's recognized unreportable reason. Dropping either value, echoing the
+    requested model, or counting the reason as observed identity must fail the integration test.
+    Remove any receipt repair and show the regression fails before restoring it.
+  priority: 4
+  status: queued
+  attempts: 0
