@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   copyFileSync,
   cpSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -1098,6 +1099,9 @@ test("W1-T964: removing the pinning fails the idempotency test", () => {
     // rather than something a future sandbox change can silently lose again.
     cpSync(join(repoRoot, "plan"), join(sandbox, "plan"), { recursive: true });
     cpSync(join(repoRoot, "test", "setup"), join(sandbox, "test", "setup"), { recursive: true });
+    // test/setup/retained-fixtures.ts re-exports `#scripts/lib/retained-fixtures.mjs`, which tmp-hygiene imports.
+    mkdirSync(join(sandbox, "scripts", "lib"), { recursive: true });
+    copyFileSync(join(repoRoot, "scripts", "lib", "retained-fixtures.mjs"), join(sandbox, "scripts", "lib", "retained-fixtures.mjs"));
     copyFileSync(join(repoRoot, targetTestFile), join(sandbox, targetTestFile));
     for (const f of ["package.json", "tsconfig.json"]) copyFileSync(join(repoRoot, f), join(sandbox, f));
     symlinkSync(join(repoRoot, "node_modules"), join(sandbox, "node_modules"));

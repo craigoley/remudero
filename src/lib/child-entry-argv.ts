@@ -10,8 +10,10 @@
 //
 // W1-T9601: a miss for the daemon's OWN tree (this package's root, where garden children and the harness-rooted gate
 // and check-proof children start) asks the store to build that tree once per source hash, so the next launch hits.
+import { fork, type ChildProcess, type ForkOptions } from "node:child_process";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker, type WorkerOptions } from "node:worker_threads";
 import {
@@ -151,23 +153,9 @@ export function startWorker(
   if (opts.override) return construct(opts.override, options);
   if (runsBundled()) return construct(bundledWorkerUrl(selfUrl), options);
   const self = new URL(selfUrl);
-  const path = fileURLToPath(self);
-  const at = path.lastIndexOf(`${sep}src${sep}`);
-  if ((opts.env ?? process.env)[BUNDLED_WORKERS_ENV] === "0" || at < 0) return construct(self, options);
-  const root = path.slice(0, at);
-  const module = relative(root, path).split(sep).join("/");
-  let decision = decisions.get(path);
-  if (!decision) {
-    decision = (() => {
-      try {
-        return decide(module, root, opts);
-      } catch (err) {
-        return { kind: "tsx" as const, reason: `decision-failed: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
-      }
-    })();
-    decisions.set(path, decision);
-    entryLog?.("worker.entry_resolved", { module, kind: decision.kind, reason: decision.reason });
-  }
+  const chosen = moduleDecision(self, opts);
+  if (chosen === undefined) return construct(self, options);
+  const { path, module, decision } = chosen;
   // A start node refuses for flags it names is retried once without them; any other refusal demotes the module.
   for (let attempt = 0; decision.kind === "bundle" && decision.url && attempt < 2; attempt++) {
     const execArgv = execArgvWithoutTsx(options.execArgv ?? process.execArgv).filter((flag) => !refusedWorkerFlags.has(flag));
@@ -197,6 +185,79 @@ export function startWorker(
     }
   }
   return construct(self, options);
+}
+
+/**
+ * The module a source URL names and its entry decision, made once per module for the process's life and logged as
+ * worker.entry_resolved; undefined when the switch is off or the URL is not under a src/ directory (its source runs).
+ */
+function moduleDecision(self: URL, opts: StartWorkerOpts): { path: string; module: string; decision: WorkerEntryDecision } | undefined {
+  const path = fileURLToPath(self);
+  const at = path.lastIndexOf(`${sep}src${sep}`);
+  if ((opts.env ?? process.env)[BUNDLED_WORKERS_ENV] === "0" || at < 0) return undefined;
+  const root = path.slice(0, at);
+  const module = relative(root, path).split(sep).join("/");
+  let decision = decisions.get(path);
+  if (!decision) {
+    decision = (() => {
+      try {
+        return decide(module, root, opts);
+      } catch (err) {
+        return { kind: "tsx" as const, reason: `decision-failed: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
+      }
+    })();
+    decisions.set(path, decision);
+    entryLog?.("worker.entry_resolved", { module, kind: decision.kind, reason: decision.reason });
+  }
+  return { path, module, decision };
+}
+
+/** {@link forkWorkerEntry}'s answer: the child, which entry it runs, and how long the spawn held the calling thread. */
+export interface WorkerEntryFork {
+  child: ChildProcess;
+  /** `override` for a caller's own module (a test's); otherwise as {@link startWorker} decided for the module. */
+  kind: "bundle" | "tsx" | "override";
+  /** The synchronous part of the spawn: the parent's page tables are copied on the calling thread (W1-T9754's bench). */
+  spawnSyncMs: number;
+}
+
+/**
+ * C5 (#13207): start a module's worker entry as a SHORT-LIVED CHILD PROCESS rather than a thread, so everything its work
+ * allocated returns to the OS when it exits; a thread that exits leaves much of its peak in the parent's allocator.
+ * The entry is the one {@link startWorker} would start, by the same per-module decision, so a child is a bundle
+ * exactly when that module's threads are. A bundle child that exits non-zero before its first message demotes the
+ * module as a thread would: a child that says it is ready before its work starts is never demoted by that work.
+ */
+export function forkWorkerEntry(
+  selfUrl: string | URL,
+  args: readonly string[],
+  options: ForkOptions & { execArgv: string[] },
+  opts: Omit<StartWorkerOpts, "construct"> & { spawn?: typeof fork } = {},
+): WorkerEntryFork {
+  const spawn = opts.spawn ?? fork;
+  const launch = (url: string | URL, execArgv: string[], kind: WorkerEntryFork["kind"]): WorkerEntryFork => {
+    const started = performance.now();
+    const child = spawn(fileURLToPath(url), [...args], { ...options, execArgv });
+    return { child, kind, spawnSyncMs: performance.now() - started };
+  };
+  const bare = execArgvWithoutTsx(options.execArgv);
+  if (opts.override) return launch(opts.override, options.execArgv, "override");
+  if (runsBundled()) return launch(bundledWorkerUrl(selfUrl), bare, "bundle");
+  const self = new URL(selfUrl);
+  const chosen = moduleDecision(self, opts);
+  if (chosen === undefined || chosen.decision.kind !== "bundle" || chosen.decision.url === undefined) return launch(self, options.execArgv, "tsx");
+  const { path, module } = chosen;
+  const preload = typescriptPreload(bare);
+  if (preload !== undefined) {
+    // As startWorker: the parent asked every child to run it, so the child keeps its source and tsx.
+    demote(path, module, `parent-preloads-typescript: ${preload.slice(-80)}`);
+    return launch(self, options.execArgv, "tsx");
+  }
+  const forked = launch(chosen.decision.url, bare, "bundle");
+  let spoke = false;
+  forked.child.once("message", () => { spoke = true; });
+  forked.child.once("exit", (code) => { if (code !== 0 && !spoke) demote(path, module, `bundle-child-exit-before-first-message: ${code}`); });
+  return forked;
 }
 
 /** Keyed by the module's absolute path: two trees in one process never share a decision. */

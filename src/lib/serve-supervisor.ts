@@ -342,8 +342,13 @@ export function cgroupSwapCurrent(read: (path: string) => string = (path) => rea
 export interface HostPressureReading {
   atMs: number;
   memAvailableBytes?: number;
-  /** pswpin delta over the sample window, pages per second. */
+  /** pswpin + zswpin delta over the sample window, pages per second (OPERATOR RULING 2026-10-19 (4): a swap-in
+   *  served from zswap's compressed pool counts in zswpin, never pswpin). */
   swapInPagesPerSec?: number;
+  /** Its parts, and how the zswap part was read: a kernel without zswap has no zswpin line, read as 0 and named. */
+  swapInDiskPagesPerSec?: number;
+  swapInZswapPagesPerSec?: number;
+  swapInZswapBasis?: string;
   psiSomeAvg10?: number;
   psiFullAvg10?: number;
   unread: string[];
@@ -411,7 +416,7 @@ export function readServeUpgradeThresholds(slotDir: string, read: (path: string)
 }
 
 /**
- * Two pswpin reads `sampleMs` apart give the swap-in rate; MemAvailable and the PSI avg10 lines are read after
+ * Two pswpin + zswpin reads `sampleMs` apart give the swap-in rate; MemAvailable and the PSI avg10 lines are read after
  * the second. Every read that fails or does not parse is named in `unread`.
  */
 export async function readHostPressure(ports: { read?: (path: string) => string; clock: Clock; sleep: (ms: number) => Promise<void>; sampleMs?: number }): Promise<HostPressureReading> {
@@ -429,9 +434,12 @@ export async function readHostPressure(ports: { read?: (path: string) => string;
       return undefined;
     }
   };
-  const pswpin = (): number | undefined => {
-    const raw = /^pswpin\s+(\d+)/m.exec(read("/proc/vmstat"))?.[1];
-    return raw === undefined ? undefined : Number(raw);
+  const pswpin = (): { disk: number; zswap: number; zswapBasis: string } | undefined => {
+    const text = read("/proc/vmstat");
+    const disk = /^pswpin\s+(\d+)/m.exec(text)?.[1];
+    if (disk === undefined) return undefined;
+    const zswap = /^zswpin\s+(\d+)/m.exec(text)?.[1];
+    return { disk: Number(disk), zswap: Number(zswap ?? 0), zswapBasis: zswap === undefined ? "no zswpin line (zswap not compiled in): 0" : "zswpin" };
   };
   const firstAt = ports.clock.now();
   const first = attempt("/proc/vmstat pswpin", pswpin);
@@ -439,10 +447,14 @@ export async function readHostPressure(ports: { read?: (path: string) => string;
   const secondAt = ports.clock.now();
   const second = first === undefined ? undefined : attempt("/proc/vmstat pswpin", pswpin);
   const seconds = (secondAt - firstAt) / 1000;
-  let swapInPagesPerSec: number | undefined;
+  let swapIn: Pick<HostPressureReading, "swapInPagesPerSec" | "swapInDiskPagesPerSec" | "swapInZswapPagesPerSec" | "swapInZswapBasis"> = {};
   if (first !== undefined && second !== undefined) {
-    if (seconds > 0) swapInPagesPerSec = Math.max(0, second - first) / seconds;
-    else unread.push("/proc/vmstat pswpin: no time elapsed between samples");
+    if (seconds > 0) {
+      const swapInDiskPagesPerSec = Math.max(0, second.disk - first.disk) / seconds;
+      const swapInZswapPagesPerSec = Math.max(0, second.zswap - first.zswap) / seconds;
+      swapIn = { swapInPagesPerSec: swapInDiskPagesPerSec + swapInZswapPagesPerSec, swapInDiskPagesPerSec, swapInZswapPagesPerSec,
+        swapInZswapBasis: second.zswapBasis };
+    } else unread.push("/proc/vmstat pswpin: no time elapsed between samples");
   }
   const memKb = attempt("/proc/meminfo MemAvailable", () => {
     const kb = /^MemAvailable:\s+(\d+)\s+kB/m.exec(read("/proc/meminfo"))?.[1];
@@ -461,7 +473,7 @@ export async function readHostPressure(ports: { read?: (path: string) => string;
   return {
     atMs: secondAt,
     ...(memKb !== undefined ? { memAvailableBytes: memKb * 1024 } : {}),
-    ...(swapInPagesPerSec !== undefined ? { swapInPagesPerSec } : {}),
+    ...swapIn,
     ...(psi ? { psiSomeAvg10: psi.some, psiFullAvg10: psi.full } : {}),
     unread,
   };
@@ -494,7 +506,9 @@ export function judgeServeUpgradeAdmission(i: {
   const peak = i.candidatePeakBytes;
   if (peak === undefined || !Number.isFinite(peak) || peak <= 0) return { admit: false, hold: "peak_unknown", detail: i.peakBasis };
   if (r.swapInPagesPerSec > t.swapInPagesPerSecMax) {
-    return { admit: false, hold: "swap_in", detail: `swap-in ${r.swapInPagesPerSec.toFixed(1)} pages/s > ${t.swapInPagesPerSecMax}` };
+    const parts = r.swapInDiskPagesPerSec === undefined ? "" : ` (disk ${r.swapInDiskPagesPerSec.toFixed(1)} + zswap ` +
+      `${(r.swapInZswapPagesPerSec ?? 0).toFixed(1)}, ${r.swapInZswapBasis ?? "zswap unread"})`;
+    return { admit: false, hold: "swap_in", detail: `swap-in ${r.swapInPagesPerSec.toFixed(1)} pages/s${parts} > ${t.swapInPagesPerSecMax}` };
   }
   if (r.psiSomeAvg10 > t.psiSomeAvg10Max || r.psiFullAvg10 > t.psiFullAvg10Max) {
     return { admit: false, hold: "psi", detail: `memory PSI some avg10 ${r.psiSomeAvg10} (max ${t.psiSomeAvg10Max}), full avg10 ${r.psiFullAvg10} (max ${t.psiFullAvg10Max})` };

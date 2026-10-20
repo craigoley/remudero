@@ -1245,7 +1245,8 @@ test("W1-T10208: strict priors survive ordinary gathers without changing legacy 
   assert.deepEqual(persisted.validationObservation, a.current, "ordinary writer preserved the actual older tag without refreshing it");
   f.w.now.ms += 200; f.files.set("/proc/vmstat", "pswpin 102\n");
   const secondLegacy = gatherShadowInputs({ ...validationRequest, root: "/private-other-fixture" }, f.options as AdmissionPorts, POLICY);
-  assert.deepEqual(secondLegacy.swapIn, { pagesPerSec: 5 }, "unchanged legacy host-global interval");
+  assert.deepEqual(secondLegacy.swapIn, { pagesPerSec: 5, diskPagesPerSec: 5, zswapPagesPerSec: 0,
+    zswapBasis: "no zswpin line (zswap not compiled in): 0" }, "unchanged legacy host-global interval");
   f.w.now.ms += 600; f.files.set("/proc/vmstat", "pswpin 103\n");
   f.files.set("/sys/fs/cgroup/memory.stat", "anon 1\nfile 1\ninactive_file 0\npswpin 102\n");
   resetShadowMemoryStateForTests(); resetMemoryAdmissionStateForTests();
@@ -1688,7 +1689,8 @@ test("W1-T10209: a non-head memory waiter has attributable queue evidence before
 
 test("W1-T10209: queue observation changes no admission decision or ordering", async () => {
   for (const [headClass, nextClass, sinceMs] of [
-    ["review", "implement", NOW], ["implement", "review", NOW - 60 * 60_000],
+    // 59 min of aging outranks a fresh review (score 3.95 against 3); at 60 min the starvation rung would admit it.
+    ["review", "implement", NOW], ["implement", "review", NOW - 59 * 60_000],
   ] as const) {
     const f = observedQueue({ ...request, workerClass: headClass, runId: "ranked-head", sinceMs },
       { ...request, workerClass: nextClass, runId: "ranked-next" });
