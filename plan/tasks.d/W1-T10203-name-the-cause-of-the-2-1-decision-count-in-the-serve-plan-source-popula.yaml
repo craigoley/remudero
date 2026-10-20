@@ -6,7 +6,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=021d61ec05d0ec7c
   attempts: 0
   files:
     - test/serve-plan-source-population.test.ts
