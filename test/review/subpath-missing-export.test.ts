@@ -104,3 +104,15 @@ test("subpath export attribution refuses repeated substitutions and unsafe packa
   f.put(f.head, "package.json", JSON.stringify({ imports: { "#src/*": "./src/*" }, padding: "x".repeat(65536) }));
   assert.equal(baseLacksPrAddedExports(f.output(), f.base, f.head), undefined);
 });
+
+test("an unreadable mapped source stays unknown even when a later extension would supply its export", t => {
+  const f = fixture(t), source = join(f.head, "src/a.ts");
+  assert.match(String(baseLacksPrAddedExports(f.output(), f.base, f.head)), /base lacks export/);
+  f.put(f.dir, "outside.ts", "export const added = 3;\n");
+  f.put(f.head, "src/a.js", "export const added = 3;\n");
+  rmSync(source); symlinkSync(join(f.dir, "outside.ts"), source);
+  assert.equal(baseLacksPrAddedExports(f.output(), f.base, f.head), undefined,
+    "ELOOP is unavailable evidence, not ENOENT permission to credit an alternate module");
+  rmSync(source); f.put(f.head, "src/a.ts", "export const added = 3;\n");
+  assert.match(String(baseLacksPrAddedExports(f.output(), f.base, f.head)), /base lacks export/);
+});
