@@ -1570,6 +1570,13 @@ export function resolveReviewTaskId(
   return taskIdFromRunBranch(headRefName);
 }
 
+/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review. */
+export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
+  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL) return true;
+  return taskIdFromRunBranch(headRefName) === taskId &&
+    /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
+}
+
 /**
  * Resolve a PR's task id (W1-T453): the `Remudero-Task:` trailer first, the `run-<taskId>-*` head ref only as
  * a fallback. The fallback is withheld for a plan-only filing (#1527), judged by the caller's own
@@ -2259,7 +2266,7 @@ export function* openPrViewSteps(
         ? undefined
         : bodyReviewContractDigest({
             reviewLedgerKey, body: pr.body ?? "",
-            unfiled: taskId === undefined || taskId === UNFILED_RUN_SENTINEL,
+            unfiled: usesUntaskedReviewMetadata(taskId, pr.headRefName),
             recordedDigest: priorReviewForReuse?.reviewContractDigest,
             semanticRisk: DEFAULT_RISK, semanticBudgetUsd: UNTASKED_REVIEW_BUDGET_USD,
           });
