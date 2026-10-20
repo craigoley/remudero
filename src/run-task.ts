@@ -48376,7 +48376,7 @@ export function shardEvidence(task: Task): string | undefined {
   return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
-/** Days since the shard's file first appeared in git history, or `null` with the reason it could
+/** Days since the exact task record was introduced in qualified Git history, or `null` with the reason it could
  *  not be read — never 0, which reads as "filed today" (#7911). Age is CONTEXT for the judge,
  *  never a threshold — nothing here decides anything from it. */
 function shardAgeDays(taskId: string, nowMs: number, invocation: TaskFilingHistoryInvocation): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
