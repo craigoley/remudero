@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { materializeDependencySeed, observeDependencySeedReuse } from '../../src/lib/dependency-seeds.js';
+// @ts-expect-error -- the standalone CLI has no declaration file.
+import { main } from '../../scripts/dependency-seeds.mjs';
 
 function fixture(t: TestContext): { root: string; checkout: (name: string) => string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'rmd-provision-observation-')));
@@ -63,4 +65,15 @@ test('normal seed CLI priming and reporting use real defaults without enabling o
   const result=spawnSync(process.execPath,[script,'report','--root',store],{encoding:'utf8',timeout:5000});assert.equal(result.status,0,result.stderr);
   const report=JSON.parse(result.stdout);assert.equal(report.state,'complete');assert.equal(report.freshInstallGenerations,1);assert.equal(report.knownProvisioningRegistrations,1);assert.equal(report.cleanupAuthorized,false);
   const refused=spawnSync(process.execPath,[script,'report','--apply','--root',store],{encoding:'utf8',timeout:5000});assert.equal(refused.status,1);assert.match(refused.stderr,/read-only/);
+});
+test('seed report command emits observed metadata in process and refuses any apply request',t=>{
+  const f=registeredFixture(t),output:string[]=[],errors:string[]=[];
+  t.mock.method(console,'log',(text:string)=>output.push(text));
+  t.mock.method(console,'error',(text:string)=>errors.push(text));
+  assert.equal(main(['report','--root',f.store]),0);
+  assert.equal(JSON.parse(output[0]).knownProvisioningRegistrations,2);
+  assert.equal(main(['report','--apply','--root',f.store]),1);
+  assert.match(errors[0],/read-only/);
+  assert.equal(main(['unknown','--root',f.store]),1);
+  assert.match(errors[1],/usage:/);
 });
