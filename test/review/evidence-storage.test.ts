@@ -88,6 +88,8 @@ test('evidence root inspection refuses before allocating beyond its explicit ent
   assert.deepEqual(readdirSync(dir).sort(), ['one.txt', 'two.txt']);
   const f = payload(t), bounded = compactEvidenceRoot(f.dir, { now: f.now, maxPricedBytes: 1 });
   assert.equal(bounded.incomplete, true); assert.equal(bounded.entries.length, 0); assert.deepEqual(readFileSync(f.path), f.bytes);
+  const eligible = compactEvidenceRoot(f.dir, { now: f.now });
+  assert.equal(eligible.entries.length, 1); assert.equal(eligible.historyDeleted, false); assert.deepEqual(readFileSync(f.path), f.bytes);
   for (const maxPricedBytes of [0, 1024 ** 3 + 1, NaN]) assert.throws(() => compactEvidenceRoot(f.dir, { maxPricedBytes }), /invalid-root-byte-budget/);
 });
 test('evidence compression refuses real fresh files and links without changing bytes', t => {
