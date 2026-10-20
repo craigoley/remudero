@@ -1,0 +1,29 @@
+- id: W1-T10223
+  title: The offline plan lint launches a precompiled bundle when one is current, so each lint child stops paying a cold tsx compile of src/run-task.ts
+  repo: remudero
+  depends_on:
+    - W1-T8775
+    - W1-T4901
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - scripts/build-child-entries.mjs
+    - scripts/preflight-author.mjs
+  acceptance:
+    - claim: the child-entry build emits a lint-plan-offline entry whose source is scripts/lint-plan-offline.mjs
+      proof: "grep: lint-plan-offline in scripts/build-child-entries.mjs"
+    - claim: preflight-author launches the offline plan lint through childEntryArgv, so a current bundle runs and tsx remains the fallback
+      proof: "grep: childEntryArgv in scripts/preflight-author.mjs"
+  origin: followup:DAEMON-1792441107709:2026-10-19T20:39:58.457Z:1
+  rationale: >-
+    From the 2026-10-19 follow-up on https://github.com/craigoley/remudero/pull/12894, ratified
+    via rmd approve:
+  
+    follow-up harvest [research]: each offline lint child takes about 13s cold, and four of these
+    proofs run six or seven children each. Consider a shared tsx cache or a precompiled entry for
+    `lint-plan-offline.mjs`. That is outside this task's declared files. — from PR-12894 (run
+    DAEMON-1792441107709, https://github.com/craigoley/remudero/pull/12894)

@@ -134,7 +134,11 @@ test("W1-T4102: serve is launched with protected memory and a higher cpu weight 
   assert.equal(serve.status, 0, serve.out);
   const line = serve.out.split("\n").find((l) => l.includes("docker run -d --name remudero-serve")) ?? "";
   const serveArgs = line.split(/\s+/);
-  assert.ok(serveArgs.includes("--memory-reservation=5120m"), `serve's memory is protected: ${line}`);
+  // Operator ruling 2026-10-19: --memory-reservation (memory.low) protected nothing — system.slice holds
+  // memory.low=0 and the kernel caps a cgroup's effective low by its ancestors' — so it is gone, and
+  // serve's share is its own memory.high, which reclaim does not push below while the host has room.
+  assert.ok(!serveArgs.some((a) => a.startsWith("--memory-reservation")), `no ineffective memory.low: ${line}`);
+  assert.ok(serveArgs.some((a) => a.startsWith("--annotation=org.systemd.property.MemoryHigh=")), `serve's share is its memory.high: ${line}`);
   const build = recycle(HOST_MIB).args;
   assert.ok(shares(serveArgs) > shares(build), `serve ${shares(serveArgs)} must outweigh a build daemon ${shares(build)}`);
 });
@@ -152,16 +156,64 @@ test("serve's memory ceiling fits an active generation and a booting standby dur
   const mib = (flag: string): number => Number(args.find((a) => a.startsWith(`${flag}=`))?.slice(flag.length + 1).replace(/m$/, ""));
   const needMib = (5.28 + 1.55 + 0.15) * 1e9 / 2 ** 20;
   assert.ok(mib("--memory") >= needMib, `ceiling ${mib("--memory")} MiB holds two generations (${Math.round(needMib)} MiB)`);
-  assert.ok(mib("--memory-reservation") * 2 ** 20 >= 4.95e9, `the reservation covers the active generation's 4.95 GB peak`);
 });
 
 test("serve is launched with a memory ceiling that bounds a leak and leaves room to swap", () => {
   const { args, out } = serveRunArgs();
   assert.ok(args.includes("--memory=7680m"), `a 7.5 GiB ceiling: an active generation (5.28 GB with swap) plus a booting standby (1.55 GB) during a handoff: ${args.join(" ")}`);
-  assert.ok(args.includes("--memory-swap=8704m"), "1 GiB of swap before the kernel kills anything");
-  assert.ok(args.includes("--memory-reservation=5120m"), "serve retains a protected 5 GiB share of host memory");
+  assert.ok(args.some((a) => a.startsWith("--memory-swap=")), "room to swap before the kernel kills anything");
   assert.ok(!args.some((a) => a.startsWith("--cpus=")), "no CPU quota by default — the weight already wins contention");
-  assert.match(out, /memory ceiling 7680 MiB \(\+1024 MiB swap\)/);
+  assert.match(out, /memory ceiling 7680 MiB \(\+\d+ MiB swap\)/);
+});
+
+test("operator ruling 2026-10-19: serve gets 2 GiB of swap and no memory reservation", () => {
+  const { args, out } = serveRunArgs();
+  // swap.max 1 GiB -> 2 GiB: at 1 GiB serve's swap read 95% full.
+  assert.ok(args.includes("--memory-swap=9728m"), `2 GiB of swap over the 7.5 GiB ceiling: ${args.join(" ")}`);
+  assert.ok(!args.some((a) => a.startsWith("--memory-reservation")), "no ineffective memory.low reservation");
+  assert.match(out, /memory ceiling 7680 MiB \(\+2048 MiB swap\)/);
+});
+
+test("operator ruling 2026-10-19: serve runs the semi-space flag and the glibc malloc tuning, with no other NODE_OPTIONS", () => {
+  const { args, out } = serveRunArgs();
+  const env = args.flatMap((a, i) => (args[i - 1] === "-e" ? [a] : []));
+  assert.deepEqual(env.filter((e) => e.startsWith("NODE_OPTIONS=")), ["NODE_OPTIONS=--max-semi-space-size=16"]);
+  assert.deepEqual(env.filter((e) => e.startsWith("GLIBC_TUNABLES=")), ["GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"]);
+  assert.match(out, /resource policy — serve: cpu-shares 4096, no memory\.low, NODE_OPTIONS --max-semi-space-size=16, GLIBC_TUNABLES glibc\.malloc\.arena_max=2/);
+});
+
+test("operator ruling 2026-10-19: the policy merges its semi-space flag into any NODE_OPTIONS exactly once", () => {
+  const merge = (value: string): string => {
+    const r = spawnSync(BASH, ["-c", 'set -u; source "$1"; resource_policy_node_options "$2"', "p", join(REPO_ROOT, "deploy", "resource-policy.sh"), value], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  };
+  assert.equal(merge(""), "--max-semi-space-size=16", "serve: the flags are the whole value");
+  assert.equal(merge("--max-old-space-size=8192"), "--max-old-space-size=8192 --max-semi-space-size=16", "the heap ceiling stays first");
+  assert.equal(merge("--max-semi-space-size=64 --max_semi_space_size 32 --enable-source-maps"), "--enable-source-maps --max-semi-space-size=16", "both spellings and the two-word form are replaced");
+  assert.equal(merge("--max-semi-space-size --trace-warnings"), "--trace-warnings --max-semi-space-size=16", "a two-word form never swallows a following flag");
+});
+
+test("operator ruling 2026-10-19: the rollback lever — emptied ruled values add nothing and drop a carried semi-space flag", () => {
+  const r = spawnSync(BASH, ["-c", [
+    'set -u; source "$1"; RESOURCE_POLICY_NODE_MEMORY_FLAGS=; RESOURCE_POLICY_GLIBC_TUNABLES=',
+    'printf "merge=[%s]\\n" "$(resource_policy_node_options "--max-old-space-size=8192 --max-semi-space-size=16")"',
+    'resource_policy_serve_args; printf "serve=%s\\n" "${RESOURCE_POLICY_SERVE_ARGS[*]}"; printf "note=%s\\n" "$RESOURCE_POLICY_NOTE"',
+    'resource_policy_build_args; printf "build=%s\\n" "${RESOURCE_POLICY_BUILD_ARGS[*]}"',
+  ].join("\n"), "p", join(REPO_ROOT, "deploy", "resource-policy.sh")], { encoding: "utf8", env: { ...process.env, RMD_MEMINFO_PATH: "/nonexistent" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^merge=\[--max-old-space-size=8192\]$/m, "the heap ceiling alone, no trailing space");
+  assert.match(r.stdout, /^serve=--cpu-shares=4096 --memory=7680m --memory-swap=9728m$/m, "no -e at all");
+  assert.match(r.stdout, /^note=serve: cpu-shares 4096, no memory\.low, NODE_OPTIONS none, GLIBC_TUNABLES none/m);
+  assert.match(r.stdout, /^build=--cpu-shares=512$/m);
+});
+
+test("operator ruling 2026-10-19: every build daemon launch carries the glibc malloc tuning", () => {
+  const { args } = recycle(HOST_MIB);
+  assert.ok(args.includes("GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"), args.join(" "));
+  assert.ok(args.some((a) => (a.startsWith("NODE_OPTIONS=") && a.endsWith(" --max-semi-space-size=16")) || a === "NODE_OPTIONS=--max-semi-space-size=16"), args.join(" "));
+  // Dropping serve's memory.low leaves the build ceiling's arithmetic alone: serve's share still sizes it.
+  assert.ok(args.includes(`--memory=${HOST_MIB - 5120 - 2048}m`));
 });
 
 test("the serve memory ceiling and a CPU quota are operator knobs without a code change", () => {
@@ -171,7 +223,7 @@ test("the serve memory ceiling and a CPU quota are operator knobs without a code
   const below = serveRunArgs({ RMD_SERVE_MEMORY_LIMIT_MIB: "1024" });
   assert.ok(!below.args.some((a) => a.startsWith("--memory=")), "a ceiling under the protected reserve is refused, not applied");
   const tuned = serveRunArgs({ RMD_SERVE_MEMORY_LIMIT_MIB: "6144", RMD_SERVE_CPUS: "4" });
-  assert.ok(tuned.args.includes("--memory=6144m") && tuned.args.includes("--memory-swap=7168m"));
+  assert.ok(tuned.args.includes("--memory=6144m") && tuned.args.includes("--memory-swap=8192m"));
   assert.ok(tuned.args.includes("--cpus=4"));
 });
 

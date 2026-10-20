@@ -102,6 +102,12 @@ const CONTAINER_ENV_BY_MODE: Record<string, string[]> = {
   // read this as "unchanged from the image" and silently revert it (rationale 5, bullet 1).
   "shadow-declared": containerEnvLines({ override: ["GH_APP_ID", "real-appid"] }),
   "node-options-other-flag": containerEnvLines({ overrides: { NODE_OPTIONS: "--enable-source-maps --max-old-space-size=8192" } }),
+  // Operator ruling 2026-10-19: a container the launcher (or an earlier recycle) started under the ruled
+  // memory flags, with an older semi-space value to be replaced.
+  "memory-flags-carried": containerEnvLines({
+    overrides: { NODE_OPTIONS: "--max-old-space-size=8192 --max-semi-space-size 64 --enable-source-maps --max_semi_space_size=32" },
+    extra: "GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072",
+  }),
   "git-author-shell-seed": containerEnvLines({ drop: ["RMD_GIT_AUTHOR_NAME", "RMD_GIT_AUTHOR_EMAIL"] }),
   "git-author-live": containerEnvLines({
     overrides: {
@@ -809,10 +815,11 @@ test("W1-T1069: image-supplied variables are not re-passed by the recycle", () =
   for (const imageVar of ["PATH", "NODE_VERSION", "YARN_VERSION", "HOME", "DISABLE_AUTOUPDATER"]) {
     assert.ok(!eNames.includes(imageVar), `${imageVar} belongs to the image — it must never be re-passed via -e`);
   }
+  // GLIBC_TUNABLES is the resource policy's own name (operator ruling 2026-10-19), set at every launch.
   assert.deepEqual(
     [...eNames].sort(),
-    Object.keys(DECLARED_RUNTIME_FIXTURE).sort(),
-    "only the declared runtime names may be passed, and every one of them must be",
+    [...Object.keys(DECLARED_RUNTIME_FIXTURE), "GLIBC_TUNABLES"].sort(),
+    "only the declared runtime names and the policy's own may be passed, and every one of them must be",
   );
 });
 
@@ -1249,19 +1256,47 @@ test("W1-T4198: an instances app fields reach the container environment", () => 
 test("W1-T4198: an instances heap size reaches NODE_OPTIONS", () => {
   const run = runInstance(["max_old_space_mb: 4096"]);
   assert.equal(run.status, 0, run.stderr);
-  assert.deepEqual(runEnvValues(run, "NODE_OPTIONS"), ["--max-old-space-size=4096"], "the registry size replaces the captured one");
+  // The ruled memory flags (operator ruling 2026-10-19) follow the heap flag; see the test below.
+  assert.deepEqual(runEnvValues(run, "NODE_OPTIONS"), ["--max-old-space-size=4096 --max-semi-space-size=16"], "the registry size replaces the captured one");
   // Other flags the container carries survive; only the heap flag is replaced.
   const merged = runInstance(["max_old_space_mb: 2048"], "node-options-other-flag");
   assert.equal(merged.status, 0, merged.stderr);
-  assert.deepEqual(runEnvValues(merged, "NODE_OPTIONS"), ["--enable-source-maps --max-old-space-size=2048"]);
-  // Absent: the captured NODE_OPTIONS is carried untouched.
+  assert.deepEqual(runEnvValues(merged, "NODE_OPTIONS"), ["--enable-source-maps --max-old-space-size=2048 --max-semi-space-size=16"]);
+  // Absent: the captured NODE_OPTIONS is carried with only the ruled memory flags added.
   const bare = runInstance([]);
-  assert.deepEqual(runEnvValues(bare, "NODE_OPTIONS"), [DECLARED_RUNTIME_FIXTURE.NODE_OPTIONS]);
+  assert.deepEqual(runEnvValues(bare, "NODE_OPTIONS"), [`${DECLARED_RUNTIME_FIXTURE.NODE_OPTIONS} --max-semi-space-size=16`]);
   // Present but not a size: refused before anything is touched, never silently dropped.
   const bad = runInstance(["max_old_space_mb: lots"]);
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr, /REFUSING -- instance 'fixture' has a malformed max_old_space_mb 'lots'/);
   assert.equal(bad.calls.filter(isRm).length, 0, "a refusal must leave the container alone");
+});
+
+// ── Operator ruling 2026-10-19: a recycle starts its daemon under the ruled memory flags ─────────
+// A recycle CARRIES the outgoing container's NODE_OPTIONS, so before this the flags the launcher renders
+// would have reached only a container the launcher itself created, and been lost at the next recycle.
+
+test("operator ruling 2026-10-19: a recycled daemon runs the semi-space flag and the glibc malloc tuning", () => {
+  const run = runRecycle("good");
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(runEnvValues(run, "NODE_OPTIONS"), ["--max-old-space-size=8192 --max-semi-space-size=16"], "the heap ceiling is kept and the ruled flag added");
+  assert.deepEqual(runEnvValues(run, "GLIBC_TUNABLES"), ["glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"]);
+  // The smoke is spelled `docker container run`; it must run what the daemon will run.
+  const smoke = run.calls.filter((c) => c.bin === "docker" && c.argv[0] === "container" && c.argv[1] === "run");
+  const runs = [...smoke, ...run.calls.filter(isRun)];
+  assert.ok(smoke.length >= 1 && runs.length >= 2, "control: a smoke run, then the daemon's");
+  for (const r of runs) {
+    assert.ok(r.argv.includes("NODE_OPTIONS=--max-old-space-size=8192 --max-semi-space-size=16"), `every launch carries the flag: ${r.argv.join(" ")}`);
+    assert.ok(r.argv.includes("GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"), `every launch carries the tuning: ${r.argv.join(" ")}`);
+  }
+});
+
+test("operator ruling 2026-10-19: a container already on the flags recycles with ONE semi-space flag, its other words kept", () => {
+  const run = runRecycle("memory-flags-carried");
+  assert.doesNotMatch(run.stderr, /carries a runtime variable this recycle does not declare/, "GLIBC_TUNABLES is the policy's own name, not drift");
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(runEnvValues(run, "NODE_OPTIONS"), ["--max-old-space-size=8192 --enable-source-maps --max-semi-space-size=16"]);
+  assert.deepEqual(runEnvValues(run, "GLIBC_TUNABLES"), ["glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"], "set once, by the policy");
 });
 
 /** W1-T9071: a codex home with one settled session, a data-disk destination, a `stat` reporting the two on

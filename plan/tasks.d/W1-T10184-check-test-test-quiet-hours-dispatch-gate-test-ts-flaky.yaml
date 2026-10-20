@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.23
   status: queued
@@ -49,10 +49,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.88
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
     reasons:
-      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The supplied rounds establish recurring test failures, but show neither a diagnosed cause nor a concrete prevention mechanism; the proposed remedy's basis cannot be verified from this record.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration. It does not execute a behavioral check demonstrating that the failure is prevented or self-healed without a fix round."
-    judged_at: "2026-10-19T04:11:22.795Z"
-    pin: "bb2be6337b0c57873823e7246b5471ced081d7b5d372c1d3b2402aa89aecb257"
+      - "The plan record describes a fix for a flaky test (test/quiet-hours-dispatch-gate.test.ts) by touching src/lib/daemon.ts and adding a new regression test file. Nothing in the description or files touches secrets, credentials, auth, permissions, merge/deploy/infrastructure policy, or data deletion."
+      - "The acceptance criterion is a grep-verifiable test in a new file (verify: auto), so the result can be verified from what is shown. It is not a decision reserved for the operator."
+      - "The family track record is mixed (36 merged, 40 declined, Beta mean 0.66), but the failure evidence is concrete, with 3 cited PRs and a named failing test. The change is also bounded by the normal CI and review path."
+      - "The declared edit to src/lib/daemon.ts is a core daemon file, which deserves normal review attention. The description gives no sign of a policy or dispatch-control change beyond fixing test flakiness."
+    judged_at: "2026-10-20T00:47:03.001Z"
+    pin: "ac046dfaf0f359ffa1ae561c08415d954aebd798ad7fa801d65abc8986d5ebf7"

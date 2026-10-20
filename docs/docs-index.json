@@ -194,6 +194,12 @@
       "grepHint": "Deploy supervisor — self-updating the daemon"
     },
     {
+      "path": "docs/evidence-storage-policy.md",
+      "title": "Bounded storage proposals, not deletion authority",
+      "summary": "`node scripts/evidence-storage-policy.mjs --manifest /private/owned/storage-observation.json`",
+      "grepHint": "Bounded storage proposals, not deletion authority"
+    },
+    {
       "path": "docs/evidence-storage.md",
       "title": "Bounded, opt-in evidence storage",
       "summary": "The Mac janitor can invoke an account-private evidence compactor during an apply",

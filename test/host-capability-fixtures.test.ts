@@ -167,6 +167,14 @@ const DECLARED: readonly Declared[] = [
     reason: "Checkpoint admission rejects group/world-readable state by explicit stat mode, not an OS permission denial. The refusal holds for uid 0 as well as the ordinary account.",
   },
   {
+    kind: "chmod", file: "review/evidence-storage-policy.test.ts", key: "0o644", count: 1,
+    reason: "The observation reader refuses public stat modes before parsing, independently of OS read permission or uid. This is a private-manifest policy control, not an EACCES fixture.",
+  },
+  {
+    kind: "chmod", file: "review/evidence-storage-policy.test.ts", key: "0o600", count: 1,
+    reason: "Restores the same observation fixture to its supported private mode before real link and directory refusals. No assertion relies on root being denied access.",
+  },
+  {
     kind: "platform-tool", file: "mac-janitor-dependency-health.test.ts", key: "/usr/bin/find", count: 1,
     reason: "The private shell fixture delegates only inside its owned root to native find, available on both Darwin and Linux; all other roots fail closed. The health assertions do not depend on BSD/GNU enumeration order or output.",
   },
