@@ -6,23 +6,23 @@ import { join } from "node:path";
 import { setImmediate as flush, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { daemonBoot, runDaemon, runLanePool, type LanePoolControl } from "../src/lib/daemon.js";
-import { adoptRunChildren } from "../src/lib/run-child.js";
-import { childIdentity, readSpec, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "../src/lib/run-child-contract.js";
-import { loadPlan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { daemonCommand, ledgerPathFor, orphanSweepRunActive } from "../src/run-task.js";
-import { defaultInstance } from "../src/lib/host-memory-ledger.js";
-import { detachSweepAction } from "../src/lib/sweep.js";
+import { daemonBoot, runDaemon, runLanePool, type LanePoolControl } from "#src/lib/daemon.js";
+import { adoptRunChildren } from "#src/lib/run-child.js";
+import { childIdentity, readSpec, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { daemonCommand, ledgerPathFor, orphanSweepRunActive } from "#src/run-task.js";
+import { defaultInstance } from "#src/lib/host-memory-ledger.js";
+import { detachSweepAction } from "#src/lib/sweep.js";
 import {
   defaultReadMarkers, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, sweepOrphanWorkers,
   TASK_ID_ENV, workerInstallationScope, WORKER_SCOPE_ENV,
-} from "../src/lib/worker-containment.js";
-import { acquireInflightLock, readInflightLock } from "../src/lib/inflight-lock.js";
-import { sweepInflightLocksWithReceipts } from "../src/lib/benchmark-run.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import type { RunChildHandle } from "../src/lib/run-child.js";
+} from "#src/lib/worker-containment.js";
+import { acquireInflightLock, readInflightLock } from "#src/lib/inflight-lock.js";
+import { sweepInflightLocksWithReceipts } from "#src/lib/benchmark-run.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import type { RunChildHandle } from "#src/lib/run-child.js";
 
 const { buildChildEntries } = createRequire(import.meta.url)("../scripts/build-child-entries.mjs") as {
   buildChildEntries(options: { root: string; entries: { name: string; source: string }[]; workers: string[] }): Promise<{ sourceHash: string }>;

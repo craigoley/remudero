@@ -11,23 +11,23 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, test } from "node:test";
 
-import { clockFromIsoFn, clockFromMillisFn } from "../src/lib/clock.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import * as deployJudge from "../src/lib/deploy-judge.js";
-import { requestPause } from "../src/lib/fleet-control.js";
-import { loadPlan } from "../src/lib/plan.js";
+import { clockFromIsoFn, clockFromMillisFn } from "#src/lib/clock.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import * as deployJudge from "#src/lib/deploy-judge.js";
+import { requestPause } from "#src/lib/fleet-control.js";
+import { loadPlan } from "#src/lib/plan.js";
 import {
   QuietRoundEndedError, RECYCLE_YIELD_LEDGER_STEP, runQuietWorkerWatchdog, type QuietWatchdogOptions,
-} from "../src/lib/quiet-worker-watchdog.js";
-import { recyclePauseDetail } from "../src/lib/recycle-yield.js";
-import { runChildModeIsOn } from "../src/lib/run-child.js";
+} from "#src/lib/quiet-worker-watchdog.js";
+import { recyclePauseDetail } from "#src/lib/recycle-yield.js";
+import { runChildModeIsOn } from "#src/lib/run-child.js";
 import {
   RUN_CHILD_ADOPTION_PASS_STEP, RUN_CHILD_CONTRACT_FAILING_STEP, RUN_CHILD_MODE_DECISION_STEP, createRunChildModeTracker,
   runChildModeFor, type RunChildContractEscalation,
-} from "../src/lib/run-child-mode.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonRunChildContract, roundEndedHandoffRows, watchDispatchSpawn } from "../src/run-task.js";
+} from "#src/lib/run-child-mode.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { daemonRunChildContract, roundEndedHandoffRows, watchDispatchSpawn } from "#src/run-task.js";
 
 const scratch: string[] = [];
 const tmp = (label: string): string => {
@@ -199,7 +199,8 @@ test("W1-T9089: a contract failure escalates once no in-process path exists", ()
 });
 
 test("W1-T9089: the declaration-weighed stop-gap is deleted with the self-path list", async () => {
-  await assert.rejects(import("../src/lib/advance-declarations.js" as string), (error: NodeJS.ErrnoException) =>
+  const retired = new URL(["..", "src", "lib", "advance-declarations.js"].join("/"), import.meta.url).href;
+  await assert.rejects(import(retired as string), (error: NodeJS.ErrnoException) =>
     error.code === "ERR_MODULE_NOT_FOUND");
   for (const name of ["DAEMON_SELF_PATH_PREFIXES", "DAEMON_SELF_COMMIT_SCOPE", "DAEMON_DECLARATION"]) {
     assert.equal(name in deployJudge, false, `${name} is retired`);

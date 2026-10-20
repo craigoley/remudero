@@ -10,16 +10,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import type { EngineChildLaunch } from "../src/lib/child-entry-argv.js";
-import { resetLearnedEstimateCacheForTests } from "../src/lib/host-memory-learning.js";
-import { DEFAULT_ESTIMATE_MIB } from "../src/lib/host-memory-ledger.js";
-import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe } from "../src/lib/run-child.js";
+import type { EngineChildLaunch } from "#src/lib/child-entry-argv.js";
+import { resetLearnedEstimateCacheForTests } from "#src/lib/host-memory-learning.js";
+import { DEFAULT_ESTIMATE_MIB } from "#src/lib/host-memory-ledger.js";
+import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe } from "#src/lib/run-child.js";
 import {
   RUN_CHILD_ADOPTION_PASS_STEP, RUN_CHILD_MODE_DECISION_STEP, classifyRunChildLoss, createRunChildModeTracker, decideRunChildMode,
   readRunChildPolicy, runChildModeEvidence, runChildModeFor,
-} from "../src/lib/run-child-mode.js";
-import { clockFromIsoFn } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/run-child-mode.js";
+import { clockFromIsoFn } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const MIB = 1024 * 1024;
 const scratch: string[] = [];
