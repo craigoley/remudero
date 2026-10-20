@@ -157,9 +157,11 @@ test("C5: the oracle child carries its own heap ceiling, not its parent's", () =
 test("C5: the oracle child body says it is ready, answers one slice with its peak resident size, then exits", () => {
   const sent: Array<Record<string, unknown>> = [];
   let onMessage: ((msg: { type?: string; id?: number; request?: OracleSliceRequest }) => void) | undefined;
+  let onDisconnect: (() => void) | undefined;
   let exits = 0;
-  runReadModelOracleChild({ on: (_event, run) => (onMessage = run), send: (message, done) => { sent.push(message as Record<string, unknown>); done(); } }, "", () => exits++);
-  assert.deepEqual(sent, [{ type: "ready" }]);
+  runReadModelOracleChild({ on: (_event, run) => (onMessage = run), once: (_event, run) => (onDisconnect = run),
+    send: (message, done) => { sent.push(message as Record<string, unknown>); done(); } }, "", () => exits++);
+  assert.deepEqual([...sent], [{ type: "ready" }]);
   assert.equal(exits, 0, "ready is not an answer");
   onMessage!({ type: "check", id: 7, request: request() });
   assert.equal(sent[1]?.type, "done");
@@ -167,6 +169,8 @@ test("C5: the oracle child body says it is ready, answers one slice with its pea
   assert.match(String((sent[1]?.result as { error?: string }).error), /the oracle could not attach to \/nonexistent\.sqlite/);
   assert.ok(Number(sent[1]?.maxRssBytes) > 0);
   assert.equal(exits, 1);
+  onDisconnect!();
+  assert.equal(exits, 2, "a parent that goes away ends the child too");
 });
 
 test("C5: forkWorkerEntry starts the bundle a module's threads start, and a bundle child dying before it speaks demotes the module", async (t) => {
@@ -185,6 +189,14 @@ test("C5: forkWorkerEntry starts the bundle a module's threads start, and a bund
   const second = forkWorkerEntry(pathToFileURL(source), [], { execArgv: [] }, opts);
   assert.equal(second.kind, "tsx", "a bundle that died before speaking is not started again");
   assert.equal(await exited(second.child), 0);
+  // A parent preloading TypeScript keeps a bundled module's child on its source, as startWorker keeps its threads.
+  const preloaded = join(root, "src", "lib", "preloaded.ts");
+  writeFileSync(preloaded, "process.exit(0);\n");
+  const setup = join(root, "setup.ts");
+  writeFileSync(setup, "export {};\n");
+  const kept = forkWorkerEntry(pathToFileURL(preloaded), [], { execArgv: ["--import", setup] }, opts);
+  assert.equal(kept.kind, "tsx");
+  assert.equal(await exited(kept.child), 0);
   (globalThis as { __rmd_bundled?: unknown }).__rmd_bundled = true;
   try {
     assert.throws(() => forkWorkerEntry(pathToFileURL(source), [], { execArgv: [] }), /a bundled process cannot start src\/lib\/lane\.ts as a worker/);

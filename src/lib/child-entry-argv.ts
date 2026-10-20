@@ -11,7 +11,6 @@
 // W1-T9601: a miss for the daemon's OWN tree (this package's root, where garden children and the harness-rooted gate
 // and check-proof children start) asks the store to build that tree once per source hash, so the next launch hits.
 import { fork, type ChildProcess, type ForkOptions } from "node:child_process";
-import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -154,23 +153,9 @@ export function startWorker(
   if (opts.override) return construct(opts.override, options);
   if (runsBundled()) return construct(bundledWorkerUrl(selfUrl), options);
   const self = new URL(selfUrl);
-  const path = fileURLToPath(self);
-  const at = path.lastIndexOf(`${sep}src${sep}`);
-  if ((opts.env ?? process.env)[BUNDLED_WORKERS_ENV] === "0" || at < 0) return construct(self, options);
-  const root = path.slice(0, at);
-  const module = relative(root, path).split(sep).join("/");
-  let decision = decisions.get(path);
-  if (!decision) {
-    decision = (() => {
-      try {
-        return decide(module, root, opts);
-      } catch (err) {
-        return { kind: "tsx" as const, reason: `decision-failed: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
-      }
-    })();
-    decisions.set(path, decision);
-    entryLog?.("worker.entry_resolved", { module, kind: decision.kind, reason: decision.reason });
-  }
+  const chosen = moduleDecision(self, opts);
+  if (chosen === undefined) return construct(self, options);
+  const { path, module, decision } = chosen;
   // A start node refuses for flags it names is retried once without them; any other refusal demotes the module.
   for (let attempt = 0; decision.kind === "bundle" && decision.url && attempt < 2; attempt++) {
     const execArgv = execArgvWithoutTsx(options.execArgv ?? process.execArgv).filter((flag) => !refusedWorkerFlags.has(flag));
@@ -202,6 +187,31 @@ export function startWorker(
   return construct(self, options);
 }
 
+/**
+ * The module a source URL names and its entry decision, made once per module for the process's life and logged as
+ * worker.entry_resolved; undefined when the switch is off or the URL is not under a src/ directory (its source runs).
+ */
+function moduleDecision(self: URL, opts: StartWorkerOpts): { path: string; module: string; decision: WorkerEntryDecision } | undefined {
+  const path = fileURLToPath(self);
+  const at = path.lastIndexOf(`${sep}src${sep}`);
+  if ((opts.env ?? process.env)[BUNDLED_WORKERS_ENV] === "0" || at < 0) return undefined;
+  const root = path.slice(0, at);
+  const module = relative(root, path).split(sep).join("/");
+  let decision = decisions.get(path);
+  if (!decision) {
+    decision = (() => {
+      try {
+        return decide(module, root, opts);
+      } catch (err) {
+        return { kind: "tsx" as const, reason: `decision-failed: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
+      }
+    })();
+    decisions.set(path, decision);
+    entryLog?.("worker.entry_resolved", { module, kind: decision.kind, reason: decision.reason });
+  }
+  return { path, module, decision };
+}
+
 /** {@link forkWorkerEntry}'s answer: the child, which entry it runs, and how long the spawn held the calling thread. */
 export interface WorkerEntryFork {
   child: ChildProcess;
@@ -230,19 +240,20 @@ export function forkWorkerEntry(
     const child = spawn(fileURLToPath(url), [...args], { ...options, execArgv });
     return { child, kind, spawnSyncMs: performance.now() - started };
   };
+  const bare = execArgvWithoutTsx(options.execArgv);
   if (opts.override) return launch(opts.override, options.execArgv, "override");
-  if (runsBundled()) return launch(bundledWorkerUrl(selfUrl), execArgvWithoutTsx(options.execArgv), "bundle");
+  if (runsBundled()) return launch(bundledWorkerUrl(selfUrl), bare, "bundle");
   const self = new URL(selfUrl);
-  let bundle: URL | undefined;
-  // startWorker's own decision, made once per module (worker.entry_resolved); its constructor only reports the URL.
-  startWorker(self, { execArgv: options.execArgv }, { ...opts, construct: (url) => {
-    if (String(url) !== self.href) bundle = new URL(url);
-    return new EventEmitter() as unknown as Worker;
-  } });
-  if (bundle === undefined) return launch(self, options.execArgv, "tsx");
-  const path = fileURLToPath(self);
-  const module = relative(path.slice(0, path.lastIndexOf(`${sep}src${sep}`)), path).split(sep).join("/");
-  const forked = launch(bundle, execArgvWithoutTsx(options.execArgv), "bundle");
+  const chosen = moduleDecision(self, opts);
+  if (chosen === undefined || chosen.decision.kind !== "bundle" || chosen.decision.url === undefined) return launch(self, options.execArgv, "tsx");
+  const { path, module } = chosen;
+  const preload = typescriptPreload(bare);
+  if (preload !== undefined) {
+    // As startWorker: the parent asked every child to run it, so the child keeps its source and tsx.
+    demote(path, module, `parent-preloads-typescript: ${preload.slice(-80)}`);
+    return launch(self, options.execArgv, "tsx");
+  }
+  const forked = launch(chosen.decision.url, bare, "bundle");
   let spoke = false;
   forked.child.once("message", () => { spoke = true; });
   forked.child.once("exit", (code) => { if (code !== 0 && !spoke) demote(path, module, `bundle-child-exit-before-first-message: ${code}`); });

@@ -765,9 +765,16 @@ export function residentPeakBytes(statusPath = "/proc/self/status"): number | un
   }
 }
 
-/** C5: an oracle child's body: answer one slice, with the child's peak resident size, then exit. */
+/**
+ * C5: an oracle child's body: answer one slice, with the child's peak resident size, then exit. A parent that goes
+ * away (its channel disconnects) wants no answer, so the child exits then too, never outliving its serve by a slice.
+ */
 export function runReadModelOracleChild(
-  proc: { on(event: "message", run: (msg: { type?: string; id?: number; request?: OracleSliceRequest }) => void): unknown; send(message: unknown, sent: () => void): unknown },
+  proc: {
+    on(event: "message", run: (msg: { type?: string; id?: number; request?: OracleSliceRequest }) => void): unknown;
+    once(event: "disconnect", run: () => void): unknown;
+    send(message: unknown, sent: () => void): unknown;
+  },
   escalationRepository: string,
   exit: () => void,
   clock: Clock = systemClock,
@@ -776,6 +783,7 @@ export function runReadModelOracleChild(
     on: (event, run) => proc.on(event, run),
     postMessage: (value) => void proc.send({ ...(value as object), maxRssBytes: residentPeakBytes() }, exit),
   }, { kind: READ_MODEL_ORACLE_KIND, ...(escalationRepository ? { escalationRepository } : {}) }, clock);
+  proc.once("disconnect", exit);
   proc.send({ type: "ready" }, () => {});
 }
 
@@ -2208,7 +2216,8 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === RE
   runReadModelOracleWorker(parentPort, workerData as ReadModelOracleData);
 }
 if (isMainThread && process.argv[2] === READ_MODEL_ORACLE_CHILD_ARG && process.send) {
-  runReadModelOracleChild({ on: (event, run) => process.on(event, run), send: (message, sent) => process.send!(message, undefined, undefined, sent) },
+  runReadModelOracleChild({ on: (event, run) => process.on(event, run), once: (event, run) => process.once(event, run),
+    send: (message, sent) => process.send!(message, undefined, undefined, sent) },
     process.argv[3] ?? "", () => process.exit(0));
 }
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_INTEGRITY_KIND && parentPort) {
