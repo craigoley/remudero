@@ -3,8 +3,7 @@
 // read was in flight never reached it: on 2026-10-07 the core daemon decided a freshness restart at 20:38:42Z and
 // started W1-T6262 at 20:39:46Z, a 20-minute run that then had to yield. These drive the REAL runDaemon at
 // laneCount 2; only the worker spawn, the freshness reading and the two awaited reads are faked.
-// W1-T7806: a lane in flight when the restart latches holds refill open until it settles or reaches a worker
-// boundary, so these fixtures have A reach its boundary once the restart is decided (the common case).
+// W1-T9089: a lane in flight when the restart is decided is awaited, and a refill that would not run as a child is held.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -41,7 +40,8 @@ const staleOwnCode = {
   stale: true as const,
   oldSha: "a".repeat(40),
   newSha: "b".repeat(40),
-  changes: [{ sha: "b".repeat(40), subject: "fix: x", files: ["src/lib/daemon.ts"] }],
+  // W1-T9089: the daemon's own code weighs as any source, so a restart-worthy advance is a threshold (18) of commits.
+  changes: Array.from({ length: 18 }, (_, n) => ({ sha: n.toString(16).padStart(40, "b"), subject: "fix: x", files: [`src/lib/m${n}.ts`] })),
 };
 
 /** A and B are held open; the refill after B frees parks on whichever awaited read `gate` names. */
@@ -58,10 +58,8 @@ function harness(gate: "merged" | "run-branches") {
   let branchReads = 0;
   let mergedReads = 0;
   const sleeps: Array<ReturnType<typeof deferred<void>>> = [];
-  const boundaries = new Map<string, () => unknown>();
-  const runOne = (id: string, options?: { restartAtWorkerBoundary: () => unknown }): Promise<RunResult> => {
+  const runOne = (id: string): Promise<RunResult> => {
     started.push(id);
-    if (options) boundaries.set(id, options.restartAtWorkerBoundary);
     if (started.includes("A") && started.includes("B")) bothStarted.resolve();
     if (id === "A" || id === "B") return release[id].promise;
     return Promise.resolve(okResult(id));
@@ -107,7 +105,6 @@ function harness(gate: "merged" | "run-branches") {
   return {
     steps, started, release, bothStarted, refillRead, refillReadStarted, run,
     freeB: () => { bReleased = true; release.B.resolve(okResult("B")); },
-    boundary: (id: string) => boundaries.get(id)?.(),
     goStale: () => { stale = true; },
     advanceClock: (ms: number) => { nowMs += ms; },
     tick: async () => {
@@ -130,7 +127,6 @@ async function decideRestartWhileTheRefillReadIsInFlight(gate: "merged" | "run-b
   await h.tick(); // past the window: the dispatch tick decides to restart
   assert.ok(h.steps.some((l) => l.step === "daemon.freshness_decision" && l.extra?.action === "restart"),
     "control: the restart was decided while the refill read was in flight");
-  assert.equal(h.boundary("A"), staleOwnCode, "A reaches a worker boundary and reads the latched restart");
   h.refillRead.resolve();
   await drainMicrotasks();
   await drainMicrotasks();
@@ -153,7 +149,8 @@ test("W1-T6274: a pending freshness restart refuses a new dispatch and says why"
   await settled(h, async () => {
     assert.deepEqual(h.started, ["A", "B"], "C is not dispatched onto B's freed lane");
     const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
-    assert.match(String(held?.extra?.reason), /^stale code \(decided while the refill read was in flight\)$/);
+    // W1-T9089: the merged-set read resolves after the decision, so its candidates are already held for the restart.
+    assert.match(String(held?.extra?.reason), /^restart decided/);
     h.release.A.resolve(okResult("A"));
     assert.equal((await h.run).stopReason, "stale", "the in-flight run finishes and the daemon restarts");
   });
@@ -164,7 +161,7 @@ test("W1-T6274: a restart decided while a refill's run-branch read is in flight 
   await settled(h, async () => {
     assert.deepEqual(h.started, ["A", "B"], "C is not dispatched onto B's freed lane");
     const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
-    assert.match(String(held?.extra?.reason), /^stale code/);
+    assert.match(String(held?.extra?.reason), /^restart decided/);
     h.release.A.resolve(okResult("A"));
     assert.equal((await h.run).stopReason, "stale");
   });

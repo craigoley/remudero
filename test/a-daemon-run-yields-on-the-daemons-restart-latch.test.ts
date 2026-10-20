@@ -14,8 +14,8 @@ const PR = "https://github.com/acme/remudero/pull/1";
 const HEAD = "c".repeat(40);
 type Stale = Extract<DaemonFreshness, { stale: true }>;
 const OWN: Stale = { stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40),
-  // W1-T9089: an image input, the one advance a busy run judges worth a restart once the self-path list is retired.
-  changes: [{ sha: "b".repeat(40), subject: "fix(deploy): rebuild the image", files: ["deploy/Dockerfile"] }] };
+  // W1-T9089: the self-path list is retired, so a busy run judges a restart worth it on a threshold's worth of source.
+  changes: Array.from({ length: 18 }, (_, n) => ({ sha: n.toString(16).padStart(40, "b"), files: [`src/lib/module-${n}.ts`] })) };
 const RECYCLE = "PAUSE requested: container recycle (deploy/recycle-container.sh)";
 
 function worker(text: string, isError = false): WorkerResult {

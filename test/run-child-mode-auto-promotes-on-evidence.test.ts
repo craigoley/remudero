@@ -2,7 +2,8 @@
 //
 // Decision record: docs/adr/0007-build-runs-outlive-the-daemon.md (A.9). `sweep.runChild.mode: auto` decides between shadow and
 // on from the ledger's own evidence since the previous daemon boot: it promotes only after a clean whole boot cycle whose closing
-// boot recorded an adoption pass, holds on a probe peak above its admitted class estimate, and demotes on a lost child.
+// boot recorded an adoption pass, and holds on a probe peak above its admitted class estimate. W1-T9089: a lost child no
+// longer demotes it (the in-process path is retired); `on` stays on and flags the contract failing for escalation.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -110,26 +111,29 @@ test("W1-T9087: auto promotes only after a clean boot cycle with an adoption", (
   assert.deepEqual(runChildModeIsOn(() => "auto", () => runChildModeEvidence([boot()])), { on: false });
 });
 
-test("W1-T9087: a lost child demotes auto to shadow", () => {
+test("W1-T9087: a lost child flags auto's contract failing instead of demoting it", () => {
   const promoted: Row[] = [boot(), adoption(), probe(300), boot(), adoption(), decided("on")];
   assert.equal(decideRunChildMode(runChildModeEvidence(promoted)).to, "on");
 
-  // A lost child demotes, and the tracker ledgers why.
+  // W1-T9089: a lost child keeps on and flags the contract failing; with no change of mode the tracker ledgers nothing.
   const ledgered: Row[] = [];
   const tracker = createRunChildModeTracker(promoted, clockFromIsoFn(at));
   tracker.observe("run_child.lost", { detail: "pid 4242 is gone", stderr_tail: "" });
   tracker.record(runChildModeFor("auto", tracker.evidence()).decision, (step, extra) => { ledgered.push({ step, ...extra }); });
-  assert.equal(ledgered.length, 1);
-  assert.equal(ledgered[0]!.step, RUN_CHILD_MODE_DECISION_STEP);
-  assert.equal(ledgered[0]!.from, "on");
-  assert.equal(ledgered[0]!.to, "shadow");
-  assert.match(String(ledgered[0]!.reason), /demoted: 1 lost child/);
-  assert.equal(tracker.evidence().mode, "shadow");
+  assert.equal(ledgered.length, 0);
+  const lostDecision = runChildModeFor("auto", tracker.evidence()).decision!;
+  assert.equal(lostDecision.to, "on");
+  assert.equal(lostDecision.contract_failing, true);
+  assert.match(lostDecision.reason, /stays on, escalated: 1 lost child/);
+  assert.equal(tracker.evidence().mode, "on");
 
-  // A misidentified child (a reused pid) and a contract mismatch demote the same way.
-  assert.match(decideRunChildMode(runChildModeEvidence([...promoted, lost("pid 7 was reused: started 9, recorded 3")])).reason, /demoted: 1 misidentified/);
-  assert.equal(decideRunChildMode(runChildModeEvidence([...promoted, probe(300, 512, "contract_mismatch")])).to, "shadow");
-  assert.equal(decideRunChildMode(runChildModeEvidence([...promoted, { step: RUN_CHILD_ADOPTION_PASS_STEP, live: 1, adopted: 0, unreadable: 0, misidentified: 1 }])).to, "shadow");
+  // A misidentified child (a reused pid) and a contract mismatch are flagged the same way.
+  assert.match(decideRunChildMode(runChildModeEvidence([...promoted, lost("pid 7 was reused: started 9, recorded 3")])).reason, /escalated: 1 misidentified/);
+  for (const row of [probe(300, 512, "contract_mismatch"), { step: RUN_CHILD_ADOPTION_PASS_STEP, live: 1, adopted: 0, unreadable: 0, misidentified: 1 }]) {
+    const flagged = decideRunChildMode(runChildModeEvidence([...promoted, row]));
+    assert.equal(flagged.to, "on");
+    assert.equal(flagged.contract_failing, true);
+  }
 
   // An outside kill is named and not charged to the contract: on stays on. An OOM kill still holds a promotion.
   assert.equal(classifyRunChildLoss({ detail: "the child exited (SIGKILL)", stderr_tail: "Out of memory: Killed process 4242 (node)" }), "oom_kill");
