@@ -59,6 +59,7 @@ import {
   readArmTimeline,
   readMergeQueueMembership,
   realArmDepsAsync,
+  readMergedRatchetsAsync,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmReprobeFacts,
@@ -71,6 +72,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
+import { judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetVerdictHolds, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
@@ -1299,6 +1301,7 @@ async function armAndLogOutcome(
     { ...(error !== undefined ? { outcome, error } : { outcome }), ...(headSha !== undefined ? { head_sha: headSha } : {}) },
     rateLimit,
     directMergePreflight,
+    typeof result === "string" ? undefined : result.ratchetJudge,
   );
   return outcome;
 }
@@ -1976,6 +1979,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "rerunFailedChecks",
   // remudero-console #2035: the task contract an escalated fix-progress latch stands on.
   "readTaskContractRevision",
+  "readMergedRatchets", // W1-T9962
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -2117,6 +2121,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readArmTimeline"
   | "readActionsStatusSummary"
   | "readTaskContractRevision"
+  | "readMergedRatchets"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -4308,6 +4313,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     // W1-T528 — the action half of W1-T520; see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
+    readMergedRatchets: (pr) => readMergedRatchetsAsync(pr.prUrl, () => config),
 
     // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
     mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
@@ -11268,7 +11274,8 @@ export interface ArmedStalledPr {
     | "distance-unknown"
     | "ready-overlap"
     | "ready-unknown"
-    | "refresh-request"; // W1-T7735: a paced board-wide request, consumed one per pass
+    | "refresh-request" // W1-T7735: a paced board-wide request, consumed one per pass
+    | "ratchet-collision"; // W1-T9962
   /** W1-T5696: the main-side files that made a distance refresh worth its CI run and re-review. */
   matchingBaseFiles?: readonly string[];
 }
@@ -13442,6 +13449,8 @@ export interface SweepDeps {
   /** W1-T528 — press update-branch: once per pass for {@link selectUpdateBranchTarget}'s one PR, and once per head
    *  W1-T9595's refresh admission admits. A `"conflict"` outcome is REPORTED and never retried by this call. */
   updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
+  /** W1-T9962 — the ratchet verdict on the merge of this PR's head into main's tip, for the armed re-judge. */
+  readMergedRatchets?: (pr: OpenPrView) => Promise<MergedRatchetJudgement>;
   /** W1-T5903 — whether the PR's base branch requires a merge queue. When it does, the queue tests
    *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
    *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
@@ -20943,8 +20952,9 @@ export async function runSweep(
   // W1-T528 — PRESS THE BUTTON. {@link selectUpdateBranchTarget} picks AT MOST ONE PR from the set
   // just reported and, when the dep is wired, requests GitHub update it. Never a loop, and a
   // conflict is REPORTED and skipped rather than retried this pass.
+  const ratchetRefreshed = new Set(await runArmedRatchetRejudge(openPrs, deps));
   if (!deps.dryRun && deps.updateBranch) {
-    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && !refreshAdmission.has(pr.prNumber) && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber));
+    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && !refreshAdmission.has(pr.prNumber) && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber) && !ratchetRefreshed.has(pr.prNumber));
     const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
     // W1-T6022: the ready refresh stands down in an Actions incident and spends one update per (PR, head).
     // The status is read only when a ready PR sits under the distance gate, so a pass with none spends no read.
@@ -21219,6 +21229,80 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   } finally {
     lightPassReadyRefreshInFlight = false;
   }
+}
+
+export const RATCHET_JUDGE_DECIDED_STEP = "sweep.ratchet_judge.decided";
+
+/** W1-T9962 — each armed, non-draft PR whose (head, main tip) pair has no judge row yet, oldest arm first. */
+export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledgerLines: readonly Record<string, unknown>[], mainTip: string): OpenPrView[] {
+  const judged = new Set<string>();
+  const firstArm = new Map<string, number>();
+  ledgerLines.forEach((l, i) => {
+    if (l.step === RATCHET_JUDGE_DECIDED_STEP) judged.add(`${String(l.pr_number)}@${String(l.head_sha)}@${String(l.main_sha)}`);
+    if (l.step === "automerge.armed" && typeof l.pr_url === "string" && !firstArm.has(l.pr_url)) firstArm.set(l.pr_url, i);
+  });
+  return openPrs
+    .filter((pr) => pr.autoMergeArmed === true && pr.isDraft !== true && !judged.has(`${pr.prNumber}@${pr.headSha}@${mainTip}`))
+    .sort((a, b) => (firstArm.get(a.prUrl) ?? Infinity) - (firstArm.get(b.prUrl) ?? Infinity) || a.prNumber - b.prNumber);
+}
+
+/**
+ * W1-T9962 — AN ARMED PR IS RE-JUDGED WHEN MAIN MOVES. GitHub merges an armed PR whenever its checks
+ * finish, so the verdict taken at the arm goes stale as main advances. A crossing or stale lowering
+ * updates the branch once per (PR, head), under the Actions incident hold; it is never disarmed
+ * (`--disable-auto` has itself fired a merge), since the new head cannot merge before its checks
+ * pass on current main. Returns the PRs it refreshed.
+ */
+export async function runArmedRatchetRejudge(
+  openPrs: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" |
+    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary">,
+): Promise<number[]> {
+  const read = deps.readMergedRatchets;
+  if (deps.dryRun || !read || !deps.readMainTip) return [];
+  const mainTip = await deps.readMainTip();
+  if (!mainTip) return [];
+  const appendLine = deps.appendLine ?? appendLedger;
+  const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const refreshed: number[] = [];
+  let incidentHold: boolean | undefined;
+  for (const pr of armedRatchetRejudgeTargets(openPrs, ledgerLines, mainTip)) {
+    let judge: MergedRatchetJudgement;
+    try {
+      judge = await read(pr);
+    } catch (e) {
+      judge = judgeMergedRatchets({ error: String((e as Error)?.message ?? e) });
+    }
+    const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RATCHET_JUDGE_DECIDED_STEP, pr_number: pr.prNumber,
+      lane: "sweep-armed", ...ratchetJudgeLedgerFields(judge), head_sha: pr.headSha, main_sha: mainTip,
+      ...(judge.mainSha !== undefined && judge.mainSha !== mainTip ? { merged_main_sha: judge.mainSha } : {}) };
+    const spent = ledgerLines.some((l) => (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") &&
+      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
+    if (!ratchetVerdictHolds(judge) || spent || !deps.updateBranch) {
+      appendLine(deps.ledgerPath, { ...row, remedy: !ratchetVerdictHolds(judge) ? "proceed" : spent ? "retry-later" : "unwired" });
+      continue;
+    }
+    if (incidentHold === undefined) {
+      const incident = deps.readActionsStatusSummary === undefined ? undefined : await Promise.resolve()
+        .then(() => deps.readActionsStatusSummary!()).then((summary) => classifyActionsIncident(summary), (error) => unreadableActionsIncident(error));
+      incidentHold = incident !== undefined && actionsIncidentHoldDecision(incident, undefined, clockFromMillisFn(deps.now).now()) === "hold";
+    }
+    appendLine(deps.ledgerPath, { ...row, remedy: incidentHold ? "incident-hold" : "update-branch" });
+    if (incidentHold) continue;
+    recordForcedRefresh(deps, pr, "ratchet-collision");
+    const target: ArmedStalledPr = { prNumber: pr.prNumber, prUrl: pr.prUrl, ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
+      headSha: pr.headSha, updateReason: "ratchet-collision" };
+    const update = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+      update_reason: "ratchet-collision", reason: "ratchet_collision", source: "armed_ratchet_rejudge" };
+    appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.attempted" });
+    try {
+      appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${await deps.updateBranch(target)}` });
+    } catch (e) {
+      appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
+    }
+    refreshed.push(pr.prNumber);
+  }
+  return refreshed;
 }
 
 let lightPassRefreshAdmissionInFlight = false;

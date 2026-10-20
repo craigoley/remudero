@@ -467,7 +467,7 @@ import {
   type OpenPrCheck,
   resolveReleasedIds,
 } from "./lib/drain.js";
-import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type DaemonFreshness, type RestartBoundary, type RestartBoundaryContext, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
+import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
@@ -1044,6 +1044,8 @@ import {
   parseProofAmendmentProposal,
   requestProofAmendment,
   requestScopeAmendment,
+  saveScopeAmendmentWork,
+  restoreScopeAmendmentWork,
   type ScopeAmendmentOutcome,
   type ScopeAmendmentRequest,
   type ProofAmendmentOutcome,
@@ -1572,7 +1574,7 @@ import {
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
-import { readyDraftPullRequest, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
+import { readyDraftPullRequest, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
@@ -2832,7 +2834,6 @@ import { materializeWorkerHome, perRunWorkerHomeDir, sweepStaleWorkerHomes, swee
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
-import { withTouchedDeclarations } from "./lib/advance-declarations.js";
 import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
@@ -3354,8 +3355,6 @@ export function watchDispatchSpawn(
     log: (step: string, fields: Record<string, unknown>) => void;
     /** The daemon's recycle-PAUSE reader: a pending recycle ends the round on the checkpoint path. */
     recyclePending?: () => string | undefined;
-    /** W1-T8139: the daemon's restart latch, read in-process (never the fetching freshness read): a latched restart ends the round too. */
-    restartPending?: () => string | undefined;
   },
   seams: {
     runWatchdog?: typeof runQuietWorkerWatchdog;
@@ -3392,7 +3391,6 @@ export function watchDispatchSpawn(
     nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
       === "delivered" ? "delivered" : "unsupported",
     ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),
-    ...(watch.restartPending ? { restartPending: watch.restartPending } : {}),
     endRound: async (reason, trigger) => {
       if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
       const cwd = spawnArgs.cwd;
@@ -3473,19 +3471,6 @@ export function freshnessYieldRows(a: {
       ...(a.freshness ? { old_sha: a.freshness.oldSha, new_sha: a.freshness.newSha } : { trigger: "recycle", detail: a.recycle }), ...undeclared } },
     { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: a.waitingOn, branch: a.branch, head_sha: a.headSha, ...undeclared } },
   ];
-}
-
-/** W1-T8139: the daemon's restart latch as the watchdog's pending-yield read: the in-process `restartAtWorkerBoundary`
- * only (never the fetching `externalWaitFreshness`), named by the sha pair it waits on. Undefined without a daemon. */
-export function restartLatchDetail(
-  latch: RestartBoundary | undefined,
-  context?: () => RestartBoundaryContext,
-): (() => string | undefined) | undefined {
-  if (!latch) return undefined;
-  return () => {
-    const freshness = latch(context?.());
-    return freshness ? `daemon restart latched: ${freshness.oldSha.slice(0, 9)}..${freshness.newSha.slice(0, 9)}` : undefined;
-  };
 }
 
 export function roundEndedHandoffRows(
@@ -5601,6 +5586,7 @@ export function armAndLogOutcome(
     { ...(error !== undefined ? { outcome, error } : { outcome }), ...(headSha !== undefined ? { head_sha: headSha } : {}) },
     rateLimit,
     directMergePreflight,
+    typeof result === "string" ? undefined : result.ratchetJudge,
   );
   return outcome;
 }
@@ -7444,12 +7430,11 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
 /** W1-T5282 — the daemon's two freshness reads of `repoDir`, both awaited: a sync `git fetch` here stalled the
  *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
-  const localGit: AsyncGitRunner = deps.git ? async (args) => deps.git!(args) : asyncGit(repoDir);
   // W1-T9092: an advance is material only when it touches the import closure of the entry this process started from.
   const closureGit: ClosureGit = deps.git ? async (args) => deps.git!(args) : daemonClosureGit(repoDir);
   const entry = daemonProcessEntry(repoDir);
   const read = (): Promise<DaemonFreshness> =>
-    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit))
+    checkServiceFreshnessAsync(repoDir, env, deps)
       .then((svc) => withDaemonClosure(svc, (sha) => daemonProcessClosure(closureGit, sha, entry))).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
@@ -11511,6 +11496,7 @@ export async function runFixRung(opts: {
     proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
     scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
     scopeAmendmentPortsIo?: Parameters<typeof buildProofAmendmentWritePorts>[1];
+    scopeAmendmentGit?: typeof hostWorktreeGitAsync;
     /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
     worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
     /** W1-T4458 (i): test seam; production runs `git merge --no-commit --no-ff origin/main`. */
@@ -11943,7 +11929,7 @@ export async function runFixRung(opts: {
   // does not parse, in which case the pre-strike merge-conflict check below is skipped every
   // round (never a guessed number).
   const prNumber = prNumberFromRef(opts.prUrl);
-  const amendScope = async (paths: string[], changedPaths: string[], headSha: string): Promise<ScopeAmendmentOutcome> => {
+  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
       const body = await (deps.fetchPrBody ?? fetchPrBodyViaGh)(opts.prUrl);
@@ -11960,10 +11946,22 @@ export async function runFixRung(opts: {
     } catch (error) {
       outcome = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
     }
-    deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
-      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined });
+    let recovery: Record<string, unknown> = {};
+    if (saveWork && (outcome.kind === "created" || outcome.kind === "resumed")) {
+      try {
+        recovery = { recovery_status: "saved",
+          recovery_path: await saveScopeAmendmentWork(scopeWork(paths, outcome.amendmentNumber)) };
+      } catch (error) {
+        const reason = String(error);
+        recovery = { recovery_status: "unavailable", recovery_reason: reason };
+      }
+    }
+    if (outcome.kind !== "amendment_merged") deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
+      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery });
     return outcome;
   };
+  const scopeWork = (paths: string[], amendmentNumber: number) => ({ root: opts.config.root,
+    worktreePath: opts.worktreePath, taskId: opts.taskId, prNumber: prNumber!, amendmentNumber, paths });
   // W1-T2671: at most one base-gap read/update attempt per invocation. A successful update ends
   // this invocation because GitHub's update-branch endpoint is asynchronous and the current
   // worktree is now stale; the next level-triggered sweep reconstructs both CI and the checkout
@@ -13225,12 +13223,71 @@ export async function runFixRung(opts: {
     const pendingScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
       row.task_id === opts.taskId && row.pr_number === prNumber && row.head_sha === priorHeadSha &&
       ["created", "resumed", "branch_update_requested"].includes(String(row.outcome)));
+    let scopeMergeStartSha: string | undefined;
+    let scopeRecoveryEvidence: string | undefined;
     if (pendingScope && Array.isArray(pendingScope.paths)) {
       const paths = pendingScope.paths as string[];
       const resumed = await amendScope(paths, paths, priorHeadSha);
       if (resumed.kind === "refused") deps.log("fix.commit_refused", { head_sha: priorHeadSha,
         reason: resumed.detail, scope_amendment_detail: `NEEDS_SCOPE ${paths.join(",")}` });
-      return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      if (resumed.kind !== "amendment_merged") {
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      }
+      const git = (args: string[], input?: string) =>
+        (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { input, maxBuffer: 1 << 26 });
+      let mergeSha: string | undefined;
+      let mergeAttempted = false;
+      try {
+        if ((await git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL])).trim()) {
+          throw new Error("local scope merge requires a clean worktree");
+        }
+        scopeMergeStartSha = (await git(["rev-parse", "HEAD"])).trim();
+        await git(["fetch", "--no-tags", "origin", "main"]);
+        mergeAttempted = true;
+        await git(["merge", "--no-edit", "--no-ff", "refs/remotes/origin/main"]);
+        mergeSha = (await git(["rev-parse", "HEAD"])).trim();
+        const contract = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${opts.taskId}`,
+          opts.worktreePath, "plan/tasks.yaml", mergeSha, git);
+        const declaredFiles = contract.taskDeclaredFiles;
+        if (contract.divergence || declaredFiles === undefined || !paths.every((path) => declaredFiles.includes(path))) {
+          throw new Error(`the locally merged task contract does not admit the amendment paths: ${contract.divergence?.reason ?? JSON.stringify(contract.taskDeclaredFiles)}`);
+        }
+        opts.task = { ...opts.task, files: contract.taskDeclaredFiles, acceptance: contract.criteria };
+      } catch (error) {
+        let reason = `${String(error)}\n${String((error as { stdout?: unknown }).stdout ?? "")}\n${String((error as { stderr?: unknown }).stderr ?? "")}`;
+        if (mergeAttempted && mergeSha === undefined) try {
+          await git(["merge", "--abort"]);
+        } catch (abortError) {
+          const error = String(abortError);
+          reason += `; merge abort: ${error}`;
+        }
+        let update: { ok: boolean; error?: string };
+        try {
+          const ports = deps.scopeAmendmentWritePorts ?? buildProofAmendmentWritePorts({
+            taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config,
+            owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, prNumber: prNumber!,
+            ledgerLinesNow: roundLedger, log: deps.log, gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
+          }, deps.scopeAmendmentPortsIo);
+          update = ports.updateBranch(opts.prUrl, priorHeadSha);
+        } catch (updateError) {
+          update = { ok: false, error: String(updateError) };
+        }
+        deps.log("fix.scope_amendment", { outcome: "branch_update_requested", ...update, reason,
+          paths, head_sha: priorHeadSha, pr_number: prNumber, amendment_number: resumed.amendmentNumber, merged_locally: false });
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      }
+      let recovery: Record<string, unknown>;
+      try {
+        const restored = await restoreScopeAmendmentWork(scopeWork(paths, resumed.amendmentNumber));
+        recovery = { recovery_status: "restored", restored_paths: restored };
+        scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber}: ${restored.join(", ")} restored from the round that asked for scope.`;
+      } catch (error) {
+        const reason = String(error);
+        recovery = { recovery_status: "unavailable", recovery_reason: reason };
+        scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber} admitted ${paths.join(", ")}. Saved work unavailable: ${reason}. Repair these admitted paths against the red below.`;
+      }
+      deps.log("fix.scope_amendment", { outcome: "amendment_merged", merged_locally: true, merge_sha: mergeSha,
+        amendment_number: resumed.amendmentNumber, paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery });
     }
     // W1-T9807: a main-owned refusal is retried, without a worker, at the first head holding the main it compared.
     const lastScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" && row.task_id === opts.taskId && row.pr_number === prNumber);
@@ -13339,6 +13396,7 @@ export async function runFixRung(opts: {
         // read one shared value, never two independently derived ones.
         reachableRemedyFiles,
       }),
+      ...(scopeRecoveryEvidence ? [scopeRecoveryEvidence] : []),
       ...(refutedFlake ? [`this red reproduced on a rerun at ${priorHeadSha}; it is not a flake. Make a real fix; another FLAKE outcome will be recorded as a no-op without a rerun.`] : []),
       ...(proofRepairRound && proofDiscriminationNow
         ? proofRepairPromptLines({ proofs: proofDiscriminationNow.proofs, stageable: proofRepairStageable })
@@ -13453,6 +13511,8 @@ export async function runFixRung(opts: {
         }
       },
     });
+    // The unpublished local merge is the commit base; the push still leases the PR's original tip.
+    const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
@@ -14053,7 +14113,7 @@ export async function runFixRung(opts: {
           pr_number: prNumber, main_sha: mainTip.status === 0 ? mainTip.stdout.trim() : undefined,
           changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)), changed_paths_error: "error" in read ? read.error : undefined });
       } else try {
-        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha);
+        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true);
       } catch (error) {
         amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
@@ -14068,7 +14128,7 @@ export async function runFixRung(opts: {
       if (harnessCommitCount > 0) {
         let landing: FixRoundLanding | undefined;
         try {
-          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
           landing = await roundLanding(expectedHeadShaForPush);
           if (pushed && pushed !== "refused") return pushed;
         } catch (error) {
@@ -14147,7 +14207,7 @@ export async function runFixRung(opts: {
     let roundPush: FixRungOutcome | "refused" | undefined;
     let landing: FixRoundLanding = { landed: false, outcome: "failed", reason: "the push did not return" };
     try {
-      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
       landing = await roundLanding(expectedHeadShaForPush);
     } catch (error) {
       landing = pushThrew(error);
@@ -16853,7 +16913,6 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   claimReserver?: DispatchClaimReserverAsync;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
-  restartAtWorkerBoundary?: RestartBoundary;
   externalWaitRecycle?: () => string | undefined;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
@@ -17780,8 +17839,6 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: ExternalWaitFreshness;
-    /** The daemon asks this run to yield or grants it a measured, bounded holdout at its current phase. */
-    restartAtWorkerBoundary?: RestartBoundary;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
@@ -17985,7 +18042,6 @@ async function runTask(
     const watchedSpawn = watchDispatchSpawn(rawSpawn, {
       enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
       provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)),
-      restartPending: restartLatchDetail(opts.restartAtWorkerBoundary, () => ({ waitingOn: restartPhase.current, runId })),
     });
     return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
@@ -20303,9 +20359,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string, phase = waitingOn): Promise<RunResult | undefined> => {
       noteRestartPhase(phase === "checkpoint" ? "checkpointed" : phase === "decision" ? "implementing" : phase);
-      const freshness = opts.restartAtWorkerBoundary
-        ? opts.restartAtWorkerBoundary({ waitingOn: restartPhase.current, runId })
-        : await opts.externalWaitFreshness?.();
+      const freshness = await opts.externalWaitFreshness?.();
       const recycle = freshness ? undefined : (opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)))();
       if (!freshness && !recycle) return undefined;
       let undeclared: readonly string[] = [];
@@ -21267,8 +21321,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       : undefined;
     if (handoffDeclined) log("run.handoff_declined", { trigger: "pr_open", reason: handoffDeclined, pr_url: prUrl });
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
-      externalWaitFreshness: opts.restartAtWorkerBoundary
-        ? () => opts.restartAtWorkerBoundary!({ waitingOn: "ci", runId }) : opts.externalWaitFreshness,
+      externalWaitFreshness: opts.externalWaitFreshness,
       externalWaitRecycle: opts.externalWaitRecycle,
       handOffAtPrOpen: opts.handOffAtPrOpen === true && handoffDeclined === undefined,
     });
@@ -38945,7 +38998,7 @@ export async function runInChildWhenOn(
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const inProcess = (reason: string): undefined => {
     if (input.mayRunInProcess?.(reason) === false) {
-      throw new TaskAdmissionError(`restart latched: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
+      throw new TaskAdmissionError(`restart decided: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
     }
     return undefined;
   };
@@ -38981,6 +39034,19 @@ export async function daemonCommand(
   return daemonCommandFromModule(rest, deps, daemonCommandHost());
 }
 
+/**
+ * W1-T9089: the daemon wiring's answer to a failing run-child contract. With the in-process restart path retired, `auto`
+ * no longer demotes; each `contract_failing` decision escalates once per evidence window through `deliver`, the
+ * daemon's existing escalate path, and ledgers `run_child.contract_failing`. Returns the per-decision hook.
+ */
+export function daemonRunChildContract(
+  deliver: (escalation: RunChildContractEscalation) => string | null | undefined,
+  log: (step: string, extra: Record<string, unknown>) => void,
+): (decision: RunChildModeDecision | undefined) => boolean {
+  const escalated = new Set<string>();
+  return (decision) => escalateRunChildContract(decision, { escalate: deliver, log, escalated });
+}
+
 /** W1-T9333: the run-task.ts symbols the moved `daemonCommand` reaches, built per call (no top-level TDZ). */
 function daemonCommandHost(): DaemonCommandHost {
   return {
@@ -39011,6 +39077,7 @@ function daemonCommandHost(): DaemonCommandHost {
     daemonDefaultBuildSweepHook,
     daemonDefaultBuildSweepLightHook,
     daemonFreshnessReads,
+    daemonRunChildContract,
     daemonGardenPassSpawn,
     daemonMemoryTelemetryReader,
     daemonPlanReaders,
@@ -44590,7 +44657,8 @@ export function buildSweepLightHook(
       }
       // W1-T9595: a held head main has fixed is refreshed only through this one admission, never the fan-out below.
       const admitted = reviewOnly ? [] : await runLightPassRefreshAdmission(openPrs, { ...effects, ledgerPath, runId });
-      const passPrs = openPrs.filter((pr) => pr.prNumber !== readyRefreshed && !admitted.includes(pr.prNumber));
+      const ratchetRefreshed = reviewOnly ? [] : await runArmedRatchetRejudge(openPrs, { ...effects, ledgerPath, runId });
+      const passPrs = openPrs.filter((pr) => pr.prNumber !== readyRefreshed && !admitted.includes(pr.prNumber) && !ratchetRefreshed.includes(pr.prNumber));
       const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
       const restPrs = requeueOnlyPrNumbers.size === 0 ? passPrs : passPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
@@ -53274,7 +53342,9 @@ import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
 import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, runChildModeIsOn, spawnRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
 import { type RunChildMode } from "./lib/policy.js";
-import { type RunChildModeEvidence } from "./lib/run-child-mode.js";
+import {
+  escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
+} from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
