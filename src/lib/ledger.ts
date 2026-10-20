@@ -576,6 +576,8 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  * docs/forensics/ledger.md#decision_relevant_ledger_steps.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
+  "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
+  "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
