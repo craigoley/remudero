@@ -19,10 +19,10 @@ const criterion = { claim: "proof", proof: "unit test: an actual title", met: tr
 const admitted = (n: number, ago: number, hostGap: boolean): Record<string, unknown> => ({
   ts: at(ago), step: "sweep.review_admitted", run_id: "one-daemon-run", task_id: "W1-T10221",
   pr_number: 10221, pr_url: URL, head_sha: HEAD, review_input_digest: DIGEST,
-  review_run_id: id(n), host_gap_rereview: hostGap, skips: ["runner-absent"],
+  review_attempt_id: id(n), host_gap_rereview: hostGap, skips: ["runner-absent"],
 });
 const posted = (n: number, ago: number): Record<string, unknown> => ({
-  ts: at(ago), step: "review.posted", run_id: id(n), task_id: "W1-T10221", pr_url: URL,
+  ts: at(ago), step: "review.posted", run_id: `review-PR10221-${1000 + n}`, review_attempt_id: id(n), task_id: "W1-T10221", pr_url: URL,
   head_sha: HEAD, review_input_digest: DIGEST, state: "success", capped: true, plan_only: false,
   decision_verdict: { state: "success", capped: true, planOnly: false, criteria: [criterion] },
 });
@@ -85,7 +85,7 @@ test("admitted host-gap attempts grow pacing once and preserve live ownership", 
     assert.equal(calls, 1, "a live same-input review owns the slot; no second effect");
     assert.ok(again.actions.every(a => !a.acted));
     const admission = liveRows.find(r => r.step === "sweep.review_admitted");
-    assert.equal(admission?.review_run_id, handedRunId);
+    assert.equal(admission?.review_attempt_id, handedRunId);
     assert.equal(admission?.host_gap_rereview, true);
     const inFlight = hostGapProgressInput(pr(), state(hostGapRereviewFacts(pr(), liveRows)));
     assert.equal(inFlight.signals.noOpRounds, 0, "an admitted unfinished attempt is not a completed no-op");
@@ -99,7 +99,7 @@ test("host-gap history separates changed inputs and incomplete legacy evidence",
   assert.equal(hostGapRereviewFacts({ ...pr(), reviewInputDigest: "v2:different-input" }, rows).history.length, 0);
   assert.deepEqual(hostGapRereviewFacts(pr(), [...rows].reverse()), hostGapRereviewFacts(pr(), rows),
     "request append order is not attempt attribution");
-  const legacy = hostGapRereviewFacts(pr(), [request(20), { ...admitted(1, 19, true), review_run_id: undefined }, posted(1, 15)]);
+  const legacy = hostGapRereviewFacts(pr(), [request(20), { ...admitted(1, 19, true), review_attempt_id: undefined }, posted(1, 15)]);
   assert.equal(legacy.history.length, 0);
   assert.equal((legacy as unknown as { attribution: { state: string } }).attribution.state, "incomplete");
   const unfinished = hostGapRereviewFacts(pr(), [admitted(2, 10, true)]);
@@ -108,10 +108,18 @@ test("host-gap history separates changed inputs and incomplete legacy evidence",
   assert.equal(input.signals.noOpRounds, 0);
   assert.equal(input.signals.incompleteRounds, 1);
 
-  const options = reviewOptionsFromFlags(["--execution-mode", "semantic", "--review-attempt-run-id", id(3)]);
-  assert.equal((options as unknown as { reviewAttemptRunId?: string }).reviewAttemptRunId, id(3));
+  const refused = { ...posted(1, 15), step: "review.post_refused", review_attempt_id: undefined,
+    reviewer_code_host_gap: "cwd-missing" };
+  const carrier = { ...posted(1, 19), step: "review.provider_provenance" };
+  assert.equal(hostGapRereviewFacts(pr(), [refused, carrier, admitted(1, 20, true)]).history.length, 1,
+    "a library-owned refusal joins only through its exact unique per-review carrier, not the daemon run");
+  const ambiguous = { ...carrier, review_attempt_id: id(2) };
+  assert.equal(hostGapRereviewFacts(pr(), [refused, carrier, ambiguous, admitted(1, 20, true)]).history.filter(r => r.completed !== false).length, 0,
+    "an ambiguous carrier never manufactures completed work");
+  const options = reviewOptionsFromFlags(["--execution-mode", "semantic", "--review-attempt-id", id(3)]);
+  assert.equal((options as unknown as { reviewAttemptId?: string }).reviewAttemptId, id(3));
   const flags = reviewOptionFlags(options);
-  assert.equal(flags[flags.indexOf("--review-attempt-run-id") + 1], id(3), "fresh-tree review keeps the admitted identity");
-  assert.equal((reviewOptionsFromFlags(["--review-attempt-run-id", "review-PR10221-../../bad"]) as unknown as { reviewAttemptRunId?: string }).reviewAttemptRunId,
+  assert.equal(flags[flags.indexOf("--review-attempt-id") + 1], id(3), "fresh-tree review keeps the admitted identity");
+  assert.equal((reviewOptionsFromFlags(["--review-attempt-id", "review-PR10221-../../bad"]) as unknown as { reviewAttemptId?: string }).reviewAttemptId,
     undefined, "an unbounded/path-shaped identity is not attribution");
 });
