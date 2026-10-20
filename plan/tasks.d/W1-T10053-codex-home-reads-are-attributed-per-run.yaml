@@ -6,7 +6,7 @@
   # the capture needs the live host under the builder rules (per-task /proc io and stat, fd readlink only); a fleet worker cannot take it
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 6.00
+  budget_usd: 11.50
   risk: high  # Rule 19: one concern, a per-run measurement and an options memo; no daemon code, no ledger step and no change to ~/.codex
   band_meaning: span
   origin: 'coordinator brief batch1017b item 11; OPERATOR RULING 2026-10-17 (coordinating session): the Codex sqlite item is MEASURE-FIRST only'

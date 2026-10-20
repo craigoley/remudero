@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 75.00
+  budget_usd: 11.50
   risk: high
   band_meaning: blast-radius
   origin: "research:kilo-ai-swarm-and-agent-manager-2026-09-21"
