@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   HOST_GAP_REREVIEW_STEP, REFUSED_POST_HOST_GAP_REREVIEW_STEP,
   hostGapProgressInput, hostGapRereviewFacts, hostGapRereviewWaitMs, planHostGapRereview, runSweep,
   type OpenPrView, type SweepDeps,
+  buildSweepEffects as libraryEffects, DEFAULT_SWEEP_POLICY, type BuildSweepEffectsDeps,
 } from "#src/lib/sweep.js";
-import { reviewOptionFlags, reviewOptionsFromFlags } from "#test/helpers/run-task-test.js";
+import { buildSweepEffects as entrypointEffects, reviewCommand, reviewOptionFlags, reviewOptionsFromFlags } from "#test/helpers/run-task-test.js";
 
 const MIN = 60_000, NOW = Date.parse("2026-10-19T12:00:00Z");
 const at = (ago: number): string => new Date(NOW - ago * MIN).toISOString();
@@ -122,4 +130,41 @@ test("host-gap history separates changed inputs and incomplete legacy evidence",
   assert.equal(flags[flags.indexOf("--review-attempt-id") + 1], id(3), "fresh-tree review keeps the admitted identity");
   assert.equal((reviewOptionsFromFlags(["--review-attempt-id", "review-PR10221-../../bad"]) as unknown as { reviewAttemptId?: string }).reviewAttemptId,
     undefined, "an unbounded/path-shaped identity is not attribution");
+});
+
+test("default review bridges and the real refusal logger preserve admitted attempt identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-gap-real-defaults-`));
+  try {
+    const ledgerPath = join(root, "state", "ledger.ndjson"), calls: Record<string, unknown>[] = [];
+    const config = { root, claudeBin: "/bin/true" } as Config;
+    const deps: BuildSweepEffectsDeps = { owner: "acme", repo: "remudero", localRepoName: "remudero", config,
+      ledgerPath, runId: "one-daemon-run", plan: { tasks: [], byId: new Map() } as Plan,
+      log: () => {}, policy: DEFAULT_SWEEP_POLICY,
+      reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: HEAD, originMainSha: HEAD, advance: "none" }),
+      reviewCommandImpl: async (_number, _args, options) => { calls.push(options); return 0; },
+    };
+    for (const build of [libraryEffects, entrypointEffects])
+      await build(deps).postReview!(pr(), { kind: "full-review" }, id(3));
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(c => c.reviewAttemptId === id(3)), "both real default runner wrappers carry the same admission");
+    await entrypointEffects(deps).postReview!(pr(), { kind: "discriminate-only", judgedHeadSha: "old" }, id(4));
+    assert.equal(calls.at(-1)?.reviewAttemptId, id(4), "the real missing-prior fallback keeps it too");
+    const carrier = readLedgerLines(ledgerPath).find(r => r.step === "review.provider_provenance");
+    assert.equal(carrier?.review_attempt_id, id(4));
+    assert.match(String(carrier?.run_id), /^review-PR10221-[0-9]+$/, "existing numeric review run convention survives");
+    assert.equal(carrier?.review_input_digest, DIGEST);
+
+    const code = await reviewCommand("10221", ["--repo", "acme/missing-subject"], {
+      reviewAttemptId: id(5), enforceReviewSubjectCheckout: true,
+      resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }), loadConfig: () => config,
+      fetchView: () => ({ body: "", html_url: URL, head: { ref: "run-unfiled-1", sha: HEAD }, number: 10221 }),
+      fetchHead: () => { throw Error("missing subject must refuse before fetch"); },
+      postReviewPending: async () => { throw Error("missing subject must refuse before a status"); },
+    });
+    assert.equal(code, 1);
+    const refusal = readLedgerLines(ledgerPath).find(r => r.step === "review.subject_refused");
+    assert.equal(refusal?.review_attempt_id, id(5), "the REAL logger wrote admission attribution, not a fake callback");
+    assert.equal(typeof refusal?.review_input_digest, "string");
+    assert.match(String(refusal?.run_id), /^review-PR10221-[0-9]+$/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
