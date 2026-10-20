@@ -212,7 +212,7 @@ esac
   }
 });
 
-test("W1-T3960: an abandoned reviewer writes the bound evidence to its ledger row", async () => {
+for (const requireSemanticReview of [false, true]) test(`W1-T3960: an abandoned reviewer writes the bound evidence to its ledger row (required=${requireSemanticReview})`, async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-abandoned-"));
   const sourceRepo = gitRepo({ kind: "codex-review-abandoned-source", seedCommit: false });
   const binDir = mkdtempSync(join(tmpdir(), "rmd-codex-review-abandoned-gh-"));
@@ -248,6 +248,7 @@ esac
     process.env.PATH = `${binDir}:${oldPath}`;
 
     let abandoned: Record<string, unknown> | undefined;
+    const effects: string[] = [];
     const reviewerSpawnWorker = async (): Promise<WorkerResult> => {
       throw new WorkerAbandonedError({ elapsedMs: 7_201, boundMs: 7_200, lastState: "working", lastStateMs: 12_345 });
     };
@@ -265,20 +266,26 @@ esac
       config: { claudeBin: "/unused", root } as never,
       log: (step: string, extra?: Record<string, unknown>) => {
         if (step === "review.reviewer.abandoned") abandoned = extra;
+        if (step === "review.posted") effects.push("posted");
       },
       say: () => {},
       account: (worker: WorkerResult) => worker,
       spawnReviewer: true,
+      requireSemanticReview,
       reviewerSpawnWorker,
       reviewerMount: { model: "gpt-5.5", effort: "high", maxTurns: 10, contextBudget: 120_000 },
       headCheckoutDir: sourceDir,
       ledgerPath,
       runId: "RUN-W1-T3960",
       disarm: () => "not-armed" as const,
-      arm: () => ({ armed: false, reason: "test" }),
+      arm: () => { effects.push("arm"); return { armed: false, reason: "test" }; },
     } as never);
 
     assert.equal(result.reviewerOutcome, "spawn_error");
+    if (requireSemanticReview) {
+      assert.equal(result.verdictWithheld, "required-semantic-spawn_error");
+      assert.deepEqual(effects, [], "an abandoned required reviewer cannot post the floor or arm merge");
+    }
     assert.deepEqual(abandoned, {
       reason_class: "worker_abandoned",
       elapsed_ms: 7_201,

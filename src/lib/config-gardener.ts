@@ -306,6 +306,7 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   // gatherRuns' pr_url fallback.
   "report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
   "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
+  "review.semantic_setup_refused", "review.semantic_incomplete",
   "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
   // capDerivation: the knowledge-budget pressure, and the cache-hit mix's call rows.
   "learnings.injected", "review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized",

@@ -194,6 +194,12 @@
       "grepHint": "Deploy supervisor — self-updating the daemon"
     },
     {
+      "path": "docs/evidence-storage-policy.md",
+      "title": "Bounded storage proposals, not deletion authority",
+      "summary": "`node scripts/evidence-storage-policy.mjs --manifest /private/owned/storage-observation.json`",
+      "grepHint": "Bounded storage proposals, not deletion authority"
+    },
+    {
       "path": "docs/forensics/README.md",
       "title": "Forensics",
       "summary": "This directory holds the measured forensic detail compacted out of source-file comments. Every",
