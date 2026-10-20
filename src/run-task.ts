@@ -1062,6 +1062,7 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
+import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "./lib/required-semantic-review.js";
 import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
@@ -8247,6 +8248,8 @@ async function runReview(args: {
   account: (r: WorkerResult) => WorkerResult;
   /** false ⇒ deterministic floor only, no LLM spawn (used by the live proofs). */
   spawnReviewer?: boolean;
+  /** Explicit semantic mode must complete before the deterministic floor can publish or arm. */
+  requireSemanticReview?: boolean;
   /**
    * W1-T2205: injectable replacement for the SDK's own `query()`, threaded straight into the
    * advisory reviewer's `spawnWorker` call below — see {@link SpawnWorkerArgs.queryFn}'s own
@@ -8433,7 +8436,8 @@ async function runReview(args: {
     { maxRotations: 0, step: REVIEW_REQUEUED_STEP, keep: (line) => line.includes(headSha) })).rawLines.flatMap((line) => {
     try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; /* deliberate: a torn line requests nothing */ }
   });
-  const decisionDigest = reviewerImageDecisionDigest(preparedDecision.decisionDigest, { headSha, runtimeImageSha, requeues });
+  const decisionDigest = reviewerImageDecisionDigest(requiredSemanticDecisionDigest(preparedDecision.decisionDigest,
+    args.requireSemanticReview === true), { headSha, runtimeImageSha, requeues });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -8674,6 +8678,17 @@ async function runReview(args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
+  const semanticRefusal = requiredSemanticRefusal({ required: args.requireSemanticReview === true,
+    planOnly: planOnlySkip, outcome, criteriaCount: criteria.length, verdicts: semantic });
+  if (semanticRefusal !== undefined) {
+    log("review.semantic_incomplete", { reason: semanticRefusal, head_sha: headSha, pr_url: prUrl,
+      reviewer_outcome: outcome, review_decision_digest: decisionDigest });
+    say(`remudero-review: verdict WITHHELD — ${semanticRefusal}; no verdict publication or merge effect`);
+    return { state: "failure", criteria: [], cannotEvaluate: true, testTheater: false,
+      summary: semanticRefusal, floorDegraded: true, capped: true, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: outcome, verdictWithheld: semanticRefusal,
+      reviewDecisionDigest: decisionDigest, evaluatorProvenance };
+  }
   // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
   // advisory; a filesystem/telemetry problem cannot become a review failure.
   let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
@@ -23312,6 +23327,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         reason: "head-task-metadata-unavailable",
         missing: [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean),
       });
+      if (!ownTaskRecordMissing) {
+        log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+        console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
+        return 2;
+      }
     } else {
       try {
         reviewerMount = resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", taskRisk);
@@ -23330,6 +23350,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           reason: "semantic-setup-unavailable",
           error: String((e as Error)?.message ?? e),
         });
+        // An explicitly selected semantic review must not become a deterministic PASS that
+        // runReview can auto-arm. Refuse before either pending poster or materializer runs.
+        log("review.semantic_setup_refused", { reason: "semantic-setup-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+        console.error("rmd review: semantic setup unavailable; no pending status, verdict or merge effect");
+        return 2;
       }
     }
   }
@@ -23458,6 +23483,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           say: (m) => console.log(m),
           account: (r) => r,
           spawnReviewer,
+          requireSemanticReview: executionMode === "semantic",
           reviewerMount,
           // W1-T185 (Gap 2): the materialized worktree above when available — the
           // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
