@@ -17,7 +17,7 @@
     - test/sweep/host-gap-pacing-counts-admitted-review-attempts.test.ts
     - test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts
     - test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

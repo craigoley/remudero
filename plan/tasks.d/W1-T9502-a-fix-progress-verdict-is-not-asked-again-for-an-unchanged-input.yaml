@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-14/RESULTS.txt, recommendation 5: #11559 held 369 of 1,244 red minutes); standing rulings: no hard fixed thresholds, machine work flows through an LLM judge"
   plan_refs: [W1-T7096, W1-T7243, W1-T7762, W1-T9297, W1-T9433, W1-T9498]
   files: [src/lib/sweep.ts, src/lib/fix-progress-judge.ts, src/run-task.ts, test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

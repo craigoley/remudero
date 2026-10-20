@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 10.00
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-20: a manual rmd review in core with RMD_GH_TRANSPORT_FLOOR=wait timed out after 30 min (rc 124)"
   plan_refs: [W1-T7957, W1-T3297, W1-T3275, W1-T4970, W1-T4085, W1-T2697, W1-T10269]

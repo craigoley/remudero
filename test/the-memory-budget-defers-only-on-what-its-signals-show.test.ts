@@ -135,20 +135,21 @@ function history(from: number, count: number, rate: (i: number) => number | null
   return Array.from({ length: count }, (_, i) => ({ at: from + i * 20_000, pagesPerSec: rate(i), stalled: stalled(i) }));
 }
 
-test("the swap-in relation compares stall after swap-in with stall after any verdict, over closed windows only", () => {
+test("the swap-in relation compares stall after swap-in with stall after the verdicts without it, over closed windows only", () => {
   const start = NOW - 2 * 60 * MINUTE;
   // Churn: swap-in on every other verdict, a stall every 30th verdict regardless of it.
   const churn = history(start, 360, (i) => (i % 2 ? 1200 : 40), (i) => i % 30 === 0);
   const r = swapStallRelationOf(churn, NOW, POLICY);
   assert.ok("samples" in r);
-  assert.ok(Math.abs(r.afterSwapIn - r.afterAny) <= r.noise, `no lift beyond noise: ${JSON.stringify(r)}`);
+  assert.ok(r.afterWithout !== null && r.noise !== null && Math.abs(r.afterSwapIn - r.afterWithout) <= r.noise,
+    `no lift beyond noise: ${JSON.stringify(r)}`);
   // Windows not yet closed are left out: verdicts in the last 5 min do not count.
   assert.equal(r.samples, churn.filter((s) => s.pagesPerSec! > 256 && NOW - s.at >= SWAP_STALL_WINDOW_MS).length);
 
   // Predictive: a burst of five swap-in verdicts every 30 min, then a stall; nothing else stalls.
   const predictive = history(NOW - 1000 * 20_000, 1000, (i) => (i % 90 < 5 ? 1200 : 40), (i) => i % 90 === 6);
   const p = swapStallRelationOf(predictive, NOW, POLICY);
-  assert.ok("samples" in p && p.afterSwapIn - p.afterAny > p.noise, JSON.stringify(p));
+  assert.ok("samples" in p && p.afterWithout !== null && p.noise !== null && p.afterSwapIn - p.afterWithout > p.noise, JSON.stringify(p));
 
   // Too few swap-in verdicts with a closed window: unlearned, and it says how many it has.
   const few = swapStallRelationOf(history(start, 40, (i) => (i < SWAP_STALL_MIN_SAMPLES - 1 ? 1200 : 40), () => false), NOW, POLICY);
@@ -164,14 +165,14 @@ test("swap-in past its threshold defers only while it predicts stall, and on the
   assert.deepEqual(unlearned.reasons, ["swap-in"], "no history: the rate alone, as before");
   assert.equal(unlearned.numbers.swapInBasis, "the rate alone: no swap-in history read");
 
-  const churn = { samples: 600, afterSwapIn: 0.48, afterAny: 0.5, noise: 0.04 };
+  const churn = { samples: 600, afterSwapIn: 0.48, without: 600, afterWithout: 0.5, afterAny: 0.49, noise: 0.04 };
   const quiet = evaluateShadowMemory(inputs(CALM, { ...swapping, swapStall: churn }), POLICY);
   assert.deepEqual(quiet.reasons, [], "1245 pages/s that has not been followed by stall defers nothing");
   assert.equal(quiet.numbers.swapInPagesPerSec, 1245, "and is still reported");
   assert.equal(quiet.numbers.swapInBasis,
-    "swap-in does not predict stall: 48% of 600 swap-in verdicts were followed by one, against 50% of all (noise 4%)");
+    "swap-in does not predict stall: 48% of 600 swap-in verdicts were followed by one, against 50% of 600 without it (noise 4%)");
 
-  const predicts = evaluateShadowMemory(inputs(CALM, { ...swapping, swapStall: { samples: 600, afterSwapIn: 0.8, afterAny: 0.5, noise: 0.04 } }), POLICY);
+  const predicts = evaluateShadowMemory(inputs(CALM, { ...swapping, swapStall: { samples: 600, afterSwapIn: 0.8, without: 600, afterWithout: 0.5, afterAny: 0.65, noise: 0.04 } }), POLICY);
   assert.deepEqual(predicts.reasons, ["swap-in"]);
   assert.match(String(predicts.numbers.swapInBasis), /^swap-in predicts stall: 80% of 600/);
 
@@ -256,7 +257,7 @@ test("a recorded verdict drops a pre-existing store's low sightings and appends 
   assert.equal(n.swapInBasis, null, "the host rate is unmeasured on a process's first verdict, so no basis is recorded");
   const stored = JSON.parse(written.at(-1)!.content) as Stored;
   assert.equal(written.at(-1)!.path, STORE);
-  assert.deepEqual(stored.prior, { at: NOW, pswpin: 421049, high: 22368 });
+  assert.deepEqual(stored.prior, { at: NOW, pswpin: 421049, zswpin: 0, high: 22368 });
   assert.equal(stored.sightings, undefined, "the legacy sightings are dropped");
   assert.deepEqual(stored.swap, [[NOW - 30 * MINUTE, 900, 0], [NOW - 29 * MINUTE, null, 1], [NOW, null, 0]],
     "the torn entry and the one past the history are gone; this verdict is appended (host rate unmeasured, no stall)");
