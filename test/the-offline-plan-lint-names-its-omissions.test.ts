@@ -17,6 +17,9 @@ import { defaultCreditOverridePath, defaultCreditStorePath, durableDependencyCre
 import { taskRulingPin } from "../src/lib/task-linter.js";
 import { withTempDir } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { createHash } from "node:crypto";
+import { chmodSync } from "node:fs";
+import { CI_DEPENDENCY_EVIDENCE_SCHEMA } from "../scripts/lib/ci-dependency-evidence.mjs";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -180,6 +183,35 @@ test("lint dependency credit: no-dependency default-entry control stays clean", 
   await withDependencyCreditFixture(t, f => {
     f.child([]);
     assert.equal(f.offline().code, 0, "the private plan has no unrelated lint refusal");
+  });
+});
+
+test("CI dependency receipt: actual offline CLI accepts only same-run evidence without native credit or network", async t => {
+  await withDependencyCreditFixture(t, f => {
+    f.config(undefined);
+    execFileSync("git", ["add", "plan"], { cwd: f.root, env: f.env });
+    execFileSync("git", ["commit", "-qm", "test: commit private CI candidate"], { cwd: f.root, env: f.env });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: f.root, env: f.env, encoding: "utf8" }).trim();
+    const runnerTemp = join(dirname(f.root), "ci-receipt-" + process.pid);
+    mkdirSync(runnerTemp);
+    t.after(() => rmSync(runnerTemp, { recursive: true, force: true }));
+    const path = join(runnerTemp, "evidence.json");
+    const payload = { schema: CI_DEPENDENCY_EVIDENCE_SCHEMA, complete: true,
+      repository: "fixture-owner/remudero", head, base: f.base, producerSha: f.base,
+      runId: "123", attempt: "1", producerJob: "commitlint", observedAtMs: Date.now(),
+      taskIds: [CREDIT_DEP], credits: nativeFixtureCredit(), overrides: [] };
+    const bytes = Buffer.from(JSON.stringify(payload)); writeFileSync(path, bytes, { mode: 0o400 }); chmodSync(path, 0o400);
+    Object.assign(f.env, { GITHUB_ACTIONS: "true", GITHUB_WORKSPACE: f.root, RUNNER_TEMP: runnerTemp,
+      GITHUB_REPOSITORY: "fixture-owner/remudero", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1",
+      RMD_CI_DEPENDENCY_EVIDENCE: path, RMD_CI_DEPENDENCY_PRODUCER_SHA: f.base,
+      RMD_CI_DEPENDENCY_DIGEST: createHash("sha256").update(bytes).digest("hex") });
+    const accepted = f.offline(); assert.equal(accepted.code, 0, accepted.output);
+    assert.equal(existsSync(f.cacheFile), false, "no durable native credit created");
+    assert.equal(existsSync(f.configFile), false, "no native runtime config created");
+    f.env.GITHUB_RUN_ATTEMPT = "2";
+    const wrongRun = f.offline(); assert.equal(wrongRun.code, 1, wrongRun.output);
+    assert.match(wrongRun.output, /UNKNOWN/);
+    assert.equal(existsSync(f.cacheFile), false);
   });
 });
 
