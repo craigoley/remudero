@@ -35,11 +35,12 @@ const TICK = { imageDriftOnly: true };
 
 /** serve as it ran after #8569 merged: the pre-change limits. */
 const OLD_LIMITS = { Memory: 5120 * MIB, MemorySwap: 6144 * MIB, CpuShares: 4096, MemoryReservation: 3072 * MIB };
-const ON_POLICY = { Memory: 7680 * MIB, MemorySwap: 8704 * MIB, CpuShares: 4096, MemoryReservation: 5120 * MIB };
+/** The policy since operator ruling 2026-10-19: 2 GiB of swap, and no reservation (memory.low protected nothing). */
+const ON_POLICY = { Memory: 7680 * MIB, MemorySwap: 9728 * MIB, CpuShares: 4096, MemoryReservation: 0 };
 const DRIFT: ResourcePolicyDrift[] = [
   { field: "Memory", expected: 7680 * MIB, actual: 5120 * MIB },
-  { field: "MemorySwap", expected: 8704 * MIB, actual: 6144 * MIB },
-  { field: "MemoryReservation", expected: 5120 * MIB, actual: 3072 * MIB },
+  { field: "MemorySwap", expected: 9728 * MIB, actual: 6144 * MIB },
+  { field: "MemoryReservation", expected: 0, actual: 3072 * MIB },
 ];
 
 interface Harness {
@@ -83,7 +84,7 @@ test("serve on its old limits is replaced once through the launcher naming each 
   assert.equal(out.replaced, true, out.reason);
   assert.equal(h.replaces, 1);
   assert.match(out.reason, new RegExp(`Memory expected=${7680 * MIB} actual=${5120 * MIB}`));
-  assert.match(out.reason, new RegExp(`MemoryReservation expected=${5120 * MIB} actual=${3072 * MIB}`));
+  assert.match(out.reason, new RegExp(`MemoryReservation expected=0 actual=${3072 * MIB}`));
   assert.doesNotMatch(out.reason, /CpuShares/, "a field that matches is not named");
   assert.deepEqual(h.rows.map((r) => r.step), ["deploy.serve_policy_replace", "deploy.serve_policy_replaced"]);
   assert.deepEqual(h.rows[1]!.data?.drift, DRIFT);
@@ -233,6 +234,23 @@ test("the shipped serve wiring reads the serve role against remudero-serve and r
 
     running = "false false";
     assert.equal(seams.serveHealthy!(), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("operator ruling 2026-10-19: serve's 5 GiB reservation and 1 GiB of swap read as drift, so the tick replaces it", () => {
+  const { root, env } = fixture();
+  // serve as it ran before the ruling: the 2026-10-02 limits, a 5 GiB memory.low and 1 GiB of swap.
+  const live = { Memory: 7680 * MIB, MemorySwap: 8704 * MIB, CpuShares: 4096, MemoryReservation: 5120 * MIB };
+  const exec = (cmd: string, args: string[]): string =>
+    cmd === "bash" ? execFileSync(cmd, args, { encoding: "utf8", env }) : JSON.stringify(live);
+  try {
+    const drift = realServePolicyDeps({ installPath: root, stateRoot: root }, exec).servePolicyDrift!();
+    assert.deepEqual(drift, [
+      { field: "MemorySwap", expected: 9728 * MIB, actual: 8704 * MIB },
+      { field: "MemoryReservation", expected: 0, actual: 5120 * MIB },
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

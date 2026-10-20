@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import {
   READ_MODEL_BUSY_TIMEOUT_MS,
@@ -11,6 +11,7 @@ import {
   acquireLease,
   currentReadModelPath,
   openReadModel,
+  flushReadModelTransactions,
   peekLease,
   publishReadModelGeneration,
   readModelGenerationPath,
@@ -30,9 +31,22 @@ import { makeTempDir } from "../src/lib/tmp.js";
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const DDL = "CREATE TABLE IF NOT EXISTS item(id INTEGER PRIMARY KEY, label TEXT);";
 
-function stateDir(t: { after: (fn: () => void) => void }): string {
+const fixtureClosers = new WeakMap<TestContext, Array<() => void>>();
+function closeFirst(t: TestContext, close: () => void): void {
+  const closers = fixtureClosers.get(t);
+  assert(closers, "fixture cleanup must be registered first");
+  closers.push(close);
+}
+
+function stateDir(t: TestContext): string {
   const dir = makeTempDir("read-model-db");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const closers: Array<() => void> = [];
+  fixtureClosers.set(t, closers);
+  t.after(async () => {
+    for (const close of closers) close();
+    await flushReadModelTransactions();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+  });
   return dir;
 }
 
@@ -53,7 +67,7 @@ function labels(dir: string): string[] {
 test("the read model opens in WAL with synchronous NORMAL a five second busy timeout and a bounded journal", (t) => {
   const dir = stateDir(t);
   const db = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL });
-  t.after(() => db.close());
+  closeFirst(t, () => db.close());
   assert.equal(db.path, join(dir, READ_MODEL_DIRNAME, "core.v1.sqlite"));
   assert.equal(db.prepare("PRAGMA journal_mode").get()?.journal_mode, "wal");
   assert.equal(db.prepare("PRAGMA synchronous").get()?.synchronous, 1, "1 is NORMAL");
@@ -103,7 +117,7 @@ test("a corrupt read-model file is renamed aside and reopened empty", (t) => {
   writeFileSync(path, Buffer.from("this is not a sqlite database ".repeat(200)));
 
   const db = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL, clock });
-  t.after(() => db.close());
+  closeFirst(t, () => db.close());
   assert.equal(db.recoveredFrom?.corruptPath, `${path}.corrupt-${T0}`);
   assert.match(db.recoveredFrom?.reason ?? "", /not a database/);
   assert.ok(existsSync(`${path}.corrupt-${T0}`), "the damaged file is kept for forensics, never deleted");
@@ -124,7 +138,7 @@ test("a second writer cannot commit while another holds the projector lease", (t
   const clock = steppingClock(T0);
   const a = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL });
   const b = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL });
-  t.after(() => { a.close(); b.close(); });
+  closeFirst(t, () => { a.close(); b.close(); });
 
   const heldByA = acquireLease(a, { holder: "writer-a", clock });
   assert.equal(heldByA.ok, true);
@@ -148,7 +162,7 @@ test("an expired lease passes to the next holder and the old holder's next trans
   const clock = steppingClock(T0);
   const a = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL });
   const b = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL });
-  t.after(() => { a.close(); b.close(); });
+  closeFirst(t, () => { a.close(); b.close(); });
   const leaseA = acquireLease(a, { holder: "writer-a", ttlMs: 1_000, clock });
   if (!leaseA.ok) throw new Error("writer-a should take a free lease");
 
@@ -171,7 +185,7 @@ test("a released lease is taken at once and a renewal keeps the original acquisi
   const clock = steppingClock(T0);
   const a = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1 });
   const b = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1 });
-  t.after(() => { a.close(); b.close(); });
+  closeFirst(t, () => { a.close(); b.close(); });
   const leaseA = acquireLease(a, { holder: "writer-a", clock });
   if (!leaseA.ok) throw new Error("writer-a should take a free lease");
   clock.advance(5_000);
@@ -187,7 +201,7 @@ test("a released lease is taken at once and a renewal keeps the original acquisi
 test("a write transaction that throws rolls back its rows", (t) => {
   const dir = stateDir(t);
   const db = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL });
-  t.after(() => db.close());
+  closeFirst(t, () => db.close());
   const lease = acquireLease(db, { clock: fixedClock(T0) });
   if (!lease.ok) throw new Error("a free lease");
   assert.throws(() =>
@@ -203,7 +217,7 @@ test("a write transaction that throws rolls back its rows", (t) => {
 
 test("a pointer names the generation every open resolves and a foreign pointer is refused", (t) => {
   const dir = makeTempDir("read-model-pointer");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(async () => { await flushReadModelTransactions(); rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   const base = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL });
   base.close();
   assert.equal(currentReadModelPath(dir, "core", 1), readModelPath(dir, "core", 1), "no pointer: the un-generationed file");
@@ -228,7 +242,7 @@ test("a pointer names the generation every open resolves and a foreign pointer i
 
 test("a pointer generation is parsed against the exact instance and schema prefix", (t) => {
   const dir = makeTempDir("read-model-dotted-instance-pointer");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(async () => { await flushReadModelTransactions(); rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   mkdirSync(join(dir, READ_MODEL_DIRNAME), { recursive: true });
   writeFileSync(readModelPointerPath(dir, "core.prod", 1), "core.prod.v1.g42.sqlite\n");
   assert.equal(currentReadModelPath(dir, "core.prod", 1), readModelGenerationPath(dir, "core.prod", 1, "42"));
@@ -242,7 +256,7 @@ test("a pointer generation is parsed against the exact instance and schema prefi
 test("an interrupted source snapshot commit leaves the last committed snapshot whole", (t) => {
   const dir = stateDir(t);
   const db = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: SOURCE_SNAPSHOT_DDL, clock: fixedClock(T0) });
-  t.after(() => db.close());
+  closeFirst(t, () => db.close());
   const got = acquireLease(db, { holder: "a", clock: fixedClock(T0) });
   assert.ok(got.ok);
   const first = "2026-09-30T11:00:00.000Z";
@@ -259,7 +273,7 @@ test("an interrupted source snapshot commit leaves the last committed snapshot w
 
 test("an agent fold state and the fact position it consumed commit together, and a writer without the lease commits neither", (t) => {
   const db = openReadModel({ stateDir: stateDir(t), instance: "core", schemaVersion: 1, ddl: DDL, clock: fixedClock(T0) });
-  t.after(() => db.close());
+  closeFirst(t, () => db.close());
   assert.equal(readAgentFold(db, "core"), undefined, "a store that predates the table has no fold");
   const got = acquireLease(db, { holder: "a", clock: fixedClock(T0) });
   assert.ok(got.ok);

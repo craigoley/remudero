@@ -1279,6 +1279,16 @@ if [ -f "$SCRIPT_DIR/cache-reclaim.py" ] && command -v python3 >/dev/null 2>&1; 
 fi
 rmd_decision_summary "$DECISION_LOG"
 log "decision-report: $DECISION_LOG (six-hour guard; workspace and generated-cache decisions)"
+# Optional account-private phase; never run it during a janitor dry-run.
+# The maintained helper defaults OFF and has no authority to expire history.
+evidence_helper="$USER_HOME/.local/bin/remudero-storage-maintenance"
+if [ "$APPLY" = 1 ] && [ -x "$evidence_helper" ] && [ ! -L "$evidence_helper" ] && [ -O "$evidence_helper" ]; then
+  if evidence_output=$("$evidence_helper" --scheduled 2>&1); then
+    log "bounded-evidence: $evidence_output"
+  else
+    log "WARN bounded-evidence: $evidence_output"
+  fi
+fi
 AFTER=$(free_gib)
 log "=== done: removed=$removed reclaimed=$((reclaimed_kb/1024))M planned=$planned estimated=$((estimated_kb/1024))M worktrees-removed=$removed_worktrees worktrees-planned=$planned_worktrees worktrees-skipped=$skipped_worktrees live-skip=$skipped_live cwd-skip=$skipped_cwd owner-skip=$skipped_owner open-skip=$skipped_open young-skip=$skipped_young free=${BEFORE}->${AFTER}GiB ==="
 

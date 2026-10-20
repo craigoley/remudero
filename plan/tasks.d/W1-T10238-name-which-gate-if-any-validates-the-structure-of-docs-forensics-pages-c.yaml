@@ -1,0 +1,26 @@
+- id: W1-T10238
+  title: Name which gate, if any, validates the structure of docs/forensics pages (Contents parity, generated-by markers) so a hand edit cannot silently fail CI
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/README.md
+    - scripts/forensics-split.mjs
+    - scripts/generate-docs-index.mjs
+  acceptance:
+    - claim: docs/forensics/README.md states which check, if any, enforces Contents parity and generated-by markers on a forensics page, citing its script and its CI job or test by path
+      proof: "grep: forensics page structure gate in docs/forensics/README.md"
+    - claim: The README states what a hand edit to a forensics page must do to stay green (regenerate with the named script, or edit the source it is generated from), or records that no gate exists
+      proof: "grep: hand edit to a forensics page in docs/forensics/README.md"
+  origin: followup:W1-T9659-1792461323770:2026-10-20T02:00:08.386Z:0
+  rationale: >-
+    From the 2026-10-20 follow-up on W1-T9659-1792461323770, ratified via rmd approve:
+  
+    follow-up harvest [research]: check whether a docs-gate or lint validates
+    `docs/forensics/*.md` structure (Contents parity, generated-by markers) — a hand edit could
+    fail CI. — from W1-T9659 (run W1-T9659-1792461323770)
