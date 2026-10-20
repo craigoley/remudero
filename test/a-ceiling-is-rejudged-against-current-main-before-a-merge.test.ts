@@ -10,7 +10,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { attemptArm, logArmAttribution, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { attemptArm, logArmAttribution, readMergedRatchetsAsync, type ArmDeps } from "#src/lib/arm-auto-merge.js";
 import { runStepsSync } from "#src/lib/git-push.js";
 import {
   CLOCK_SCOPE_RE,
@@ -249,6 +249,86 @@ test("W1-T9962: an armed PR is re-judged once per main tip and refreshed when ma
   assert.deepEqual(await runArmedRatchetRejudge([pr], deps), [], "one update per (PR, head)");
   assert.equal(updates.length, 1);
   assert.equal(ledger.filter((r) => r.step === "sweep.ratchet_judge.decided").at(-1)?.remedy, "retry-later");
+});
+
+test("W1-T9962: a refresh that fails or throws leaves the PR neither armed nor merged and names the failure", () => {
+  for (const [label, updateBranch] of [
+    ["throws", () => { throw new Error("update-branch exploded"); }],
+    ["returns not-ok", () => ({ ok: false, error: "update-branch exploded" })],
+  ] as const) {
+    const calls: string[] = [];
+    const said: string[] = [];
+    const result = attemptArm(url(12700), armDeps({ calls, readMergedRatchets: () => CROSSING, updateBranch, say: (m: string) => { said.push(m); } }), "head-sha");
+    assert.equal(result.outcome, "direct-merge-update-failed", label);
+    assert.deepEqual(calls, [], `${label}: never armed and never merged`);
+    assert.equal(result.directMergePreflight?.reason, "ratchet_collision", label);
+    assert.equal(result.directMergePreflight?.error, "update-branch exploded", label);
+    assert.ok(said.some((m) => m.startsWith("automerge.direct_merge_update_failed (W1-T9962)") && m.includes("update-branch exploded") && m.includes(FILE)), label);
+  }
+});
+
+test("W1-T9962: a ratchet counter that throws, or a blob read that fails, is unread and not clean", () => {
+  const counter = judgeMergedRatchets({ mainSha: "m", headSha: "h", changed: [FILE], measuredFiles: [FILE],
+    readMerged: () => { throw new Error("counter blew up"); }, readMain: () => null });
+  assert.equal(counter.verdict, "unread");
+  assert.deepEqual(counter.rows, []);
+  assert.match(counter.reason ?? "", /a ratchet counter threw: counter blew up/);
+
+  const sha = (c: string) => c.repeat(40);
+  let fetched = "";
+  const run = (args: readonly string[]) => {
+    const [verb] = args;
+    if (verb === "rev-parse") return { status: 0, stdout: args[1] === "FETCH_HEAD" ? `${sha(fetched === "main" ? "a" : "b")}\n` : ".git\n" };
+    if (verb === "fetch") { fetched = args[args.length - 1] === "main" ? "main" : "head"; return { status: 0, stdout: "" }; }
+    if (verb === "merge-base") return { status: 0, stdout: `${sha("c")}\n` };
+    if (verb === "merge-tree") return { status: 0, stdout: `${sha("d")}\n` };
+    if (verb === "diff") return { status: 0, stdout: `${FILE}\n` };
+    if (verb === "ls-tree") return { status: 0, stdout: `${FILE}\n` };
+    return { status: 128, stdout: "", stderr: "fatal: bad object" };
+  };
+  const read = judgeMergedRatchets(runStepsSync(readMergedRatchetInputsSteps({ owner: OWNER, repo: REPO, prNumber: 7 }, () => ({ base: { ref: "main" } }), run)));
+  assert.equal(read.verdict, "unread");
+  assert.match(read.reason ?? "", /git cat-file --batch exited 128: fatal: bad object/);
+});
+
+test("W1-T9962: with no readable config the production reader is unread, never clean", async () => {
+  const j = await readMergedRatchetsAsync(url(12701), () => { throw new Error("no config here"); });
+  assert.equal(j.verdict, "unread");
+  assert.match(j.reason ?? "", /no clone to merge in: no config here/);
+});
+
+test("W1-T9962: an armed re-judge whose read or refresh throws records unread and the error, and goes on", async () => {
+  const pr: OpenPrView = {
+    prNumber: 12800, prUrl: url(12800), taskId: "unfiled", headSha: "head-d", lastActivityAt: "2026-10-16T21:35:51.000Z",
+    reviewState: "success", checksState: "pending", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: true, mergeState: "behind",
+    changedFiles: [FILE],
+  };
+  const ledger: Array<Record<string, unknown>> = [];
+  let judged = CROSSING;
+  let readThrows = true;
+  const deps = {
+    ledgerPath: "/dev/null/ledger.ndjson",
+    runId: "run-test",
+    readLedger: () => ledger,
+    appendLine: (_p: string, row: Record<string, unknown>) => { ledger.push(row); },
+    readMainTip: () => "main-9",
+    readMergedRatchets: async () => { if (readThrows) throw new Error("clone unreadable"); return judged; },
+    updateBranch: () => { throw new Error("update refused"); },
+    now: () => Date.parse("2026-10-16T22:00:00.000Z"),
+  };
+  assert.deepEqual(await runArmedRatchetRejudge([pr], deps), []);
+  const unread = ledger.find((r) => r.step === "sweep.ratchet_judge.decided");
+  assert.equal(unread?.verdict, "unread");
+  assert.equal(unread?.remedy, "proceed");
+  assert.match(String(unread?.reason), /clone unreadable/);
+
+  ledger.length = 0;
+  readThrows = false;
+  assert.deepEqual(await runArmedRatchetRejudge([pr], deps), [12800]);
+  const errored = ledger.find((r) => r.step === "sweep.update_branch.error");
+  assert.equal(errored?.error, "update refused");
+  assert.equal(errored?.reason, "ratchet_collision");
+  assert.equal(errored?.pr_number, 12800);
 });
 
 test("W1-T9962: a clean merge arms as today, an unreadable merge records unread, and a run-derived gate is named", () => {
