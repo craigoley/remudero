@@ -461,7 +461,7 @@ test("W1-T10278: unrelated duplicate metadata preserves exact filing history", t
   const f = metadataHistoryCase(); t.after(() => f.repo.cleanup());
   writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
   const moved = join(f.repo.dir, "plan", "tasks.d", "W1-T9003-moved.yaml");
-  writeFileSync(moved, ruling("W1-T9003"));
+  writeFileSync(moved, "!!seq\n- !!map\n  !!str id: !!str W1-T9003\n");
   commitHistory(f.repo.dir, "2020-01-04T12:00:00Z", "move embedded identity");
   renameSync(moved, join(f.repo.dir, "plan", "tasks.d", "renamed-record.yaml"));
   writeFileSync(join(f.repo.dir, "plan", "tasks.d", "W1-T9555-decoy.yaml"), ruling("W1-T9998"));
@@ -498,6 +498,7 @@ test("W1-T10278: ambiguous structured identity stays unknown", async t => {
     ["numeric identity", "- id: 7\n"],
     ["collection identity", "- id: [W1-T9003]\n"],
     ["complex mapping key", "- ? [id]\n  : W1-T9003\n  id: W1-T9999\n"],
+    ["numeric mapping key", "- 7: metadata\n  id: W1-T9999\n"],
     ["custom identity tag", "- id: !identity W1-T9999\n"],
     ["custom key tag", "- ? !field id\n  : W1-T9999\n"],
     ["custom record tag", "- !record { id: W1-T9999 }\n"],
