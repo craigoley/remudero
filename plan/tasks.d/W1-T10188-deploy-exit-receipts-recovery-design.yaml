@@ -10,7 +10,9 @@
   origin: feedback#fb-1791856366585-19538c
   plan_refs: ["§4", "§7B", W1-T6160, W1-T6062, W1-T3199]
   files: [plan/deploy-recovery-design.md]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=0834e700f1ab80c8
   attempts: 0
   rationale: |
     Grounding in this checkout finds a commissioning-only receipt in commission_receipt and
