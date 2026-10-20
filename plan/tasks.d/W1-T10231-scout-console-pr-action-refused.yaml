@@ -20,3 +20,11 @@
     The ledger step console.pr_action_refused carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 6 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single test file (test/gardeners/scout-console-pr-action-refused.test.ts), which does not exist yet. Nothing in the description or files list touches secrets, auth, permissions, merge/deploy policy, or data deletion.; on the change's description/files alone, no diff was read — The task is a fix for a recurring ledger symptom. Its acceptance is a grep for a named test in a test file, so it is verifiable and does not ask for an operator-only decision.; on the change's description/files alone, no diff was read — The rationale says the rows name no file, so the actual cause lies in code not yet located. The real fix may touch files beyond the declared one, and the PR will still pass CI and review. The step name \"pr_action_refused\" hints at merge-related behavior, but the description gives no sign that it changes merge policy.; on the change's description/files alone, no diff was read — The scout family has a weak record (0 merged, 1 declined; Beta mean 0.33), and the evidence shows 0 cited PRs. This adds some caution, but it does not meet the escalation criteria."
+    judged_at: "2026-10-20T05:33:31.122Z"
+    pin: "337f266068896514e23bcb6c3e2662efb243806684f8562ed54b63fd611db151"

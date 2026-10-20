@@ -1,0 +1,58 @@
+- id: W1-T10235
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/serve-view-events.test.ts:flaky cost 21.2 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.26
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/serve-view-events.test.ts:flaky"
+  files:
+    - src/lib/read-model-worker.ts
+    - test/console-api/read-model/check-test-test-serve-view-events-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/serve-view-events.test.ts:flaky"
+      proof: "grep: test(\"W1-T10235: check:test:test/serve-view-events.test.ts:flaky is prevented, not retried\" in test/console-api/read-model/check-test-test-serve-view-events-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/serve-view-events.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/serve-view-events.test.ts:flaky cost 21.2 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/read-model-worker.ts: test/serve-view-events.test.ts imports it
+    - test/serve-view-events.test.ts: named by the failing check
+    - the rounds name a failing test: test/serve-view-events.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12968 at 2026-10-20T00:57:20Z: hand fix PR #12968: src/lib/read-model-db.ts, src/lib/read-model-worker.ts, src/lib/view-shadow-store.ts, src/lib/view-shadow.ts; minutes are the pass median proxy (5.95405), not measured repair time
+    - PR #12829 (https://github.com/craigoley/remudero/pull/12829) at 2026-10-18T22:05:10.857Z: ci-log round — coverage-shard (1/8): test/serve-view-events.test.ts
+        failing tests: a ledger row reaches an events subscriber of the assembled serve over real HTTP; W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that returns clear, a ledger row reaches an events subscriber of the assembled serve over real HTTP; W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that returns clear
+        log excerpt:
+          | ...
+          | not ok 2773 - a ledger row reaches an events subscriber of the assembled serve over real HTTP
+          |   ---
+          |   duration_ms: 5264.86135
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/serve-view-events.test.ts:101:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly equal:
+          | 
+          |     'judge' !== 'body'
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The supplied rounds show one assertion failure and one hand-fix file list; they do not establish a shared flaky cause or explain why changing read-model-worker.ts prevents recurrence. The operator rule escalates findings that cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not demonstrate that the test executes or that the reported failure is prevented."
+    judged_at: "2026-10-20T05:35:54.917Z"
+    pin: "7d43a97a1be9299d98e16c7590d4eedb6d2a7a4bf4b1e322f2105f87b44dfb4a"
