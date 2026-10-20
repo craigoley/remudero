@@ -95,3 +95,11 @@
     deliberately retains the requested deploy review boundary. No platform-facts gap required web
     research for intake. Intake inspected checkout symbols, not authenticated current-main or open
     PR heads; the design worker must obtain that evidence before recommending implementation.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares plan/deploy-recovery-design.md, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-20T00:44:13.342Z"
+    pin: "63c4b36748fca577d32cc815db14183fa1763e2315db7e5ae58ced16731b1ed3"
