@@ -20,3 +20,11 @@
     The ledger step dispatch.lifetime_history_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 12 in the older half, 58 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The description and declared files show only a new test file (test/gardeners/scout-dispatch-lifetime-history-unavailable.test.ts) under test/gardeners, with no declared touch of secrets, auth, permissions, merge/deploy/infrastructure policy, or data deletion.; on the change's description/files alone, no diff was read — The acceptance is a grep-verifiable test name, so the outcome can be checked from what is shown. The task asks for a cause fix rather than hiding rows, which is consistent with the plan and not an operator-only decision.; on the change's description/files alone, no diff was read — The rationale says the rows name no file, so the fix location is unknown and the real change may touch more than the declared file. This is a scope uncertainty, but the PR still goes through CI and review. The scout family's track record (0 merged, 1 declined) is weak, but it does not match any HIGH escalation criterion."
+    judged_at: "2026-10-20T05:33:04.368Z"
+    pin: "2b49e1b7a06ed6373d3d460f9ef48e8f74a6214f9d557a917404639b9aa6d366"

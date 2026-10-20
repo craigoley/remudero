@@ -20,3 +20,11 @@
     The ledger step model.successor.refused carries a failure shape and landed rows in both halves of the trailing 7 days: 4 in the older half, 12 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single new test file (test/gardeners/scout-model-successor-refused.test.ts), which is not a secrets, auth, deletion, deploy, merge-policy, or irreversible surface according to the filed plan record.; on the change's description/files alone, no diff was read — The acceptance criterion is a grep for a test name, which is verifiable from the PR itself, and the task is verify: auto, so CI and review still apply.; on the change's description/files alone, no diff was read — The gates state shows a machine-authored task from the scout family with a weak track record (0 merged, 1 declined), and the evidence shows 0 PR citations and that the declared file does not yet exist at the base. This is a reason for caution but not an escalation criterion under the operator rule.; on the change's description/files alone, no diff was read — The rationale says the rows name no file, so the code that writes this step must be located first. This leaves the real fix location unknown, and the declared file list may understate what is touched. No change view was supplied to confirm the touched files, so this is an uncertainty rather than an observed danger."
+    judged_at: "2026-10-20T05:33:22.317Z"
+    pin: "939770005def5d59b658b5550f4b3f498c572761c963664873a6c978c9a9566a"
