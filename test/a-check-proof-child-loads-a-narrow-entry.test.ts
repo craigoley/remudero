@@ -1,15 +1,19 @@
 // @census-reads: src/ — the import graph walked from src/check-proof-main.ts
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { stripComments } from "../src/lib/test-impact-map.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const entry = resolve(root, "src/check-proof-main.ts");
+
+function runNarrow(argv: string[], cwd: string, env: NodeJS.ProcessEnv, input?: string) {
+  return spawnSync(process.execPath, argv, { cwd, env, input, encoding: "utf8", timeout: 60_000 });
+}
 
 // @source-text-subject: the static import graph is the task's isolation contract.
 test("W1-T7728: the narrow check-proof entry never imports the run-task module", () => {
@@ -49,9 +53,7 @@ test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit c
       const args = [`grep: ${pattern} in marker.txt`, "--base", "HEAD~1"];
       const argv = checkProofChildArgv(args[0]!, "HEAD~1");
       assert.equal(argv[2], entry, "the shared builder must launch the narrow entry");
-      const narrow = spawnSync(process.execPath, argv, {
-        cwd: fixture.dir, env, encoding: "utf8", timeout: 60_000,
-      });
+      const narrow = runNarrow(argv, fixture.dir, env);
       const cli = spawnSync(resolve(root, "bin/rmd"), ["check-proof", ...args], {
         cwd: fixture.dir, env, encoding: "utf8", timeout: 60_000,
       });
@@ -67,4 +69,64 @@ test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit c
   } finally {
     fixture.cleanup();
   }
+});
+
+function exportFixture(t: TestContext, baseSource: string) {
+  const fixture = gitRepo({ scope: t, kind: "narrow-export-observation" });
+  mkdirSync(resolve(fixture.dir, "src")); mkdirSync(resolve(fixture.dir, "test"));
+  symlinkSync(resolve(root, "node_modules"), resolve(fixture.dir, "node_modules"), "dir");
+  writeFileSync(resolve(fixture.dir, ".gitignore"), "node_modules\n");
+  writeFileSync(resolve(fixture.dir, "src/a.ts"), baseSource);
+  writeFileSync(resolve(fixture.dir, "test/probe.test.ts"),
+    'import {test} from "node:test";import assert from "node:assert/strict";import {added} from "../src/a.js";test("observed CLI export",()=>assert.equal(added,3));\n');
+  fixture.git("add", "."); fixture.git("commit", "-qm", "test: base export fixture");
+  writeFileSync(resolve(fixture.dir, "src/a.ts"), "export const added = 3;\n");
+  fixture.git("add", "."); fixture.git("commit", "-qm", "test: head export fixture");
+  return fixture;
+}
+
+function childEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  return env;
+}
+
+test("the narrow CLI awaits a real missing-export observation before claiming discrimination", async t => {
+  const fixture = exportFixture(t, "export const kept = 1;\n");
+  const { checkProofChildArgv } = await import("../src/lib/check-proof.js");
+  const out = runNarrow(checkProofChildArgv("unit test: test/probe.test.ts", "HEAD~1"), fixture.dir, childEnv());
+  assert.equal(out.status, 0, out.stdout + out.stderr);
+  assert.match(out.stdout, /COULD NOT LINK — base lacks export\(s\) added/);
+  assert.match(out.stdout, /discrimination: discriminates/);
+  assert.doesNotMatch(out.stdout, /\[object Promise\]/);
+});
+
+test("the narrow CLI retains unknown for an unrelated base load failure", async t => {
+  const fixture = exportFixture(t, "export const malformed = ;\n");
+  const { checkProofChildArgv } = await import("../src/lib/check-proof.js");
+  const out = runNarrow(checkProofChildArgv("unit test: test/probe.test.ts", "HEAD~1"), fixture.dir, childEnv());
+  assert.equal(out.status, 0, out.stdout + out.stderr);
+  assert.match(out.stdout, /discrimination: unknown/);
+  assert.doesNotMatch(out.stdout, /COULD NOT LINK|\[object Promise\]/);
+});
+
+test("the narrow observation protocol reads real fixtures and refuses invalid requests", async t => {
+  const fixture = exportFixture(t, "export const kept = 1;\n");
+  const base = gitRepo({ scope: t, kind: "narrow-observation-base" });
+  mkdirSync(resolve(base.dir, "src"));
+  writeFileSync(resolve(base.dir, "src/a.ts"), "export const kept = 1;\n");
+  const { checkProofObservationChildArgv } = await import("../src/lib/check-proof.js");
+  const output = `# ${resolve(base.dir, "test/probe.test.ts")}:1\n# SyntaxError: The requested module '../src/a.js' does not provide an export named 'added'\n`;
+  const request = { output, base: base.dir, head: fixture.dir };
+  const valid = runNarrow(checkProofObservationChildArgv(), fixture.dir, childEnv(), JSON.stringify(request));
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.match(JSON.parse(valid.stdout), /base lacks export\(s\) added/);
+  for (const input of ["{", "null", JSON.stringify({ ...request, base: "relative" }), " ".repeat(4 * 1024 ** 2 + 1)]) {
+    const out = runNarrow(checkProofObservationChildArgv(), fixture.dir, childEnv(), input);
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(JSON.parse(out.stdout), null);
+  }
+  const extra = runNarrow([...checkProofObservationChildArgv(), "extra"], fixture.dir, childEnv(), JSON.stringify(request));
+  assert.equal(extra.status, 0, extra.stderr);
+  assert.equal(JSON.parse(extra.stdout), null);
 });

@@ -7,7 +7,8 @@ import { loadDefaultPolicy } from "./policy.js";
 import { breMetacharsIn } from "./bre-metachars.js";
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 import { grepOnlyBaseTargets, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./proof-base-stale.js";
-import { baseLacksPrAddedExports } from "./proof-missing-export.js";
+import { spawnSync } from "node:child_process";
+import { PROOF_FILE_READ_BYTES } from "./proof-file-reader-child.js";
 import { hostWorktreeGit, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./worktree-git.js";
 import { resolveTestPath } from "./test-path-resolver.js";
 import {
@@ -18,6 +19,7 @@ import {
 
 const CHECK_PROOF_USAGE = "usage: rmd check-proof <proof> [--allow-full-suite] [--base <ref>] [--repo <owner/name>]";
 export const CHECK_PROOF_CHILD_ENTRY = "src/check-proof-main.ts";
+export const MISSING_EXPORT_OBSERVATION_FLAG = "--observe-missing-exports";
 
 /** A missing materialised file alone proves nothing: independently read the literal Git tree. */
 export function verifyBaseGrepAbsence(
@@ -47,12 +49,33 @@ export function verifyBaseGrepAbsence(
   }
 }
 
+function proofChildEntryArgv(root = fileURLToPath(new URL("../../", import.meta.url))): string[] {
+  return ["--import", createRequire(import.meta.url).resolve("tsx"), resolve(root, CHECK_PROOF_CHILD_ENTRY)];
+}
+
 /** Resolve the harness entry and tsx from this package, even when cwd is a consumer repository. */
 export function checkProofChildArgv(
   proof: string, base: string, root = fileURLToPath(new URL("../../", import.meta.url)),
 ): string[] {
-  return ["--import", createRequire(import.meta.url).resolve("tsx"),
-    resolve(root, CHECK_PROOF_CHILD_ENTRY), proof, "--base", base];
+  return [...proofChildEntryArgv(root), proof, "--base", base];
+}
+
+export function checkProofObservationChildArgv(): string[] {
+  return [...proofChildEntryArgv(), MISSING_EXPORT_OBSERVATION_FLAG];
+}
+
+/** The synchronous CLI retains its reservation while a narrow child awaits confined reads. */
+function cliMissingExportNote(output: string, base: string, head: string): string | undefined {
+  try {
+    const input = JSON.stringify({ output, base, head });
+    if (Buffer.byteLength(input) > PROOF_FILE_READ_BYTES) return undefined;
+    const args = checkProofObservationChildArgv();
+    const child = spawnSync(process.execPath, args, { input, encoding: "utf8",
+      env: { ...process.env, NODE_V8_COVERAGE: "" }, timeout: checkProofTimeoutMs(), maxBuffer: PROOF_FILE_READ_BYTES });
+    if (child.error || child.signal || child.status !== 0) return undefined;
+    const note: unknown = JSON.parse(child.stdout);
+    return typeof note === "string" ? note : undefined;
+  } catch { return undefined; }
 }
 
 /**
@@ -735,7 +758,7 @@ export function checkProofCommand(
       printFailureOutput("base", baseDiag, baseDiag === undefined && typeof loadOutput === "string" ? proofFailureTail(loadOutput) : undefined);
       const missingExport =
         baseW.kind === "test" && typeof loadOutput === "string"
-          ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
+          ? cliMissingExportNote(loadOutput, baseCheckoutDir, process.cwd())
           : undefined;
       if (missingExport !== undefined) {
         console.log(`base:       COULD NOT LINK — ${missingExport}`);
