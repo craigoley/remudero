@@ -695,6 +695,34 @@ export function openScratchReadModel(): ReadModelDb {
   return wrap(new Database(":memory:"), ":memory:", 0, false, undefined);
 }
 
+/** Persistent shadow evidence is not a rebuildable scratch projection. Never redirect or recover it. */
+export function openShadowCounterDb(path: string, readOnly = false): ReadModelDb {
+  if (!readOnly) mkdirSync(dirname(path), { recursive: true });
+  const raw = connect(path, readOnly);
+  const db = wrap(raw, path, 1, readOnly);
+  try {
+    const tables = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all();
+    if (tables.length > 0 && (!tables.some(row => row.name === "meta") || db.meta("schema_version") !== "1" || db.meta("shadow_store_contract") !== "1")) {
+      throw new ReadModelError("schema_mismatch", `${path} is not shadow counter schema 1`);
+    }
+    if (!readOnly) {
+      // Counter/key updates must survive together. FULL also orders WAL/checkpoint writes on power loss.
+      raw.exec("PRAGMA synchronous=FULL");
+      immediate(db, () => db.exec(`${BASE_DDL}
+        CREATE TABLE IF NOT EXISTS shadow_counter(view TEXT PRIMARY KEY, state TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS shadow_key(view TEXT NOT NULL, key TEXT NOT NULL, ordinal INTEGER NOT NULL,
+          PRIMARY KEY(view, key), UNIQUE(view, ordinal)) WITHOUT ROWID;
+        INSERT OR IGNORE INTO meta(k,v) VALUES('schema_version','1');
+        INSERT OR IGNORE INTO meta(k,v) VALUES('shadow_store_contract','1');`));
+    }
+    if (db.meta("schema_version") !== "1") throw new ReadModelError("schema_mismatch", `${path} is not shadow counter schema 1`);
+    return db;
+  } catch (error) {
+    try { db.close(); } catch { /* Preserve the opening/schema refusal. Never move evidence aside. */ }
+    throw error;
+  }
+}
+
 /** Moves an unusable file (and its WAL and shared-memory siblings) aside, never deleting it. */
 function moveAside(path: string, clock: Clock): string {
   const corruptPath = `${path}.corrupt-${clock.now()}`;

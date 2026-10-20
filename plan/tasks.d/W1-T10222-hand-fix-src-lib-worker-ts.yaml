@@ -1,0 +1,45 @@
+- id: W1-T10222
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — hand_fix:src/lib/worker.ts cost 27.8 PR minute(s) across 9 round(s) on 9 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.24
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:hand_fix:src/lib/worker.ts"
+  files:
+    - src/lib/worker.ts
+    - test/worker/spawn/hand-fix-src-lib-worker-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on hand_fix:src/lib/worker.ts"
+      proof: "grep: test(\"W1-T10222: hand_fix:src/lib/worker.ts is prevented, not retried\" in test/worker/spawn/hand-fix-src-lib-worker-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:src/lib/worker.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: hand_fix:src/lib/worker.ts cost 27.8 PR minute(s) across 9 red run(s) within the measured window on 9 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/worker.ts: repaired by hand in multiple distinct merged PRs
+
+    RECENT ROUNDS (newest first):
+    - PR #12960 at 2026-10-19T18:04:09Z: hand fix PR #12960: src/lib/review-worktree-reclaim.ts, src/lib/worker.ts; minutes are the pass median proxy (5.954133333333333), not measured repair time
+    - PR #12910 at 2026-10-19T10:36:17Z: hand fix PR #12910: src/lib/worker.ts; minutes are the pass median proxy (5.954133333333333), not measured repair time
+    - PR #12658 at 2026-10-17T21:04:32Z: hand fix PR #12658: src/lib/worker.ts; minutes are the pass median proxy (5.954133333333333), not measured repair time
+    - PR #12384 at 2026-10-16T18:17:08Z: hand fix PR #12384: scripts/security-merge-producer.mjs, src/lib/arm-auto-merge.ts, src/lib/ci-parity.ts, src/lib/code-scanning-merge-adapter.mjs, src/lib/security-merge-admission.ts, src/lib/security
+    - PR #11342 at 2026-10-13T13:38:55Z: hand fix PR #11342: src/lib/worker-init-summary.ts, src/lib/worker.ts; minutes are the pass median proxy (5.954133333333333), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "Declared files are src/lib/worker.ts and a new test file only; the description names no secrets, auth, permission, merge/deploy policy, or deletion scope."
+      - "Acceptance is a checkable grep for a named test in the new test file, so the finding is verifiable from what is shown."
+      - "The family track record is mixed (36 merged, 40 declined) and no bounded change view was supplied, which lowers confidence, but the PR still passes CI and review."
+    judged_at: "2026-10-20T02:25:52.813Z"
+    pin: "8f1a486e127cd42813c46045284d9f1b15f1524ea492e7c4d6e6389715032bdf"

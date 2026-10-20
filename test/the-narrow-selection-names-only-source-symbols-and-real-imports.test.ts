@@ -185,6 +185,30 @@ test("unknown lexical source causes the existing conservative full selection, no
     });
     assert.equal(result.fullRun, true);
     assert.match(result.reasons.join("\n"), /lexical context unknown/);
+    assert.match(result.reasons.join("\n"), /changed-symbols "src\/private\.ts":/);
     assert.deepEqual(result.suites, []);
   }
+});
+
+test("changed-symbol lexical fallback names the actual file and retains its cause", () => {
+  const reads: string[] = [];
+  const diff = '+++ b/src/first.ts\n@@ -1 +1 @@\n+++ b/src/with space.ts\n@@ -1 +1 @@\n';
+  assert.throws(() => affected.changedSymbols(diff, path => {
+    reads.push(path);
+    return path === "src/first.ts" ? "export const known = 1;" : "await / liveCall() /g;";
+  }), (error: unknown) => {
+    assert(error instanceof Error);
+    assert.match(error.message, /^changed-symbols "src\/with space\.ts": lexical context unknown at line 1 /);
+    assert(error.cause instanceof Error);
+    assert.match(error.cause.message, /^lexical context unknown at line 1 /);
+    return true;
+  });
+  assert.deepEqual(reads, ["src/first.ts", "src/with space.ts"]);
+});
+
+test("changed-symbol diagnostics preserve non-lexical read errors and confirmed deletion semantics", () => {
+  const diff = '+++ b/src/private.ts\n@@ -1 +1 @@\n';
+  const denied = Object.assign(new Error("owned fixture denied"), { code: "EACCES" });
+  assert.throws(() => affected.changedSymbols(diff, () => { throw denied; }), error => error === denied);
+  assert.deepEqual(affected.changedSymbols(diff, () => { throw Object.assign(new Error("absent"), { code: "ENOENT" }); }), []);
 });

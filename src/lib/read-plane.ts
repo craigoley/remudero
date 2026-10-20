@@ -4,6 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
+import { rawCallSites } from "./raw-call-sites.js";
 import { startLoopStallProfiler, type LoopLagReading, type LoopStallProfiler, type LoopStallProfilerOptions,
   type StallLog } from "./loop-stall-profiler.js";
 
@@ -112,19 +113,6 @@ function callerChain(callerLine: string, sites: readonly CallSite[]): string[] |
   return chain;
 }
 
-/** W1-T9720: this frame's callers as V8's raw call sites. A scoped `Error.prepareStackTrace` hands them over
- *  unformatted, so Node never applies a source map: with maps on (tsx turns them on), formatting `.stack` parses
- *  each frame's module map and keeps it for the life of the isolate (+134.5 MiB for 587 maps, W1-T9091). */
-function rawCallSites(): NodeJS.CallSite[] {
-  const prepare = Error.prepareStackTrace;
-  const limit = Error.stackTraceLimit;
-  Error.prepareStackTrace = (_error, sites) => sites;
-  Error.stackTraceLimit = 50;
-  let sites: NodeJS.CallSite[];
-  try { sites = new Error().stack as unknown as NodeJS.CallSite[]; }
-  finally { Error.prepareStackTrace = prepare; Error.stackTraceLimit = limit; }
-  return sites.slice(1); // this helper's own frame: the list begins at callerFrame, as `.stack` did
-}
 
 /** W1-T9720: one call site in the source-mapped formatter's shape (`Object.fn (/abs/path.ts:L:C)`, `<anonymous>`
  *  for a nameless function) at the position node RUNS, not the TypeScript line: reading a mapped line would parse

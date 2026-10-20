@@ -71,6 +71,13 @@ function expectedPolicy(env: NodeJS.ProcessEnv, container: string): string[] {
 }
 
 const policyArgs = (args: string[]) => args.filter((arg) => /^--(?:memory=|memory-swap=|cpu-shares=|annotation=org\.systemd\.property\.MemoryHigh=)/.test(arg));
+const envPairs = (args: string[]) => args.flatMap((arg, i) => (args[i - 1] === "-e" ? [arg] : []));
+
+/** The revived container carries the policy's limits AND every `-e NAME=value` it sets (operator ruling 2026-10-19). */
+function assertPolicyApplied(actual: string[], expected: string[]): void {
+  assert.deepEqual(policyArgs(actual), policyArgs(expected));
+  for (const pair of envPairs(expected)) assert.ok(envPairs(actual).includes(pair), `the revival must pass -e ${pair}`);
+}
 
 test("deploy revival applies the current build resource policy to the actual Docker argv", (t) => {
   const f = fixture(t);
@@ -80,7 +87,8 @@ test("deploy revival applies the current build resource policy to the actual Doc
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const expected = expectedPolicy(f.env, "remudero-daemon");
   assert.ok(expected.some((arg) => arg.startsWith("--memory=")), "positive control: readable host memory sizes a ceiling");
-  assert.deepEqual(policyArgs(f.args()), expected);
+  assert.ok(envPairs(expected).some((pair) => pair.startsWith("GLIBC_TUNABLES=")), "positive control: the policy sets the malloc tuning");
+  assertPolicyApplied(f.args(), expected);
   assert.ok(f.args().includes("--restart=on-failure:5"));
   assert.match(result.stdout, /resource policy from .*daemon-install\/deploy\/resource-policy\.sh/);
   assert.match(result.stdout, /memory ceiling 8820 MiB/);
@@ -94,7 +102,7 @@ test("deploy revival uses the installed policy when the checkout is absent", (t)
   writeFileSync(join(f.state, "state", "memory-high-tuned-remudero-console-daemon.json"), '{"container":"remudero-console-daemon","high_mib":3072}\n');
   const result = f.run();
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.deepEqual(policyArgs(f.args()), expectedPolicy(f.env, "remudero-console-daemon"));
+  assertPolicyApplied(f.args(), expectedPolicy(f.env, "remudero-console-daemon"));
   assert.ok(f.args().includes("--annotation=org.systemd.property.MemoryHigh=uint64 3221225472"), "use this instance's learned high, not Core's floor");
   assert.match(result.stdout, /resource policy from .*bin\/rmd-resource-policy/);
 });
@@ -104,7 +112,7 @@ test("deploy revival preserves the policy's explicit unreadable-memory outcome",
   writeFileSync(f.meminfo, "FixtureWithoutMemTotal: 0\n");
   const result = f.run();
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.deepEqual(policyArgs(f.args()), expectedPolicy(f.env, "remudero-daemon"));
+  assertPolicyApplied(f.args(), expectedPolicy(f.env, "remudero-daemon"));
   assert.deepEqual(policyArgs(f.args()), ["--cpu-shares=512"]);
   assert.match(result.stdout, /NO memory ceiling.*MemTotal unreadable/);
 });
