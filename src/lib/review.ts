@@ -11,7 +11,7 @@ import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
 import { createRequire } from "node:module";
-import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
@@ -1741,9 +1741,9 @@ const PROOF_SANDBOX_ETC = [
   "/etc/fonts",
 ] as const;
 
-/** How this process runs proof children: under bwrap, or UNSANDBOXED with the named reason — the reason is what
- *  {@link ReviewVerdict.proofSandboxDegraded} records, so a degraded review is never silently read as a sandboxed one. */
-export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "unsandboxed"; reason: string };
+/** Proof children use bwrap or an explicitly degraded runtime; unavailable private storage refuses execution.
+ *  {@link ReviewVerdict.proofSandboxDegraded} records the degraded reason, never silently claiming containment. */
+export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "unsandboxed"; reason: string } | { mode: "unavailable"; reason: string };
 
 /** A sandbox that could not start for THIS proof. {@link judgeCriterion} grades it `not_executable`, never a pass and
  *  never `executed_fail`: the proof's code was not run, so nothing was learned about the criterion. */
@@ -1804,6 +1804,7 @@ export function probeProofSandbox(
     });
     return { mode: "bwrap", binary: PROOF_SANDBOX_BINARY };
   } catch (error) {
+    if (error instanceof ProofSandboxUnavailableError) return { mode: "unavailable", reason: error.sandboxReason };
     return {
       mode: "unsandboxed",
       reason: `bwrap cannot start on this Linux host (${spawnFailureText(error)}); ran with a throwaway HOME and the env allowlist only`,
@@ -1813,10 +1814,12 @@ export function probeProofSandbox(
   }
 }
 
-/** The process's memoised {@link probeProofSandbox} answer. */
+/** Memoise assessed runtime answers; a transient storage refusal must remain retryable. */
 export function proofSandboxStatus(): ProofSandboxStatus {
-  proofSandboxMemo ??= probeProofSandbox();
-  return proofSandboxMemo;
+  if (proofSandboxMemo !== undefined) return proofSandboxMemo;
+  const status = probeProofSandbox();
+  if (status.mode !== "unavailable") proofSandboxMemo = status;
+  return status;
 }
 
 /** A path's real location, or `undefined` when nothing is there to mount or mask. */
@@ -2006,6 +2009,24 @@ export function proofMaskedGitConfig(sharedConfig: string): string {
   return `[remote "origin"]\n\turl = "${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
 }
 
+function privateProofTmp(home: string): string {
+  const path = join(home, ".rmd-private-tmp");
+  try {
+    try { mkdirSync(path, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW, 0o600);
+    try {
+      const stat = fstatSync(fd);
+      if (stat.uid !== process.geteuid?.() || (stat.mode & 0o777) !== 0o700) throw Error("the temporary tree is not private to this uid");
+      const type = statfsSync(process.platform === "linux" ? `/proc/self/fd/${fd}` : path, { bigint: true }).type;
+      if (type === 0x01021994n || type === 0x858458f6n) throw Error("the temporary tree is RAM-backed, not disk-backed");
+      return path;
+    } finally { closeSync(fd); }
+  } catch (error) {
+    throw new ProofSandboxUnavailableError(`private disk /tmp unavailable: ${String((error as Error)?.message ?? error).slice(0, 180)}`);
+  }
+}
+
 /** Bubblewrap arguments, ending in `--`, for one proof child. Writable: the checkout, its throwaway HOME and its
  *  worktree gitdir. Read-only: the runtime, the git common dir (its `config`, which can carry a token-bearing remote,
  *  masked by a file carrying only its credential-free origin url), the node_modules link targets and the browser
@@ -2016,6 +2037,8 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   const cwd = realpathSync(input.cwd);
   const home = realpathSync(input.home);
   if (cwd === "/" || home === "/") throw new ProofSandboxUnavailableError("refusing / as a writable sandbox bind");
+  // Already writable through HOME; its owner removes it on success, error and timeout. Never a shared cache.
+  const scratch = privateProofTmp(home);
   const runtime: string[] = PROOF_SANDBOX_RUNTIME_ROOTS.filter((p) => existsSync(p));
   const binds: { path: string; writable: boolean }[] = [];
   const nodePrefix = dirname(dirname(realpathSync(input.execPath ?? process.execPath)));
@@ -2051,6 +2074,9 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   }
   const key = env.GH_APP_PRIVATE_KEY_PATH ? realpathIfPresent(env.GH_APP_PRIVATE_KEY_PATH) : undefined;
   if (key !== undefined && binds.some((b) => isWithin(key, b.path))) masks.push({ from: "/dev/null", path: key });
+  if (binds.some(b => !b.writable && isWithin(b.path, scratch)) || masks.some(m => isWithin(m.path, scratch))) {
+    throw new ProofSandboxUnavailableError("private disk /tmp overlaps a protected bind or credential mask");
+  }
   const dirs = new Set<string>();
   for (const { path } of binds) {
     for (let current = dirname(path); current !== dirname(current); current = dirname(current)) dirs.add(current);
@@ -2066,7 +2092,7 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
     ...runtime.flatMap((path) => ["--ro-bind", path, path]),
     "--proc", "/proc",
     "--dev", "/dev",
-    "--tmpfs", "/tmp",
+    "--bind", scratch, "/tmp",
     ...createDirs.flatMap((path) => ["--dir", path]),
     ...binds.flatMap(({ path, writable }) => [writable ? "--bind" : "--ro-bind", path, path]),
     ...masks.flatMap(({ from, path }) => ["--ro-bind", from, path]),
@@ -2101,12 +2127,13 @@ function prepareProofChild(command: string, args: readonly string[], cwd: string
   const home = makeTempDir("proof-home");
   const cleanup = () => rmSync(home, { recursive: true, force: true });
   const env = proofChildEnv(home);
-  const status = proofSandboxStatus();
-  if (status.mode !== "bwrap") {
-    unsandboxedProofSpawns += 1;
-    return { ...child, env, cleanup };
-  }
   try {
+    const status = proofSandboxStatus();
+    if (status.mode === "unavailable") throw new ProofSandboxUnavailableError(status.reason);
+    if (status.mode !== "bwrap") {
+      unsandboxedProofSpawns += 1;
+      return { ...child, env, cleanup };
+    }
     const sandbox = proofSandboxArgv({ cwd, home });
     return {
       file: status.binary,
@@ -8723,6 +8750,9 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * {@link INSTRUMENT_SURFACE_EXCLUSIONS} plus
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
+  "^scripts/preflight-author\\.mjs$",
+  "^scripts/calibrate-author-runtime\\.mjs$",
+  "^scripts/lib/author-step-capture\\.mjs$",
   "^src/lib/review\\.ts$",
   "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
@@ -8795,6 +8825,10 @@ const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
  * found eleven), where widening what refuses a PR must be
  * measured against real merged diffs first. */
 export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
+  "docs/docs-index.json":
+    "Generated document inventory (paths, titles, summaries and search hints), not validation rule logic. " +
+    "scripts/generate-docs-index.mjs --check and --check-paths still enforce freshness and path consistency; " +
+    "this exact data classification exempts neither the generator nor another JSON file or executable.",
   // ── verified non-instrument: content/data a gate validates, not the rule that validates it ──
   "openapi/daemon.yaml":
     "the daemon's API schema (content) — scripts/generate-api-client.mjs is the enforcement logic and is tracked below",

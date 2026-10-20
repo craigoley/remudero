@@ -75,9 +75,10 @@ test("each instance's memory.high sits above its working set and below an unchan
   const big = install(BIG_HOST_MIB * 1024);
   try {
     const hostMib = Math.floor(HOST_KB / 1024);
-    // SOFT LIMITS ONLY: memory.max and swap are byte-identical to the policy before memory.high existed.
+    // SOFT LIMITS ONLY: memory.max and swap are byte-identical to the policy before memory.high existed,
+    // except serve's swap, which operator ruling 2026-10-19 raised from 1 GiB to 2 GiB.
     const baseMax = { build: hostMib - 5120 - 2048, serve: 7680 };
-    const baseSwap = { build: 4096, serve: 1024 };
+    const baseSwap = { build: 4096, serve: 2048 };
     for (const { container, role, workingSet } of INSTANCES) {
       const p = policyOf(root, env, role, container);
       assert.equal(p.max, baseMax[role] * MIB, `${container}: memory.max unchanged`);

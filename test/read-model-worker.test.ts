@@ -25,6 +25,7 @@ import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
 import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
 import { buildReadModelViewRoutes, shownReadiness, viewMode, type ViewBody } from "../src/lib/views.js";
 import { shadowReadiness, viewShadowPath, type ViewShadowState } from "../src/lib/view-shadow.js";
+import { readShadowCounters } from "#src/lib/view-shadow-store.js";
 import { createService } from "../src/lib/service.js";
 import {
   READ_MODEL_CHECK_SHARE,
@@ -151,15 +152,13 @@ test("default agent worker and warm boot refuse old generation readiness and com
   assert.equal(entry.qualificationGeneration, AGENT_QUALIFICATION_GENERATION);
   assert.equal(((entry.body.data as AgentViewData).body as AgentProposalsBody).coverage?.complete, 1, "fully supported source positive control");
   worker.shadow({ view: "agent", key, requests: 0 });
-  const current = (): ViewShadowState | undefined => Object.values(JSON.parse(readFileSync(path, "utf8")) as Record<string, ViewShadowState>).find((s) => s.qualificationGeneration === AGENT_QUALIFICATION_GENERATION);
-  while (!current()?.samples && !current()?.skipped && Date.now() < deadline) await sleep(20);
-  const measured = current();
-  assert.ok(measured, "one native comparator received the default worker's pair");
-  assert.deepEqual([measured.samples, measured.streakSamples, measured.diffs.real, measured.streakKeys], [1, 1, 0, [key]], "equal current producer pair begins its own streak, not 3001 samples");
-  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).agent, old, "old qualified history survives actual worker comparison");
   const nativeBody = () => worker!.body("read-model")!.body;
   const nativeRow = () => (nativeBody().data as { shadow?: Array<{ view: string; samples: number; skipped?: number; qualificationGeneration?: string }> }).shadow?.find((s) => s.view === "agent");
   while ((nativeRow()?.samples !== 1 || nativeRow()?.qualificationGeneration !== AGENT_QUALIFICATION_GENERATION) && Date.now() < deadline) await sleep(20);
+  const measured = Object.values(readShadowCounters(path, true)?.states ?? {}).find((s) => s.qualificationGeneration === AGENT_QUALIFICATION_GENERATION);
+  assert.ok(measured, "one native comparator received the default worker's pair");
+  assert.deepEqual([measured.samples, measured.streakSamples, measured.diffs.real, measured.streakKeys], [1, 1, 0, [key]], "equal current producer pair begins its own streak, not 3001 samples");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).agent, old, "old qualified history survives actual worker comparison");
   assert.equal(nativeRow()?.samples, 1, "status publishes the actual current-generation receipt");
   t.diagnostic(JSON.stringify({ nativeAgentReadinessFixture: "fresh", clockMs: Date.now(), body: nativeBody() }));
   worker.shadow({ view: "agent", key, requests: 0, legacy: { data: entry.body.data, asOfMs: Date.now(), qualificationGeneration: "old-record-contract" } });

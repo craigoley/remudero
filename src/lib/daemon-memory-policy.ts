@@ -146,6 +146,9 @@ export interface DaemonMemoryEntryResult {
   /** The NODE_OPTIONS this process was started with, and what its children now inherit. */
   node_options_before?: string;
   node_options_children?: string;
+  /** Operator ruling 2026-10-19: the malloc tuning the launch set (GLIBC_TUNABLES), so a boot row shows
+   *  it took effect. Absent when the launch set none. The node flags are in node_options_before. */
+  glibc_tunables?: string;
 }
 
 /** Daemon entry: set the growth factor and take the heap ceiling out of the inherited NODE_OPTIONS. This
@@ -161,6 +164,7 @@ export function applyDaemonMemoryPolicy(policy: DaemonMemoryPolicy, io: DaemonMe
     heap_growing_percent: Math.round(policy.heapGrowingPercent),
     ...(before !== undefined ? { node_options_before: before } : {}),
     ...(after !== undefined ? { node_options_children: after } : {}),
+    ...(env.GLIBC_TUNABLES !== undefined ? { glibc_tunables: env.GLIBC_TUNABLES } : {}),
   };
 }
 

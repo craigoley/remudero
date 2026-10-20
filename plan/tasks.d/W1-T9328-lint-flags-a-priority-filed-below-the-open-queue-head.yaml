@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-13: the dispatch diagnosis's priority-inflation finding, the lint half (the order half is W1-T9323)"
   plan_refs: [W1-T9323, W1-T422, W1-T4064]
   files: [src/lib/task-linter.ts, test/lint-flags-a-priority-filed-below-the-open-queue-head.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.17
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/a-generic-term-locates-no-owner.test.ts"

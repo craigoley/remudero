@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.1
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts"

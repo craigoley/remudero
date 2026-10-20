@@ -12,7 +12,7 @@
   origin: 'Operator-approved separate alias-fixture portability repair, 2026-10-18; normal reservation refs/rmd-id/W1-T10179.'
   plan_refs: [W1-T9864, W1-T10154]
   files: [test/a-test-imports-through-the-subpath-alias.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at W10154 source37f0ec5309 and actual pinned base e44e34837ca2:

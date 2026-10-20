@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.28
   status: queued
@@ -45,3 +45,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/lib/ledger.ts and a new test file under test/ledger/. Neither is shown to touch secrets, auth, permissions, merge/deploy/infrastructure policy, or data deletion."
+      - "The task is a CI-friction remedy that makes a flaky test less likely to cost fix rounds. The description does not ask for an operator-only decision, and the filed acceptance is a grep-verifiable test marker, so the finding can be verified from what is shown."
+      - "The rationale lists recent rounds that include comment-load-ratchet and baseline-file guidance. That is context only, and the declared files do not include the baseline JSON or any review policy file."
+      - "The family track record is mixed (36 merged, 40 declined, Beta mean 0.66), and the \"flaky\" cause is not sharply diagnosed. Even so, the PR still passes CI and review, and the gardener measures the result afterwards and reopens the cause if the share does not fall."
+    judged_at: "2026-10-20T00:44:43.222Z"
+    pin: "f3a46a22688309eda19dc73cf4fdfa6f2e7fc45da82ccb793806fc150d7f86e4"

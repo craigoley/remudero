@@ -174,7 +174,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const changed = identity !== memo.identity;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
   const generatedAt = fixedClock(written ? now : memo.writtenAtMs!).iso();
-  const bodies = inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot), inboxStoreSource(generatedAt), content.snapshotKey);
+  const bodies = inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot, { content, scope }), inboxStoreSource(generatedAt), content.snapshotKey);
   if (written) {
     writePersistedInbox(stateDir, content, now);
     writeClassificationSnapshot(stateDir, classifications, fixedClock(now), inboxClassificationEvidence(classified));
