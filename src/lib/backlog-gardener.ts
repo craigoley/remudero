@@ -238,7 +238,7 @@ function describe(e: BacklogEvidence): string {
   return `fanout=${e.fanout}; symptoms=${symptoms}; files present=${e.presentFiles.join(", ") || "none"}; missing=${e.missingFiles.join(", ") || "none"}; symbols present=${e.presentSymbols.join(", ") || "none"}; missing=${e.missingSymbols.join(", ") || "none"}; merged surface=${e.overtaken?.sha ?? "none"}; proofs=${e.proofsHold ? "hold" : "not proven"}; satisfied by main=${e.satisfiedByMain ? `${e.satisfiedByMain.branch} changed only ${e.satisfiedByMain.files.join(", ")}` : "no"}; class value=${e.classValue ? `${e.classValue.mean} over ${e.classValue.attempts} attempts` : "unavailable"}`;
 }
 
-export function applyBacklogActions(root: string, shards: ReadonlyMap<string, string>, actions: readonly BacklogAction[], now: Date = new Date()): string[] {
+export function applyBacklogActions(root: string, shards: ReadonlyMap<string, string>, actions: readonly BacklogAction[], now?: Date): string[] {
   const paths: string[] = [];
   for (const action of actions) {
     const rel = shards.get(action.target);
@@ -260,7 +260,7 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
     if (action.disposition.kind === "band") {
       const band = action.disposition.band;
       next = declared ? next.replace(DECLARED_PRIORITY, `  priority: ${band}`) : next.replace(/^ {2}status: queued[ \t]*$/m, `  priority: ${band}\n  status: queued`);
-      next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: queued\n  # backlog gardener: band=${band} evidence=${action.evidence.signature}\n  # backlog gardener: placed=${now.toISOString()}`);
+      next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: queued\n  # backlog gardener: band=${band} evidence=${action.evidence.signature}${now ? `\n  # backlog gardener: placed=${now.toISOString()}` : ""}`);
     } else {
       next = next.replace(DECLARED_PRIORITY_LINE, "");
       next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: blocked\n  retirement: ${action.disposition.retirement}\n  # backlog gardener: retirement evidence=${action.evidence.signature}`);
