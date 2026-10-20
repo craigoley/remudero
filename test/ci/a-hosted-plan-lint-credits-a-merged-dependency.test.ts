@@ -62,6 +62,9 @@ function fixture(t: TestContext) {
 }
 
 test("W1-T10258: hosted plan lint credits a merged dependency from same-run producer evidence", async t => {
+  const workflow = parse(readFileSync(".github/workflows/ci.yml", "utf8"));
+  assert.ok(workflow.jobs.commitlint.steps.some((step: { id?: string }) => step.id === "dependency-evidence"),
+    "dependency credit unavailable (UNKNOWN): the same-run producer step is absent");
   const f = fixture(t), before = f.repo.git("status", "--porcelain");
   const produced = await produceCiDependencyEvidence(f.context, { request: f.request });
   const receipt = f.consume(produced);
@@ -198,5 +201,6 @@ test("hosted wiring seals protected-base evidence before candidate code and reta
   assert.deepEqual(workflow.jobs.ci.needs, ["commitlint"]);
   assert.equal(workflow.jobs.ci.if, "${{ !cancelled() }}");
   assert.match(workflow.jobs.ci.env.RMD_CI_DEPENDENCY_DIGEST, /needs\.commitlint\.outputs\.dependency_digest/);
-  assert.ok(workflow.jobs.ci.steps.some((step: { with?: { name?: string } }) => step.with?.name === "ci-dependency-evidence-${{ github.run_id }}-${{ github.run_attempt }}"));
+  assert.ok(workflow.jobs.ci.steps.some((step: { run?: string }) => step.run?.includes('gh run download "$GITHUB_RUN_ID"') &&
+    step.run.includes('ci-dependency-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}')));
 });
