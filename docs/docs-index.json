@@ -200,6 +200,12 @@
       "grepHint": "Bounded storage proposals, not deletion authority"
     },
     {
+      "path": "docs/evidence-storage.md",
+      "title": "Bounded, opt-in evidence storage",
+      "summary": "The Mac janitor can invoke an account-private evidence compactor during an apply",
+      "grepHint": "Bounded, opt-in evidence storage"
+    },
+    {
       "path": "docs/forensics/README.md",
       "title": "Forensics",
       "summary": "This directory holds the measured forensic detail compacted out of source-file comments. Every",
