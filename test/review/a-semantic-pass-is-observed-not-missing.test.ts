@@ -32,6 +32,13 @@ test("missing malformed partial and out-of-range reviewer output remains incompl
   assert.deepEqual(parseReviewerVerdicts("unparseable", 2), [undefined, undefined]);
 });
 
+test("a required mixed PASS and FAIL transcript is complete only when every criterion is observed", () => {
+  const transcript = "REVIEW_VERDICT 1: PASS\nREVIEW_VERDICT 2: FAIL actual evidence gap\nreview_verdict 3: pass";
+  assert.equal(refusal(transcript, 3), undefined, "a negative finding is a complete evaluation, not a missing one");
+  assert.deepEqual(parseReviewerVerdicts(transcript, 3), [true, false, true]);
+  assert.equal(refusal(transcript.replace("REVIEW_VERDICT 1: PASS\n", ""), 3), "required-semantic-incomplete-verdicts");
+});
+
 test("an observed semantic FAIL remains a downgrade even after a later PASS", () => {
   for (const text of ["REVIEW_VERDICT 1: FAIL\nREVIEW_VERDICT 1: PASS",
     "REVIEW_VERDICT 1: PASS\nREVIEW_VERDICT 1: FAIL"]) {
