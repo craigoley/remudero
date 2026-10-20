@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
+import { appendLedger, rotateLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
@@ -140,6 +141,32 @@ test("host-gap history separates changed inputs and incomplete legacy evidence",
   assert.equal(flags[flags.indexOf("--review-attempt-id") + 1], id(3), "fresh-tree review keeps the admitted identity");
   assert.equal((reviewOptionsFromFlags(["--review-attempt-id", "review-PR10221-../../bad"]) as unknown as { reviewAttemptId?: string }).reviewAttemptId,
     undefined, "an unbounded/path-shaped identity is not attribution");
+});
+
+test("an admitted host-gap refusal remains attributable after real ledger rotation", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-gap-rotation-`));
+  try {
+    const path = join(root, "state", "ledger.ndjson");
+    const carrier = { ...posted(1, 19), step: "review.provider_provenance" };
+    const refusal = { ...posted(1, 15), step: "review.post_refused", review_attempt_id: undefined,
+      reviewer_code_host_gap: "cwd-missing" };
+    for (const row of [admitted(1, 20, true), carrier, refusal])
+      appendLedger(path, row as LedgerLine, { ceilingBytes: Number.MAX_SAFE_INTEGER });
+    const before = hostGapRereviewFacts(pr(), readLedgerLines(path));
+    assert.equal(before.history.length, 1, "the real writer's exact carrier joins the library refusal");
+    assert.equal(before.history[0]?.completed, true);
+    assert.equal(rotateLedger(path, { ceilingBytes: 1 }).rotated, true, "the real default rotation must run");
+    const retained = readLedgerLines(path);
+    assert.equal(retained.filter(row => row.step === "sweep.review_admitted").length, 1,
+      "positive control: rotation retains the admission");
+    assert.equal(retained.filter(row => row.step === "review.post_refused").length, 1,
+      "positive control: rotation retains the refusal");
+    const after = hostGapRereviewFacts(pr(), retained);
+    assert.equal(after.history.length, 1, "the deciding reader still witnesses exactly one real attempt");
+    assert.equal(after.history[0]?.completed, true,
+      "dropping the provenance carrier must not turn completed work into an unfinished admission");
+    assert.deepEqual(after, before);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("default review bridges and the real refusal logger preserve admitted attempt identity", async () => {
