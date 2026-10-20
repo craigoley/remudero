@@ -1323,11 +1323,112 @@ esac
 #    against TWICE the interval the broker wrote into it: still no network here. With no live broker
 #    this rule is exactly today's 180 s floor. A `gh` WRITE seen here appends `<repo|*> <number>` to the
 #    broker's invalidation file, so a body edited with `gh pr edit` is never served stale.
+#
+#    ONE WRITE RULE. Which `gh api` call is a write is `ghArgvIsWrite` in src/lib/github-transport.ts, the
+#    rule the transport, `rmd gh` and the broker share; `gh_api_is_write` below mirrors it word for word,
+#    on the words `hr_tokens` splits, with no network. Before this, the hook saw a write only with an
+#    explicit -X/--method, so a `gh api …/comments -f body=x` (gh POSTs it) or a GraphQL mutation was a
+#    READ here, and it was routed to `rmd gh`, whose broker refuses a write: the write could not run at all.
+#    gh's method is the explicit -X/--method, else POST when any -f/--raw-field/-F/--field/--input is
+#    given, else GET; a non-GET/HEAD call is a write. `gh api graphql` is a read only when its query
+#    provably is not a mutation: a local `-F query=@file` or `--input file` is read to decide, and an
+#    unreadable, stdin or empty query is a write, the safe direction. FALSIFIER:
+#    test/github/one-write-rule-for-every-gh-path.test.ts runs every case through all four paths.
+GH_GQL_MUTATION_RE='(^|[^A-Za-z0-9_])mutation([^A-Za-z0-9_]|$)'
+gh_gql_text_may_mutate() {  # $1 = GraphQL query text; true when it may be a mutation (empty counts)
+  case "$1" in *[![:space:]]*) ;; *) return 0 ;; esac
+  if [[ $1 =~ $GH_GQL_MUTATION_RE ]]; then return 0; fi
+  return 1
+}
+gh_local_file_text() {  # $1 = a path as gh would open it; prints its text, false when stdin or unreadable
+  local f="$1"
+  case "$f" in ''|-) return 1 ;; '~/'*) f="$HOME/${f#\~/}" ;; esac
+  case "$f" in /*) ;; *) if [ -n "$hook_cwd" ]; then f="$hook_cwd/$f"; fi ;; esac
+  if [ -f "$f" ] && [ -r "$f" ]; then cat -- "$f" 2>/dev/null; return; fi
+  return 1
+}
+gh_api_is_write() {  # $@ = the words after `gh api`; true when the call is a write
+  local w name val inline method="" endpoint="" fields=0 have_input=0 input="" queries=0 query_may=0 txt
+  while [ "$#" -gt 0 ]; do
+    w="$1"
+    shift
+    case "$w" in $'\036'*|*'>'*|*'<'*) continue ;; esac  # a heredoc body or a redirection is not gh's argv
+    name="$w"
+    val=""
+    inline=0
+    case "$w" in
+      --*=*) name="${w%%=*}"; val="${w#*=}"; inline=1 ;;
+      --*) ;;
+      -[XHfFqtp]?*) name="${w:0:2}"; val="${w:2}"; val="${val#=}"; inline=1 ;;
+    esac
+    case "$name" in
+      -X|--method|-H|--header|-f|--raw-field|-F|--field|--input|-q|--jq|-t|--template|-p|--preview|--hostname|--cache)
+        if [ "$inline" -eq 0 ]; then
+          val="${1-}"
+          if [ "$#" -gt 0 ]; then shift; fi
+        fi
+        case "$name" in
+          -X|--method) method="$val" ;;
+          -f|--raw-field|-F|--field)
+            fields=1
+            case "$val" in
+              query=*)
+                queries=1
+                txt="${val#query=}"
+                case "$name:$txt" in
+                  -F:@*|--field:@*) if txt="$(gh_local_file_text "${txt#@}")"; then :; else txt=""; fi ;;
+                esac
+                if gh_gql_text_may_mutate "$txt"; then query_may=1; fi ;;
+            esac ;;
+          --input) have_input=1; input="$val" ;;
+        esac ;;
+      -*) ;;
+      *) if [ -z "$endpoint" ]; then endpoint="$w"; fi ;;
+    esac
+  done
+  case "$method" in
+    ''|[gG][eE][tT]|[hH][eE][aA][dD]) ;;
+    *) return 0 ;;
+  esac
+  if [ "$endpoint" = graphql ]; then
+    if [ "$queries" -eq 1 ]; then
+      if [ "$query_may" -eq 1 ]; then return 0; fi
+      return 1
+    fi
+    if [ "$have_input" -eq 1 ] && txt="$(gh_local_file_text "$input")"; then
+      if gh_gql_text_may_mutate "$txt"; then return 0; fi
+      return 1
+    fi
+    return 0
+  fi
+  if [ -n "$method" ]; then return 1; fi
+  if [ "$fields" -eq 1 ] || [ "$have_input" -eq 1 ]; then return 0; fi
+  return 1
+}
+gh_segment_api_is_write() {  # $1 = one hr_tokens line; true when it runs a `gh api` write
+  local -a t
+  local n i=1
+  IFS=$'\037' read -r -a t <<< "$1"
+  n=${#t[@]}
+  while [ "$((i + 1))" -lt "$n" ]; do
+    case "${t[$i]}" in
+      gh|*/gh)
+        if [ "${t[$((i + 1))]}" = api ]; then
+          if gh_api_is_write "${t[@]:$((i + 2))}"; then return 0; fi
+          return 1
+        fi ;;
+    esac
+    i=$((i + 1))
+  done
+  return 1
+}
 if [ -n "$cmd" ] && invokes_gh "$cmd"; then
   # `rmd gh [--class c] [--fresh] -- <args>` reads as `gh <args>` to every classifier below.
   gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
   gh_is_write=0
-  printf '%s' "$gh_norm" | grep -Eq '(-X|--method)[[:space:]]+(POST|PATCH|PUT|DELETE)' && gh_is_write=1
+  while IFS= read -r gh_seg; do
+    if gh_segment_api_is_write "$gh_seg"; then gh_is_write=1; fi
+  done < <(printf '%s\n' "$gh_norm" | hr_tokens)
   printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+(pr|issue)[[:space:]]+(create|merge|edit|close|reopen|comment|review|ready|lock|unlock)' && gh_is_write=1
   printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+(run[[:space:]]+(rerun|cancel|delete)|workflow[[:space:]]+(run|enable|disable)|release[[:space:]]+(create|edit|delete)|label[[:space:]]+(create|edit|delete)|secret[[:space:]]+set)' && gh_is_write=1
 
