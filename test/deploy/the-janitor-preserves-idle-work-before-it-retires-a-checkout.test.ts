@@ -24,7 +24,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 function setup(config: Record<string, unknown> | null = {}): Fx {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "preserve-retire-")));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-preserve-retire-")));
   const home = join(root, "home");
   mkdirSync(join(home, ".local/state/remudero"), { recursive: true, mode: 0o700 });
   for (const dir of [home, join(home, ".local"), join(home, ".local/state"), join(home, ".local/state/remudero")]) chmodSync(dir, 0o700);
