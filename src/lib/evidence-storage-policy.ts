@@ -10,10 +10,12 @@ const bytes = (x: unknown): x is number => Number.isSafeInteger(x) && (x as numb
 /** A truncated capture can never turn back into complete evidence. */
 export class BoundedStorageCapture {
   private readonly storage: Buffer;
+  private readonly limit: number;
   private used = 0;
   private exceeded = false;
-  constructor(private readonly limit: number) {
+  constructor(limit: number) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_MANIFEST_BYTES) throw new Error('invalid storage capture bound');
+    this.limit = limit;
     this.storage = Buffer.alloc(limit);
   }
   append(chunk: Buffer): void {
