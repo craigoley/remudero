@@ -138,6 +138,88 @@ test("W1-T2803: an ordinary tests_failed STILL repairs and still re-runs — the
   assert.equal(outcome.repaired, true);
 });
 
+async function interruptedEvidence(stdout: string) {
+  const events: { step: string; fields: Record<string, unknown> }[] = [];
+  let calls = 0, repairs = 0, regenerations = 0;
+  const outcome = await runRetroPrepublishPreflight({
+    worktreePath: REPO_ROOT,
+    provenance: { model: "fixture", effort: "default", sessionId: "partial-evidence" },
+    remotePrExisted: false,
+    repair: async () => { repairs++; },
+    regenerateHarnessArtifacts: () => { regenerations++; },
+    log: (step, fields) => { events.push({ step, fields }); },
+    deps: {
+      now: () => 0,
+      run: () => ++calls === 1
+        ? { status: 0, signal: null, stdout: "test/fixture.test.ts\n", stderr: "" }
+        : { status: null, signal: "SIGTERM", stdout, stderr: "",
+            error: Object.assign(new Error("fixture total backstop"), { code: "ETIMEDOUT" }) },
+    },
+  });
+  assert.deepEqual(outcome, { ok: false, attempts: 1, suiteCount: 1, repaired: false });
+  assert.deepEqual({ calls, repairs, regenerations }, { calls: 2, repairs: 0, regenerations: 0 });
+  const failure = events.find(row => row.step === "retro.preflight_failed")?.fields;
+  const standDown = events.find(row => row.step === "retro.preflight_repair_stood_down")?.fields;
+  assert.ok(failure); assert.ok(standDown);
+  assert.equal(failure.exit_class, "process_timeout");
+  assert.equal(failure.has_summary, false);
+  return { failure, standDown };
+}
+
+test("retro bound evidence: a timeout retains partial assertion names without calling the evidence empty", async () => {
+  const name = "author deadline admission refuses a too-small real slot budget before starting static work";
+  const { failure, standDown } = await interruptedEvidence(`not ok 1 - ${name}\n`);
+  assert.deepEqual(failure.failing_tests, [name]);
+  assert.equal(standDown.retained_failing_test_names, 1);
+  assert.equal(standDown.retained_cancelled_test_names, 0);
+  assert.equal(standDown.has_summary, false);
+  assert.doesNotMatch(String(standDown.reason), /no failing test|empty evidence/);
+  assert.match(String(standDown.reason), /execution bound|could not start/);
+});
+
+test("retro bound evidence: a timeout keeps cancelled names separate from assertion evidence", async () => {
+  const { failure, standDown } = await interruptedEvidence(
+    "not ok 1 - fixture cancelled\n  ---\n  failureType: 'cancelledByParent'\n  ...\n",
+  );
+  assert.deepEqual(failure.failing_tests, []);
+  assert.deepEqual(failure.cancelled_tests, ["fixture cancelled"]);
+  assert.equal(standDown.retained_failing_test_names, 0);
+  assert.equal(standDown.retained_cancelled_test_names, 1);
+  assert.equal(standDown.has_summary, false);
+});
+
+test("retro bound evidence: a timeout with no retained names still reports incomplete evidence", async () => {
+  const { failure, standDown } = await interruptedEvidence("");
+  assert.deepEqual(failure.failing_tests, []);
+  assert.deepEqual(failure.cancelled_tests, []);
+  assert.equal(standDown.retained_failing_test_names, 0);
+  assert.equal(standDown.retained_cancelled_test_names, 0);
+  assert.equal(standDown.has_summary, false);
+});
+
+test("retro bound evidence: an ordinary completed assertion failure still gets its one repair", async () => {
+  let calls = 0, repairs = 0, regenerations = 0;
+  const events: string[] = [];
+  const outcome = await runRetroPrepublishPreflight({
+    worktreePath: REPO_ROOT,
+    provenance: { model: "fixture", effort: "default", sessionId: "completed-evidence" },
+    remotePrExisted: false,
+    repair: async () => { repairs++; },
+    regenerateHarnessArtifacts: () => { regenerations++; },
+    log: step => { events.push(step); },
+    deps: { now: () => 0, run: () => {
+      calls++;
+      if (calls % 2 === 1) return { status: 0, signal: null, stdout: "test/fixture.test.ts\n", stderr: "" };
+      return calls === 2
+        ? { status: 1, signal: null, stdout: "not ok 1 - fixture assertion\n# tests 1\n# fail 1\n", stderr: "" }
+        : { status: 0, signal: null, stdout: "ok 1 - repaired\n# tests 1\n# fail 0\n", stderr: "" };
+    } },
+  });
+  assert.deepEqual(outcome, { ok: true, attempts: 2, suiteCount: 1, repaired: true });
+  assert.deepEqual({ calls, repairs, regenerations }, { calls: 4, repairs: 1, regenerations: 1 });
+  assert.equal(events.includes("retro.preflight_repair_stood_down"), false);
+});
+
 test("W1-T2803: the prepublish failure message names what survives, and no longer promises a preserved branch", () => {
   // Pins the ABSENCE, not one exact replacement wording — a test greping for a single new sentence
   // reddens on every future rewording and teaches nothing.
