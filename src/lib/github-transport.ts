@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
 import { RmdError } from "./errors.js";
+import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
@@ -140,12 +141,54 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
   );
 }
 
+// ── W1-T10279 — A LIVE MAC BROKER TAKES THE READ INSTEAD OF THE FLOOR ───────────────────────────
+//
+// When the account's GitHub read broker (src/lib/gh-read-broker.ts) is live, a read goes to it and the
+// 180 s floor is not applied here: the broker paces every session's reads from GitHub's own headers.
+// Writes and the budget probe never move. With no live broker every path below is unchanged, which is
+// every host but an operator's Mac.
+
+/** The broker socket for this read, or `undefined` for today's direct, floored path. */
+function ghBrokerSocketFor(args: readonly string[], env: NodeJS.ProcessEnv | undefined): string | undefined {
+  if (ghArgvIsWrite(args) || ghArgvIsCadenceExempt(args)) return undefined;
+  return ghBrokerRouteFor(env ?? process.env);
+}
+
+/** A brokered failure shaped like the `execFile` error a direct `gh` would have thrown. */
+function ghBrokerExecError(args: readonly string[], result: GhBrokerResult): Error {
+  return Object.assign(new Error(`Command failed: gh ${args.join(" ")}\n${result.stderr}`), {
+    status: result.exitCode,
+    code: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  });
+}
+
+/** The ASYNC read through a live broker: its stdout, or `undefined` when no broker took the read. */
+async function ghBrokeredAsync(args: readonly string[]): Promise<string | undefined> {
+  const socket = ghBrokerSocketFor(args, undefined);
+  if (socket === undefined) return undefined;
+  let result: GhBrokerResult;
+  try {
+    result = await brokerGhRead(socket, args);
+  } catch {
+    // The broker went away between the liveness read and the request: take the direct path, paced
+    // by the floor as before, rather than fail a read the direct path could still make.
+    return undefined;
+  }
+  if (result.exitCode !== 0) throw ghBrokerExecError(args, result);
+  return result.stdout;
+}
+
 export function ghExec(args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExec(args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
-  // W1-T3297: this overload always spawns the real `gh`, so the cadence floor always applies.
-  applyGhReadCadence(args);
-  return ghExecFile("gh", args, opts) as string | Buffer;
+  // W1-T10279: with a live broker the same one spawn runs the broker client in place of `gh`, unfloored.
+  const socket = ghBrokerSocketFor(args, opts.env);
+  // W1-T3297: otherwise this overload spawns the real `gh`, so the cadence floor applies.
+  if (socket === undefined) applyGhReadCadence(args);
+  const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args);
+  return ghExecFile(spawned.file, spawned.args, opts) as string | Buffer;
 }
 
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
@@ -166,13 +209,16 @@ export function ghJson(
 ): unknown {
   // W1-T3297: an injected `exec` reaches no network, so pacing it would spend a shared window
   // on a call that never touched the limiter.
-  if (exec === execFileSync) {
-    refuseSentinelGhToken("gh", args, undefined);
-    applyGhReadCadence(args);
-  }
   const isApiCall = args[0] === "api";
   const execArgs = isApiCall ? [...args, "-i"] : args;
-  const out = exec("gh", execArgs, {
+  let spawned = { file: "gh", args: execArgs };
+  if (exec === execFileSync) {
+    refuseSentinelGhToken("gh", args, undefined);
+    const socket = ghBrokerSocketFor(execArgs, undefined);
+    if (socket === undefined) applyGhReadCadence(args);
+    else spawned = ghBrokerClientSpawn(socket, execArgs);
+  }
+  const out = exec(spawned.file, spawned.args, {
     encoding: "utf8",
     maxBuffer: DEFAULT_GH_MAX_BUFFER,
     timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
@@ -328,6 +374,8 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
     // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
     refuseSentinelGhToken("gh", args, undefined);
+    const brokered = await ghBrokeredAsync(execArgs);
+    if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     return run();
   })();
@@ -363,6 +411,8 @@ export async function ghTextAsync(
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     refuseSentinelGhToken("gh", args, undefined);
+    const brokered = await ghBrokeredAsync(args);
+    if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     return read();
   })();
@@ -389,6 +439,12 @@ export async function ghLinesAsync(
 ): Promise<void> {
   const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
   refuseSentinelGhToken("gh", args, undefined);
+  const brokered = await ghBrokeredAsync(args);
+  if (brokered !== undefined) {
+    // The broker answers whole; the lines are still handed over one at a time, as `onLine` expects.
+    for (const line of brokered.split("\n")) onLine(line);
+    return;
+  }
   await applyGhReadCadenceAsync(args);
   const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
   // Not spawn's own `timeout`: a child that never started never exits, and that timer then holds the process open.
