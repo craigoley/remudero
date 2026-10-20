@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { constants, closeSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { durableDependencyCredit } from '../../src/lib/status.js';
+import { durableDependencyCredit, loadCreditOverrides, refusesAsPlanOnly } from '../../src/lib/status.js';
+import { loadPlanAtRef } from '../../src/lib/plan.js';
+import { ghJson } from '../../src/lib/worker.js';
 import { gitOrThrow } from './git.mjs';
 
 // This is a consumer of a SAME-RUN trusted producer's output, not a new source of durable credit.
@@ -102,4 +104,105 @@ export function ciDependencyEvidenceForInvocation(argv, env = process.env, cwd =
   } catch {
     return () => unknown('checkout or base unreadable or changed');
   }
+}
+
+/** Read only the changed machine filings' dependency closure from immutable Git objects. */
+export function ciDependencyClosure(checkout, head, base) {
+  const git = (args, input) => gitOrThrow(args, { cwd: checkout, input });
+  const at = ref => loadPlanAtRef(checkout, 'plan/tasks.yaml', ref, git);
+  const plan = at(head), before = at(base), ids = new Set();
+  const pending = plan.tasks.filter(task => task.author_class === 'machine' &&
+    !(task.status === 'blocked' && task.retirement !== undefined) &&
+    JSON.stringify(task) !== JSON.stringify(before.byId.get(task.id))).flatMap(task => task.depends_on ?? []);
+  while (pending.length) {
+    const id = pending.pop();
+    if (ids.has(id)) continue;
+    if (!ID.test(id) || ids.size >= 32) throw new Error('CI dependency closure unavailable or exceeds the consumer bound');
+    const task = plan.byId.get(id);
+    if (!task) throw new Error('CI dependency task absent from committed plan');
+    ids.add(id); pending.push(...(task.depends_on ?? []));
+  }
+  const overrides = [];
+  for (const ref of new Set([base, head])) {
+    if (!git(['ls-tree', '--name-only', ref, 'plan/credit-overrides.yaml'])) continue;
+    let reading;
+    const parsed = loadCreditOverrides(() => git(['show', ref + ':plan/credit-overrides.yaml']), state => { reading = state; });
+    if (reading?.state !== 'present' || parsed.refused.length ||
+        parsed.rows.some(row => !ID.test(row.task) || !Number.isSafeInteger(row.pr) || row.pr < 1)) {
+      throw new Error('CI dependency override ruling unreadable or malformed');
+    }
+    overrides.push(...parsed.rows);
+  }
+  return { plan, taskIds: [...ids].sort(), overrides };
+}
+
+/** SAME-RUN, GET-only observation; never writes a native credit store or infers MERGED from a search hit. */
+export async function produceCiDependencyEvidence(context, { request = path => ghJson(['api', '--method', 'GET', path]),
+  closure = ciDependencyClosure, git = args => gitOrThrow(args, { cwd: context.checkout }) } = {}) {
+  if (!object(context) || context.actions !== true ||
+      typeof context.repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(context.repository) ||
+      context.repository.split('/').some(part => part === '.' || part === '..') ||
+      ![context.head, context.base, context.producerSha].every(value => typeof value === 'string' && SHA.test(value)) ||
+      context.producerSha !== context.base || context.producerJob !== 'commitlint' ||
+      ![context.runId, context.attempt].every(value => typeof value === 'string' && /^[1-9][0-9]*$/.test(value)) ||
+      !isAbsolute(context.checkout ?? '') || !Number.isSafeInteger(context.nowMs) || context.nowMs < 0) {
+    throw new Error('CI dependency producer context unavailable or malformed');
+  }
+  if (git(['rev-parse', '--verify', 'HEAD^{commit}']) !== context.head ||
+      git(['rev-parse', '--verify', context.base + '^{commit}']) !== context.base) {
+    throw new Error('CI dependency checkout identity changed');
+  }
+  const { plan, taskIds, overrides } = closure(context.checkout, context.head, context.base);
+  const credits = {};
+  for (const id of taskIds) {
+    const candidates = new Set();
+    for (const term of [`"Remudero-Task: ${id}" in:body`, `head:run-${id}-`]) {
+      const query = encodeURIComponent(`repo:${context.repository} is:pr is:merged ${term}`);
+      const found = await request(`search/issues?q=${query}&per_page=100`);
+      if (!object(found) || found.incomplete_results !== false || !Array.isArray(found.items) ||
+          !Number.isSafeInteger(found.total_count) || found.total_count !== found.items.length || found.total_count > 100 ||
+          found.items.some(row => !object(row) || !Number.isSafeInteger(row.number) || row.number < 1 || !object(row.pull_request))) {
+        throw new Error('CI dependency search incomplete or malformed');
+      }
+      for (const item of found.items) candidates.add(item.number);
+    }
+    const record = {};
+    for (const number of [...candidates].sort((a, b) => b - a)) {
+      const pr = await request(`repos/${context.repository}/pulls/${number}`);
+      if (!object(pr) || pr.number !== number || pr.merged !== true || pr.state !== 'closed' ||
+          typeof pr.merged_at !== 'string' || !Number.isFinite(Date.parse(pr.merged_at)) || Date.parse(pr.merged_at) > context.nowMs ||
+          pr.html_url !== `https://github.com/${context.repository}/pull/${number}` ||
+          pr.base?.repo?.full_name?.toLowerCase() !== context.repository.toLowerCase() || pr.base?.ref !== 'main' ||
+          !SHA.test(pr.merge_commit_sha ?? '') || typeof pr.body !== 'string' || typeof pr.head?.ref !== 'string') continue;
+      const sources = [];
+      if (new RegExp(`^Remudero-Task: ${id}$`, 'm').test(pr.body)) sources.push('trailer');
+      if (new RegExp(`^run-${id}-[0-9]+$`).test(pr.head.ref)) sources.push('head-branch');
+      if (!sources.length) continue;
+      try { git(['merge-base', '--is-ancestor', pr.merge_commit_sha, context.base]); }
+      catch { continue; } // Not proven in this protected base; a later run can observe it.
+      // GitHub's files endpoint exposes at most 3,000 files, 100 per page; partial files cannot grant credit.
+      if (!Number.isSafeInteger(pr.changed_files) || pr.changed_files < 1 || pr.changed_files > 3000) continue;
+      const paths = [];
+      for (let page = 1; page <= Math.ceil(pr.changed_files / 100); page++) {
+        const files = await request(`repos/${context.repository}/pulls/${number}/files?per_page=100&page=${page}`);
+        if (!Array.isArray(files) || files.length !== Math.min(100, pr.changed_files - paths.length) ||
+            files.some(file => !object(file) || typeof file.filename !== 'string' || !file.filename)) {
+          throw new Error('CI dependency changed-file evidence incomplete');
+        }
+        paths.push(...files.map(file => file.filename));
+      }
+      if (new Set(paths).size !== paths.length || refusesAsPlanOnly(plan.byId.get(id), paths)) continue;
+      for (const source of sources) if (!record[source]) record[source] = {
+        source, prUrl: pr.html_url, prNumber: number, prState: 'MERGED',
+      };
+      if (record.trailer && record['head-branch']) break;
+    }
+    credits[id] = record;
+  }
+  const value = { schema: CI_DEPENDENCY_EVIDENCE_SCHEMA, complete: true, repository: context.repository,
+    head: context.head, base: context.base, producerSha: context.producerSha, producerJob: context.producerJob,
+    runId: context.runId, attempt: context.attempt, observedAtMs: context.nowMs, taskIds, credits, overrides };
+  const bytes = JSON.stringify(value) + '\n';
+  if (Buffer.byteLength(bytes) > CI_DEPENDENCY_EVIDENCE_MAX_BYTES) throw new Error('CI dependency artifact exceeds the consumer byte bound');
+  return { bytes, digest: createHash('sha256').update(bytes).digest('hex'), producerSha: context.producerSha };
 }
