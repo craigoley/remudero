@@ -18,10 +18,11 @@ raw: |-
   Governed request: choose the existing owning/fix lane or a scoped dependent remedy for W1-T8776, without filing a duplicate implementation task or racing a live owner. Preserve atomic publication and typed tsx fallback; qualify absent-target races and invalid-target recovery under two independent publishers before crediting the no-overwrite guarantee. Runtime adoption, real fleet bundle use, physical CoW savings and paired memory benefit are separate claims and remain unqualified in this continuation.
 attachments: []
 origin: cli
-status: new
+status: grilling
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

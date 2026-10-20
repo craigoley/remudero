@@ -1,0 +1,77 @@
+- id: W1-T10242
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:coverage-ratchet cost 14.7 PR minute(s) across 64 round(s) on 32 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.35
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:coverage-ratchet"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/ci-friction-remedy-12d5da1dc5ca8623.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:coverage-ratchet"
+      proof: "grep: test(\"W1-T10242: check:coverage-ratchet is prevented, not retried\" in test/gardeners/ci-friction-remedy-12d5da1dc5ca8623.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:coverage-ratchet's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:coverage-ratchet cost 14.7 PR minute(s) across 64 red run(s) within the measured window on 32 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet-required for coverage-ratchet
+
+    RECENT ROUNDS (newest first):
+    - PR #13031 (https://github.com/craigoley/remudero/pull/13031) at 2026-10-20T04:36:38.762Z: ci-log round — coverage-ratchet: diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/e
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/arm-auto-merge.ts:1409
+          |   - src/lib/arm-auto-merge.ts:1413
+          |   - src/lib/arm-auto-merge.ts:1414
+          |   - src/lib/arm-auto-merge.ts:1415
+          |   - src/lib/arm-auto-merge.ts:826
+          |   - src/lib/merged-ratchet-verdict.ts:177
+          |   - src/lib/merged-ratchet-verdict.ts:284
+          |   - src/lib/sweep.ts:21274
+          |   - src/lib/sweep.ts:21301
+    - PR #12975 (https://github.com/craigoley/remudero/pull/12975) at 2026-10-19T21:28:37.878Z: ci-log round — coverage-ratchet: diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/e
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/host-memory-admission.ts:384
+    - PR #12830 (https://github.com/craigoley/remudero/pull/12830) at 2026-10-18T22:51:08.043Z: census-precheck: this branch grows 1 census count(s) CI will refuse:   census-suite: test/the-affected-suite-reach-ratchet.test.ts fails — , test/dispatch-is-not-held-behind-the-boot-cadence-gate.test
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/cli/commands/daemon.ts:1030
+          |   - src/cli/commands/daemon.ts:7
+    - PR #12740 (https://github.com/craigoley/remudero/pull/12740) at 2026-10-18T14:41:59.197Z: ci-log round — coverage-ratchet: diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/e
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - scripts/test-repo-root-codemod.mjs:157
+          |   - scripts/test-repo-root-codemod.mjs:158
+          |   - scripts/test-repo-root-codemod.mjs:159
+          |   - scripts/test-repo-root-codemod.mjs:160
+          |   - scripts/test-repo-root-codemod.mjs:161
+          |   - scripts/test-repo-root-codemod.mjs:162
+          |   - scripts/test-repo-root-codemod.mjs:163
+          |   - scripts/test-repo-root-codemod.mjs:164
+          |   - scripts/test-rep
+    - PR #12570 (https://github.com/craigoley/remudero/pull/12570) at 2026-10-17T13:45:03.775Z: ci-log round — coverage-ratchet: diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/e; CodeQL; Scan; security-merge-policy
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/test-slot-mutation.ts:141
+          |   - src/lib/test-slot-mutation.ts:183
+          |   - src/lib/test-slot-mutation.ts:184
+          |   - src/lib/test-slot-mutation.ts:185
+          |   - src/lib/test-slot-mutation.ts:186
+          |   - src/lib/test-slot-mutation.ts:198
+          |   - src/lib/test-slot-mutation.ts:199
+          |   - src/lib/test-slot-mutation.ts:213
+          |   - src/lib/test-slot-mutation.ts:214
+          |   - src/lib/test-slot-
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

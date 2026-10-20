@@ -6,5 +6,8 @@
  * lint logic and prints the checks its offline dependency boundary cannot run.
  */
 import { lintPlanCommand } from "../src/run-task.js";
+import { ciDependencyEvidenceForInvocation } from "./lib/ci-dependency-evidence.mjs";
 
-process.exitCode = await lintPlanCommand(process.argv.slice(2), { offline: true });
+const args = process.argv.slice(2);
+const dependencyEvidence = ciDependencyEvidenceForInvocation(args);
+process.exitCode = await lintPlanCommand(args, { offline: true, ...(dependencyEvidence ? { dependencyEvidence } : {}) });

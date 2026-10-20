@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.24
   status: queued
@@ -33,3 +33,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "Declared files are src/lib/worker.ts and a new test file only; the description names no secrets, auth, permission, merge/deploy policy, or deletion scope."
+      - "Acceptance is a checkable grep for a named test in the new test file, so the finding is verifiable from what is shown."
+      - "The family track record is mixed (36 merged, 40 declined) and no bounded change view was supplied, which lowers confidence, but the PR still passes CI and review."
+    judged_at: "2026-10-20T02:25:52.813Z"
+    pin: "8f1a486e127cd42813c46045284d9f1b15f1524ea492e7c4d6e6389715032bdf"

@@ -200,6 +200,12 @@
       "grepHint": "Bounded storage proposals, not deletion authority"
     },
     {
+      "path": "docs/evidence-storage.md",
+      "title": "Bounded, opt-in evidence storage",
+      "summary": "The Mac janitor can invoke an account-private evidence compactor during an apply",
+      "grepHint": "Bounded, opt-in evidence storage"
+    },
+    {
       "path": "docs/forensics/README.md",
       "title": "Forensics",
       "summary": "This directory holds the measured forensic detail compacted out of source-file comments. Every",
@@ -840,6 +846,12 @@
       "title": "Native hash-locked Semgrep Community Edition",
       "summary": "Scan uses an independently audited source closure, isolated native engine and bounded disposable MCP controls.",
       "grepHint": "Native hash-locked Semgrep Community Edition"
+    },
+    {
+      "path": "docs/shared-git-storage.md",
+      "title": "Account-private shared Git workspaces",
+      "summary": "Stage new unfiled author work in linked worktrees sharing one existing account's",
+      "grepHint": "Account-private shared Git workspaces"
     },
     {
       "path": "docs/system-diagrams.md",

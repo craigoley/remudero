@@ -104,7 +104,7 @@ test('coverage sharding: every declared lossless V8 bundle is required before No
   // W1-T4398: the retry wrapper hands coverage/raw to the instrumented first pass alone.
   assert.match(runBodies('coverage-ratchet'), /test-with-retry\.mjs --coverage-first-pass coverage\/raw \\\s+node --enable-source-maps/);
   // W1-T5923: each shard ships its reports already source-mapped; the aggregator replays only the range merge.
-  assert.match(runBodies('coverage-ratchet'), /scripts\/coverage-merge-ratchet\.mjs --premap-output coverage\/premapped coverage\/raw/);
+  assert.match(runBodies('coverage-ratchet'), /scripts\/coverage-merge-ratchet\.mjs --premap-output coverage-artifact\/raw coverage\/raw/);
   assert.doesNotMatch(runBodies('coverage-ratchet'), /cp coverage\/raw\/coverage-\*\.json/);
   const upload = shards.steps?.find((step) => step.name === 'Upload coverage shard');
   assert.match(upload?.uses ?? '', /^actions\/upload-artifact@[0-9a-f]{40}$/);

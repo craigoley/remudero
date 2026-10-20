@@ -1,0 +1,29 @@
+- id: W1-T10224
+  title: Name where the comment-load ceiling is breached and design a prevention that never raises a ceiling
+  repo: remudero
+  depends_on:
+    - W1-T3022
+  type: recon
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=169e6406d6554704
+  attempts: 0
+  files:
+    - docs/comment-standard.md
+    - scripts/comment-load-ratchet.mjs
+    - scripts/comment-load-baseline.json
+    - src/lib/sweep.ts
+    - src/lib/fix-rung-classify.ts
+  acceptance:
+    - claim: "The comment standard records the finding: which comment-load-ratchet breaches workers cause, which gates they pass first, and an author-time prevention that trims comments instead of raising a ceiling"
+      proof: "grep: comment-load prevention finding in docs/comment-standard.md"
+  origin: followup:W1-T9399-1792328767905:2026-10-18T13:09:18.033Z:0
+  rationale: >-
+    From the 2026-10-18 follow-up on W1-T9399-1792328767905, ratified via rmd approve:
+  
+    follow-up harvest [research]: locate the comment-load-ratchet check and its ceiling file, and
+    see how `classify.ts` classifies its failure. This is needed to design a prevention that
+    doesn't loosen the ratchet. — from W1-T9399 (run W1-T9399-1792328767905)
