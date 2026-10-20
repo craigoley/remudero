@@ -23811,7 +23811,12 @@ export type EscalationTriageHistoryReader = ((stateDir: string) => Promise<Ledge
   current(stateDir: string): LedgerUnionRecordRead;
   /** W1-T9710: the last union pass's loop reads, parsed lines and seeded rotations. */
   lastPass(): IncrementalUnionPass;
+  /** W1-T10046: the last call's off-loop load: the rotations it loaded, and how many a durable digest answered. */
+  lastLoad(): EscalationTriageHistoryLoad;
 };
+
+/** What one {@link EscalationTriageHistoryReader} call loaded off the loop; a restarted reader's digest hits show here. */
+export interface EscalationTriageHistoryLoad { rotations: number; digestHits: number; digestMisses: number }
 
 /**
  * Builds the rung's history reader, once per daemon start (`buildSweepHook`), or once per call where no
@@ -23842,8 +23847,10 @@ export function createEscalationTriageHistoryReader(
     return `${s.size}:${s.mtimeMs}`;
   };
   let loaded = new Map<string, string>();
+  let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
   const current = (stateDir: string): LedgerUnionRecordRead => union(stateDir, { step: steps, refuseIncomplete: true });
   return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
+    lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
     let names: string[] = [];
     try {
       names = fsDeps.readdirSync(stateDir);
@@ -23868,6 +23875,8 @@ export function createEscalationTriageHistoryReader(
         holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       await memo.load(fresh);
+      const { digestHits = 0, digestMisses = 0 } = memo.retention();
+      lastLoad = { rotations: fresh.length, digestHits, digestMisses };
       // W1-T9710: hand the union what the load just kept, so its pass never re-reads those digests on the loop.
       for (const entry of fresh) {
         const key = stats.get(entry.path) as string;
@@ -23877,7 +23886,7 @@ export function createEscalationTriageHistoryReader(
     }
     loaded = stats;
     return current(stateDir);
-  }, { current, lastPass: union.lastPass });
+  }, { current, lastPass: union.lastPass, lastLoad: (): EscalationTriageHistoryLoad => ({ ...lastLoad }) });
 }
 
 /** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */
