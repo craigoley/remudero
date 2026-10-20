@@ -5,7 +5,7 @@ import { test, type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { OPENWEIGHT_ALLOWANCE_FILENAME, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
-import { ownedFixtureDir } from "../../helpers/owned-fixture-dir.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const requestId = "3a2c1a77-453a-4cad-9165-a6bb1cb26400";
 const secret = "test-only-private-key-do-not-record";
