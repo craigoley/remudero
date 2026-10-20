@@ -99,7 +99,7 @@ test("a monolith-only plan still reaches one non-spending bakeoff replay", async
     assert.equal(await command(async ({ planText }) => {
       replays++;
       assert.deepEqual(parse(planText).map((row: { id: string }) => row.id), expected.map((row) => row.id));
-      assert.equal(parse(planText)[0].title, expected[0].title);
+      assert.equal(parse(planText)[0].title, expected[0]!.title);
       return [];
     }), 0);
     assert.equal(replays, 1);
