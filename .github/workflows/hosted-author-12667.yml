@@ -1,0 +1,662 @@
+name: Hosted memory pressure author pilot
+on:
+  push:
+    branches:
+      - run-unfiled-1792507409614
+    paths:
+      - .github/workflows/hosted-author-12667.yml
+permissions:
+  contents: read
+concurrency:
+  group: hosted-author-12667-exact-head
+  cancel-in-progress: false
+jobs:
+  author:
+    name: hosted-memory-pressure-exact-head
+    runs-on: ubuntu-24.04
+    timeout-minutes: 205
+    env:
+      SOURCE_HEAD: 9b7a94cf14836f1b3374b9d88b3c55c3b779657c
+      CAPTURED_BASE: 8a0a315db30efeab63484056c2b8a94bd9005f05
+      SOURCE_BUNDLE_SHA256: 14d6ba477eee4e349f044b40740aed4ccbcbfb748156f584bf5017a85c065632
+      PUBLICATION_BRANCH: run-unfiled-1792376433657
+      PILOT_CONCERN: memory-pressure
+    steps:
+      - name: Fix one total deadline including setup and calibration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime, os
+          deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=195)
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('PILOT_DEADLINE=' + deadline.isoformat() + '\n')
+              f.write('PLAYWRIGHT_BROWSERS_PATH=' + os.path.join(os.environ['RUNNER_TEMP'], 'pilot-browsers') + '\n')
+          PY
+
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const tmp=process.env.RUNNER_TEMP;
+          const dir=path.join(tmp,'pilot-bootstrap-evidence');fs.mkdirSync(dir,{mode:0o700});fs.writeFileSync(path.join(dir,'input.json'),JSON.stringify({at:new Date().toISOString(),sourceHead:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,controllerHead:process.env.GITHUB_SHA,bundleSha256:process.env.SOURCE_BUNDLE_SHA256,author:'NOT_RUN',exception:'Explicit operator-approved execution-location deferral for both unchanged pre-push hooks; no check waived'}),{flag:'wx',mode:0o600});
+          fs.writeFileSync(path.join(tmp,'hosted-author-12667.mjs'),process.env.PILOT_CONTROLLER_JS,{flag:'wx',mode:0o600});
+          fs.writeFileSync(path.join(tmp,'pilot-source-input.json'),JSON.stringify({format:'rmd-hosted-author-input-v1',head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,bundleSha256:process.env.SOURCE_BUNDLE_SHA256,bundleBytes:Buffer.from(process.env.PILOT_SOURCE_BUNDLE_B64,'base64').length,requiredPublicPrerequisite:process.env.CAPTURED_BASE,bundleBase64:process.env.PILOT_SOURCE_BUNDLE_B64}),{flag:'wx',mode:0o600});
+          JS
+
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';import path from 'node:path';
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'pilot-passive.mjs'),process.env.PILOT_PASSIVE_JS,{flag:'wx',mode:0o600});
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'pilot-seal.mjs'),process.env.PILOT_SEAL_JS,{flag:'wx',mode:0o600});
+          JS
+          nohup env -i PATH="$PATH" node "$RUNNER_TEMP/pilot-passive.mjs" "$RUNNER_TEMP" "$(sed -n 's/^PILOT_DEADLINE=//p' "$GITHUB_ENV")" > "$RUNNER_TEMP/pilot-passive.stdout.log" 2> "$RUNNER_TEMP/pilot-passive.stderr.log" < /dev/null &
+        env:
+          PILOT_CONTROLLER_JS: |
+            import fs from 'node:fs';
+            import cp from 'node:child_process';
+            import os from 'node:os';
+            import path from 'node:path';
+            import crypto from 'node:crypto';
+            import assert from 'node:assert/strict';
+            import net from 'node:net';
+            import {pathToFileURL} from 'node:url';
+            const [mode,configPath]=process.argv.slice(2);
+            const config=JSON.parse(fs.readFileSync(configPath,'utf8'));
+            const {source,head,base,publicationBranch,deadline,output,privateHome,privateTmp,browsers}=config;
+            const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+            const git=args=>cp.execFileSync('git',['-C',source,...args],{encoding:'utf8',timeout:60000,maxBuffer:8*1024*1024}).trim();
+            const save=(name,value)=>fs.writeFileSync(path.join(output,name),JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});
+            const sample=()=>{
+             const mem=Object.fromEntries(fs.readFileSync('/proc/meminfo','utf8').split('\n').filter(l=>/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/.test(l)).map(l=>[l.split(':')[0],Number(l.trim().split(/\s+/)[1])*1024]));
+             const vm=Object.fromEntries(fs.readFileSync('/proc/vmstat','utf8').trim().split('\n').map(l=>l.split(/\s+/)));
+             const psi=Object.fromEntries(fs.readFileSync('/proc/pressure/memory','utf8').split('\n').find(l=>l.startsWith('full ')).split(' ').slice(1).map(x=>x.split('=')));
+             return{at:new Date().toISOString(),memory:mem,swapInPages:Number(vm.pswpin),fullAvg60:Number(psi.avg60),workspaceFree:Number(fs.statfsSync(source).bavail)*Number(fs.statfsSync(source).bsize),tempFree:Number(fs.statfsSync(privateTmp).bavail)*Number(fs.statfsSync(privateTmp).bsize)};
+            };
+            function mirrorIdentity(){
+             const roots=[source,config.controller],moduleUrl=pathToFileURL(path.join(source,'src/lib/owner-repo.ts')).href;
+             const probe='import {resolveOwnerRepoAt} from '+JSON.stringify(moduleUrl)+';console.log(JSON.stringify('+JSON.stringify(roots)+'.map(root=>({root,...resolveOwnerRepoAt(root)}))));';
+             const identities=JSON.parse(cp.execFileSync(process.execPath,['--import',path.join(source,'node_modules/tsx/dist/loader.mjs'),'--input-type=module','-e',probe],{cwd:source,env:{PATH:process.env.PATH,HOME:privateHome,TMPDIR:privateTmp,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_TERMINAL_PROMPT:'0'},encoding:'utf8',timeout:15000,maxBuffer:1024*1024}));
+             assert.equal(identities.length,2);for(const [i,row]of identities.entries()){assert.equal(row.root,roots[i]);assert.equal(row.owner,'craigoley');assert.equal(row.repo,'remudero');}
+             return{at:new Date().toISOString(),identities,reader:'actual unchanged resolveOwnerRepoAt',limits:'File-only mirrors retain canonical repository identity. No resolver fake, network, credential or product-source change.'};
+            }
+            if(mode==='prepare'){
+             assert(/^[a-f0-9]{40}$/.test(head)&&/^[a-f0-9]{40}$/.test(base));
+             assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['rev-parse','--is-shallow-repository']),'false');assert.equal(git(['status','--porcelain']),'');
+             assert.equal(fs.readFileSync(path.join(source,'.nvmrc'),'utf8').trim().replace(/^v/,''),process.versions.node);
+             assert(Date.parse(deadline)>Date.now(),'Fixed pilot deadline already elapsed');
+             for(const dir of[output,privateHome,privateTmp])fs.mkdirSync(dir,{recursive:false,mode:0o700});
+             assert(!fs.existsSync(path.join(source,'.git','objects','info','alternates')),'Borrowed Git objects are not admitted');
+             git(['checkout','-b',publicationBranch,head]);git(['config','core.hooksPath','hooks']);
+             const mirror=path.join(path.dirname(output),'source-mirror','craigoley','remudero.git');assert(!fs.existsSync(mirror));fs.mkdirSync(path.dirname(mirror),{recursive:true,mode:0o700});cp.execFileSync('git',['clone','--mirror','--no-local','--no-hardlinks',source,mirror],{encoding:'utf8',timeout:120000});
+             cp.execFileSync('git',['-C',mirror,'update-ref','refs/heads/main',base],{encoding:'utf8',timeout:10000});
+             git(['remote','set-url','origin','file://'+mirror]);git(['update-ref','refs/remotes/origin/main',base]);assert.equal(git(['rev-parse','origin/main']),base);
+             assert.equal(config.controllerBranch,"run-unfiled-1792507409614");
+             assert.equal(config.controllerPriorHead,"8a0a315db30efeab63484056c2b8a94bd9005f05");assert.equal(config.controllerPushPreviousHead,'0000000000000000000000000000000000000000');
+             const controlGit=args=>cp.execFileSync('git',['-C',config.controller,...args],{encoding:'utf8',timeout:60000}).trim();
+             assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');
+             assert.equal(controlGit(['rev-parse','--is-shallow-repository']),'false');assert(!fs.existsSync(path.join(config.controller,'.git/objects/info/alternates')));
+             controlGit(['cat-file','-e',config.controllerPriorHead+'^{commit}']);
+             const recipes=['package.json','package-lock.json',...fs.readdirSync(path.join(source,'packages')).flatMap(n=>fs.existsSync(path.join(source,'packages',n,'package.json'))?['packages/'+n+'/package.json']:[])];
+             for(const file of recipes)assert.equal(hash(path.join(source,file)),hash(path.join(config.controller,file)),'Controller/source dependency recipe differs: '+file);
+             assert(!fs.existsSync(path.join(config.controller,'node_modules')));fs.symlinkSync(path.join(source,'node_modules'),path.join(config.controller,'node_modules'),'dir');
+             const controlMirror=path.join(path.dirname(output),'controller-mirror','craigoley','remudero.git');assert(!fs.existsSync(controlMirror));fs.mkdirSync(path.dirname(controlMirror),{recursive:true,mode:0o700});
+             cp.execFileSync('git',['clone','--mirror','--no-local','--no-hardlinks',config.controller,controlMirror],{encoding:'utf8',timeout:120000});
+             cp.execFileSync('git',['-C',controlMirror,'update-ref','refs/heads/main',base],{encoding:'utf8',timeout:10000});
+             controlGit(['remote','set-url','origin','file://'+controlMirror]);controlGit(['update-ref','refs/remotes/origin/main',base]);controlGit(['config','core.hooksPath','hooks']);
+             save('mirror-identity-prepared.json',mirrorIdentity());
+             save('controller-prepared.json',{head:config.controllerHead,base,tree:controlGit(['rev-parse','HEAD^{tree}']),branch:config.controllerBranch,priorHead:config.controllerPriorHead,hookSha256:hash(path.join(config.controller,'hooks/pre-push')),sourceHookSha256:hash(path.join(source,'hooks/pre-push')),mirror:controlMirror,recipesVerified:recipes,limits:'Actual controller tree, separate from author source; unchanged hook must execute on this exact tree after bootstrap.'});
+             const out={pilot:12667,stage:'prepared',at:new Date().toISOString(),head,base,tree:git(['rev-parse','HEAD^{tree}']),publicationBranch,deadline,node:process.version,platform:process.platform,arch:process.arch,kernel:os.release(),cpus:os.availableParallelism(),source,mirror,locks:{package:hash(path.join(source,'package-lock.json')),manifest:hash(path.join(source,'scripts/test-tier-manifest.json'))},limits:'Fresh public source and lockfile-installed dependencies only; source gate will fetch captured public main from a complete file-only mirror. No production state, credentials or test result reuse.'};save('prepared.json',out);console.log(JSON.stringify(out));
+            }else if(mode==='phase'){
+             const rootOutput=output,phase=process.argv[4],phases=['admission','typecheck','fixture','registry','controller-hook','source-hook','selection','calibration','author'],index=phases.indexOf(phase);assert(index>=0);assert(Date.now()<Date.parse(deadline),'One fixed deadline elapsed');
+             const phasePath=path.join(rootOutput,'phases',String(index+1).padStart(2,'0')+'-'+phase);fs.mkdirSync(path.dirname(phasePath),{recursive:true,mode:0o700});fs.mkdirSync(phasePath,{mode:0o700});
+             const savePhase=(name,value)=>fs.writeFileSync(path.join(phasePath,name),JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});
+             let prior=null;if(index){const previous=path.join(rootOutput,'phases',String(index).padStart(2,'0')+'-'+phases[index-1],'phase-result.json');prior=JSON.parse(fs.readFileSync(previous));assert(prior.passed&&prior.head===head&&prior.base===base&&prior.deadline===deadline&&prior.phase===phases[index-1]);}
+             assert.equal(process.getuid(),config.uid);assert.equal(process.env.HOME,privateHome);assert.equal(process.env.TMPDIR,privateTmp);assert.notEqual(fs.readlinkSync('/proc/self/ns/net'),config.hostNetNamespace);
+             const server=net.createServer(socket=>socket.end('loopback-control'));await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});const port=server.address().port;const loopback=await new Promise((resolve,reject)=>{let text='';const socket=net.connect(port,'127.0.0.1');socket.on('data',b=>text+=b);socket.once('error',reject);socket.once('end',()=>resolve(text));});await new Promise(r=>server.close(r));assert.equal(loopback,'loopback-control');
+             savePhase('network-control.json',{phase,at:new Date().toISOString(),isolatedNamespace:fs.readlinkSync('/proc/self/ns/net'),hostNamespace:config.hostNetNamespace,loopback:'passed',routeTable:fs.readFileSync('/proc/net/route','utf8')});
+             assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['status','--porcelain']),'');assert.equal(process.versions.node,fs.readFileSync(path.join(source,'.nvmrc'),'utf8').trim());savePhase('mirror-identity-isolated.json',mirrorIdentity());
+             const controlGit=args=>cp.execFileSync('git',['-C',config.controller,...args],{encoding:'utf8',timeout:60000}).trim();assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');
+             const command=async(name,args,program=process.execPath,options={})=>{
+              assert(Date.now()<Date.parse(deadline),'Fixed deadline elapsed');
+              const paths={stdout:path.join(phasePath,name+'.stdout.log'),stderr:path.join(phasePath,name+'.stderr.log')};
+              const out=fs.openSync(paths.stdout,'wx',0o600),err=fs.openSync(paths.stderr,'wx',0o600),started=Date.now();
+              let reason=null,error=null,escalation;const child=cp.spawn(program,args,{cwd:options.cwd??source,env:{...process.env,...options.env},stdio:['ignore',out,err],detached:true});
+              const alive=()=>{if(!child.pid)return false;try{process.kill(-child.pid,0);return true;}catch(e){if(e.code==='ESRCH')return false;throw e;}};
+              const stop=why=>{if(reason)return;reason=why;if(alive())process.kill(-child.pid,'SIGTERM');escalation=setTimeout(()=>{if(alive())process.kill(-child.pid,'SIGKILL');},15000);escalation.unref();};
+              const timer=setTimeout(()=>stop('fixed-deadline'),Math.max(1,Date.parse(deadline)-Date.now()));timer.unref();
+              const leaseTimer=options.ownsSlot?setInterval(()=>{if(!options.ownsSlot())stop('test-slot-lost-or-unknown');},1000):null;leaseTimer?.unref();
+              const exit=await new Promise(resolve=>{child.once('error',e=>{error={code:e.code,message:e.message};});child.once('close',(status,signal)=>resolve({status,signal}));});
+              clearTimeout(timer);if(leaseTimer)clearInterval(leaseTimer);
+              for(let i=0;i<20&&alive();i++)await new Promise(r=>setTimeout(r,50));
+              if(alive()){stop('descendants-after-parent-close');for(let i=0;i<320&&alive();i++)await new Promise(r=>setTimeout(r,50));}
+              if(escalation)clearTimeout(escalation);const groupClosed=!alive();fs.closeSync(out);fs.closeSync(err);
+              const result={...exit,error,reason,outputComplete:groupClosed&&!reason&&!error&&!exit.signal,startedAt:new Date(started).toISOString(),finishedAt:new Date().toISOString(),durationMs:Date.now()-started,ownedGroup:child.pid,groupClosed,stdout:fs.readFileSync(paths.stdout,'utf8'),stderr:fs.readFileSync(paths.stderr,'utf8')};
+              savePhase(name+'.native.json',{...result,stdout:undefined,stderr:undefined,stdoutBytes:Buffer.byteLength(result.stdout),stderrBytes:Buffer.byteLength(result.stderr),resources:sample()});
+              console.log(JSON.stringify({stage:name,status:result.status,durationMs:result.durationMs,outputComplete:result.outputComplete,reason:result.reason}));
+              return result;
+             };
+             let detail=null,passed=false,error=null;const startedAt=new Date().toISOString();
+             try{
+              if(phase==='admission'){
+               const first=sample();await new Promise(r=>setTimeout(r,30000));const last=sample(),checks={memory:min(first.memory.MemAvailable,last.memory.MemAvailable)>=7*1024**3,disk:min(first.workspaceFree,last.workspaceFree,first.tempFree,last.tempFree)>=20*1024**3,noSwapIn:first.swapInPages===last.swapInPages,pressure:Math.max(first.fullAvg60,last.fullAvg60)<0.5};detail={first,last,checks,admitted:Object.values(checks).every(Boolean)};savePhase('admission.json',{head,deadline,...detail});assert(detail.admitted,'Hosted admission refused; no gate started');
+              }else if(phase==='typecheck'){
+               const result=await command('source-typecheck',['--import','tsx','scripts/typecheck.mjs']);assert(result.status===0&&result.outputComplete&&!result.error&&!result.signal,'Early maintained source typecheck failed');
+              }else if(phase==='fixture'){
+               detail=await memoryControls(command,{...config,output:phasePath});
+              }else if(phase==='registry'){
+               detail=await companionControls(command,{...config,source:config.controller,head:config.controllerHead,output:phasePath});
+              }else if(phase==='controller-hook'||phase==='source-hook'){
+               const controller=phase==='controller-hook',branch=controller?config.controllerBranch:publicationBranch,sha=controller?config.controllerHead:head,previous=controller?config.controllerPushPreviousHead:'0'.repeat(40),ref='refs/heads/'+branch+' '+sha+' refs/heads/'+branch+' '+previous;
+               const result=await command(controller?'controller-pre-push':'source-pre-push',['--noprofile','--norc','-c','set -euo pipefail; printf "%s\\n" "$1" | /bin/sh hooks/pre-push origin "$2"','pilot-prepush',ref,controller?controlGit(['remote','get-url','origin']):git(['remote','get-url','origin'])],'/bin/bash',controller?{cwd:config.controller}:{});
+               assert(result.status===0&&!result.error&&!result.signal&&result.outputComplete,'Unchanged actual hook did not pass');assert(!(result.stdout+'\n'+result.stderr).split('\n').some(l=>l.startsWith('census-precheck: census suites NOT MEASURED')||l.startsWith('pre-push: census-precheck could not measure')),'Unmeasured hook checks cannot qualify');
+              }else if(phase==='selection'){
+               const result=await command('selection',['--import','tsx','scripts/preflight-author.mjs','--dry-run','--head-ref',publicationBranch,'--head-sha',head]);assert(result.status===0&&!result.error&&!result.signal&&result.outputComplete);fs.copyFileSync(path.join(source,'coverage/preflight-author.json'),path.join(phasePath,'selection.json'),fs.constants.COPYFILE_EXCL);const selected=JSON.parse(fs.readFileSync(path.join(phasePath,'selection.json')));assert.equal(selected.headSha,head);assert.equal(selected.baseSha,base);assert(selected.suites.length>0);for(const file of selected.suites)assert(fs.lstatSync(path.join(source,file)).isFile(),file);detail={physicalFiles:selected.suites.length};
+              }else if(phase==='calibration'){
+               const result=await command('calibration',['--import','tsx','scripts/calibrate-author-runtime.mjs']);assert(result.status===0&&!result.error&&!result.signal&&result.outputComplete);const rows=result.stdout.trim().split('\n').flatMap(s=>{try{return[JSON.parse(s)];}catch{return[];}}),profile=rows.findLast(r=>r.head===head&&r.samples===32&&r.path);assert(profile,'No new source-bound32-file maintained profile');detail=profile;
+              }else if(phase==='author'){
+               const selected=JSON.parse(fs.readFileSync(path.join(rootOutput,'phases','07-selection','selection.json'))),calibration=JSON.parse(fs.readFileSync(path.join(rootOutput,'phases','08-calibration','phase-result.json'))),profile=calibration.detail;assert(profile?.head===head&&profile.samples===32&&fs.lstatSync(profile.path).isFile());
+               const result=await command('author',['--import','tsx','scripts/preflight-author.mjs','--head-ref',publicationBranch,'--head-sha',head,'--deadline',deadline,'--runtime-profile',profile.path]),receipt=JSON.parse(fs.readFileSync(path.join(source,'coverage/preflight-author.json')));fs.copyFileSync(path.join(source,'coverage/preflight-author.json'),path.join(phasePath,'author-receipt.json'),fs.constants.COPYFILE_EXCL);
+               assert.deepEqual(receipt.suites,selected.suites);for(const file of receipt.suites)assert(fs.lstatSync(path.join(source,file)).isFile(),file);const tests=receipt.steps.find(s=>s.name==='affected-tests'),summary=tests?.testSummary;
+               const qualified=result.status===0&&!result.error&&!result.signal&&result.outputComplete&&receipt.verdict==='passed'&&receipt.headSha===head&&receipt.baseSha===base&&receipt.steps.every(s=>s.ok===true)&&!receipt.tiered&&tests?.judge?.complete===true&&summary?.tests>0&&summary.fail===0&&summary.cancelled===0&&summary.todo===0&&summary.pass+summary.skipped===summary.tests;
+               const final={pilot:12667,at:new Date().toISOString(),head,base,tree:git(['rev-parse','HEAD^{tree}']),deadline,passed:qualified,status:result.status,selectedPhysicalFiles:receipt.suites.length,summary,conditionalSkips:summary?.skipped??null,memoryControls:JSON.parse(fs.readFileSync(path.join(rootOutput,'phases','03-fixture','memory-controls.json'))),controllerRegistryControls:JSON.parse(fs.readFileSync(path.join(rootOutput,'phases','04-registry','companion-controls.json'))),judge:tests?.judge,slot:receipt.testSlot,executionWorkers:receipt.executionWorkers,runtimeAdmission:receipt.runtimeAdmission,capacity:receipt.capacity,finalResources:sample(),phaseAccounting:receipt.phaseAccounting??null,limits:'Exact-head full author gate only; all nine phases required. No skipped required check or manually omitted selected suite. Existing conditional skips disclosed. Hosted CI/review/merge/adoption and live benefit remain separate.'};savePhase('final.json',final);detail=final;assert(qualified,'Actual maintained author gate did not qualify this head');
+              }
+              assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['status','--porcelain']),'');assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');assert(Date.now()<Date.parse(deadline),'Fixed total deadline elapsed');passed=true;
+             }catch(e){error={message:e.message};throw e;}
+             finally{
+              const coverage=path.join(source,'coverage');if(fs.existsSync(coverage)&&['selection','calibration','author'].includes(phase))for(const name of fs.readdirSync(coverage).filter(n=>n.startsWith('rmd-author-')||n.startsWith('rmd-native-runtime-')||n==='preflight-author-static.json'))fs.cpSync(path.join(coverage,name),path.join(phasePath,name),{recursive:true,errorOnExist:true,force:false});
+              savePhase('phase-result.json',{pilot:12667,phase,index,head,base,controllerHead:config.controllerHead,deadline,startedAt,finishedAt:new Date().toISOString(),passed,error,detail,previousPhase:index?phases[index-1]:null,limits:'One closed phase of one attempt, never a source PASS on its own. Unchanged deadline and actual executors; passive observer does not control resources or execution.'});
+             }
+            }else throw Error('Unknown pilot mode');
+            function min(...values){return Math.min(...values);}
+
+            async function companionControls(command,config){
+             const {source,base,head,output,privateTmp,deadline}=config;
+             const {acquireTestSlot,testSlotExecutionAllowed,lowPriorityCommand,testRunArgv,startTestSlotHeartbeat}=await import(pathToFileURL(path.join(source,'src/lib/test-slot.ts')).href);
+             const file='test/instrument-surface-completeness.test.ts',sourceText=fs.readFileSync(path.join(source,'src/lib/review.ts'),'utf8'),testText=fs.readFileSync(path.join(source,file),'utf8');
+             const titles=['hosted author and calibration tools are exact protected instruments, never data exclusions','the generated document index is data while its freshness and path checks remain wired','hosted tooling registration still refuses a newly unregistered executable in a workflow'];
+             assert(fs.lstatSync(path.join(source,file)).isFile());for(const title of titles)assert(testText.includes(title));
+             const budget=Date.parse(deadline)-Date.now();assert(budget>60000,'No fixed-deadline room for real companion controls');
+             const slot=acquireTestSlot('hosted-instrument-companion:controls',{waitBoundMs:Math.min(10*60*1000,budget-60000)});
+             assert.equal(slot.outcome,'acquired');assert(testSlotExecutionAllowed(slot)&&slot.childEnvironment,'No real inherited test-slot capacity for controls');
+             const root=fs.mkdtempSync(path.join(privateTmp,'companion-falsifiers-')),cases=[];let slotLost=false;
+             let heartbeat;
+             const summary=text=>Object.fromEntries(['tests','pass','fail','cancelled','skipped','todo'].map(k=>[k,Number([...text.matchAll(new RegExp('^# '+k+' ([0-9]+)$','gm'))].at(-1)?.[1]??NaN)]));
+             const run=async(label,repo,expectedFailure)=>{
+              assert(!slotLost);slot.refresh();
+              assert(fs.lstatSync(path.join(repo,file)).isFile(),'Verified physical fixture test required');
+              const argv=testRunArgv(['--test','--test-reporter=tap','--import','tsx','--import','./test/setup/tmp-hygiene.ts',file],Math.min(1,slot.concurrency)),low=lowPriorityCommand(process.execPath,argv);
+              const result=await command(label,low.args,low.file,{cwd:repo,env:slot.childEnvironment,ownsSlot:()=>!slotLost}),tap=summary(result.stdout+'\n'+result.stderr);
+              assert(!result.error&&!result.signal&&result.outputComplete===true,'Fixture output incomplete: '+label);assert(tap.tests>0&&tap.cancelled===0&&tap.todo===0&&tap.skipped===0);
+              const failedTitles=result.stdout.split('\n').filter(l=>l.trim().startsWith('not ok '));
+              if(expectedFailure){assert.equal(result.status,1);assert(tap.fail>0&&failedTitles.some(l=>l.includes(expectedFailure)),'Expected intended companion failure: '+expectedFailure);}
+              else{assert.equal(result.status,0);assert.equal(tap.fail,0);assert.equal(tap.pass,tap.tests);}
+              cases.push({label,base:label==='control-base'?base:head,physicalFiles:[file],tap,expectedFailure:expectedFailure??null,failedTitles});
+             };
+             const fixture=(label,ref,mutate)=>{
+              const repo=path.join(root,label);cp.execFileSync('git',['clone','--quiet','--no-local','--no-hardlinks','--no-checkout',source,repo],{encoding:'utf8',timeout:120000});
+              cp.execFileSync('git',['-C',repo,'checkout','--detach',ref],{encoding:'utf8',timeout:20000});assert(!fs.existsSync(path.join(repo,'.git/objects/info/alternates')));
+              for(const p of ['package.json','package-lock.json',...fs.readdirSync(path.join(source,'packages')).flatMap(n=>fs.existsSync(path.join(source,'packages',n,'package.json'))?['packages/'+n+'/package.json']:[])])assert.equal(hash(path.join(repo,p)),hash(path.join(source,p)),'Fixture recipe differs');
+              fs.symlinkSync(path.join(source,'node_modules'),path.join(repo,'node_modules'),'dir');fs.writeFileSync(path.join(repo,file),testText);
+              const target=path.join(repo,'src/lib/review.ts');if(mutate)fs.writeFileSync(target,mutate(sourceText));
+              const diff=cp.execFileSync('git',['-C',repo,'diff','--','src/lib/review.ts',file],{encoding:'utf8',timeout:20000,maxBuffer:2*1024*1024});
+              fs.writeFileSync(path.join(output,label+'.fixture.diff'),diff,{flag:'wx',mode:0o600});return repo;
+             };
+             try{
+              heartbeat=slot.heartbeat?startTestSlotHeartbeat(slot.heartbeat,row=>{fs.appendFileSync(path.join(output,'controls-heartbeats.ndjson'),JSON.stringify(row)+'\n',{mode:0o600});if(['test_slot.heartbeat_lost','test_slot.heartbeat_failed'].includes(row.step))slotLost=true;}):null;
+              await run('control-head',source);
+              await run('control-base',fixture('base',base));
+              for(const [i,p]of ['scripts/preflight-author.mjs','scripts/calibrate-author-runtime.mjs','scripts/lib/author-step-capture.mjs'].entries()){
+               const repo=fixture('remove-tool-'+i,head,text=>{const lines=text.split('\n'),needle=JSON.stringify('^'+p.replaceAll('.','\\.')+'$')+',';assert.equal(lines.filter(l=>l.trim()===needle).length,1);return lines.filter(l=>l.trim()!==needle).join('\n');});
+               await run('control-remove-tool-'+i,repo,titles[0]);
+              }
+              const noData=fixture('remove-data',head,text=>{const lines=text.split('\n'),start=lines.findIndex(l=>l.trim()==='"docs/docs-index.json":'),end=lines.findIndex((l,i)=>i>start&&l.trim().endsWith('",'));assert(start>0&&end>start&&end-start<8);lines.splice(start,end-start+1);return lines.join('\n');});
+              await run('control-remove-data',noData,titles[1]);
+              const waived=fixture('bad-executable-exclusion',head,text=>{const anchor='export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {';assert(text.includes(anchor));return text.replace(anchor,anchor+'\n  "scripts/unregistered-hosted-control.mjs": "Deliberately wrong disposable fixture, never source policy.",');});
+              await run('control-bad-executable-exclusion',waived,titles[2]);
+              await run('control-restored-head',source);
+              assert(!slotLost,'Test-slot uncertainty cannot qualify companion controls');
+             }finally{heartbeat?.stop(true);slot.release();assert.equal(cp.execFileSync('git',['-C',source,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),head);assert.equal(cp.execFileSync('git',['-C',source,'status','--porcelain'],{encoding:'utf8'}).trim(),'');assert(root.startsWith(privateTmp+'/companion-falsifiers-')&&root!==source);fs.rmSync(root,{recursive:true});}
+             const out={head,base,slot:{outcome:slot.outcome,concurrency:slot.concurrency,waitedMs:slot.waitedMs},cases,sourceRestoredClean:true,limits:'Real full physical-file controls plus base and five deliberately wrong disposable fixtures. Expected red controls are not author PASS; the unchanged full author selection still follows.'};
+             fs.writeFileSync(path.join(output,'companion-controls.json'),JSON.stringify(out,null,2)+'\n',{flag:'wx',mode:0o600});return out;
+            }
+
+            async function memoryControls(command,config){
+             const {source,base,head,output,privateTmp,deadline,concern}=config;
+             assert(['memory-pressure','memory-accounting'].includes(concern));
+             const pressure=concern==='memory-pressure';
+             const files=pressure?['test/an-enforced-memory-budget-waits-in-priority-order.test.ts']:
+              ['test/a-shadow-memory-verdict-never-delays-a-start.test.ts','test/the-memory-budget-claims-a-calibrated-joint-quantile.test.ts'];
+             const module=pressure?'src/lib/host-memory-admission.ts':'src/lib/host-memory-shadow.ts';
+             const sourceText=fs.readFileSync(path.join(source,module),'utf8'),tests=new Map(files.map(file=>{assert(fs.lstatSync(path.join(source,file)).isFile());return[file,fs.readFileSync(path.join(source,file),'utf8')];}));
+             const titles=pressure?['an empty reservation ledger never overrides observed host memory pressure',
+              'an observed shortfall stays deferred after its garden ages and recovers when pressure clears',
+              'an empty reservation ledger never overrides observed container pressure or swap-in']:
+              ['physical memory attribution excludes swapped pages without changing legacy admission',
+              'physical memory attribution stays unknown when its actual population is incomplete'];
+             for(const title of titles)assert([...tests.values()].some(text=>text.includes(title)));
+             const {acquireTestSlot,testSlotExecutionAllowed,lowPriorityCommand,testRunArgv,startTestSlotHeartbeat}=await import(pathToFileURL(path.join(source,'src/lib/test-slot.ts')).href);
+             const budget=Date.parse(deadline)-Date.now();assert(budget>60000);
+             const slot=acquireTestSlot('hosted-'+concern+':controls',{waitBoundMs:Math.min(10*60*1000,budget-60000)});
+             assert.equal(slot.outcome,'acquired');assert(testSlotExecutionAllowed(slot)&&slot.childEnvironment);
+             const root=fs.mkdtempSync(path.join(privateTmp,concern+'-falsifiers-')),cases=[];let lost=false,closed=true,heartbeat;
+             const summary=text=>Object.fromEntries(['tests','pass','fail','cancelled','skipped','todo'].map(k=>{
+              const rows=[...text.matchAll(new RegExp('^# '+k+' ([0-9]+)$','gm'))];assert.equal(rows.length,1,'Unique native summary '+k);return[k,Number(rows[0][1])];}));
+             const replace=(text,before,after)=>{assert.equal(text.split(before).length,2,'Unique falsifier anchor: '+before);return text.replace(before,after);};
+             const fixture=(label,ref,mutate)=>{
+              const repo=path.join(root,label);cp.execFileSync('git',['clone','--quiet','--no-local','--no-hardlinks','--no-checkout',source,repo],{encoding:'utf8',timeout:120000});
+              cp.execFileSync('git',['-C',repo,'checkout','--detach',ref],{encoding:'utf8',timeout:20000});assert(!fs.existsSync(path.join(repo,'.git/objects/info/alternates')));
+              for(const p of ['package.json','package-lock.json',...fs.readdirSync(path.join(source,'packages')).flatMap(n=>fs.existsSync(path.join(source,'packages',n,'package.json'))?['packages/'+n+'/package.json']:[])])assert.equal(hash(path.join(repo,p)),hash(path.join(source,p)),'Fixture dependency drift');
+              fs.symlinkSync(path.join(source,'node_modules'),path.join(repo,'node_modules'),'dir');
+              for(const [file,text]of tests)fs.writeFileSync(path.join(repo,file),text);
+              if(mutate)fs.writeFileSync(path.join(repo,module),mutate(sourceText));
+              const diff=cp.execFileSync('git',['-C',repo,'diff','--',module,...files],{encoding:'utf8',timeout:20000,maxBuffer:4*1024**2});
+              fs.writeFileSync(path.join(output,label+'.fixture.diff'),diff,{flag:'wx',mode:0o600});return repo;
+             };
+             const run=async(label,repo,expectedFailure)=>{
+              assert(!lost);slot.refresh();for(const file of files)assert(fs.lstatSync(path.join(repo,file)).isFile());
+              const argv=testRunArgv(['--test','--test-reporter=tap','--import','tsx','--import','./test/setup/tmp-hygiene.ts',...files],Math.min(1,slot.concurrency)),low=lowPriorityCommand(process.execPath,argv);
+              const result=await command(label,low.args,low.file,{cwd:repo,env:slot.childEnvironment,ownsSlot:()=>!lost});closed=closed&&result.groupClosed;
+              assert(!result.error&&!result.signal&&result.outputComplete,'Incomplete control '+label);
+              const tap=summary(result.stdout),failedTitles=result.stdout.split('\n').filter(l=>l.trim().startsWith('not ok '));
+              assert(tap.tests>0&&tap.cancelled===0&&tap.todo===0&&tap.skipped===0);
+              if(expectedFailure){assert.equal(result.status,1);assert(tap.fail>0&&failedTitles.some(l=>l.includes(expectedFailure)),'Expected behavioral refusal '+label);}
+              else{assert.equal(result.status,0);assert.equal(tap.fail,0);assert.equal(tap.pass,tap.tests);}
+              cases.push({label,ref:label==='memory-base'?base:head,physicalFiles:files,tap,expectedFailure:expectedFailure??null,failedTitles});
+             };
+             try{
+              heartbeat=slot.heartbeat?startTestSlotHeartbeat(slot.heartbeat,row=>{fs.appendFileSync(path.join(output,'memory-controls-heartbeats.ndjson'),JSON.stringify(row)+'\n',{mode:0o600});if(['test_slot.heartbeat_lost','test_slot.heartbeat_failed'].includes(row.step))lost=true;}):null;
+              await run('memory-head',source);
+              await run('memory-base',fixture('base',base),titles[0]);
+              if(pressure){
+               const condition='tier === "shortfall" && !reservedWorkRunning(inputs) && observedMemoryShortfall(verdict) === undefined';
+               await run('memory-remove-empty-pressure-check',fixture('remove-empty-check',head,text=>replace(text,condition,'tier === "shortfall" && !reservedWorkRunning(inputs)')),titles[0]);
+               await run('memory-remove-aged-pressure-check',fixture('remove-aged-check',head,text=>replace(text,'  return observedMemoryShortfall(verdict);','  return undefined;')),titles[1]);
+               for(const [reason,title]of [['memory-available',titles[0]],['psi',titles[0]],['swap-in',titles[2]],['container-ceiling',titles[2]]]){
+                const bad=fixture('ignore-'+reason,head,text=>replace(text,'  for (const reason of verdict.reasons) {\n    if (reason === "memory-available"',
+                 '  for (const reason of verdict.reasons) {\n    if (reason === '+JSON.stringify(reason)+') continue;\n    if (reason === "memory-available"'));
+                await run('memory-ignore-'+reason,bad,title);
+               }
+              }else{
+               const rss='sum + ("mib" in entry.resident ? entry.resident.rssMib! : 0), 0) : null;';
+               await run('memory-add-swap-to-rss',fixture('add-swap',head,text=>replace(text,rss,'sum + ("mib" in entry.resident ? entry.resident.mib : 0), 0) : null;')),titles[0]);
+               const original='  const reservationRss = rssKnown ? owned.reduce((sum, entry) =>\n    '+rss;
+               await run('memory-collapse-unknown-to-zero',fixture('unknown-zero',head,text=>replace(text,original,
+                '  const reservationRss = owned.reduce((sum, entry) => sum + ("mib" in entry.resident ? (entry.resident.rssMib ?? 0) : 0), 0);')),titles[1]);
+               await run('memory-clamp-attribution',fixture('clamp',head,text=>replace(text,
+                'null : containerCurrent - reservationRss,','null : Math.max(0, containerCurrent - reservationRss),')),titles[0]);
+               await run('memory-count-foreign-tree',fixture('foreign',head,text=>replace(text,
+                'const owned = inputs.entries.filter(entry => entry.status === "owned");','const owned = inputs.entries;')),titles[0]);
+               await run('memory-remove-real-rss-gather',fixture('no-rss-gather',head,text=>replace(text,
+                'residentsOf(ports.readFile, recorded.map((entry) => entry.path), undefined, { includeRss: true })',
+                'residentsOf(ports.readFile, recorded.map((entry) => entry.path))')),'W1-T8879: legacy residents keep their shape');
+               await run('memory-change-legacy-claims',fixture('change-legacy',head,text=>replace(text,
+                '      resident = entry.resident.mib;','      resident = entry.resident.rssMib ?? entry.resident.mib;')),titles[0]);
+              }
+              await run('memory-restored-head',source);assert(!lost);
+             }finally{
+              heartbeat?.stop(true);slot.release();
+              assert.equal(cp.execFileSync('git',['-C',source,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),head);
+              assert.equal(cp.execFileSync('git',['-C',source,'status','--porcelain'],{encoding:'utf8'}).trim(),'');
+              if(closed){assert(root.startsWith(privateTmp+'/'+concern+'-falsifiers-')&&root!==source);fs.rmSync(root,{recursive:true});}
+             }
+             const result={head,base,concern,slot:{outcome:slot.outcome,concurrency:slot.concurrency,waitedMs:slot.waitedMs},cases,
+              sourceRestoredClean:true,closedDisposableFixtures:closed,limits:'Actual verified full physical-file HEAD/base and six independent falsifiers, restored clean. Synthetic controls, not full author evidence, production pressure recovery, or policy activation.'};
+             fs.writeFileSync(path.join(output,'memory-controls.json'),JSON.stringify(result,null,2)+'\n',{flag:'wx',mode:0o600});return result;
+            }
+          PILOT_SOURCE_BUNDLE_B64: IyB2MiBnaXQgYnVuZGxlCi04NzA5ZmY0OGQ2NmY5ZjlmNjBkMThjODIyNmYzMDViMjAxZWYyNWE1IGZpeChzZWxlY3Rvcik6IGZpbGUgbWlzc2VkIG5hcnJvdyBlZGdlIGZvciBydW4tdGFzay50ZXN0LnRzICgjMTI4NzEpCi1iMTdhNjRiOTQ5YzE3YzIwNGIxZmE5N2ZiOTczZjQzOTUxNDNhMjJmIGZpeCh0ZXN0cyk6IGlkZW50aWZ5IHRoZSBzb3VyY2Ugb2YgbGV4aWNhbCBzZWxlY3Rpb24gZmFsbGJhY2sgKCMxMjk4MCkKLTY2ZmM5YzhmZmJiNjc5MGVhZjA1MjA5NTk2YTVkNjA5ODJhNDk1N2MgZmVhdChmbG93LWdhcmRlbmVyKTogdGhlIGZsb3cgZ2FyZGVuZXIgY291bnRzIHJldmlld3Mgc3BlbnQgb24gYW4gdW5jaGFuZ2VkIHByIChXMS1UOTA0OCkgKCMxMjk4OSkKLTE3ZWFkNjc4NjE5NTlhMThlOTMxZTFhNGFiYzE4ZmVjNjFiOTIxOWUgY2hvcmUocGxhbik6IGRyYWZ0IGEgZmxvdyByZW1lZHkgZm9yIHBsYW4tcHJvb2YtdW5ydW5uYWJsZS1wbGFuLW9ubHktcHItaXMtcmVkLW9uLWNpLXNoYXJkLW4gKCMxMzEyMykKLTA0ZWQ5MTVhNzdkZTJhMDM2NGUzZjIzZGYzYjU4YWQ2YmVkZDU4NTcgY2hvcmUocGxhbik6IGZpbGUgVzEtVDEwMjUwLi5XMS1UMTAyNTUsIFcxLVQxMDI2NCwgVzEtVDEwMjY1OyBhbWVuZCBXMS1UOTExOSAoIzEzMTMyKQotOGEwYTMxNWRiMzBlZmVhYjYzNDg0MDU2YzJiOGE5NGJkOTAwNWYwNSB0ZXN0KHJlYWQtbW9kZWwpOiBzZXR0bGUgZGlhZ25vc3RpY3MgYmVmb3JlIGZpeHR1cmUgY2xlYW51cCAoIzEzMTM2KQotZTAxMzYzYzI1NmFjZWEzN2VhYWNhZDU1ZTUwZjAyODU2YTI5ZmVlNCBmaXgoYXV0aG9yKTogdmVyaWZ5IHRoZSB0cmFja2VkIGNvbXBpbGVyIGFkbWlzc2lvbiB3cmFwcGVyICgjMTMxMTEpCjliN2E5NGNmMTQ4MzZmMWIzMzc0YjlkODhi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
+          PILOT_PASSIVE_JS: |
+            import fs from 'node:fs';import path from 'node:path';import os from 'node:os';
+            const [root,deadline]=process.argv.slice(2),dir=path.join(root,'pilot-passive-observer');fs.mkdirSync(dir,{mode:0o700});
+            const file=path.join(dir,'samples.ndjson'),fd=fs.openSync(file,'wx',0o600);let rows=0,bytes=0;
+            function record(){
+             const mem=Object.fromEntries(fs.readFileSync('/proc/meminfo','utf8').split('\n').filter(l=>/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/.test(l)).map(l=>[l.split(':')[0],Number(l.trim().split(/\s+/)[1])*1024]));
+             const vm=Object.fromEntries(fs.readFileSync('/proc/vmstat','utf8').trim().split('\n').map(l=>l.split(/\s+/))),stat=fs.statfsSync(root),pressure=fs.readFileSync('/proc/pressure/memory','utf8').trim(),cpu=fs.readFileSync('/proc/stat','utf8').split('\n')[0].trim().split(/\s+/).slice(1).map(Number);
+             const row=JSON.stringify({at:new Date().toISOString(),memory:mem,swapInPages:Number(vm.pswpin),swapOutPages:Number(vm.pswpout),memoryPressure:pressure,cpuTicks:cpu,diskAvailableBytes:Number(stat.bavail)*Number(stat.bsize),load:os.loadavg()})+'\n';
+             if(rows>=2400||bytes+Buffer.byteLength(row)>4*1024**2)return false;fs.writeSync(fd,row);rows++;bytes+=Buffer.byteLength(row);return true;
+            }
+            fs.writeFileSync(path.join(dir,'identity.json'),JSON.stringify({pid:process.pid,at:new Date().toISOString(),node:process.version,deadline,mode:'passive',noProcessSignals:true,noResourceChanges:true,noArgvEnvOrPayloadReads:true}),{flag:'wx',mode:0o600});
+            let capped=false;while(Date.now()<Date.parse(deadline)&&!fs.existsSync(path.join(dir,'stop'))){try{if(!record()){capped=true;break;}}catch(e){fs.writeFileSync(path.join(dir,'error.json'),JSON.stringify({at:new Date().toISOString(),message:e.message}),{flag:'wx',mode:0o600});break;}await new Promise(r=>setTimeout(r,5000));}
+            fs.fsyncSync(fd);fs.closeSync(fd);fs.writeFileSync(path.join(dir,'final.json'),JSON.stringify({at:new Date().toISOString(),rows,bytes,capped,passive:true}),{flag:'wx',mode:0o600});
+          PILOT_SEAL_JS: |
+            import fs from 'node:fs';import path from 'node:path';import crypto from 'node:crypto';import assert from 'node:assert/strict';
+            const [root,phase]=process.argv.slice(2),phases=['bootstrap','admission','typecheck','fixture','registry','controller-hook','source-hook','selection','calibration','author','teardown'],i=phases.indexOf(phase);assert(i>=0);const evidence=path.join(root,'pilot-evidence'),dir=phase==='bootstrap'?path.join(root,'pilot-bootstrap-evidence'):phase==='teardown'?path.join(root,'pilot-teardown-evidence'):path.join(evidence,'phases',String(i).padStart(2,'0')+'-'+phase);fs.mkdirSync(dir,{recursive:true,mode:0o700});
+            const hash=b=>crypto.createHash('sha256').update(b).digest('hex'),observer=path.join(root,'pilot-passive-observer'),monitor=path.join(observer,'samples.ndjson'),offsetFile=path.join(root,'pilot-passive-snapshot-offset.json');let previous=0;if(fs.existsSync(offsetFile))previous=JSON.parse(fs.readFileSync(offsetFile)).offset;
+            if(fs.existsSync(monitor)){const st=fs.lstatSync(monitor);assert(st.isFile()&&!st.isSymbolicLink()&&st.size<=4*1024**2);const data=fs.readFileSync(monitor),end=data.lastIndexOf(10)+1;assert(previous<=end);const part=data.subarray(previous,end);fs.writeFileSync(path.join(dir,'passive-resources.ndjson'),part,{flag:'wx',mode:0o600});fs.writeFileSync(path.join(dir,'passive-resources-range.json'),JSON.stringify({phase,previous,end,bytes:part.length,sha256:hash(part),tailBytes:data.length-end,passive:true}),{flag:'wx',mode:0o600});const tmp=offsetFile+'.tmp';fs.writeFileSync(tmp,JSON.stringify({phase,offset:end}),{flag:'wx',mode:0o600});fs.renameSync(tmp,offsetFile);for(const name of ['identity.json','error.json','final.json'])if(fs.existsSync(path.join(observer,name)))fs.copyFileSync(path.join(observer,name),path.join(dir,'passive-'+name),fs.constants.COPYFILE_EXCL);}
+            // Prepared source/config evidence contains public source identities only, never HOME/env.
+            if(phase==='bootstrap'&&fs.existsSync(evidence))for(const name of fs.readdirSync(evidence).filter(n=>n.endsWith('.json'))){const p=path.join(evidence,name),st=fs.lstatSync(p);assert(st.isFile()&&!st.isSymbolicLink());fs.copyFileSync(p,path.join(dir,name),fs.constants.COPYFILE_EXCL);}
+            const files=[];let bytes=0;function walk(p,rel=''){for(const name of fs.readdirSync(p)){assert(/^[A-Za-z0-9_.-]+$/.test(name));const full=path.join(p,name),r=path.join(rel,name),st=fs.lstatSync(full);assert(!st.isSymbolicLink());if(st.isDirectory())walk(full,r);else{assert(st.isFile());bytes+=st.size;assert(bytes<=128*1024**2,'Closed phase evidence bound exceeded; do not claim qualification');files.push({path:r,bytes:st.size,sha256:hash(fs.readFileSync(full))});}}}walk(dir);fs.writeFileSync(path.join(dir,'closed-evidence-manifest.json'),JSON.stringify({at:new Date().toISOString(),phase,bytes,files,limits:'Complete bounded closed-phase files; numeric passive monitoring only. This manifest is not a gate verdict.'},null,2)+'\n',{flag:'wx',mode:0o600});console.log(JSON.stringify({phase,files:files.length,bytes}));
+      - name: Checkout the reviewed pilot controller without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: pilot-control
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and reconstruct the exact source from its checksummed Git input
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import cp from 'node:child_process';
+          import crypto from 'node:crypto';
+          import assert from 'node:assert/strict';
+          const root=process.env.GITHUB_WORKSPACE,control=path.join(root,'pilot-control'),source=path.join(root,'source');
+          const input=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'pilot-source-input.json'),'utf8'));
+          assert.equal(input.format,'rmd-hosted-author-input-v1');assert.equal(input.head,process.env.SOURCE_HEAD);assert.equal(input.base,process.env.CAPTURED_BASE);assert.equal(input.bundleSha256,process.env.SOURCE_BUNDLE_SHA256);
+          const bytes=Buffer.from(input.bundleBase64,'base64');assert.equal(bytes.length,input.bundleBytes);assert(bytes.length<10*1024*1024);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),input.bundleSha256);
+          const bundle=path.join(process.env.RUNNER_TEMP,'pilot-source-input.bundle');fs.writeFileSync(bundle,bytes,{flag:'wx',mode:0o600});
+          const git=(dir,args)=>cp.execFileSync('git',['-C',dir,...args],{encoding:'utf8',timeout:120000}).trim();
+          git(control,['cat-file','-e',input.base+'^{commit}']);
+          cp.execFileSync('git',['clone','--no-local','--no-hardlinks','--no-checkout',control,source],{encoding:'utf8',timeout:120000});
+          git(source,['fetch',control,'refs/remotes/origin/main:refs/remotes/origin/main']);git(source,['cat-file','-e',input.base+'^{commit}']);
+          git(source,['bundle','verify',bundle]);assert.equal(git(source,['bundle','list-heads',bundle]),input.head+' HEAD');
+          git(source,['fetch',bundle,'HEAD:refs/heads/pilot-input']);git(source,['checkout','--detach',input.head]);assert.equal(git(source,['rev-parse','HEAD']),input.head);assert.equal(git(source,['status','--porcelain']),'');
+          console.log(JSON.stringify({stage:'source-reconstructed',head:input.head,base:input.base,bundleSha256:input.bundleSha256,bundleBytes:bytes.length,author:'NOT_RUN'}));
+          JS
+      - name: Use the source tree's pinned runtime and npm download cache
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: source/.nvmrc
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - name: Install exact locked dependencies
+        working-directory: source
+        run: npm ci
+      - name: Install the browser required by normal repository tests
+        working-directory: source
+        run: npx --no-install playwright install chromium
+      - name: Prepare complete local source inputs without production state
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const tmp=process.env.RUNNER_TEMP,workspace=process.env.GITHUB_WORKSPACE;
+          const config={concern:process.env.PILOT_CONCERN,controller:path.join(workspace,"pilot-control"),controllerHead:process.env.GITHUB_SHA,controllerBranch:"run-unfiled-1792507409614",controllerPriorHead:"8a0a315db30efeab63484056c2b8a94bd9005f05",controllerPushPreviousHead:"0000000000000000000000000000000000000000",source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
+          fs.writeFileSync(path.join(tmp,'pilot-config.json'),JSON.stringify(config),{flag:'wx',mode:0o600});
+          JS
+          node "$RUNNER_TEMP/hosted-author-12667.mjs" prepare "$RUNNER_TEMP/pilot-config.json"
+      - name: Seal bootstrap evidence
+        id: seal_bootstrap
+        if: always()
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" bootstrap
+      - name: Upload closed bootstrap evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-bootstrap
+          path: ${{ runner.temp }}/pilot-bootstrap-evidence/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase admission
+        id: phase_admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" admission
+      - name: Seal closed admission evidence
+        if: always() && steps.phase_admission.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" admission
+      - name: Upload closed admission evidence
+        if: always() && steps.phase_admission.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-admission
+          path: ${{ runner.temp }}/pilot-evidence/phases/01-admission/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase typecheck
+        id: phase_typecheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" typecheck
+      - name: Seal closed typecheck evidence
+        if: always() && steps.phase_typecheck.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" typecheck
+      - name: Upload closed typecheck evidence
+        if: always() && steps.phase_typecheck.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-typecheck
+          path: ${{ runner.temp }}/pilot-evidence/phases/02-typecheck/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase fixture
+        id: phase_fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" fixture
+      - name: Seal closed fixture evidence
+        if: always() && steps.phase_fixture.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" fixture
+      - name: Upload closed fixture evidence
+        if: always() && steps.phase_fixture.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-fixture
+          path: ${{ runner.temp }}/pilot-evidence/phases/03-fixture/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase registry
+        id: phase_registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" registry
+      - name: Seal closed registry evidence
+        if: always() && steps.phase_registry.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" registry
+      - name: Upload closed registry evidence
+        if: always() && steps.phase_registry.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-registry
+          path: ${{ runner.temp }}/pilot-evidence/phases/04-registry/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase controller-hook
+        id: phase_controller_hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" controller-hook
+      - name: Seal closed controller-hook evidence
+        if: always() && steps.phase_controller_hook.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" controller-hook
+      - name: Upload closed controller-hook evidence
+        if: always() && steps.phase_controller_hook.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-controller-hook
+          path: ${{ runner.temp }}/pilot-evidence/phases/05-controller-hook/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase source-hook
+        id: phase_source_hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" source-hook
+      - name: Seal closed source-hook evidence
+        if: always() && steps.phase_source_hook.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" source-hook
+      - name: Upload closed source-hook evidence
+        if: always() && steps.phase_source_hook.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-source-hook
+          path: ${{ runner.temp }}/pilot-evidence/phases/06-source-hook/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase selection
+        id: phase_selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" selection
+      - name: Seal closed selection evidence
+        if: always() && steps.phase_selection.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" selection
+      - name: Upload closed selection evidence
+        if: always() && steps.phase_selection.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-selection
+          path: ${{ runner.temp }}/pilot-evidence/phases/07-selection/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase calibration
+        id: phase_calibration
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" calibration
+      - name: Seal closed calibration evidence
+        if: always() && steps.phase_calibration.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" calibration
+      - name: Upload closed calibration evidence
+        if: always() && steps.phase_calibration.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-calibration
+          path: ${{ runner.temp }}/pilot-evidence/phases/08-calibration/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase author
+        id: phase_author
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" author
+      - name: Seal closed author evidence
+        if: always() && steps.phase_author.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" author
+      - name: Upload closed author evidence
+        if: always() && steps.phase_author.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-author
+          path: ${{ runner.temp }}/pilot-evidence/phases/09-author/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Close passive observer and seal teardown evidence
+        if: always()
+        shell: bash
+        run: |-
+          set -euo pipefail
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';import path from 'node:path';
+          const dir=path.join(process.env.RUNNER_TEMP,'pilot-passive-observer');if(fs.existsSync(dir)){fs.writeFileSync(path.join(dir,'stop'),'teardown\n',{flag:'wx',mode:0o600});for(let n=0;n<12&&!fs.existsSync(path.join(dir,'final.json'));n++)await new Promise(r=>setTimeout(r,500));}
+          JS
+          node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" teardown
+      - name: Upload closed teardown evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: memory-pressure-phased-${{ github.run_id }}-teardown
+          path: ${{ runner.temp }}/pilot-teardown-evidence/
+          retention-days: 1
+          if-no-files-found: error
