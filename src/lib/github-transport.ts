@@ -15,7 +15,6 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { refreshInstallationToken } from "./github-app.js";
 import { sameHost } from "./host-identity.js";
-import { deriveLedgerActor, type LedgerActor } from "./ledger.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
 /** PRIMARY CONTROL: every GitHub CLI invocation gets a wall-clock ceiling unless a caller narrows it. */
@@ -977,6 +976,8 @@ export function readGhStampText(path: string | undefined): string | undefined {
   try {
     return readFileSync(path, "utf8");
   } catch {
+    // FAIL OPEN (design (v)): an absent and an unreadable stamp both read as "no text", which every
+    // caller treats as an unmarked read — the conservative side, since it COUNTS against the floor.
     return undefined;
   }
 }
@@ -1028,7 +1029,7 @@ export interface GhReadTicket {
   id: string;
   /** 0 serves first: operators and unknown callers. 1: daemon, run_child, worker and service callers. */
   rank: number;
-  actor: LedgerActor;
+  actor: string;
   seq: number;
   pid: number;
   host: string;
@@ -1043,8 +1044,8 @@ export function ghReadTicketDir(stampPath: string): string {
 }
 
 /** W1-T10271's priority order, which W1-T10279's broker reuses: a person, or a caller nobody can name,
- *  ahead of the automation that can always try again next tick. */
-export function ghReadTicketRank(actor: LedgerActor): number {
+ *  ahead of the automation that can always try again next tick. `actor` is a ledger actor (ledger.ts). */
+export function ghReadTicketRank(actor: string): number {
   return actor === "daemon" || actor === "run_child" || actor === "worker" || actor === "service" || actor === "host_automation" ? 1 : 0;
 }
 
@@ -1059,6 +1060,7 @@ function parseGhReadTicket(id: string, raw: string): GhReadTicket | undefined {
       typeof t.createdMs !== "number" || typeof t.refreshedMs !== "number" || typeof t.host !== "string") return undefined;
     return { ...t, id, yielded: t.yielded === true } as GhReadTicket;
   } catch {
+    // A garbled ticket is not a ticket: the caller removes it, so it can never block the queue.
     return undefined;
   }
 }
@@ -1070,6 +1072,8 @@ export function readGhReadTickets(stampPath: string): GhReadTicket[] {
   try {
     names = readdirSync(dir);
   } catch {
+    // No queue directory is the normal case (nobody is waiting); an unreadable one fails open the
+    // same way, because a queue nobody can read cannot hold anyone's turn.
     return [];
   }
   const tickets: GhReadTicket[] = [];
@@ -1103,6 +1107,14 @@ function removeGhReadTicket(stampPath: string, id: string): void {
   } catch {
     // Already gone, or unwritable: either way it no longer holds anyone up that we can help.
   }
+}
+
+/** Who is asking, for a waiting ticket's priority. The CLI installs ledger.ts's `deriveLedgerActor` at
+ *  startup: this module cannot import the ledger without closing an import ring through config. */
+let ghReadActorResolver: (env: NodeJS.ProcessEnv) => string = () => "unknown";
+
+export function setGhReadActorResolver(resolve: (env: NodeJS.ProcessEnv) => string): void {
+  ghReadActorResolver = resolve;
 }
 
 /** Process-local counts since the previous {@link takeGhReadCadenceTally}; the gated admissions are
@@ -1191,8 +1203,8 @@ export interface GhReadCadenceDeps {
   stampGated?(path: string | undefined, text?: string, atMs?: number): void;
   /** W1-T10271: the process this read is made from — its own stamps, and its ticket. */
   pid?: number;
-  /** W1-T10271: the caller whose priority a ticket carries; {@link deriveLedgerActor} by default. */
-  actor?(): LedgerActor;
+  /** W1-T10271: the ledger actor whose priority a ticket carries; {@link setGhReadActorResolver}'s by default. */
+  actor?(): string;
   /** W1-T10271: whether a ticket's process on THIS host is still alive. */
   pidAlive?(pid: number): boolean;
   sleepSync?(ms: number): void;
@@ -1380,9 +1392,9 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   let waiter = false;
   let floorWaitMs = 0;
   let ticket: GhReadTicket | undefined;
-  let actor: LedgerActor | undefined;
+  let actor: string | undefined;
 
-  const callerActor = (): LedgerActor => (actor ??= deps.actor?.() ?? deriveLedgerActor(env));
+  const callerActor = (): string => (actor ??= deps.actor?.() ?? ghReadActorResolver(env));
   /** The newest read that counts against a gated window: the gated stamp, or a shared stamp that is
    *  not a daemon's advisory read (whose text carries the counted read it replaced instead). */
   const countedFloorMs = (): number | undefined => {

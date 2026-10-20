@@ -69,7 +69,7 @@ import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, setGhReadActorResolver, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -1059,6 +1059,7 @@ import {
   isSpawnInfraBlockedError,
   LEDGER_COST_TAG_INFRA,
   DECISION_RELEVANT_LEDGER_STEPS,
+  deriveLedgerActor,
   markDaemonProcessActor,
   markLedgerProcessActor,
   MAX_RETAINED_LINES_PER_STEP,
@@ -54236,6 +54237,7 @@ export async function main(
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
+  setGhReadActorResolver((env) => deriveLedgerActor(env));
   // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
   // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
   // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and

@@ -12,6 +12,7 @@ import {
   ghReadTicketDir,
   GhReadCadenceRefusal,
   readGhReadTickets,
+  setGhReadActorResolver,
   takeGhReadCadenceTally,
   writeGhReadTicket,
   type GhReadCadenceDeps,
@@ -190,11 +191,13 @@ test("W1-T10271: an operator ticket goes first and equal tickets are served in o
     f.otherGatedRead(f.clock.now());
     served.push({ id: head.id, at: f.clock.now() });
   };
+  // The CLI installs the ledger's actor derivation; this waiter's priority comes from it.
+  setGhReadActorResolver(() => "operator_ai");
+  t.after(() => setGhReadActorResolver(() => "unknown"));
   applyGhReadCadence(["api", "repos/o/r/pulls/1"], {
     ...f.seams,
     env: f.env("wait"),
     pid: 7_103,
-    actor: () => "operator_ai",
     sleepSync: (ms) => { f.clock.advance(ms); serveOthers(); },
   });
   served.push({ id: "me", at: f.clock.now() });
