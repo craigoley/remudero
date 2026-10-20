@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/lib/retro.ts
     - test/learning/retro-backoff-same-unit-count.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, not a projection from a distinct-PR count. The marker is 2026-10-06T10:45:50.161Z.

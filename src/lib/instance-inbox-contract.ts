@@ -33,6 +33,7 @@ import { RAW_BODY_CACHE, readBoundedRawBody, verifiedActor, type Route } from ".
 import { readPersistedInbox } from "./fleet-lane.js";
 import { INBOX_RECEIPT_DIR, WHY_ME_ACTION, whyMePresencePath, correctionOf, whyMePayload, type WhyMeCorrection } from "./inbox-why-me.js";
 import { INBOX_STALE_AFTER_MS } from "./inbox-freshness.js";
+import { INBOX_THREAD_PAGE_MAX_BYTES } from "./inbox-thread-list-view.js";
 export { INBOX_RECEIPT_DIR } from "./inbox-why-me.js";
 
 /** The conversation contract: each capability, the instance-relative path it mounts at, and the source route it wraps. */
@@ -195,7 +196,12 @@ function viewRoute(spec: ContractRoute, source: Route, binding: InstanceInboxBin
         return;
       }
       const capture = captureResponse();
-      await source.handler(req, capture.res, ctx);
+      const pagedThreads = spec.capability === "inbox/threads" && (params.has("limit") || params.has("cursor"));
+      const pageContract = pagedThreads ? (binding.contract ?? (() => instanceInboxContractState(binding.stateDir)))().mode : undefined;
+      const sourceContext = pagedThreads ? { ...ctx, params: { ...ctx.params,
+        inboxThreadRepository: binding.repository, inboxThreadInstance: binding.instance, inboxThreadContract: pageContract!,
+      } } : ctx;
+      await source.handler(req, capture.res, sourceContext);
       const captured = capture.done();
       const parsed = parseBody(captured);
       if ("reason" in parsed) {
@@ -213,7 +219,7 @@ function viewRoute(spec: ContractRoute, source: Route, binding: InstanceInboxBin
         sendScoped(res, binding, 502, { error: "inbox_thread_identity_mismatch", detail: `asked for ${String(requested)}, the source answered ${String(body.threadId)}` });
         return;
       }
-      const mode = (binding.contract ?? (() => instanceInboxContractState(binding.stateDir)))().mode;
+      const mode = pageContract ?? (binding.contract ?? (() => instanceInboxContractState(binding.stateDir)))().mode;
       if (spec.capability === "inbox/proposal" && captured.status === 200) {
         if (body.proposalId !== requested) {
           sendScoped(res, binding, 502, { error: "inbox_proposal_identity_mismatch" }); return;
@@ -224,7 +230,19 @@ function viewRoute(spec: ContractRoute, source: Route, binding: InstanceInboxBin
         const reframe = binding.routes.some(r => r.method === "POST" && r.path === "/v1/inbox/reframe");
         body.actions = mode === "read-write" && reframe ? [{ action: "reframe", tier: "low", path: `/v1/i/${binding.instance}/inbox/reframe` }] : [];
       }
-      emit(res, captured, { ...body, ...identity(binding), contract: mode });
+      const envelope = { ...body, ...identity(binding), contract: mode };
+      const page = body.page as { total?: unknown; nextCursor?: unknown } | null | undefined;
+      if (pagedThreads && captured.status === 200 && (typeof body.threadListKey !== "string" || !/^[a-f0-9]{64}$/.test(body.threadListKey) ||
+        !Array.isArray(body.threads) || typeof page !== "object" || page === null || !Number.isSafeInteger(page.total) || (page.total as number) < body.threads.length ||
+        typeof body.source !== "object" || body.source === null || page.nextCursor !== undefined && typeof page.nextCursor !== "string")) {
+        sendScoped(res, binding, 502, { error: "inbox_thread_page_unverified", detail: "The source did not return a keyed, source-qualified thread page." });
+        return;
+      }
+      if (pagedThreads && captured.status === 200 && Buffer.byteLength(JSON.stringify(envelope)) > INBOX_THREAD_PAGE_MAX_BYTES) {
+        sendScoped(res, binding, 413, { error: "inbox_thread_page_too_large", detail: "The complete scoped page exceeds the response bound; no row was omitted or truncated." });
+        return;
+      }
+      emit(res, captured, envelope);
     },
   };
 }

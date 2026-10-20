@@ -11,7 +11,7 @@
   origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
   plan_refs: [W1-T9489, W1-T4348, W1-T505, W1-T971]
   files: [src/lib/worker-init-summary.ts, src/lib/worker-mcp-isolation.ts, src/lib/worker.ts, test/a-worker-init-names-the-plugins-and-skills-it-loaded.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

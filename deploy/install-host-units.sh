@@ -281,6 +281,14 @@ done
 case "$MAX_OLD_SPACE_MB" in ''|*[!0-9]*) echo "install-host-units: FATAL — RMD_NODE_MAX_OLD_SPACE_MB must be an integer, got '${MAX_OLD_SPACE_MB}'." >&2; exit 2 ;; esac
 case "$STATE_DIR" in /*) : ;; *) echo "install-host-units: FATAL — RMD_STATE_DIR must be absolute, got '${STATE_DIR}'." >&2; exit 2 ;; esac
 
+# OPERATOR RULING 2026-10-19: the daemon's NODE_OPTIONS carries the ruled memory flags beside its heap
+# ceiling, merged by the same deploy/resource-policy.sh function a recycle applies to the NODE_OPTIONS
+# it carries over, so a launcher-created container and a recycled one start alike. Rendered here, so a
+# changed flag is launcher drift that the watchdog tick's units check converges.
+# shellcheck source=deploy/resource-policy.sh
+. "${SCRIPT_DIR}/resource-policy.sh"
+DAEMON_NODE_OPTIONS="$(resource_policy_node_options "--max-old-space-size=${MAX_OLD_SPACE_MB}")"
+
 # The install root installs only what main holds: a hand edit there went live unmerged on 2026-10-01
 # and blocked deploy-run. No optional locks, so a sudo run never writes a root-owned index.
 if [ "$MODE" = "install" ] && [ -d "${STATE_DIR}/daemon-install" ] && \
@@ -1568,6 +1576,7 @@ $(render_instance_name_env)
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
+# Its memory flags and GLIBC_TUNABLES (in the build args) are operator ruling 2026-10-19.
 docker run -d --name ${CONTAINER_NAME} \\
   --restart=on-failure:5 \\
   "\${RESOURCE_POLICY_BUILD_ARGS[@]}" \\
@@ -1579,7 +1588,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -e GH_APP_ID=${GH_APP_ID_V} \\
   -e GH_APP_INSTALLATION_ID=${GH_APP_INST_V} \\
   -e GH_APP_PRIVATE_KEY_PATH=${GH_APP_KEY_SHELL} \\
-  -e NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_MB} \\
+  -e "NODE_OPTIONS=${DAEMON_NODE_OPTIONS}" \\
   -e RMD_RESTART_THROTTLE_S=120 \\
   -e RMD_FRESHNESS_RESTART_MAX=100 \\
   -e RMD_OPENWEIGHT_API_KEY \\

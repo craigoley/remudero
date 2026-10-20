@@ -68,14 +68,16 @@ export interface CoverageJudgement {
 const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
 
 /**
- * The narrow pass first: if it covers every added src line the outcome is `covered`, whatever the reach. A gap
+ * The narrow pass first, within the same scoped ceiling: covering every added src line is `covered`. A gap
  * runs the reach passes as before — only they can return `uncovered` — and when the reach is over the ceiling (or
  * a changed file forces the full suite) the gap is `uncovered-narrow`, advisory. A narrow pass that cannot look
- * (timeout, spawn failure, no `SF:` record) is no verdict, and the reach passes decide exactly as they always did.
+ * (over ceiling, timeout, spawn failure, no `SF:` record) is no verdict; valid reach passes can still decide.
  */
 export async function judgeCoverage(j: CoverageJudgement): Promise<CoverageVerdict> {
   let narrowGap: string | undefined;
-  if (j.narrow.length > 0) {
+  const skippedNarrow = j.narrow.length > j.ceiling ? `; ${j.narrow.length} own and direct-importer suite(s) were not measured (over preflight's scoped ceiling of ${j.ceiling})` : "";
+  const unavailable = (reason: string): Extract<CoverageVerdict, { outcome: "unavailable" }> => ({ outcome: "unavailable", reason: `${reason}${skippedNarrow}` });
+  if (j.narrow.length > 0 && j.narrow.length <= j.ceiling) {
     const { r } = await j.bounded(j.narrow);
     if (!r.timedOut && r.spawnError === undefined) {
       if (r.status === 0) return { outcome: "covered", reason: `${j.narrow.length} own and direct-importer suite(s) cover every added src line`, suites: j.narrow.length };
@@ -95,27 +97,27 @@ export async function judgeCoverage(j: CoverageJudgement): Promise<CoverageVerdi
   const { selection } = j;
   if (selection.fullRun) {
     const why = selection.reasons[0] ?? "a changed file forces the full suite";
-    return (await advisory(why)) ?? { outcome: "unavailable", reason: why };
+    return (await advisory(why)) ?? unavailable(why);
   }
-  if (selection.suites.length === 0) return { outcome: "unavailable", reason: "no suite reaches the changed src files" };
+  if (selection.suites.length === 0) return unavailable("no suite reaches the changed src files");
   for (const suites of j.passes) {
     // A pass the narrow run already contained would repeat a run that left a gap: the verdict stands.
     if (narrowGap !== undefined && suites.every((f) => j.narrow.includes(f))) return { outcome: "uncovered", text: narrowGap, suites: j.narrow.length };
     if (suites.length > j.ceiling) {
       const tooWide = `${suites.length} suite(s) are too wide to precheck quickly (over preflight's scoped ceiling of ${j.ceiling})`;
-      return (await advisory(tooWide)) ?? { outcome: "unavailable", reason: `${tooWide}${j.narrowUnreadable}` };
+      return (await advisory(tooWide)) ?? unavailable(`${tooWide}${j.narrowUnreadable}`);
     }
     const { predictedMs, boundMs, r } = await j.bounded(suites);
-    if (r.timedOut) return { outcome: "unavailable", reason: `timed out over its ${boundMs}ms bound (manifest-measured ${predictedMs}ms for ${suites.length} suite(s))` };
-    if (r.spawnError !== undefined) return { outcome: "unavailable", reason: `spawn failed: ${r.spawnError.slice(0, 300)}` };
+    if (r.timedOut) return unavailable(`timed out over its ${boundMs}ms bound (manifest-measured ${predictedMs}ms for ${suites.length} suite(s))`);
+    if (r.spawnError !== undefined) return unavailable(`spawn failed: ${r.spawnError.slice(0, 300)}`);
     if (r.status === 0) return { outcome: "covered", reason: `${suites.length} scoped suite(s) cover every added src line`, suites: suites.length };
     if (j.isUncovered(r.output)) return { outcome: "uncovered", text: j.refusalText(r.output), suites: suites.length };
     if (!j.isMissingSf(r.output)) {
       const why = /^diff-coverage-local: .*$/m.exec(r.output)?.[0] ?? `exited ${r.status}`;
-      return { outcome: "unavailable", reason: why.slice(0, 300) };
+      return unavailable(why.slice(0, 300));
     }
   }
-  return { outcome: "unavailable", reason: "a changed src file has no SF record even after widening to the slow-tier siblings" };
+  return unavailable("a changed src file has no SF record even after widening to the slow-tier siblings");
 }
 
 /** The `push.coverage_precheck` row fields an `uncovered-narrow` adds: the lines to cover and the head they were

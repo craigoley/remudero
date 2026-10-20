@@ -13,7 +13,7 @@
   files:
     - scripts/preflight-author.mjs
     - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
-  status: queued
+  status: merged
   priority: 1  # every full-fallback author run under a deadline holds a shared Mac test slot for hours
   attempts: 0
   rationale: |

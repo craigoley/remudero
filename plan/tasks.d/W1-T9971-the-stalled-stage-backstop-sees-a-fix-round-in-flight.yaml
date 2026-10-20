@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/the-stalled-stage-backstop-sees-a-fix-round-in-flight.test.ts
-  status: queued
+  status: merged
   priority: 1  # every conflict or own-red round that waits on memory admission past its backstop opens a false needs-human issue, and until W1-T9585 lands that issue stands the next strike down
   attempts: 0
   rationale: |

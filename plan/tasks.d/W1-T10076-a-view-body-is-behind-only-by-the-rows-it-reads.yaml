@@ -15,7 +15,7 @@
     - src/lib/instances-view.ts
     - src/lib/view-freshness.ts
     - test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator 2026-10-17: the operator effectively cannot act from the console while the catalogue reads stale
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: worker memory investigation (operator approved filing the worker-typecheck memory task)"
   plan_refs: [W1-T7392, W1-T6155, W1-T5658, W1-T8776]
   files: [src/lib/worker.ts, scripts/tsc-entry.mjs, test/worker/spawn/a-model-tsc-runs-the-fleet-typecheck.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

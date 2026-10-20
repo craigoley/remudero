@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13 (standing approval: go ahead with the recommended follow-ups to fix and improve all of this): found while fixing #11374"
   plan_refs: [W1-T9071, W1-T3387, W1-T2846, W1-T3029, W1-T440, W1-T9001]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-build-head-missing-its-own-task-record-is-refreshed-not-escalated.test.ts, test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts, test/event-driven-semantic-review.test.ts]
-  status: queued
+  status: merged
   priority: 1 # operator-2026-10-13: a build whose branch predates its own shard fails closed and needs a hand merge; the fix is a self-healing base refresh
   attempts: 0
   rationale: |
