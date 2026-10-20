@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import { CI_DEPENDENCY_EVIDENCE_SCHEMA, ciDependencyEvidenceForInvocation, readCiDependencyEvidence, type CiDependencyEvidenceContext } from '../../../scripts/lib/ci-dependency-evidence.mjs';
 import { ownedFixtureDir } from '../../helpers/owned-fixture-dir.js';
 import { gitRepo } from '../../helpers/git-repo.js';
@@ -98,6 +99,9 @@ test('CI dependency receipt: real filesystem rejects missing corrupt writable ov
   assert.equal(readCiDependencyEvidence(link, f.expected).state, 'unknown');
   assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, checkout: f.expected.runnerTemp }).state, 'unknown');
   assert.equal(readCiDependencyEvidence(f.path, { ...f.expected, runnerTemp: f.checkout }).state, 'unknown');
+  const fifo = join(f.expected.runnerTemp, 'fifo');
+  execFileSync('mkfifo', [fifo]); chmodSync(fifo, 0o400);
+  assert.equal(readCiDependencyEvidence(fifo, f.expected).state, 'unknown', 'FIFO without a writer must not block');
 });
 
 test('CI dependency receipt: actual invocation binds git head base and clean plan without changing local defaults', t => {
@@ -109,7 +113,7 @@ test('CI dependency receipt: actual invocation binds git head base and clean pla
     RMD_CI_DEPENDENCY_EVIDENCE: f.path, RMD_CI_DEPENDENCY_PRODUCER_SHA: producerSha,
     RMD_CI_DEPENDENCY_DIGEST: f.write(value) };
   assert.deepEqual(ciDependencyEvidenceForInvocation(['--base', 'HEAD'], env, repo.dir)!({ id: 'ZZ-T1' }), { state: 'merged' });
-  for (const args of [[], ['--base'], ['--base', 'missing-branch']]) {
+  for (const args of [[], ['--base'], ['--base', 'missing-branch'], ['--base', 'HEAD', '--plan', 'elsewhere/tasks.yaml']]) {
     assert.equal(ciDependencyEvidenceForInvocation(args, env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown');
   }
   assert.equal(ciDependencyEvidenceForInvocation([], {}, repo.dir), undefined);
@@ -119,6 +123,10 @@ test('CI dependency receipt: actual invocation binds git head base and clean pla
   repo.git('add', 'plan'); repo.git('commit', '-qm', 'test: changed plan');
   const next = repo.git('rev-parse', 'HEAD');
   env.RMD_CI_DEPENDENCY_DIGEST = f.write({ ...value, head: next, base: next });
+  mkdirSync(join(repo.dir, 'plan/tasks.d')); writeFileSync(join(repo.dir, 'plan/tasks.d/untracked.yaml'), '[]\n');
+  assert.equal(ciDependencyEvidenceForInvocation(['--base', 'HEAD'], env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown');
+  writeFileSync(join(repo.dir, '.gitignore'), 'plan/tasks.d/untracked.yaml\n');
+  assert.equal(ciDependencyEvidenceForInvocation(['--base', 'HEAD'], env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown', 'ignored shards are still consumed plan inputs');
   writeFileSync(join(repo.dir, 'plan/tasks.yaml'), '# dirty\n[]\n');
   assert.equal(ciDependencyEvidenceForInvocation(['--base', 'HEAD'], env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown');
 });

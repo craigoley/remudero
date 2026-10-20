@@ -498,38 +498,6 @@ test("lint dependency credit: real online dependency credit does not hide unchan
   }, true);
 });
 
-function git(args: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync("git", args, {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    env: { ...process.env, ...env },
-  }).trim();
-}
-
-function baseCommitWithBlob(relPath: string, content: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-offline-lint-base-"));
-  try {
-    const indexFile = join(dir, "index");
-    const env = { GIT_INDEX_FILE: indexFile };
-    git(["read-tree", "HEAD"], env);
-    const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-      input: content,
-    }).trim();
-    git(["update-index", "--add", "--cacheinfo", `100644,${blob},${relPath}`], env);
-    const tree = git(["write-tree"], env);
-    return git(["commit-tree", tree, "-p", "HEAD", "-m", "planted: offline lint base"], {
-      GIT_AUTHOR_NAME: FIXTURE_IDENTITY.name,
-      GIT_AUTHOR_EMAIL: FIXTURE_IDENTITY.email,
-      GIT_COMMITTER_NAME: FIXTURE_IDENTITY.name,
-      GIT_COMMITTER_EMAIL: FIXTURE_IDENTITY.email,
-    });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
 function taskYaml(proofs: readonly string[]): string {
   return [
     "- id: ZZ-Offline-Lint",
@@ -551,10 +519,20 @@ function taskYaml(proofs: readonly string[]): string {
   ].join("\n");
 }
 
-function fixturePlan(): { dir: string; planPath: string; relPath: string } {
-  const dir = mkdtempSync(join(REPO_ROOT, ".rmd-offline-lint-fixture-"));
-  const planPath = join(dir, "tasks.yaml");
-  return { dir, planPath, relPath: relative(REPO_ROOT, planPath) };
+function fixturePlan(t: TestContext): { dir: string; planPath: string; baseCommit: (content: string) => string } {
+  const repo = gitRepo({ scope: t, seedCommit: false, kind: "offline-lint-private-plan" });
+  const dir = repo.dir, planPath = join(dir, "plan/tasks.yaml");
+  mkdirSync(join(dir, "plan"));
+  // Keep the real npm entrypoint and production source/dependencies read-only; only fixture data
+  // and its own Git objects are writable. No active checkout is a test scratch directory.
+  symlinkSync(join(REPO_ROOT, "scripts"), join(dir, "scripts"), "dir");
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"), "dir");
+  const scripts = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).scripts;
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { "lint-plan:offline": scripts["lint-plan:offline"] } }));
+  return { dir, planPath, baseCommit: content => {
+    writeFileSync(planPath, content); repo.git("add", "plan"); repo.git("commit", "-qm", "test: offline lint base");
+    return repo.git("rev-parse", "HEAD");
+  } };
 }
 
 async function capturedLint(
@@ -575,11 +553,11 @@ async function capturedLint(
   }
 }
 
-test("offline plan lint keeps local blocking rules and names every GitHub-backed omission", async () => {
-  const { dir, planPath, relPath } = fixturePlan();
+test("offline plan lint keeps local blocking rules and names every GitHub-backed omission", async t => {
+  const { dir, planPath, baseCommit } = fixturePlan(t);
   try {
     const clean = taskYaml(["unit test: test/example.test.ts"]);
-    const base = baseCommitWithBlob(relPath, clean);
+    const base = baseCommit(clean);
     writeFileSync(planPath, taskYaml(["works"]), "utf8");
     let externalCalls = 0;
     const forbidden = () => {
@@ -588,6 +566,7 @@ test("offline plan lint keeps local blocking rules and names every GitHub-backed
     };
 
     const result = await capturedLint(["--plan", planPath, "--base", base], {
+      repoRoot: dir,
       offline: true,
       loadConfig: forbidden as never,
       resolveOwnerRepo: forbidden as never,
@@ -609,11 +588,11 @@ test("offline plan lint keeps local blocking rules and names every GitHub-backed
   }
 });
 
-test("the offline runner omits the merged-task amendment block instead of manufacturing a verdict", async () => {
-  const { dir, planPath, relPath } = fixturePlan();
+test("the offline runner omits the merged-task amendment block instead of manufacturing a verdict", async t => {
+  const { dir, planPath, baseCommit } = fixturePlan(t);
   try {
     const oneCriterion = taskYaml(["unit test: test/example.test.ts"]);
-    const base = baseCommitWithBlob(relPath, oneCriterion);
+    const base = baseCommit(oneCriterion);
     writeFileSync(
       planPath,
       taskYaml(["unit test: test/example.test.ts", "unit test: test/example.test.ts"]),
@@ -621,6 +600,7 @@ test("the offline runner omits the merged-task amendment block instead of manufa
     );
     const args = ["--plan", planPath, "--base", base];
     const online = await capturedLint(args, {
+      repoRoot: dir,
       loadConfig: (() => ({ root: "/synthetic" })) as never,
       resolveOwnerRepo: (() => ({ owner: "o", repo: "r" })) as never,
       ghGateway: (() => ({})) as never,
@@ -628,6 +608,7 @@ test("the offline runner omits the merged-task amendment block instead of manufa
       openPlanShardSlugs: (() => []) as never,
     });
     const offline = await capturedLint(args, {
+      repoRoot: dir,
       offline: true,
       loadConfig: (() => {
         throw new Error("must stay offline");
@@ -644,18 +625,18 @@ test("the offline runner omits the merged-task amendment block instead of manufa
   }
 });
 
-test("the standalone offline runner never reaches a gh executable", () => {
-  const { dir, planPath, relPath } = fixturePlan();
+test("the standalone offline runner never reaches a gh executable", t => {
+  const { dir, planPath, baseCommit } = fixturePlan(t);
   const shim = ghShim([{ when: "", exit: 99 }], { kind: "offline-lint-no-gh" });
   try {
-    const base = baseCommitWithBlob(relPath, taskYaml(["unit test: test/example.test.ts"]));
+    const base = baseCommit(taskYaml(["unit test: test/example.test.ts"]));
     writeFileSync(planPath, taskYaml(["unit test: test/example.test.ts", "unit test: test/example.test.ts"]), "utf8");
 
     const child = spawnSync(
       "npm",
       ["run", "--silent", "lint-plan:offline", "--", "--plan", planPath, "--base", base],
       {
-        cwd: REPO_ROOT,
+        cwd: dir,
         encoding: "utf8",
         env: { ...process.env, PATH: `${shim.dir}:${process.env.PATH ?? ""}` },
       },

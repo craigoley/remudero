@@ -34,7 +34,7 @@ export function readCiDependencyEvidence(path, expected) {
     const root = realpathSync(expected.runnerTemp), checkout = realpathSync(expected.checkout);
     const target = realpathSync(path);
     if (target !== resolve(path) || !inside(root, target) || inside(checkout, target)) return refuse('artifact is not a private runner-temporary regular path');
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size === 0 || stat.size > CI_DEPENDENCY_EVIDENCE_MAX_BYTES || (stat.mode & 0o222) !== 0) {
       return refuse('artifact must be bounded, read-only and regular');
@@ -86,7 +86,10 @@ export function ciDependencyEvidenceForInvocation(argv, env = process.env, cwd =
     if (baseAt < 0 || !argv[baseAt + 1]) throw new Error('changed-task base required');
     const head = gitOrThrow(['rev-parse', '--verify', 'HEAD^{commit}'], { cwd });
     const base = gitOrThrow(['rev-parse', '--verify', argv[baseAt + 1] + '^{commit}'], { cwd });
-    if (gitOrThrow(['status', '--porcelain', '--untracked-files=no', '--', 'plan'], { cwd }) !== '') throw new Error('plan changed after checkout');
+    const planAt = argv.indexOf('--plan');
+    if (planAt >= 0 && (!argv[planAt + 1] || resolve(cwd, argv[planAt + 1]) !== resolve(cwd, 'plan/tasks.yaml'))) throw new Error('receipt is for the canonical plan only');
+    if (gitOrThrow(['status', '--porcelain', '--untracked-files=all', '--', 'plan'], { cwd }) !== '' ||
+        gitOrThrow(['ls-files', '--others', '--ignored', '--exclude-standard', '--', 'plan'], { cwd }) !== '') throw new Error('plan changed after checkout');
     return readCiDependencyEvidence(env.RMD_CI_DEPENDENCY_EVIDENCE, {
       actions: true, repository: env.GITHUB_REPOSITORY, head, base,
       producerSha: env.RMD_CI_DEPENDENCY_PRODUCER_SHA,
