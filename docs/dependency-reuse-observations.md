@@ -24,6 +24,10 @@ registrations. It refuses linked/public/unbounded metadata and distinguishes
 legacy observations and foreign mount namespaces from known provisioning. A
 partial or empty cohort has a null reuse rate, not a fabricated perfect score.
 Fresh installs are counted by generation, not once per workspace child.
+Failure samples preserve their registration, generation or store scope and the
+underlying reason. At most eight are retained in a report; `failuresTruncated`
+explicitly marks additional failures, while unknown counts and null rates remain
+unchanged. A bounded sample is not a claim that no other failures occurred.
 
 This is a snapshot of registered provisioning metadata. It is not all-time job
 history, a payload-byte attestation, a complete filesystem-reference census,
