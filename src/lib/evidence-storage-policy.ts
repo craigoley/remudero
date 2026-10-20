@@ -2,6 +2,8 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpat
 import { dirname, resolve } from 'node:path';
 
 export const STORAGE_IDLE_MS = 6 * 60 * 60 * 1000;
+// PRIMARY CONTROL: normal proposal admission rejects observations over 60 seconds old;
+// stale capacity is not current capacity, even when every artifact is safely idle.
 export const STORAGE_OBSERVATION_MAX_AGE_MS = 60_000;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const record = (x: unknown): Record<string, unknown> => x !== null && typeof x === 'object' && !Array.isArray(x) ? x as Record<string, unknown> : {};
