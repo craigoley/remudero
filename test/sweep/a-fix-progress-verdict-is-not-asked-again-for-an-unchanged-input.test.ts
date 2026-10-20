@@ -164,7 +164,8 @@ test("W1-T9502: the real fix rung reuses its ledger answer and names the reused 
         model: "sonnet", effort: "medium", costUsd: 0, blocks: [], stderr: "", isError: false, apiError: false,
         childEnvKeys: [], modelUsage: {}, compactionEvents: [], qualitySuspect: false,
         tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, permissionDenials: [] } as never; },
-      runReview: async () => ({ ...args.initialReview, state: "success", criteria: [] } as ReviewRunResult),
+      runReview: async () => workers === 0 ? args.initialReview :
+        ({ ...args.initialReview, state: "success", criteria: [] } as ReviewRunResult),
       waitForCiGreen: async () => "green" as const, fetchPrBody: async () => `Remudero-Task: ${TASK}`,
       fetchPrDiffFiles: async () => [], push: () => {}, ledgerPath: join(root, "ledger.ndjson"),
       issues: { create: () => { assert.fail("no escalation is permitted"); } },

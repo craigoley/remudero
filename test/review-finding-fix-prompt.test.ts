@@ -65,7 +65,8 @@ async function promptFrom(rows: Array<Record<string, unknown>>, sweep: boolean, 
           } satisfies WorkerResult;
         },
         waitForCiGreen: async () => "green",
-        runReview: async () => ({ ...initialReview, state: "success", criteria: criteria.map((c) => ({ ...c, met: true })), headSha: "d".repeat(40) }),
+        runReview: async () => prompts.length === 0 ? opts.initialReview :
+          ({ ...initialReview, state: "success", criteria: criteria.map((c) => ({ ...c, met: true })), headSha: "d".repeat(40) }),
         push: () => {}, fetchPrBody: async () => "implemented", fetchPrDiffFiles: async () => task.files,
         issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} },
         log: () => {}, say: () => {}, account: (worker) => worker,
