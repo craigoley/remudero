@@ -4,7 +4,7 @@ import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdi
 import {homedir} from 'node:os';import{join,resolve}from'node:path';import test,{type TestContext}from'node:test';
 import {readSharedGitPolicy,readSharedWorkspaceCapacity,borrowedWorkspaceWorker,createSharedWorkspace} from '#scripts/lib/shared-workspace.mjs';
 import {main} from '#scripts/shared-workspace.mjs';
-import {testSlotProcessFacts} from '#src/lib/test-slot.js';
+import {resolveTestSlotDir,testSlotProcessFacts} from '#src/lib/test-slot.js';
 function fixture(t:TestContext){
   const home=realpathSync(mkdtempSync(join(homedir(),'.rmd-shared-git-fixture-'))),parent=join(home,'workspaces'),seed=join(home,'origin'),pool=join(home,'pool'),root=join(home,'dependencies'),configDir=join(home,'.config/remudero'),config=join(configDir,'git-storage.json');
   for(const p of[parent,seed,root,configDir])mkdirSync(p,{recursive:true,mode:0o700});
@@ -88,19 +88,20 @@ test('native capacity and inherited-worker diagnostics never create or reclaim r
   assert.equal(p.status,0,p.stderr);assert.deepEqual(JSON.parse(p.stdout),{admitted:false,reason:'no inherited genuine worker'});
   assert.equal(typeof borrowedWorkspaceWorker,'function');
 });
-test('inherited reservation fixtures require the real ancestor start, nonce, pool and one-worker identity',t=>{
+test('inherited reservation fixtures require the real ancestor start, nonce, pool and one-worker identity',async t=>{
   // Unit identity fixtures, NOT global allocation or a native capacity qualification.
-  const f=fixture(t),slots=join(f.home,'fixture-slots');mkdirSync(slots);const path=join(slots,'slot-1.json'),start=testSlotProcessFacts(process.pid)!.start;
-  const held={pid:process.pid,ownerNonce:'fixture-nonce',processStart:start,concurrency:1};writeFileSync(path,JSON.stringify(held),{mode:0o600});
-  const claim={pid:process.pid,nonce:held.ownerNonce,start,concurrency:1,path},probe="import{borrowedWorkspaceWorker}from'./scripts/lib/shared-workspace.mjs';try{console.log(JSON.stringify(await borrowedWorkspaceWorker()));}catch(e){console.log(JSON.stringify({admitted:false,reason:e.message}));}";
-  const read=(value:unknown)=>{
-    const fixtureEnv:NodeJS.ProcessEnv={...process.env,RMD_TEST_SLOT_DIR:slots,RMD_TEST_SLOT_PARENT:typeof value==='string'?value:JSON.stringify(value)};
-    // Model a standalone CLI over ONLY this owned fixture pool. The node-test
-    // context otherwise deliberately substitutes a different private test pool.
-    delete fixtureEnv.NODE_TEST_CONTEXT;
-    const p=spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',probe],{encoding:'utf8',timeout:10000,env:fixtureEnv});assert.equal(p.status,0,p.stderr);return JSON.parse(p.stdout);
-  };
-  const positive=read(claim);assert.equal(positive.admitted,true,JSON.stringify(positive));
-  for(const value of[{...claim,nonce:'wrong'},{...claim,start:'wrong'},{...claim,concurrency:2},{...claim,path:join(f.home,'not-a-slot')},'x'.repeat(16385),'{'])assert.equal(read(value).admitted,false);
-  writeFileSync(path,JSON.stringify({...held,pid:process.pid+1000000}));assert.equal(read(claim).admitted,false);
+  // Keep NODE_TEST_CONTEXT and coverage intact. The maintained resolver gives
+  // this test process its own private pool; no host reservation is modified.
+  const pool=resolveTestSlotDir();assert.equal(pool.scope,'test-process');
+  const path=join(pool.dir,'slot-9999999.json'),start=testSlotProcessFacts(process.ppid)!.start;
+  const held={pid:process.ppid,ownerNonce:'fixture-nonce',processStart:start,concurrency:1};writeFileSync(path,JSON.stringify(held),{flag:'wx',mode:0o600});
+  const owned=lstatSync(path),old=process.env.RMD_TEST_SLOT_PARENT;
+  t.after(()=>{const current=lstatSync(path);assert.equal(current.ino,owned.ino);assert.equal(current.dev,owned.dev);rmSync(path);});
+  const claim={pid:process.ppid,nonce:held.ownerNonce,start,concurrency:1,path};
+  const read=async(value:unknown)=>{process.env.RMD_TEST_SLOT_PARENT=typeof value==='string'?value:JSON.stringify(value);try{return await borrowedWorkspaceWorker();}catch(e){return{admitted:false,reason:(e as Error).message};}};
+  try{
+    const positive=await read(claim);assert.equal(positive.admitted,true,JSON.stringify(positive));
+    for(const value of[{...claim,nonce:'wrong'},{...claim,start:'wrong'},{...claim,concurrency:2},{...claim,path:join(pool.dir,'not-a-slot')},'x'.repeat(16385),'{'])assert.equal((await read(value)).admitted,false);
+    writeFileSync(path,JSON.stringify({...held,pid:process.ppid+1000000}));assert.equal((await read(claim)).admitted,false);
+  }finally{if(old===undefined)delete process.env.RMD_TEST_SLOT_PARENT;else process.env.RMD_TEST_SLOT_PARENT=old;}
 });
