@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+import { checkProofCommand, CHECK_PROOF_EXIT, verifyBaseGrepAbsence } from "../src/lib/check-proof.js";
 
 /** This repo's own root — used by the base_unknown test below, which needs a real `unit test:`
  *  proof (a `grep:`-only fixture dir cannot resolve one) rather than the throwaway single-file
@@ -338,6 +338,68 @@ test("a `grep:` proof is compared against the REAL base blob at --base <ref> wit
     assert.equal(existsSync(baseTree), false, "the base tree was removed on the way out");
   } finally {
     rmSync(dirname(baseTree), { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("verified real Git-tree absence discriminates for a new source grep target without changing the head verdict", () => {
+  const repo = twoCommitRepo({}, { "src/marker.txt": `${NEEDLE}\n` });
+  try {
+    const { code, out } = runCheckProof(["--base", "HEAD~1", ...PROOF_ARGV], repo);
+    assert.equal(code, CHECK_PROOF_EXIT.pass, out);
+    assert.match(out, /^verdict:\s+pass$/m);
+    assert.match(out, /^base:\s+ABSENT at HEAD~1.*verified literal tree [0-9a-f]{40}/m);
+    assert.match(out, /^discrimination: discriminates —/m);
+    assert.doesNotMatch(out, /discrimination: unknown/);
+    assert.equal(git(repo, "worktree", "list").split("\n").length, 1);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("verified absence uses a literal normalized path and rejects existing files and directories", () => {
+  const repo = twoCommitRepo({ "src/marker.txt": `${NEEDLE}\n` }, {});
+  try {
+    assert.equal(verifyBaseGrepAbsence(repo, "HEAD~1", "./src//missing?.txt").state, "absent");
+    assert.equal(verifyBaseGrepAbsence(repo, "HEAD~1", "src/marker.txt").state, "unknown");
+    assert.equal(verifyBaseGrepAbsence(repo, "HEAD~1", "src/").state, "unknown");
+    for (const target of [".", "/src/marker.txt", "../outside", "src/../../outside", "bad\0path"]) {
+      assert.equal(verifyBaseGrepAbsence(repo, "HEAD~1", target).state, "unknown", target);
+    }
+    // A failed showBlob seam cannot turn a real existing base path into discrimination.
+    const { out } = runCheckProof(["--base", "HEAD~1", ...PROOF_ARGV], repo, {
+      baseBlobDeps: { showBlob: () => { throw Object.assign(new Error("absent claimed by a reader"), { status: 128 }); } },
+    });
+    assert.match(out, /target exists in the base tree/);
+    assert.match(out, /^discrimination: unknown/m);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("verified absence remains UNKNOWN for unreadable trees, invalid identities and obstructing ancestors", () => {
+  const repo = twoCommitRepo({ "src/marker.txt": `${NEEDLE}\n`, "block": "not a directory\n" }, {});
+  try {
+    symlinkSync("src", join(repo, "alias"));
+    git(repo, "add", "alias");
+    git(repo, "commit", "--quiet", "-m", "link");
+    assert.equal(verifyBaseGrepAbsence(repo, "HEAD", "alias/missing.txt").state, "unknown");
+    assert.equal(verifyBaseGrepAbsence(repo, "HEAD", "block/missing.txt").state, "unknown");
+    assert.equal(verifyBaseGrepAbsence(repo, FAKE_BASE_REF, "src/missing.txt").state, "unknown");
+    assert.equal(verifyBaseGrepAbsence(repo, "--help", "src/missing.txt").state, "unknown");
+    assert.deepEqual(verifyBaseGrepAbsence(repo, "HEAD", "src/missing.txt", () => "not-an-object-id"), {
+      state: "unknown", reason: "base tree identity is invalid",
+    });
+    assert.deepEqual(verifyBaseGrepAbsence(repo, "HEAD", "src/missing.txt", (_cwd, args) => {
+      if (args[0] === "rev-parse") return "a".repeat(40);
+      throw new Error("tree read failed");
+    }), { state: "unknown", reason: "base tree could not be read" });
+    const { out } = runCheckProof(["--base", "HEAD~1", ...PROOF_ARGV], repo, {
+      baseBlobDeps: { showBlob: () => { throw new Error("unreadable, not absent"); } },
+    });
+    assert.match(out, /^base:\s+UNREADABLE/m);
+    assert.match(out, /^discrimination: unknown/m);
+  } finally {
     rmSync(repo, { recursive: true, force: true });
   }
 });

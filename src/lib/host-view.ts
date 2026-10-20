@@ -29,6 +29,7 @@ import type { ReadModelInstanceState } from "./task-view.js";
 import { loadSkillRegistry, skillsDir, type Skill } from "./skill.js";
 import { readLedgerLines } from "./status.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
+import { createViewHoldBook, type ThreadHolds } from "./worker-heaps.js";
 
 export const HOST_VIEW_NAME = "host";
 export const HOST_VIEW_VERSION = 1;
@@ -156,8 +157,10 @@ type HostBody = { key: string; data: HostViewData; sources: ViewSource[] };
 export function createHostView(opts: HostViewOptions): {
   name: string;
   version: number;
+  heldSizes(): ThreadHolds;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: ReadModelInstanceState }> }): HostBody[];
 } {
+  const holds = createViewHoldBook();
   const clock = opts.clock ?? systemClock;
   const intervalMs = opts.intervalMs ?? HOST_PROBE_INTERVAL_MS;
   const config = opts.config;
@@ -203,6 +206,11 @@ export function createHostView(opts: HostViewOptions): {
   return {
     name: HOST_VIEW_NAME,
     version: HOST_VIEW_VERSION,
+    heldSizes: () => {
+      if (config) holds.unsized("host:configuration", 1, "configuration and reader closures are shared; exclusive bytes unavailable", "container");
+      holds.unsized("host:async-state", 1, "pending promises and the sampled fields alias the retained body; not counted twice", "container");
+      return holds.read();
+    },
     materialize: ({ now, instances }) => {
       const home = instances[0];
       if (!config || !read || !home) return [];
@@ -238,6 +246,7 @@ export function createHostView(opts: HostViewOptions): {
       };
       const selfMeasurement = held.measurement ?? { status: "unreadable", reason: "the measurement union has not been read yet" };
       last = { key: "", data: { ...current.parts, selfMeasurement, gauges }, sources: current.sources };
+      holds.account("host:retained-body", last, 1, "body");
       return [last];
     },
   };

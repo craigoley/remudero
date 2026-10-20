@@ -17,10 +17,12 @@
 // lower-privilege human-flagging rung (`insertPlanRepairFlag`/`dispatchPlanOnlyRepair`, W1-T3390,
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { RmdError } from "./errors.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
@@ -570,7 +572,13 @@ export interface ScopeAmendmentRequest {
 }
 
 export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "ineligible" } | { kind: "refused" }> |
+  { kind: "amendment_merged"; amendmentNumber: number } |
   { kind: "refused"; reason: string; detail: string };
+
+/** W1-T2891's two Stryker registration files. Review admits them beside the product change they register, because a
+ *  new suite cannot be registered before it exists; refusing them as scope left a task that adds a classify.ts suite
+ *  unable to finish (#12776). Every other instrument, including the mutation score floor, is still refused. */
+export const SCOPE_GRANTABLE_INSTRUMENTS: ReadonlySet<string> = new Set(["stryker.conf.json", "scripts/mutation-relevant-paths.json"]);
 
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
   const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
@@ -589,7 +597,8 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
       return refuse("invalid-path", path);
     }
     if (path.startsWith("plan/")) return refuse("plan-path", path);
-    if (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path)) {
+    if (!SCOPE_GRANTABLE_INSTRUMENTS.has(path) &&
+        (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path))) {
       return refuse("instrument-path", path);
     }
     if (path.startsWith("test/")) return refuse("test-path", path);
@@ -599,8 +608,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   const key = `scope:${request.taskId}:${request.prNumber}:${digest}`;
   const existing = deps.lookupIdentity(key);
   if (existing?.merged) {
-    const result = deps.updateBranch(request.prUrl, request.headSha);
-    return { kind: "branch_update_requested", ...result };
+    return { kind: "amendment_merged", amendmentNumber: existing.amendmentNumber };
   }
   if (existing) return { kind: "resumed", amendmentUrl: existing.amendmentUrl, amendmentNumber: existing.amendmentNumber };
   const branch = `scope-amendment/${request.taskId}-${request.prNumber}`;
@@ -688,4 +696,243 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   } finally {
     deps.worktreeRemove(deps.repoDir, wp);
   }
+}
+
+export interface ScopeAmendmentWork {
+  root: string;
+  worktreePath: string;
+  taskId: string;
+  prNumber: number;
+  amendmentNumber: number;
+  paths: readonly string[];
+}
+
+function scopeWorkIdentity(input: ScopeAmendmentWork): string {
+  return JSON.stringify([input.taskId, input.prNumber, input.amendmentNumber, [...new Set(input.paths)].sort()]);
+}
+
+function scopeWorkRecoveryPath(input: ScopeAmendmentWork): string {
+  const key = createHash("sha256").update(scopeWorkIdentity(input)).digest("hex");
+  return join(input.root, "recovery", "scope-amendment", `${key}.json`);
+}
+
+// Recovery copies contain regular files or deletions only; neither a source nor a destination may
+// follow a worker-controlled symlink out of the worktree (including an ancestor directory).
+function scopeWorkParts(path: string): string[] {
+  if (!path || /[\\\x00-\x1f\x7f:]/.test(path) || path.split("/").some((p) => !p || p === "." || p === ".." || p === ".git")) {
+    throw new Error(`unsafe scope recovery path: ${path}`);
+  }
+  return path.split("/");
+}
+
+interface ScopeWorkEntry { path: string; data: string | null; mode: number }
+
+interface ScopeWorkIo { run: (script: string, input: string) => string | Promise<string> }
+// BACKSTOP: bound the rare recovery subprocess and its private IPC, never truncate saved work.
+const SCOPE_WORK_IO_TIMEOUT_MS = 30_000;
+const SCOPE_WORK_IO_MAX_BYTES = 64 * 1024 * 1024;
+const scopeWorkIo: ScopeWorkIo = { async run(script, input) {
+  const command = execFileLoopBounded("python3", ["-I", "-c", script], {
+    encoding: "utf8", timeout: SCOPE_WORK_IO_TIMEOUT_MS, maxBuffer: SCOPE_WORK_IO_MAX_BYTES,
+    killSignal: "SIGKILL",
+  });
+  const fed = new Promise<void>((resolveInput, rejectInput) => {
+    const stdin = command.child.stdin!;
+    stdin.once("error", rejectInput);
+    stdin.end(input, (error?: Error | null) => error ? rejectInput(error) : resolveInput());
+  });
+  const [{ stdout }] = await Promise.all([command, fed]);
+  return stdout;
+} };
+
+// Python3 is already required by the deploy image. Its dir_fd operations expose openat/renameat
+// on both supported POSIX hosts; /dev/fd/<directory>/<child> is not portable to macOS.
+const SCOPE_WORK_FILES = String.raw`
+import base64, contextlib, errno, json, os, stat, sys, uuid
+
+def recover(request):
+    required = (os.open, os.mkdir, os.unlink, os.rename, os.stat)
+    if not all(fn in os.supports_dir_fd for fn in required) or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("descriptor-relative scope recovery is unavailable")
+    entries = request["entries"]
+    for entry in entries:
+        name = entry["path"]
+        if not name or any(ord(c) < 32 or ord(c) == 127 or c in "\\:" for c in name) or any(p in ("", ".", "..", ".git") for p in name.split("/")):
+            raise ValueError("unsafe scope recovery path")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with contextlib.ExitStack() as stack:
+        def held(fd):
+            stack.callback(os.close, fd)
+            return fd
+        root = held(os.open(request["root"], directory_flags))
+        def parent_for(name, create):
+            parent = root
+            for part in name.split("/")[:-1]:
+                try:
+                    child = os.open(part, directory_flags, dir_fd=parent)
+                except FileNotFoundError:
+                    if not create:
+                        return None
+                    try:
+                        os.mkdir(part, mode=0o755, dir_fd=parent)
+                        os.fsync(parent)
+                    except FileExistsError:
+                        pass
+                    child = os.open(part, directory_flags, dir_fd=parent)
+                parent = held(child)
+            return parent
+        plans = []
+        for entry in entries:
+            parent = parent_for(entry["path"], request["restore"] and entry["data"] is not None)
+            leaf = entry["path"].split("/")[-1]
+            if request["restore"] and parent is not None:
+                try:
+                    current = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    current = None
+                if current is not None and not stat.S_ISREG(current.st_mode):
+                    raise ValueError("scope recovery requires a regular path")
+            plans.append((entry, parent, leaf))
+        result = []
+        for entry, parent, leaf in plans:
+            if not request["restore"]:
+                try:
+                    if parent is None:
+                        raise FileNotFoundError()
+                    fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                except FileNotFoundError:
+                    result.append(dict(path=entry["path"], data=None, mode=0))
+                    continue
+                with os.fdopen(fd, "rb") as source:
+                    info = os.fstat(source.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError("scope recovery requires a regular path without hard links")
+                    result.append(dict(path=entry["path"], data=base64.b64encode(source.read()).decode("ascii"), mode=stat.S_IMODE(info.st_mode) & 0o777))
+            elif parent is not None:
+                if entry["data"] is None:
+                    try:
+                        os.unlink(leaf, dir_fd=parent)
+                        os.fsync(parent)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    data = base64.b64decode(entry["data"], validate=True)
+                    temporary = ".scope-restore-" + uuid.uuid4().hex
+                    fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                    published = False
+                    try:
+                        with os.fdopen(fd, "w+b") as target:
+                            target.write(data)
+                            target.flush()
+                            os.fchmod(target.fileno(), entry["mode"])
+                            os.fsync(target.fileno())
+                            target.seek(0)
+                            if target.read() != data:
+                                raise ValueError("restored scope recovery bytes did not verify")
+                        os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                        published = True
+                        os.fsync(parent)
+                    finally:
+                        if not published:
+                            os.unlink(temporary, dir_fd=parent)
+        return result
+
+try:
+    print(json.dumps(dict(ok=True, entries=recover(json.load(sys.stdin)))))
+except (OSError, ValueError) as error:
+    message = "scope recovery requires a regular path" if isinstance(error, OSError) and error.errno in (errno.ELOOP, errno.ENOTDIR) else str(error)
+    print(json.dumps(dict(ok=False, error=message)))
+`;
+
+async function scopeWorkFiles(input: ScopeAmendmentWork, entries: ScopeWorkEntry[], restore: boolean, io: ScopeWorkIo): Promise<ScopeWorkEntry[]> {
+  for (const entry of entries) scopeWorkParts(entry.path);
+  const result = JSON.parse(await io.run(SCOPE_WORK_FILES, JSON.stringify({ root: resolve(input.worktreePath), entries, restore })));
+  if (result.ok !== true) throw new ScopeRecoveryError(String(result.error ?? "scope recovery filesystem unavailable"));
+  if (!Array.isArray(result.entries)) throw new Error("scope recovery filesystem response did not verify");
+  return result.entries;
+}
+
+class ScopeRecoveryError extends RmdError {
+  constructor(message: string) {
+    super("scope_recovery", 1, message);
+    this.name = "ScopeRecoveryError";
+  }
+}
+
+class MissingScopeWorkError extends ScopeRecoveryError {
+  constructor() {
+    super("missing saved work from the round that asked for scope");
+    this.name = "MissingScopeWorkError";
+  }
+}
+
+function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
+  const file = scopeWorkRecoveryPath(input);
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new MissingScopeWorkError();
+  }
+  const saved = JSON.parse(text);
+  if (saved.identity !== scopeWorkIdentity(input) || typeof saved.payload !== "string" ||
+      saved.digest !== createHash("sha256").update(saved.payload).digest("hex")) {
+    throw new Error("scope recovery identity or digest did not verify");
+  }
+  const entries: ScopeWorkEntry[] = JSON.parse(saved.payload);
+  const paths = [...new Set(input.paths)].sort();
+  if (!Array.isArray(entries) || entries.length !== paths.length || entries.some((entry, i) =>
+    entry.path !== paths[i] || (entry.data !== null && typeof entry.data !== "string") ||
+    !Number.isInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o777)) {
+    throw new Error("scope recovery paths or file content did not verify");
+  }
+  return entries;
+}
+
+/** Shared by any lane that parks edits behind a scope amendment. A resume verifies its existing
+ *  immutable copy instead of replacing the asking round's work with an empty, later checkout. */
+export async function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string> {
+  const file = scopeWorkRecoveryPath(input);
+  try {
+    readScopeWork(input);
+    return file;
+  } catch (error) {
+    if (!(error instanceof MissingScopeWorkError)) throw error;
+  }
+  const entries = await scopeWorkFiles(input, [...new Set(input.paths)].sort().map((path) => ({ path, data: null, mode: 0 })), false, io);
+  const payload = JSON.stringify(entries);
+  const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
+    digest: createHash("sha256").update(payload).digest("hex") });
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(join(input.root, "recovery", ".rmd-scratch-keep"), "preserved scope-amendment work\n", { flush: true });
+  // Publish a complete file in one link; a losing writer can then verify the winner's bytes.
+  const staging = join(dirname(file), `.scope-work-${randomUUID()}.tmp`);
+  let created = false;
+  try {
+    writeFileSync(staging, text, { flag: "wx", mode: 0o600, flush: true });
+    try {
+      linkSync(staging, file);
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  } finally {
+    rmSync(staging, { force: true });
+  }
+  if (created) {
+    if (readFileSync(file, "utf8") !== text) throw new Error("saved scope recovery bytes did not verify");
+    for (const path of [dirname(file), dirname(dirname(file)), input.root]) {
+      const fd = openSync(path, "r");
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+    }
+  }
+  readScopeWork(input);
+  return file;
+}
+
+export async function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string[]> {
+  const entries = readScopeWork(input);
+  await scopeWorkFiles(input, entries, true, io);
+  return entries.map((entry) => entry.path);
 }

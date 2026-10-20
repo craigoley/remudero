@@ -17,8 +17,12 @@
  *     `util.promisify.custom` symbol — so a promisified caller still gets the original's shape.
  *     Dropping that symbol is the falsifier: `promisify(fn)` would fall back to the callback
  *     convention and resolve the wrong shape for a function that defines its own.
+ *   - Unobserved child-process reads make coverage UNKNOWN, not an empty reusable read set.
+ *     Child custom promisifiers are wrapped too while preserving their native output shape.
  */
 import fs from "node:fs";
+import childProcess from "node:child_process";
+import { promisify } from "node:util";
 import { devNull } from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -35,6 +39,7 @@ export interface ReadRecord {
   suite: string;
   reads: string[];
   listed: string[];
+  /** Includes descendants whose file reads this process cannot observe. UNKNOWN is sticky. */
   unknownDescriptors: boolean;
 }
 
@@ -256,14 +261,42 @@ export async function installReadMap(opts: { dir: string; root: string; suite: s
     const probe = await nativeOpen(devNull, "r");
     try { handlePrototype = Object.getPrototypeOf(probe) as object; } finally { await probe.close(); }
   }
-  const restore = patchFsForReadMap(recorder, opts.target, handlePrototype);
-  if (opts.target === undefined) syncBuiltinESMExports();
+  const restoreFs = patchFsForReadMap(recorder, opts.target, handlePrototype);
+  const childUndo: Array<() => void> = [];
+  const realFs = opts.target === undefined || opts.target === fs;
+  if (realFs) {
+    // Observing a launch does not observe its reads. Do not credit an empty parent read set to a
+    // descendant, forward preloads/credentials, or infer what an executable is going to read.
+    const table = childProcess as unknown as Patchable;
+    for (const name of ["exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync", "fork"]) {
+      const original = table[name];
+      if (typeof original !== "function") { recorder.unknown(); continue; }
+      const marked = (fn: AnyFn): AnyFn => function (this: unknown, ...args: unknown[]) {
+        recorder.unknown();
+        return Reflect.apply(fn, this, args);
+      };
+      const wrapper = marked(original as AnyFn);
+      // Node's custom promisifier closes over the native function, bypassing a plain API wrapper.
+      // Preserve its flags and output shape, but wrap its call too; identity cannot stay native.
+      for (const key of Reflect.ownKeys(original)) {
+        const property = Object.getOwnPropertyDescriptor(original, key)!;
+        // Define a native non-configurable custom descriptor only ONCE on the new function.
+        if (key === promisify.custom && typeof property.value === "function") property.value =
+          preserveProperties(property.value as AnyFn, marked(property.value as AnyFn));
+        Object.defineProperty(wrapper, key, property);
+      }
+      table[name] = wrapper;
+      childUndo.push(() => { table[name] = original; });
+    }
+    syncBuiltinESMExports();
+  }
   const file = join(opts.dir, recordFileName(opts.suite));
   return {
     recorder,
     restore: () => {
-      restore();
-      if (opts.target === undefined) syncBuiltinESMExports();
+      for (const restore of childUndo.reverse()) restore();
+      restoreFs();
+      if (realFs) syncBuiltinESMExports();
     },
     flush() {
       const own = recorder.snapshot();

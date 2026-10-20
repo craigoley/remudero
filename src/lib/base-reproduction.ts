@@ -230,30 +230,35 @@ export function mainPathsReachingRed(input: {
 
 /** W1-T8396 — whether merging main may clear this red. Rule 3 first: a refresh that already left the same
  *  red is never repeated until main changes a counted path. Then step 1a, the path pre-filter, and step 1b,
- *  the trial-merge probe. Red on the merged tree refuses; clear refreshes. Partial or unrunnable keeps
- *  today's refresh only with readable history. No count, timer or clock decides anything here. */
+ *  the trial-merge probe. Red on the merged tree refuses; clear refreshes. Partial, unrunnable or fileless
+ *  keeps today's refresh only with readable history that shows no refresh already left this red: a repeat
+ *  needs a trial merge that clears it. #12703 took four main merges on its own census red and no worker.
+ *  No count, timer or clock decides anything here. */
 export async function assessRefreshClearance(
   input: { failingTestFiles: readonly string[]; reach: { counted: string[]; complete: boolean } | undefined; priorRefresh: boolean | undefined },
   probeMerge: (() => Promise<BaseProbeResult>) | undefined,
 ): Promise<RefreshClearance> {
   const countedPaths = input.reach?.counted;
   const counted = countedPaths === undefined ? {} : { countedPaths };
+  // Why only a clear trial merge may refresh: no history to read, or a refresh that already left this red.
+  const unproven = input.priorRefresh === undefined ? "refresh history is unreadable"
+    : input.priorRefresh ? "a refresh already left this red" : undefined;
   if (input.priorRefresh && (countedPaths === undefined || countedPaths.length === 0)) {
     return { refresh: false, evidence: "repeat", ...counted, reason: countedPaths === undefined
       ? "a refresh already left this red, and main's changes since the head's merge base are unread"
       : "a refresh already left this red, and main has changed nothing since that could reach it" };
   }
   if (input.failingTestFiles.length === 0) {
-    if (input.priorRefresh === undefined) return { refresh: false, evidence: "fileless", ...counted,
-      reason: "refresh history is unreadable and the red names no test file to probe" };
+    if (unproven !== undefined) return { refresh: false, evidence: "fileless", ...counted,
+      reason: `${unproven} and the red names no test file to probe` };
     return { refresh: true, evidence: "fileless", ...counted, reason: "the red names no test file to probe; the arm's own path evidence decides" };
   }
   if (input.reach?.complete && input.reach.counted.length === 0) {
     return { refresh: false, evidence: "prefilter", countedPaths: [], reason:
       "main changed no failing test file, no module the failing tests import, and no CI harness path since the head's merge base" };
   }
-  if (probeMerge === undefined) return { refresh: input.priorRefresh !== undefined, evidence: "unrunnable", ...counted,
-    reason: input.priorRefresh === undefined ? "refresh history is unreadable and the trial-merge probe is unwired"
+  if (probeMerge === undefined) return { refresh: unproven === undefined, evidence: "unrunnable", ...counted,
+    reason: unproven !== undefined ? `${unproven} and the trial-merge probe is unwired`
       : "the trial-merge probe is unwired; keeping today's refresh" };
   // A probe that throws is a setup failure carrying its reason, the same shape main's probe records.
   const probed: BaseProbeResult = await probeMerge().then((result) => result,
@@ -266,8 +271,8 @@ export async function assessRefreshClearance(
   }
   if (mergedVerdict === "clear") return { refresh: true, evidence: "merged-probe", ...merged, reason: "the failing test files pass on a trial merge with main" };
   const why = probed.setup_error ?? probed.reason;
-  if (input.priorRefresh === undefined) return { refresh: false, evidence: mergedVerdict, ...merged,
-    reason: `refresh history is unreadable and the trial merge is ${mergedVerdict}${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}` };
+  if (unproven !== undefined) return { refresh: false, evidence: mergedVerdict, ...merged,
+    reason: `${unproven} and the trial merge is ${mergedVerdict}${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}` };
   return { refresh: true, evidence: mergedVerdict, ...merged, reason: mergedVerdict === "partial"
     ? "some failing test files still fail on the trial merge; keeping today's refresh"
     : `the trial merge is unrunnable${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}; keeping today's refresh` };

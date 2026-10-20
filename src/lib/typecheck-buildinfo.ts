@@ -22,11 +22,36 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 /** The buildinfo's file name inside a checkout's git directory. */
 export const TYPECHECK_BUILDINFO_NAME = "rmd-typecheck.tsbuildinfo";
 
-/** The peak a COLD full check is expected to reach: the memory one typecheck slot asks the host for. OBSERVED
- *  2026-10-10: two worker `npm run typecheck` runs held 2.4 and 2.2 GB RSS. An estimate of the run, not a limit. */
-export const TYPECHECK_COLD_PEAK_BYTES = 2.5 * 1024 ** 3;
-/** A warm check's expected peak: about half the cold one (this module's header). An estimate, not a limit. */
+/** The peak a COLD full check is expected to reach: the memory one typecheck slot asks the host for. An estimate of
+ *  the run, not a limit. OPERATOR DECISION (ruling 2026-10-20), raised from 2.5 GiB: MEASURED 2026-10-20 on the fleet
+ *  host, a cold full check of this repo with `declaration` off and {@link TYPECHECK_GOMEMLIMIT} peaked at 3.0–3.2 GB
+ *  (RSS 3.0 GB, cgroup peak 3.15 GB); 2.5 GiB (from two 2026-10-10 worker runs at 2.4 and 2.2 GB) undercounted it.
+ *  Measurements: PR 13113. */
+export const TYPECHECK_COLD_PEAK_BYTES = 3.25 * 1024 ** 3;
+/** A warm check's expected peak: about half the cold one (this module's header); MEASURED 2026-10-20 at 1.6–1.7 GB with
+ *  `declaration` off. An estimate, not a limit. */
 export const TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES / 2;
+
+/**
+ * OPERATOR DECISION (ruling 2026-10-20): the Go soft memory limit every tsc spawn runs under unless `GOMEMLIMIT` is
+ * already set. TS 7's compiler is a Go program, so as its heap nears the limit the GC works harder instead of letting
+ * the heap grow. MEASURED 2026-10-20 on the fleet host (tsc 7.0.2, a cold full check of this repo, each run alone in a
+ * capped scope): memory demand (cgroup peak + swap) 6.2–6.8 GB by default, 4.4–5.2 GB under 3GiB; with `declaration`
+ * off as well, 3.2 GB against 3.4–3.6 GB without the limit, at 12–15 s wall against 10 s. It is the effective knob:
+ * {@link lowMemoryTypecheckArgs}'s fewer checkers buy only ~0.1–0.2 GB. PRIMARY CONTROL on a check's Go heap, and a
+ * SOFT one, never a kill: a check that needs more still finishes, with more collections. `GOMEMLIMIT=off` opts one run
+ * out. Measurements: PR 13113.
+ */
+export const TYPECHECK_GOMEMLIMIT = "3GiB";
+
+/** `env` for a tsc child: {@link TYPECHECK_GOMEMLIMIT} unless a limit is set. `explicit` is the caller's own limit,
+ *  `env`'s by default; a caller whose child env is an allowlist (which drops `GOMEMLIMIT`) passes its parent's. */
+export function typecheckEnv<E extends Record<string, string | undefined>>(
+  env: E,
+  explicit: string | undefined = env.GOMEMLIMIT,
+): E & { GOMEMLIMIT: string } {
+  return { ...env, GOMEMLIMIT: explicit ?? TYPECHECK_GOMEMLIMIT };
+}
 
 /** tsc 7's own checker count when no `--checkers` is passed. */
 export const TSC_DEFAULT_CHECKERS = 4;

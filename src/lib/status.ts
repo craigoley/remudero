@@ -15,7 +15,7 @@ import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP } from "./ledger-carry.js";
-import type { Plan, Task, TaskStatus } from "./plan.js";
+import type { DependencyMergeEvidence, Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { isHolderStale } from "./fs-race-safe.js";
@@ -639,6 +639,9 @@ export interface CreditOverrideLoad {
   refused: Array<{ reason: string; raw: unknown }>;
 }
 
+/** Optional observation of the existing read; ordinary accelerator consumers retain their permissive contract. */
+export type CreditReadState = { state: "present" } | { state: "missing" | "unavailable" | "unreadable" | "corrupt"; reason: string };
+
 /** `<root>/plan/credit-overrides.yaml`, derived from `ledgerPath` as {@link defaultCreditStorePath}
  *  derives its own, so every existing caller consults this with no new required field. Under
  *  `plan/` and not `state/`: the correction must be a diff a reviewer reads. */
@@ -648,14 +651,26 @@ export function defaultCreditOverridePath(ledgerPath: string): string {
 
 /** Parse the override record. NEVER throws: any read or parse failure yields no rows, which is the
  *  status quo. A structurally valid row that is not a `remove-credit` ruling is REFUSED by name. */
-export function loadCreditOverrides(readFile: () => string): CreditOverrideLoad {
+export function loadCreditOverrides(readFile: () => string, observe?: (state: CreditReadState) => void): CreditOverrideLoad {
+  let text: string;
+  try {
+    text = readFile();
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException)?.code === "ENOENT";
+    observe?.({ state: missing ? "missing" : "unreadable", reason: missing ? "optional credit overrides file absent" : "credit overrides unreadable" });
+    return { rows: [], refused: [] };
+  }
   let parsed: unknown;
   try {
-    parsed = parseYaml(readFile());
+    parsed = parseYaml(text);
   } catch {
+    observe?.({ state: "corrupt", reason: "credit overrides corrupt: invalid YAML" });
     return { rows: [], refused: [] }; // unreadable or unparseable — fail toward the status quo
   }
-  if (!Array.isArray(parsed)) return { rows: [], refused: [] };
+  if (!Array.isArray(parsed)) {
+    observe?.({ state: "corrupt", reason: "credit overrides malformed: expected an array" });
+    return { rows: [], refused: [] };
+  }
 
   const rows: CreditOverrideRow[] = [];
   const refused: Array<{ reason: string; raw: unknown }> = [];
@@ -683,6 +698,7 @@ export function loadCreditOverrides(readFile: () => string): CreditOverrideLoad 
     }
     rows.push({ task: r.task, pr: r.pr, action: "remove-credit", reason: r.reason, author_class: "operator" });
   }
+  observe?.({ state: "present" });
   return { rows, refused };
 }
 
@@ -699,14 +715,73 @@ export function creditOverrideFor(
 
 /** Reads the durable store — `{}` on a missing OR corrupt file, never a throw. The store is an ACCELERATOR, not
  *  the sole route to a credit, so a read failure degrades to "nothing durable yet". */
-export function loadCreditStore(path: string, fsDeps: CreditStoreFsDeps = realCreditStoreFs): CreditStore {
-  if (!fsDeps.existsSync(path)) return {};
-  try {
-    const parsed = JSON.parse(fsDeps.readFileSync(path, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as CreditStore) : {};
-  } catch {
+export function loadCreditStore(path: string, fsDeps: CreditStoreFsDeps = realCreditStoreFs, observe?: (state: CreditReadState) => void): CreditStore {
+  if (!fsDeps.existsSync(path)) {
+    // existsSync(false) cannot distinguish physical absence from inaccessible ancestors.
+    observe?.({ state: "unavailable", reason: "merge credit store missing or inaccessible" });
     return {};
   }
+  let text: string;
+  try {
+    text = fsDeps.readFileSync(path, "utf8");
+  } catch {
+    observe?.({ state: "unreadable", reason: "native merge credit store unreadable" });
+    return {};
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!creditObject(parsed)) {
+      observe?.({ state: "corrupt", reason: "native merge credit store malformed: expected an object" });
+      return {};
+    }
+    observe?.({ state: "present" });
+    return parsed as CreditStore;
+  } catch {
+    observe?.({ state: "corrupt", reason: "native merge credit store corrupt: invalid JSON" });
+    return {};
+  }
+}
+
+function creditObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function creditPrProblem(value: Record<string, unknown>, repository: string): string | undefined {
+  if (!Number.isSafeInteger(value.prNumber) || (value.prNumber as number) <= 0) return "malformed PR number";
+  const match = typeof value.prUrl === "string" && /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)$/.exec(value.prUrl);
+  if (!match) return "invalid canonical GitHub PR URL: scheme, host, userinfo, query, hash or path suffix";
+  if (match[1]!.toLowerCase() !== repository.toLowerCase()) return "credit repository mismatch";
+  if (Number(match[2]) !== value.prNumber) return "PR number and URL mismatch";
+  return undefined;
+}
+
+/** Positive native-store evidence only. No IO, new authority, correction/backfill credit, or observed-unmerged claim. */
+export function durableDependencyCredit(
+  store: CreditStore, taskId: string, repository: string, overrides: readonly CreditOverrideRow[],
+): Exclude<DependencyMergeEvidence, { state: "unmerged" }> {
+  const unknown = (reason: string): { state: "unknown"; reason: string } => ({ state: "unknown", reason });
+  const record: unknown = Object.hasOwn(store, taskId) ? store[taskId] : undefined;
+  if (record === undefined) return unknown("native dependency credit absent");
+  if (!creditObject(record)) return unknown("malformed native dependency credit record");
+  const invalidated = record.invalidated;
+  if (invalidated !== undefined && (!creditObject(invalidated) || Object.entries(invalidated).some(([key, mark]) =>
+    !creditObject(mark) || creditPrProblem(mark, repository) !== undefined || typeof mark.reason !== "string" || !mark.reason.trim() ||
+    key !== "trailer" && key !== "head-branch" && key !== mark.prUrl))) return unknown("malformed credit invalidation/quarantine metadata");
+  const quarantined = quarantinedCreditUrls(record as CreditStoreTaskRecord);
+  const quarantinedNumbers = new Set(Object.values((record as CreditStoreTaskRecord).invalidated ?? {}).map(mark => mark.prNumber));
+  const reasons: string[] = [];
+  for (const source of ["trailer", "head-branch"] as const) {
+    const entry = record[source];
+    if (entry === undefined) continue;
+    if (!creditObject(entry) || entry.source !== source) { reasons.push("malformed credit entry or invalid source slot"); continue; }
+    if (entry.prState !== "MERGED") { reasons.push("invalid non-MERGED PR state"); continue; }
+    const problem = creditPrProblem(entry, repository);
+    if (problem) { reasons.push(problem); continue; }
+    if (quarantined.has(entry.prUrl as string) || quarantinedNumbers.has(entry.prNumber as number)) { reasons.push("credit quarantined/invalidated as plan-only"); continue; }
+    if (creditOverrideFor(overrides, taskId, entry.prNumber as number)) { reasons.push("credit removed by subtract-only override"); continue; }
+    return { state: "merged" };
+  }
+  return unknown(reasons.join("; ") || "native dependency credit absent");
 }
 
 /** Writes the durable store ATOMICALLY — temp file plus rename, the SAME pattern the status.json write uses, so
@@ -916,13 +991,28 @@ export function readMergeCreditedTaskIds(
   return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && hidden };
 }
 
-const creditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
+/** W1-T10048: the async credit scan's memo keeps a durable digest per rotation, so a restarted daemon's first pass
+ *  reads kilobytes of digests instead of decompressing every archive (about 309 MB per boot, OBSERVED 2026-10-17). */
+export function createCreditScanMemo(): LedgerRotationMemo {
+  return createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), {
+    pattern: /verdict/, holder: "status.credit-scan", durableDigest: { reducerVersion: "1" },
+  });
+}
+const creditScanMemo = createCreditScanMemo();
 const syncCreditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
 
 export async function readMergeCreditedTaskIdsAsync(
   path: string,
-  opts: { candidates?: Iterable<string>; readLive?: (path: string) => Iterable<Record<string, unknown>> } = {},
-): Promise<{ credited: Set<string>; filesRead: number; complete: boolean; budgetExhausted: boolean }> {
+  opts: {
+    candidates?: Iterable<string>;
+    readLive?: (path: string) => Iterable<Record<string, unknown>>;
+    /** W1-T10048: the rotation memo; a fresh one stands in for a restarted process. */
+    memo?: LedgerRotationMemo;
+  } = {},
+): Promise<{
+  credited: Set<string>; filesRead: number; complete: boolean; budgetExhausted: boolean;
+  digestHits: number; digestMisses: number; rotationsLoaded: number;
+}> {
   const credited = new Set<string>();
   const wanted = new Set(opts.candidates ?? []);
   let outstanding = wanted.size;
@@ -935,12 +1025,28 @@ export async function readMergeCreditedTaskIdsAsync(
   };
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
   const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path);
-  const read = await readLedgerUnionRecordsMemoized(dirname(path), creditScanMemo, {
+  const memo = opts.memo ?? creditScanMemo;
+  const before = memo.retention();
+  let rotationsLoaded = 0;
+  const counted: LedgerRotationMemo = {
+    ...memo,
+    load: (entries) => {
+      rotationsLoaded += entries.length;
+      return memo.load(entries);
+    },
+  };
+  const read = await readLedgerUnionRecordsMemoized(dirname(path), counted, {
     liveFirst: true, order: "newest-first", dedupe: false, pattern: /verdict/,
     readLiveRecords: () => live, onRecord: take, satisfied: () => wanted.size > 0 && outstanding <= 0,
   });
+  const after = memo.retention();
   const complete = wanted.size === 0 ? true : outstanding <= 0;
-  return { credited, filesRead: read.filesRead, complete, budgetExhausted: false };
+  return {
+    credited, filesRead: read.filesRead, complete, budgetExhausted: false,
+    digestHits: (after.digestHits ?? 0) - (before.digestHits ?? 0),
+    digestMisses: (after.digestMisses ?? 0) - (before.digestMisses ?? 0),
+    rotationsLoaded,
+  };
 }
 
 /** The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST, stopping at

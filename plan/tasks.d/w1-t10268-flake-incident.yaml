@@ -1,0 +1,36 @@
+- id: W1-T10268
+  title: "FLAKE INCIDENT — 'W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame' failed CI on 4 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/serves-main-loop-stalls-are-profiled-and-named.test.ts#W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame"
+  files:
+    - test/serves-main-loop-stalls-are-profiled-and-named.test.ts
+  acceptance:
+    - claim: "the cause of the intermittent failure W1-T10268 records in test/serves-main-loop-stalls-are-profiled-and-named.test.ts is fixed, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T10268 pins the cause of the intermittent failure"
+    - claim: "the test that pins the cause is added to test/serves-main-loop-stalls-are-profiled-and-named.test.ts, beside the test that failed"
+      proof: "grep: test(\"W1-T10268 pins the cause of the intermittent failure\" in test/serves-main-loop-stalls-are-profiled-and-named.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame' (test/serves-main-loop-stalls-are-profiled-and-named.test.ts)
+    Failed CI on 4 distinct pull requests whose changed files include neither the test file nor a module it imports: #12643, #12696, #12997, #13012.
+    CI runs: 39078684989, 39097405238, 39099810017, 39346158967, 39355044663.
+    Retry outcomes: 4 recovered on retry, 1 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows, 5 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filing proposes a bounded repair in one existing test file, with acceptance requiring a test that forces the failing order and pins the cause."
+      - "Harness evidence reports failures across four unrelated PRs and four recoveries on retry, supporting investigation of intermittent failure."
+      - "The declared scope requests no secrets, permissions, deletion, deployment or review-policy changes, irreversible action, or operator preference decision."
+    judged_at: "2026-10-20T16:37:01.253Z"
+    pin: "9b0e40bc884e59edd482e1927075abb438bab1d4553578645044dd43808cd99d"

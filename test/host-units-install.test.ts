@@ -75,7 +75,7 @@ test("W1-T2877: check mode reports missing units and changes nothing, including 
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
     const dropinRelative = `systemd/user-${SESSION_UID}.slice.d/50-rmd-cap.conf`;
     assert.deepEqual(filesUnder(root), [
-      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-scratch-mounts", "rmd-relaunch.sh",
+      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-resource-policy", "bin/rmd-scratch-mounts", "rmd-relaunch.sh",
       "systemd/rmd-acr-login.service", "systemd/rmd-acr-login.timer",
       "systemd/rmd-fleet-watchdog.service", "systemd/rmd-fleet-watchdog.timer", "systemd/rmd-fleet.service",
       "systemd/rmd-reap-stray.service", "systemd/rmd-reap-stray.timer", dropinRelative,
@@ -467,6 +467,25 @@ test("W1-T2953: comment drift alone is NOT drift — the live reaper timer check
     const changed = run([], env, root);
     assert.equal(changed.status, 1, "a changed directive must still fail");
     assert.match(changed.stdout, /DRIFTED.*rmd-reap-stray\.timer/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Operator ruling 2026-10-19: every daemon runs --max-semi-space-size=16 beside its heap ceiling, and
+// glibc arena_max 2 with a 128 KiB trim threshold. The launcher renders the node flag into the docker
+// run it issues (so a changed flag is units drift the watchdog tick converges); GLIBC_TUNABLES rides
+// the build args it sources from deploy/resource-policy.sh at run time.
+test("operator ruling 2026-10-19: the rendered launcher starts the daemon under the ruled memory flags", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-memflags-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0);
+    const launcher = readFileSync(join(root, "rmd-relaunch.sh"), "utf8");
+    const nodeOptions = launcher.split("\n").filter((l) => l.includes("NODE_OPTIONS="));
+    assert.deepEqual(nodeOptions.map((l) => l.trim()), ['-e "NODE_OPTIONS=--max-old-space-size=8192 --max-semi-space-size=16" \\'], "one NODE_OPTIONS, heap ceiling first");
+    assert.match(launcher, /"\$\{RESOURCE_POLICY_BUILD_ARGS\[@\]\}"/, "the build args (which carry GLIBC_TUNABLES) reach the docker run");
+    const policy = spawnSync("bash", ["-c", 'source "$1"; resource_policy_build_args remudero-daemon; printf "%s\\n" "${RESOURCE_POLICY_BUILD_ARGS[@]}"', "p", "deploy/resource-policy.sh"], { encoding: "utf8" });
+    assert.match(policy.stdout, /^GLIBC_TUNABLES=glibc\.malloc\.arena_max=2:glibc\.malloc\.trim_threshold=131072$/m);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

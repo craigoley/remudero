@@ -168,7 +168,7 @@ function commitIn(cwd: string, message: string, edit: () => void): void {
 type FixRound = (args: SpawnWorkerArgs) => void | Promise<void>;
 
 /** Recon, then an implement worker that commits `census.red`, then every FIX prompt to `fix`. */
-function scriptedSpawn(fix: FixRound, fixCalls: SpawnWorkerArgs[]): typeof spawnWorker {
+function scriptedSpawn(fix: FixRound, fixCalls: SpawnWorkerArgs[], built = "census.red"): typeof spawnWorker {
   let calls = 0;
   return async (args) => {
     calls += 1;
@@ -178,12 +178,12 @@ function scriptedSpawn(fix: FixRound, fixCalls: SpawnWorkerArgs[]): typeof spawn
       await fix(args);
       return workerResult({ sessionId: `fix-session-${fixCalls.length}`, text: "REPORT\nfixed the census\n" });
     }
-    commitIn(args.cwd!, "feat: the finished build", () => writeFileSync(join(args.cwd!, "census.red"), "Date.now()\n"));
+    commitIn(args.cwd!, "feat: the finished build", () => writeFileSync(join(args.cwd!, built), "Date.now()\n"));
     return workerResult({ text: "REPORT\nbuilt it\n" });
   };
 }
 
-async function drive(fx: Fixture, fix: FixRound, extra: { spawnWallClockBoundMs?: number } = {}) {
+async function drive(fx: Fixture, fix: FixRound, extra: { spawnWallClockBoundMs?: number } = {}, built?: string) {
   const fixCalls: SpawnWorkerArgs[] = [];
   // Offline `gh`: PR creation answers nothing, so a run that got past its push ends on `no PR opened`.
   const gh = ghShim([], { kind: "census-push-gh" });
@@ -196,7 +196,7 @@ async function drive(fx: Fixture, fix: FixRound, extra: { spawnWallClockBoundMs?
         planPath: fx.planPath,
         config: fx.config,
         github: OFFLINE_GITHUB,
-        spawn: scriptedSpawn(fix, fixCalls),
+        spawn: scriptedSpawn(fix, fixCalls, built),
         containmentExec: holdingContainmentExec,
         isolationExec: cleanIsolationExec,
         ...extra,
@@ -331,19 +331,45 @@ test("W1-T4656: a baseline the refusal does not offer is never pushed", async ()
   }
 });
 
-test("W1-T4656: a retried push refused by a NON-census check still takes the run.error path", async () => {
+test("a retried push refused by a NON-census gate reaches the next strike with that gate's output", async () => {
+  // Before 2026-10-17 this pinned the opposite: a non-census refusal of a strike's push ended the run at run.error,
+  // which is how W1-T9089's finished build was thrown away when test-tier-manifest refused its second strike.
+  const fx = buildFixture();
+  try {
+    let round = 0;
+    const run = await drive(fx, (args) => {
+      round += 1;
+      if (round === 1) {
+        return commitIn(args.cwd!, "fix: trade one red for another", () => {
+          execFileSync("git", ["-C", args.cwd!, "rm", "-q", "census.red"]);
+          writeFileSync(join(args.cwd!, "other.red"), "x\n");
+        });
+      }
+      return commitIn(args.cwd!, "fix: clear the other gate", () => execFileSync("git", ["-C", args.cwd!, "rm", "-q", "other.red"]));
+    });
+    assert.equal(run.error, undefined, `the run must not throw: ${String((run.error as Error)?.message)}`);
+    assert.equal(rows(run.ledger, "run.error").length, 0, "a gate refusal is repairable, never run.error");
+    assert.equal(run.fixCalls.length, 2);
+    const second = String(run.fixCalls[1]!.prompt);
+    assert.ok(second.includes("rule15-precheck: a plan record rides with code"), "strike 2 is handed the gate's own output");
+    assert.match(second, /PRE-PUSH GATE/);
+    assert.deepEqual(rows(run.ledger, "census_push.refused").map((row) => row.censuses), [["clock-signature"], ["rule15-precheck"]]);
+    assert.deepEqual(fx.hookLog().map((l) => l.split(" ")[0]).slice(0, 3), ["refused", "other", "accepted"], "every retry ran the hook");
+    assert.equal(rows(run.ledger, "census_push.cleared")[0]!.strikes, 2);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("a first push refused by a NON-census gate reaches the repair rung, not run.error", async () => {
   const fx = buildFixture();
   try {
     const run = await drive(fx, (args) =>
-      commitIn(args.cwd!, "fix: trade one red for another", () => {
-        execFileSync("git", ["-C", args.cwd!, "rm", "-q", "census.red"]);
-        writeFileSync(join(args.cwd!, "other.red"), "x\n");
-      }),
-    );
-    assert.match(String((run.error as Error)?.message), /rule15-precheck/);
-    assert.equal(rows(run.ledger, "run.error").length, 1);
-    assert.equal(rows(run.ledger, "verdict")[0]!.cause, "git-push-failed");
-    assert.deepEqual(fx.hookLog().map((l) => l.split(" ")[0]), ["refused", "other"]);
+      commitIn(args.cwd!, "fix: clear the gate", () => execFileSync("git", ["-C", args.cwd!, "rm", "-q", "other.red"])), {}, "other.red");
+    assert.equal(run.error, undefined, `the run must not throw: ${String((run.error as Error)?.message)}`);
+    assert.equal(rows(run.ledger, "run.error").length, 0);
+    assert.ok(String(run.fixCalls[0]!.prompt).includes("rule15-precheck: a plan record rides with code"));
+    assert.deepEqual(fx.hookLog().map((l) => l.split(" ")[0]).slice(0, 2), ["other", "accepted"], "the retry ran the hook");
   } finally {
     fx.cleanup();
   }

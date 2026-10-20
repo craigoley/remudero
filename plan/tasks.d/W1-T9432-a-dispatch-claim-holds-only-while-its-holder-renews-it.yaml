@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: W1-T9409's claim 62091@Craigs-Mac-mini (09:18:05Z) outlived its dead session and was released by hand at ~11:10Z; the operator asked for the root cause fixed"
   plan_refs: [W1-T1268, W1-T2270, W1-T2446, W1-T2784, W1-T5024, W1-T5047, W1-T5859, W1-T8176, W1-T8616, W1-T9323, W1-T396]
   files: [src/lib/dispatch-claim.ts, src/run-task.ts, docs/cli-reference.md, docs/operator-guide.md, test/a-dispatch-claim-holds-only-while-its-holder-renews-it.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

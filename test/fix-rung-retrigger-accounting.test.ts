@@ -231,7 +231,7 @@ test("W1-T2403/W1-T7096: the judge may escalate after repeated retriggers; the o
     retriggerCap: RETRIGGER_CAP,
     initialReview: fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], "sha-0"),
     deps: {
-      fixProgressJudge: async () => ++judgeCalls > RETRIGGER_CAP
+      fixProgressJudge: async () => ++judgeCalls >= RETRIGGER_CAP
         ? { verdict: "escalate", loop: "three retrigger rounds at the same red set", reason: "no new evidence" }
         : { verdict: "continue", reason: "one more round is justified" },
       spawn: async () => {
@@ -344,7 +344,7 @@ test("W1-T2403/W1-T7096: the former retrigger cap is diagnostic only; it does no
   });
 
   assert.equal(spawnCalls, 3, "the judge permits retriggers past the former cap of one until CI is green");
-  assert.deepEqual(judgedRoundCounts, [0, 1, 2], "each next-round decision sees the completed round history");
+  assert.deepEqual(judgedRoundCounts, [1, 2], "each next-round decision after the first (W1-T10039) sees the completed round history");
   assert.equal(rung.outcome, "fixed", "green CI and a successful review resolve the rung");
   assert.equal(rung.retriggers, 3, "all retrigger rounds are still counted for diagnostics");
   assert.equal(rung.strikes, 0, "retrigger rounds still spend no repair strikes");
@@ -373,7 +373,7 @@ test("W1-T2403/W1-T7096: a permanently red check is escalated by an explicit jud
     // ci-log mode from round 1: no review has ever posted, the check itself is the evidence.
     ciFailures: [{ name: "coverage-ratchet", logTail: "flaky infra hiccup" }],
     deps: {
-      fixProgressJudge: async () => ++judgeCalls > RETRIGGER_CAP
+      fixProgressJudge: async () => ++judgeCalls >= RETRIGGER_CAP
         ? { verdict: "escalate", loop: "coverage-ratchet stayed red through retrigger rounds", reason: "the check remains red" }
         : { verdict: "continue", reason: "retry is still justified" },
       spawn: async () => {

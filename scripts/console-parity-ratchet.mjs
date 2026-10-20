@@ -135,6 +135,9 @@ export const CLI_ONLY = {
       // 2026-10-11: the host watchdog's own alarms, counted and spooled under the host's state dir; the
       // console sees them as the needs-human issue the daemon posts from the spool.
       "host-alert",
+      // W1-T9874: reads the operator checkout's test tree and the committed placement map on the
+      // operator's host; a builder's local query, not a console action.
+      "test-place",
       // W1-T4627: an operator measurement that spawns a sealed grader on the daemon host; not a console action.
       "impossible-canary",
       // A held-out skill eval: spawns sealed paired attempts on the daemon host and writes its proposal registry there;
@@ -203,6 +206,13 @@ export const CLI_ONLY = {
     REASON_LOCAL_PROCESS,
   ),
   ...reasons(["sweep", "fix"], REASON_RUNG_DISPATCH),
+  // W1-T10279: the Mac read broker is an account-local helper on the operator's own machine.
+  gh:
+    "runs one gh read through the operator's own Mac account broker and prints gh's own output; " +
+    "the console reads GitHub through core's transport on Azure, never through a Mac session's broker",
+  "gh-broker":
+    "serves, inspects or stops the per-account read broker on the operator's Mac (installed by " +
+    "deploy/mac); there is no broker on the console's host to start or read",
   serve:
     "bootstraps the console server itself — there is no console route to start the process " +
     "that serves the console's own routes",

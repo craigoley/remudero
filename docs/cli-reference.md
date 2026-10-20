@@ -23,7 +23,7 @@ usage:
   rmd lint-plan [--plan <path>] [--base <git-ref>] [--merge-base]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
-  rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
+  rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--sandbox-metrics]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
   rmd pr-checks <pr-number> [--repo <name>]   # Print a PR head's checks (runs and commit statuses, latest attempt) and exit 1 if any is red.
   rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]   # Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.
   rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]   # Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.
@@ -36,11 +36,14 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>   # Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.
+  rmd gh-broker serve | status [--since <dur>] | stop   # Serve, inspect or stop the per-account GitHub read broker (Mac only; installed by deploy/mac).
   rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>   # Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
   rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
   rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]   # Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
-  rmd claim <task-id> [--drop]   # Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.
+  rmd test-place <test-path...> [--json]   # Print the test/ folder each test file belongs in, computed from the src modules it imports.
+  rmd claim <task-id> [--drop]   # Take, hold, renew or drop the dispatch claim the fleet honours, for a hand-build.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
@@ -219,7 +222,7 @@ W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN 
 The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
 
 ```
-rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]
+rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--sandbox-metrics]
 ```
 
 W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: rule-checks:population, cli-reference:check, claims, learnings-budget-ratchet, jscpd, comment-load-signal, depcruise, api-client:check, no-hand-rolled-fetch:check, source-size-signal, lint-plan:fast, census:self-path-proof, census:bound-kind, census:ledger-literal, census:catch-erasure, census:negative-reachability, census:authority, census:no-shallowing, census:no-draft-pr, worker-branch-shape:check, census-precheck — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code
@@ -346,6 +349,26 @@ rmd ledger-grep <pattern>
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
 
+### `rmd gh`
+
+Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.
+
+```
+rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>
+```
+
+W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Writes go straight to gh, unpaced. With no live broker it runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.
+
+### `rmd gh-broker`
+
+Serve, inspect or stop the per-account GitHub read broker (Mac only; installed by deploy/mac).
+
+```
+rmd gh-broker serve | status [--since <dur>] | stop
+```
+
+W1-T10279: serve listens on <cache>/remudero/gh-broker/broker.sock (directory 0700, this uid only) and rewrites a heartbeat file every interval it advertises there; hooks/deny-floor.sh reads it to route raw gh reads to rmd gh. status prints queue depth by class, each limiter's gap, hold and primary spread, and counts of hit-fresh, coalesced, revalidated-304, upstream-200 and refused; --since <n>s|m|h|d summarises the request log (reads, upstream calls, share served without upstream, longest interactive wait). stop ends the server. deploy/mac/install-gh-read-broker.sh installs the launchd agent that keeps serve running; nothing on Azure changes.
+
 ### `rmd inspect`
 
 Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
@@ -386,15 +409,25 @@ rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--r
 
 2026-10-11: the host watchdog's entry into src/lib/launcher-host-alerts.ts. --raise records one observation of a condition (crash-loop, units-not-on-main, units-diverged, deploy-code-fetch-failed, deploy-code-diverged, deploy-run-problem) under <state-root>/launcher-alerts/. A refusal is counted per consecutive observed tick: at the deployer's REFUSAL_PERSISTING_AT it writes launcher_alert.persisting, at REFUSAL_ESCALATE_AT it spools one needs-human escalation under <state-root>/escalation-spool/ for the daemon to post (the host has no GitHub credential). A crash loop is spooled on its first observation, because the launcher only names one after its own tiering. --clear ends the run when the launcher sees the step succeed: a still-spooled escalation is withdrawn and one the daemon already opened gets a spooled close. Prints one JSON line with --json.
 
+### `rmd test-place`
+
+Print the test/ folder each test file belongs in, computed from the src modules it imports.
+
+```
+rmd test-place <test-path...> [--json]
+```
+
+W1-T9874: a test's folder is computed, not chosen. Extracts the test's value, type-only and helper imports (helpers followed through test/helpers|setup|lib), repo path strings and imported symbol names with a comment-aware scanner, then scores every module by reach weight x IDF x symbol count plus name bonuses, sums per subsystem and maps the winner to one of the 21 folders (or rules/ for a suite that reads the repo as text). The data is scripts/test-placement/subsystem-map.json and test-folders.tsv. Prints the folder, the confidence (high, medium, low, none) and the reasons for each path; --json prints the same as an array. Exits 2 on no path or an unknown flag, 1 on a path that does not exist.
+
 ### `rmd claim`
 
-Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.
+Take, hold, renew or drop the dispatch claim the fleet honours, for a hand-build.
 
 ```
 rmd claim <task-id> [--drop]
 ```
 
-W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. A claim needs no release verb: the existing release arms drop it once the task has landed.
+W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. W1-T9432: a claim holds only while its holder renews it. --hold takes the claim (or adopts this host's existing one), stays in the foreground, renews it every 5 minutes (--interval-ms <n> overrides the pace) printing one `renewed` line each time, and drops it on SIGINT, SIGTERM or SIGHUP; run it in the background of a session so the claim dies with the session. A `lost` renewal exits 1 naming the new holder. --renew renews once, and only a claim whose anchor's host is this host. A renewal is a child commit of the claim pushed with --force-with-lease, so it never recreates a reclaimed claim. A lane that meets a claim whose holder has been silent (no renewal and no run-<id>-* branch commit) for twice W, the p90 of this instance's measured claim-to-verdict durations, reclaims it; a hand-build that neither holds nor renews its claim is reclaimed that way.
 
 ### `rmd routing-ab`
 

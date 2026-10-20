@@ -52,6 +52,11 @@ export const DEFAULT_DAEMON_MEMORY_POLICY: DaemonMemoryPolicy = {
 /** The tightest growth factor the governor applies: a collection at every 10% of growth. */
 export const TIGHTEST_HEAP_GROWING_PERCENT = 10;
 
+/** W1-T9596: restart only for growth beyond the charge an over-line boot already held. */
+export const BOOT_BASELINE_RESTART_MARGIN = 1.25;
+/** Below this heap share, tighter GC cannot materially reduce the held daemon's charge. */
+export const FUTILE_RESTART_HEAP_SHARE = 0.4;
+
 const ROW_BOUNDS: Record<keyof DaemonMemoryPolicy, { min: number; max: number }> = {
   heapGrowingPercent: { min: TIGHTEST_HEAP_GROWING_PERCENT, max: 300 },
   tightenShare: { min: 0.05, max: 0.95 },
@@ -141,6 +146,24 @@ export interface DaemonMemoryEntryResult {
   /** The NODE_OPTIONS this process was started with, and what its children now inherit. */
   node_options_before?: string;
   node_options_children?: string;
+  /** Operator ruling 2026-10-19: the malloc tuning the launch set (GLIBC_TUNABLES), so a boot row shows
+   *  it took effect. Absent when the launch set none. The node flags are in node_options_before. */
+  glibc_tunables?: string;
+  /** The node flags a run child and an automated retro child start with: {@link childHeapPolicyArgs}. */
+  child_node_args?: string[];
+}
+
+/** The growth percent this process's run and retro children start with; set by {@link applyDaemonMemoryPolicy}. */
+let childHeapGrowingPercent: number | undefined;
+
+/**
+ * The node flags that start a run child or an automated retro child under the daemon's growth percent. NODE_OPTIONS
+ * refuses `--heap-growing-percent`, so before this a child grew at V8's default factor: OBSERVED 2026-10-19, a run child
+ * peaked at 915 MB and an automated retro child at 1.58 GB, then held 565 MB and 687 MB in swap while idle. The flag
+ * goes on the child's own command line. Empty in a process that never applied the policy.
+ */
+export function childHeapPolicyArgs(): string[] {
+  return childHeapGrowingPercent === undefined ? [] : [heapGrowingFlag(childHeapGrowingPercent)];
 }
 
 /** Daemon entry: set the growth factor and take the heap ceiling out of the inherited NODE_OPTIONS. This
@@ -152,10 +175,13 @@ export function applyDaemonMemoryPolicy(policy: DaemonMemoryPolicy, io: DaemonMe
   const after = withoutHeapCeiling(before);
   if (after === undefined) delete env.NODE_OPTIONS;
   else env.NODE_OPTIONS = after;
+  childHeapGrowingPercent = policy.heapGrowingPercent;
   return {
     heap_growing_percent: Math.round(policy.heapGrowingPercent),
+    child_node_args: childHeapPolicyArgs(),
     ...(before !== undefined ? { node_options_before: before } : {}),
     ...(after !== undefined ? { node_options_children: after } : {}),
+    ...(env.GLIBC_TUNABLES !== undefined ? { glibc_tunables: env.GLIBC_TUNABLES } : {}),
   };
 }
 
@@ -209,7 +235,7 @@ export function readDaemonMemory(io: DaemonMemoryReadingIo = {}): DaemonMemoryRe
   return reading;
 }
 
-export type MemoryPressureTier = "clear" | "tighten" | "restart";
+export type MemoryPressureTier = "clear" | "tighten" | "restart" | "hold";
 
 export interface MemoryPressureDecision {
   tier: MemoryPressureTier;
@@ -258,13 +284,29 @@ export function decideMemoryPressure(
 
 export interface MemoryGovernorStep extends MemoryPressureDecision {
   reading: DaemonMemoryReading;
+  /** Observation only: expose the actual first reading, including an unknown budget, not a later warm guess. */
+  initialReading?: boolean;
+  baseline?: Readonly<DaemonMemoryReading & { charged_bytes: number; share?: number; boot_over_line: boolean }>;
   /** True when the tier or the applied growth percent changed on this step. */
   changed: boolean;
   previousTier: MemoryPressureTier;
+  /** Present only when a futile-restart hold begins, ends, or its remedy/budget changes. */
+  futileRestart?: {
+    held: boolean;
+    baseline_bytes: number;
+    charged_bytes: number;
+    line_bytes?: number;
+    share?: number;
+    restart_share: number;
+    k: number;
+    budget_bytes?: number;
+    budget_source?: DaemonMemoryReading["budget_source"];
+    heap_share: number;
+  };
 }
 
 export interface DaemonMemoryGovernor {
-  step(): MemoryGovernorStep;
+  step(readingIsUsable?: (reading: DaemonMemoryReading) => boolean): MemoryGovernorStep;
   /** The growth percent last applied (W1-T8401: a reclaim restores it after its tightest-factor collection). */
   inForcePercent?(): number;
 }
@@ -273,6 +315,7 @@ export interface DaemonMemoryGovernorOptions {
   policy?: DaemonMemoryPolicy;
   read?: () => DaemonMemoryReading;
   setFlags?: (flags: string) => void;
+  heapUsed?: () => number;
 }
 
 /** The stateful half: reads, decides, applies a changed growth percent, and remembers what is in force. */
@@ -280,18 +323,52 @@ export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): D
   const policy = opts.policy ?? DEFAULT_DAEMON_MEMORY_POLICY;
   const setFlags = opts.setFlags ?? setFlagsFromString;
   const read = opts.read ?? (() => readDaemonMemory());
+  const heapUsed = opts.heapUsed ?? (() => getHeapStatistics().used_heap_size);
   let inForce = Math.round(policy.heapGrowingPercent);
   let tier: MemoryPressureTier = "clear";
+  let baseline: number | undefined;
+  let baselineReading: MemoryGovernorStep["baseline"];
+  let bootOverLine = false;
+  let heldBudget: number | undefined;
+  let heldSource: DaemonMemoryReading["budget_source"];
   return {
-    step() {
+    step(readingIsUsable) {
       const reading = read();
+      if (readingIsUsable && !readingIsUsable(reading)) throw new Error("post-reclaim charge or unchanged budget is unreadable; retain the restart");
       const decision = decideMemoryPressure(reading, policy, inForce);
+      const charged = reading.rss_bytes + (reading.swap_bytes ?? 0);
+      const initialReading = baseline === undefined;
+      if (baseline === undefined) {
+        baseline = charged;
+        bootOverLine = decision.share !== undefined && decision.share >= policy.restartShare;
+        baselineReading = { ...reading, charged_bytes: charged, share: decision.share, boot_over_line: bootOverLine };
+      }
+      const held = bootOverLine && decision.share !== undefined && decision.share >= policy.restartShare &&
+        charged <= BOOT_BASELINE_RESTART_MARGIN * baseline;
+      const heapShare = held || tier === "hold" ? heapUsed() / charged : 0;
+      if (held) {
+        decision.tier = "hold";
+        decision.heapGrowingPercent = heapShare < FUTILE_RESTART_HEAP_SHARE
+          ? Math.round(policy.heapGrowingPercent) : TIGHTEST_HEAP_GROWING_PERCENT;
+        delete decision.detail;
+      }
       const previousTier = tier;
       const changed = decision.tier !== tier || decision.heapGrowingPercent !== inForce;
+      const futileChanged = (held || tier === "hold") && (changed ||
+        reading.budget_bytes !== heldBudget || reading.budget_source !== heldSource);
+      const futileRestart: MemoryGovernorStep["futileRestart"] = futileChanged ? {
+        held, baseline_bytes: baseline, charged_bytes: charged,
+        line_bytes: reading.budget_bytes === undefined ? undefined : policy.restartShare * reading.budget_bytes,
+        share: decision.share, restart_share: policy.restartShare, k: BOOT_BASELINE_RESTART_MARGIN,
+        budget_bytes: reading.budget_bytes, budget_source: reading.budget_source, heap_share: heapShare,
+      } : undefined;
       if (decision.heapGrowingPercent !== inForce) setFlags(heapGrowingFlag(decision.heapGrowingPercent));
       inForce = decision.heapGrowingPercent;
       tier = decision.tier;
-      return { ...decision, reading, changed, previousTier };
+      heldBudget = held ? reading.budget_bytes : undefined;
+      heldSource = held ? reading.budget_source : undefined;
+      return { ...decision, reading, changed, previousTier, initialReading, baseline: baselineReading,
+        ...(futileRestart ? { futileRestart } : {}) };
     },
     inForcePercent: () => inForce,
   };
@@ -823,6 +900,53 @@ export function installDaemonSlackReclaimer(reclaimer: DaemonSlackReclaimer | un
 
 export function installedDaemonSlackReclaimer(): DaemonSlackReclaimer | undefined {
   return installedReclaimer;
+}
+
+/** Reclaim once before an otherwise-required cgroup restart; only a complete fresh reading can avert it. */
+export function reclaimBeforeMemoryRestart(
+  step: MemoryGovernorStep,
+  governor: DaemonMemoryGovernor,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  reclaimer: DaemonSlackReclaimer | undefined = installedDaemonSlackReclaimer(),
+): MemoryGovernorStep {
+  if (step.tier !== "restart") return step;
+  let next = step;
+  let outcome = "unavailable";
+  let recheck = "not-run";
+  let reason: string | undefined;
+  const completeReading = (read: DaemonMemoryReading): boolean => Number.isFinite(read.rss_bytes) && read.rss_bytes > 0 &&
+    typeof read.budget_bytes === "number" && Number.isFinite(read.budget_bytes) && read.budget_bytes > 0 &&
+    read.budget_bytes === step.reading.budget_bytes && read.budget_source === step.reading.budget_source &&
+    typeof read.swap_bytes === "number" && Number.isFinite(read.swap_bytes) && read.swap_bytes >= 0;
+  try {
+    if (reclaimer === undefined) reason = "no daemon slack reclaimer installed";
+    else {
+      const record = reclaimer.reclaim();
+      outcome = record.outcome;
+      reason = record.reason;
+      if (record.outcome === "reclaimed") {
+        recheck = "unavailable";
+        const fresh = governor.step(completeReading);
+        const complete = completeReading(fresh.reading) && Number.isFinite(fresh.share);
+        recheck = complete ? "measured" : "unavailable";
+        if (complete) next = { ...fresh, previousTier: step.previousTier, changed: step.changed || fresh.changed };
+        else reason = "post-reclaim charge or unchanged budget is unreadable; retain the restart";
+      }
+    }
+  } catch (error) {
+    log("daemon.memory_restart_reclaim", {
+      outcome: "unavailable", recheck, reason: String((error as Error)?.message ?? error).slice(0, 200),
+      prior_share: step.share, share: step.share,
+      budget_bytes: step.reading.budget_bytes, budget_source: step.reading.budget_source, relieved: false,
+    });
+    return step;
+  }
+  log("daemon.memory_restart_reclaim", {
+    outcome, recheck, reason, prior_share: step.share, share: next.share,
+    budget_bytes: step.reading.budget_bytes, budget_source: step.reading.budget_source,
+    relieved: next.tier !== "restart",
+  });
+  return next;
 }
 
 /** The reclaim's fields on a hold row (`dispatch_deferred_wip`, `dispatch_memory_observed`, `sweep.fix_capacity`). */

@@ -1,5 +1,5 @@
 - id: W1-T9501
-  title: "A READ-MODEL LOCK STALL NEVER NAMES THE CONNECTION HOLDING THE LOCK — on 2026-10-14 serve's projector (thread 4) AND its views writer (thread 12) both got 'database is locked' on core.v1.sqlite from 12:27:02Z to 12:40:43Z, the stall escalated #11656, and nothing recorded which third connection held the write lock for 13 minutes"
+  title: "A READ-MODEL LOCK STALL NEVER NAMES THE RECORDED WRITE TRANSACTION — on 2026-10-14 serve's projector and views writer repeatedly got 'database is locked' from 12:27:02Z to 12:40:43Z, but the failed connections do not identify the blocker or prove one connection held it throughout"
   repo: remudero
   depends_on: []
   type: implement
@@ -11,10 +11,18 @@
   origin: "operator session 2026-10-14: triage of needs-human #11656 (READ-MODEL-CORE), fix every problem at the root"
   plan_refs: [W1-T5177, W1-T4568]
   files: [src/lib/read-model-db.ts, src/lib/read-model-worker.ts, test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
+    CORRECTNESS AMENDMENT 2026-10-17: distinguish attempted acquisition, recorded successful acquisition,
+    released/stale records and unverifiable process identity. This preserves the three-file diagnostic scope,
+    budget, review gates, limits and all operational guards; it adds no lock, reclaim or recovery authority.
+    A natural 21:12:51Z agent publication failure now identifies exec.begin-immediate on namespace PID508474.
+    The independently checked current serve host PID3528404/start275349447 maps to that namespace PID.
+    This identifies the failing connection, not the blocking holder. SQLite's transaction documentation says
+    BEGIN IMMEDIATE can fail while another write transaction is active; no successful acquisition can be
+    inferred from a record written before that call returns. The bind mount also crosses PID namespaces.
     OBSERVED in the core ledger (archive ledger.2026-10-14T13-40-43-328Z.ndjson.gz and the live file), serve run
     SERVE-1791980175174, pid 128:
       - 12:27:02Z first read_model.tick_failed "database is locked [connection=369176e1…/writer pid=128 thread=4
@@ -24,34 +32,53 @@
         opened #11656; tick_failed continued (failures 9..17, backoff 60 s) with fresh connection ids after each reopen.
       - 12:40:43Z read_model.unstalled, stalledMs 784978, with no operator action. Single one-retry lock misses
         recurred at 13:24Z, 13:48-13:49Z and 15:34Z.
-    The writer lock was held by a THIRD connection for about 13 minutes. identifyLockFailure (read-model-db.ts)
+    INFERRED: other transaction activity blocked these attempts. The rows do not establish one continuous
+    third holder for the entire thirteen-minute interval. identifyLockFailure (read-model-db.ts)
     appends only the WAITING connection's id, role, pid and thread, so neither the tick_failed rows nor the
     escalation can say which connection, thread, process or code path held it. The read-model directory is bind-mounted
     into BOTH the serve and core-daemon containers (/mnt/scratch/rmd/rmd-state2/read-model), so the holder may be
-    another process. W1-T5177 moved READERS onto read-only connections, so this was a writer or a checkpoint.
-    Without the holder's name, the fix for the holder cannot be chosen; this task supplies it.
+    another process. W1-T5177 moved READERS onto read-only connections; the actual conflicting operation
+    and its owner remain unknown. This task supplies bounded transaction observations, not a recovery policy.
   design: |
     1. Every writable ReadModelDb (openReadModel's writer and attachReadModel) records each write transaction it
-       opens: BEGIN IMMEDIATE (immediate/withWriteTransaction) writes a small holder record — connection id, pid,
-       thread id, the caller's label (the lease name or the operation, e.g. "projector.tick", "view_cost",
-       "memo_retention"), and startedMs — into a per-database sidecar directory beside the db (readModelSidecarDir),
-       one file per connection, written before BEGIN and removed after COMMIT or ROLLBACK. A process that dies
-       leaves its file; a reader treats a record whose pid is not alive on this host as stale and says so.
-    2. identifyLockFailure appends the holders it finds to the error text:
-       `holders=[<connection>/<label> pid=<p> thread=<t> held=<ms>]`, oldest first, bounded to the three oldest.
-       No holder file found is stated as `holders=none-recorded` (a connection outside this code, e.g. the sqlite3 CLI).
-    3. read_model.stalled and read_model.stall_escalated carry the same holders field, and the escalation detail
-       names the oldest holder and how long it has held the lock, so the issue says what to fix.
-    4. The holder record never blocks or fails a write: a sidecar write error is swallowed and logged once per
-       connection as read_model.holder_record_failed.
-    Tests go in the new file, titled verbatim as in the proofs, over a REAL WAL file in a private tmp dir with two
-    connections: one holds BEGIN IMMEDIATE with a label, the other's write fails and its error names the holder.
+       opens in a per-database sidecar directory (readModelSidecarDir), one bounded atomic record per connection.
+       Include connection/transaction nonce, caller label, thread, process identity and timestamps.
+       An attempted BEGIN is never a verified holder.
+       A before-BEGIN record, if needed for a blocked call, is explicitly attempting. Only after BEGIN IMMEDIATE
+       returns successfully may it become recorded-acquired, with a separate acquisition timestamp. A failed
+       BEGIN never promotes it. Successful COMMIT/ROLLBACK or close retires only that connection/transaction's
+       own record; a failed COMMIT may leave a live transaction and must not be reported as released.
+    2. Process liveness requires matching boot ID, PID namespace and process start ticks; otherwise report unknown.
+       A bare pid, process existence, age or namespace mismatch cannot establish liveness or death. Preserve
+       cross-container records as unverifiable when identity cannot be checked; PID reuse is not the old owner.
+       Dead-identity records are stale. Missing, malformed, unreadable and truncated inventories are explicit
+       unknown/incomplete states, never no-holder evidence. A successful acquisition record is last-recorded
+       transaction evidence, not independent proof that it still owns SQLite's lock at the failure instant.
+    3. identifyLockFailure and read_model.stalled/stall_escalated carry the same bounded diagnostic observations:
+       attempting, recorded-acquired, stale or unknown, with label, identity, as-of and elapsed record age.
+       Keep at most three oldest relevant records and report inventory completeness separately. An attempt's
+       age is never held duration. No record is none-recorded, not no lock; outside connections and implicit
+       transactions may be unobserved. A failing connection is never relabeled as the blocking connection.
+    4. Diagnostic records grant no lock-release, lease-clearing, capacity-reclaim or lifecycle authority.
+       Sidecar failure never blocks/fails a database write, changes busy timeouts or transaction ordering,
+       deletes another connection's records, or increases a resource/safety limit. Log a bounded
+       read_model.holder_record_failed once per connection; failed cleanup stays explicitly unverified.
+    Tests stay in the existing new-file scope with the verbatim proof titles. Use a REAL private WAL database
+    and two connections: one successfully acquires BEGIN IMMEDIATE; the other's real failed BEGIN remains an
+    attempt, not a holder. Preserve label/oldest-record escalation and unknown/unrecorded controls. Add
+    acquisition failure, failed COMMIT, successful release/close, cleanup failure, PID reuse, foreign namespace,
+    identity unreadability, malformed/truncated inventory and late cleanup of an old nonce controls. At least
+    one test uses the real default sidecar writer and a real child process; fakes alone do not cover it.
   acceptance:
-    - claim: "a write that fails on the read model's lock names the connection that holds it, with its label and how long it has held it"
+    - claim: "a real failed write reports the separately recorded successful acquisition and label, never its own attempting record as the holder"
       proof: 'grep: test("W1-T9501: a locked write names the connection holding the lock" in test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts'
-    - claim: "a stall escalation carries the oldest holder"
+    - claim: "a stall escalation carries the oldest recorded acquisition with explicit state and observation age, not an invented continuous blocking duration"
       proof: 'grep: test("W1-T9501: a stall escalation names the oldest lock holder" in test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts'
-    - claim: "a holder whose process is gone is reported as stale, and a lock held by an unrecorded connection says none-recorded"
+    - claim: "verified dead identities are stale, reused or foreign/unverifiable identities are unknown, and absent records mean none-recorded rather than no lock"
       proof: 'grep: test("W1-T9501: a dead or unrecorded holder is named as such" in test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts'
   falsifier: |
     Remove the holder record from immediate() and the locked write's error names only the waiting connection again.
+    Promote a before-BEGIN attempt to a holder: the real competing-writer control must fail. Trust bare pid
+    existence or age across namespaces: identity controls must fail. Treat failed COMMIT or sidecar cleanup as
+    verified release: the corresponding controls must fail. Restore each change and require actual passing
+    test/file inventories, same-commit instrumented coverage, canonical proofs, governed review and CI.

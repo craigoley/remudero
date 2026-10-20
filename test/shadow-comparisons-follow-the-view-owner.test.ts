@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { createReadModelTicker, createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, threadViews, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { shadowReadiness, viewShadowPath, withViewShadow } from "../src/lib/view-shadow.js";
+import { readShadowCounters } from "../src/lib/view-shadow-store.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { trackWorkerThreads } from "../src/lib/worker-heaps.js";
 
@@ -123,8 +124,9 @@ test("shadow owner: captured inputs stay paired and failed preparation grants no
   value = 2;
   ticker.buildNow("paired");
   assert.equal(ticker.shadow(prepared), true, "compare the captured body, not the peer's newer body");
-  const bytes = readFileSync(viewShadowPath(dir), "utf8");
-  const state = JSON.parse(bytes).paired;
+  const persisted = () => readShadowCounters(viewShadowPath(dir), true)!.states;
+  const bytes = JSON.stringify(persisted());
+  const state = persisted().paired!;
   assert.equal(state.samples, 1);
   assert.equal(state.diffs.real, 0);
   assert.equal(shadowReadiness("paired", state, Date.now()).ready, false, "one matching sample never waives the sustained readiness guard");
@@ -132,7 +134,7 @@ test("shadow owner: captured inputs stay paired and failed preparation grants no
   fail = true;
   assert.equal(ticker.prepareShadow(request), undefined);
   assert.ok(events.some((message) => message.type === "log" && message.step === "view.shadow_failed"));
-  assert.equal(readFileSync(viewShadowPath(dir), "utf8"), bytes, "missing and failed preparation cannot manufacture a sample");
+  assert.equal(JSON.stringify(persisted()), bytes, "missing and failed preparation cannot manufacture a sample");
 });
 
 test("shadow owner: native heavy worker accrues parity for unchanged values without promoting", async (t) => {
@@ -172,7 +174,16 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
     worker.stop(); await book.stop(); rmSync(dir, { recursive: true, force: true });
   });
   worker.start();
-  const state = () => existsSync(viewShadowPath(dir)) ? JSON.parse(readFileSync(viewShadowPath(dir), "utf8"))["paired-worker"] : undefined;
+  const state = () => {
+    try { return readShadowCounters(viewShadowPath(dir), true)?.states["paired-worker"]; }
+    catch (error) {
+      // A reader can see the new SQLite file before its first schema transaction commits.
+      // This is UNKNOWN, never an old receipt or a sample. Wait for the real committed control.
+      if ((error as { code?: string }).code === "ERR_SQLITE_ERROR" && /no such table: meta/.test(String(error))) return undefined;
+      if (String(error) === "Error: shadow counter migration is not committed") return undefined;
+      throw error;
+    }
+  };
   // Native threads load the application under the flake screen's CPU contention before building.
   await until(() => logs.some((row) => row.step === "read_model.view_lane_moved" && row.extra.view === "paired-worker" && row.extra.to === "heavy"), 60_000);
   await until(() => existsSync(marks) && readFileSync(marks, "utf8").includes('"lane":"heavy"'), 60_000);
@@ -182,11 +193,13 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
   assert.ok(drive, "the real handle registered its shadow driver");
   drive();
   await until(() => (state()?.samples ?? 0) > 0, 60_000);
+  const committed = state();
+  assert.ok(committed, "the awaited committed counter is readable");
   assert.equal(sent, 1, "one driver offer produces one comparison without a request");
-  assert.equal(state().samples, 1);
-  assert.equal(state().requests, 0);
-  assert.equal(state().diffs.real, 0);
-  assert.equal(shadowReadiness("paired-worker", state(), Date.now()).ready, false);
+  assert.equal(committed.samples, 1);
+  assert.equal(committed.requests, 0);
+  assert.equal(committed.diffs.real, 0);
+  assert.equal(shadowReadiness("paired-worker", committed, Date.now()).ready, false);
   assert.equal(worker.autoMode?.("paired-worker"), "shadow");
   assert.deepEqual(worker.body("paired-worker")?.body.data, { value: 1 });
   assert.equal(logs.some((row) => row.step === "view.auto_promoted"), false, "actual default workers preserve the sustained readiness gate");

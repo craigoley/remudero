@@ -15,7 +15,8 @@ const ADVANCE: Extract<DaemonFreshness, { stale: true }> = {
   oldSha: "a".repeat(40),
   newSha: "b".repeat(40),
   installNeeded: true,
-  changes: [{ sha: "b".repeat(40), files: ["src/lib/daemon.ts"] }],
+  // W1-T9089: the daemon's own code is no longer full weight, so a material advance is a threshold's worth of source.
+  changes: Array.from({ length: 18 }, (_, n) => ({ sha: n.toString(16).padStart(40, "b"), files: [`src/lib/module-${n}.ts`] })),
 };
 
 function deferred<T>() {
@@ -47,7 +48,6 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
   let pause = false;
   let complete = false;
   let nowMs = Date.now();
-  const boundaries = new Map<string, () => unknown>();
   const run = runDaemon(loadPlan(path), {
     refreshMerged: () => () => false,
     checkStop: () => stop ? "fixture cleanup" : undefined,
@@ -64,9 +64,8 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
     ...(backgroundSweep ? { sweep: () => sweep.promise } : {}),
     runInstall: () => logs.push({ step: "install" }),
     log: (step, extra) => logs.push({ step, extra }),
-    runOne: async (id, options) => {
+    runOne: async (id) => {
       started.push(id);
-      if (options) boundaries.set(id, options.restartAtWorkerBoundary);
       if (started.length === 2) ready.resolve();
       await gates.get(id)?.promise;
       if (externalWait) {
@@ -88,15 +87,13 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
       finished.push(id);
       return result(id, externalWait);
     },
-  }, { laneCount: 2, pollIntervalMs: 10, max });
+  }, { freshnessMinLifetimeMs: 0, laneCount: 2, pollIntervalMs: 10, max });
   void run.then(() => { complete = true; });
   return {
     logs, started, finished, run, ready: ready.promise,
     advance: (value: DaemonFreshness = ADVANCE) => { advance = value; },
     pause: () => { pause = true; },
     release: (id: string) => gates.get(id)?.resolve(),
-    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
-    boundary: (id: string) => boundaries.get(id)?.(),
     releaseSweep: () => sweep.resolve(),
     tick: async (elapsedMs = 0) => {
       nowMs += elapsedMs;
@@ -163,8 +160,7 @@ test("W1-T5308: in-flight runs are asked to yield at their external-wait boundar
     await releaseQuietWindow(h);
     assert.ok(h.logs.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart"));
     assert.deepEqual(h.finished, [], "live workers remain live until they enter their external wait");
-    // W1-T7806: A was in flight at the latch, so it holds refill open until it reaches a boundary (or settles).
-    assert.ok(h.boundary("A"), "A reaches a worker boundary and reads the latched restart");
+    // W1-T9089: A in flight at the decision is awaited; no daemon latch reaches into it, its own external wait yields.
     h.release("B");
     await flush();
     assert.deepEqual(h.finished, ["B"], "B yields on its own while A keeps working");

@@ -43,7 +43,7 @@ import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
-import { DEFAULT_SWEEP_POLICY, RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
+import { DEFAULT_SWEEP_POLICY, RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { ghJson } from "./worker.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
@@ -1570,6 +1570,13 @@ export function resolveReviewTaskId(
   return taskIdFromRunBranch(headRefName);
 }
 
+/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review. */
+export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
+  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL) return true;
+  return taskIdFromRunBranch(headRefName) === taskId &&
+    /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
+}
+
 /**
  * Resolve a PR's task id (W1-T453): the `Remudero-Task:` trailer first, the `run-<taskId>-*` head ref only as
  * a fallback. The fallback is withheld for a plan-only filing (#1527), judged by the caller's own
@@ -2259,7 +2266,7 @@ export function* openPrViewSteps(
         ? undefined
         : bodyReviewContractDigest({
             reviewLedgerKey, body: pr.body ?? "",
-            unfiled: taskId === undefined || taskId === UNFILED_RUN_SENTINEL,
+            unfiled: usesUntaskedReviewMetadata(taskId, pr.headRefName),
             recordedDigest: priorReviewForReuse?.reviewContractDigest,
             semanticRisk: DEFAULT_RISK, semanticBudgetUsd: UNTASKED_REVIEW_BUDGET_USD,
           });
@@ -2390,6 +2397,7 @@ export function* openPrViewSteps(
       // REQUIRED child already visible while that aggregate is still pending.
       ciFailures,
       redRequiredChecks,
+      pendingRequiredChecks: pendingQualityGateNames(pr.statusCheckRollup, ciGateRequired), // W1-T10067
       // W1-T1223 — the "absence of a verdict" observable, populated alongside `ciFailures`
       // above off the SAME rollup read (no extra request); see `cancelledRequiredChecks`'s own
       // doc.

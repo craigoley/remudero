@@ -1,0 +1,73 @@
+- id: W1-T10095
+  title: An unreadable commit range is not an empty emitter pass
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator followthrough 2026-10-17: distinguish a failed Git range read from a genuinely empty validator corpus"
+  plan_refs: [W1-T416, W1-T421, W1-T8800, W1-T8945, W1-T9979]
+  files: [src/lib/commit-message.ts, test/an-unreadable-commit-range-is-not-an-empty-emitter-pass.test.ts, test/commit-message.test.ts, test/preflight-spawn-failure.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED while preparing an owned unpublished history-only message correction:
+    a new clone lacked the original comparison commit objects. Real commitlint refused
+    the invalid revision range. Real readRangeCommitMessages returned an empty array,
+    and emitterChecksStep reported PASS with zero messages for that same unreadable
+    range. The private preparation guard refused this as evidence, fetched the preserved
+    objects and required exactly two messages before either negative or positive control.
+    This is not a full-preflight false pass: the sibling commitlint correctly blocked it.
+    Current readRangeCommitMessages invokes Git and calls spawnFailureDetail, which
+    distinguishes a missing exit status but intentionally leaves ordinary nonzero status
+    for each caller to judge. This caller never judges it before splitting empty stdout.
+    Existing W416 fixed trimmed empty messages and conventional-rule parity, not failed
+    Git range reads. Genuinely empty, successfully read ranges remain a separate valid
+    state; rejecting every zero would conflate absence with an outage in the other direction.
+  design: |
+    1. In the maintained range reader, require Git's actual successful exit before
+       parsing messages. A normal nonzero Git exit is an explicit unreadable/refused
+       result naming its bounded diagnostic/status; missing status, signal and errno
+       keep their existing distinct spawn-failure explanations. Never infer success
+       from empty stdout or fabricate a commit message. Preserve the real shared CLI,
+       emitter rules, source bodies, trailers and ordinary valid-range behavior.
+    2. Drive the REAL default on a disposable Git repository with a valid one-commit
+       range, an invalid/missing from or to revision and a genuinely empty successful
+       range. Set Git identity only in the fixture; use isolated fixture global/system
+       config and no live remote. Show valid conventional text passes, real invalid
+       conventional text fails, failed reads cannot report clean zero, and successful
+       empty ranges preserve their documented semantics. Test status/signal/errno arms
+       through the existing seam without replacing every real default with a fake.
+    3. Delete the actual status check and require the unreadable-range semantic case to
+       fail, then restore it to pass. Keep W416 empty-message/rule-parity and existing
+       spawn-failure cases unchanged. Do not weaken commitlint, shape messages to hide
+       history, rename a production primitive, widen baselines or add detector exemptions.
+    4. Check merged trailer/run-branch credit, claims, ALL OPEN subjects and the actual
+       selector before build/publication. Commit before verified-path tests and mapped
+       coverage of every changed source SF; use shipped host slots and child tsx/tmp
+       preload. One native per distinct final repair; reproduce every new failure on
+       its actual unchanged pinned base before attribution. Stored canonical proofs and
+       current-head hosted CI/coverage/normal review/merge remain required, not waived.
+    5. This is validator truthfulness, not new policy or live authority. Preserve healthy
+       trusted PR flow and owner/admin override; registry/admission stays opt-in SHADOW
+       ONLY, scoped services and public Apache implementation remain. No scheduler,
+       worker stop, deployment, credential/config/settings change or external closure.
+  acceptance:
+    - claim: The actual emitter default distinguishes unreadable ranges from successful empty reads
+      proof: 'unit test: actual emitter range reads refuse failed Git without erasing valid empty ranges'
+    - claim: Real valid and invalid commit messages preserve the existing conventional rules
+      proof: 'unit test: emitter range status checks preserve healthy and invalid message controls'
+    - claim: Nonzero Git status and existing signal or errno failures retain truthful diagnostics
+      proof: 'unit test: emitter range failures name Git status signal and errno without certifying zero'
+    - claim: Removing the real range status check restores the observed false zero-message pass
+      proof: 'unit test: actual emitter range status checking is load-bearing'
+  falsifier: |
+    The real Git invalid-range call exits nonzero and prints no messages; before repair
+    the maintained emitter reports PASS0. A successful HEAD..HEAD read also returns no
+    messages but is not an outage. After repair only the failed read refuses. Deleting
+    the real status check returns the semantic false pass; exact restoration passes
+    beside the healthy, valid-empty, invalid-message, signal and errno controls.

@@ -9,8 +9,9 @@
  *   - fits: admitted at once.
  *   - uncertain (only the widened margin tipped it): one back-off step for a fresher reading, then admitted and named.
  *   - shortfall (measured headroom, swap-in, PSI or the container ceiling): waits with exponential back-off while this
- *     instance or another still runs reserved work that can free memory. With NOTHING live to wait for, waiting cannot
- *     help, so the start is admitted and named: the budget never wedges the fleet on memory it does not account for.
+ *     instance or another still runs reserved work that can free memory. With NOTHING live to wait for, a projected
+ *     shortfall may admit one named progress start. Observed host pressure or a sighted container ceiling NEVER takes
+ *     that escape: defer callers stay due; wait callers remain cancellable by their caller's existing deadline.
  * PRIORITY: waiting starts in one process are evaluated one at a time, highest class weight times aged wait first
  *   (host-memory-priority.ts `rankDemand`), so an older build eventually outranks a newer review and nothing starves.
  * FAIL-OPEN AND NAMED: an error admits the start and writes memory_budget.enforce_error; it never holds work hostage.
@@ -31,33 +32,71 @@
  * no earlier own-tail start still inside its time-to-peak, is admitted on "own-tail" when its typical peak clears the
  * reserve. psi, swap-in, memory-available and a sighted container ceiling still refuse. A wait is ledgered at its first
  * attempt and whenever its reasons change, and the admit row splits the waiting time by reason.
+ * W1-T10085: "psi" is named past the LEARNED full avg10 bound, and every admitted start, on any tier, is marked admitted
+ * in the PSI record under the admission lock, so the bound learns from the starts it let through.
+ * STARVATION RUNG (OPERATOR RULING 2026-10-19): a worker class held {@link MEMORY_ADMISSION_STARVATION_MS} or more while
+ * its work is queued is admitted ONE start at a time past its SOFT reasons ({@link STARVATION_SOFT_REASONS}); measured
+ * headroom ("memory-available"), the container's ceiling and any reason not classified soft still hold. Each admission
+ * writes memory_budget.starvation_admit, and the streak raises one host alert. The clock is the class's oldest waiter or
+ * deferral streak (its restart seed included), carried across a daemon restart by the held record beside the ledger
+ * ({@link MEMORY_ADMISSION_HELD_FILE}) while it was refreshed within {@link MEMORY_ADMISSION_HELD_GAP_MS}. OBSERVED
+ * 10-19: every review start held 12:27:52Z-15:20Z on swap-in and psi, a queue of 6-11, across two daemon boots.
  */
 
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { fixedClock } from "./clock.js";
 
-import { daemonOwnedProcess, openLearnedReservation, type LearnedReservation } from "./host-memory-learning.js";
-import { MEMORY_ADMISSION_LOCK_BUSY, withMemoryAdmissionLock, type WorkerClass } from "./host-memory-ledger.js";
+import { daemonOwnedProcess, openLearnedReservation, readValidationClassEstimate, type LearnedReservation, type ValidationClassEstimate } from "./host-memory-learning.js";
+import { MEMORY_ADMISSION_LOCK_BUSY, ownedMemoryRunBinding, withMemoryAdmissionLock, type HostMemoryReading, type WorkerClass } from "./host-memory-ledger.js";
 import { rankDemand, type HostMemoryPriorityPolicy } from "./host-memory-priority.js";
 import {
   defaultShadowMemoryPorts,
   evaluateShadowMemory,
   gatherShadowInputs,
   hostMemoryBudgetModeFor,
+  markPsiStartAdmitted,
+  markStrictPsiStartAdmitted,
+  swapInRowFields,
   type ShadowInputs,
   type ShadowMemoryPorts,
   type ShadowReason,
   type ShadowVerdict,
+  type StrictPsiStartMark,
 } from "./host-memory-shadow.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 
 export const ENFORCE_WAIT_STEP = "memory_budget.enforce_wait";
+export const ENFORCE_QUEUE_STEP = "memory_budget.enforce_queue";
 export const ENFORCE_ADMIT_STEP = "memory_budget.enforce_admit";
 export const ENFORCE_ERROR_STEP = "memory_budget.enforce_error";
 /** A start that asked to be deferred rather than wait was deferred to its caller's next pass. */
 export const ENFORCE_DEFER_STEP = "memory_budget.enforce_defer";
+/** A starving class's one start, admitted past its soft reasons. */
+export const STARVATION_ADMIT_STEP = "memory_budget.starvation_admit";
+
+/** OPERATOR RULING 2026-10-19: how long a class may be held, while its work is queued, before the starvation rung. */
+export const MEMORY_ADMISSION_STARVATION_MS = 60 * 60_000;
+/** PROPOSAL (an operator decision): the longest silence a held streak survives, so a daemon restart (10-19: daemon.start
+ *  to boot_gate.opened in 7-11 min) keeps its clock while a class that stopped asking starts a new one. */
+export const MEMORY_ADMISSION_HELD_GAP_MS = 20 * 60_000;
+/** Per class, since when its starts have been held, beside the ledger: the starvation clock's restart seed. */
+export const MEMORY_ADMISSION_HELD_FILE = "memory-admission-held.json";
+
+/**
+ * The reasons the starvation rung may admit past, each by the verdict's own semantics:
+ *   - "swap-in": a host swap-in RATE, not a shortfall; 10-19 it was chronic (~2,290 pages/s averaged over 281 h).
+ *   - "psi": a stall signal past a threshold, not a shortfall; 10-19 full avg10 > 2 came with 76-80% of all verdicts.
+ *   - "uncertainty": only the widened margin tipped it; the uncertain tier already admits after one re-read.
+ *   - "unrealized-reservations": a PROJECTION of live trees' typical growth plus one tail; the aged and own-tail rungs
+ *     already admit past it.
+ * HARD, never overridden: "memory-available" (MemAvailable less the daemons' typical growth and any cold-start reserve
+ * below hostReserveMib, MEASURED), "container-ceiling" (the container's projection past memory.high, or at its ceiling
+ * now), and every reason not listed here, so a reason added later holds until it is classified.
+ */
+export const STARVATION_SOFT_REASONS: ReadonlySet<ShadowReason> = new Set<ShadowReason>(["swap-in", "psi", "uncertainty", "unrealized-reservations"]);
 
 /** PROPOSALS for the back-off schedule: the first re-read after 5 s, doubling to one re-read a minute. */
 export const ADMISSION_BACKOFF = { baseMs: 5_000, maxMs: 60_000, jitter: 0.2 } as const;
@@ -66,7 +105,10 @@ export type AdmissionTier = "fits" | "uncertain" | "shortfall";
 
 /** Why the aged rung did not admit a deferred start; each defer row names one. */
 export type AgedBlock = "no-cadence" | "younger-than-cadence" | "unobserved-seed" | "outranked" | "aged-child-running"
-  | "memory-available" | "container-sighted";
+  | "memory-available" | "container-sighted" | "swap-in" | "psi";
+
+/** Why the starvation rung did not admit a shortfall. */
+export type StarvationBlock = "younger-than-starvation" | "hard-reason" | "starvation-start-running";
 
 /** Why the own-tail rung did not admit a shortfall: a refusing reason, or the rung's own condition that failed. */
 export type OwnTailBlock = Exclude<ShadowReason, "unrealized-reservations"> | "container-sighted" | "joint-claim"
@@ -89,6 +131,18 @@ export function reservedWorkRunning(inputs: Pick<ShadowInputs, "entries">): bool
   return inputs.entries.some((entry) => !entry.occupancyReleased && entry.status !== "uncertain");
 }
 
+/** An observed pressure reason cannot become capacity merely because no reservation can be waited out.
+ * Projected container claims are deliberately excluded: the existing minimum-progress escape still applies. */
+function observedMemoryShortfall(verdict: Pick<ShadowVerdict, "reasons" | "numbers">):
+  "memory-available" | "container-sighted" | "swap-in" | "psi" | undefined {
+  // Keep the aged rung's existing measured-headroom/ceiling precedence when several reasons coexist.
+  if (verdict.reasons.includes("memory-available")) return "memory-available";
+  if (verdict.reasons.includes("container-ceiling") && verdict.numbers.containerSighted) return "container-sighted";
+  if (verdict.reasons.includes("swap-in")) return "swap-in";
+  if (verdict.reasons.includes("psi")) return "psi";
+  return undefined;
+}
+
 export interface AdmissionRequest {
   workerClass: WorkerClass;
   signal?: AbortSignal;
@@ -104,14 +158,14 @@ export interface AdmissionRequest {
   onShortfall?: "wait" | "defer";
   /** A "defer" caller's own pass cadence, and when it was last due if this process has not asked before (a restart).
    *  The due time seeds the streak at this process's first observed deferral, never a first ask's admission. */
-  deferral?: { cadenceMs: number; cadenceBasis: "measured" | "scheduled"; dueSinceMs?: number };
+  deferral?: { cadenceMs: number; cadenceBasis: "measured" | "carried" | "scheduled"; samples?: number; dueSinceMs?: number };
 }
 
 export type AdmissionOutcome =
   | { kind: "abandoned"; reason: "admission-abandoned"; waitedMs: number; attempts: number }
   | { kind: "not-enforced"; why: string }
   | { kind: "deferred"; reasons: ShadowVerdict["reasons"] }
-  | { kind: "admitted"; tier: AdmissionTier | "nothing-to-wait-for" | "aged" | "own-tail"; waitedMs: number; attempts: number; reservation?: LearnedReservation;
+  | { kind: "admitted"; tier: AdmissionTier | "nothing-to-wait-for" | "aged" | "own-tail" | "starvation"; waitedMs: number; attempts: number; reservation?: LearnedReservation;
     /** Only on the aged tier: call when the admitted child ends, so the next aged start may run. */
     endAged?: () => void }
   | { kind: "error"; reason: string; reservation?: LearnedReservation; reservationAttempted?: true };
@@ -123,6 +177,96 @@ export interface AdmissionPorts extends ShadowMemoryPorts {
   enforceHere: () => boolean;
   withLock: <T>(action: () => T) => T;
   openReservation: (input: { workerClass: WorkerClass; root: string }) => LearnedReservation | undefined;
+  /** Raises the starvation streak's one host alert: the sink run-task installs (the escalation spool the daemon
+   *  drains, host-escalation-spool.ts `spoolingStarvationAlert`). */
+  alert: (root: string, alert: StarvationAlert) => void;
+}
+
+/** The starvation streak's host alert, shaped as an escalation (escalate.ts `Escalation`) without importing it, so the
+ *  admission stays out of the escalation module's import graph. */
+export interface StarvationAlert {
+  class: "BLOCKED";
+  taskId: string;
+  runId: string;
+  summary: string;
+  detail: string;
+  options: Array<{ label: string; detail: string }>;
+  recommendation: string;
+  consequence: string;
+}
+
+let installedAlert: AdmissionPorts["alert"] | undefined;
+
+/** run-task.ts installs the host-alert sink once per process; a process without one names the alert unraised. */
+export function installStarvationAlertSink(sink: AdmissionPorts["alert"] | undefined): void {
+  installedAlert = sink;
+}
+
+export type ValidationWorkerClass = Extract<WorkerClass, "test" | "check-proof" | "push-gate">;
+export type ValidationAdmissionRequest = Omit<AdmissionRequest, "workerClass" | "onShortfall" | "deferral" | "reserve"> & { workerClass: ValidationWorkerClass };
+export interface ValidationAdmissionPorts extends AdmissionPorts {
+  validationEstimate: (workerClass: ValidationWorkerClass) => ValidationClassEstimate;
+  ownedBinding: (id: string, root: string) => ReturnType<typeof ownedMemoryRunBinding>;
+}
+type ValidationPsiMark = StrictPsiStartMark | { kind: "not-attempted" };
+export type ValidationAdmissionOutcome =
+  | { kind: "ready"; tier: "fits"; reservation: LearnedReservation; waitedMs: number; attempts: number;
+      basis: "legacy-compatible-tree-peaks"; samples: number; psiMark: Extract<StrictPsiStartMark, { kind: "recorded" }> }
+  | { kind: "not-started"; reason: "budget-unavailable" | "unsafe-without-live-work" | "admission-error" | "abandoned";
+      details: string[]; waitedMs: number; attempts: number; cleanup: "none" | "release-requested" | "held-unknown"; psiMark: ValidationPsiMark }
+  | Extract<AdmissionOutcome, { kind: "not-enforced" }>;
+
+type ValidationPorts = Pick<ValidationAdmissionPorts, "validationEstimate" | "ownedBinding">;
+type ValidationFailure = Pick<Extract<ValidationAdmissionOutcome, { kind: "not-started" }>, "reason" | "details">;
+interface AdmissionEvaluation {
+  inputs: ShadowInputs; verdict: ShadowVerdict; tier: AdmissionTier;
+  admitAs?: Extract<AdmissionOutcome, { kind: "admitted" }>["tier"];
+  agedBlock?: AgedBlock; ownTail?: OwnTailRung;
+  validationFailure?: ValidationFailure; validationBasis?: ValidationClassEstimate;
+  starvation?: StarvationState;
+}
+/** The starvation rung's reading in one evaluation: why it did not admit, the class's clock, and the alert's fate. */
+interface StarvationState { block?: StarvationBlock; sinceMs: number; seeded: boolean; alert?: string }
+/** Strict evidence is emitted by the maintained reader from actual tagged history, never reconstructed here. */
+function validationSnapshot(request: AdmissionRequest, root: string, ports: AdmissionPorts, validation: ValidationPorts,
+  policy: ReturnType<AdmissionPorts["policy"]>): {
+    inputs: ShadowInputs; issues: string[]; basis: ValidationClassEstimate;
+  } {
+  const issues: string[] = [];
+  const basis = validation.validationEstimate(request.workerClass as ValidationWorkerClass);
+  let ledger: HostMemoryReading | undefined;
+  const inputs = gatherShadowInputs({ ...request, root, ...(basis.kind === "measured" ? {
+    estimateMib: basis.estimateMib, estimateSource: { kind: "measured" as const, samples: basis.samples },
+  } : {}) }, { ...ports,
+    readLedger: r => { ledger = ports.readLedger(r); return ledger; },
+    typical: cls => cls === request.workerClass && basis.kind === "measured" ? basis.typicalMib : ports.typical(cls),
+  }, policy, { strictEvidence: true });
+  const evidence = inputs.strictEvidence;
+  if (!evidence) issues.push("strict-observation-unavailable");
+  else if (evidence.kind === "unavailable") issues.push(...evidence.reasons);
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  if (!ledger || ledger.state !== "present" || ledger.scope !== "host" || ledger.counts.uncertain !== 0 ||
+      ledger.counts.incompleteWalk !== 0 || ledger.counts.localScope !== 0 || ledger.counts.unreadable !== 0 ||
+      ledger.entries.some(e => e.status === "uncertain" || e.walkComplete !== true)) issues.push("ledger-incomplete");
+  if (basis.kind !== "measured") issues.push(basis.reason);
+  else if (!finite(basis.estimateMib) || basis.estimateMib === 0 || !finite(basis.typicalMib) ||
+      basis.typicalMib > basis.estimateMib || !Number.isSafeInteger(basis.samples) || basis.samples <= 0 ||
+      inputs.start.estimateSource?.kind !== "measured" || inputs.start.estimateSource.samples !== basis.samples) issues.push("class-basis-incomplete");
+  if (!("mib" in inputs.memAvailable) || !finite(inputs.memAvailable.mib)) issues.push("host-memory-unavailable");
+  if (!("pagesPerSec" in inputs.swapIn) || !finite(inputs.swapIn.pagesPerSec)) issues.push("host-swap-unavailable");
+  if ("unread" in inputs.psi || !finite(inputs.psi.someAvg10) || !finite(inputs.psi.someAvg60) ||
+      !finite(inputs.psi.fullAvg10) || !finite(inputs.psi.fullAvg60)) issues.push("host-pressure-incomplete");
+  if ("unread" in inputs.container || !finite(inputs.container.currentMib) || inputs.container.highMib === undefined ||
+      (inputs.container.maxMib !== null && !finite(inputs.container.maxMib)) ||
+      (inputs.container.highMib !== null && !finite(inputs.container.highMib)) || !finite(inputs.container.reclaimableMib)) issues.push("container-memory-incomplete");
+  const pressure = inputs.containerPressure;
+  if (!pressure || "unread" in pressure || "unread" in pressure.psi || !finite(pressure.psi.someAvg10) ||
+      !finite(pressure.psi.fullAvg10) || "unmeasured" in pressure.swapIn || !finite(pressure.swapIn.pagesPerSec) ||
+      !finite(pressure.ceilingCrossings)) issues.push("container-pressure-incomplete");
+  if (inputs.serve.scenario === "unknown") issues.push("serve-scenario-unknown");
+  if (inputs.daemonGrowth.length === 0 || inputs.daemonGrowth.some(g => g.samples < policy.daemonGrowthMinSamples ||
+      !finite(g.growthMib) || !finite(g.typicalMib) || !g.basis || !g.currentBasis || g.currentBasis === "the latest sample")) issues.push("daemon-allowance-incomplete");
+  return { inputs, issues, basis };
 }
 
 interface Waiter {
@@ -146,12 +290,18 @@ const streaks = new Map<string, Streak>();
 let agedRunning: string | undefined;
 /** Per state root, the reservation of this process's latest own-tail start, until it is past its time-to-peak. */
 const ownTailRunning = new Map<string, string>();
+/** Per (state root, class), the reservation of this process's latest starvation start, while it runs. */
+const starvationRunning = new Map<string, string>();
+/** Per (state root, class), the held-since of the streak this process raised its alert for. */
+const starvationAlerted = new Map<string, number>();
 
 export function resetMemoryAdmissionStateForTests(): void {
   waiting.length = 0;
   streaks.clear();
   agedRunning = undefined;
   ownTailRunning.clear();
+  starvationRunning.clear();
+  starvationAlerted.clear();
 }
 
 /** Deferral streaks open in this process, for diagnostics and tests. */
@@ -174,9 +324,7 @@ function agedRungBlock(key: string, self: Waiter, deferral: AdmissionRequest["de
   const others = [...streaks].filter(([other]) => other !== key).map(([, streak]) => streak as Waiter);
   if (rankDemand([...others, self], ranking, now)[0] !== self) return "outranked";
   if (agedRunning !== undefined) return "aged-child-running";
-  if (verdict.reasons.includes("memory-available")) return "memory-available";
-  if (verdict.reasons.includes("container-ceiling") && verdict.numbers.containerSighted) return "container-sighted";
-  return undefined;
+  return observedMemoryShortfall(verdict);
 }
 
 interface OwnTailRung {
@@ -220,6 +368,108 @@ function ownTailRung(root: string, inputs: ShadowInputs, verdict: ShadowVerdict,
   return rung;
 }
 
+/** One class's held streak as the record beside the ledger keeps it. */
+export interface HeldRecord {
+  since: number;
+  /** The last time a process of this instance saw the class held: a restart continues the streak only near it. */
+  last: number;
+  /** The streak's one host alert was raised. */
+  alerted?: true;
+  /** The reservation of the streak's latest starvation start, so a restarted process still admits one at a time. */
+  starvation?: string;
+}
+type HeldStore = Partial<Record<WorkerClass, HeldRecord>>;
+
+/** The held record, or why it could not be read: an unread record is never replaced, only created (see writeHeld). */
+function readHeld(ports: Pick<AdmissionPorts, "readFile">, root: string): { store: HeldStore; unread?: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(ports.readFile(join(root, "state", MEMORY_ADMISSION_HELD_FILE)));
+  } catch (error) {
+    // Absent or unreadable: no record, and `unread` says which, so a failed read never replaces a record (writeHeld).
+    return { store: {}, unread: error instanceof SyntaxError ? "unparseable" : reasonOf(error) };
+  }
+  const store: HeldStore = {};
+  if (typeof parsed !== "object" || parsed === null) return { store };
+  for (const [workerClass, raw] of Object.entries(parsed as Record<string, unknown>)) {
+    const r = raw as Partial<HeldRecord> | null;
+    if (!r || !Number.isFinite(r.since) || !Number.isFinite(r.last)) continue;
+    store[workerClass as WorkerClass] = { since: r.since!, last: r.last!, ...(r.alerted === true ? { alerted: true } : {}),
+      ...(typeof r.starvation === "string" ? { starvation: r.starvation } : {}) };
+  }
+  return { store };
+}
+
+/** Never throws: an unwritable record only costs a restart its clock. */
+function writeHeld(ports: Pick<AdmissionPorts, "writeFile">, root: string, store: HeldStore, unread: string | undefined): void {
+  try {
+    const path = join(root, "state", MEMORY_ADMISSION_HELD_FILE);
+    if (unread !== undefined && unread !== "unparseable") ports.writeFile(path, `${JSON.stringify(store)}\n`, { exclusive: true });
+    else ports.writeFile(path, `${JSON.stringify(store)}\n`);
+  } catch (error) {
+    void error; // Unwritable or left in place: this process's own waiters and streaks still keep the clock.
+  }
+}
+
+/** Since when `workerClass` has been held on `root`: its oldest waiter or deferral streak here, or the held record's
+ *  streak when that was refreshed within the gap (a restart). Pure but for this process's waiters and streaks. */
+function classHeldSince(root: string, workerClass: WorkerClass, record: HeldRecord | undefined, now: number): { sinceMs: number; seeded: boolean } {
+  const own = [...waiting, ...streaks.values()].filter(w => w.instance === root && w.workerClass === workerClass)
+    .reduce((min, w) => Math.min(min, w.waitingSinceMs), now);
+  const fresh = record !== undefined && now - record.last <= MEMORY_ADMISSION_HELD_GAP_MS && record.since < own;
+  return fresh ? { sinceMs: record.since, seeded: true } : { sinceMs: own, seeded: false };
+}
+
+/** The class's queued work in this process: starts waiting now and deferral streaks still open, the asker's excluded. */
+function classQueue(root: string, workerClass: WorkerClass, key: string): { waiting: number; deferred: number } {
+  const ofClass = (w: Waiter): boolean => w.instance === root && w.workerClass === workerClass;
+  return { waiting: waiting.filter(ofClass).length, deferred: [...streaks].filter(([k, w]) => k !== key && ofClass(w)).length };
+}
+
+/** Whether the starvation rung admits this shortfall, or why not. Pure but for this process's starvation start. */
+function starvationBlock(classKey: string, inputs: ShadowInputs, verdict: ShadowVerdict, heldMs: number,
+  record: HeldRecord | undefined): StarvationBlock | undefined {
+  if (heldMs < MEMORY_ADMISSION_STARVATION_MS) return "younger-than-starvation";
+  if (verdict.reasons.some(reason => !STARVATION_SOFT_REASONS.has(reason))) return "hard-reason";
+  const running = starvationRunning.get(classKey) ?? record?.starvation;
+  const entry = running === undefined ? undefined : inputs.entries.find(candidate => candidate.id === running);
+  if (entry !== undefined && entry.occupancyReleased !== true) return "starvation-start-running";
+  starvationRunning.delete(classKey);
+  return undefined;
+}
+
+/** The largest resident reserved trees and the container's unreserved memory: what the alert names as holders. */
+function holdersOf(verdict: ShadowVerdict): string[] {
+  const trees = verdict.claims.filter(claim => claim.residentMib !== null && claim.residentMib > 0)
+    .sort((a, b) => b.residentMib! - a.residentMib!).slice(0, 3)
+    .map(claim => `${claim.workerClass} tree ${Math.round(claim.residentMib!)} MiB rss+swap`);
+  const unreserved = verdict.numbers.unreservedContainerMib;
+  return unreserved === null ? trees : [...trees, `container memory no reservation accounts for (daemon, gardens) ${Math.round(unreserved)} MiB`];
+}
+
+/** The streak's one host alert. */
+export function starvationEscalation(input: { workerClass: WorkerClass; root: string; sinceMs: number; heldMs: number;
+  queue: { waiting: number; deferred: number }; reasons: readonly string[]; holders: readonly string[]; swapInBasis: string | null }): StarvationAlert {
+  const minutes = Math.round(input.heldMs / 60_000);
+  return {
+    class: "BLOCKED",
+    taskId: "MEMORY-BUDGET",
+    runId: `memory-budget-starvation-${input.workerClass}`,
+    summary: `memory budget: ${input.workerClass} starts held past ${MEMORY_ADMISSION_STARVATION_MS / 60_000} min on soft reasons`,
+    detail: `Every ${input.workerClass} start on ${input.root} has been held since ${fixedClock(input.sinceMs).iso()} ` +
+      `(${minutes} min) with work queued (${input.queue.waiting} waiting, ${input.queue.deferred} deferred). Reasons: ` +
+      `${input.reasons.join(", ")}. The starvation rung now admits one ${input.workerClass} start at a time past them; ` +
+      `measured headroom and the container ceiling still hold.\n\nSwap-in basis: ${input.swapInBasis ?? "unmeasured"}\n\n` +
+      `Largest holders: ${input.holders.length > 0 ? input.holders.join("; ") : "none measured"}.`,
+    options: [
+      { label: "let the starvation rung run", detail: `one ${input.workerClass} start at a time is admitted past its soft reasons until a start fits` },
+      { label: "retune the soft thresholds", detail: "edit sweep.hostMemoryBudget in plan/policy.yaml (swapInPagesPerSecMax, psiFullAvg10Max)" },
+    ],
+    recommendation: "let the starvation rung run",
+    consequence: `${input.workerClass} work is admitted one start at a time while the soft reasons persist`,
+  };
+}
+
 /** Starts waiting in this process right now, for diagnostics and tests. */
 export function waitingStarts(): ReadonlyArray<Readonly<Waiter>> {
   return [...waiting];
@@ -233,12 +483,22 @@ function defaultAdmissionPorts(): AdmissionPorts {
     enforceHere: () => daemonOwnedProcess(),
     withLock: withMemoryAdmissionLock,
     openReservation: openLearnedReservation,
+    alert: (root, alert) => {
+      if (installedAlert === undefined) throw new Error("no host-alert sink installed in this process");
+      installedAlert(root, alert);
+    },
   };
 }
 
 function ownTailRow(rung: OwnTailRung): Record<string, number | null> {
   return { start_typical_mib: rung.startTypicalMib, start_tail_mib: rung.startTailMib,
     other_claims_charged_mib: rung.otherClaimsChargedMib, typical_headroom_mib: rung.typicalHeadroomMib };
+}
+
+/** What a wait or defer row says about the starvation rung: why it did not admit, and the class's clock. */
+function starvationFields(starvation: { block?: StarvationBlock; sinceMs: number; seeded: boolean } | undefined, now: number): Record<string, unknown> {
+  return starvation === undefined ? {} : { starvation_blocked: starvation.block, held_since: fixedClock(starvation.sinceMs).iso(),
+    held_ms: now - starvation.sinceMs, seeded_from_record: starvation.seeded };
 }
 
 function reasonOf(error: unknown): string {
@@ -253,7 +513,22 @@ export async function awaitMemoryAdmission(
   request: AdmissionRequest,
   overrides: Partial<AdmissionPorts> = {},
 ): Promise<AdmissionOutcome> {
-  const ports: AdmissionPorts = { ...defaultAdmissionPorts(), ...overrides };
+  return admissionLoop(request, { ...defaultAdmissionPorts(), ...overrides });
+}
+
+/** Shared prerequisite ONLY: no launcher uses this entry and no policy mode is promoted here. */
+export async function awaitValidationMemoryAdmission(
+  request: ValidationAdmissionRequest, overrides: Partial<ValidationAdmissionPorts> = {},
+): Promise<ValidationAdmissionOutcome> {
+  const ports = { ...defaultAdmissionPorts(), enforceHere: () => process.env.GITHUB_ACTIONS !== "true" && daemonOwnedProcess(),
+    validationEstimate: readValidationClassEstimate,
+    ownedBinding: (id: string, root: string) => ownedMemoryRunBinding(id, { root }), ...overrides };
+  return admissionLoop(request, ports, ports);
+}
+
+function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts): Promise<AdmissionOutcome>;
+function admissionLoop(request: ValidationAdmissionRequest, ports: AdmissionPorts, validation: ValidationPorts): Promise<ValidationAdmissionOutcome>;
+async function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts, validation?: ValidationPorts): Promise<AdmissionOutcome | ValidationAdmissionOutcome> {
   let ledgerPath: string | undefined;
   const base = { run_id: request.runId ?? "memory-budget-enforce", task_id: request.taskId ?? "MEMORY-BUDGET" };
   const write = (row: { step: string } & Record<string, unknown>): void => {
@@ -261,7 +536,8 @@ export async function awaitMemoryAdmission(
       if (ledgerPath !== undefined) ports.write?.(ledgerPath, { ...base, ...row });
       else ports.stderr(JSON.stringify({ ...base, ...row }));
     } catch (error) {
-      ports.stderr(JSON.stringify({ event: row.step, error: reasonOf(error) }));
+      if (!validation) ports.stderr(JSON.stringify({ event: row.step, error: reasonOf(error) }));
+      else { try { ports.stderr(JSON.stringify({ event: row.step, error: reasonOf(error) })); } catch { /* Refusal survives a failed diagnostic. */ } }
     }
   };
   let waiter: Waiter | undefined;
@@ -269,25 +545,50 @@ export async function awaitMemoryAdmission(
   let reservationAttempted = false;
   let streakKey: string | undefined;
   let startedAt: number | undefined;
+  let finishQueueObservation: (() => void) | undefined;
   let attempt = 0;
-  const abandoned = (): AdmissionOutcome => ({ kind: "abandoned", reason: "admission-abandoned",
-    waitedMs: startedAt === undefined ? 0 : Math.max(0, ports.clock.now() - startedAt), attempts: attempt });
+  let lastAt: number | undefined;
+  let validationRoot: string | undefined;
+  const effects: { psiMark: ValidationPsiMark } = { psiMark: { kind: "not-attempted" } };
+  const refuse = (failure: ValidationFailure): Extract<ValidationAdmissionOutcome, { kind: "not-started" }> => {
+    let cleanup: Extract<ValidationAdmissionOutcome, { kind: "not-started" }>['cleanup'] = "none";
+    if (reservation) {
+      cleanup = "held-unknown";
+      try {
+        if (reservation.id && validationRoot && validation?.ownedBinding(reservation.id, validationRoot).state === "fresh") {
+          cleanup = "release-requested";
+          reservation.releaseOccupancy();
+        }
+      } catch { /* A failed best-effort request or unknown ownership is never verified release. */ }
+    }
+    const result = { kind: "not-started" as const, ...failure, waitedMs: startedAt === undefined || lastAt === undefined ? 0 : Math.max(0, lastAt - startedAt), attempts: attempt, cleanup, psiMark: effects.psiMark };
+    write({ step: "memory_budget.validation_not_started", worker_class: request.workerClass, admitted: false, ...result });
+    return result;
+  };
+  const abandoned = (): AdmissionOutcome | ValidationAdmissionOutcome => validation ? refuse({ reason: "abandoned", details: ["admission-abandoned"] })
+    : { kind: "abandoned", reason: "admission-abandoned", waitedMs: startedAt === undefined ? 0 : Math.max(0, ports.clock.now() - startedAt), attempts: attempt };
   try {
     if (request.signal?.aborted) return abandoned();
+    if (validation && !(["test", "check-proof", "push-gate"] as readonly string[]).includes(request.workerClass)) {
+      return refuse({ reason: "budget-unavailable", details: ["unsupported-validation-class"] });
+    }
     const policy = ports.policy();
     const mode = hostMemoryBudgetModeFor(policy, request.workerClass);
-    const defers = request.onShortfall === "defer";
+    const defers = !validation && request.onShortfall === "defer";
     if (mode !== "enforce") {
       if (defers) endDeferralStreak(request.runId ?? request.workerClass);
       return { kind: "not-enforced", why: `mode ${mode}` };
     }
     if (!ports.enforceHere()) return { kind: "not-enforced", why: "not a daemon-owned process" };
     const root = typeof request.root === "string" ? request.root : request.root();
+    validationRoot = root;
     ledgerPath = join(root, "state", LEDGER_FILENAME);
     const clock = ports.clock;
     startedAt = clock.now();
+    lastAt = startedAt;
     const runId = request.runId ?? request.workerClass;
     const key = streakKey = `${root}\u0000${runId}`;
+    const classKey = `${root}\u0000${request.workerClass}`;
     const due = request.deferral?.dueSinceMs;
     const open = defers ? streaks.get(key) : undefined;
     // A restart seed waits for this process to observe a deferral: it joins the streak when one opens, below.
@@ -296,6 +597,33 @@ export async function awaitMemoryAdmission(
     const seededSince = open === undefined && due !== undefined ? Math.min(startedAt, due) : undefined;
     waiter = { instance: root, workerClass: request.workerClass, waitingSinceMs: since };
     waiting.push(waiter);
+    const ownRunId = typeof request.runId === "string" && request.runId.trim() ? request.runId : undefined;
+    const ownTaskId = typeof request.taskId === "string" && request.taskId.trim() ? request.taskId : undefined;
+    const ownClass = request.workerClass;
+    const missingIdentity = [...(ownRunId === undefined ? ["run_id"] : []), ...(ownTaskId === undefined ? ["task_id"] : [])];
+    let observationId: string | undefined;
+    let sampledAt = startedAt;
+    const observedPhases = new Set<"queued-behind-rank" | "evaluating-head" | "settled">();
+    const observeQueue = (phase: "queued-behind-rank" | "evaluating-head" | "settled", position: number | null,
+      size: number | null, ahead: WorkerClass | null): void => {
+      if (observedPhases.has(phase)) return;
+      observedPhases.add(phase);
+      try {
+        observationId ??= randomUUID();
+        const row = { step: ENFORCE_QUEUE_STEP, run_id: ownRunId ?? "unknown", task_id: ownTaskId ?? "unknown",
+          worker_class: ownClass, identity_state: missingIdentity.length === 0 ? "supplied" : "unknown",
+          missing_identity: missingIdentity, admission_id: observationId, phase, phase_basis: "first-observation-per-phase",
+          worker_assignment: "not-observed", queue_position: position, queue_size: size, ahead_worker_class: ahead,
+          wait_start_ms: since, observed_start_ms: startedAt, sampled_at_ms: sampledAt,
+          waited_ms: Math.max(0, sampledAt - startedAt!), timing_basis: "existing-admission-sample",
+          ...(phase === "settled" ? { cancelled: request.signal?.aborted === true } : {}) };
+        if (ports.write === undefined) ports.stderr(JSON.stringify(row));
+        else write(row);
+      } catch {
+        // Deliberate diagnostic loss: even allocation or a failing stderr fallback must not admit, reserve or block.
+      }
+    };
+    finishQueueObservation = () => { if (observationId !== undefined) observeQueue("settled", null, null, null); };
     let noted = false;
     let ledgeredKey: string | undefined;
     let lastKey = "queued";
@@ -303,37 +631,131 @@ export async function awaitMemoryAdmission(
     for (;;) {
       if (request.signal?.aborted) return abandoned();
       const now = clock.now();
-      const head = rankDemand(waiting, ports.priorityPolicy(), now)[0];
-      if (head !== waiter) lastKey = "queued";
+      lastAt = now;
+      const ranked = rankDemand(waiting, ports.priorityPolicy(), now);
+      const head = ranked[0];
+      sampledAt = now;
+      if (head !== waiter) {
+        lastKey = "queued";
+        observeQueue("queued-behind-rank", ranked.indexOf(waiter) + 1, ranked.length, head?.workerClass ?? null);
+      } else if (observationId !== undefined) observeQueue("evaluating-head", 1, ranked.length, null);
+      // Diagnostic sinks may synchronously cancel this strict invocation before evaluation.
+      if (validation && request.signal?.aborted) return abandoned();
       if (head === waiter) {
         try {
-          const { inputs, verdict, tier, admitAs, agedBlock, ownTail } = ports.withLock(() => {
-            const inputs = gatherShadowInputs({ ...request, root }, ports, policy);
+          const { inputs, verdict, tier, admitAs, agedBlock, ownTail, validationFailure, validationBasis, starvation } = ports.withLock<AdmissionEvaluation>(() => {
+            const strict = validation ? validationSnapshot(request, root, ports, validation, policy) : undefined;
+            const validationBasis = strict?.basis;
+            let validationFailure: ValidationFailure | undefined;
+            const inputs = strict?.inputs ?? gatherShadowInputs({ ...request, root }, ports, policy);
             const verdict = evaluateShadowMemory(inputs, policy);
             const tier = admissionTier(verdict);
+            if (strict) {
+              const issues = [...strict.issues, ...verdict.uncertainty.filter(u =>
+                // The positively measured start is included by the evaluator BEFORE its atomic publication.
+                !(u.kind === "start-unrecorded" && u.count === 1 && u.marginMib === 0)).map(u => u.kind)];
+              if (policy.claimModel && policy.claimModel !== "legacy-one-tail") issues.push("unsupported-validation-claim-model");
+              if (issues.length > 0) validationFailure = { reason: "budget-unavailable", details: [...new Set(issues)] };
+              else if (tier !== "fits" && !reservedWorkRunning(inputs)) validationFailure = { reason: "unsafe-without-live-work", details: verdict.reasons };
+            }
             const agedBlock = defers && tier === "shortfall"
               ? agedRungBlock(key, waiter!, request.deferral, verdict, ports.priorityPolicy(), now, seededSince) : undefined;
+            const held = readHeld(ports, root);
+            const record = held.store[request.workerClass];
+            const clock = classHeldSince(root, request.workerClass, record, now);
             let ownTail: OwnTailRung | undefined;
-            const admitAs: AdmissionTier | "nothing-to-wait-for" | "aged" | "own-tail" | undefined = tier === "fits" ? "fits"
+            let starvation: StarvationState | undefined;
+            const admitAs: AdmissionTier | "nothing-to-wait-for" | "aged" | "own-tail" | "starvation" | undefined = validation
+              ? validationFailure === undefined && tier === "fits" ? "fits" : undefined
+              : tier === "fits" ? "fits"
               : tier === "uncertain" && attempt > 0 ? "uncertain"
-                : tier === "shortfall" && !reservedWorkRunning(inputs) ? "nothing-to-wait-for"
+                : tier === "shortfall" && !reservedWorkRunning(inputs) && observedMemoryShortfall(verdict) === undefined
+                  ? "nothing-to-wait-for"
                   : defers && tier === "shortfall" && agedBlock === undefined ? "aged"
                     : tier === "shortfall" && (ownTail = ownTailRung(root, inputs, verdict, policy)).block === undefined ? "own-tail"
-                      : undefined;
+                      : tier === "shortfall" && (starvation = { ...clock,
+                        block: starvationBlock(classKey, inputs, verdict, now - clock.sinceMs, record) }).block === undefined ? "starvation"
+                        : undefined;
             if (admitAs !== undefined) {
               if (admitAs === "fits" && inputs.ledger.state !== "present") throw new Error(`admission-ledger-${inputs.ledger.state}`);
               reservationAttempted = true;
-              reservation = request.reserve ? request.reserve() : ports.openReservation({ workerClass: request.workerClass, root });
+              reservation = !validation && request.reserve ? request.reserve() : ports.openReservation({ workerClass: request.workerClass, root });
               if (reservation === undefined || reservation.id === undefined) throw new Error("admission-reservation-unavailable");
               if (reservation.published !== true) throw new Error("admission-reservation-unpublished");
               if (reservation.estimateMib !== inputs.start.estimateMib) throw new Error("admission-estimate-changed");
+              if (validation && (reservation.estimateSource.kind !== "measured" || validationBasis?.kind !== "measured" ||
+                  reservation.estimateSource.samples !== validationBasis.samples)) throw new Error("admission-measurement-changed");
               const visible = ports.readLedger(root);
               if (visible?.state !== "present") throw new Error(`admission-ledger-${visible?.state ?? "unreadable"}`);
               if (!visible.entries.some(entry => entry.id === reservation!.id)) throw new Error("admission-reservation-not-visible");
+              if (validation && (visible.scope !== "host" || visible.counts.uncertain !== 0 || visible.counts.incompleteWalk !== 0 ||
+                  visible.counts.localScope !== 0 || visible.counts.unreadable !== 0 ||
+                  validation.ownedBinding(reservation.id, root).state !== "fresh")) throw new Error("admission-not-fresh-owned");
+              if (validation && request.signal?.aborted) validationFailure = { reason: "abandoned", details: ["admission-abandoned"] };
+              if (validationFailure) return { inputs, verdict, tier, admitAs: undefined, agedBlock, ownTail, validationFailure, validationBasis };
+              if (validation) {
+                if (inputs.strictEvidence?.kind !== "paired") validationFailure = { reason: "admission-error", details: ["psi-mark-missing"] };
+                else {
+                  const mark = markStrictPsiStartAdmitted(ports, root, inputs.strictEvidence.marker);
+                  effects.psiMark = mark;
+                  if (mark.kind !== "recorded") validationFailure = { reason: "admission-error", details: [`psi-mark-${mark.reason}`] };
+                }
+                if (request.signal?.aborted) validationFailure = { reason: "abandoned", details: ["admission-abandoned"] };
+              } else if (inputs.psiRecordAt !== undefined) markPsiStartAdmitted(ports, root, inputs.psiRecordAt);
             }
-            return { inputs, verdict, tier, admitAs, agedBlock, ownTail };
+            if (admitAs === "starvation") {
+              const alreadyAlerted = record?.alerted === true || starvationAlerted.has(classKey);
+              let alert = "already-raised";
+              if (!alreadyAlerted) {
+                try {
+                  ports.alert(root, starvationEscalation({ workerClass: request.workerClass, root, sinceMs: clock.sinceMs,
+                    heldMs: now - clock.sinceMs, queue: classQueue(root, request.workerClass, key), reasons: verdict.reasons,
+                    holders: holdersOf(verdict), swapInBasis: verdict.numbers.swapInBasis }));
+                  alert = "raised";
+                  starvationAlerted.set(classKey, clock.sinceMs);
+                } catch (error) {
+                  alert = `failed: ${reasonOf(error)}`;
+                }
+              }
+              starvationRunning.set(classKey, reservation!.id!);
+              starvation!.alert = alert;
+            }
+            // The held record: a class held is stamped (its clock and the time it was last seen held), every class still
+            // queued here is refreshed with it, and a start admitted on any other tier ends its class's streak.
+            const ended = admitAs !== undefined && admitAs !== "starvation";
+            if (!validation && (tier === "shortfall" || (ended && record !== undefined))) {
+              const store = { ...held.store };
+              if (ended) {
+                delete store[request.workerClass];
+                starvationAlerted.delete(classKey);
+              } else {
+                store[request.workerClass] = { since: clock.sinceMs, last: now,
+                  ...(record?.alerted === true || starvationAlerted.has(classKey) ? { alerted: true as const } : {}),
+                  ...(starvationRunning.has(classKey) ? { starvation: starvationRunning.get(classKey)! } : {}) };
+              }
+              for (const other of new Set([...waiting, ...streaks.values()].filter(w => w.instance === root).map(w => w.workerClass))) {
+                if (other === request.workerClass) continue;
+                const otherClock = classHeldSince(root, other, store[other], now);
+                store[other] = { ...store[other], since: otherClock.sinceMs, last: now };
+              }
+              writeHeld(ports, root, store, held.unread);
+            }
+            return { inputs, verdict, tier, admitAs, agedBlock, ownTail, validationFailure, validationBasis, starvation };
           });
+          if (validation && request.signal?.aborted) return abandoned();
+          if (validationFailure) return refuse(validationFailure);
           lastKey = verdict.reasons.join("+") || tier;
+          if (validation && admitAs !== undefined) {
+            const psiMark = effects.psiMark;
+            if (admitAs !== "fits" || !reservation || validationBasis?.kind !== "measured" || psiMark.kind !== "recorded") throw new Error("validation-admission-invariant");
+            if (noted) write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: "fits", validation: true,
+              waited_ms: now - startedAt, attempts: attempt, reasons: verdict.reasons, waited_ms_by_reason: waitedByReason, ...swapInRowFields(verdict.numbers), numbers: verdict.numbers });
+            // Settle diagnostics before the final strict check, not after a computed ready return.
+            finishQueueObservation?.();
+            if (request.signal?.aborted) return abandoned();
+            return { kind: "ready", tier: "fits", reservation, waitedMs: now - startedAt, attempts: attempt,
+              basis: validationBasis.basis, samples: validationBasis.samples, psiMark };
+          }
           if (admitAs !== undefined) {
             const streak = streaks.get(key);
             if (defers) streaks.delete(key);
@@ -343,18 +765,27 @@ export async function awaitMemoryAdmission(
               agedRunning = key;
               write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: "aged", waited_ms: waitedMs,
                 seeded_ms: askedSince - since, deferred_since: fixedClock(since).iso(),
-                deferrals: streak?.deferrals ?? 0, cadence_ms: request.deferral!.cadenceMs, cadence_basis: request.deferral!.cadenceBasis,
+                deferrals: streak?.deferrals ?? 0, cadence_ms: request.deferral!.cadenceMs, cadence_basis: request.deferral!.cadenceBasis, cadence_samples: request.deferral!.samples ?? 0,
                 reasons: verdict.reasons, overrode: verdict.reasons, attempts: attempt, waited_ms_by_reason: waitedByReason,
-                numbers: verdict.numbers });
+                ...swapInRowFields(verdict.numbers), numbers: verdict.numbers });
               const endAged = (): void => { if (agedRunning === key) agedRunning = undefined; };
               return { kind: "admitted", tier: admitAs, waitedMs, attempts: attempt, ...(reservation ? { reservation } : {}), endAged };
             }
             const waitedMs = now - startedAt;
+            if (admitAs === "starvation") {
+              write({ step: STARVATION_ADMIT_STEP, worker_class: request.workerClass, tier: "starvation", waited_ms: waitedMs,
+                held_since: fixedClock(starvation!.sinceMs).iso(), held_ms: now - starvation!.sinceMs,
+                seeded_from_record: starvation!.seeded, starvation_ms: MEMORY_ADMISSION_STARVATION_MS,
+                queue: classQueue(root, request.workerClass, key), reasons: verdict.reasons, overrode: verdict.reasons,
+                alert: starvation!.alert, holders: holdersOf(verdict), attempts: attempt, waited_ms_by_reason: waitedByReason,
+                reservation_id: reservation!.id, ...swapInRowFields(verdict.numbers), numbers: verdict.numbers });
+              return { kind: "admitted", tier: admitAs, waitedMs, attempts: attempt, ...(reservation ? { reservation } : {}) };
+            }
             if (admitAs === "own-tail") ownTailRunning.set(root, reservation!.id!);
             if (noted || admitAs !== "fits") {
               write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: admitAs, waited_ms: waitedMs,
                 attempts: attempt, reasons: verdict.reasons, waited_ms_by_reason: waitedByReason,
-                ...(admitAs === "own-tail" ? { own_tail: ownTailRow(ownTail!) } : {}), numbers: verdict.numbers });
+                ...(admitAs === "own-tail" ? { own_tail: ownTailRow(ownTail!) } : {}), ...swapInRowFields(verdict.numbers), numbers: verdict.numbers });
             }
             return { kind: "admitted", tier: admitAs, waitedMs, attempts: attempt, ...(reservation ? { reservation } : {}) };
           }
@@ -364,24 +795,27 @@ export async function awaitMemoryAdmission(
             streak.deferrals += 1;
             streaks.set(key, streak);
             write({ step: ENFORCE_DEFER_STEP, worker_class: request.workerClass, tier, reasons: verdict.reasons,
-              uncertainty: verdict.uncertainty, numbers: verdict.numbers, scenario: verdict.scenario, attempts: attempt,
+              uncertainty: verdict.uncertainty, ...swapInRowFields(verdict.numbers), numbers: verdict.numbers, scenario: verdict.scenario, attempts: attempt,
               waited_ms: now - startedAt, deferred_since: fixedClock(streak.waitingSinceMs).iso(),
               seeded_ms: streak.askedSinceMs - streak.waitingSinceMs, deferrals: streak.deferrals,
-              cadence_ms: request.deferral?.cadenceMs ?? null, cadence_basis: request.deferral?.cadenceBasis ?? null, aged_blocked: agedBlock });
+              cadence_ms: request.deferral?.cadenceMs ?? null, cadence_basis: request.deferral?.cadenceBasis ?? null,
+              cadence_samples: request.deferral === undefined ? null : request.deferral.samples ?? 0, aged_blocked: agedBlock,
+              ...starvationFields(starvation, now) });
             return { kind: "deferred", reasons: verdict.reasons };
           }
           // The first attempt and every change of reasons are ledgered, so the waiting time splits by cause.
-          const waitKey = `${lastKey}|${ownTail?.block ?? ""}`;
+          const waitKey = `${lastKey}|${ownTail?.block ?? ""}|${starvation?.block ?? ""}`;
           if (waitKey !== ledgeredKey) {
             noted = true;
             ledgeredKey = waitKey;
             write({ step: ENFORCE_WAIT_STEP, worker_class: request.workerClass, tier, reasons: verdict.reasons,
-              uncertainty: verdict.uncertainty, numbers: verdict.numbers, scenario: verdict.scenario,
+              uncertainty: verdict.uncertainty, ...swapInRowFields(verdict.numbers), numbers: verdict.numbers, scenario: verdict.scenario,
               waiting: waiting.length, attempt, waited_ms: now - startedAt,
-              ...(ownTail ? { own_tail_blocked: ownTail.block, own_tail: ownTailRow(ownTail) } : {}) });
+              ...(ownTail ? { own_tail_blocked: ownTail.block, own_tail: ownTailRow(ownTail) } : {}), ...starvationFields(starvation, now) });
           }
         } catch (error) {
           if ((error as NodeJS.ErrnoException)?.code !== MEMORY_ADMISSION_LOCK_BUSY) throw error;
+          if (validation) return refuse({ reason: "budget-unavailable", details: ["admission-lock-held"] });
           lastKey = "admission-lock-held";
           if (!noted) {
             noted = true;
@@ -408,10 +842,12 @@ export async function awaitMemoryAdmission(
   } catch (error) {
     if (request.signal?.aborted) return abandoned();
     const reason = reasonOf(error);
+    if (validation) return refuse({ reason: "admission-error", details: [reason] });
     if (streakKey !== undefined && request.onShortfall === "defer") streaks.delete(streakKey); // fail-open is an admission
     write({ step: ENFORCE_ERROR_STEP, worker_class: request.workerClass, reason, admitted: true });
     return { kind: "error", reason, ...(reservation ? { reservation } : reservationAttempted ? { reservationAttempted: true as const } : {}) };
   } finally {
     if (waiter) waiting.splice(waiting.indexOf(waiter), 1);
+    finishQueueObservation?.();
   }
 }

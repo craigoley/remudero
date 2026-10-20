@@ -1,0 +1,26 @@
+- id: W1-T10203
+  title: "Name the cause of the 2 !== 1 decision count in the serve plan-source population test"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=021d61ec05d0ec7c
+  attempts: 0
+  files:
+    - test/serve-plan-source-population.test.ts
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-view.ts
+  acceptance:
+    - claim: "The test file records the demonstrated root cause of the intermittent decision count of 2 where 1 is expected, with the reproduction that showed it"
+      proof: "grep: ROOT CAUSE: in test/serve-plan-source-population.test.ts"
+  origin: "followup:W1-T10008-1792385128373:2026-10-19T04:52:03.027Z:0"
+  rationale: >-
+    From the 2026-10-19 follow-up on W1-T10008-1792385128373, ratified via rmd approve:
+  
+    follow-up harvest [research]: find the cause of the `2 !== 1` operator-decision count in
+    test/serve-plan-source-population.test.ts (line ~98) — the flake's root cause decides the
+    remedy. — from W1-T10008 (run W1-T10008-1792385128373)

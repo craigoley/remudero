@@ -12,10 +12,24 @@
   plan_refs: [W1-T9619, W1-T9602, W1-T8778, W1-T6124]
   files:
     - src/lib/preopen-gate.ts
-    - test/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts
-  status: queued
+    - src/lib/gate-sandbox-metrics.ts
+    - src/run-task.ts
+    - test/ci/gates/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts
+  status: merged
   priority: 2
   attempts: 0
+  note: |
+    Contract reconciliation 2026-10-19: the child owns the sandbox measurements, not the parent.
+    At ac382304c, preopen-gate.ts launches the trusted preflight child with --summary-file, but the writer and the
+    step dispatch live in preflightCommand in src/run-task.ts. Declare that producer and its small measurement leaf
+    explicitly; changing only the parent cannot measure the child's private /tmp or its own process.resourceUsage().
+    The maintained placeTest/newTestPath result for this subject is ci/gates (high confidence, preopen-gate import).
+    Replace title-presence greps with executable literal-title proofs; retain the two original behavioral claims.
+    This is a plan-only prerequisite, not implementation credit. No test, source, threshold or runtime setting is
+    changed here. The 04:55Z core memcg OOM had about 2.2 GB shmem, but no receipt attributes it to this sandbox;
+    this task measures a known gap and does not claim that fixing it resolves that distinct OOM.
+    CREATES: src/lib/gate-sandbox-metrics.ts
+    CREATES: test/ci/gates/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts
   rationale: |
     READ at W1-T9619's build head ad81f6cfd (open PR #12122; symbols, not lines):
     - src/lib/preopen-gate.ts runs the gate child inside proofSandboxArgv (W1-T6124) plus its own binds. That argv
@@ -32,17 +46,30 @@
     1. The gate's summary (the harness-owned --summary-file) gains, as the child measures them at exit: the peak
        bytes used on /tmp (statfs sampled by the child at each step boundary, and at exit), the tsx cache
        directory's file count and bytes at start and at exit, and process.resourceUsage() maxRSS and CPU.
+       preopen-gate.ts explicitly requests this measurement from its trusted preflightCommand child; the child uses
+       gate-sandbox-metrics.ts to observe the existing spawn boundaries without changing their commands or results.
+       Name the scope: tmp_peak_bytes is the maximum of boundary samples, not an observed continuous high-water mark;
+       max_rss_kb and cpu_ms describe the preflight process, not its subprocess tree. The cache's start sample is the
+       first observed sample after the child loads, never an invented zero before tsx imported its modules. Count
+       only the child's own tsx cache, without following symlinks or scanning other sandboxes. Bound enumeration and
+       name unreadable, non-private-tmpfs, partial or over-budget measurements rather than publishing partial zeros.
     2. implement.preopen_gate carries them as `sandbox: {tmp_peak_bytes, compile_cache: {files_start, files_end,
        bytes_end}, max_rss_kb, cpu_ms}`, or `sandbox_unmeasured: <reason>`; never zero for unknown.
     3. NOT IN SCOPE, OPERATOR DECISIONS for a follow-up once the rows exist: a persistent read-only compile cache
        bound into the sandbox, and a disk-backed /tmp. Each needs the measured numbers this row produces.
-    Tests go in test/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts, titled verbatim as in
-    the proofs, with the sandbox and child seams the W1-T9619 suite uses.
+    Tests go in test/ci/gates/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts, titled verbatim
+    as in the proofs, with the sandbox and child seams the W1-T9619 suite uses. Exercise the real default filesystem
+    and resource sampler, each failure arm and a real trusted child summary; an injected summary alone cannot prove
+    that the producer is wired. Check that pass/fail/unmeasured verdicts and the injected-spawn summary-path guard
+    are unchanged when measurement is missing. Delete producer and ledger propagation separately to prove the tests
+    fail; deleting the unknown arm must fail the no-fabricated-zero case. Hosted full checks remain required.
   acceptance:
     - claim: "a sandboxed gate row carries the peak /tmp bytes, the compile cache's start and end size, and the child's max RSS and CPU"
-      proof: 'grep: test("W1-T9739: a sandboxed gate row names its tmp peak, compile cache and child cost" in test/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts'
+      proof: 'unit test: W1-T9739: a sandboxed gate row names its tmp peak, compile cache and child cost'
     - claim: "a gate whose child wrote no measurement says why and never reports zero"
-      proof: 'grep: test("W1-T9739: an unmeasured sandbox is named, never zero" in test/the-sandboxed-preopen-gate-measures-its-tmp-and-compile-cache.test.ts'
+      proof: 'unit test: W1-T9739: an unmeasured sandbox is named, never zero'
+    - claim: "the real preflight child constructs the sandbox sampler rather than leaving a test-only module"
+      proof: 'grep: createGateSandboxMetrics( in src/run-task.ts'
   falsifier: |
     At W1-T9619's head, run a gate whose fake child writes 5 MB to /tmp and exits 0: the implement.preopen_gate row
     has no sandbox field and the first test fails. Have the child die before writing its summary: a builder that

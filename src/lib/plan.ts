@@ -5,8 +5,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { RmdError } from "./errors.js";
+import { sameTestFile } from "./test-path-resolver.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
+import { PLACEMENT_DIR, placeTest, type SubsystemMap } from "./test-placement.js";
 
 /** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
  *  plane flips `status`; every task's `prompt` is pre-authored (G-2). */
@@ -381,11 +383,54 @@ export interface MachineFilingAdmissionContext {
   plan: Plan;
   releasedIds: ReadonlySet<string>;
   isMerged?: MergedResolver;
+  dependencyEvidence?: (task: Task) => DependencyMergeEvidence;
   pathExists?: (repoRelPath: string) => boolean;
   pathExistsAtBase?: (repoRelPath: string) => boolean;
 }
 
+/** Missing evidence is not an observed unmerged dependency; both still refuse admission. */
+export type DependencyMergeEvidence = { state: "merged" } | { state: "unmerged" } | { state: "unknown"; reason: string };
+
 const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
+
+let placementMapCache: SubsystemMap | undefined;
+
+/** The reviewed subsystem map `placeTest` scores against (W1-T9874), read once from the harness checkout. */
+export function placementSubsystemMap(): SubsystemMap {
+  placementMapCache ??= JSON.parse(readFileSync(fileURLToPath(new URL(`../../${PLACEMENT_DIR}/subsystem-map.json`, import.meta.url)), "utf8")) as SubsystemMap;
+  return placementMapCache;
+}
+
+const placementModule = (path: string): string | undefined => /^(?:src|scripts)\/(?:[\w.-]+\/)*([\w.-]+)\.(?:ts|mjs)$/.exec(path)?.[1];
+
+/** The `placeTest` imports a task's declared files stand for: each src or scripts module is a direct reach. */
+export function placementImports(files: readonly string[]): { module: string; reach: "direct" }[] {
+  return files.flatMap((f) => placementModule(f) ?? []).map((module) => ({ module, reach: "direct" as const }));
+}
+
+/**
+ * W1-T9875: the folder under test/ a NEW test belongs in, computed by `placeTest` from the src modules the minted task
+ * names (`srcFiles`) and the test's slug — never chosen, and never flat. A test no module or name places falls back to
+ * the folder of `subject`, the module the finding is about, so every minter lands somewhere the map knows.
+ */
+export function computedTestFolder(slug: string, srcFiles: readonly string[], subject: string): string {
+  const map = placementSubsystemMap();
+  const placed = placeTest({ imports: placementImports(srcFiles), name: slug, kind: "unit" }, map);
+  return placed.confidence !== "none" ? placed.folder : placeTest({ imports: [{ module: subject, reach: "direct" }], name: slug, kind: "unit" }, map).folder;
+}
+
+/** `test/<computed folder>/<slug>.test.ts` for a new test (W1-T9875); see {@link computedTestFolder}. */
+export function newTestPath(slug: string, srcFiles: readonly string[], subject: string): string {
+  return `test/${computedTestFolder(slug, srcFiles, subject)}/${slug}.test.ts`;
+}
+
+/** Whether `path` sits in a folder the subsystem map knows: `test/<folder>/` or `test/<folder>/<second level>/` (W1-T9875). */
+export function isPlacedTestPath(path: string): boolean {
+  const m = /^test\/([\w-]+)(?:\/([\w-]+))?\/[\w.-]+\.test\.[mc]?[jt]s$/.exec(path);
+  if (!m) return false;
+  const map = placementSubsystemMap();
+  return map.folders.includes(m[1]!) && (m[2] === undefined || (map.second_level[m[1]!] ?? []).includes(m[2]));
+}
 
 /** What may own a ci-friction cause: code under src/ or scripts/, or — since the gardener resolves a
  *  check to the workflow job that declares it (#10428) — that workflow file. A workflow-owned remedy
@@ -449,12 +494,16 @@ function isExpiringFixtureDefuseShape(task: Task): boolean {
     files[0] === origin.slice("expiring-fixture:".length);
 }
 
-const SCOUT_TEST_FILE = /^test\/scout-[\w.-]+\.test\.ts$/;
+const SCOUT_TEST_FILE = /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/;
 
 /** A scout draft (W1-T8523): the symptom's files, then the NEW test/scout-*.test.ts as the LAST declared file. */
 function isScoutDraftShape(task: Task): boolean {
   const files = task.files ?? [];
   return task.origin?.startsWith("scout:") === true && files.length > 0 && SCOUT_TEST_FILE.test(files[files.length - 1]!);
+}
+
+function isCiLearningLessonPath(path: string): boolean {
+  return /^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$/.test(path);
 }
 
 function isParkedMachineProposal(task: Task): boolean {
@@ -470,7 +519,7 @@ function isParkedMachineProposal(task: Task): boolean {
     (task.depends_on ?? []).length === 0 &&
     (isSelectorShadowEdgeShape(task) || isFlakeIncidentShape(task) ||
       (task.files?.length === 1 &&
-        ((task.origin?.startsWith("ci-learning:") === true && (task.files[0] === "learnings/ci.yaml" || /^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$/.test(task.files[0]!))) ||
+        ((task.origin?.startsWith("ci-learning:") === true && (task.files[0] === "learnings/ci.yaml" || isCiLearningLessonPath(task.files[0]!))) ||
           (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
           (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))))
   );
@@ -487,7 +536,7 @@ function isSelectorShadowEdgeShape(task: Task): boolean {
   const files = task.files ?? [];
   if (files[0] !== "src/lib/affected-suites.ts") return false;
   if (task.origin?.startsWith("selector-shadow:") === true || task.origin?.startsWith("selector-shadow-miss:") === true) {
-    return files.length === 1 || (files.length === 2 && files[1] === SELECTOR_SHADOW_MISS_TEST_PATH);
+    return files.length === 1 || (files.length === 2 && sameTestFile(files[1]!, SELECTOR_SHADOW_MISS_TEST_PATH));
   }
   return isSelectorShadowStructuralShape(task);
 }
@@ -496,7 +545,7 @@ function isSelectorShadowEdgeShape(task: Task): boolean {
 function isSelectorShadowStructuralShape(task: Task): boolean {
   const files = task.files ?? [];
   return task.origin?.startsWith("selector-shadow-structural:") === true && files.length === 2 &&
-    files[0] === "src/lib/affected-suites.ts" && /^test\/affected-suites-selects-[\w.-]+\.test\.ts$/.test(files[1]!);
+    files[0] === "src/lib/affected-suites.ts" && /^test\/(?:[\w-]+\/){0,2}affected-suites-selects-[\w.-]+\.test\.ts$/.test(files[1]!);
 }
 
 /** A flake incident (W1-T6406): the one existing test file whose intermittent failure it names. */
@@ -1410,11 +1459,23 @@ export function machineFilingAdmissionViolations(
         `task ${task.id} is verify:human — not auto-runnable by the proto-runner`,
     );
   } else {
-    const unmet = unmetDependencies(context.plan, task, context.isMerged ?? yamlStatusMerged);
-    if (unmet.length > 0) {
+    const unknown = new Map<string, string>();
+    const unmet = unmetDependencies(context.plan, task, candidate => {
+      if (!context.dependencyEvidence) return (context.isMerged ?? yamlStatusMerged)(candidate);
+      const evidence = context.dependencyEvidence(candidate);
+      if (evidence.state === "unknown") unknown.set(candidate.id, evidence.reason);
+      return evidence.state === "merged";
+    });
+    if (context.dependencyEvidence) for (const id of unmet) {
+      if (!context.plan.byId.has(id)) unknown.set(id, "dependency task missing from plan");
+    }
+    if (unknown.size > 0) reasons.push(`task ${task.id} dependency credit unavailable (UNKNOWN): ` +
+      [...unknown].map(([id, reason]) => `${id}: ${reason}`).join("; "));
+    const unmerged = unmet.filter(id => !unknown.has(id));
+    if (unmerged.length > 0) {
       reasons.push(
         `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
-          `task ${task.id} has unmerged dependencies: ${unmet.join(", ")}`,
+          `task ${task.id} has unmerged dependencies: ${unmerged.join(", ")}`,
       );
     }
   }
@@ -1425,7 +1486,9 @@ export function machineFilingAdmissionViolations(
   const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
   const declared = task.files ?? [];
   const scoutNew = isScoutDraftShape(task) ? declared[declared.length - 1] : undefined;
-  const missing = missingDeclaredPaths(task, context, (path) => (newTestAllowed && created(path)) || path === scoutNew);
+  const newLessonAllowed = task.origin?.startsWith("ci-learning:") === true && declared.length === 1 && isParkedMachineProposal(task);
+  const missing = missingDeclaredPaths(task, context, (path) =>
+    (newTestAllowed && created(path)) || path === scoutNew || (newLessonAllowed && isCiLearningLessonPath(path)));
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +

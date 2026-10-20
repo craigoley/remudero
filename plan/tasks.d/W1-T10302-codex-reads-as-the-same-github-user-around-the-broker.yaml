@@ -1,0 +1,116 @@
+- id: W1-T10302
+  title: "CODEX READS GITHUB AS THE SAME USER AROUND THE BROKER — the operator's Codex sessions run under a second Mac account and open every codex/ PR as cao825, the same GitHub user the Claude sessions read as, but no hook routes their `gh` reads and W1-T10279's broker paces one account only; route Codex reads through the broker and share one pacer per GitHub login across Mac accounts"
+  repo: remudero
+  depends_on: [W1-T10279]  # extends the broker #13204 builds: its pacer, its client and the deny-floor routing rule
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern — which pacer a Mac GitHub READ passes through; writes, Azure and the fleet App identity are unchanged
+  band_meaning: span
+  budget_usd: 12.00
+  priority: 1  # operator-2026-10-20: "file the codex gap now"
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-20: root-causing the Mac gh read floor; Codex was found reading as the same GitHub user outside every pacer"
+  plan_refs: [W1-T10279, W1-T10271, W1-T3275, W1-T3297, W1-T5354]
+  files:
+    - .codex/config.toml
+    - hooks/deny-floor.sh
+    - src/lib/gh-read-broker.ts
+    - src/run-task.ts
+    - deploy/mac/install-gh-read-broker.sh
+    - docs/operator-guide.md
+    - test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts
+  rationale: |
+    READ 2026-10-20 at origin/main c89ef695b, on the Mac as craigoleyagent.
+    WHO READS AS cao825.
+      - `gh auth status` for craigoleyagent: account cao825. The public API (GET /user/4397075) resolves user ID
+        4397075 to cao825.
+      - The operator's Codex sessions run under the craigoley Mac account (~/.codex/sessions there, 11 GB on
+        2026-10-20). The last 100 PRs with a `codex/` head branch were all authored by cao825, the newest that day.
+      - So Codex and every Claude session and agent on this Mac spend ONE GitHub user's per-user limits.
+    WHAT PACES WHICH.
+      - hooks/deny-floor.sh rule 10 runs only where .claude/settings.json wires it: Claude sessions. The repo has no
+        .codex/config.toml, and nothing in deploy/ or docs wires an operator Codex session to a hook. The deny-floor's
+        Codex notes (W1-T5354, apply_patch from codex-cli 0.159.0) cover fleet workers in containers.
+      - The floor's stamp is ${XDG_CACHE_HOME:-~/.cache}/remudero/gh-last-read under each Mac account's own home, so
+        even a hooked Codex session under craigoley would pace against a different stamp.
+      - W1-T10279's broker (design 1) is one process per Mac account, and says so: "Two Mac accounts reading as the
+        same login each run a broker; sharing one pacer across accounts is out of scope."
+      - So after W1-T10279 lands, Claude reads on craigoleyagent are paced by one AIMD pacer, while Codex reads on
+        craigoley spend the same cao825 limits blind to it. A Codex burst makes GitHub refuse, and the Claude broker
+        backs off for a refusal it did not cause. Its pacing also never sees what Codex spent.
+    WHY IT MATTERS. Every real GitHub limit hit in this account's Claude transcripts (36, 2026-09-04..09-30) was
+    "API rate limit exceeded for user ID 4397075", a per-user throttle that arrived with core and graphql at
+    5000/5000. A per-user limit is only paced correctly when every caller of that user passes one pacer.
+    UNMEASURED, AND NAMED AS SUCH. The craigoley account's ~/.codex and gh config are not readable from
+    craigoleyagent (mode 0700), so Codex's read volume and the codex-cli version installed there are unknown. Design
+    5 measures them; no number below is gated on a guess.
+    OVERLAP SWEEP (plan/tasks.d, open PRs, 2026-10-20): W1-T10279 (#13204, in flight) builds the per-account broker.
+    W1-T10271 (merged #13180) is core's fair turn on Azure. No task or PR wires operator Codex sessions to a hook or
+    shares a pacer across Mac accounts.
+  design: |
+    No fixed bounds; this reuses W1-T10279's adaptive pacer unchanged.
+    1. CODEX GETS THE ROUTING RULE, NOT THE WHOLE FLOOR.
+       - Commit a project-level .codex/config.toml that registers a PreToolUse hook for Codex's shell tool, running
+         `bash hooks/deny-floor.sh` with RMD_DENY_FLOOR_ONLY=gh-read set inline in the hook command.
+       - Under RMD_DENY_FLOOR_ONLY=gh-read, deny-floor.sh evaluates rule 10 alone. The other rules encode the Claude
+         session and fleet-worker contracts; whether they bind the operator's own Codex sessions is a separate
+         operator decision and out of scope.
+       - Capture a real Codex PreToolUse payload for a shell call from the installed codex-cli first, as W1-T5354
+         did for apply_patch, and build the test fixture from it. If the payload names the command under a different
+         field, normalise it in the hook's input parsing, never by guessing.
+       - With a live broker, a raw read-shaped `gh` from Codex is refused with the same one-line instruction, naming
+         the client: `rmd gh --class interactive --client codex -- <same gh args>`. With no live broker, rule 10's
+         fallback floor applies, as it does for Claude.
+    2. ONE PACER PER GITHUB LOGIN, SHARED ACROSS MAC ACCOUNTS. Caches stay per account.
+       - Each account keeps its own broker, socket and cache (cached bodies are private repo data and never cross a
+         Mac account).
+       - The pacer's state (per limiter: gap, hold-until, last start, consecutive secondary refusals) moves to a
+         per-login state file in a directory both accounts can reach: /Users/Shared/remudero/gh-pace/<login>/. The
+         installer creates it with an ACL naming exactly the Mac accounts it was run for. It never uses world-writable
+         modes.
+       - Upstream starts take a per-login lock (mkdir, the same fail-open shape rule 10 uses), so the two brokers'
+         upstream calls for one login are serial per limiter, as GitHub's best-practice guide asks.
+       - A refusal seen by either broker widens the shared gap and sets the shared hold, so both back off together.
+         A success seen by either narrows it.
+       - The state holds timing numbers only, never a response, header value or token.
+       - Fail open: an unreadable or unwritable shared state falls back to the per-account pacer W1-T10279 ships,
+         and status says so.
+    3. THE INSTALLER JOINS A SECOND ACCOUNT.
+       - deploy/mac/install-gh-read-broker.sh records the login its `gh` reads as. When the shared pace directory for
+         that login already exists, it joins it: it adds this account to the ACL, which the operator approves by
+         running the installer on that account.
+       - It prints the login, the accounts sharing its pacer and the codex-cli version found, if any.
+    4. NO NEW ESCAPE. `rmd gh` stays unfloored only because the shared pacer paces it. Rule 7 still refuses a polling
+       loop around `rmd gh` from either client.
+    5. MEASURED. The broker's per-request log gains a `client` field (claude, codex, agent). `rmd gh-broker status`
+       prints, per login: requests by client, upstream calls, and refusals by limiter, with which account's broker saw
+       each. The status command in src/run-task.ts reads this through one exported helper, ghBrokerLoginStatus(. After the operator installs on both accounts, one day's counts go in the PR thread. No threshold is gated
+       on them.
+    6. DOCUMENT IT. docs/operator-guide.md gains the two-account install step, and how to confirm a Codex session is
+       routed: one `gh pr view` from Codex is refused with the `rmd gh` instruction, and the re-run appears in status
+       under client=codex.
+    Tests go in test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts (or the folder
+    `rmd test-place` computes), using an injected gh executor, clock and temp directories standing in for two
+    accounts' homes plus the shared pace directory. No real gh, Codex or network.
+  acceptance:
+    - claim: "the broker's per-login status has a production caller in the CLI"
+      proof: 'grep: ghBrokerLoginStatus( in src/run-task.ts'
+    - claim: "the repo wires operator Codex sessions to the deny floor's gh-read rule"
+      proof: 'grep: RMD_DENY_FLOOR_ONLY=gh-read in .codex/config.toml'
+    - claim: "under RMD_DENY_FLOOR_ONLY=gh-read a captured Codex shell payload with a raw gh read is routed to rmd gh, while a command another rule would refuse is allowed"
+      proof: 'grep: test("W1-T10302: a Codex shell payload is routed by the gh-read rule alone" in test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts'
+    - claim: "two brokers for one login share a pacer: a secondary refusal seen by one holds and widens the other's next upstream start"
+      proof: 'grep: test("W1-T10302: two Mac accounts reading as one login back off together" in test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts'
+    - claim: "upstream starts for one login are serial across both brokers, and a cache entry never crosses Mac accounts"
+      proof: 'grep: test("W1-T10302: one login is serial across accounts and caches stay per account" in test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts'
+    - claim: "an unusable shared pace directory falls back to the per-account pacer and status names the fallback"
+      proof: 'grep: test("W1-T10302: an unusable shared pacer falls back to the account pacer" in test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts'
+  falsifier: |
+    Leave .codex/config.toml out: the first grep finds nothing.
+    Run the whole deny floor for Codex: the command another rule refuses is refused, and the first test fails.
+    Keep the pacer per account: the second broker starts upstream inside the first's hold, and the second test
+    fails.
+    Drop the per-login lock: two upstream starts for one limiter overlap, and the third test fails.
+    Fail closed on the shared state: reads stop instead of falling back, and the fourth test fails.

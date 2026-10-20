@@ -1314,16 +1314,68 @@ esac
 #    Only READS are paced, because a read is what a session repeats while waiting. `gh api
 #    rate_limit` and `gh auth status` are exempt BY NAME: they cost no quota and are how a session
 #    learns to stop.
+#
+#    W1-T10279 — THE FLOOR BECOMES A ROUTING BACKSTOP ON A MAC WITH A LIVE READ BROKER. One stamp for
+#    every session of an account meant about 20 reads an hour between all of them. The broker
+#    (`rmd gh-broker serve`) paces every session's reads from GitHub's own headers instead, so while
+#    its heartbeat is live a RAW read-shaped `gh` call is refused with one instruction — re-run it as
+#    `rmd gh -- <same args>` — and `rmd gh` itself is not floored. Liveness is the heartbeat file's age
+#    against TWICE the interval the broker wrote into it: still no network here. With no live broker
+#    this rule is exactly today's 180 s floor. A `gh` WRITE seen here appends `<repo|*> <number>` to the
+#    broker's invalidation file, so a body edited with `gh pr edit` is never served stale.
 if [ -n "$cmd" ] && invokes_gh "$cmd"; then
+  # `rmd gh [--class c] [--fresh] -- <args>` reads as `gh <args>` to every classifier below.
+  gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
   gh_is_write=0
-  printf '%s' "$cmd" | grep -Eq '(-X|--method)[[:space:]]+(POST|PATCH|PUT|DELETE)' && gh_is_write=1
-  printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+(pr|issue)[[:space:]]+(create|merge|edit|close|reopen|comment|review|ready|lock|unlock)' && gh_is_write=1
-  printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+(run[[:space:]]+(rerun|cancel|delete)|workflow[[:space:]]+(run|enable|disable)|release[[:space:]]+(create|edit|delete)|label[[:space:]]+(create|edit|delete)|secret[[:space:]]+set)' && gh_is_write=1
+  printf '%s' "$gh_norm" | grep -Eq '(-X|--method)[[:space:]]+(POST|PATCH|PUT|DELETE)' && gh_is_write=1
+  printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+(pr|issue)[[:space:]]+(create|merge|edit|close|reopen|comment|review|ready|lock|unlock)' && gh_is_write=1
+  printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+(run[[:space:]]+(rerun|cancel|delete)|workflow[[:space:]]+(run|enable|disable)|release[[:space:]]+(create|edit|delete)|label[[:space:]]+(create|edit|delete)|secret[[:space:]]+set)' && gh_is_write=1
 
   gh_is_exempt=0
-  printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api[[:space:]]+rate_limit|gh[[:space:]]+auth[[:space:]]+status' && gh_is_exempt=1
+  printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+api[[:space:]]+rate_limit|gh[[:space:]]+auth[[:space:]]+status' && gh_is_exempt=1
 
-  if [ "$gh_is_write" -eq 0 ] && [ "$gh_is_exempt" -eq 0 ]; then
+  gh_broker_dir="${RMD_GH_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/remudero/gh-broker"
+  gh_broker_live=0
+  if [ -f "$gh_broker_dir/heartbeat" ]; then
+    gh_hb_interval="$(head -c 32 "$gh_broker_dir/heartbeat" 2>/dev/null | tr -dc '0-9' || true)"
+    gh_hb_mtime="$(stat -c %Y "$gh_broker_dir/heartbeat" 2>/dev/null || true)"
+    case "$gh_hb_mtime" in ''|*[!0-9]*) gh_hb_mtime="$(stat -f %m "$gh_broker_dir/heartbeat" 2>/dev/null || true)" ;; esac
+    gh_hb_now="$(date +%s 2>/dev/null || echo 0)"
+    case "$gh_hb_interval" in ''|*[!0-9]*) gh_hb_interval=0 ;; esac
+    case "$gh_hb_mtime" in ''|*[!0-9]*) gh_hb_mtime=0 ;; esac
+    case "$gh_hb_now" in ''|*[!0-9]*) gh_hb_now=0 ;; esac
+    if [ "$gh_hb_interval" -gt 0 ] && [ "$gh_hb_mtime" -gt 0 ] && [ $(( gh_hb_now - gh_hb_mtime )) -lt $(( 2 * gh_hb_interval )) ]; then
+      gh_broker_live=1
+    fi
+  fi
+
+  if [ "$gh_is_write" -eq 1 ] && [ -d "$gh_broker_dir" ]; then
+    gh_inv_num="$(printf '%s' "$gh_norm" | sed -n -E 's/.*gh[[:space:]]+(pr|issue)[[:space:]]+[a-z]+[[:space:]]+#?([0-9]+).*/\2/p' | head -1)"
+    gh_inv_repo="$(printf '%s' "$gh_norm" | sed -n -E 's/.*(-R|--repo)[[:space:]=]+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+).*/\2/p' | head -1)"
+    if [ -z "$gh_inv_num" ]; then
+      gh_inv_api="$(printf '%s' "$gh_norm" | sed -n -E 's/.*repos\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(pulls|issues)\/([0-9]+).*/\1 \3/p' | head -1)"
+      gh_inv_repo="${gh_inv_api% *}"
+      gh_inv_num="${gh_inv_api#* }"
+    fi
+    case "$gh_inv_num" in ''|*[!0-9]*) ;; *)
+      printf '%s %s\n' "${gh_inv_repo:-*}" "$gh_inv_num" >> "$gh_broker_dir/invalidations" 2>/dev/null || true ;;
+    esac
+  fi
+
+  if [ "$gh_is_write" -eq 0 ] && [ "$gh_is_exempt" -eq 0 ] && [ "$gh_broker_live" -eq 1 ]; then
+    # `rmd gh` is paced by the broker. A RAW `gh` left once it is blanked out is routed, never floored.
+    gh_raw="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh([[:space:]])/\1\2 rmd-gh\5/g')"
+    if invokes_gh "$gh_raw"; then
+      gh_class=interactive
+      gh_agent=""
+      [ "$have_jq" -eq 1 ] && gh_agent="$(printf '%s' "$input" | jq -r '.agent_id // .agent_type // ""' 2>/dev/null || true)"
+      if [ "$worker_lane" -eq 1 ] || [ -n "$gh_agent" ]; then gh_class=agent; fi
+      printf 'deny-floor: routed - a live GitHub read broker serves this account (W1-T10279).\n' >&2
+      printf '  Re-run the read as: rmd gh --class %s -- <same gh args>\n' "$gh_class" >&2
+      printf '  It answers exactly as gh would, from cache when GitHub says the answer is fresh.\n' >&2
+      exit 2
+    fi
+  elif [ "$gh_is_write" -eq 0 ] && [ "$gh_is_exempt" -eq 0 ]; then
     # FAIL OPEN THROUGHOUT. A cadence floor that errors must never block work, so every failure
     # path below falls through to allowing the call.
     # THE OVERRIDE COMES FROM THE COMMAND, NOT THIS PROCESS'S ENV. A PreToolUse hook is spawned by

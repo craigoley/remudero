@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomicAsync } from "./fs-race-safe.js";
@@ -18,6 +19,9 @@ export interface GardenerRuntimeEvent {
   executionMs: number | null;
   exit: number | null;
   reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | null;
+  /** W1-T9975: on a finished pass, how long the garden went from its previous completion to the first ask of this
+   *  pass's due period. Admission and pass-pool wait are not in it. Absent when the loop had no earlier completion. */
+  dueIntervalMs?: number;
 }
 export interface GardenerRuntimeEntry extends GardenerRuntimeEvent {
   enabled: boolean;
@@ -29,6 +33,9 @@ export interface GardenerRuntimeEntry extends GardenerRuntimeEvent {
   lastCompletedAt: string | null;
   lastSuccessAt: string | null;
   lastFailureAt: string | null;
+  /** W1-T9975: the garden's measured due-interval median, carried across restarts, and the samples behind it. */
+  dueIntervalMedianMs: number | null;
+  dueIntervalSamples: number;
 }
 export interface GardenerRuntimeSnapshot {
   version: 1;
@@ -46,6 +53,32 @@ const object = (value: unknown): value is Record<string, unknown> => !!value && 
 const time = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
 const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const duration = (value: unknown) => value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+
+/** The median of a list of durations; undefined when it is empty. Pure. */
+export function medianMs(values: readonly number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** A due-interval median and the number of intervals behind it. */
+export interface DueInterval { medianMs: number; samples: number }
+
+/**
+ * W1-T9975: which due interval stands. With two intervals of this process's own, its median stands, joined to the
+ * carried one weighted by sample count. Below two, the carried one stands; with neither, a lone own interval is
+ * kept for the next boot, and with none there is nothing measured.
+ */
+export function standingDueInterval(own: DueInterval | undefined, carried: DueInterval | undefined): { interval: DueInterval; basis: "measured" | "carried" } | undefined {
+  if (own !== undefined && own.samples >= 2) {
+    if (carried === undefined) return { interval: own, basis: "measured" };
+    const samples = own.samples + carried.samples;
+    return { interval: { medianMs: (own.medianMs * own.samples + carried.medianMs * carried.samples) / samples, samples }, basis: "measured" };
+  }
+  if (carried !== undefined) return { interval: carried, basis: "carried" };
+  return own === undefined ? undefined : { interval: own, basis: "carried" };
+}
 
 export function parseGardenerRuntime(raw: unknown): GardenerRuntimeSnapshot {
   if (!object(raw) || raw.version !== GARDENER_RUNTIME_VERSION || typeof raw.repository !== "string" ||
@@ -66,15 +99,20 @@ export function parseGardenerRuntime(raw: unknown): GardenerRuntimeSnapshot {
         !(entry.exit === null || (typeof entry.exit === "number" && Number.isInteger(entry.exit))) || !reasons.includes(entry.reason) ||
         !count(entry.attempts) || !count(entry.completions) || !count(entry.failures) || entry.completions > entry.attempts ||
         entry.failures > entry.completions || [entry.lastCompletedAt, entry.lastSuccessAt, entry.lastFailureAt]
-          .some((stamp) => stamp !== null && !time(stamp))) throw new Error("gardener runtime entry is malformed");
+          .some((stamp) => stamp !== null && !time(stamp)) ||
+        !(entry.dueIntervalSamples === undefined || count(entry.dueIntervalSamples)) ||
+        !(entry.dueIntervalMedianMs === undefined || entry.dueIntervalMedianMs === null || duration(entry.dueIntervalMedianMs))) throw new Error("gardener runtime entry is malformed");
     names.add(entry.name);
     // Validation does not authorize forwarding future or private producer fields.
     const g = entry as unknown as GardenerRuntimeEntry;
+    // A median without samples, or samples without a median, is not a measurement and is not forwarded.
+    const measured = g.dueIntervalMedianMs != null && (g.dueIntervalSamples ?? 0) > 0;
     gardens.push({ name: g.name, enabled: g.enabled, cadenceMs: g.cadenceMs, scope: g.scope,
       phase: g.phase, observedAt: g.observedAt, passId: g.passId, nextDueAt: g.nextDueAt,
       queueMs: g.queueMs, executionMs: g.executionMs, exit: g.exit, reason: g.reason,
       attempts: g.attempts, completions: g.completions, failures: g.failures,
-      lastCompletedAt: g.lastCompletedAt, lastSuccessAt: g.lastSuccessAt, lastFailureAt: g.lastFailureAt });
+      lastCompletedAt: g.lastCompletedAt, lastSuccessAt: g.lastSuccessAt, lastFailureAt: g.lastFailureAt,
+      ...(measured ? { dueIntervalMedianMs: g.dueIntervalMedianMs!, dueIntervalSamples: g.dueIntervalSamples } : { dueIntervalMedianMs: null, dueIntervalSamples: 0 }) });
   }
   return { version: 1, repository: raw.repository, daemonRunId: raw.daemonRunId,
     codeSha: raw.codeSha, configuredAt: raw.configuredAt, observedAt: raw.observedAt, gardens };
@@ -108,11 +146,23 @@ export function createGardenerRuntimeWriter(input: {
 }) {
   const clock = input.clock ?? systemClock;
   const configuredAt = clock.iso();
+  // W1-T9975: the previous generation's last completion and due interval carry forward, so one short-lived boot
+  // does not erase what the next boot seeds from. An unreadable file carries nothing.
+  const prior = new Map<string, GardenerRuntimeEntry>();
+  try {
+    for (const g of parseGardenerRuntime(JSON.parse(readFileSync(join(input.stateDir, GARDENER_RUNTIME_FILE), "utf8"))).gardens) prior.set(g.name, g);
+  } catch {
+    // deliberate: no readable runtime file means nothing earlier to carry; every entry starts unmeasured.
+  }
+  const carried = new Map<string, DueInterval>();
+  const ownIntervals = new Map<string, number[]>();
   const snapshot = parseGardenerRuntime({ version: 1, repository: input.repository, daemonRunId: input.daemonRunId,
     codeSha: input.codeSha ?? null, configuredAt, observedAt: configuredAt,
     gardens: input.gardens.map((entry) => ({ ...entry, phase: "scheduled", observedAt: configuredAt,
       passId: null, nextDueAt: null, queueMs: null, executionMs: null, exit: null, reason: null,
-      attempts: 0, completions: 0, failures: 0, lastCompletedAt: null, lastSuccessAt: null, lastFailureAt: null })) });
+      attempts: 0, completions: 0, failures: 0, lastCompletedAt: prior.get(entry.name)?.lastCompletedAt ?? null, lastSuccessAt: null, lastFailureAt: null,
+      dueIntervalMedianMs: prior.get(entry.name)?.dueIntervalMedianMs ?? null, dueIntervalSamples: prior.get(entry.name)?.dueIntervalSamples ?? 0 })) });
+  for (const g of snapshot.gardens) if (g.dueIntervalMedianMs !== null && g.dueIntervalSamples > 0) carried.set(g.name, { medianMs: g.dueIntervalMedianMs, samples: g.dueIntervalSamples });
   let revision = 1, written = 0, running: Promise<void> | undefined;
   const write = input.write ?? writeAtomicAsync;
   const flush = (): Promise<void> => {
@@ -137,9 +187,17 @@ export function createGardenerRuntimeWriter(input: {
       const entry = snapshot.gardens.find((garden) => garden.name === event.name);
       if (!entry || !entry.enabled) throw new Error("gardener event is outside the configured inventory");
       // A cheap unchanged-input observation is not a new pass and must retain its last timings.
+      const { dueIntervalMs, ...fields } = event;
       if (event.phase === "idle" && event.reason === "inputs-unchanged") Object.assign(entry, { phase: event.phase, observedAt: event.observedAt,
         nextDueAt: event.nextDueAt, reason: event.reason });
-      else Object.assign(entry, event);
+      else Object.assign(entry, fields);
+      if (dueIntervalMs !== undefined) {
+        const own = ownIntervals.get(event.name) ?? [];
+        own.push(dueIntervalMs);
+        ownIntervals.set(event.name, own);
+        const standing = standingDueInterval({ medianMs: medianMs(own)!, samples: own.length }, carried.get(event.name));
+        if (standing) { entry.dueIntervalMedianMs = standing.interval.medianMs; entry.dueIntervalSamples = standing.interval.samples; }
+      }
       if (event.phase === "queued") entry.attempts++;
       if (["completed", "failed", "cancelled"].includes(event.phase)) { entry.completions++; entry.lastCompletedAt = event.observedAt; }
       if (event.phase === "completed") entry.lastSuccessAt = event.observedAt;

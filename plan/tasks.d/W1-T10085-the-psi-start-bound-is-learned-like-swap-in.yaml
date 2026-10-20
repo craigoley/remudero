@@ -1,0 +1,106 @@
+- id: W1-T10085
+  title: "THE PSI START BOUND IS LEARNED LIKE THE SWAP-IN BOUND — the memory budget refuses every start whose host memory PSI full avg10 passes the fixed plan/policy.yaml psiFullAvg10Max 2, whatever the record says about starts admitted at that pressure; on 2026-10-17 all three long fix waits (W1-T10025 37.5 min, W1-T9877 38.7 min, W1-T10038 27.6 min) named psi at fullAvg10 2.13-12.07, and the light-pass advisory waits before each fix dispatch waited on psi alone in 12 of 14 rows, while swap-in past its bound already counts only while it has predicted stall"
+  repo: remudero
+  depends_on: [W1-T10069]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, the level host PSI full avg10 must pass before the verdict names "psi"; the prior (2), psiSomeAvg10Max, the swap-in relation, the container arm, the tiers, the reserve and serve's own admission are unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-17 ~20:30Z, Craig: \"File: learn it like swap-in\" (filing agent F18), on agent F17's 10-17 measurement of the fix-lane waits"
+  plan_refs: [W1-T10069, W1-T9982, W1-T8472, W1-T9972, W1-T9679]
+  files:
+    - src/lib/host-memory-shadow.ts
+    - src/lib/host-memory-admission.ts
+    - test/the-psi-start-bound-is-learned-like-swap-in.test.ts
+  status: merged
+  priority: 1  # operator ruling 10-17: the fixed PSI bound held every long fix wait of the day
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 on the core ledger (/mnt/rmd/state2/state, archives 17:04Z and 19:19Z and earlier 10-17 ones
+    plus the live file; read-only, niced, streamed to the Mac; rows memory_budget.enforce_admit, enforce_wait,
+    enforce_defer and memory_budget.shadow, 09:45-20:33Z):
+    - THE BOUND BINDS. 240 enforce_wait and 75 enforce_defer rows name psi at fullAvg10 > 2. W1-T10069's measurement
+      (16:20-17:29Z): the three fix waits W1-T10038 (#12607), W1-T10025 (#12601) and W1-T9877 (#12575) named
+      ["psi","unrealized-reservations"] at fullAvg10 2.13-12.07; the light-pass advisory waits before each fix dispatch
+      (agent F17) waited on psi ALONE in 12 of 14 rows with their claims fitting (hostClaimMib 621-1,728).
+    - STARTS ARE ADMITTED ABOVE IT ALREADY, SO THE RECORD EXISTS. 30 enforce_admit rows admitted a start at fullAvg10
+      > 2 (23 nothing-to-wait-for, 7 aged; e.g. advisory 13:34:56Z at 20.88, garden aged 18:14:32Z at 11.67, implement
+      18:54:01Z at 2.72). The ledger keeps about 200 rows per step, so this is a floor. Nothing today asks whether a
+      stall or an OOM kill followed them.
+    - OOM. Host /proc/vmstat oom_kill read 26 (cumulative since host boot) at ~20:35Z; the daemon.memory rows of 10-17
+      carry no cg_events_oom_kill field, so no ledger row ties an OOM kill to a start today.
+    READ at origin/main 5ebc934c5 (symbols; the three files are unchanged since e8aa38e98):
+    - src/lib/host-memory-shadow.ts `evaluateShadowMemory` adds "psi" when `psi.fullAvg10 > policy.psiFullAvg10Max`
+      (or someAvg10 past psiSomeAvg10Max): a fixed comparison, no history.
+    - THE SWAP-IN MECHANISM (#11004, eacc28b41): `readContainerPressure` appends [at, pagesPerSec, stalled] per verdict
+      to state/container-pressure.json (SWAP_STALL_HISTORY_MS 6 h, SWAP_HISTORY_CAP); `swapStallRelationOf` takes the
+      verdicts whose SWAP_STALL_WINDOW_MS (5 min) has closed and compares the share followed by a stalled verdict for
+      those past the swap-in bound against all of them, with noise 2*sqrt(p(1-p)/n), and stays "unlearned" below
+      SWAP_STALL_MIN_SAMPLES (30); `swapInPredictsStall` counts swap-in only when the lift exceeds the noise, and the
+      row's numbers.swapInBasis says which. `containerLiftOf` (W1-T8472) reuses the same windows for the container arm.
+    - src/lib/host-memory-admission.ts `awaitMemoryAdmission` waits on any "shortfall" verdict, psi included;
+      W1-T10069 (#12653, built by B53, merged 4719f9427 at ~20:47Z) adds an own-tail tier and `waited_ms_by_reason` but `ownTailRung` keeps psi a HARD STOP
+      there, so where psi binds it does not shorten the wait.
+    - src/lib/serve-supervisor.ts applies the same policy number to serve's own start (RMD_SERVE_ADMIT_PSI_FULL_AVG10_MAX
+      via serve-policy-convergence.ts). Out of scope: serve's admission keeps the prior.
+    NOT COVERED ELSEWHERE: swept origin/main plan/ (5ebc934c5) for psiFullAvg10Max, psi bound, learned psi,
+    swapStallRelationOf and swapInPredictsStall: only W1-T10069 (psi a hard stop on its tier) and W1-T8472 (the
+    container arm). W1-T9982 (queued) charges a fresh daemon's boot growth; it is the case the learned bound must not
+    open on: the 02:33-02:42Z collapse admitted starts minutes before host MemAvailable fell to ~1 GB. Swept the open PR
+    heads at 20:48Z (11: #12662 #12661 #12660 #12659 #12658 #12657 #12654 #12643 #12641 #12639 #12632): none changes plan/ or either host-memory file.
+  design: |
+    Operator rulings honoured: no hard threshold, never raise core memory.max, the 2,048 MiB host reserve unchanged.
+    REUSE the swap-in mechanism: the same store, windows, history span, minimum sample count and noise. No new
+    constant, interval or count.
+    1. THE RECORD. The state/container-pressure.json store gains a `psi` series of [at, fullAvg10, admitted, oomKill]:
+       one entry per verdict, `admitted` 1 when that verdict's start was admitted on any tier (fits, uncertain,
+       nothing-to-wait-for, aged, W1-T10069's own-tail, or a shadow-mode class that always starts), `oomKill` the
+       cumulative /proc/vmstat oom_kill read beside pswpin (null when unread). It is pruned and capped like `swap`.
+       `awaitMemoryAdmission` marks the admitted bit under the admission lock it already holds.
+    2. THE OUTCOME. A start admitted at time t is HARMED when, within SWAP_STALL_WINDOW_MS after t, the oom_kill count
+       rose, or a later verdict read host PSI full avg60 past the PRIOR (policy.psiFullAvg10Max). The outcome is defined
+       by the prior and never by the learned bound, so the bound cannot train itself loose; the swap-in `stalled` bit
+       and the container arm keep the prior too.
+    3. THE RELATION (beside `swapStallRelationOf`, same shape). Over closed windows within SWAP_STALL_HISTORY_MS, for a
+       candidate level v above the prior: the share of ADMITTED starts with fullAvg10 in (prior, v] that were harmed,
+       against the share of ALL verdicts in the same band followed by harm, noise 2*sqrt(p(1-p)/n). The band, not the
+       whole history, is the baseline, so a start is judged against the pressure it was admitted into. The learned
+       bound is the largest admitted fullAvg10 v with at least SWAP_STALL_MIN_SAMPLES admitted starts in (prior, v],
+       whose lift does not exceed the noise and none of which was followed by an OOM kill. The bound only rises above
+       the prior, as swap-in only stops counting; it never tightens below it.
+    4. FAIL CLOSED. Store unread or unparseable, oom_kill unread on every sample in the band, or fewer than
+       SWAP_STALL_MIN_SAMPLES admitted starts above the prior: the bound is the prior, and the basis says which
+       ("the prior 2: 12 of 30 admitted starts above it with a closed window").
+    5. APPLIED. `evaluateShadowMemory` names "psi" when fullAvg10 passes the LEARNED bound (someAvg10 against
+       psiSomeAvg10Max unchanged). W1-T10069's own-tail hard stop reads the same reason, so it inherits the bound.
+    6. LEDGERED. Every memory_budget.shadow and enforce_* row's numbers carry `psiFullAvg10Bound` {bound, prior, basis,
+       samples, afterAdmitted, afterBand, noise, ooms}, so each decision is recorded with its inputs.
+    TESTS in test/the-psi-start-bound-is-learned-like-swap-in.test.ts, `test(` titles verbatim as in the proofs, with
+    the pure relation and `evaluateShadowMemory` over fixture histories: 30+ admitted starts at fullAvg10 2.1-6.0 with
+    closed windows, none harmed, against a band harm share of 10%; a start at fullAvg10 4.0 whose claims fit.
+  acceptance:
+    - claim: "at a PSI the record shows harmless, a start whose claims fit is admitted"
+      proof: 'grep: test("W1-T10085: a start at a PSI the record shows harmless is admitted" in test/the-psi-start-bound-is-learned-like-swap-in.test.ts'
+    - claim: "a band whose admitted starts were followed by stall or an OOM kill keeps the prior"
+      proof: 'grep: test("W1-T10085: a PSI band followed by stall or an OOM kill keeps the prior" in test/the-psi-start-bound-is-learned-like-swap-in.test.ts'
+    - claim: "an unread or thin record keeps the prior and the basis names why"
+      proof: 'grep: test("W1-T10085: an unread or thin record keeps the prior and names why" in test/the-psi-start-bound-is-learned-like-swap-in.test.ts'
+    - claim: "each verdict row carries the bound, the prior and the relation's inputs"
+      proof: 'grep: test("W1-T10085: each verdict ledgers the PSI bound with its inputs" in test/the-psi-start-bound-is-learned-like-swap-in.test.ts'
+  falsifier: |
+    Over a record of 30+ admitted starts at fullAvg10 2.1-6.0 with closed windows, none followed by an OOM kill or a
+    full avg60 past 2, a start at fullAvg10 4.0 whose claims fit is admitted at head (wouldAdmit, no "psi" reason) and
+    refused at origin/main, where `evaluateShadowMemory` compares against psiFullAvg10Max 2 and names "psi"; the first
+    test fails at base. Learning from every verdict instead of admitted starts, or from the learned bound's own stall
+    definition, fails the second; dropping the fail-closed prior fails the third. Deleting the fix gives `# fail N`,
+    restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISION named here: the bound may rise to any level the record shows harmless, with no ceiling but the
+    record. The only samples above the prior are starts already admitted on the nothing-to-wait-for and aged tiers (30
+    on 10-17), so the bound learns at that pace; this task adds no exploration tier that admits a start above the bound
+    to learn. Depends on W1-T10069 (#12653) because both change host-memory-admission.ts; W1-T9982 also edits
+    host-memory-shadow.ts (another function), so merge main before the push. EFFECT, measured after merge: the share
+    of enforce_wait rows naming psi, and fix-class enforce_admit waited_ms, over the same hours. Healthy shape: psi
+    holds a start only in a band whose admitted starts were followed by harm.

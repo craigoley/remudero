@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: console inbox review (W1-T147, W1-T204, W1-T5717, W2-T2, W3-T4, W1-T12e, W3-T7 all read \"0 days ago\")"
   plan_refs: [W1-T3887, W1-T2635]
   files: [src/run-task.ts, src/lib/verify-human-judge.ts, test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
-import { ciFrictionRoundsFromLedger } from "../src/lib/ci-friction-gardener.js";
+import { ciFrictionRoundsFromLedger, gitCiFrictionOwnerSearch, withoutBirthRounds } from "../src/lib/ci-friction-gardener.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const FILE = "test/x.test.ts";
 const dispatch = (head: string, run: string, ts: string, ci_failures: Array<{ check: string; signature?: string }>): LedgerRecord =>
@@ -38,4 +41,42 @@ test("W1-T9056: an aggregator with no named producer keeps its key, and a non-te
   assert.deepEqual(alone.map((r) => r.cause.name), ["ci-log:coverage-ratchet", "ci-log:commitlint"]);
   const named = ciFrictionRoundsFromLedger([pr("bbb", 2), dispatch("bbb", "DAEMON-1", "2026-10-13T01:00:00.000Z", [{ check: "coverage-ratchet" }, { check: "commitlint", signature: "subject too long" }])]);
   assert.deepEqual(named.map((r) => [r.cause.name, r.minutes]), [["ci-log:commitlint:subject-too-long", 10]]);
+});
+
+test("W1-T9823: a test's red on the pull request that added the test is that PR's own development, not friction", () => {
+  const rounds = ciFrictionRoundsFromLedger([
+    pr("aaa", 12294),
+    pr("bbb", 7),
+    dispatch("aaa", "DAEMON-1", "2026-10-16T12:47:58.000Z", [{ check: "ci-shard (1/8)", signature: FILE }]),
+    dispatch("bbb", "DAEMON-1", "2026-10-17T01:00:00.000Z", [{ check: "ci-shard (1/8)", signature: FILE }]),
+    dispatch("bbb", "DAEMON-1", "2026-10-17T02:00:00.000Z", [{ check: "commitlint", signature: "subject too long" }]),
+  ]);
+  const addedByPr = (file: string) => file === FILE ? 12294 : undefined;
+  assert.deepEqual(withoutBirthRounds(rounds, { addedByPr }).map((r) => [r.pr, r.cause.name]),
+    [[7, `test:${FILE}`], [7, "ci-log:commitlint:subject-too-long"]]);
+  // A flaky-keyed cause is the same test file, so its birth round goes too.
+  const flaky = [{ pr: 12294, cause: { kind: "check" as const, name: `test:${FILE}:flaky` }, minutes: 1 }];
+  assert.deepEqual(withoutBirthRounds(flaky, { addedByPr }), []);
+  // No provenance, from an absent seam or a test with no adding pull request, keeps every round.
+  assert.equal(withoutBirthRounds(rounds, {}).length, rounds.length);
+  assert.equal(withoutBirthRounds(rounds, { addedByPr: () => undefined }).length, rounds.length);
+});
+
+test("W1-T9823: the git owner search names the pull request whose merge added a file", (t) => {
+  const repo = gitRepo({ kind: "added-by-pr" });
+  t.after(() => repo.cleanup());
+  mkdirSync(join(repo.dir, "test"), { recursive: true });
+  writeFileSync(join(repo.dir, FILE), "a\n");
+  repo.git("add", FILE);
+  repo.git("commit", "-qm", "test(x): add the x suite (#12294)");
+  writeFileSync(join(repo.dir, FILE), "b\n");
+  repo.git("commit", "-qam", "fix(x): a later edit (#12400)");
+  writeFileSync(join(repo.dir, "test/y.test.ts"), "y\n");
+  repo.git("add", "test/y.test.ts");
+  repo.git("commit", "-qm", "a direct commit with no pull request");
+  const search = gitCiFrictionOwnerSearch((args) => repo.git(...args), "HEAD");
+  assert.equal(search.addedByPr?.(FILE), 12294);
+  assert.equal(search.addedByPr?.(FILE), 12294, "a second read answers from the same pinned history");
+  assert.equal(search.addedByPr?.("test/y.test.ts"), undefined);
+  assert.equal(search.addedByPr?.("test/absent.test.ts"), undefined);
 });

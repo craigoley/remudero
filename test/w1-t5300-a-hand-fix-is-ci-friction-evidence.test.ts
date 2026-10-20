@@ -64,14 +64,14 @@ test("hand-fix collector runs the real git and gh defaults and persists the merg
     const shim = ghShim([{ when: "api repos/owner/repo/pulls", stdout: JSON.stringify([row]) }]);
     shimDir = shim.dir;
     process.env.PATH = `${shim.dir}:${priorPath}`;
-    const result = readCiFrictionHandFixes(repo, state, "owner", "repo", clock);
+    const result = readCiFrictionHandFixes(repo, state, "owner", "repo", clock, undefined, () => "a".repeat(40));
     assert.equal(result.state, "observed"); assert.deepEqual(result.fixes, [fix]);
     assert.equal(JSON.parse(readFileSync(join(state, "ci-friction-hand-fixes.json"), "utf8")).asOf, clock.iso());
-    const reused = readCiFrictionHandFixes(repo, state, "owner", "repo", clock, () => { throw new Error("fresh cache must not read GitHub"); });
+    const reused = readCiFrictionHandFixes(repo, state, "owner", "repo", clock, () => { throw new Error("unchanged origin/main must not read GitHub"); }, () => "a".repeat(40));
     assert.equal(reused.state, "observed");
     assert.deepEqual(reused.fixes, [fix]);
     const later = readCiFrictionHandFixes(repo, state, "owner", "repo", fixedClock(clock.now() + 600_001),
-      (command) => { if (command === "git") throw new Error("known merge must reuse its files"); return JSON.stringify([row]); });
+      (command) => { if (command === "git") throw new Error("known merge must reuse its files"); return JSON.stringify([row]); }, () => "b".repeat(40));
     assert.equal(later.state, "observed");
   } finally { process.env.PATH = priorPath; fixture.cleanup(); rmSync(root, { recursive: true, force: true }); if (shimDir) rmSync(shimDir, { recursive: true, force: true }); }
 });
@@ -138,4 +138,18 @@ test("the live garden reports unreadable manual evidence while still producing i
     assert.ok(logs.includes("ci-friction.hand_fixes_unmeasured"));
     assert.equal(spec.scorecard(inv, { actions: [], acting: [] }).hand_fixes && inv.priced.length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a hand fix merged before a cause's first observed round is not that cause's evidence", () => {
+  const priced = priceCiFrictionCauses(rounds);
+  // rounds[0] first saw changed-nothing at 2026-10-01T10:00Z: a repair of its owner merged a day earlier predates it.
+  const early = { ...fix, pr: 7, at: "2026-09-30T10:00:00Z" };
+  assert.deepEqual(ciFrictionHandFixRounds([early], rounds, priced, search), []);
+  // The same file repaired twice before the cause was ever seen is a repeated hand fix of that file instead.
+  const repeated = ciFrictionHandFixRounds([early, { ...early, pr: 8 }], rounds, priced, search);
+  assert.deepEqual(repeated.map((r) => [r.pr, r.cause]), [[7, { kind: "hand_fix", name: "src/worker.ts" }], [8, { kind: "hand_fix", name: "src/worker.ts" }]]);
+  // At or after the first observed round the owner match still holds, and an undated round dates its cause from always.
+  assert.deepEqual(ciFrictionHandFixRounds([{ ...early, at: rounds[0]!.at }], rounds, priced, search).map((r) => r.cause.name), ["changed-nothing"]);
+  const undated = [{ ...rounds[0]!, at: undefined }, rounds[1]!];
+  assert.deepEqual(ciFrictionHandFixRounds([early], undated, priceCiFrictionCauses(undated), search).map((r) => r.cause.name), ["changed-nothing"]);
 });

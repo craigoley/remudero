@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-14: rmd-id reservation census (7,130 refs, 3,885 orphaned) and the leased release in PR #11707"
   plan_refs: [W1-T1011, W1-T2326, W1-T3300, W1-T949]
   files: [src/run-task.ts, test/a-lane-releases-the-reserved-ids-it-never-filed.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

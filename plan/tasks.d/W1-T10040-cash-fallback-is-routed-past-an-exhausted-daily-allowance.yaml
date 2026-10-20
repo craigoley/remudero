@@ -16,7 +16,7 @@
     - src/lib/classify.ts
     - src/run-task.ts
     - test/cash-fallback-reads-the-remaining-allowance.test.ts
-  status: queued
+  status: merged
   priority: 1  # while claude sits below reserve and codex reads unreadable, cash is the only arm; every lane on it pays full setup and then four refused attempts per run until 00:00Z, and a review loses its model reviewer
   attempts: 0
   rationale: |

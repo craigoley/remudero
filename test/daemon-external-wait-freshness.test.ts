@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { runDaemon, type DaemonDeps, type DaemonFreshness, type DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
+import { DEPLOY_RESTART_SCORE_THRESHOLD } from "../src/lib/deploy-judge.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -427,7 +428,18 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
       undefined,
       "a low-weight advance a busy daemon defers does not end the run's CI wait (W1-T5037)",
     );
+    // W1-T9089: the daemon's own code weighs the source floor of 1 like any other source, so one commit to the daemon
+    // loop still defers; the CI wait hands off once the advance carries the restart threshold's worth of source commits.
+    const advanced = [{ sha: lowSha, subject: "advance source for freshness handoff", files: ["src/freshness.ts"] }];
     cleanupGit.advanceOrigin("src/lib/daemon.ts", "advance the daemon loop");
+    advanced.push({ sha: originHead(), subject: "advance the daemon loop", files: ["src/lib/daemon.ts"] });
+    assert.equal(await forwarded.externalWaitFreshness?.(), undefined, "the daemon's own loop alone is the floor: a busy daemon defers it");
+    while (advanced.length < DEPLOY_RESTART_SCORE_THRESHOLD.value) {
+      const file = `src/lib/advance-${advanced.length}.ts`;
+      const subject = `advance source ${advanced.length}`;
+      cleanupGit.advanceOrigin(file, subject);
+      advanced.push({ sha: originHead(), subject, files: [file] });
+    }
     const newSha = originHead();
     assert.equal(forwarded.externalWaitRecycle?.(), undefined, "no recycle PAUSE: the CI wait is not handed off (W1-T5127)");
     mkdirSync(join(root, "state"), { recursive: true });
@@ -444,10 +456,7 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
         stale: true,
         oldSha,
         newSha,
-        changes: [
-          { sha: newSha, subject: "advance the daemon loop", files: ["src/lib/daemon.ts"] },
-          { sha: lowSha, subject: "advance source for freshness handoff", files: ["src/freshness.ts"] },
-        ],
+        changes: [...advanced].reverse(),
       },
       "an advance that restarts a busy daemon crosses the handoff boundary, carrying the commits it advanced by (W1-T4945)",
     );

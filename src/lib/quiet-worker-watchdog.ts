@@ -611,9 +611,6 @@ export interface QuietWatchdogOptions {
   endRound?: (reason: string, trigger?: RoundEndTrigger) => Promise<EndRoundResult>;
   /** The container-recycle PAUSE detail while one is pending, else `undefined`. */
   recyclePending?: () => string | undefined;
-  /** W1-T8139: the daemon's restart-latch detail while one is latched, else `undefined`. An in-process read: it must
-   * never fetch, because the watchdog calls it on every poll. A pending recycle is checked first. */
-  restartPending?: () => string | undefined;
   /** Polling cadence for {@link QuietWatchdogHandle.start}; ticks are cheap until a bound is crossed. */
   pollMs?: number;
 }
@@ -664,21 +661,19 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
   const yieldToRecycle = async (): Promise<boolean> => {
     if (recycleTried || !opts.endRound) return false;
     const recycle = opts.recyclePending?.();
-    const restart = recycle ? undefined : opts.restartPending?.();
-    const pending = recycle || restart;
-    if (!pending) return false;
-    const trigger: RoundEndTrigger = recycle ? "recycle" : "restart";
+    if (!recycle) return false;
+    const trigger: RoundEndTrigger = "recycle";
     recycleTried = true;
     let result: EndRoundResult;
     try {
-      result = await opts.endRound(`${trigger} pending: ${pending}`, trigger);
+      result = await opts.endRound(`${trigger} pending: ${recycle}`, trigger);
     } catch (error) {
       result = { ended: false, reason: String((error as Error)?.message ?? error) };
     }
     finished = result.ended;
     opts.ledger(RECYCLE_YIELD_LEDGER_STEP, {
       decision: result.ended ? "acted" : "action_failed", action: "end_round",
-      ...(recycle ? { recycle } : { trigger, restart }),
+      recycle,
       checkpoint_sha: result.checkpointSha ?? null, ...(result.reason ? { detail: result.reason } : {}),
     });
     return result.ended;

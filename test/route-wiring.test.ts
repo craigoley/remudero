@@ -314,6 +314,7 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/drain/run",
   "POST /v1/pr-actions",
   "POST /v1/questions/answer",
+  "POST /v1/inbox/keep",
   "POST /v1/policy/daily-cost-ceiling",
   "POST /v1/policy/daily-cost-ceiling/clear",
   "POST /v1/operator-agent/actions/execute-high",
@@ -699,6 +700,35 @@ test("W1-T4657: POST /v1/operator-agent/actions/execute-high runs an approved ki
 });
 
 // ── 6. ANSWER — the measured misrooting hazard, asserted in the OTHER direction ──
+
+test("W1-T10078: keep writes its observed state at the production inbox root and audits the decision", async () => {
+  await withProductionServer(async (h) => {
+    const proposalId = "ruling:wiring-keep";
+    const stateDir = join(h.fleetRoot, "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({
+      proposals: [{ id: proposalId, summary: "Keep the current behaviour.", evidenceAnchors: [] }],
+    }));
+    const res = await post(h.base, "/v1/inbox/keep", { proposalId, reason: "The current behaviour is intended." });
+    const body = await res.json() as { ok: boolean; proposalId: string; kept: boolean; keptAt: string };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.ok, true);
+    assert.equal(body.proposalId, proposalId);
+    assert.equal(body.kept, true);
+    const mark = JSON.parse(readFileSync(join(stateDir, "inbox-triage.json"), "utf8"))[proposalId];
+    assert.equal(mark.keptAt, body.keptAt);
+    assert.equal(mark.keptState.lane, "notReady");
+    assert.equal(mark.keptState.state, "not_ready");
+    assert.ok(mark.keptState.reasons.length > 0);
+    assert.match(mark.keptState.messageHash, /^[a-f0-9]{64}$/);
+    assert.equal(existsSync(join(h.questionsRoot, "state", "inbox-triage.json")), false);
+    const rows = ledgerSteps(h.ledgerPath).filter(row => row.step === "inbox.kept");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].task_id, proposalId);
+    assert.equal(rows[0].reason, "The current behaviour is intended.");
+    assert.deepEqual(rows[0].keptState, mark.keptState);
+  });
+});
 
 test("POST /v1/questions/answer writes questions.ndjson under questionsRoot, not fleetControlRoot", async () => {
   await withProductionServer(async (h) => {

@@ -62,6 +62,7 @@ test("linkWorktreeNodeModules reports failure instead of throwing -- a worktree 
       throw new Error("ENOENT");
     },
     resolveSource: () => "/src/node_modules",
+    realpath: (path) => path,
     symlink: () => {
       throw new Error("EPERM");
     },

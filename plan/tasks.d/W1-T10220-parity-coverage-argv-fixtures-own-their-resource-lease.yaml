@@ -1,0 +1,127 @@
+- id: W1-T10220
+  title: "A coverage argv fixture uses an explicit resource lease without weakening real parity admission"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 5.00
+  priority: 1.5
+  status: merged
+  attempts: 0
+  origin: "Operator-approved separate parity-resource repair, 2026-10-19; normal reservation refs/rmd-id/W1-T10220."
+  plan_refs: [W1-T10094, W1-T10153, W1-T4951, W1-T4526, W1-T5655, W1-T5709]
+  files:
+    - src/lib/ci-parity.ts
+    - test/proof-exec-tmp-hygiene.test.ts
+    - test/helpers/coverage-parity-spawn.ts
+  rationale: |
+    OBSERVED on the unpublished W10094 source8746aab5bedd and ACTUAL unchanged pinned
+    base14f9184bca76: the maintained512MiB bounded author route reports the same coverage
+    argv fixture failure, zero recorded coverage children instead of eight. Source native is
+    complete114tests113pass1fail; exact-base contained comparison is
+    complete1test0pass1samefail. The same base file ordinarily passes6of6. These are a
+    context-dependent baseline fixture refusal, not a W10094 regression, native PASS or gate
+    waiver.
+    The real runCiParity return refuses the mounted TMPDIR scratch path above the
+    maintained60-character Unix-socket-safe limit BEFORE spawning coverage. Its subsequent
+    hardcoded global/tmp lock and checkout coverage writes are additional visible resource
+    assumptions, not observed causes of the first refusal. Fake child/capacity inputs
+    currently still leave these real resource seams active. Preserve the failed native,
+    exact-base, ordinary positive and setup receipts without publication of private capture
+    bytes or paths.
+    Fresh main and every captured OPEN subject tree retain the same real table and resource
+    defaults. W4526 nested scratch, W4951 sharded coverage, W5655 lock recovery and W5709
+    preferred volume are preserved; do not rebuild or weaken them. W10179 is alias-only
+    portability, W9856 names a different lint-plan-fast failure and existing scope refusal,
+    W10133 recurrence is not this root cause, and W5882 remains explicitly held. This
+    separately approved task must not compete with an active owner or silently extend W10094
+    design/scope/authority.
+  design: |
+    1. Separate coverage resource acquisition/lifetime from the existing production shard
+    workload. Add an explicit typed dependency port in the existing parity dependency flow so
+    a caller-supplied fixture resource lease can run the SAME real shard planning, argv
+    construction, judged artifact checks and final coverage sequence. Production/default
+    callers omit the port and retain current resource checks and cleanup. Prefer a coherent
+    resource contract over independent allow flags or filesystem monkeypatches.
+    2. The fixture lease owns only real disposable directories beneath the supplied tmpdir.
+    It may mock capacity/host-lock ownership for its already-mocked children, but must not
+    claim real coverage capacity, native admission or full parity validation. No
+    environment/CLI/config setting activates the fixture lease; no global monkeypatch or
+    early return producing success-shaped output. Preserve unrelated unmocked seams and
+    explicitly report actual default refusals.
+    3. Keep all six existing proof-executor/parity test titles and substantive assertions.
+    Both parity cases must still call REAL runCiParity with its actual checked-in job table;
+    the coverage assertion must see eight ACTUAL calls to the recording spawn, with adjacent
+    tsx then tmp-hygiene imports. Do not replace those assertions with source grep, a copied
+    argv planner, fabricated production call text or planned-but-unspawned commands. Assert
+    the returned coverage step outcome so future resource refusals name their cause rather
+    than only 0-versus8.
+    4. The default 60-character socket-safe path check, outside-checkout identity check,
+    same-device fallback,20GiB reserve, global cross-TMPDIR lock identity/reclamation, host
+    slots, checked refresh/diff, complete shard/artifact judging, ratchets and error outcomes
+    remain unchanged. Default cleanup must retain existing re-entrant ownership rules. The
+    explicit injected fixture cannot alter the default gate or authorize an operator/daemon
+    effect. No native sandbox change, writable checkout/global/tmp exception, resource-bound
+    increase, baseline/exclusion/skip or weaker passing selection.
+    5. Use deterministic fixtures proving actual lease forwarding through the real parity
+    table; owned scratch/artifact cleanup after both success and failure; unchanged
+    omitted-port default selection and refusal reasons; and healthy/default plus
+    long-path/capacity/live-lock/unreadable controls from actual existing implementations.
+    Test real default IO and every new catch. Validate both old callers omitting the optional
+    dependency and explicitly injected fixtures, with no policy/runtime/owner semantics
+    changed.
+    6. Retain the failed native, exact-base reproduction and ordinary positive before repair.
+    Add a contained fixture regression that fails on the actual unchanged base. Delete only
+    the new production forwarding to make the contained behavioral control fail; delete the
+    actual hygiene import to make the argv proof fail; restore exact committed bytes and
+    require complete passing TAP. A setup failure, skip, mocked success result or an
+    unexecuted plan is not a falsifier. Commit before mapped coverage, instrument every
+    changed source SF and run one justified native for a distinct changed tree using the full
+    verified failing selection. Every new native failure must be compared on THAT run's
+    actual unchanged pinned base.
+    7. Before reservation/filing/build/publication, refresh both scope-time checks with
+    complete historical/current exact merged trailer OR runbranch credit, all current OPEN
+    subject blobs and positive/window controls, current task/package selector and ordinary
+    ownership. Take no contested claim. File a distinct normal plan PR, preserving existing
+    task records. Use canonical behavioral proofs, verify GitHub STORED parser/executor
+    output, attach every created PR and follow required exact-head
+    CI/coverage/security/normal remudero-review/fleet merge. No plan auto-arm or duplicate
+    author/review/publication. W10094 remains held until the separate repair actually
+    normally merges, then rebase its existing source normally and qualify a genuinely changed
+    committed tree. Its old native stays FAILED.
+    Research: actual local production code and exact-base contained/ordinary controls are the
+    causal evidence. Node24 test mocks distinguish injected function observations from real
+    default behavior; fixture success cannot certify host capacity or native admission.
+    https://nodejs.org/docs/latest-v24.x/api/test.html#mocking ; supplied temporary roots
+    remain execution-context input, not permission to write the host:
+    https://nodejs.org/api/os.html#ostmpdir
+  acceptance:
+    - claim: "The real parity coverage entry records every shard argv inside supplied bounded scratch without host-resource writes"
+      proof: "unit test: parity coverage argv fixtures use supplied scratch through the real table"
+    - claim: "Omitted fixture resources preserve real coverage admission, locks and cleanup"
+      proof: "unit test: parity fixture resources leave default coverage admission unchanged"
+    - claim: "Fixture resource/artifact failures remain failures with precise owned cleanup"
+      proof: "unit test: parity fixture lease failures preserve refusal and owned cleanup"
+    - claim: "Real resource forwarding and tmp-hygiene argv are independently load-bearing"
+      proof: "unit test: parity fixture forwarding and hygiene imports are load-bearing"
+  falsifier: |
+    Keep the original six titles/assertions and new contained controls fixed. Delete only
+    production resource-lease forwarding: the real-table contained fixture must fail, not a
+    ghost path, setup crash or manufactured result. Delete only the actual tmp-hygiene
+    import: its real eight recorded child argv assertions must fail independently. Restore
+    exact committed bytes and obtain complete passing TAP while omitted-port default
+    refusals, resource bounds, cross-volume lock identity and cleanup stay unchanged. A lease
+    fixture does not establish actual coverage capacity or author PASS. No skip, selection
+    reduction, sandbox exception or unchanged failing native retry.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Operator explicitly approved this exact separate USD5 high/span three-file parity-resource repair and its four behavioral proofs; omitted-port production admission, locks, capacity, containment and independent owner override remain unchanged. Normal gates and ownership apply; no duplicate work, schedules, worker stops or live cutover."
+    judged_at: "2026-10-19T21:03:31.449Z"
+    pin: "187c8dc0fc8e0b23e6620ece2ec36cb18278583693f7772d0cfd1b0c661fff39"

@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
 import { lintTask, sizingViolation } from "../src/lib/task-linter.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations } from "../src/lib/plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath } from "../src/lib/plan.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -28,7 +28,7 @@ test("a ci-friction remedy naming its owning code and a new regression test is a
     "W1-T99999",
   );
   const files = loadPlanFromYaml(yaml, "x").tasks[0]!.files;
-  assert.deepEqual(files, ["src/run-task.ts", "test/check-fixture-never-built.test.ts"]);
+  assert.deepEqual(files, ["src/run-task.ts", newTestPath("check-fixture-never-built", ["src/run-task.ts"], "ci-friction-gardener")]);
   assert.equal(existsSync(join(REPO_ROOT, files[1]!)), false, "the regression test does not exist before the build writes it");
   assert.deepEqual(admit(yaml), []);
 });
@@ -42,7 +42,7 @@ test("an invented source path is still refused, and a remedy with no owning code
   const testOnly = invented.replace("    - src/lib/no-such-module.ts\n", "");
   const reasons = admit(testOnly).join("; ");
   assert.match(reasons, /verify:human — not auto-runnable/);
-  assert.match(reasons, /exist in neither the checkout nor the base tree: test\/check-x\.test\.ts/);
+  assert.match(reasons, /exist in neither the checkout nor the base tree: test\/[\w-]+\/check-x\.test\.ts/);
 });
 
 test("the legacy docs-only ci-friction shard still files, so existing records keep admitting", () => {
@@ -63,10 +63,11 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
   const plan = loadPlanFromYaml(yaml, "x");
   const task = plan.tasks[0]!;
   const stem = ciFrictionShardStem(key);
-  assert.deepEqual(task.files, ["src/lib/ci-parity.ts", `test/${stem}.test.ts`], "one owner file plus a test named for the shard");
+  const testPath = newTestPath(stem, ["src/lib/ci-parity.ts"], "ci-friction-gardener");
+  assert.deepEqual(task.files, ["src/lib/ci-parity.ts", testPath], "one owner file plus a test named for the shard, in its computed folder");
   assert.equal(sizingViolation(task, { duplicateSlug: stem }), undefined, "the test is the shard's own falsifier, so the span is one concern");
   const proof = task.acceptance?.[0]?.proof ?? "";
-  assert.equal(proof, `grep: test("${ciFrictionRemedyTestTitle("W1-T99995", key)}" in test/${stem}.test.ts`);
+  assert.equal(proof, `grep: test("${ciFrictionRemedyTestTitle("W1-T99995", key)}" in ${testPath}`);
   assert.equal(proof.split(" in ").length, 2, "the title never splits the proof's path");
   assert.equal(ciFrictionRemedyTestTitle("W1-T1", "check:pass in ci"), "W1-T1: check:pass within ci is prevented, not retried");
   const lint = lintTask(task, { duplicateSlug: stem, machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: (p) => existsSync(join(REPO_ROOT, p)) } });

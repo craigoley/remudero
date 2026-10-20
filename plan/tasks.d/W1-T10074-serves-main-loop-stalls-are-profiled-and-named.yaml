@@ -15,7 +15,7 @@
     - src/lib/incident-invariants.ts
     - src/lib/loop-stall-profiler.ts
     - test/serves-main-loop-stalls-are-profiled-and-named.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator 2026-10-17: the console cannot load its inbox while serve's loop is blocked
   attempts: 0
   rationale: |

@@ -16,6 +16,7 @@ import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
 import { BOARD_MAX_PAGES, type BoardIssueRest, type BoardPrRest } from "../src/lib/open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+// @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}board-snapshot-`));
@@ -458,7 +459,7 @@ esac
 });
 
 test("production daemon and Serve composition roots construct and pass the shared snapshot cache", () => {
-  const source = readFileSync(join(process.cwd(), "src", "run-task.ts"), "utf8");
+  const source = readFileSync(join(process.cwd(), "src", "cli", "commands", "daemon.ts"), "utf8") + "\n" + readFileSync(join(process.cwd(), "src", "run-task.ts"), "utf8");
   assert.ok(/createBoardSnapshotCache\(/.test(source), "the module is constructed outside its unit test");
   assert.ok(/snapshotCache:\s*boardSnapshotFor\(|snapshotFor:\s*boardSnapshotFor\b/.test(source), "daemon projection and lane gateways receive the per-repo shared cache");
   assert.ok(/buildSweepHook\([\s\S]*?boardSnapshotFor\(target\.owner, target\.repo\)/.test(source), "the full sweep gateway receives the same daemon cache");

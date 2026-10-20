@@ -13,11 +13,15 @@
 # mixed-owner paths, Git checkouts/worktrees, scheduled log/lock files, or paths with process/CWD/open
 # use or an incomplete safety scan. Those paths are recorded for review instead of silently skipped.
 #
-# The age window is always six hours, regardless of free space. Each account runs its own hourly
+# The age window is always six hours for BOTH mtime and ctime, regardless of free space.
+# Restored/backdated files are recent when their kernel change time is recent. Each account runs its own hourly
 # sweep; ownership, process/CWD/open-file, symlink, and Git checks below still fail closed. Old
 # regular log files are eligible too, except when the current crontab schedules that path or any
 # safety check is uncertain.
 set -u
+# Cron supplies /usr/bin:/bin, while macOS installs lsof under /usr/sbin.
+# Append system tools without changing caller precedence or trusting user package bins.
+export PATH="${PATH:-/usr/bin:/bin}:/usr/sbin:/sbin"
 shopt -s nullglob
 SEED_GUARD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
@@ -244,13 +248,16 @@ artifact_risk() {
 # forever. Keep the directory itself, but assess old regular files individually.
 prune_old_tree_files() {
   local tree="$1" file status recent owner_name why file_dir abs k old_candidate
-  old_candidate=$(find "$tree" -xdev -type f -mmin "+$AGE_MIN" -print -quit 2>/dev/null); status=$?
+  old_candidate=$(find "$tree" -xdev -type f -mmin "+$AGE_MIN" -cmin "+$AGE_MIN" -print -quit 2>/dev/null); status=$?
   if [ "$status" -ne 0 ]; then report_risk 'nested age scan unavailable' "$ROOT_REAL/${tree#./}"; return 0; fi
   [ -n "$old_candidate" ] || return 0
   why=$(artifact_risk "$tree" 1)
   if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/${tree#./}"; return 0; fi
+  # A live enclosing scratch run protects all of its leaves, not only the one
+  # descriptor/CWD the process happens to hold while this scan observes it.
+  if why=$(path_is_live_or_unknown "$tree"); then report_risk "$why" "$ROOT_REAL/${tree#./}"; return 0; fi
   while IFS= read -r -d '' file; do
-    recent=$(find "$file" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); status=$?
+    recent=$(find "$file" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); status=$?
     if [ "$status" -ne 0 ]; then report_risk 'nested age recheck unavailable' "$ROOT_REAL/${file#./}"; continue; fi
     [ -z "$recent" ] || continue
     owner_name=$(owner "$file" 2>/dev/null)
@@ -271,9 +278,10 @@ prune_old_tree_files() {
     k=$(du -xsk "$abs" 2>/dev/null | cut -f1)
     [ -n "$k" ] || { report_risk 'nested size scan unavailable' "$abs"; continue; }
     if [ "$APPLY" = 1 ]; then
-      recent=$(find "$abs" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); status=$?
+      recent=$(find "$abs" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); status=$?
       if [ "$status" -ne 0 ]; then report_risk 'nested age recheck unavailable' "$abs"; continue; fi
       [ -z "$recent" ] || continue
+      if why=$(path_is_live_or_unknown "$tree"); then report_risk "$why" "$ROOT_REAL/${tree#./}"; return 0; fi
       if why=$(path_is_live_or_unknown "$abs"); then report_risk "$why" "$abs"; continue; fi
       if ! rm -f -- "$abs"; then report_risk 'nested file delete failed' "$abs"; continue; fi
       echo "deleted old nested file: $abs"
@@ -281,7 +289,7 @@ prune_old_tree_files() {
       printf 'WOULD DELETE nested file %s (%s KiB)\n' "$abs" "$k"
     fi
     del_k=$((del_k + ${k:-0})); del_n=$((del_n + 1))
-  done < <(find "$tree" -xdev -type f -user "$ME" -mmin "+$AGE_MIN" -print0 2>/dev/null)
+  done < <(find "$tree" -xdev -type f -user "$ME" -mmin "+$AGE_MIN" -cmin "+$AGE_MIN" -print0 2>/dev/null)
 }
 
 # TSX caches are write-once compiled files. Keep the cache directory itself;
@@ -306,6 +314,12 @@ prune_tsx_cache() {
     entries=$(find -P "$dir" -xdev ! -type d -print 2>/dev/null) || { report_risk 'TSX content scan unavailable' "$dir"; return 0; }
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
+      # tsx creates <pid>.pipe Unix sockets beside its transpile cache. Keep
+      # these IPC endpoints, but do not let a stale endpoint hide old cache
+      # files. Whole-cache live/open checks below still protect a live server.
+      if [ -S "$entry" ] && [ ! -L "$entry" ] && [[ "${entry##*/}" =~ ^[0-9]+\.pipe$ ]] && [ "$(owner "$entry" 2>/dev/null)" = "$ME" ]; then
+        continue
+      fi
       if [ ! -f "$entry" ] || [ -L "$entry" ] || [[ ! "${entry##*/}" =~ ^[0-9]+-[0-9a-f]{40}$ ]]; then
         report_risk 'TSX discovery contains unrecognized or special data' "$dir"; return 0
       fi
@@ -362,7 +376,7 @@ process_tmp_entry() {
     report_risk "owned by ${entry_owner:-unknown}; age check requires owner account" "$ROOT_REAL/${path#./}"
     return 0
   fi
-  old_check=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); old_status=$?
+  old_check=$(find "$path" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); old_status=$?
   if [ "$old_status" -ne 0 ]; then report_risk 'age scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
   if [ -n "$old_check" ]; then
     if [ -d "$path" ] && [ ! -L "$path" ]; then
@@ -372,16 +386,18 @@ process_tmp_entry() {
   fi
   why=$(artifact_risk "$path")
   if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/${path#./}"; return 0; fi
-  # Recheck age and every risk gate immediately before deletion.
+  # Sizing may be slow, or a run may start while it executes. Keep sizing before
+  # the final age/activity qualification rather than leaving a gap before rm.
+  k=$(du -xsk "$path" 2>/dev/null | cut -f1)
+  if [ -z "$k" ]; then report_risk 'size scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
+  # Recheck age and every risk gate after sizing, immediately before deletion.
   if [ "$APPLY" = 1 ]; then
-    old_check=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); old_status=$?
+    old_check=$(find "$path" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); old_status=$?
     if [ "$old_status" -ne 0 ]; then report_risk 'age recheck unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
     [ -z "$old_check" ] || return 0
     why=$(artifact_risk "$path")
     if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/${path#./}"; return 0; fi
   fi
-  k=$(du -xsk "$path" 2>/dev/null | cut -f1)
-  if [ -z "$k" ]; then report_risk 'size scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
   del_k=$(( del_k + ${k:-0} )); del_n=$(( del_n + 1 ))
   if [ "$APPLY" = 1 ]; then
     if ! rm -rf "$path"; then report_risk 'delete failed/incomplete' "$ROOT_REAL/${path#./}"; fi
@@ -422,7 +438,7 @@ process_session_scratch_dir() {
   if [ -z "$resolved" ] || [ "$resolved" != "$path" ]; then
     report_risk 'session scratch path changed or could not be resolved' "$path"; return 0
   fi
-  recent=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); status=$?
+  recent=$(find "$path" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); status=$?
   if [ "$status" -ne 0 ]; then report_risk 'session scratch age scan unavailable' "$path"; return 0; fi
   if [ -n "$recent" ]; then report_risk 'recent content inside session scratch directory' "$path"; return 0; fi
   why=$(session_scratch_risk "$path")
@@ -430,7 +446,7 @@ process_session_scratch_dir() {
   k=$(du -xsk "$path" 2>/dev/null | cut -f1)
   if [ -z "$k" ]; then report_risk 'session scratch size scan unavailable' "$path"; return 0; fi
   if [ "$APPLY" = 1 ]; then
-    recent=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); status=$?
+    recent=$(find "$path" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); status=$?
     if [ "$status" -ne 0 ]; then report_risk 'session scratch age recheck unavailable' "$path"; return 0; fi
     [ -z "$recent" ] || { report_risk 'recent content appeared before session scratch deletion' "$path"; return 0; }
     why=$(session_scratch_risk "$path")

@@ -1,0 +1,51 @@
+id: console-inbox-causal-response-20261020
+ts: 2026-10-20T19:02:15.568Z
+raw: "Approved console follow-up: bind each Inbox answer and generated redraft
+  to the exact scoped operator feedback it consumed. Submitted by Codex for the
+  operator, not as an operator risk ruling or a model verdict. Source facts:
+  ThreadMessageExtra.replyId deduplicates incoming delivery, but answerThread
+  does not carry that input identity to its acknowledgement; reframeProposal
+  stores feedback text without an immutable feedback identity;
+  threadEventsForRow labels inbox.drafted as a redraft whenever the current
+  proposal has any reframeHistory. A historical backfill or an older in-flight
+  completion therefore must not acknowledge later direction merely because it
+  was appended later or has a later clock. Core PR #13175 separately prevents
+  executing recorded action events as new commands; it does NOT fix this causal
+  join. Plan PR #13151 / W1-T10272 concerns served-model evidence, not
+  correspondence identity; coordinate with that owner before touching
+  inbox-responder.ts. Ground this against current main, every open head and
+  active claims; file only a separately scoped, atomically reserved task through
+  the normal risk/scope/review/CI gates, or report positive evidence it is
+  already owned. Capture the input identity before asynchronous work and carry
+  its immutable same-repository/proposal/thread feedback snapshot through queue,
+  action and completion. Keep response completion dedup separate from input
+  delivery and mirrored-action dedup. Do not infer links from matching text,
+  timestamps or current history length; legacy unlinked records remain
+  explicitly unknown and are never rewritten or retired. Preserve incoming newer
+  direction while an older response is in flight. Cover equal timestamps,
+  historical backfill, distinct identical-text inputs, two replies during a
+  decider call, newer reframe during an older draft, duplicate/restarted
+  callbacks, foreign/ambiguous/missing identity, legacy data, genuine linked
+  delivery, and action-success/answer-append-failure without repeating the
+  action. Exercise the real store/default composition with only provider work
+  faked; use a genuine source-removal falsifier. Preserve every approval/hold,
+  action gate, provider, model, retry, permission, billing/budget and service
+  setting. Add no diagnostic model call, synthetic production reply, automatic
+  approval or Inbox retirement. This is a work request, not task credit,
+  deployment approval or authority to bypass a guard. Explicit causal-link
+  design is informed by
+  https://opentelemetry.io/docs/concepts/signals/traces/#span-links and
+  https://www.rfc-editor.org/rfc/rfc5322.html#section-3.6.4; applying that
+  principle here is a design inference, not an instrumentation/framework
+  migration. Keep CI infrastructure and Azure memory with their existing owners.
+  Field Trials is out of scope."
+attachments: []
+origin: cli
+status: proposed
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:f1cfbadd-2f86-4bd1-b9d8-c3cfe7d2a3bc
+thread_id: null
+answered_by: null

@@ -3,7 +3,9 @@ import { join } from "node:path";
 import {
   type OperatorMessageSlot,
 } from "./operator-message.js";
-import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES } from "./typecheck-buildinfo.js";
+import {
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
+} from "./typecheck-buildinfo.js";
 import { dirIsWritable, prepareTypecheckRun } from "./typecheck-run.js";
 import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 
@@ -548,7 +550,7 @@ export function typecheckStep(
       if (!testSlotExecutionAllowed(slot)) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
     }
     const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
-    const res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot });
+    const res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot, env: typecheckEnv(process.env) });
     const spawnFailed = spawnFailureDetail("typecheck", res);
     if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };
     const ok = res.status === 0;
@@ -594,6 +596,10 @@ export function readRangeCommitMessages(
   // skipping it would let a never-run spawn read as zero messages, a vacuous pass.
   const spawnFailed = spawnFailureDetail("emitter-checks", res);
   if (spawnFailed) throw new Error(spawnFailed);
+  if (res.status !== 0) {
+    const diagnostic = res.stderr.trim().slice(0, 512) || "no Git stderr captured";
+    throw new Error(`emitter-checks: Git range read FAILED (exit ${res.status}); ${diagnostic}`);
+  }
   return splitRangeCommitMessages(res.stdout);
 }
 

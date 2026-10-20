@@ -78,7 +78,7 @@ function latchedLane(t: TestContext, ledger: readonly string[] | ((exiting: bool
       return "timeout";
     },
     sweepLight: async (scope?: LightPassScope) => { passes.push({ scope, exiting }); },
-  } as DaemonDeps, { laneCount: 1, max: 1, sweepWallClockBoundMs: BOUND_MS });
+  } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 1, max: 1, sweepWallClockBoundMs: BOUND_MS });
   const at = (ageMinutes: number) => { nowMs = start + ageMinutes * minute; };
   return {
     daemon, rows, passes, at,

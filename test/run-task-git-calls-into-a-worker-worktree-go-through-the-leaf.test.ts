@@ -34,6 +34,8 @@ import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 const SOURCE = fileURLToPath(new URL("../src/run-task.ts", import.meta.url));
 /** W1-T9722: the tick-read producer's declarations moved here; HARNESS_SITES still records their sites. */
 const MOVED_SOURCE = fileURLToPath(new URL("../src/lib/tick-read-worker.ts", import.meta.url));
+/** W1-T9333: daemonCommand moved here; HARNESS_SITES still records its sites. */
+const DAEMON_MODULE = fileURLToPath(new URL("../src/cli/commands/daemon.ts", import.meta.url));
 
 /** A raw git spawn, or a `-C` argv element, wherever it sits. */
 const RAW_GIT = /"-C",|\b(?:execFileSync|execFile|execFilePromise|spawnSync|spawn|exec|baseReproductionExecFile)\(\s*"git"/g;
@@ -103,7 +105,6 @@ const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>>
   refCommitMatchesDirtyRecovery: { count: 6, reason: FIX_CLONE },
   preserveFixHead: { count: 6, reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 2, reason: FIX_CLONE },
-  shardAgeDays: { count: 2, reason: OWN },
   idCitedInSrc: { count: 2, reason: OWN },
   approveCommand: { count: 20, reason: `${APPROVE}, and the clone it ls-remotes` },
   approveBatchCommand: { count: 6, reason: APPROVE },
@@ -156,7 +157,7 @@ function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set
 }
 
 describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site", () => {
-  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}`;
+  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_MODULE, "utf8")}`;
   const { raw, leaf, declared } = sitesByDeclaration(text);
   const proofSites = sitesByDeclaration(readFileSync(fileURLToPath(new URL("../src/lib/check-proof.ts", import.meta.url)), "utf8"));
 

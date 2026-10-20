@@ -1723,6 +1723,7 @@ components:
         fleet: {type: integer}
         archived: {type: integer, description: "W1-T8831 -- items the operator archived; counted here and in no other lane."}
         snoozed: {type: integer, description: "W1-T8831 -- items snoozed past the slow lane's last pass; counted here and in no other lane."}
+        kept: {type: integer, description: "Items held by a keep decision while their observed state is unchanged."}
         needsYou:
           type: object
           required: [ready, drafting, notReady, declined]
@@ -1778,6 +1779,11 @@ components:
             $ref: "#/components/schemas/InboxViewItem"
         needsYou:
           $ref: "#/components/schemas/InboxNeedsYou"
+        kept:
+          type: array
+          description: Items held by a keep decision; each carries keptAt and its original lane.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
         counts:
           $ref: "#/components/schemas/InboxCounts"
         page:
@@ -6830,7 +6836,7 @@ components:
 
     GardenerRuntimeEntry:
       type: object
-      required: [name, enabled, scope, cadenceMs, phase, observedAt, passId, nextDueAt, queueMs, executionMs, exit, reason, attempts, completions, failures, lastCompletedAt, lastSuccessAt, lastFailureAt]
+      required: [name, enabled, scope, cadenceMs, phase, observedAt, passId, nextDueAt, queueMs, executionMs, exit, reason, attempts, completions, failures, lastCompletedAt, lastSuccessAt, lastFailureAt, dueIntervalMedianMs, dueIntervalSamples]
       properties:
         name:
           type: string
@@ -6883,6 +6889,13 @@ components:
         lastFailureAt:
           type: [string, "null"]
           format: date-time
+        dueIntervalMedianMs:
+          type: [number, "null"]
+          minimum: 0
+          description: The median time from a completed pass to the first ask of the next one, carried across restarts.
+        dueIntervalSamples:
+          type: integer
+          minimum: 0
 
     GardenersResult:
       type: object
@@ -8829,6 +8842,32 @@ components:
         kind: {type: string}
         name: {type: string}
 
+    InboxSnapshotAttention:
+      type: object
+      description: >
+        Snapshot-owned attention from the SAME validated persisted census as this lane item, not
+        live thread coherence or write authority. Observed requires complete matching public scope
+        and key; unknown omits attention and identity. Partial/missing/invalid evidence stays unknown.
+        Lane counts are unchanged; countSemantics does not certify current human decisions.
+      oneOf:
+        - type: object
+          required: [state, coverage, countSemantics, repository, instance, snapshotKey, attention, waitingOn]
+          properties:
+            state: {type: string, enum: [observed]}
+            coverage: {type: string, enum: [complete]}
+            countSemantics: {type: string, enum: [observed_snapshot_not_verified]}
+            repository: {type: string, description: "Exact public repository of an observed snapshot."}
+            instance: {type: string, description: "Exact public instance of an observed snapshot."}
+            snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+            attention: {type: string, enum: [decision, reply, in_progress, history, awaiting_daemon]}
+            waitingOn: {type: string, enum: [operator, daemon]}
+        - type: object
+          required: [state, coverage, countSemantics]
+          properties:
+            state: {type: string, enum: [unknown]}
+            coverage: {type: string, enum: [partial, unavailable]}
+            countSemantics: {type: string, enum: [observed_snapshot_not_verified]}
+
     InboxViewItem:
       type: object
       description: >
@@ -8836,6 +8875,11 @@ components:
         unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem.
       required: [proposalId]
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -8893,6 +8937,10 @@ components:
               required: [proposalId]
               properties:
                 proposalId: {type: string}
+        keptAt:
+          type: string
+          format: date-time
+          description: When the operator recorded the current keep decision; present in the kept section.
         archivedAt:
           type: string
           format: date-time
@@ -8951,7 +8999,7 @@ components:
               description: One completed classification, reused by every section, continuation and attention census.
             section:
               type: string
-              enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
+              enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed, kept]
             items:
               type: array
               items:
@@ -10637,6 +10685,11 @@ components:
         - plain
         - draftedTasks
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10680,6 +10733,11 @@ components:
         - plain
         - spawnedAt
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10718,6 +10776,11 @@ components:
         - plain
         - reasons
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         retirement:
           $ref: '#/components/schemas/InboxRetirement'
         needsTriageReason:
@@ -10784,6 +10847,11 @@ components:
         - plain
         - reason
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
+        keptChanged:
+          type: string
+          description: Why the previous keep decision lapsed after a material state change.
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10850,6 +10918,8 @@ components:
         - plain
         - lane
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10934,6 +11004,11 @@ components:
         snoozed:
           type: array
           description: W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
+        kept:
+          type: array
+          description: Items held by a keep decision; each carries keptAt and its original lane.
           items:
             $ref: "#/components/schemas/InboxViewItem"
         counts:
@@ -11114,6 +11189,27 @@ components:
           type: boolean
           description: The daemon wrote last and the read mark is behind that message.
 
+    InboxThreadListSource:
+      type: object
+      description: Classification evidence, not the HTTP read time or permission to write. Partial coverage never establishes a complete empty Inbox.
+      required: [state, completeness, classifiedAt, verifiedAt, ageMs, builtAt]
+      properties:
+        state: {type: string, enum: [fresh, stale]}
+        completeness: {type: string, enum: [complete, partial]}
+        classifiedAt: {type: string, format: date-time}
+        verifiedAt: {type: [string, "null"], format: date-time, description: Null when the classification was not confirmed current.}
+        ageMs: {type: number, minimum: 0}
+        builtAt: {type: string, format: date-time}
+        refreshError: {type: string}
+
+    InboxThreadListPage:
+      type: object
+      description: Continuation over one exact threadListKey; terminal coverage requires unique rows totaling total. A prefix is not a verified complete list.
+      required: [total]
+      properties:
+        total: {type: integer, minimum: 0}
+        nextCursor: {type: string, maxLength: 1024, description: Opaque generation/scope/representation-bound continuation; absent only at the end.}
+
     InboxThreadsResult:
       type: object
       description: GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity.
@@ -11122,10 +11218,28 @@ components:
       properties:
         planSource:
           $ref: "#/components/schemas/PlanSource"
+        source:
+          $ref: "#/components/schemas/InboxThreadListSource"
+        threadListKey:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Present with opt-in pages. Binds semantic classification/items, stored messages, marks, public scope and representation, not verification clocks. Not the proposal classification snapshot key.
+        page:
+          $ref: "#/components/schemas/InboxThreadListPage"
         threads:
           type: array
           items:
             $ref: "#/components/schemas/InboxThreadSummary"
+
+    InstanceInboxThreadsResult:
+      allOf:
+        - $ref: '#/components/schemas/InboxThreadsResult'
+        - type: object
+          required: [repository, instance, contract]
+          properties:
+            repository: {type: string}
+            instance: {type: string}
+            contract: {type: string, enum: [read-write, read-only]}
 
     InboxAttentionCensusSourceState:
       type: string
@@ -11972,6 +12086,24 @@ components:
         feedback:
           type: string
           description: The operator's feedback, captured verbatim; must be non-blank.
+
+    InboxKeepRequest:
+      type: object
+      description: Record the observed state as a keep decision, or clear it with kept false.
+      required: [proposalId]
+      properties:
+        proposalId: {type: string}
+        reason: {type: string, description: Optional operator reason recorded verbatim.}
+        kept: {type: boolean, default: true, description: False clears the decision immediately.}
+
+    InboxKeepResult:
+      type: object
+      required: [ok, proposalId, kept]
+      properties:
+        ok: {type: boolean, enum: [true]}
+        proposalId: {type: string}
+        kept: {type: boolean}
+        keptAt: {type: string, format: date-time, description: Present while kept; repeating an unchanged decision preserves its instant.}
 
     InboxArchiveRequest:
       type: object
@@ -16897,7 +17029,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
+            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed, kept]
         - name: cursor
           in: query
           required: false
@@ -18011,7 +18143,7 @@ paths:
             operator set aside, listed here and in no other lane or count).
           schema:
             type: string
-            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
+            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed, kept]
         - name: limit
           in: query
           required: false
@@ -18084,8 +18216,16 @@ paths:
         W1-T4088 (src/lib/panel-graph.ts's `buildInboxThreadsRoute`): one thread per
         operator-owned inbox item, with its headline, the first sentence of the latest message,
         who it is waiting on, last activity, message count and unread flag.
+        A bare read remains the whole legacy list. Opt in with limit or cursor for a threadListKey
+        and page envelope, each at most 131072 serialized UTF-8 bytes. Pass nextCursor with the same
+        limit/qualified representation. Changed generations require an explicit first-page restart;
+        an oversized singleton is refused, never dropped. Source coverage/freshness and write gates do not change.
       security:
         - bearerRead: []
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}, description: Opt-in maximum rows per byte-bounded page.}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 1024}, description: Exact continuation returned by this representation and threadListKey.}
+        - {name: qualified, in: query, schema: {type: string, enum: ['1']}, description: Permit labelled stale evidence; this does not make it current or writable.}
       responses:
         "200":
           description: The thread list.
@@ -18093,6 +18233,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxThreadsResult"
+        "400":
+          description: Invalid page limit or malformed cursor.
+        "409":
+          description: Continuation belongs to another thread generation, public scope, representation or offset; restart explicitly.
+        "413":
+          description: A singleton or its complete envelope cannot fit; no thread was omitted or truncated.
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -18358,6 +18504,36 @@ paths:
                   - {type: object, required: [repository, instance], properties: {repository: {type: string}, instance: {type: string}}}
         '503': {description: Instance or maintained classification unavailable.}
 
+  /v1/i/{instance}/inbox/threads:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    get:
+      summary: The selected instance's source-qualified thread list, optionally byte-bounded and paged.
+      description: >
+        Same opt-in limit/cursor/qualified contract as /v1/inbox/threads. Public repository, instance
+        and contract mode are included in the key and actual 131072-byte response budget. Source,
+        threadListKey and page are required on successful opt-in pages. Bare reads retain the legacy
+        whole list. A capability advertisement is not write authority; incomplete/stale evidence stays qualified.
+      security: [{bearerRead: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 1024}}
+        - {name: qualified, in: query, schema: {type: string, enum: ['1']}}
+      responses:
+        '200':
+          description: Complete bare list or one explicitly continued page, with unchanged classification evidence.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InstanceInboxThreadsResult'}
+        '400': {description: Invalid page request.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: Scope or continuation generation/representation mismatch.}
+        '413': {description: Complete scoped envelope or singleton cannot fit the response budget.}
+        '500': {description: Thread store unreadable.}
+        '502': {description: Source did not provide a keyed source-qualified page.}
+        '503': {description: Classification unavailable or stale without qualified opt-in.}
+
   /v1/i/{instance}/inbox/attention-census:
     parameters:
       - {name: instance, in: path, required: true, schema: {type: string}}
@@ -18518,6 +18694,50 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/keep:
+    post:
+      summary: Record a reversible keep decision for the item's observed state.
+      description: >
+        Write tier LOW. Records inbox.kept with the observed lane, classification state and reasons,
+        and a hash of the summary and plain message. The durable state/inbox-triage.json mark moves
+        the item to kept, outside needsYou and its counts, on the slow lane's next pass. A material
+        state change reopens the item with keptChanged explaining why. Elapsed time alone does not.
+        Repeating an unchanged keep preserves keptAt; kept false clears it immediately. Other inbox
+        decision and triage verbs clear the mark.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxKeepRequest"
+      responses:
+        "200":
+          description: The keep decision is recorded or cleared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxKeepResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No active proposal with this id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "409":
+          description: The proposal is ratified, declined, retired or no longer awaiting a decision.
           content:
             application/json:
               schema:

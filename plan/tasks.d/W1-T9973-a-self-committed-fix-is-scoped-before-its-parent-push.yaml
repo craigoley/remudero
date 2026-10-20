@@ -11,7 +11,7 @@
   band_meaning: blast-radius
   origin: "operator instruction 2026-10-17: reconcile W9793 repair publication and prevent the measured first-push scope gap"
   plan_refs: [W1-T1227, W1-T2651, W1-T2653, W1-T5534, W1-T6465, W1-T9793]
-  files: [src/run-task.ts, test/a-self-committed-fix-is-scoped-before-its-parent-push.test.ts, test/fix-rung-scope-standdown.test.ts, test/a-fix-round-that-did-the-work-lands-it.test.ts]
+  files: [src/run-task.ts, test/a-self-committed-fix-is-scoped-before-its-parent-push.test.ts, test/fix-rung-scope-standdown.test.ts, test/a-fix-round-that-did-the-work-lands-it.test.ts, test/helpers/run-task-test.ts]
   status: queued
   attempts: 0
   rationale: |

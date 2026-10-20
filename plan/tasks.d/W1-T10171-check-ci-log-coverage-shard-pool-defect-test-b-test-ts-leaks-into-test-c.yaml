@@ -1,0 +1,102 @@
+- id: W1-T10171
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts cost 37.8 PR minute(s) across 9 round(s) on 9 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.18
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/check-ci-log-coverage-shard-pool-defect-test-b-test-ts-leaks-into-test-c.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts"
+      proof: "grep: test(\"W1-T10171: check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts is prevented, not retried\" in test/gardeners/check-ci-log-coverage-shard-pool-defect-test-b-test-ts-leaks-into-test-c.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts cost 37.8 PR minute(s) (seven-day half-life) across 9 fix round(s) on 9 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet for coverage-shard
+    - the rounds name a failing test: test/b.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12787 (https://github.com/craigoley/remudero/pull/12787) at 2026-10-18T16:04:59.765Z: ci-log round — coverage-shard (2/8): test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts; coverage-shard (8/8): pool defect: test/b.test.ts leaks into test/c.test.ts
+        failing tests: W1-T9968: a P2 with 29 open dependents does not outrank a fresh P1; W1-T9325: calibrated age, starts and imputation survive in the explanation; ["W1-T9325: a tick start logs dispatch.pick_scored with its components and the runner-up","W1-T9325: a lane refill logs dispatch.pick_scored for the task it starts","W1-T9325: a runner-up serialized by packing keeps its score and reason","W1-T9325: explanation preserves calibrated inputs without reading a clock","W1-T9325: calibrated age, starts and imputation survive in the explanation"]
+        log excerpt:
+          | not ok 2270 - W1-T9968: a P2 with 29 open dependents does not outrank a fresh P1
+          |   ---
+          |   duration_ms: 27.574104
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts:53:1'
+          |   failureType: 'testCodeFailure'
+          |   error: "the cost of delay keeps the fan-out product (W1-T9325's row)"
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   expected: true
+          |   actual: false
+          |   operator: '=='
+          |   stack: |-
+    - PR #12780 (https://github.com/craigoley/remudero/pull/12780) at 2026-10-18T15:11:23.606Z: ci-log round — coverage-shard (2/8): pool defect: test/b.test.ts leaks into test/c.test.ts; coverage-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts; coverage-shard (5/8): test/reso
+        failing tests: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — the head-bound resolver has exactly the review command and W1-T3557 fix-rung contract paths
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+          | not ok 1 - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+          |   ---
+          |   duration_ms: 115.146545
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:240:1'
+          |   failureType: 'testCodeFailure'
+          | 
+    - PR #12773 (https://github.com/craigoley/remudero/pull/12773) at 2026-10-18T13:42:05.902Z: ci-log round — coverage-shard (7/8): test/ci-cache-concurrency-and-job-timeouts.test.ts; coverage-shard (6/8): pool defect: test/b.test.ts leaks into test/c.test.ts
+        failing tests: R-50: every job in every PR-firing workflow declares a positive timeout-minutes; rmd lint-plan refuses a filing that cites a doctrine page no file holds and its files: does not create, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes; rmd lint-plan refuses a filing that cites a doctrine page no file holds and its files: does not create; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base
+        log excerpt:
+          | ...
+          | not ok 5 - R-50: every job in every PR-firing workflow declares a positive timeout-minutes
+          | TAP version 13
+          | # Subtest: R-50: setup caches npm unless it only bootstraps guarded dependency-free admission
+          | ok 1 - R-50: setup caches npm unless it only bootstraps guarded dependency-free admission
+          |   ---
+          |   duration_ms: 190.544516
+          |   type: 'test'
+          |   ...
+          | not ok 5 - R-50: every job in every PR-firing workflow declares a positive timeout-minutes
+          |   ---
+          |   duration_ms: 99.21028
+          |   type: 'test'
+          |   location: '/tmp/rmd-author-workflow-contract-ncGllU/test/ci-cache-concurrency-and-job-timeouts.test.ts:3:3338'
+    - PR #12667 (https://github.com/craigoley/remudero/pull/12667) at 2026-10-17T22:21:00.971Z: ci-log round — coverage-shard (7/8); coverage-shard (6/8): pool defect: test/b.test.ts leaks into test/c.test.ts; coverage-shard (8/8): test/a-fix-round-that-needs-scope-files-its-own-amendment.test.t
+        failing tests: the head-bound resolver has exactly the review command and W1-T3557 fix-rung contract paths, W1-T2594: production ordering records only after ownership/push and before the next gate; resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — the head-bound resolver has exactly the review command and W1-T3557 fix-rung contract paths; W1-T2594: production ordering records only after ownership/push and before the next gate; scope amendments refuse shard drift and leave the implementation contract unchanged, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes; scope amendments refuse shard drift and leave the implementation contract unchanged
+        log excerpt:
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED names check(s) outside REQUIRED: not-a-required-check
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is EMPTY, which would gate on nothing
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not a JSON array of strings
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not a JSON array of strings
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not valid JSON
+          | ci-gate-from-contract: refusing the merge_group gate:
+    - PR #12639 (https://github.com/craigoley/remudero/pull/12639) at 2026-10-17T21:36:46.564Z: ci-log round — coverage-shard (7/8): pool defect: test/b.test.ts leaks into test/c.test.ts; Scan
+        failing tests: W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain, W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row, W1-T6356: the loop turns during a managed checkout refresh; W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain, W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row, W1-T6356: the loop turns during a managed checkout refresh
+          | not ok 3 - W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain
+          |   ---
+          |   duration_ms: 295.297545
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-spent-check-requeue-survives-ledger-
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-19T01:59:28.231Z"
+    pin: "499d9eae1b2f48dd9cc3aca010f97a681d2ff68a0ea9a1ed35ce0b56ea69a8ab"

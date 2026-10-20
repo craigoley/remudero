@@ -576,6 +576,8 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  * docs/forensics/ledger.md#decision_relevant_ledger_steps.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
+  "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
+  "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
@@ -690,9 +692,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.base_fixed.refresh", // baseRedHistoryFromLedger and refreshRecordsFromLedger read prior refreshes.
   "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
   "sweep.base_red.refresh_admission", // W1-T9595: the light pass replays its held heads; pacing reads its cohort.
+  "sweep.ratchet_judge.decided", // W1-T9962: the armed re-judge's once-per-(head, main tip) memo reads it back.
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
   "sweep.ci_timeout_refresh.escalated",
+  "sweep.own_task_record.refresh", // W1-T9232: the sweep's once-per-PR refresh bound reads it back.
+  "review.reviewer.skipped", // W1-T9232: ownTaskRecordMissingRow reads the cause row for the PR's head.
   "sweep.actions_incident_hold",
   "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
@@ -700,8 +705,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.fold_debt_pull.ingested", // W1-T7853: foldDebtRunIdsFromLedger dedups on it; lost, CI fold debt is pulled and landed again.
   "sweep.fold_debt_pull.dropped", // W1-T7853: the same dedup for a run whose PR closed unmerged or merged at a later head.
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
-  "sweep.capped_host_gap_rereview", // W1-T7837: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
-  "sweep.review_host_gap_rereview", // W1-T7850: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
+  "sweep.capped_host_gap_rereview", // W1-T7837: releases the delivered-review key; demand alone never spends an admitted attempt.
+  "sweep.review_host_gap_rereview", // W1-T7850: same demand release for a refused POST, not completed review work.
   "sweep.fix.checkout_claim_declined",
   "sweep.fix.dispatch_failed",
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
@@ -799,6 +804,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // archived away, a completed migration reads as `hold` and the rung submits it again.
   "dep-review.migrate.completed",
   "review.posted",
+  // W1-T10221: hostGapRereviewFacts joins library-owned refusals through this unique
+  // per-review carrier. Dropping it makes a completed admitted attempt look unfinished.
+  "review.provider_provenance",
+  "sweep.review_requeued", // W1-T9970: sweep and review read this per-head image request after rotation.
   "review.skipped_stale_reviewer_code", // W1-T3691: preserve the daemon's freshness restart history across boots.
   // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.
   PLAN_ONLY_REVIEW_MARKER_STEP,
@@ -816,6 +825,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // `panel.escalation_marked_handled` stays out: it carries nothing a calibrator could read back.
   RISK_OVERRIDE_RECORDED_STEP,
   "daemon.boot",
+  // fixSeedRead needs both the empty boot census and later ownership/uncertainty:
+  // dropping either side changes whether an old fix can re-enter the checkout claim.
+  "run_child.adoption_pass",
+  "run_child.adopted",
+  "run_child.adoption_unreadable",
+  "run_child.adoption_misidentified",
   // impl-DF: the idle rung's reason tally. A HUMAN reads it to tell "starved of work" from
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",

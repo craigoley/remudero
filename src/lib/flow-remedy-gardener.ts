@@ -13,7 +13,7 @@ import { ghExec } from "./github-transport.js";
 import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { loadPlanFromYaml } from "./plan.js";
+import { loadPlanFromYaml, newTestPath } from "./plan.js";
 import { PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
@@ -381,7 +381,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
   return { episodes, charges, priced, candidates, ladder, next };
 }
 
-function draftShard(action: FlowAction, taskId: string, search: OwnerSearch, kind: LadderKind): string {
+export function draftShard(action: FlowAction, taskId: string, search: OwnerSearch, kind: LadderKind): string {
   const [blocker, ...reason] = action.price.key.split(":");
   const matches = search.filesContaining(reason.join(":"));
   const found = matches.length ? matches : search.filesContaining(blocker!);
@@ -389,7 +389,7 @@ function draftShard(action: FlowAction, taskId: string, search: OwnerSearch, kin
     .sort((a, b) => b.hits - a.hits || a.file.localeCompare(b.file));
   if (!files.length) throw new Error(`${kind.stem} gardener: no source owner found for ${action.price.key}`);
   const stem = slug(action.price.key, 80);
-  const testPath = `test/${kind.stem}-${stem}.test.ts`;
+  const testPath = newTestPath(`${kind.stem}-${stem}`, [files[0]!.file], "flow-remedy-gardener");
   const evidence = new Map<number, { hours: number; reason: string }>();
   for (const c of action.charges) {
     const prior = evidence.get(c.pr);

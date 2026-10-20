@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/lib/worker-provider.ts
     - test/a-codex-built-test-is-committed-through-the-subpath-alias.test.ts
-  status: queued
+  status: merged
   priority: 1  # Codex carries most of today's builds, so most new tests still reach the W1-T9864 census unrewritten
   attempts: 0
   rationale: |

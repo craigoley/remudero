@@ -1,0 +1,55 @@
+- id: W1-T10207
+  title: "An ordinary read-model tick failure retains its attached transaction observations"
+  repo: remudero
+  depends_on: [W1-T9501, W1-T10175]
+  plan_refs: [W1-T9501, W1-T10175]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Existing cross-named fixture and worker are both admitted; no own-falsifier sizing discount.
+  priority: 3
+  status: merged
+  attempts: 0
+  author_class: operator
+  origin: "operator continuation 2026-10-19: accepted bounded ordinary failSlot diagnostic disposition; normal fleet work behind safe critical work"
+  files: [src/lib/read-model-worker.ts, test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts]
+  rationale: |
+    W1-T9501/#12817 supplies bounded Error.readModelTransactions and separate stall-tier telemetry.
+    Its compatibility repair intentionally preserves error.message. W1-T10175/#12852 fixes fixture
+    teardown, not event projection. Preserve both tasks' merged credit; obsolete325b stays unpublished.
+    At source 417602c5624988afe39ee9501b634e265401896d, the saved real core tick_failed at
+    2026-10-19T02:52:20.495Z carries the waiting connection and operation but no transaction inventory.
+    Main 92ff5fb0a2f6576f9d5f2159d71ddde5806643f0 and all eight inspected open PR heads retain the
+    same worker bytes: failSlot logs error.message while identifyLockFailure attached the inventory
+    separately. Existing direct-error and stall proofs do not exercise this ordinary event boundary.
+    The strict whole-native refresh refused on a raced process disappearance; the selected event
+    and exact source comparison do not establish overall runtime health, a blocking owner, held
+    duration or a root cause. This is one diagnostic projection follow-up, not contention repair.
+  design: |
+    In createReadModelTicker.failSlot, project only an already attached Error.readModelTransactions
+    inventory into the ordinary read_model.tick_failed event's structured transactions field.
+    Preserve the existing message, SQLite code/outcome, instance, lease handling, failures, backoff
+    and transaction ordering. Retain attempting versus recorded-acquired, inventory completeness,
+    unknown/stale/unverified identity and recordAge semantics. A missing attachment must not invent
+    a holder or establish no holder. Do not reread sidecars synchronously, collect new observations,
+    add a sampler or retry, or include the separate outer-worker tick_failed emitter or sibling
+    materialize/view-cost paths. No runtime control, restart, capacity or safety-gate change.
+    Extend only the declared existing fixture. Drive real private WAL contention through an actual
+    ticker into failSlot and capture its ordinary event. Observe the real thrown SQLite object to
+    prove its message/code unchanged; retain backoff/lease behavior and release/recovery controls.
+    Exercise non-lock and missing-attachment failures without manufacturing transaction evidence.
+    Keep the direct-error and stall positive controls intact. Use normal committed-tree author
+    validation, literal stored-body acceptance, same-tree instrumented coverage, hosted/security
+    checks and native fleet review. Queue behind existing safe critical work; no manual merge.
+  acceptance:
+    - claim: "A real ordinary ticker lock failure retains the already attached bounded observations without changing the SQLite error, lease or backoff behavior"
+      proof: "unit test: W1-T10207: an ordinary tick failure retains its attached transaction observations"
+    - claim: "Non-lock and missing-attachment ordinary failures preserve their outcome and never invent transaction evidence"
+      proof: "unit test: W1-T10207: an ordinary failure without attached observations invents no holder"
+  falsifier: |
+    Remove ONLY the ordinary failSlot event projection, preserving sidecar production, error
+    attachment, real contention, message compatibility and stall-tier logging. The ordinary-event
+    regression must fail while the existing direct-error and stall controls still pass. Restore the
+    projection and require actual test titles, physical paths and passing TAP summaries. A fake
+    SQLite throw alone, a declaration grep, no-test success or an unqualified run is not proof.

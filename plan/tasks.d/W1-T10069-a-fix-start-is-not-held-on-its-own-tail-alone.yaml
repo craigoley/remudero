@@ -13,7 +13,7 @@
   files:
     - src/lib/host-memory-admission.ts
     - test/a-fix-start-is-not-held-on-its-own-tail-alone.test.ts
-  status: queued
+  status: merged
   priority: 1  # every fix lane on the host waited 28-39 min in one hour with nothing else charged; the fix rounds the hand fixes replaced were starved here
   attempts: 0
   rationale: |

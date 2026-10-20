@@ -1,12 +1,12 @@
 # Native hash-locked Semgrep Community Edition
 
-Scan avoids Docker Hub container initialization with an isolated, fully hash-locked native installation.
+Scan uses an independently audited source closure, isolated native engine and bounded disposable MCP controls.
 
-## Current compatibility block
+## Historical compatibility block and distinct source closure
 
-The committed lock is not presently a compatible environment: Semgrep 1.180.0
+The previous committed lock was not a compatible environment: Semgrep 1.180.0
 requires `mcp==1.29.0`, while the security refresh locks MCP 1.30.0. Semgrep 1.181.0
-has the same upstream constraint. The real Scan fails at `pip check`; neither an
+has the same upstream constraint. That Scan failed at `pip check`; neither an
 OSV result nor a matching hash overrides that incompatibility. Do not downgrade MCP,
 ignore an advisory, suppress `pip check`, or edit an upstream wheel's METADATA.
 
@@ -14,7 +14,12 @@ The independent exact-head artifact/runtime boundary merged separately. Its sour
 unit controls and a source PR's required-CI success are not evidence that the scanner
 installed or that a whole-repository scan completed.
 
-## Scoped downstream source preparation (not wired into Scan)
+The operator-approved replacement is the distinctly versioned source distribution
+`1.181.0+remudero.1`, with CLI/protocol/unchanged CE engine version `1.181.0` and
+MCP `1.30.0`. This is not a relabelled or edited upstream wheel. Ordinary `pip check`
+remains mandatory in addition to the separately staged original and built audits.
+
+## Scoped downstream source preparation
 
 `.github/semgrep/prepare-source-build.py` prepares a distinctly versioned
 `semgrep==1.181.0+remudero.1` distribution. It hash-checks the exact original sdist
@@ -45,14 +50,32 @@ DEFLATE level, ordering, timestamps and modes are fixed. Reproduce twice on the
 same recorded Python/zlib profile and compare full wheel hashes; no cross-profile
 bit-identity is claimed. The existing 256-MiB artifact bound remains intact.
 
-This preparation does not change the runtime locks, Scan workflow, findings policy,
-merge policy, pilot, runner services or fleet configuration. Before wiring it into
-Scan, independently qualify its original/built metadata and layout, the complete
-hash-locked dependency closure, standard `pip check`, MCP API compatibility, actual
-CLI/engine identity, baseline and invalid-rule sentinels, and full JSON/SARIF target
-and error inventories on CPython 3.12.15/Linux x86_64. An assembled artifact or an
-inert unit receipt cannot substitute for any of those checks. No package publication
-or old native-runner/SDK/eval grant is authorized by this preparation.
+Preparation itself changes no runtime or findings/merge policy. Scan's separate
+`source-runtime-qualification.py --install-root` composition first runs all seven
+unchanged trusted auditor phases, restaging each regular committed source against
+its independent digest. It then restages its own exact executed Git bytes and runs
+the installed MCP probe. Missing, revised, partial, failed or timed-out controls
+cannot publish an executable environment into `GITHUB_PATH`. No retry, resolver
+override, live issuer or package publication substitutes for this boundary.
+
+The installed probe uses the real Semgrep registration, context and lifecycle and
+the installed SDK's HTTP client/server, bearer, scope, resource, Host and Origin
+checks. Disposable user/deployment data comes from a private localhost fixture via
+upstream's supported `SEMGREP_URL` setting; it is not a Semgrep account or live OAuth
+identity. Only localhost reads and approved private commands are allowed by the
+Python effect trap; this is not an OS sandbox claim. No prompt is executed, model
+called, Pro engine installed, account logged in or external service written. Actual
+language-schema/JavaScript/TypeScript controls and listener shutdown are mandatory.
+
+Install/MCP receipts explicitly leave `runtimeQualified` and `wholeCorpusQualified`
+false: scanner controls and repository inventories are distinct later evidence.
+The paired original parser sentinel can retain `INCOMPLETE`/`PARTIAL` while boundary
+markers are reached. Do not call that whole-AST coverage or silently fix source to
+hide the omission. Report execution `COMPLETE` means the JSON/SARIF execution contract
+closed, not zero findings, all Git paths scanned, all syntax parsed or SARIF upload
+processed. Unreported skipped-target counts remain `null`/`UNKNOWN`; neither a report
+nor an exit zero turns them into zero omissions. Raw reports stay private; summaries
+retain constrained inventories and hashes rather than source snippets or secrets.
 
 References: [PyPA local versions](https://packaging.python.org/en/latest/specifications/version-specifiers/#local-version-identifiers),
 [wheel format](https://packaging.python.org/en/latest/specifications/binary-distribution-format/),
@@ -81,8 +104,8 @@ closure, scanner operation, Python 3.12.15 qualification or pilot activation.
 
 ## Install boundary
 
-Operator-approved CE 1.180.0 replaces 1.167.0, whose dependency constraints forced
-MCP 1.23.3 and PyJWT 2.13.0 with reported security advisories. The reviewed new closure
+The earlier CE 1.180.0 refresh replaced 1.167.0, whose dependency constraints forced
+MCP 1.23.3 and PyJWT 2.13.0 with reported security advisories. The source closure
 uses MCP 1.30.0 and PyJWT 2.15.1; PyPI reported no advisories for this exact closure at
 lock preparation. That point-in-time result is not an exhaustive vulnerability audit.
 
@@ -97,10 +120,11 @@ Every package in `.github/semgrep/build-requirements.txt` and
 `.github/semgrep/requirements.txt` has an exact version and one SHA256-approved artifact.
 These are platform-specific locks, not a general macOS/ARM/Windows install recipe.
 The pip download cache key includes BOTH files; an executable virtual environment is
-never restored. Each job makes a fresh venv in `RUNNER_TEMP`, hash-reinstalls the locked
-build tools, hash-verifies runtime downloads, then rechecks those bytes during an offline
-installation with built-wheel cache reuse disabled. `pip check` and the exact scanner
-version check must pass before the venv enters `GITHUB_PATH`. Installation failure fails
+never restored. Each job makes a fresh private root in `RUNNER_TEMP`, obtains inert
+hash-bound artifacts, audits original metadata/layout, builds only approved Peewee,
+audits its built metadata/layout and hash-installs the complete closure offline.
+`pip check`, distribution/CLI/engine identities and installed MCP controls must pass
+before the runtime environment enters `GITHUB_PATH`. Installation failure fails
 Scan; the established advisory treatment applies only to the scan step's findings.
 
 Peewee 3.18.3 is the only source-distribution exception because it has no PyPI wheel.
@@ -168,9 +192,9 @@ before the wheel joins the original-artifact population. Raw TLS acquisition is
 separate from inert assembly. Newly created build/runtime environments have private
 directory entries; existing entries and their permissions are never repaired or reused.
 
-This staging does not modify either lock or the Scan workflow, and does not resolve
-the current committed Semgrep/MCP incompatibility by itself. Merge the trusted
-workflow staging before a separate lock/Scan adoption PR. Original and built
+The trusted staging was merged before the separate lock/Scan adoption change. Its
+workflow, auditor, recipe, assembler and policy remain unchanged by adoption; a new
+need to change them requires another governed staging change before use. Original and built
 metadata audits, offline hash installation, standard `pip check` and installed
 version/engine checks remain mandatory. Source controls, relocated private Python
 checks and inert artifact audits do not qualify the production runner, MCP startup,

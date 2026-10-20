@@ -14,7 +14,7 @@
     - src/lib/dispatch-value.ts
     - test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts
     - test/new-work-is-ordered-by-cost-of-delay.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: "Weight dependents by value"; P1 fixes ranked 28 and 31 behind a P2 chain's enablers
   attempts: 0
   rationale: |

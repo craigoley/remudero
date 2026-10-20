@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-code-scanning-fix-round-is-not-traded-for-a-base-refresh.test.ts
-  status: queued
+  status: merged
   priority: 1  # a real high alert is the one red a base refresh cannot clear, and the swap spent no strike, so it repeated each pass
   attempts: 0
   rationale: |

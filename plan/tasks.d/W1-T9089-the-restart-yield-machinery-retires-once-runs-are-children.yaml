@@ -11,7 +11,7 @@
   origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
   plan_refs: [W1-T147, W1-T7806, W1-T8139, W1-T8170, W1-T8198, W1-T8927, W1-T9069, W1-T4945, W1-T6273, W1-T9087, W1-T9086]
   files: [src/lib/daemon.ts, src/run-task.ts, src/lib/deploy-judge.ts, src/lib/run-child.ts, src/lib/run-child-mode.ts, plan/policy.yaml, test/the-restart-yield-machinery-retires-once-runs-are-children.test.ts, test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts, test/the-daemon-freshness-reads-never-block-the-loop.test.ts, test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts, test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts, test/a-decided-restart-names-the-lanes-it-waits-on.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/the-daemon-entry-point-and-daemon-scoped-commits-restart-it-at-once.test.ts, test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts, test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts, src/lib/advance-declarations.ts, test/a-run-task-change-outside-the-daemons-declarations-waits-for-the-age-horizon.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-16: restart idle is ~42% of lane slot-minutes; build the ADR 0007 cheap-restart chain first (W1-T9087 merged #12219)
   attempts: 0
   rationale: |

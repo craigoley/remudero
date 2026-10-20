@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runDaemon, type DaemonFreshness } from "../src/lib/daemon.js";
-import { decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS } from "../src/lib/deploy-judge.js";
+import { decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD } from "../src/lib/deploy-judge.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, type ServiceFreshness } from "../src/lib/self-sync.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -132,7 +132,10 @@ test("W1-T7851: a restart withheld by a dirty tree is named once per new sha", a
   assert.equal(control.rows.some((r) => r.step === "daemon.freshness_blocked_dirty"), false);
   assert.equal(control.rows.some((r) => r.extra.stale_since_ms !== undefined), false);
   const urgentService = service();
-  urgentService.behind!.changes = [{ sha: NEW, files: ["src/lib/daemon.ts"] }];
+  // W1-T9089: the daemon's own code weighs the source floor of 1; change pressure reaches the threshold on its worth of commits.
+  urgentService.behind!.changes = Array.from({ length: DEPLOY_RESTART_SCORE_THRESHOLD.value }, (_, index) => ({
+    sha: index === 0 ? NEW : String(index).padStart(40, "f"), files: ["src/lib/daemon.ts"],
+  }));
   const urgent = await daemon(() => daemonFreshnessFromService(urgentService), 2);
   const urgentBlocked = urgent.rows.filter((r) => r.step === "daemon.freshness_blocked_dirty");
   assert.equal(urgentBlocked.length, 1);
