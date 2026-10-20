@@ -94,7 +94,7 @@ test('inherited reservation fixtures require the real ancestor start, nonce, poo
   const held={pid:process.pid,ownerNonce:'fixture-nonce',processStart:start,concurrency:1};writeFileSync(path,JSON.stringify(held),{mode:0o600});
   const claim={pid:process.pid,nonce:held.ownerNonce,start,concurrency:1,path},probe="import{borrowedWorkspaceWorker}from'./scripts/lib/shared-workspace.mjs';try{console.log(JSON.stringify(await borrowedWorkspaceWorker()));}catch(e){console.log(JSON.stringify({admitted:false,reason:e.message}));}";
   const read=(value:unknown)=>{
-    const fixtureEnv={...process.env,RMD_TEST_SLOT_DIR:slots,RMD_TEST_SLOT_PARENT:typeof value==='string'?value:JSON.stringify(value)};
+    const fixtureEnv:NodeJS.ProcessEnv={...process.env,RMD_TEST_SLOT_DIR:slots,RMD_TEST_SLOT_PARENT:typeof value==='string'?value:JSON.stringify(value)};
     // Model a standalone CLI over ONLY this owned fixture pool. The node-test
     // context otherwise deliberately substitutes a different private test pool.
     delete fixtureEnv.NODE_TEST_CONTEXT;
