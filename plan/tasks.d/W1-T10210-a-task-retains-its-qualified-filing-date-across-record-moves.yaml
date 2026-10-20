@@ -13,7 +13,7 @@
   attempts: 0
   author_class: operator
   origin: "operator continuation 2026-10-19: remaining issue7911 exact-record filing-history follow-up"
-  files: [src/lib/task-filing-history.ts, src/run-task.ts, test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts, test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts]
+  files: [src/lib/task-filing-history.ts, src/run-task.ts, test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts, test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/no-shallowing-of-the-canonical-checkout.test.ts]
   rationale: |
     At main 7733faf8163295b9ad9ae1e9156f683b6e362c5b, shardAgeDays dates only a matching shard
     filename add-commit. A readable embedded task remains unknown and a later shard move can date
@@ -76,6 +76,17 @@
     exception by that one removed site. The censuses reject stale entries as well as increases.
     Add no allowance, ignore, new baseline site or higher ceiling.
 
+    In the existing no-shallowing fixture, recognize the sanctioned shared Git fixture helper
+    as a self-created source only when its binding is imported from the actual git-repo helper,
+    is unshadowed, and is called with no arguments or statically inspectable initializer options.
+    A cloneFrom option, spread/computed/unknown options, unknown binding or shadowed factory
+    remains unproven. Keep the existing literal-init route, forbidden flag table, canonical
+    checkout protection, named exemptions, positive controls and fixture-copy baselines unchanged.
+    Add positive and negative predicate controls and run the real tracked-tree scan; preserve the
+    real filtered-clone regression instead of introducing raw fixture boilerplate or hiding flags.
+    Verify removal of only the shared-helper recognition causes its intended positive control
+    and the actual helper-built fixture scan to fail while refusal and literal-init controls pass.
+
     Use the normal fleet owner and file-overlap controls; coordinate PR12894 before editing
     src/run-task.ts and never hand-push its branch or start a competing writer. Recheck main, all open
     heads, claims, run refs, private work and exact API merge credit before a build/publication.
@@ -97,6 +108,8 @@
       proof: "unit test: W1-T10210: callers share one aggregate filing-history budget"
     - claim: "Both age consumers preserve lifetime fallback and source-bound age-excluded judgment and proposal identity"
       proof: "unit test: W1-T10210: age consumers preserve fallback and judgment identity"
+    - claim: "The shallow-fixture census recognizes only proven shared-helper initialization without changing forbidden flags or exemptions"
+      proof: "unit test: W1-T10210: shallow fixture census recognizes only initialized shared Git sources"
   falsifier: |
     In a private committed variant, remove only the production record-history resolution while
     leaving every fixture/assertion, old unknown-versus-zero adapter, lifetime fallback and policy
