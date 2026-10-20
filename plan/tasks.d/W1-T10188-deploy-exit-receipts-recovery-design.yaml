@@ -103,5 +103,5 @@
     confidence: 1
     reasons:
       - "deterministic backstop: it declares plan/deploy-recovery-design.md, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-20T00:44:13.342Z"
-    pin: "63c4b36748fca577d32cc815db14183fa1763e2315db7e5ae58ced16731b1ed3"
+    judged_at: "2026-10-20T05:32:24.330Z"
+    pin: "96854775291e6dc1e4567f9dc1830311f7ae24bc4137e7ec47fa55243fefd045"

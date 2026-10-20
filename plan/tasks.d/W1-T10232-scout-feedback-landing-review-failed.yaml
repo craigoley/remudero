@@ -20,3 +20,11 @@
     The ledger step feedback.landing_review.failed carries a failure shape and landed rows in both halves of the trailing 7 days: 3 in the older half, 3 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The record supplies recurrence counts but no row details or diagnosed cause; it explicitly leaves locating the emitter to future investigation. The finding requiring repair cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The task requires fixing the cause, yet declares only a new test file and a grep proof matching a test declaration; that proof does not establish that recurrence stops or its cause is fixed."
+    judged_at: "2026-10-20T05:34:47.366Z"
+    pin: "a4d285439c49ec3064190b95c291c9f0ff13ae84d5094bd10c413d57f60bd357"

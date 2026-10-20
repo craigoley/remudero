@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.3
   status: queued
@@ -59,3 +59,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are src/lib/board.ts and a new test file. The description shows no contact with secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The acceptance criterion is a grep-verifiable test name in a new test file, so the finding can be verified from what is shown. The file's absence at base is expected for a new file."
+      - "The family track record (36 merged, 40 declined) is mixed, which warrants some scrutiny. It is not a gates-state concern on the scale of the HIGH criteria, and CI and review still apply."
+    judged_at: "2026-10-20T05:36:14.395Z"
+    pin: "77d843acfb02d999578b23fe5b27c24c3b30efc4a0723154384427fc81b31046"
