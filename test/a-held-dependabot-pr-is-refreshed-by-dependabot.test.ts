@@ -21,6 +21,7 @@ import {
   headCarriesForeignCommit,
   reconcileDependabotRefresh,
   type DependabotHeadCommit,
+  type DependabotIssueComment,
   type DependabotActionsPort,
   type DependabotHeadRun,
   type DependabotRefreshVerdict,
@@ -152,6 +153,10 @@ interface CommandFixture {
   setHead: (sha: string, commits: DependabotHeadCommit[] | undefined) => void;
   setRed: (red: boolean) => void;
   failComment: (fail: boolean) => void;
+  failUpdate: (error: string | undefined) => void;
+  setComments: (rows: DependabotIssueComment[]) => void;
+  updates: Array<{ prNumber: number; expectedHeadSha: string }>;
+  root: string;
   forgetLedger: () => void;
   ledger: () => Record<string, unknown>[];
   comments: Array<{ url: string; body: string }>;
@@ -167,6 +172,9 @@ function commandFixture(t: TestContext): CommandFixture {
   let commits: DependabotHeadCommit[] | undefined = [{ oid: HEAD, authors: [DEPENDABOT_AUTHOR] }];
   let red = true;
   let commentFails = false;
+  let updateError: string | undefined;
+  let replies: DependabotIssueComment[] = [];
+  const updates: Array<{ prNumber: number; expectedHeadSha: string }> = [];
   const comments: Array<{ url: string; body: string }> = [];
   const opened: Array<{ title: string; body: string }> = [];
   const issues: IssueGateway = {
@@ -195,6 +203,11 @@ function commandFixture(t: TestContext): CommandFixture {
         comments.push({ url, body });
       },
       close: () => { throw new Error("a refresh never closes the PR"); },
+      updateBranch: (prNumber, expectedHeadSha) => {
+        updates.push({ prNumber, expectedHeadSha });
+        return updateError === undefined ? { ok: true } : { ok: false, error: updateError };
+      },
+      comments: () => replies,
     },
   };
   return {
@@ -203,6 +216,9 @@ function commandFixture(t: TestContext): CommandFixture {
     setHead: (sha, c) => { head = sha; commits = c; },
     setRed: (value) => { red = value; },
     failComment: (value) => { commentFails = value; },
+    failUpdate: (value) => { updateError = value; },
+    setComments: (rows) => { replies = rows; },
+    updates, root,
     forgetLedger: () => rmSync(ledgerPath, { force: true }),
     ledger: () => readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line)),
     comments, opened,
@@ -239,61 +255,87 @@ test("W1-T9584: a stale held Dependabot head asks Dependabot to rebase once per 
   await effects.depReview!(redView(), { kind: "wait", check: "coverage-ratchet" });
   assert.deepEqual(commandArgs, [["--repo", "remudero", "--dependabot-refresh", "base-red-recovered"], ["--repo", "remudero"]]);
 
-  // The command side: one comment per head, recorded durably, the rest of the passes say it is unanswered.
+  assert.deepEqual([headCarriesForeignCommit([{ authors: [{ login: "dependabot[bot]" }] }]), DEPENDABOT_NOREPLY_EMAIL_RE.test(DEPENDABOT_AUTHOR.email),
+    DEPENDABOT_NOREPLY_EMAIL_RE.test(FLEET_AUTHOR.email)], [false, true, false], "the fleet App's noreply address is not Dependabot's");
+  assert.equal(dependabotRefreshCommand(undefined), DEPENDABOT_RECREATE_COMMAND, "unread commits fail toward recreate");
+  assert.equal(dependabotRefreshCommand([{ authors: [] }]), DEPENDABOT_RECREATE_COMMAND);
+  assert.equal(dependabotRefreshCommand([{ authors: [DEPENDABOT_AUTHOR] }]), DEPENDABOT_REBASE_COMMAND);
+});
+
+test("W1-T9994: a base-red Dependabot refresh uses the guarded update-branch, not a command", async (t) => {
   const f = commandFixture(t);
   assert.equal(await f.run("base-red-recovered"), 1);
-  assert.deepEqual(f.comments, [{ url: "https://github.com/craigoley/remudero/pull/11793", body: DEPENDABOT_REBASE_COMMAND }]);
+  assert.deepEqual(f.updates, [{ prNumber: 11793, expectedHeadSha: HEAD }], "the update carries the head it judged as the expected head");
+  assert.deepEqual(f.comments, [], "no @dependabot command is commented");
   const requested = f.ledger().filter((r) => r.step === "dep-review.refresh_requested");
   assert.equal(requested.length, 1);
-  assert.equal(requested[0].command, DEPENDABOT_REBASE_COMMAND);
+  assert.equal(requested[0].via, "update-branch");
   assert.equal(requested[0].cause, "base-red-recovered");
   assert.equal(requested[0].head_sha, HEAD);
   assert.equal(requested[0].pr_number, 11793);
   f.advance(120_000);
   assert.equal(await f.run("base-red-recovered"), 1);
-  assert.equal(f.comments.length, 1, "the same head is never asked twice");
+  assert.equal(f.updates.length, 1, "the same head is refreshed once");
   const unanswered = f.ledger().filter((r) => r.step === "dep-review.refresh_unanswered");
   assert.equal(unanswered.length, 1);
   assert.equal(unanswered[0].age_ms, 120_000);
-  assert.equal(unanswered[0].command, DEPENDABOT_REBASE_COMMAND);
   f.forgetLedger();
   await f.run("base-red-recovered");
-  assert.equal(f.comments.length, 1, "a ledger rotation never re-asks: the head is recorded in the durable hold state");
+  assert.equal(f.updates.length, 1, "a ledger rotation never refreshes twice: the head is recorded in the durable hold state");
 
-  // The aged-hold backstop is unchanged (no new timeout) and its body names the request.
+  // The aged-hold backstop is unchanged (no new timeout) and its body names the refresh.
   f.advance(24 * 60 * 60 * 1000);
   await f.run("base-red-recovered");
   assert.equal(f.opened.length, 1);
-  assert.match(f.opened[0].body, /@dependabot rebase/);
-  assert.match(f.opened[0].body, /Refresh requested/);
+  assert.match(f.opened[0].body, /guarded update-branch was applied/);
 
-  // A failed comment records nothing, so the next pass asks again.
+  // A NEW head re-earns judgement.
   f.setHead("e".repeat(40), [{ oid: "e", authors: [DEPENDABOT_AUTHOR] }]);
-  f.failComment(true);
   await f.run("base-red-recovered");
-  assert.equal(f.ledger().filter((r) => r.step === "dep-review.refresh_failed").length, 1);
-  f.failComment(false);
-  await f.run("base-red-recovered");
-  assert.equal(f.comments.at(-1)?.body, DEPENDABOT_REBASE_COMMAND);
-  assert.equal(f.comments.length, 2, "a NEW head re-earns judgement, and a failed ask is retried");
+  assert.deepEqual(f.updates.at(-1), { prNumber: 11793, expectedHeadSha: "e".repeat(40) });
+  assert.equal(f.updates.length, 2);
+  assert.deepEqual(f.comments, []);
 
-  // A head carrying the fleet's merge commit (#11793's 2d5030059) is edited: rebase is refused, so recreate.
-  f.setHead("d".repeat(40), [{ oid: "x", authors: [DEPENDABOT_AUTHOR] }, { oid: "d", authors: [FLEET_AUTHOR] }]);
-  await f.run("base-red-recovered");
-  assert.equal(f.comments.at(-1)?.body, DEPENDABOT_RECREATE_COMMAND);
-  assert.equal(f.ledger().filter((r) => r.step === "dep-review.refresh_requested").at(-1)?.edited_head, true);
-  assert.equal(headCarriesForeignCommit([{ authors: [{ login: "dependabot[bot]" }] }]), false);
-  assert.equal(DEPENDABOT_NOREPLY_EMAIL_RE.test(DEPENDABOT_AUTHOR.email), true);
-  assert.equal(DEPENDABOT_NOREPLY_EMAIL_RE.test(FLEET_AUTHOR.email), false, "the fleet App's noreply address is not Dependabot's");
-  assert.equal(dependabotRefreshCommand(undefined), DEPENDABOT_RECREATE_COMMAND, "unread commits fail toward recreate");
-  assert.equal(dependabotRefreshCommand([{ authors: [] }]), DEPENDABOT_RECREATE_COMMAND);
-
-  // Green checks on a requested head are not a hold: nothing more is asked or reported.
+  // Green checks on a refreshed head are not a hold: nothing more is attempted or reported.
   f.setRed(false);
   const before = f.ledger().length;
   assert.equal(await f.run("base-red-recovered"), 0);
-  assert.equal(f.comments.length, 3);
+  assert.equal(f.updates.length, 2);
   assert.equal(f.ledger().slice(before).filter((r) => String(r.step).startsWith("dep-review.refresh")).length, 0);
+});
+
+test("W1-T9994: a refused update-branch escalates once with the refusal quoted", async (t) => {
+  const f = commandFixture(t);
+  f.failUpdate("HTTP 422: merge conflict between base and head");
+  assert.equal(await f.run("base-red-recovered"), 1);
+  assert.equal(f.updates.length, 1);
+  assert.equal(f.opened.length, 1);
+  assert.match(f.opened[0].body, /update-branch of this head was refused or does not apply/);
+  assert.match(f.opened[0].body, /merge conflict between base and head/);
+  const failed = f.ledger().filter((r) => r.step === "dep-review.refresh_failed");
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].via, "update-branch");
+  assert.equal(f.ledger().filter((r) => r.step === "dep-review.refresh_requested").length, 0, "a refused refresh is not requested");
+  f.advance(60_000);
+  await f.run("base-red-recovered");
+  await f.run("base-red-recovered");
+  assert.equal(f.updates.length, 1, "a refused update-branch is not retried on this head");
+  assert.equal(f.opened.length, 1, "the escalation is raised once per head");
+  assert.equal(f.ledger().filter((r) => r.step === "dep-review.refresh_escalated").length, 1);
+
+  // An earlier command Dependabot refused is quoted beside the update-branch refusal.
+  const g = commandFixture(t);
+  g.failUpdate("HTTP 403");
+  const statePath = join(g.root, "state", "dep-review-holds", "craigoley", "remudero", "PR11793.json");
+  mkdirSync(join(statePath, ".."), { recursive: true });
+  writeFileSync(statePath, `${JSON.stringify({ headSha: HEAD, heldSinceMs: NOW, asks: [], refreshes: [{
+    headSha: HEAD, command: DEPENDABOT_REBASE_COMMAND, cause: "base-red-recovered", requestedAtMs: NOW - 3_600_000, delivered: true }] })}\n`);
+  g.setComments([{ user: { login: "dependabot[bot]" }, created_at: new Date(NOW - 3_599_000).toISOString(),
+    body: "Sorry, only users with push access can use that command.\n\nmore" }]);
+  await g.run();
+  assert.equal(g.opened.length, 1);
+  assert.match(g.opened[0].body, /Sorry, only users with push access can use that command\./);
+  assert.match(g.opened[0].body, /HTTP 403/);
 });
 
 test("W1-T9584: an own red on a Dependabot head posts no command", async (t) => {
@@ -347,8 +389,9 @@ test("W1-T9584: invalid refresh history refuses to forget requested heads", (t) 
         decision: "hold", semverLevel: "patch", pinOnly: false, offendingFiles: [],
         redChecks: ["coverage-ratchet"], migrationBumps: [], reason: "checks are red",
       },
-      cause: "base-red-recovered", commits: [{ oid: HEAD, authors: [DEPENDABOT_AUTHOR] }],
-      comment: (body) => { comments.push(body); },
+      cause: "base-red-recovered",
+      updateBranch: () => { comments.push("update-branch"); return { ok: true }; },
+      readComments: () => [], escalate: () => "https://example.test/issues/1",
       log: (step) => { logs.push(step); },
     }), { message: "invalid dependency refresh state; refusing to forget requested heads" }, description);
     assert.equal(readFileSync(statePath, "utf8"), saved, `${description}: preserve the durable history`);
