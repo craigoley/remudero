@@ -94,7 +94,7 @@ test('inherited reservation fixtures require the real ancestor start, nonce, poo
   const held={pid:process.pid,ownerNonce:'fixture-nonce',processStart:start,concurrency:1};writeFileSync(path,JSON.stringify(held),{mode:0o600});
   const claim={pid:process.pid,nonce:held.ownerNonce,start,concurrency:1,path},probe="import{borrowedWorkspaceWorker}from'./scripts/lib/shared-workspace.mjs';try{console.log(JSON.stringify(await borrowedWorkspaceWorker()));}catch(e){console.log(JSON.stringify({admitted:false,reason:e.message}));}";
   const read=(value:unknown)=>{const p=spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',probe],{encoding:'utf8',timeout:10000,env:{...process.env,RMD_TEST_SLOT_DIR:slots,RMD_TEST_SLOT_PARENT:typeof value==='string'?value:JSON.stringify(value)}});assert.equal(p.status,0,p.stderr);return JSON.parse(p.stdout);};
-  assert.equal(read(claim).admitted,true);
+  const positive=read(claim);assert.equal(positive.admitted,true,JSON.stringify(positive));
   for(const value of[{...claim,nonce:'wrong'},{...claim,start:'wrong'},{...claim,concurrency:2},{...claim,path:join(f.home,'not-a-slot')},'x'.repeat(16385),'{'])assert.equal(read(value).admitted,false);
   writeFileSync(path,JSON.stringify({...held,pid:process.pid+1000000}));assert.equal(read(claim).admitted,false);
 });
