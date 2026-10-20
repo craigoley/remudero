@@ -365,21 +365,38 @@ test("W1-T10210: finite defaults cover a production-shaped immutable history", t
   const repo = gitRepo({ kind: "filing-history-population", seedCommit: false }); t.after(() => repo.cleanup());
   const data = (value: string): string => `data ${Buffer.byteLength(value)}\n${value}\n`;
   const { name, email } = GIT_REPO_FIXTURE_IDENTITY;
+  // The cdc59077 plan has 56 shaped queued candidates before merge-credit exclusion;
+  // the original-parent history survey had 9,873 commits. Exercise both in one budget,
+  // with a real changed record on every commit rather than only unchanged ancestry.
+  const candidateIds = Array.from({ length: 56 }, (_, i) => `P${i}`);
+  const commits = 10_000;
   let stream = `commit refs/heads/main\ncommitter ${name} <${email}> 1577880000 +0000\n` + data("population root");
   stream += "M 100644 inline plan/tasks.yaml\n" + data("[]\n");
   for (let i = 0; i < 4096; i++) stream += `M 100644 inline plan/tasks.d/record-${i}.yaml\n` + data(ruling(`P${i}`));
   stream += "\n";
-  for (let i = 1; i < 1024; i++) stream += `commit refs/heads/main\ncommitter ${name} <${email}> ${1577880000 + i} +0000\n` + data(`unchanged plan ${i}`) + "\n";
+  for (let i = 1; i < commits; i++) {
+    const changed = i % candidateIds.length;
+    stream += `commit refs/heads/main\ncommitter ${name} <${email}> ${1577880000 + i} +0000\n` + data(`record edit ${i}`);
+    stream += `M 100644 inline plan/tasks.d/record-${changed}.yaml\n` + data(ruling(`P${changed}`) + `# revision ${i}\n`) + "\n";
+  }
   stream += "done\n";
   execFileSync("git", ["-C", repo.dir, "fast-import", "--quiet"], { input: stream, stdio: "pipe" });
-  const ctx = createTaskFilingHistoryInvocation(repo.dir, ["P0", "P4095"]);
+  const ctx = createTaskFilingHistoryInvocation(repo.dir, candidateIds);
   const started = performance.now();
-  assert.equal(resolveTaskFilingHistory("P0", ctx).state, "qualified");
+  const first = resolveTaskFilingHistory("P0", ctx);
+  assert.equal(first.state, "qualified");
   const usage = { ...ctx.usage };
-  assert.equal(resolveTaskFilingHistory("P4095", ctx).state, "qualified");
-  assert.deepEqual(ctx.usage, usage, "a second candidate reuses the completed immutable scan");
-  assert.equal(ctx.usage.commitVisits, 1024); assert.equal(ctx.usage.blobReads, 4097);
+  for (const id of candidateIds) {
+    const result = resolveTaskFilingHistory(id, ctx);
+    assert.equal(result.state, "qualified");
+    if (result.state === "qualified" && first.state === "qualified") {
+      assert.equal(result.commit, first.commit, "record edits preserve the original shared birth");
+      assert.equal(result.committerSeconds, 1577880000);
+    }
+  }
+  assert.deepEqual(ctx.usage, usage, "every later candidate reuses the completed immutable scan");
+  assert.equal(ctx.usage.commitVisits, commits); assert.equal(ctx.usage.blobReads, 4097 + commits - 1);
   for (const key of Object.keys(FILING_HISTORY_LIMITS) as (keyof typeof FILING_HISTORY_LIMITS)[])
     assert.ok(ctx.usage[key] <= FILING_HISTORY_LIMITS[key]);
-  t.diagnostic(JSON.stringify({ population: { commits: 1024, containers: 4097 }, usage: ctx.usage, measuredMs: performance.now() - started }));
+  t.diagnostic(JSON.stringify({ population: { commits, containers: 4097, candidates: candidateIds.length }, usage: ctx.usage, measuredMs: performance.now() - started }));
 });
