@@ -42,7 +42,10 @@ function consumer() {
     run<T>(fn: () => T): T {
       const prior = process.env.PATH;
       process.env.PATH = `${bin}:${prior ?? ""}`;
-      try { return fn(); } finally { process.env.PATH = prior; }
+      try { return fn(); } finally {
+        if (prior === undefined) delete process.env.PATH;
+        else process.env.PATH = prior;
+      }
     },
     body(proof: string, baseRef?: string) {
       return buildPlanPrBody({
