@@ -54,13 +54,13 @@ function reading(entries: Array<Partial<ReadingEntry>>): HostMemoryReading {
   };
 }
 
-/** A host under memory pressure (PSI some avg10 20) whose MemAvailable the test moves. */
-function host(state: { availableMib: number }): (path: string) => string {
+/** Projected reservations cause the shortfall; observed PSI can independently block an aged start. */
+function host(state: { availableMib: number; psiSomeAvg10: number }): (path: string) => string {
   return (path) => {
     const table: Record<string, string> = {
       "/proc/meminfo": `MemAvailable: ${state.availableMib * 1024} kB\n`,
       "/proc/vmstat": "pswpin 100\n",
-      "/proc/pressure/memory": "some avg10=20.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+      "/proc/pressure/memory": `some avg10=${state.psiSomeAvg10.toFixed(2)} avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n`,
       "/sys/fs/cgroup/memory.current": `${2000 * MIB}\n`,
       "/sys/fs/cgroup/memory.max": `${12_000 * MIB}\n`,
       "/sys/fs/cgroup/memory.swap.current": "0\n",
@@ -77,12 +77,12 @@ function host(state: { availableMib: number }): (path: string) => string {
 interface World {
   rows: LedgerLine[];
   now: { ms: number };
-  state: { availableMib: number };
+  state: { availableMib: number; psiSomeAvg10: number };
   running: { entries: Array<Partial<ReadingEntry>> };
 }
 
 function world(): World {
-  return { rows: [], now: { ms: NOW }, state: { availableMib: 5000 }, running: { entries: [{ id: "build", workerClass: "implement", estimateMib: BUILD_MIB }] } };
+  return { rows: [], now: { ms: NOW }, state: { availableMib: 5000, psiSomeAvg10: 0 }, running: { entries: [{ id: "build", workerClass: "implement", estimateMib: BUILD_MIB }] } };
 }
 
 function ports(w: World): Partial<AdmissionPorts> {
@@ -98,6 +98,8 @@ function ports(w: World): Partial<AdmissionPorts> {
     daemonPid: () => 777,
     listStateDir: () => [],
     estimate: () => 900,
+    typical: (workerClass) => workerClass === "implement" ? BUILD_MIB : 900,
+    survival: () => ({ unmeasured: "no time-to-peak samples in this fixture" }),
     readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
     enforceHere: () => true,
     withLock: (action) => action(),
@@ -211,11 +213,23 @@ test("W1-T9975: a restart carries the measured due interval forward", async () =
     assert.equal(deferRow!.cadence_ms, COVERAGE_MS, "the garden is held to its own interval, not the 60 s tick");
     assert.equal(deferRow!.cadence_basis, "carried");
     assert.equal(deferRow!.cadence_samples, 3);
+    assert.deepEqual(deferRow!.reasons, ["unrealized-reservations"], "the cadence test starts with only a projected shortfall");
     restarted.now.ms += TICK_MS;
+    restarted.state.psiSomeAvg10 = 20;
+    const pressured = await spawn(GATE, [], { stopped: false, deferral: { ...scheduled, firstAsk: false } });
+    assert.deepEqual(pressured, { kind: "deferred", reason: "memory-budget-shortfall" }, "a carried interval never overrides observed PSI");
+    const pressureRow = rowsOf(restarted, ENFORCE_DEFER_STEP, GATE).at(-1)!;
+    assert.equal(pressureRow.aged_blocked, "psi");
+    assert.ok((pressureRow.reasons as string[]).includes("psi"));
+    assert.equal(rowsOf(restarted, ENFORCE_ADMIT_STEP, GATE).length, 0);
+    assert.equal(restarted.running.entries.length, 1, "no child reservation was opened under pressure");
+    restarted.state.psiSomeAvg10 = 0;
     const second = await spawn(GATE, [], { stopped: false, deferral: { ...scheduled, firstAsk: false } });
     assert.equal(second, 0, "the garden has been due longer than its interval, so it is aged in");
     const [admitRow] = rowsOf(restarted, ENFORCE_ADMIT_STEP, GATE);
     assert.deepEqual([admitRow!.tier, admitRow!.cadence_ms, admitRow!.cadence_basis, admitRow!.cadence_samples], ["aged", COVERAGE_MS, "carried", 3]);
+    assert.equal(admitRow!.deferrals, 2, "pressure recovery preserves the carried deferral streak");
+    assert.deepEqual(admitRow!.overrode, ["unrealized-reservations"]);
 
     // Control: due only ten minutes ago, a garden with a 57 minute interval is not yet aged one tick later.
     await generation(stateDir, "DAEMON-2", NOW - 10 * 60_000 - 1_000, [COVERAGE_MS, COVERAGE_MS, COVERAGE_MS]);

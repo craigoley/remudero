@@ -108,6 +108,8 @@ function ports(w: World): Partial<AdmissionPorts> {
     daemonPid: () => 777,
     listStateDir: () => [],
     estimate: () => 900,
+    typical: (workerClass) => workerClass === "implement" ? BUILD_MIB : 900,
+    survival: () => ({ unmeasured: "no time-to-peak samples in this fixture" }),
     readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
     enforceHere: () => true,
     withLock: (action) => action(),
