@@ -1209,12 +1209,21 @@ jobs:
       - name: lint-plan (rmd lint-plan, PR-changed tasks only)
         id: lint-plan
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            node --import tsx scripts/lint-plan-offline.mjs --online --base HEAD^1
+            dependency_lint_base=HEAD^1
           else
-            node --import tsx scripts/lint-plan-offline.mjs --online --base "$GATE_BASE"
+            dependency_lint_base="$GATE_BASE"
           fi
+          node --import tsx --input-type=module - "$dependency_lint_base" <<'PLAN_LINT'
+          import { lintPlanCommand } from './src/run-task.js';
+          import { ciDependencyEvidenceForInvocation } from './scripts/lib/ci-dependency-evidence.mjs';
+          const args = ['--base', process.argv[2]];
+          const dependencyEvidence = ciDependencyEvidenceForInvocation(args);
+          process.exitCode = await lintPlanCommand(args, { ...(dependencyEvidence ? { dependencyEvidence } : {}) });
+          PLAN_LINT
 
       - name: dependency-cruiser fitness rules
         id: depcruise

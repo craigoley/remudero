@@ -20,7 +20,7 @@ function fixture(t: TestContext) {
   mkdirSync(join(repo.dir, "src/lib"), { recursive: true }); mkdirSync(join(repo.dir, "test"));
   put("src/lib/subject.ts", "export const answer = 1;\n");
   put("test/proof.test.ts", 'import { test } from "node:test";test("hosted dependency fixture behavior",()=>{});\n');
-  const record = (id: string, dependencies: string[]) => parseTasksFromYaml(`- id: ${id}\n  title: Hosted dependency fixture ${id}\n  repo: remudero\n  depends_on: [${dependencies.join(", ")}]\n  type: implement\n  verify: auto\n  risk: low\n  status: queued\n  attempts: 0\n  origin: fixture\n  files: [src/lib/subject.ts, test/proof.test.ts]\n  acceptance:\n    - claim: The dependency fixture behaves\n      proof: 'unit test: hosted dependency fixture behavior'\n`)[0]!;
+  const record = (id: string, dependencies: string[]) => parseTasksFromYaml(`- id: ${id}\n  title: Hosted dependency fixture ${id}\n  repo: remudero\n  depends_on: [${dependencies.join(", ")}]\n  type: implement\n  verify: auto\n  risk: low\n  status: queued\n  attempts: 0\n  origin: fixture\n  files: [src/lib/subject.ts, test/proof.test.ts]\n  acceptance:\n    - claim: The dependency fixture behaves\n      proof: 'unit test: hosted dependency fixture behavior'\n`, "hosted-producer-fixture")[0]!;
   put("plan/tasks.yaml", stringify([record("ZZ-T1", [])]));
   repo.git("add", "."); repo.git("commit", "-qm", "test: committed dependency implementation");
   const base = repo.git("rev-parse", "HEAD");
@@ -197,7 +197,10 @@ test("hosted wiring seals protected-base evidence before candidate code and reta
   assert.match(steps[producer]!.run!, /npm ci --ignore-scripts/);
   assert.doesNotMatch(steps[producer]!.run!, /cp -al node_modules|import\(['"]\.\/scripts/);
   assert.match(steps[producer]!.run!, /protected base has no qualified dependency producer/);
-  assert.match(steps.find(step => step.id === "lint-plan")!.run!, /lint-plan-offline\.mjs --online --base/);
+  const lint = steps.find(step => step.id === "lint-plan")!.run!;
+  assert.match(lint, /lintPlanCommand\(args,/);
+  assert.match(lint, /ciDependencyEvidenceForInvocation\(args\)/);
+  assert.doesNotMatch(lint, /offline:/);
   assert.deepEqual(workflow.jobs.ci.needs, ["commitlint"]);
   assert.equal(workflow.jobs.ci.if, "${{ !cancelled() }}");
   assert.match(workflow.jobs.ci.env.RMD_CI_DEPENDENCY_DIGEST, /needs\.commitlint\.outputs\.dependency_digest/);
