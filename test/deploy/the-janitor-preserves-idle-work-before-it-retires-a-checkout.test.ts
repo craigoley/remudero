@@ -12,6 +12,7 @@ const HOUR = 3600;
 // The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later.
 const NOW = Math.floor(Date.now() / 1000) + 48 * HOUR;
 const GIT_ENV = {
+  ...process.env,
   GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
   GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid",
@@ -20,7 +21,7 @@ const GIT_ENV = {
 interface Fx { root: string; home: string; origin: string; bin: string; lsof: string }
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, ...GIT_ENV } }).trim();
+  return execFileSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV }).trim();
 }
 
 function setup(config: Record<string, unknown> | null = {}): Fx {
@@ -67,7 +68,7 @@ function commit(repo: string, file: string, text: string, message: string) {
 function helper(fx: Fx, args: string[] = ["--apply"], env: Record<string, string> = {}, now = NOW) {
   return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), ...args], {
     encoding: "utf8", timeout: 120_000,
-    env: { ...process.env, ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}`, ...env },
+    env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}`, ...env },
   });
 }
 
@@ -266,7 +267,7 @@ test("the janitor runs the preserve-then-retire phase and rotates its human log"
     const log = join(fx.root, "janitor.log");
     writeFileSync(log, "x".repeat(16 * 1024 * 1024 + 1));
     const r = spawnSync("bash", [JANITOR, "--dry-run"], { encoding: "utf8", timeout: 120_000, env: {
-      ...process.env, ...GIT_ENV, HOME: fx.home, PATH: `${fx.bin}:${process.env.PATH}`, TMPDIR: fx.root,
+      ...GIT_ENV, HOME: fx.home, PATH: `${fx.bin}:${process.env.PATH}`, TMPDIR: fx.root,
       REMUDERO_JANITOR_ACCOUNT_HOME: fx.home, REMUDERO_JANITOR_SCAN_ROOTS: fx.root,
       REMUDERO_JANITOR_DIRECTORY_ROOTS: join(fx.home, "Remudero"),
       REMUDERO_JANITOR_LOG: log, REMUDERO_JANITOR_LOCK_DIR: join(fx.root, "janitor.lock"),
