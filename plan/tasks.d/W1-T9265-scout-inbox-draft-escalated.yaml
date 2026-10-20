@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
   priority: 1.55
   status: queued
@@ -11,6 +11,7 @@
   author_class: machine
   origin: "scout:inbox.draft_escalated"
   files:
+    - src/lib/scout-gardener.ts
     - test/scout-inbox-draft-escalated.test.ts
   acceptance:
     - claim: "inbox.draft_escalated stops recurring: its cause is fixed rather than its rows hidden"

@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
   priority: 2.5
   status: queued
@@ -26,11 +26,9 @@
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
   risk_ruling:
     verdict: "low"
-    action: proceed
-    confidence: 0.93
+    action: escalate
+    confidence: 0.6
     reasons:
-      - "The filed scope declares one existing test file and requires a cause fix plus a regression test that forces the failing order, with unit test and grep proofs."
-      - "The rationale cites four distinct unrelated PR failures, four recoveries on retry, and specific CI runs with a stated evidence source."
-      - "The supplied scope requests no sensitive access, destructive action, policy change, or operator-only decision; the family track record reports seven merged tasks and zero declined."
-    judged_at: "2026-10-13T14:43:56.902Z"
-    pin: "be0fbf74c68f7540b0dfdd549beff3fee75c1643ff0341cf3a9c1acf4f00a811"
+      - "low-confidence verdict (0.60 < 0.6799999999999999) — on the change's description/files alone, no diff was read — The declared scope is a single existing test file (test/an-unattributed-loop-stall-is-profiled-live.test.ts), and the acceptance criteria call for fixing the flake cause and adding a pinning test beside the failing one. Nothing in the description touches secrets, auth, permissions, deploy, merge or review policy, or data deletion.; on the change's description/files alone, no diff was read — The filed evidence shows retries recovered on every filed PR (the rationale says 4 recovered, the harness block says 3 recovered, with 0 retries also failing). This is consistent with a flake rather than a red inherited from main. The 4-versus-3 count mismatch is minor.; on the change's description/files alone, no diff was read — Main's CI status at the PRs' bases is unread, so an inherited-red cause is not ruled out. This is a verification gap, but the change is test-only, reversible, and still has to pass CI and review.; on the change's description/files alone, no diff was read — The family track record is mixed (7 merged, 6 declined, Beta mean 0.53). That calls for ordinary scrutiny, not escalation, because the escalation criteria are not met."
+    judged_at: "2026-10-20T05:36:38.799Z"
+    pin: "93a7b46493188298f8527c9191b465e7aee9e72fdfaeab64a00f8a8bf7daef7c"
