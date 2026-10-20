@@ -32,7 +32,7 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
-import { firstFixRoundVerdict, judgeFixProgress,
+import { judgeFixProgress, resolveFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -1062,6 +1062,7 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
+import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "./lib/required-semantic-review.js";
 import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
@@ -8247,6 +8248,8 @@ async function runReview(args: {
   account: (r: WorkerResult) => WorkerResult;
   /** false ⇒ deterministic floor only, no LLM spawn (used by the live proofs). */
   spawnReviewer?: boolean;
+  /** Explicit semantic mode must complete before the deterministic floor can publish or arm. */
+  requireSemanticReview?: boolean;
   /**
    * W1-T2205: injectable replacement for the SDK's own `query()`, threaded straight into the
    * advisory reviewer's `spawnWorker` call below — see {@link SpawnWorkerArgs.queryFn}'s own
@@ -8433,7 +8436,8 @@ async function runReview(args: {
     { maxRotations: 0, step: REVIEW_REQUEUED_STEP, keep: (line) => line.includes(headSha) })).rawLines.flatMap((line) => {
     try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; /* deliberate: a torn line requests nothing */ }
   });
-  const decisionDigest = reviewerImageDecisionDigest(preparedDecision.decisionDigest, { headSha, runtimeImageSha, requeues });
+  const decisionDigest = reviewerImageDecisionDigest(requiredSemanticDecisionDigest(preparedDecision.decisionDigest,
+    args.requireSemanticReview === true), { headSha, runtimeImageSha, requeues });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -8674,6 +8678,17 @@ async function runReview(args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
+  const semanticRefusal = requiredSemanticRefusal({ required: args.requireSemanticReview === true,
+    planOnly: planOnlySkip, outcome, criteriaCount: criteria.length, verdicts: semantic });
+  if (semanticRefusal !== undefined) {
+    log("review.semantic_incomplete", { reason: semanticRefusal, head_sha: headSha, pr_url: prUrl,
+      reviewer_outcome: outcome, review_decision_digest: decisionDigest });
+    say(`remudero-review: verdict WITHHELD — ${semanticRefusal}; no verdict publication or merge effect`);
+    return { state: "failure", criteria: [], cannotEvaluate: true, testTheater: false,
+      summary: semanticRefusal, floorDegraded: true, capped: true, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: outcome, verdictWithheld: semanticRefusal,
+      reviewDecisionDigest: decisionDigest, evaluatorProvenance };
+  }
   // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
   // advisory; a filesystem/telemetry problem cannot become a review failure.
   let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
@@ -11409,6 +11424,8 @@ export async function runFixRung(opts: {
   retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
+  /** The sweep's independently read PR input; absent is not proof that the body stayed unchanged. */
+  progressReviewInputDigest?: string;
   initialCriterionIndices?: readonly number[];
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
   /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
@@ -11796,6 +11813,7 @@ export async function runFixRung(opts: {
   // into both the pre-strike probe's key and the false-block producer below, so the two can never
   // disagree about "current".
   const currentContractRevision = taskContractRevision(opts.task);
+  let progressReviewInputDigest = opts.progressReviewInputDigest;
   const admitFixTests = !(opts.task.files?.length && opts.task.files.every(isInPlanScope));
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
   // queue, no ledger step. The ten fix-rung sites below are the NEEDS ME board's largest class.
@@ -12023,10 +12041,11 @@ export async function runFixRung(opts: {
       operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap, parkedReason: forJudge ? parkedReason : undefined });
     standInEscalates = true;
     try {
-      const decision = await judgeFixProgress(input, progressJudge);
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
+      const { decision, receipt } = await resolveFixProgress(input, persisted,
+        { judge: progressJudge, reviewInputDigest: progressReviewInputDigest, contractRevision: currentContractRevision });
+      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
         parked_reason: parkedReason, former_ceiling: input.formerCeiling,
-        round_count: input.rounds.length, signals: input.signals, ...decision });
+        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       return decision;
     } finally {
       standInEscalates = false;
@@ -12355,11 +12374,13 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
+      const { decision, receipt } = await resolveFixProgress(input, persisted,
+        { judge: progressJudge, firstRound: true, reviewInputDigest: progressReviewInputDigest,
+          contractRevision: currentContractRevision });
+      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
         parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-        round_count: input.rounds.length, signals: input.signals, ...decision });
+        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
         const loop = `fix progress loop: ${decision.loop} — ${decision.reason}`;
@@ -14451,6 +14472,7 @@ export async function runFixRung(opts: {
       runId: opts.runId,
       openTaskIds: opts.openTaskIds,
     });
+    progressReviewInputDigest = reviewInputBody === undefined ? undefined : reviewInputDigest(review.headSha, reviewInputBody);
     if (review.verdictWithheld) {
       deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.verdictWithheld });
       return { outcome: "stood_down", review, strikes, retriggers, reason: review.verdictWithheld, standDownReason: review.verdictWithheld };
@@ -23305,6 +23327,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         reason: "head-task-metadata-unavailable",
         missing: [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean),
       });
+      if (!ownTaskRecordMissing) {
+        log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+        console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
+        return 2;
+      }
     } else {
       try {
         reviewerMount = resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", taskRisk);
@@ -23323,6 +23350,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           reason: "semantic-setup-unavailable",
           error: String((e as Error)?.message ?? e),
         });
+        // An explicitly selected semantic review must not become a deterministic PASS that
+        // runReview can auto-arm. Refuse before either pending poster or materializer runs.
+        log("review.semantic_setup_refused", { reason: "semantic-setup-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+        console.error("rmd review: semantic setup unavailable; no pending status, verdict or merge effect");
+        return 2;
       }
     }
   }
@@ -23451,6 +23483,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           say: (m) => console.log(m),
           account: (r) => r,
           spawnReviewer,
+          requireSemanticReview: executionMode === "semantic",
           reviewerMount,
           // W1-T185 (Gap 2): the materialized worktree above when available — the
           // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
@@ -28512,6 +28545,9 @@ export function readReservationHolder(
  *  CLI dispatch below) omit `deps` entirely and get the real functions, same DI shape as
  *  `runTask`'s `opts.config ?? loadConfig()` / `opts.github ?? ghGateway(...)`. */
 export type LintPlanStatusDeps = {
+  /** A CI adapter may supply independently verified, invocation-bound dependency evidence.
+   * Offline callers still perform no GitHub/config writes. Omitted preserves the native store path. */
+  dependencyEvidence?: (task: Task) => DependencyMergeEvidence;
   /**
    * Checkout that owns an explicit `--plan` path and its `--base` reads. Omitted by the CLI;
    * tests use a throwaway clone so a fixture mutation cannot be observed by sibling test workers.
@@ -29764,6 +29800,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // Read only for a changed machine task's non-retired dependency. Never enter loadConfig offline.
   let offlineCredit: { store: CreditStore; repository: string; overrides: readonly CreditOverrideRow[] } | { reason: string } | undefined;
   const dependencyEvidence = (candidate: Task): DependencyMergeEvidence => {
+    if (offline && deps.dependencyEvidence) return deps.dependencyEvidence(candidate);
     if (!offline) {
       const projected = dependencyStatusByTaskId?.get(candidate.id);
       return !projected || projected.indeterminate
@@ -40614,6 +40651,7 @@ export function buildFixRungDispatchArgs(args: {
   evidence: FixDispatchEvidence;
   pr: {
     headSha: string;
+    reviewInputDigest?: string;
     reviewSummary?: string;
     pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
@@ -40718,6 +40756,7 @@ export function buildFixRungDispatchArgs(args: {
     budgetUsd: args.budgetUsd,
     strikeCap: args.strikeCap,
     initialReview,
+    progressReviewInputDigest: pr.reviewInputDigest,
     initialCriterionIndices,
     constraint: feedbackFixConstraint(pr.pendingAnswer),
     feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),

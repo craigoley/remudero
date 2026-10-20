@@ -470,7 +470,9 @@ test("CLI: --list-plan-reading-suites prints one path per line, sorted, all unde
   const lines = result.stdout.trim().split("\n").filter(Boolean);
   assert.ok(lines.length > 10, `expected a substantial plan-reading set, got ${lines.length}`);
   for (const line of lines) {
-    assert.match(line, /^test\/[^/]+\.test\.ts$/);
+    // suiteFiles() walks test/ recursively, so a plan-reading suite under test/ci/<group>/ is listed too.
+    assert.match(line, /^test\/(?:[^/]+\/)*[^/]+\.test\.ts$/);
+    assert.ok(!line.startsWith("test/fixtures/"), `fixtures are never enumerated as suites: ${line}`);
   }
   const sorted = [...lines].sort();
   assert.deepEqual(lines, sorted, "the list must be sorted, not enumeration order");
