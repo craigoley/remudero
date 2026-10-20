@@ -24068,7 +24068,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
           cause: "migrate", reply: answer.reply });
       }
     } catch (e) {
-      log("dep-review.migrate.answer_unread", { pr_url: view.url, head_sha: view.headRefOid, error: String((e as Error)?.message ?? e) });
+      log("dep-review.migrate.answer_unread", { pr_number: view.number, head_sha: view.headRefOid, error: String((e as Error)?.message ?? e) });
     }
 
     log("dep-review.migrate.completed", {
