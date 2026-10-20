@@ -1100,8 +1100,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEPENDENCY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
-          if (
-          set -euo pipefail
+          if bash -euo pipefail <<'PRODUCER'
           [[ "$DEPENDENCY_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           dependency_base="$(git rev-parse --verify "${DEPENDENCY_BASE_SHA}^{commit}")"
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
@@ -1128,7 +1127,8 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT, `digest=${produced.digest}\nproducer_sha=${produced.producerSha}\nartifact_path=${path}\n`);
           appendFileSync(process.env.GITHUB_ENV, `RMD_CI_DEPENDENCY_EVIDENCE=${path}\nRMD_CI_DEPENDENCY_DIGEST=${produced.digest}\nRMD_CI_DEPENDENCY_PRODUCER_SHA=${produced.producerSha}\n`);
           NODE
-          ); then
+          PRODUCER
+          then
             echo "Bounded dependency observation sealed."
           else
             echo "::warning::Dependency producer unavailable; machine-filing lint remains UNKNOWN."
