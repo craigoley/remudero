@@ -21,6 +21,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   automationProposalFromJudgedShard,
   buildVerifyHumanJudgePrompt,
+  observedStateKey,
   proposalFromJudgedShard,
   type ShardUnderJudgement,
   type VerifyHumanVerdict,
@@ -441,4 +442,120 @@ test("W1-T10210: finite defaults cover a production-shaped immutable history", t
   for (const key of Object.keys(FILING_HISTORY_LIMITS) as (keyof typeof FILING_HISTORY_LIMITS)[])
     assert.ok(ctx.usage[key] <= FILING_HISTORY_LIMITS[key]);
   t.diagnostic(JSON.stringify({ population: { commits, containers: 4097, candidates: candidateIds.length }, usage: ctx.usage, measuredMs: performance.now() - started }));
+});
+
+/** The current plan is repaired; the unrelated malformed snapshots remain in its real history. */
+function metadataHistoryCase(): ReturnType<typeof historyCase> & { birth: string } {
+  const f = historyCase(), birth = f.repo.git("rev-parse", "HEAD").trim();
+  const unrelated = join(f.repo.dir, "plan", "tasks.d", "W1-T9999-metadata.yaml");
+  writeFileSync(unrelated, ruling("W1-T9999") +
+    "  priority: 1\n  priority: 2\n  metadata:\n    id: W1-T9555\n    id: only-a-nested-reference\n");
+  commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "unrelated duplicate metadata");
+  writeFileSync(unrelated, ruling("W1-T9999") +
+    "  priority: 2\n  metadata:\n    id: W1-T9555\n  note: W1-T9003 is a reference, not another record\n");
+  commitHistory(f.repo.dir, "2020-01-03T12:00:00Z", "repair current metadata");
+  return { ...f, birth };
+}
+
+test("W1-T10278: unrelated duplicate metadata preserves exact filing history", t => {
+  const f = metadataHistoryCase(); t.after(() => f.repo.cleanup());
+  writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
+  const moved = join(f.repo.dir, "plan", "tasks.d", "W1-T9003-moved.yaml");
+  writeFileSync(moved, ruling("W1-T9003"));
+  commitHistory(f.repo.dir, "2020-01-04T12:00:00Z", "move embedded identity");
+  renameSync(moved, join(f.repo.dir, "plan", "tasks.d", "renamed-record.yaml"));
+  writeFileSync(join(f.repo.dir, "plan", "tasks.d", "W1-T9555-decoy.yaml"), ruling("W1-T9998"));
+  commitHistory(f.repo.dir, "2020-01-05T12:00:00Z", "rename and add a wrong-id filename");
+  const ctx = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003", "W1-T9001", "W1-T9555"]);
+  const revision = f.repo.git("rev-parse", "HEAD").trim();
+  assert.deepEqual(resolveTaskFilingHistory("W1-T9003", ctx), {
+    state: "qualified", revision, completeness: "complete", commit: f.birth,
+    path: "plan/tasks.yaml", source: "embedded", committerSeconds: 1577880000,
+  });
+  const control = resolveTaskFilingHistory("W1-T9001", ctx);
+  assert.equal(control.state, "qualified");
+  if (control.state === "qualified") {
+    assert.equal(control.commit, f.birth); assert.equal(control.source, "shard");
+  }
+  const reference = resolveTaskFilingHistory("W1-T9555", ctx);
+  assert.equal(reference.state, "unknown", "nested metadata, prose and filenames never introduce identity");
+  if (reference.state === "unknown") assert.match(reference.reason, /absent/);
+});
+
+test("W1-T10278: ambiguous structured identity stays unknown", async t => {
+  const cases: [string, string][] = [
+    ["duplicate id with equal values", "- id: W1-T9999\n  id: W1-T9999\n"],
+    ["duplicate id can hide a candidate", "- id: W1-T9999\n  id: W1-T9003\n"],
+    ["quoted equivalent id", "- id: W1-T9999\n  'id': W1-T9003\n"],
+    ["escaped equivalent id", "- id: W1-T9999\n  \"i\\u0064\": W1-T9003\n"],
+    ["alias record", "- &record { id: W1-T9999 }\n- *record\n"],
+    ["alias key", "- ? &key id\n  : W1-T9999\n- ? *key\n  : W1-T9003\n"],
+    ["alias identity value", "- id: &name W1-T9999\n- id: *name\n"],
+    ["alias in unrelated metadata", "- id: W1-T9999\n  title: &text fixture\n  rationale: *text\n"],
+    ["merge-derived identity", "- <<: { id: W1-T9999 }\n  title: merged identity\n"],
+    ["merge key beside explicit identity", "- id: W1-T9999\n  <<: { id: W1-T9003 }\n"],
+    ["missing identity", "- title: no identity\n"],
+    ["numeric identity", "- id: 7\n"],
+    ["collection identity", "- id: [W1-T9003]\n"],
+    ["complex mapping key", "- ? [id]\n  : W1-T9003\n  id: W1-T9999\n"],
+    ["custom identity tag", "- id: !identity W1-T9999\n"],
+    ["custom key tag", "- ? !field id\n  : W1-T9999\n"],
+    ["custom record tag", "- !record { id: W1-T9999 }\n"],
+    ["custom sequence tag", "!records\n- id: W1-T9999\n"],
+    ["mapping container", "tasks: []\n"],
+    ["scalar record", "- not-a-record\n"],
+    ["multiple documents", "- id: W1-T9999\n---\n- id: W1-T9003\n"],
+    ["syntax error alongside duplicate metadata", "- id: W1-T9999\n  priority: 1\n  priority: 2\n  broken: [\n"],
+  ];
+  for (const [name, text] of cases) await t.test(name, child => {
+    const f = historyCase(); child.after(() => f.repo.cleanup());
+    writeFileSync(join(f.repo.dir, "plan", "tasks.d", "unreadable-identity.yaml"), text);
+    commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "unsupported historical identity");
+    const result = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+    assert.equal(result.state, "unknown", name);
+    if (result.state === "unknown") assert.match(result.reason, /unsupported|ambiguous/, name);
+  });
+});
+
+test("W1-T10278: duplicate metadata preserves shared history limits", async t => {
+  await t.test("one completed scan serves both candidates", child => {
+    const f = metadataHistoryCase(); child.after(() => f.repo.cleanup());
+    const calls: string[][] = [];
+    const ctx = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003", "W1-T9001"], {
+      readGit: (root, args, options) => { calls.push([...args]); return hostWorktreeGit(root, args, options); },
+    });
+    assert.equal(resolveTaskFilingHistory("W1-T9003", ctx).state, "qualified");
+    const usage = { ...ctx.usage }, count = calls.length;
+    assert.equal(resolveTaskFilingHistory("W1-T9001", ctx).state, "qualified");
+    assert.deepEqual(ctx.usage, usage); assert.equal(calls.length, count);
+    for (const key of Object.keys(FILING_HISTORY_LIMITS) as (keyof typeof FILING_HISTORY_LIMITS)[])
+      assert.ok(ctx.usage[key] <= FILING_HISTORY_LIMITS[key]);
+  });
+  // Clean-history refusal controls still exercise the real resource guards when tolerance is removed.
+  for (const resource of Object.keys(FILING_HISTORY_LIMITS) as (keyof typeof FILING_HISTORY_LIMITS)[])
+    await t.test(`${resource} exhaustion still refuses`, child => {
+      const f = historyCase(); child.after(() => f.repo.cleanup());
+      const ctx = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003", "W1-T9001"], { limits: { [resource]: 0 } });
+      const result = resolveTaskFilingHistory("W1-T9003", ctx);
+      assert.equal(result.state, "unknown");
+      if (result.state === "unknown") assert.match(result.reason, /budget exhausted/);
+      const usage = { ...ctx.usage };
+      assert.equal(resolveTaskFilingHistory("W1-T9001", ctx).state, "unknown");
+      assert.deepEqual(ctx.usage, usage); assert.equal(ctx.usage[resource], 0);
+    });
+});
+
+test("W1-T10278: parked ages survive unrelated historical metadata errors", t => {
+  const f = metadataHistoryCase(); t.after(() => f.repo.cleanup());
+  const now = Date.parse("2020-01-08T12:00:00Z"), rows = parkedById(f.repo.dir, now);
+  const embedded = rows.get("W1-T9003")!;
+  assert.equal(embedded.ageDays, 7); assert.equal(embedded.ageUnknownReason, undefined);
+  assert.equal(rows.get("W1-T9001")?.ageDays, 7, "the same scan dates its sharded control");
+  assert.equal(parkedById(f.repo.dir, Date.parse("2020-01-01T13:00:00Z")).get("W1-T9003")?.ageDays, 0,
+    "a measured same-day zero is still distinct from unknown");
+  assert.equal(observedStateKey(embedded), observedStateKey({ ...embedded, ageDays: null, ageUnknownReason: "unreadable" }));
+  const verdict: VerifyHumanVerdict = { decision: "needs_operator", reason: "fixture" };
+  assert.equal(proposalFromJudgedShard(embedded, verdict).id,
+    proposalFromJudgedShard({ ...embedded, ageDays: null }, verdict).id);
+  assert.match(proposalFromJudgedShard(embedded, verdict).summary, /7 days ago/);
 });
