@@ -42,11 +42,13 @@ test('capacity and genuine-worker refusals precede every Git or receipt mutation
   const worker=await createSharedWorkspace('unfiled',{...f.options,borrowWorker:async()=>({admitted:false})});assert.match(worker.reason!,/genuine/);assert.deepEqual(readdirSync(f.parent),before);
 });
 test('real linked workspaces share the common Git store and reuse dependencies with no fresh install',async t=>{
-  const f=fixture(t),r=await createSharedWorkspace('unfiled',f.options);assert.equal(r.state,'CREATED_SHARED_OBJECTS_NO_FRESH_INSTALL',r.reason);
+  const f=fixture(t),r=await createSharedWorkspace('unfiled',{...f.options,borrowWorker:async()=>({admitted:true,nonce:'private-worker-capability-must-not-leak'})});assert.equal(r.state,'CREATED_SHARED_OBJECTS_NO_FRESH_INSTALL',r.reason);
+  assert.equal(JSON.stringify(r).includes('private-worker-capability-must-not-leak'),false,'public result must not expose private ownership capability');
   assert.equal(r.commonGitDir,join(f.pool,'.git'));assert.equal(r.base,f.git(f.pool,'rev-parse','origin/main'));
   assert.equal(lstatSync(join(r.path!,'node_modules')).isSymbolicLink(),false);assert.equal(r.freshNpmInstalls,0);
   assert.equal(f.git(r.path!,'rev-parse','--path-format=absolute','--git-common-dir'),r.commonGitDir);
   assert.equal(JSON.parse(readFileSync(join(r.receiptDir!,'result.json'),'utf8')).state,r.state);
+  assert.equal(readFileSync(join(r.receiptDir!,'result.json'),'utf8').includes('private-worker-capability-must-not-leak'),false);
   const second=await createSharedWorkspace('unfiled',{...f.options,now:()=>101});assert.equal(second.state,'CREATED_SHARED_OBJECTS_NO_FRESH_INSTALL',second.reason);
   assert.notEqual(spawnSync('/usr/bin/git',['-C',r.path!,'rev-parse','--abbrev-ref','@{u}'],{encoding:'utf8',timeout:3000}).status,0);
 });

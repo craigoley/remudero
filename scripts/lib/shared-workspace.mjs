@@ -71,18 +71,18 @@ const defaultMaterialize=async(path,options)=>{const {materializeDependencySeed}
 /** Create one unfiled linked worktree; uncertainty never authorizes a clone or install. */
 export async function createSharedWorkspace(taskId,{home=homedir(),readCapacity=readSharedWorkspaceCapacity,borrowWorker=borrowedWorkspaceWorker,materialize=defaultMaterialize,now=Date.now}={}) {
   const result={schema:'rmd-shared-workspace/v1',state:'NOT_RUN',modelCalls:0,freshNpmInstalls:0,automaticPruning:false};
-  let receiptDir,created=false;
+  let receiptDir,worker,created=false;
   try{
     if(taskId!=='unfiled')throw Error('filed tasks require the maintained task, claim and merged-credit workflow');
     const config=readSharedGitPolicy(home);if(!config.enabled){result.reason='Git storage policy disabled';return result;}
     result.capacity=readCapacity(config.parent);if(!result.capacity.admitted)throw Error('bounded workspace capacity unavailable');
-    result.worker=await borrowWorker();if(!result.worker.admitted)throw Error('genuine inherited worker unavailable');
+    worker=await borrowWorker();result.worker={admitted:worker.admitted};if(!worker.admitted)throw Error('genuine inherited worker unavailable');
     const stamp=now();if(!Number.isSafeInteger(stamp)||stamp<0)throw Error('invalid workspace identity');
     const branch='run-unfiled-'+stamp,path=join(config.parent,branch);if(lstatSync(path,{throwIfNoEntry:false}))throw Error('workspace path occupied; no retry');
     receiptDir=mkdtempSync(join(config.parent,'.rmd-shared-workspace-receipt-'));result.receiptDir=receiptDir;
     let step=0;const deadline=Date.now()+90000,env=cleanGitEnvironment();
     const git=(args,cwd=config.pool)=>{
-      result.worker.verify?.();
+      worker.verify?.();
       const remaining=deadline-Date.now();if(remaining<=0)throw Error('whole workspace Git budget expired');
       const prefix=join(receiptDir,String(++step).padStart(2,'0'));
       const p=captureStepSync('/usr/bin/git',['-c','gc.auto=0','-c','maintenance.auto=false',...args],{cwd,env,runtimeMs:Math.min(30000,remaining),maxBytes:1024**2,trackParent:true,stdoutPath:prefix+'.out',stderrPath:prefix+'.err',resultPath:prefix+'.json'});
@@ -98,7 +98,7 @@ export async function createSharedWorkspace(taskId,{home=homedir(),readCapacity=
     const base=git(['rev-parse','origin/main^{commit}']);git(['worktree','add','--quiet','--no-track','-b',branch,path,base]);created=true;Object.assign(result,{path,branch,base});
     if(git(['rev-parse','--path-format=absolute','--git-common-dir'],path)!==common)throw Error('new workspace does not share expected Git objects');result.commonGitDir=common;
     result.dependencies=await materialize(path,{root:config.dependencyRoot,sourceDir:config.dependencyDonor,lockWaitMs:0,runInstall(){throw Error('fresh npm fallback refused; retain workspace for harness retirement');}});
-    result.worker.verify?.();
+    worker.verify?.();
     if(result.dependencies.status!=='materialized'&&result.dependencies.status!=='present')throw Error('dependency result incomplete');
     result.state='CREATED_SHARED_OBJECTS_NO_FRESH_INSTALL';
   }catch(error){result.reason=error instanceof Error?error.message:String(error);if(created)result.state='CREATED_DEPENDENCIES_OR_READBACK_UNKNOWN_RETAINED';}
