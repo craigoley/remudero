@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync,
-  readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync, type Stats } from 'node:fs';
+  readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -124,6 +124,24 @@ test('post-publication public-path writer is not overwritten and the original is
   const result = compressEvidenceFile(f.path, { apply: true, now: f.now, afterPublish: ({ path }) => writeFileSync(path, 'new public writer content') });
   assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION'); assert.ok(result.retainedOriginalPath);
   assert.equal(readFileSync(f.path, 'utf8'), 'new public writer content'); assert.deepEqual(readFileSync(result.retainedOriginalPath), f.bytes);
+});
+test('a replaced stage pathname is refused before publication and its new bytes are retained', t => {
+  const f = payload(t); if (platformRefusal(f.path, f.now)) return;
+  let replaced: string | undefined;
+  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, beforePublish: () => {
+    replaced = join(f.dir, readdirSync(f.dir).find(n => n.startsWith('.rmd-evidence-compress-'))!);
+    renameSync(replaced, join(f.dir, 'verified-stage-held')); writeFileSync(replaced, 'foreign replacement', { mode: 0o600 });
+  } });
+  assert.equal(result.disposition, 'KEEP'); assert.equal(result.reason, 'stage-changed-before-publish');
+  assert.equal(readFileSync(replaced!, 'utf8'), 'foreign replacement'); assert.deepEqual(readFileSync(f.path), f.bytes);
+});
+test('a replaced public pathname cannot be confused with the retained published descriptor', t => {
+  const f = payload(t); if (platformRefusal(f.path, f.now)) return;
+  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, afterPublish: ({ path }) => {
+    renameSync(path, join(f.dir, 'published-inode-held')); writeFileSync(path, 'new public inode', { mode: 0o600 });
+  } });
+  assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION'); assert.equal(result.reason, 'published-reader-changed');
+  assert.equal(readFileSync(f.path, 'utf8'), 'new public inode'); assert.deepEqual(readFileSync(result.retainedOriginalPath!), f.bytes);
 });
 test('another process holding the evidence descriptor prevents compaction', async t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;

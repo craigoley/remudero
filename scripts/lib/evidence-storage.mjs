@@ -45,16 +45,16 @@ function samePayloadMetadata(a, b) {
 export function compressEvidenceFile(file, options = {}) {
   const { apply = false, now = Date.now(), beforePublish = () => {}, afterPublish = () => {} } = options;
   const entry = { path: file, disposition: 'KEEP' };
-  let fd, snapshot, stage, backup, published = false;
+  let fd, stagedFd, stagedIdentity, snapshot, stage, backup, published = false;
   try {
     if (process.platform !== 'darwin') throw Error('platform-not-qualified');
-    const original = lstatSync(file);
+    privateParents(file);
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const original = fstatSync(fd);
     if (!eligibleEvidence(original, now, process.getuid())) throw Error('recent-foreign-linked-or-not-private');
     if (original.size < 65536 || original.size > EVIDENCE_MAX_FILE_BYTES
         || original.blocks * 512 < original.size * .9) throw Error('small-oversize-or-already-compressed');
-    privateParents(file);
-    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    if (!sameEvidenceIdentity(original, fstatSync(fd))) throw Error('open-race');
+    if (!sameEvidenceIdentity(original, lstatSync(file))) throw Error('open-race');
     noOtherOpenFiles(file);
     entry.sha256 = evidenceDigest(fd, original.size);
     entry.logicalBytes = original.size;
@@ -75,17 +75,20 @@ export function compressEvidenceFile(file, options = {}) {
       timeout: 30000, encoding: 'utf8', maxBuffer: 65536,
     });
     if (copied.error || copied.status !== 0 || copied.stderr) throw Error('compression-incomplete');
-    const staged = lstatSync(stage), stagedFd = openSync(stage, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      if (evidenceDigest(stagedFd, original.size) !== entry.sha256) throw Error('staged-bytes-mismatch');
-      fsyncSync(stagedFd);
-    } finally { closeSync(stagedFd); }
+    stagedFd = openSync(stage, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const staged = fstatSync(stagedFd);
+    stagedIdentity = staged;
     if (!staged.isFile() || staged.nlink !== 1 || staged.size !== original.size || staged.mode !== original.mode
         || staged.uid !== original.uid || staged.gid !== original.gid || staged.mtimeMs !== original.mtimeMs) throw Error('staged-metadata-mismatch');
+    if (evidenceDigest(stagedFd, original.size) !== entry.sha256
+        || !sameEvidenceIdentity(staged, fstatSync(stagedFd))
+        || !sameEvidenceIdentity(staged, lstatSync(stage))) throw Error('staged-bytes-or-identity-mismatch');
+    fsyncSync(stagedFd);
     if (staged.blocks * 512 >= original.blocks * 512 * .9) throw Error('insufficient-saving');
     beforePublish();
     noOtherOpenFiles(file);
     if (!sameEvidenceIdentity(original, fstatSync(fd)) || !sameEvidenceIdentity(original, lstatSync(file))) throw Error('publish-race');
+    if (!sameEvidenceIdentity(staged, fstatSync(stagedFd)) || !sameEvidenceIdentity(staged, lstatSync(stage))) throw Error('stage-changed-before-publish');
     backup = join(dirname(file), '.rmd-evidence-original-' + randomUUID());
     linkSync(file, backup);
     if (!samePayloadMetadata(original, lstatSync(backup)) || lstatSync(backup).nlink !== 2) throw Error('recovery-link-race');
@@ -101,14 +104,12 @@ export function compressEvidenceFile(file, options = {}) {
         || !sameEvidenceIdentity(detached, lstatSync(backup))
         || evidenceDigest(fd, original.size) !== entry.sha256
         || !sameEvidenceIdentity(detached, fstatSync(fd))) throw Error('detached-original-changed');
-    const outputFd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-    let output;
-    try {
-      output = fstatSync(outputFd);
-      if (evidenceDigest(outputFd, original.size) !== entry.sha256
-          || !sameEvidenceIdentity(output, fstatSync(outputFd))
-          || !sameEvidenceIdentity(output, lstatSync(file))) throw Error('published-reader-changed');
-    } finally { closeSync(outputFd); }
+    // Keep the verified staged descriptor across rename instead of reopening a
+    // pathname whose earlier metadata check can no longer authorize an open.
+    const output = fstatSync(stagedFd);
+    if (evidenceDigest(stagedFd, original.size) !== entry.sha256
+        || !sameEvidenceIdentity(output, fstatSync(stagedFd))
+        || !sameEvidenceIdentity(output, lstatSync(file))) throw Error('published-reader-changed');
     const dirfd = openSync(dirname(file), constants.O_RDONLY);
     try { fsyncSync(dirfd); } finally { closeSync(dirfd); }
     if (!sameEvidenceIdentity(detached, fstatSync(fd)) || !sameEvidenceIdentity(detached, lstatSync(backup))) throw Error('original-changed-before-release');
@@ -122,8 +123,12 @@ export function compressEvidenceFile(file, options = {}) {
     if (backup) entry.retainedOriginalPath = backup;
   } finally {
     if (fd !== undefined) closeSync(fd);
+    if (stagedFd !== undefined) closeSync(stagedFd);
     if (snapshot) { try { unlinkSync(snapshot); } catch (e) { if (e.code !== 'ENOENT') entry.snapshotCleanup = 'UNKNOWN'; } }
-    if (stage) { try { unlinkSync(stage); } catch { entry.stageCleanup = 'UNKNOWN'; } }
+    if (stage) { try {
+      if (!stagedIdentity || !sameEvidenceIdentity(stagedIdentity, lstatSync(stage))) throw Error('unverified-stage-cleanup');
+      unlinkSync(stage);
+    } catch { entry.stageCleanup = 'UNKNOWN_RETAINED'; } }
   }
   return entry;
 }
