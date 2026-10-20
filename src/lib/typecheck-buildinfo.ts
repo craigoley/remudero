@@ -37,8 +37,9 @@ export const TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES / 2;
  * the heap grow. MEASURED 2026-10-20 on the fleet host (tsc 7.0.2, a cold full check of this repo, each run alone in a
  * capped scope): memory demand (cgroup peak + swap) 6.2–6.8 GB by default, 4.4–5.2 GB under 3GiB; with `declaration`
  * off as well, 3.2 GB against 3.4–3.6 GB without the limit, at 12–15 s wall against 10 s. It is the effective knob:
- * {@link lowMemoryTypecheckArgs}'s fewer checkers buy only ~0.1–0.2 GB. A SOFT limit, never a kill — a check that
- * needs more still finishes, with more collections. `GOMEMLIMIT=off` opts one run out.
+ * {@link lowMemoryTypecheckArgs}'s fewer checkers buy only ~0.1–0.2 GB. PRIMARY CONTROL on a check's Go heap, and a
+ * SOFT one, never a kill: a check that needs more still finishes, with more collections. `GOMEMLIMIT=off` opts one run
+ * out.
  */
 export const TYPECHECK_GOMEMLIMIT = "3GiB";
 
