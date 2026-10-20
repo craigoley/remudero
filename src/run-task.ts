@@ -493,6 +493,7 @@ import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { testPlaceOutcome } from "./lib/test-placement.js";
+import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
@@ -14123,21 +14124,28 @@ export async function runFixRung(opts: {
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha,
         ...(fixAction.attribution ? { attribution: fixAction.attribution.kind, attribution_reason: fixAction.attribution.reason } : {}) });
-      if (unfiledScope) {
+      const workflowPaths = fixAction.paths.filter((path) => path.startsWith(".github/workflows/"));
+      if (workflowPaths.length > 0 || unfiledScope) {
+        const scopeKind = workflowPaths.length > 0 ? "workflow" : "unfiled";
         const paths = [...new Set(fixAction.paths)].sort();
         const identityKey = createHash("sha256").update(JSON.stringify([prNumber, priorHeadSha, paths])).digest("hex");
         const prior = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
-          row.outcome === "unfiled-escalated" && row.identity_key === identityKey);
+          row.outcome === `${scopeKind}-escalated` && row.identity_key === identityKey);
         let issueUrl = typeof prior?.issue_url === "string" ? prior.issue_url : undefined;
         let deliveryError: { error: string } | undefined;
         if (!issueUrl) try {
           issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
             headSha: priorHeadSha, cause: "ci", contractRevision: identityKey,
-            summary: `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`,
-            detail: `@${opts.reviewBase.owner}: ${opts.prUrl} has no plan record to amend. Round ${roundId} ` +
+            summary: scopeKind === "workflow"
+              ? `PR #${prNumber} needs a workflow repair outside the fix lane — ${opts.prUrl}`
+              : `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`,
+            detail: `@${opts.reviewBase.owner}: ${opts.prUrl} ` + (scopeKind === "workflow"
+              ? `needs workflow edits that the fix lane cannot amend or commit: ${workflowPaths.join(", ")}.`
+              : "has no plan record to amend.") + ` Round ${roundId} ` +
               `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}\n\n` +
               `Worker's NEEDS_SCOPE diagnosis (including any main-inherited cause):\n${fixReport}\n\n` +
-              `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}`,
+              `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}` +
+              (scopeKind === "workflow" ? `\n\nBaked-closure catalog:\n${bakedClosureCatalogDetails((priorCiFailures ?? []).map((failure) => failure.logTail ?? "").join("\n"))}` : ""),
             options: [{ label: "route-repair", detail: "route the named paths to their owner or a filed repair task" },
               { label: "revise-pr", detail: "revise this PR's scope explicitly, then resume its fix lane" }],
             recommendation: "route-repair", consequence: "this fix lane stays down at this head until its scope is resolved" },
@@ -14145,11 +14153,11 @@ export async function runFixRung(opts: {
         } catch (error) {
           deliveryError = { error: String(error) };
         }
-        const reason = issueUrl ? "unfiled scope need escalated" : "unfiled scope escalation undelivered";
-        deps.log("fix.scope_amendment", { outcome: issueUrl ? "unfiled-escalated" : "unfiled-escalation-failed",
+        const reason = issueUrl ? `${scopeKind} scope need escalated` : `${scopeKind} scope escalation undelivered`;
+        deps.log("fix.scope_amendment", { outcome: issueUrl ? `${scopeKind}-escalated` : `${scopeKind}-escalation-failed`,
           identity_key: identityKey, paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
           issue_url: issueUrl, reason, ...deliveryError });
-        deps.log("fix.stood_down", { site: "rung.unfiled_scope", head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
+        deps.log("fix.stood_down", { site: `rung.${scopeKind}_scope`, head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
         logFixDone();
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
       }
@@ -19115,7 +19123,7 @@ export async function pushFixRoundPrechecked(
 }
 
 export type CensusPushRungOutcome =
-  | { outcome: "cleared"; strikes: number; remedy: "code-change" | "baseline-row"; baselineFiles: string[] }
+  | { outcome: "cleared"; strikes: number; remedy: "code-change" | "baseline-row"; baselineFiles: string[]; catalogFiles?: string[] }
   | { outcome: "refused"; strikes: number; refusal: CensusPushRefusal; reason: string };
 
 /**
@@ -19146,15 +19154,20 @@ export async function repairCensusRefusedPush(input: {
   /** W1-T4797: re-run a NON-hook gate (the diff-coverage precheck) after each strike's commit, before the push;
    *  a refusal it returns becomes the next strike's evidence exactly as a hook refusal does. */
   recheck?: () => Promise<CensusPushRefusal | undefined>;
+  /** Only the implement fallback offers closure catalog edits; the fix lane never does. */
+  catalogFiles?: (refusal: CensusPushRefusal) => readonly string[];
 }): Promise<CensusPushRungOutcome> {
   const { task, worktreePath: cwd, log } = input;
   const head = () => hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
   const startHead = head();
   const offered = new Set(input.refusal.offeredBaselines);
+  const catalogOffered = new Set<string>();
   const { harnessCommits, cashTools } = fixRoundGitOwnership(input.config);
   const strikeCap = fixStrikeCap(input.config);
   let refusal = input.refusal;
   for (let strike = 1; strike <= strikeCap; strike++) {
+    const catalogFiles = input.catalogFiles?.(refusal) ?? [];
+    for (const path of catalogFiles) catalogOffered.add(path);
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
     const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
     const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? await writeFixCensusSnapshotAsync(cwd, log) : undefined;
@@ -19166,7 +19179,10 @@ export async function repairCensusRefusedPush(input: {
         harnessCommits,
         censusSnapshotPath,
         evidence: { ciFailures: [{ name: input.recheck ? COVERAGE_PUSH_CHECK : CENSUS_PUSH_CHECK, logTail: refusal.text }] },
-        reachableRemedyFiles: refusal.offeredBaselines.map((path) => ({ path, job: "census-precheck" })),
+        reachableRemedyFiles: [
+          ...refusal.offeredBaselines.map((path) => ({ path, job: "census-precheck" })),
+          ...catalogFiles.map((path) => ({ path, job: "baked-closure" })),
+        ],
       }),
       "",
       input.recheck
@@ -19175,6 +19191,7 @@ export async function repairCensusRefusedPush(input: {
           ? "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above."
           : "PRE-PUSH GATE: no PR exists yet — hooks/pre-push refused this branch with the gate output above; apply the remedy it names.",
       CENSUS_PUSH_NEVER_BYPASS,
+      ...(catalogFiles.length > 0 ? ["Baked-closure catalog — update these lists in this reviewed implement build:", bakedClosureCatalogDetails(refusal.text)] : []),
     ].join("\n");
     const roundStart = head();
     const receipt = fixWorkerReceipt(input.spawn, log, fixWorkerRunId(input.runId, `census${strike}`, systemClock.now()), fixLaneBenchmarkWork(task, input.ledgerPath));
@@ -19218,7 +19235,7 @@ export async function repairCensusRefusedPush(input: {
       commitCount: commitsAhead(cwd, roundStart),
       report: workerTranscript(result),
       worktreePath: cwd,
-      declaredPaths: [...(task.files ?? []), ...refusal.offeredBaselines],
+      declaredPaths: [...(task.files ?? []), ...refusal.offeredBaselines, ...catalogFiles],
       acceptance: task.acceptance,
       assignmentId: result.selectionAssignmentId,
       log,
@@ -19246,8 +19263,12 @@ export async function repairCensusRefusedPush(input: {
       continue;
     }
     const remedy = baselineFiles.length > 0 ? "baseline-row" : "code-change";
+    const catalogFilesStaged = catalogOffered.size > 0
+      ? hostWorktreeGit(cwd, ["diff", "--name-only", startHead, "HEAD", "--", ...catalogOffered]).split("\n").filter(Boolean).sort()
+      : [];
     log("census_push.cleared", { strikes: strike, remedy, baseline_files: baselineFiles, censuses: input.refusal.censuses });
-    return { outcome: "cleared", strikes: strike, remedy, baselineFiles };
+    return { outcome: "cleared", strikes: strike, remedy, baselineFiles,
+      ...(catalogFilesStaged.length > 0 ? { catalogFiles: catalogFilesStaged } : {}) };
   }
   return { outcome: "refused", strikes: strikeCap, refusal, reason: `not cleared in ${strikeCap} strike(s)` };
 }
@@ -20887,6 +20908,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
 
     // ── PR (worker REPORT or orchestrator fallback).
     let prUrl = parseReport(fullText(impl))?.prUrl;
+    let stagedClosureCatalogFiles: string[] = [];
 
     // SILENT NO-OP GUARD: by here the worker reached a terminal SUCCESS (non-success
     // subtypes already returned above via workerErrorVerdict). If it committed NOTHING and
@@ -21256,11 +21278,26 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
+          catalogFiles: (refusal) => bakedClosureCatalogFiles(refusal.text),
           ...(refusalLabel === "coverage-refused"
             ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push.repair") }
             : {}),
         });
         if (rung.outcome === "refused") {
+          if (bakedClosureCatalogFiles(rung.refusal.text).length > 0) {
+            try {
+              const issueUrl = await escalateAsync({ class: "BLOCKED", taskId, runId,
+                summary: `implement build ${taskId} could not catalog its baked closure`,
+                detail: `Census rows:\n${rung.refusal.text}\n\nBaked-closure catalog:\n${bakedClosureCatalogDetails(rung.refusal.text)}\n\nWorktree kept: ${worktreePath}`,
+                options: [{ label: "catalog-and-resume", detail: "catalog the named closure lists in this build, then resume" },
+                  { label: "file-a-task", detail: "file a reviewed task for the missed closure join" }],
+                recommendation: "catalog-and-resume", consequence: "the build stays failed with its worktree kept until the closure is catalogued" },
+              { issues: opts.prOpenRefusalIssues ?? ghIssueGatewayAsync(owner, task.repo), ledgerPath, runId });
+              log("census_push.closure_escalated", { issue_url: issueUrl, refusal: rung.refusal.text, worktree: worktreePath });
+            } catch (error) {
+              log("census_push.closure_escalated", { error: String(error), refusal: rung.refusal.text, worktree: worktreePath });
+            }
+          }
           // The gate refuses every push of this head, so the worktree is the evidence W1-T434 would have pushed.
           log("verdict", {
             verdict: "failed",
@@ -21279,6 +21316,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           say(`verdict: failed — ${refusalLabel} push (${rung.refusal.censuses.join(", ")}); worktree kept: ${worktreePath}`);
           return { taskId, runId, merged: false, costUsd, verdict: "failed" };
         }
+        stagedClosureCatalogFiles = rung.catalogFiles ?? [];
       }
     }
     // W1-T4425: when the worker already reported its OWN PR, normalize its body from THIS run's
@@ -21362,6 +21400,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId, log);
+    recordBakedClosureCatalog(prUrl, stagedClosureCatalogFiles, log);
     recordHeadProviderAfterPush(
       { taskId, prUrl, source: "implement", worker: impl, workerHeadCreatedLocally },
       {
@@ -22702,6 +22741,27 @@ export function normalizeRunPrAcceptanceFromPlan(
   } catch (e) {
     log("pr.body_normalize.error", { pr_url: prUrl, error: String((e as Error)?.message ?? e) });
     return "error";
+  }
+}
+
+/** Show the exact closure catalog files the harness staged, above the task trailer. */
+export function recordBakedClosureCatalog(
+  prUrl: string,
+  files: readonly string[],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: Pick<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "fetchBody" | "editBody"> = {},
+): void {
+  if (files.length === 0) return;
+  try {
+    const body = (deps.fetchBody ?? defaultRetroFetchBody)(prUrl);
+    const catalog = `Baked-closure catalog: ${[...new Set(files)].sort().map((file) => `\`${file}\``).join(", ")}`;
+    if (body.split("\n").includes(catalog)) return;
+    const trailer = body.match(/^Remudero-Task: .+$/m)?.[0];
+    const prose = body.replace(/^Remudero-Task: .+\n?/gm, "").trimEnd();
+    (deps.editBody ?? defaultRetroEditBody)(prUrl, `${prose}\n\n${catalog}${trailer ? `\n\n${trailer}` : ""}`);
+    log("pr.body_normalized", { pr: prUrl, site: "baked-closure-catalog", catalog_files: [...files] });
+  } catch (error) {
+    log("pr.body_normalize.error", { pr_url: prUrl, site: "baked-closure-catalog", catalog_files: [...files], error: String(error) });
   }
 }
 
