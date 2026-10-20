@@ -608,6 +608,12 @@
       "grepHint": "status.ts comment forensics"
     },
     {
+      "path": "docs/forensics/storage-permission-fixtures-on-the-azure-host.md",
+      "title": "Storage permission fixtures: paired controls and Azure evidence limits",
+      "summary": "Paired worker controls reproduce ten storage refusals from the reported eleven; the preflight failure remains unattributed.",
+      "grepHint": "Storage permission fixtures: paired controls and Azure evidence limits"
+    },
+    {
       "path": "docs/forensics/sweep-map.md",
       "title": "Removed block map — `src/lib/sweep.ts`",
       "summary": "Every comment block compacted out of `src/lib/sweep.ts`, mapped to the heading in",
