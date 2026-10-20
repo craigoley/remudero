@@ -1,0 +1,111 @@
+- id: W1-T10280
+  title: "An unlinked census receipt is never certified as retained"
+  repo: remudero
+  depends_on: [W1-T10094]
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 5.00
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "Operator-approved separate original-receipt custody follow-up2026-10-20; native reserved refs/rmd-id/W1-T10280."
+  plan_refs: [W1-T10094, W1-T10153, W1-T9919, W1-T9796]
+  files:
+    - scripts/census-precheck.mjs
+    - test/ci/gates/an-incomplete-census-capture-survives-its-producer-exit.test.ts
+  rationale: |
+    Normal W10094 repair C1 safely reads a validated descriptor but can close the sole
+    descriptor to an unlinked original and then claim retained readable custody while only
+    replacement bytes survive actual producer exit. Its own rename-and-preserve fixture keeps
+    the original in native.json.closed and masks unlink loss. Exact same new diagnostic test
+    against immutable production scripts gives C1 1test/0pass/1semanticfail, F5parent1/1/0
+    and existingFEcorrected1/1/0, no omissions. These are component comparisons, not native
+    validation, unchanged-whole-base results or a live exploit. F5's independent security
+    race remains real; do not revert descriptor reading.
+    Source13036 merged normally at2026-10-20T18:23:04Z
+    as51a8e5ec236234a18dcf17ea1ab9db538a63e533. The requested same-PR reconciliation was no
+    longer possible: the branch is closed and its source credit belongs only to W10094. This
+    separate residual does not rebuild or relabel that task. Its preserved operator candidate
+    and the normal owner source both remain recoverable. Current task/open-head/claim census
+    must still be refreshed before implementation or publication.
+    W10153 separately owns COMPLETE rejected-measurement custody at the later qualification
+    decision boundary. Preserve its one bounded remeasure, default healthy behavior and exact
+    four proofs; do not silently absorb this INCOMPLETE original-receipt defect or amend its
+    identity/authority/budget/dependencies to force our order. Operationally serialize actual
+    shared-file work and defer to any active owner. Unknown historical timeout causes remain
+    unknown.
+  design: |
+    1. Keep the normal owner's descriptor-based O_NOFOLLOW/O_NONBLOCK open, regular-file
+    validation, original native binding and descriptor close on every outcome. Before
+    claiming current retained receipt custody, recheck that the retained pathname still
+    resolves to the validated original; unlinked, replaced, unreadable or unsupported
+    evidence stays explicit custody UNKNOWN. Preserve available partial diagnostics and
+    original failure/status/signal/completeness; this is bounded revalidation, not a promise
+    against every future filesystem mutation.
+    2. Reuse the existing retention registry and native transport. No new public raw
+    path/bytes, blanket retention, timing/admission/retry/calibration change, scanner
+    exemption or baseline change. Healthy complete cleanup and actual original incomplete
+    failure remain independent. Actor admission or diagnostic custody grants no disclosure
+    permission.
+    3. Preserve existing semantic coverage while extending the real default
+    child/producer-exit cases for unlink+replacement after descriptor validation,
+    rename/replacement, missing evidence and descriptor failures. Verify mutation actually
+    occurs, no saved original survives the unlink fixture, and remaining bytes differ from
+    the original observed receipt before judging custody. Keep the original native result
+    failed. Unsupported flags must not silently widen a read.
+    4. Freeze behavioral tests, delete only actual production custody revalidation to obtain
+    a real failure, then restore exact committed source to pass. Name exact committed
+    head/base, verified physical paths and complete TAP; source-map every changed supported
+    source file. One distinct author entry under maintained admissions, reproduce every new
+    native failure on its actual unchanged pinned base, retain all old failures/unknowns and
+    follow canonical stored body/proofs plus normal current-head CI/security/review/merge. No
+    duplicate implementation, claim, author run or publication.
+    5. Keep this incomplete-receipt residual separate from W10153's
+    complete-rejected-measurement decision-boundary custody. Reconcile actual shared-file
+    owners before any build. Do not alter W10153's identity, authority, four proofs, budget
+    or dependency record merely to force our operational order. If another actual source
+    repair already satisfies the new behavior, qualify that outcome instead of building a
+    duplicate.
+    6. Opt-in SHADOW ONLY and independent human owner/admin override, trusted PR flow, scoped
+    services and complete public Apache core. No worker stop/restart, schedule, external
+    closure, production policy/config/settings/credentials/infrastructure change, deployment
+    or live cutover.
+    Primary research agrees with the actual fixture: unlink removes the directory entry; when
+    the last link is removed, an open file persists only until its final reference closes.
+    Descriptor safety is therefore not post-exit retained-path custody. Preserve descriptor
+    reading rather than restoring check-then-read:
+    https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/unlink.2.html
+    ; pinned Node24.21 filesystem contracts:
+    https://nodejs.org/download/release/v24.21.0/docs/api/fs.html ; CodeQL descriptor
+    guidance: https://codeql.github.com/codeql-query-help/javascript/js-file-system-race/
+  acceptance:
+    - claim: "Unlinked original evidence never becomes a retained post-producer-exit receipt claim"
+      proof: "unit test: an unlinked census receipt cannot certify original post-exit custody"
+    - claim: "Descriptor-safe reading and explicit unknowns reject changed or unavailable retained evidence"
+      proof: "unit test: census descriptor custody rejects replaced and unavailable retained receipts"
+    - claim: "Healthy cleanup and original native failures remain independent of custody observations"
+      proof: "unit test: census receipt custody preserves healthy cleanup and original failure controls"
+    - claim: "Removing actual retained-path revalidation restores the semantic false-custody failure"
+      proof: "unit test: original census receipt custody revalidation is load-bearing"
+  falsifier: |
+    Use a real closed native receipt and actual producer exit. Freeze tests and remove only
+    the actual current retained-path identity recheck: unlink+replacement must restore the
+    wrong retained-custody assertion, not a missing-path wrapper, skipped test, setup failure
+    or changed original native outcome. Restore exact source for complete passing TAP.
+    Independently preserve no-follow descriptor reading, regular-file checks, closure on each
+    default IO failure, healthy complete cleanup, existing explicit retention and private
+    diagnostic availability. Source-map every changed supported source file. No timing,
+    admission, scanner, baseline or gate loosening and no retry of an unchanged refused
+    native tree.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The operator explicitly approved the separate USD5 high/span two-file plan titled An unlinked census receipt is never certified as retained and its four behavioral proofs in this same chat. Fresh duplicate-credit, ALL OPEN subjects, ordinary ownership, normal plan/source author/hosted/security/proof/review/merge and actual source-merge ordering remain required. Keep SHADOW ONLY and independent owner/admin override, trusted flow/scoped services/complete public Apache implementation; no duplicate work, worker stops, schedules, live changes, external closures or cutover. This is the actual operator approval, not a model judgment."
+    judged_at: "2026-10-20T18:48:18.807Z"
+    pin: "8f975e2cafdcd0939e8b7b419e9307a1d7cf8999835fec7f76a37e9ec0575f54"
