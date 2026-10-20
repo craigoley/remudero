@@ -3167,6 +3167,36 @@ export class OpenWeightDeploymentNotFoundError extends RmdError {
   }
 }
 
+/** Keep bounded Azure rate evidence, never response bodies, arbitrary headers or credentials. */
+function cashHttpFailure(response: Response, source: string): Error {
+  const evidence: Record<string, number | string> = {};
+  try {
+    const unsigned = (name: string): number | undefined => {
+      const value = response.headers.get(name);
+      return value !== null && /^[0-9]{1,16}$/.test(value) && Number.isSafeInteger(Number(value))
+        ? Number(value) : undefined;
+    };
+    const millis = unsigned("retry-after-ms"), seconds = unsigned("retry-after");
+    const retryAfter = millis ?? (seconds !== undefined && Number.isSafeInteger(seconds * 1000) ? seconds * 1000 : undefined);
+    if (retryAfter !== undefined) evidence.retry_after_ms = retryAfter;
+    const requests = unsigned("x-ratelimit-remaining-requests"), tokens = unsigned("x-ratelimit-remaining-tokens");
+    if (requests !== undefined) evidence.remaining_requests = requests;
+    if (tokens !== undefined) evidence.remaining_tokens = tokens;
+    for (const name of ["apim-request-id", "x-request-id"]) {
+      const value = response.headers.get(name);
+      if (value !== null && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) {
+        evidence.request_id = value;
+        break;
+      }
+    }
+  } catch {
+    // An unreadable diagnostic must not replace the actual HTTP failure or expose its exception.
+    evidence.diagnostics = "unreadable";
+  }
+  const suffix = Object.keys(evidence).length > 0 ? ` ${JSON.stringify(evidence)}` : "";
+  return new Error(`${source} request failed with HTTP ${response.status}${suffix}`);
+}
+
 /** How long a 404 keeps a deployment out of selection before one request asks again. */
 export const OPENWEIGHT_ABSENT_TTL_MS = 30 * 60_000;
 const openWeightAbsentUntil = new Map<string, number>();
@@ -4693,7 +4723,7 @@ export async function spawnFoundryClaudeWorker(
         clearTimeout(deadline);
       }
       if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
-      if (!response.ok) throw new Error(`cash ${label} request failed with HTTP ${response.status}`);
+      if (!response.ok) throw cashHttpFailure(response, `cash ${label}`);
       const payload = await response.json() as {
         id?: unknown; model?: unknown; stop_reason?: unknown; stop_details?: { category?: unknown } | null;
         content?: Array<Record<string, unknown>>;
@@ -4936,7 +4966,7 @@ export async function spawnOpenWeightWorker(
         clearTimeout(deadline);
       }
       if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
-      if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
+      if (!response.ok) throw cashHttpFailure(response, "openweight");
       const envelope = await response.json();
       const payload = (responses ? responses.read(envelope) : envelope) as {
         id?: unknown;
