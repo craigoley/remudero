@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
-import {homedir} from 'node:os';import{join,resolve}from'node:path';import test,{type TestContext}from'node:test';
+import {homedir,hostname} from 'node:os';import{join,resolve}from'node:path';import test,{type TestContext}from'node:test';
 import {readSharedGitPolicy,readSharedWorkspaceCapacity,borrowedWorkspaceWorker,createSharedWorkspace} from '#scripts/lib/shared-workspace.mjs';
 import {main} from '#scripts/shared-workspace.mjs';
 import {resolveTestSlotDir,testSlotProcessFacts} from '#src/lib/test-slot.js';
@@ -94,14 +94,23 @@ test('inherited reservation fixtures require the real ancestor start, nonce, poo
   // this test process its own private pool; no host reservation is modified.
   const pool=resolveTestSlotDir();assert.equal(pool.scope,'test-process');
   const path=join(pool.dir,'slot-9999999.json'),start=testSlotProcessFacts(process.ppid)!.start;
-  const held={pid:process.ppid,ownerNonce:'fixture-nonce',processStart:start,concurrency:1};writeFileSync(path,JSON.stringify(held),{flag:'wx',mode:0o600});
+  const held={pid:process.ppid,ownerNonce:'fixture-nonce',processStart:start,concurrency:1,host:hostname(),startedAt:new Date().toISOString(),heartbeatAt:new Date().toISOString()};writeFileSync(path,JSON.stringify(held),{flag:'wx',mode:0o600});
   const owned=lstatSync(path),old=process.env.RMD_TEST_SLOT_PARENT;
   t.after(()=>{const current=lstatSync(path);assert.equal(current.ino,owned.ino);assert.equal(current.dev,owned.dev);rmSync(path);});
   const claim={pid:process.ppid,nonce:held.ownerNonce,start,concurrency:1,path};
   const read=async(value:unknown)=>{process.env.RMD_TEST_SLOT_PARENT=typeof value==='string'?value:JSON.stringify(value);try{return await borrowedWorkspaceWorker();}catch(e){return{admitted:false,reason:(e as Error).message};}};
   try{
     const positive=await read(claim);assert.equal(positive.admitted,true,JSON.stringify(positive));
+    assert.equal(typeof positive.verify,'function');
+    writeFileSync(path,JSON.stringify({...held,releaseRequestedAt:new Date().toISOString()}));assert.throws(()=>positive.verify!(),/identity/);
+    for(const change of[{host:'foreign-fixture.invalid'},{heartbeatAt:'invalid'},{releaseRequestedAt:'closed'}]){writeFileSync(path,JSON.stringify({...held,...change}));assert.equal((await read(claim)).admitted,false);}
+    writeFileSync(path,JSON.stringify(held));
     for(const value of[{...claim,nonce:'wrong'},{...claim,start:'wrong'},{...claim,concurrency:2},{...claim,path:join(pool.dir,'not-a-slot')},'x'.repeat(16385),'{'])assert.equal((await read(value)).admitted,false);
     writeFileSync(path,JSON.stringify({...held,pid:process.ppid+1000000}));assert.equal((await read(claim)).admitted,false);
   }finally{if(old===undefined)delete process.env.RMD_TEST_SLOT_PARENT;else process.env.RMD_TEST_SLOT_PARENT=old;}
+});
+test('a lost inherited worker is rechecked before the next Git phase, without worktree creation',async t=>{
+  const f=fixture(t);let checks=0;
+  const r=await createSharedWorkspace('unfiled',{...f.options,borrowWorker:async()=>({admitted:true,verify(){if(++checks===2)throw Error('fixture inherited worker released');}})});
+  assert.equal(r.state,'NOT_RUN');assert.equal(checks,2);assert.match(r.reason!,/worker released/);assert.equal(r.path,undefined);
 });

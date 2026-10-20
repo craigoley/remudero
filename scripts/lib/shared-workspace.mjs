@@ -1,7 +1,7 @@
 // Account-private linked workspaces. No clone, fresh npm fallback, pruning or filed-task dispatch.
 import {constants,openSync,closeSync,fstatSync,lstatSync,readSync,realpathSync,existsSync,statfsSync,mkdtempSync,writeFileSync} from 'node:fs';
 import {basename,dirname,join,resolve,sep} from 'node:path';
-import {homedir} from 'node:os';
+import {homedir,hostname} from 'node:os';
 import {spawnSync} from 'node:child_process';
 import {captureStepSync} from './author-step-capture.mjs';
 
@@ -49,15 +49,21 @@ export async function borrowedWorkspaceWorker() {
   if(!process.env.RMD_TEST_SLOT_PARENT)return{admitted:false,reason:'no inherited genuine worker'};
   if(process.env.RMD_TEST_SLOT_PARENT.length>MAX_JSON_BYTES)throw Error('oversized inherited worker claim');
   const {testSlotProcessFacts,testSlotHasAncestor,resolveTestSlotDir}=await import('../../src/lib/test-slot.ts');
-  const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT);
+  const {sameHost}=await import('../../src/lib/host-identity.ts');
+  const raw=process.env.RMD_TEST_SLOT_PARENT,claim=JSON.parse(raw);
   if(typeof claim.path!=='string'||dirname(claim.path)!==resolveTestSlotDir().dir||!/^slot-[1-9][0-9]*\.json$/.test(basename(claim.path)))throw Error('inherited reservation outside configured pool');
-  const fd=openSync(claim.path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
-  try{
-    const s=fstatSync(fd);if(!s.isFile()||s.uid!==process.getuid()||s.size>MAX_JSON_BYTES)throw Error('unverified inherited reservation');
-    const bytes=Buffer.alloc(s.size+1),n=readSync(fd,bytes,0,bytes.length,0),held=JSON.parse(bytes.subarray(0,n).toString('utf8'));
-    if(n!==s.size||!same(s,fstatSync(fd))||!same(s,lstatSync(claim.path))||!Number.isSafeInteger(claim.pid)||claim.pid<=0||held.pid!==claim.pid||held.ownerNonce!==claim.nonce||held.processStart!==claim.start||!claim.nonce||!claim.start||!testSlotHasAncestor(claim.pid)||testSlotProcessFacts(claim.pid)?.start!==claim.start||held.concurrency!==1||claim.concurrency!==1)throw Error('inherited worker identity unverified');
-    return{admitted:true,pid:claim.pid,nonce:claim.nonce,start:claim.start};
-  }finally{closeSync(fd);}
+  // Keep the maintained inheritedTestSlot host/release/start contract, with a
+  // bounded non-following descriptor reader and no allocator/recovery effects.
+  const verify=()=>{
+    if(process.env.RMD_TEST_SLOT_PARENT!==raw)throw Error('inherited worker claim changed');
+    const fd=openSync(claim.path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+    try{
+      const s=fstatSync(fd);if(!s.isFile()||s.uid!==process.getuid()||s.nlink!==1||s.size>MAX_JSON_BYTES)throw Error('unverified inherited reservation');
+      const bytes=Buffer.alloc(s.size+1),n=readSync(fd,bytes,0,bytes.length,0),held=JSON.parse(bytes.subarray(0,n).toString('utf8'));
+      if(n!==s.size||!same(s,fstatSync(fd))||!same(s,lstatSync(claim.path))||!Number.isSafeInteger(claim.pid)||claim.pid<=0||typeof claim.nonce!=='string'||!claim.nonce||typeof claim.start!=='string'||!claim.start||held.releaseRequestedAt!==undefined||!sameHost(held.host,hostname())||typeof held.startedAt!=='string'||typeof held.heartbeatAt!=='string'||!Number.isFinite(Date.parse(held.heartbeatAt))||held.pid!==claim.pid||held.ownerNonce!==claim.nonce||held.processStart!==claim.start||!testSlotHasAncestor(claim.pid)||testSlotProcessFacts(claim.pid)?.start!==claim.start||held.concurrency!==1||claim.concurrency!==1)throw Error('inherited worker identity unverified');
+    }finally{closeSync(fd);}
+  };
+  verify();return{admitted:true,pid:claim.pid,nonce:claim.nonce,start:claim.start,verify};
 }
 function cleanGitEnvironment(){const env={...process.env,GIT_TERMINAL_PROMPT:'0'};for(const key of Object.keys(env))if(/^GIT_(DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|INDEX_FILE|CONFIG.*)$/.test(key))delete env[key];return env;}
 const defaultMaterialize=async(path,options)=>{const {materializeDependencySeed}=await import('../../src/lib/dependency-seeds.ts');return materializeDependencySeed(path,options);};
@@ -76,6 +82,7 @@ export async function createSharedWorkspace(taskId,{home=homedir(),readCapacity=
     receiptDir=mkdtempSync(join(config.parent,'.rmd-shared-workspace-receipt-'));result.receiptDir=receiptDir;
     let step=0;const deadline=Date.now()+90000,env=cleanGitEnvironment();
     const git=(args,cwd=config.pool)=>{
+      result.worker.verify?.();
       const remaining=deadline-Date.now();if(remaining<=0)throw Error('whole workspace Git budget expired');
       const prefix=join(receiptDir,String(++step).padStart(2,'0'));
       const p=captureStepSync('/usr/bin/git',['-c','gc.auto=0','-c','maintenance.auto=false',...args],{cwd,env,runtimeMs:Math.min(30000,remaining),maxBytes:1024**2,trackParent:true,stdoutPath:prefix+'.out',stderrPath:prefix+'.err',resultPath:prefix+'.json'});
@@ -91,6 +98,7 @@ export async function createSharedWorkspace(taskId,{home=homedir(),readCapacity=
     const base=git(['rev-parse','origin/main^{commit}']);git(['worktree','add','--quiet','--no-track','-b',branch,path,base]);created=true;Object.assign(result,{path,branch,base});
     if(git(['rev-parse','--path-format=absolute','--git-common-dir'],path)!==common)throw Error('new workspace does not share expected Git objects');result.commonGitDir=common;
     result.dependencies=await materialize(path,{root:config.dependencyRoot,sourceDir:config.dependencyDonor,lockWaitMs:0,runInstall(){throw Error('fresh npm fallback refused; retain workspace for harness retirement');}});
+    result.worker.verify?.();
     if(result.dependencies.status!=='materialized'&&result.dependencies.status!=='present')throw Error('dependency result incomplete');
     result.state='CREATED_SHARED_OBJECTS_NO_FRESH_INSTALL';
   }catch(error){result.reason=error instanceof Error?error.message:String(error);if(created)result.state='CREATED_DEPENDENCIES_OR_READBACK_UNKNOWN_RETAINED';}
