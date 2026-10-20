@@ -150,6 +150,8 @@ test("W1-T9086: a restart under mode on exits without waiting on child lanes", a
       checkFreshness: () => stale ? { stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40), installNeeded: false,
         changes: [{ sha: "b".repeat(40), subject: "fix(daemon): reload", files: ["src/lib/daemon.ts"] }] } : { stale: false },
       now: () => new Date(now), sleep: async () => { now += 3_600_000; await delay(1); },
+      // W1-T9089: under a decided restart only a refill the run-child policy runs as a child starts.
+      refillRunsAsChild: () => true,
       runOne: (id, options) => {
         started.push(id);
         assert.equal("restartAtWorkerBoundary" in options!, false, "W1-T9089: a restart never reaches into a run");

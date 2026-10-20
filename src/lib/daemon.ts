@@ -1412,8 +1412,7 @@ export interface DaemonDeps {
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   adoptRunChildren?: () => AdoptedRunChild[];
-  /** W1-T9924: will the run-child policy run this refill as an adoptable child? Unwired, it reads true once a run of
-   *  this daemon became a child (W1-T9089). */
+  /** W1-T9924: will the run-child policy run this refill as an adoptable child? Unwired, it reads false. */
   refillRunsAsChild?: (task: Task) => boolean;
   /** Run ONE task through the existing run-task path (default = runTask). W1-T9089: a restart never reaches into a
    *  run; a child run is left running for the next boot to adopt and an in-process lane is awaited. */
@@ -6861,8 +6860,8 @@ export async function runDaemon(
       }
       if (childMode) releaseChildren?.();
     };
-    // W1-T9924: whether a refill runs as an adoptable child; unwired, a daemon whose runs became children says yes.
-    const runsAsChild = (t: Task): boolean => deps.refillRunsAsChild ? deps.refillRunsAsChild(t) : childMode;
+    // W1-T9924: whether a refill runs as an adoptable child; unwired, it reads false.
+    const runsAsChild = (t: Task): boolean => deps.refillRunsAsChild?.(t) === true;
     // W1-T5282: a lane's refill is synchronous and cannot await a fetch, so with an awaited reader it reads the
     // latest reading settled since this tick began: the admission read above, then each dispatch tick's.
     let settledFreshness = selfFreshness;

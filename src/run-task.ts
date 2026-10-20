@@ -38880,7 +38880,7 @@ export async function runInChildWhenOn(
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const inProcess = (reason: string): undefined => {
     if (input.mayRunInProcess?.(reason) === false) {
-      throw new TaskAdmissionError(`restart latched: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
+      throw new TaskAdmissionError(`restart decided: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
     }
     return undefined;
   };
