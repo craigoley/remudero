@@ -503,9 +503,9 @@ jobs:
           # the coverage check. An if/else costs one line and enumerates as nothing.
           #
           # SHARD 1 ONLY, AND ONLY WHEN THE WORKFLOW ITSELF CHANGED. The guard population cannot
-          # move unless ci.yml does, and a full pass is ~14 minutes (shard 1 of #10400 and #10522 took
-          # 15.3 min, 2026-10-09/10; 43 guards over 100 ci.yml-reading suites at 2026-10-13), so
-          # running it four times on every PR would buy nothing at four times the cost.
+          # move unless ci.yml does, so running it on every shard would buy nothing at eight times the
+          # cost. Run one suite at a time, a full pass outgrew this job's 35-min ceiling (#12981,
+          # 2026-10-19: cancelled at 34.4 min, 46 guards over 118 suites); its suites now run in a pool.
           if [ "${{ matrix.shard }}" = "1" ] && grep -qxF ".github/workflows/ci.yml" changed-files.txt; then
             node scripts/workflow-guard-mutation-ratchet.mjs
           else
