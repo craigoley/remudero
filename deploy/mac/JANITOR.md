@@ -226,9 +226,49 @@ not prove a unique skipped-byte total or complete discovery. Cache-helper
 decisions also enter the receipt; partial/unverified removals remain informational
 with an explicit uncertainty reason, not completed removals. A Git-unknown
 hold needs its original object store restored or an operator-reviewed recovery;
-an unpublished hold needs its work deliberately published, not forced cleanup.
+an unpublished hold needs its work deliberately published, not forced cleanup,
+unless the account opts in to the preserve-then-retire phase below.
 
 Azure installs the shared guard through `deploy/install-host-units.sh` and records
 the same receipts. Broad temp globs route Git-containing units through these
 guards instead of recursively deleting them. Older orphan archives never expire
 automatically: they may contain the only surviving unpublished work.
+
+## Preserve-then-retire (opt-in per account)
+
+The holds above are permanent on their own: an account that is never cleaned by hand
+accumulates unpublished, dirty and ignored checkouts until the disk is full. On
+2026-10-20 one Mac account reached 0 GiB free with about 46 GiB of such checkouts and
+bare origins, and every janitor pass reported `removed=0`.
+
+`preserve-retire.py` runs as the last phase of every pass. It does nothing until the
+account writes an owner-private (0600) `~/.local/state/remudero/preserve-retire.json`
+below private parents, for example `{"enabled": true, "idle_hours": 24, "retain_days": 7}`.
+It scans `~/Remudero`, `~/rmd-work`, `~/.codex/work-artifacts` and
+`~/Developer/remudero-operator-worktrees` (never other `Developer` clones or protected
+roots), at most once every `interval_hours` (default 6).
+
+A checkout, standalone clone or bare repository is a candidate when nothing in it
+(dependencies included, its own Git metadata excluded) changed in `idle_hours` by
+mtime or ctime, its HEAD did not move, no command line names it, and no open file or
+cwd is inside it. For each candidate it saves, under `~/Remudero-preserved/<path>@<UTC>`:
+a bundle of every commit not in published `main` (detached HEAD, tags and stash
+included), verified in the source or a published base; the `git diff --binary HEAD`
+patch; a tarball of untracked and ignored files without `node_modules`, `coverage`,
+`dist`, `.turbo` and `.next`; every ref in `refs.txt`; and `MANIFEST.txt` with restore
+steps. "Published" means the first-parent history of each published remote's current
+`main` (fresh `git ls-remote`), or a cached `origin/main` of a published remote.
+
+Every candidate is preserved before any is deleted, and the keep set is recomputed
+afterwards, so a borrower whose copy failed keeps its object lender. A clone or bare
+repository is deleted only when no other account can enter the home (mode and ACL)
+and a complete borrower census of the home found no kept borrower. These are held
+for a person and never retired: unreadable history (missing worktree Git dir or
+alternate object store), a locked worktree, an untracked file over `max_untracked_mb`
+(default 50), a foreign owner, and any failed probe. Each candidate is checked again
+for activity just before removal. Worktrees go through `git worktree remove --force`,
+then `git worktree prune`. Copies older than `retain_days` are expired; folders the
+phase did not stamp are never touched. After expiry, unpublished work exists nowhere
+else, so set `retain_days` to how long you might want it back.
+
+The janitor's human log now rotates at 16 MiB, keeping one previous generation.

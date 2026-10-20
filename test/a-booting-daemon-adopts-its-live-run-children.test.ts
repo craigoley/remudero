@@ -6,23 +6,23 @@ import { join } from "node:path";
 import { setImmediate as flush, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { daemonBoot, runDaemon, runLanePool, type LanePoolControl } from "../src/lib/daemon.js";
-import { adoptRunChildren } from "../src/lib/run-child.js";
-import { childIdentity, readSpec, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "../src/lib/run-child-contract.js";
-import { loadPlan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { daemonCommand, ledgerPathFor, orphanSweepRunActive } from "../src/run-task.js";
-import { defaultInstance } from "../src/lib/host-memory-ledger.js";
-import { detachSweepAction } from "../src/lib/sweep.js";
+import { daemonBoot, runDaemon, runLanePool, type LanePoolControl } from "#src/lib/daemon.js";
+import { adoptRunChildren } from "#src/lib/run-child.js";
+import { childIdentity, readSpec, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { daemonCommand, ledgerPathFor, orphanSweepRunActive } from "#src/run-task.js";
+import { defaultInstance } from "#src/lib/host-memory-ledger.js";
+import { detachSweepAction } from "#src/lib/sweep.js";
 import {
   defaultReadMarkers, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, sweepOrphanWorkers,
   TASK_ID_ENV, workerInstallationScope, WORKER_SCOPE_ENV,
-} from "../src/lib/worker-containment.js";
-import { acquireInflightLock, readInflightLock } from "../src/lib/inflight-lock.js";
-import { sweepInflightLocksWithReceipts } from "../src/lib/benchmark-run.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import type { RunChildHandle } from "../src/lib/run-child.js";
+} from "#src/lib/worker-containment.js";
+import { acquireInflightLock, readInflightLock } from "#src/lib/inflight-lock.js";
+import { sweepInflightLocksWithReceipts } from "#src/lib/benchmark-run.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import type { RunChildHandle } from "#src/lib/run-child.js";
 
 const { buildChildEntries } = createRequire(import.meta.url)("../scripts/build-child-entries.mjs") as {
   buildChildEntries(options: { root: string; entries: { name: string; source: string }[]; workers: string[] }): Promise<{ sourceHash: string }>;
@@ -143,7 +143,6 @@ test("W1-T9086: a restart under mode on exits without waiting on child lanes", a
     let now = Date.now();
     let stale = false;
     const started: string[] = [];
-    const boundaries: Array<() => unknown> = [];
     detachSweepAction(drain.promise, { actionKind: "fix-dispatch", taskId: "review", phase: "worker" });
     run = runDaemon(loadPlan(path), {
       refreshMerged: () => () => false,
@@ -151,9 +150,11 @@ test("W1-T9086: a restart under mode on exits without waiting on child lanes", a
       checkFreshness: () => stale ? { stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40), installNeeded: false,
         changes: [{ sha: "b".repeat(40), subject: "fix(daemon): reload", files: ["src/lib/daemon.ts"] }] } : { stale: false },
       now: () => new Date(now), sleep: async () => { now += 3_600_000; await delay(1); },
+      // W1-T9089: under a decided restart only a refill the run-child policy runs as a child starts.
+      refillRunsAsChild: () => true,
       runOne: (id, options) => {
         started.push(id);
-        boundaries.push(() => options!.restartAtWorkerBoundary());
+        assert.equal("restartAtWorkerBoundary" in options!, false, "W1-T9089: a restart never reaches into a run");
         const settled = id === "A" ? childA.promise : id === "B" ? childB.promise : childC.promise;
         options!.onChild!({ started: true, runId: id, dir: f.root, pid: process.pid, settled,
           abort: async () => { throw new Error("freshness must never abort a child"); } });
@@ -167,7 +168,6 @@ test("W1-T9086: a restart under mode on exits without waiting on child lanes", a
     await until(() => started.length === 2);
     stale = true;
     await until(() => f.rows.some((r) => r.step === "daemon.freshness_drain.started"));
-    assert.equal(boundaries[0](), undefined);
     childB.resolve(result("B"));
     await until(() => started.includes("C"));
     assert.equal(f.rows.some((r) => r.step === "daemon.freshness_exit"), false);
@@ -443,7 +443,7 @@ writeStatus(dir, { schema: RUN_CHILD_SCHEMA, runId: spec.value.runId, identity: 
       runTask: async () => assert.fail("a spawned child must not fall through to runTask"),
       runDaemon: async (_plan, deps) => {
         let forwarded = 0;
-        const value = await deps.runOne("A", { restartAtWorkerBoundary: () => undefined,
+        const value = await deps.runOne("A", {
           onChild: (handle) => { forwarded++; child = handle; } });
         assert.equal(forwarded, 1, "the actual daemonCommand closure must forward the full handle exactly once");
         assert.ok(child?.started);

@@ -81,6 +81,18 @@ process.exit(r.status === null ? 128 : r.status);
 
 const pairs = (argv: string[], flag: string): Array<[string, string]> => argv.flatMap((a, i) => (a === flag ? [[argv[i + 1]!, argv[i + 2]!] as [string, string]] : []));
 
+/** What the sandbox finally shows at `target`: bwrap mounts in argv order, so the LAST bind or tmpfs at or above it
+ *  decides, and a writable mount after that one beneath `target` reopens part of it. A writable parent bound BEFORE
+ *  a read-only overlay is hidden by it; the same parent bound after is not — destination membership cannot tell. */
+function finalOverlay(argv: string[], target: string): "read-only" | "writable" | "writable child" | "unmounted" {
+  const mounts = argv.slice(0, argv.lastIndexOf("--")).flatMap((a, i, all) =>
+    a === "--ro-bind" || a === "--bind" ? [{ writable: a === "--bind", to: all[i + 2]! }] : a === "--tmpfs" ? [{ writable: true, to: all[i + 1]! }] : []);
+  const last = mounts.findLastIndex(({ to }) => target === to || target.startsWith(`${to}/`));
+  if (last < 0) return "unmounted";
+  if (mounts[last]!.writable) return "writable";
+  return mounts.slice(last + 1).some(({ writable, to }) => writable && to.startsWith(`${target}/`)) ? "writable child" : "read-only";
+}
+
 test("an engine whose node_modules links into the managed checkout's install starts sandboxed, not unmeasured", async () => {
   const f = engineFixture();
   const contain = await defaultGateContainment(f.input, { binary: bwrapLikeSandbox(f.engine), platform: "linux", parentEnv: { GH_APP_PRIVATE_KEY_PATH: f.key } });
@@ -93,7 +105,17 @@ test("an engine whose node_modules links into the managed checkout's install sta
   const writable = pairs(argv, "--bind");
   assert.deepEqual(writable.filter(([, to]) => to === "/tmp"), [[join(f.input.home, ".rmd-private-tmp"), "/tmp"]], "only this HOME's private scratch backs sandbox /tmp");
   assert.ok(!writable.some(([from]) => join(f.canonical, "node_modules").startsWith(`${from}/`) || from === f.engine), "no writable host bind holds the install or the engine");
-  assert.ok(!writable.some(([, to]) => to !== "/tmp" && (join(f.canonical, "node_modules").startsWith(`${to}/`) || to === f.engine)), "no writable overlay exposes the install or the engine");
+  // The private scratch is a writable PARENT of a /tmp fixture's install and engine: only mount order keeps them read-only.
+  const install = join(f.canonical, "node_modules"), scratch = join(f.input.home, ".rmd-private-tmp");
+  for (const target of [install, f.engine]) assert.equal(finalOverlay(argv, target), "read-only", `the final overlay at ${target}`);
+  // Negative controls: the order check refuses each way the overlay could leave them writable.
+  const appended = (...extra: string[]) => [...argv.slice(0, -1), ...extra, "--"];
+  for (const target of [install, f.engine]) {
+    const unbound = new Set(argv.flatMap((a, i) => (a === "--ro-bind" && argv[i + 2] === target ? [i, i + 1, i + 2] : [])));
+    assert.notEqual(finalOverlay(argv.filter((_, i) => !unbound.has(i)), target), "read-only", `a missing read-only bind exposes ${target}`);
+    assert.equal(finalOverlay(appended("--bind", scratch, dirname(target)), target), "writable", `a late writable parent exposes ${target}`);
+    assert.equal(finalOverlay(appended("--bind", scratch, join(target, "child")), target), "writable child", `a late writable child exposes ${target}`);
+  }
   // W1-T9619: harness read-only with its .git and the App key masked, no network, and the argv still ends in --.
   assert.ok(ro.some(([from, to]) => from === to && to === f.engine), "the harness is bound read-only");
   assert.ok(ro.some(([from, to]) => from === "/dev/null" && to === join(f.engine, ".git")), "the harness's .git is masked");

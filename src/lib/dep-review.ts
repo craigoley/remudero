@@ -968,6 +968,23 @@ export function buildDepReviewArmUnreachableEscalation(args: {
   };
 }
 
+function refreshEscalationLines(refresh: DependabotRefreshRecord): string[] {
+  const at = fixedClock(refresh.requestedAtMs).iso();
+  if (refresh.updateFailed) {
+    return [
+      `Refresh attempted: the guarded update-branch of this head was refused or does not apply at ${at} (${refresh.cause}): ${refresh.updateError ?? "no reason given"}.`,
+      ...(refresh.reply === undefined ? [] : [`Dependabot refused the earlier \`${refresh.command}\`: "${refresh.reply}".`]),
+    ];
+  }
+  if (refresh.via === "update-branch") {
+    return [`Refresh requested: the guarded update-branch was applied to this head at ${at} (${refresh.cause}).`];
+  }
+  if (refresh.answer === "refused") {
+    return [`Refresh refused: Dependabot answered \`${refresh.command}\` (posted ${at}, ${refresh.cause}) with "${refresh.reply ?? ""}".`];
+  }
+  return [`Refresh requested: \`${refresh.command}\` was posted for this head at ${at} (${refresh.cause}), and Dependabot has not produced a new head.`];
+}
+
 export function buildDepReviewEscalation(args: {
   prUrl: string;
   prNumber: number;
@@ -988,10 +1005,7 @@ export function buildDepReviewEscalation(args: {
         `Dependabot PR ${args.prUrl} is held on head ${args.hold.headSha}.`,
         `Blocker: required check(s) not green: ${args.hold.redChecks.join(", ")}.`,
         ...(args.hold.advisoryRed?.length ? [`Advisory red, not holding (still visible on the PR): ${args.hold.advisoryRed.join(", ")}.`] : []),
-        ...(refresh === undefined ? [] : [
-          `Refresh requested: \`${refresh.command}\` was posted for this head at ` +
-            `${fixedClock(refresh.requestedAtMs).iso()} (${refresh.cause}), and Dependabot has not produced a new head.`,
-        ]),
+        ...(refresh === undefined ? [] : refreshEscalationLines(refresh)),
         `Owner: repository operator. Inspect the failed check logs, rerun transient failures,`,
         `or repair the dependency/CI failure and ask Dependabot to rebase or recreate the PR.`,
         `Do not override failing checks. Green checks resume deterministic review and auto-merge;`,
@@ -1118,6 +1132,47 @@ export interface DependabotRefreshRecord {
   requestedAtMs: number;
   /** False only between the write-ahead record and a comment that has not yet returned. */
   delivered: boolean;
+  /** W1-T9994 — Dependabot's reply refused the command: `delivered` means POSTED, never ANSWERED. */
+  answer?: "refused";
+  answeredAtMs?: number;
+  /** The refusal reply's first line, quoted by the escalation. */
+  reply?: string;
+  /** W1-T9994 — the base refresh went through the guarded REST update-branch, not a command. */
+  via?: "update-branch";
+  /** The update-branch was refused or does not apply; the record then escalates once. */
+  updateFailed?: boolean;
+  updateError?: string;
+  issueUrl?: string;
+}
+
+// ── W1-T9994 — Dependabot refuses the fleet's commands ("Sorry, only users with push access can use that
+// command", #11968 at 20:45:17Z), yet a posted command read `delivered: true` for hours. The answer is read.
+
+/** The wording Dependabot answers a command from a commenter without push access, seeded with #11968's reply. */
+export const DEPENDABOT_REFUSAL_WORDING = "only users with push access can use that command";
+export const DEPENDABOT_UPDATE_BRANCH_COMMAND = "update-branch";
+
+/** The fields of one REST issue comment a command answer reads. */
+export interface DependabotIssueComment {
+  user?: { login?: string } | null;
+  created_at?: string;
+  body?: string;
+}
+
+export type DependabotCommandAnswer = { kind: "refused"; reply: string } | { kind: "none" };
+
+/** Pure: Dependabot's refusal among the issue comments created at or after `sinceMs`, else `none`. */
+export function dependabotCommandAnswer(comments: readonly DependabotIssueComment[], sinceMs: number): DependabotCommandAnswer {
+  const sinceSecond = Math.floor(sinceMs / 1000) * 1000; // GitHub stamps whole seconds; the request is stamped in ms
+  for (const comment of comments) {
+    const created = Date.parse(comment.created_at ?? "");
+    if (!Number.isFinite(created) || created < sinceSecond) continue;
+    const login = comment.user?.login;
+    if (login === undefined || !isDependabotAuthor({ login })) continue;
+    const body = comment.body ?? "";
+    if (body.toLowerCase().includes(DEPENDABOT_REFUSAL_WORDING)) return { kind: "refused", reply: body.split("\n")[0].trim() };
+  }
+  return { kind: "none" };
 }
 
 /** `wait`: main also fails this check, so a refresh would only inherit it. `request`: main's red has
@@ -1187,58 +1242,110 @@ function readRefreshState(statePath: string, headSha: string): DepReviewHoldStat
   return state;
 }
 
-export type DependabotRefreshOutcome = "requested" | "unanswered" | "failed" | "none";
+export type DependabotRefreshOutcome = "requested" | "unanswered" | "refused" | "escalated" | "failed" | "none";
 
 /** Runs after {@link reconcileDepReviewHold} on the same pass and state file. Acts only on a
- *  `hold` with red checks: a hold on pending checks has nothing to refresh. */
-export function reconcileDependabotRefresh(args: {
+ *  `hold` with red checks: a hold on pending checks has nothing to refresh.
+ *
+ *  W1-T9994: a base refresh goes through the guarded REST update-branch (`expected_head_sha`), never a
+ *  command Dependabot refuses from this identity. An earlier command record is answered by reading
+ *  Dependabot's reply once per pass; a refusal is ledgered and stops pinning the head. Only a refused
+ *  update-branch escalates, once, quoting the reply. */
+export async function reconcileDependabotRefresh(args: {
   statePath: string;
   prNumber: number;
   headSha: string;
   result: DepReviewResult;
   cause: DependabotRefreshCause | undefined;
-  commits: readonly DependabotHeadCommit[] | undefined;
   nowMs: number;
-  comment: (body: string) => void;
+  updateBranch: (expectedHeadSha: string) => Promise<{ ok: boolean; error?: string }>;
+  readComments: (sinceIso: string) => Promise<readonly DependabotIssueComment[]>;
+  escalate: (refresh: DependabotRefreshRecord) => string | null | undefined;
   log: (step: string, extra: Record<string, unknown>) => void;
-}): DependabotRefreshOutcome {
+}): Promise<DependabotRefreshOutcome> {
   if (args.result.decision !== "hold" || args.result.redChecks.length === 0) return "none";
   const state = readRefreshState(args.statePath, args.headSha);
   const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  const at = { pr_number: args.prNumber, head_sha: args.headSha };
+
+  const escalateOnce = (record: DependabotRefreshRecord): DependabotRefreshOutcome => {
+    if (record.issueUrl !== undefined) return "escalated";
+    let issueUrl: string | null | undefined;
+    try {
+      issueUrl = args.escalate(record);
+    } catch (error) {
+      args.log("dep-review.refresh_failed", { ...at, action: "escalate", error: String((error as Error)?.message ?? error) });
+      return "failed";
+    }
+    if (!issueUrl) return "failed";
+    record.issueUrl = issueUrl;
+    save();
+    args.log("dep-review.refresh_escalated", { ...at, cause: record.cause, issue_url: issueUrl,
+      ...(record.reply === undefined ? {} : { reply: record.reply }), ...(record.updateError === undefined ? {} : { error: record.updateError }) });
+    return "escalated";
+  };
+
+  const refreshByUpdateBranch = async (record: DependabotRefreshRecord): Promise<DependabotRefreshOutcome> => {
+    const outcome = await (async (): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        return await args.updateBranch(args.headSha);
+      } catch (error) {
+        return { ok: false, error: String((error as Error)?.message ?? error) };
+      }
+    })();
+    if (outcome.ok) {
+      record.via = "update-branch";
+      record.delivered = true;
+      save();
+      args.log("dep-review.refresh_requested", { ...at, command: record.command, via: "update-branch", cause: record.cause,
+        edited_head: false, red_checks: args.result.redChecks });
+      return "requested";
+    }
+    record.updateFailed = true;
+    record.updateError = outcome.error ?? "update-branch did not apply";
+    save();
+    args.log("dep-review.refresh_failed", { ...at, command: record.command, via: "update-branch", cause: record.cause, error: record.updateError });
+    return escalateOnce(record);
+  };
+
   const prior = state.refreshes?.find((r) => r.headSha === args.headSha);
   if (prior !== undefined) {
+    if (prior.updateFailed) return escalateOnce(prior);
+    if (prior.command === DEPENDABOT_UPDATE_BRANCH_COMMAND && prior.via === undefined) return await refreshByUpdateBranch(prior);
+    const read = prior.answer === undefined && prior.via === undefined && prior.delivered
+      ? await (async (): Promise<{ answer?: DependabotCommandAnswer; error?: string }> => {
+        try {
+          return { answer: dependabotCommandAnswer(await args.readComments(fixedClock(prior.requestedAtMs).iso()), prior.requestedAtMs) };
+        } catch (error) {
+          return { error: String((error as Error)?.message ?? error) };
+        }
+      })()
+      : {};
+    const readError = read.error;
+    if (read.answer?.kind === "refused") {
+      prior.answer = "refused";
+      prior.answeredAtMs = args.nowMs;
+      prior.reply = read.answer.reply;
+      save();
+      args.log("dep-review.refresh_refused", { ...at, command: prior.command, cause: prior.cause, reply: read.answer.reply,
+        requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs });
+    }
+    if (prior.answer === "refused") return prior.via === undefined ? await refreshByUpdateBranch(prior) : "refused";
     args.log("dep-review.refresh_unanswered", {
-      pr_number: args.prNumber, head_sha: args.headSha, command: prior.command, cause: prior.cause, delivered: prior.delivered,
+      ...at, command: prior.command, cause: prior.cause, delivered: prior.delivered,
       requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs,
-      red_checks: args.result.redChecks,
+      red_checks: args.result.redChecks, ...(readError === undefined ? {} : { answer_read_error: readError }),
     });
     return "unanswered";
   }
   if (args.cause === undefined) return "none";
   const record: DependabotRefreshRecord = {
-    headSha: args.headSha, command: dependabotRefreshCommand(args.commits), cause: args.cause,
+    headSha: args.headSha, command: DEPENDABOT_UPDATE_BRANCH_COMMAND, cause: args.cause,
     requestedAtMs: args.nowMs, delivered: false,
   };
   state.refreshes = [...(state.refreshes ?? []), record];
   save();
-  try {
-    args.comment(record.command);
-  } catch (error) {
-    state.refreshes = state.refreshes.filter((r) => r !== record);
-    save();
-    args.log("dep-review.refresh_failed", {
-      pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
-      error: String((error as Error)?.message ?? error),
-    });
-    return "failed";
-  }
-  record.delivered = true;
-  save();
-  args.log("dep-review.refresh_requested", {
-    pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
-    edited_head: record.command === DEPENDABOT_RECREATE_COMMAND, red_checks: args.result.redChecks,
-  });
-  return "requested";
+  return await refreshByUpdateBranch(record);
 }
 
 

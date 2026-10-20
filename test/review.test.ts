@@ -382,7 +382,7 @@ test("a semantic PASS cannot rescue an unpasted proof (proof must be pasted, not
   assert.equal(v.state, "failure");
 });
 
-test("parseReviewerVerdicts: FAIL downgrades that index; PASS/absent stay undefined (advisory floor)", () => {
+test("parseReviewerVerdicts: FAIL downgrades; PASS is observed and absent stays undefined", () => {
   const text = [
     "REPORT",
     "REVIEW_VERDICT 1: PASS — proof pasted",
@@ -390,7 +390,7 @@ test("parseReviewerVerdicts: FAIL downgrades that index; PASS/absent stay undefi
     "posted remudero-review=failure",
   ].join("\n");
   const s = parseReviewerVerdicts(text, 3);
-  assert.deepEqual(s, [undefined, false, undefined]);
+  assert.deepEqual(s, [true, false, undefined]);
 });
 
 test("parseReviewerVerdicts: unparseable reviewer output leaves the floor untouched (all undefined)", () => {

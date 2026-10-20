@@ -60,8 +60,6 @@ export interface DeployWorthChange {
   sha: string;
   subject?: string;
   files: readonly string[];
-  /** The top-level declarations of src/run-task.ts this commit touched (advance-declarations.ts); absent when unread. */
-  declarations?: readonly string[];
 }
 
 export interface DeployWorthVerdict {
@@ -352,77 +350,17 @@ export function replayDeployRestartFrequency(scores: readonly number[], threshol
   return { restarts, finalTotal: total };
 }
 
-/**
- * W1-T4945 — the daemon's own loop, dispatch, drain and ledger code, plus what decides how it resolves. An
- * advance touching one changes what the RUNNING daemon does next, so it is worth a drain even while busy.
- */
-export const DAEMON_SELF_PATH_PREFIXES: readonly string[] = [
-  "src/run-task.ts",
-  "src/lib/daemon",
-  "src/lib/sweep",
-  "src/lib/drain",
-  "src/lib/dispatch-",
-  "src/lib/ledger",
-  "src/lib/self-sync.ts",
-  "bin/",
-  "package.json",
-  "package-lock.json",
-  "tsconfig.json",
-];
-
 export const FRESHNESS_DECISION_STEP = "daemon.freshness_decision";
 
-/** Freshness weight on deploy-judge's own scale: the daemon's own code is full weight, all else as deployed. */
-/** W1-T6273: a conventional-commit scope naming the daemon's own machinery, e.g. `perf(daemon): …`. */
-export const DAEMON_SELF_COMMIT_SCOPE = /^[a-z]+\((?:daemon|drain|dispatch|sweep)\)!?:/i;
-
-/** W1-T6273's entry module, weighed by the declarations a commit touched (advance-declarations.ts). */
-const DAEMON_ENTRY_MODULE = "src/run-task.ts";
-
-/** A top-level declaration of the entry module that is the daemon's own: daemonCommand, its gateways, its hooks. */
-export const DAEMON_DECLARATION = /daemon/i;
-
 /**
- * An entry-module change whose touched declarations are all read, named and none the daemon's own. Every other
- * shape keeps full weight: no declarations read, an empty list, or an unnamed hunk all fail toward restarting.
+ * Freshness weight on deploy-judge's own scale. W1-T9089 (ADR 0007 A.10): once every build run is a child a booting
+ * daemon adopts, a restart drains only its own reviews and detached actions, so the daemon's own code is weighed like
+ * any other material advance; the self-path list, the self-scoped commit test and #11861's declaration weighing are gone.
  */
-function entryChangeOutsideTheDaemon(change: DeployWorthChange, selfFiles: readonly string[]): boolean {
-  const declarations = change.declarations;
-  return selfFiles.every((file) => file === DAEMON_ENTRY_MODULE) && declarations !== undefined && declarations.length > 0 &&
-    declarations.every((name) => name.length > 0 && !DAEMON_DECLARATION.test(name));
-}
-
 export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVerdict {
-  const selfFiles = change.files.filter((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix)));
-  if (selfFiles.length > 0 && !entryChangeOutsideTheDaemon(change, selfFiles)) {
-    return {
-      score: 18,
-      reason: "the daemon's own loop, dispatch, drain or ledger code changed",
-      source: "deterministic",
-    };
-  }
-  if (change.subject !== undefined && DAEMON_SELF_COMMIT_SCOPE.test(change.subject) && reachesDaemonRuntime(change)) {
-    return {
-      score: 18,
-      reason: "the commit is scoped to the daemon's own machinery",
-      source: "deterministic",
-    };
-  }
   // B1 (2026-10-17): an image input is NOT full weight here. A daemon process restart reruns the mounted checkout on
-  // the image it already has, so it cannot deliver a rebuilt image; the recycle does (deployer.ts). 31 of the 1406
-  // commits of 10-12..10-17 scored 18 by this rule alone. An image input now scores by its files, as below.
+  // the image it already has, so it cannot deliver a rebuilt image; the recycle does (deployer.ts).
   return sourceDeployWorth(change);
-}
-
-/**
- * B2 (2026-10-17): a daemon-scoped subject is full weight only when the commit reaches what the daemon process runs.
- * A `test(sweep): …` commit touching only test/ changes nothing a restart would load. An empty file list is unread,
- * not empty, so it keeps the scope's weight: an unknown advance never waits.
- */
-function reachesDaemonRuntime(change: DeployWorthChange): boolean {
-  return change.files.length === 0 || change.files.some((file) =>
-    file.startsWith("src/") || file.startsWith("bin/") || file === "package.json" || file === "package-lock.json" ||
-    (!file.includes("/") && file.startsWith("tsconfig")));
 }
 
 export interface FreshnessDecision {

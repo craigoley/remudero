@@ -277,7 +277,6 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
   let isStale = false;
   let cleaning = false;
   const merged = new Set<string>();
-  const boundaries = new Map<string, () => unknown>();
   const run = runDaemon(loadPlan(path), {
     now: () => new Date(nowMs),
     readLedgerLines: () => history(durationMs),
@@ -287,7 +286,6 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
     log: (step, extra) => rows.push({ step, extra }),
     runOne: (id, options) => {
       started.push({ id, age: nowMs - start });
-      if (options) boundaries.set(id, options.restartAtWorkerBoundary);
       return releases.get(id)!.promise;
     },
     sleep: () => { const sleep = deferred<void>(); sleeps.push(sleep); return sleep.promise; },
@@ -295,8 +293,6 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
   } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 3, max: 10, ...opts });
   return {
     run, started, rows,
-    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
-    boundary: (id: string, waitingOn?: string) => (boundaries.get(id) as ((c?: { waitingOn: string; runId: string }) => unknown) | undefined)?.(waitingOn ? { waitingOn, runId: `${id}-run` } : undefined),
     settle: async (id: string, ageMinutes: number) => {
       nowMs = start + ageMinutes * minute;
       merged.add(id);
@@ -344,41 +340,32 @@ test("lane refill uses the adaptive queue admission and resumes only an exact ha
 });
 
 test("W1-T7697: freed lanes keep refilling while one slow lane holds the phase", async () => {
-  // W1-T9069: under a latch a freed lane takes work that ends before the restart's expected time, so the holdouts
-  // report an estimate (implementing ends in 55 min against a 200-min yield) and the src class's span is 5 min.
-  const now = Date.now();
-  const row = (age: number, fields: Record<string, unknown>) => JSON.stringify({ ts: new Date(now - age * minute).toISOString(), ...fields });
+  // W1-T9089: freed lanes refill past the slow lane until a restart is decided. Then an in-process refill is held, and
+  // the lanes in flight are awaited to the exit: none is asked to yield and none holds out.
   const material = { ...stale, changes: [{ sha: stale.newSha, subject: "fix: update worker", files: ["src/lib/worker.ts"] }],
-    staleSinceMs: now - 120 * minute };
+    staleSinceMs: Date.now() - 120 * minute };
   let visible = false;
-  const h = phase(5 * minute, {
-    checkFreshness: () => visible ? material : { stale: false },
-    readRestartHistory: () => [
-      row(600, { step: "run.start", task_class: "src", run_id: "span" }), row(595, { step: "verdict", run_id: "span", verdict: "merged" }),
-      row(400, { step: "verdict", task_id: "yielded", run_id: "yielded", reason: "freshness_yield" }),
-      row(200, { step: "run.start", task_id: "yielded", run_id: "resumed" }),
-      row(300, { step: "run.phase", waiting_on: "implementing", run_id: "completed" }), row(245, { step: "pr.opened", run_id: "completed" }),
-    ],
-  });
+  const h = phase(5 * minute, { checkFreshness: () => visible ? material : { stale: false } });
   try {
     await flush();
-    visible = true;
-    await h.tick(1, true);
     await h.settle("B", 1);
     await h.settle("C", 5);
+    await h.settle("D", 9);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "E", "F"], "freed lanes refill while A runs on");
+    assert.equal(h.rows.some(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.reason === "phase bound"), false);
+    visible = true;
     await h.tick(11);
     assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
-    for (const id of ["A", "D", "E"]) assert.equal(h.boundary(id, "implementing"), undefined, `${id} holds the restart open`);
-    for (const [id, age] of [["D", 21], ["E", 26], ["F", 31], ["G", 36]] as const) await h.settle(id, age);
-    assert.deepEqual(h.rows.find(({ step, extra }) => step === "dispatch.lane_refilled" && extra?.finished_task === "E")?.extra?.waiting_on, ["A"]);
-    assert.ok(h.started.filter(({ age }) => age > 20 * minute).length >= 4);
-    assert.equal(h.rows.some(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.reason === "phase bound"), false);
+    await h.settle("E", 21);
+    assert.equal(h.started.length, 6, "an in-process refill is held once the restart is decided");
+    assert.equal(h.rows.find(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.finished_task === "E")?.extra?.reason,
+      "stale code: no candidate runs as a child");
+    await h.settle("F", 31);
     await h.settle("A", 66);
-    const before = h.started.length;
-    await h.settle("H", 67);
-    await h.settle("I", 68);
-    assert.equal(h.started.length, before, "when the original slow lane yields, the restart drains rather than refills");
     assert.equal((await h.run).stopReason, "stale");
+    for (const step of ["daemon.restart_yield_asked", "daemon.restart_holdout", "daemon.freshness_restart_waiting"]) {
+      assert.equal(h.rows.some((row) => row.step === step), false, step);
+    }
   } finally { await h.cleanup(); }
 });
 
@@ -484,22 +471,11 @@ test("a parked lane ends with the phase when its last sibling settles inside the
 });
 
 test("a restart decided while lanes are parked drains them", async () => {
-  // W1-T9069: under a latch a woken lane takes work that ends before the restart's expected time, so the history
-  // gives the src class a 5-min median span.
-  const now = Date.now();
-  const row = (age: number, fields: Record<string, unknown>) => JSON.stringify({ ts: new Date(now - age * minute).toISOString(), ...fields });
+  // W1-T9089: the decision wakes the parked lanes, and each is held for the restart rather than refilled on old code.
   let latched = false;
   const material = { ...stale, changes: [{ sha: stale.newSha, subject: "fix: update worker", files: ["src/lib/worker.ts"] }],
-    staleSinceMs: now - 120 * minute };
-  const h = phase(16 * minute, {
-    checkFreshness: () => latched ? material : { stale: false },
-    readRestartHistory: () => [
-      row(600, { step: "run.start", task_class: "src", run_id: "span" }), row(595, { step: "verdict", run_id: "span", verdict: "merged" }),
-      row(400, { step: "verdict", task_id: "yielded", run_id: "yielded", reason: "freshness_yield" }),
-      row(200, { step: "run.start", task_id: "yielded", run_id: "resumed" }),
-      row(300, { step: "run.phase", waiting_on: "implementing", run_id: "completed" }), row(245, { step: "pr.opened", run_id: "completed" }),
-    ],
-  });
+    staleSinceMs: Date.now() - 120 * minute };
+  const h = phase(16 * minute, { checkFreshness: () => latched ? material : { stale: false } });
   try {
     await flush();
     await h.settle("A", 2);
@@ -509,23 +485,16 @@ test("a restart decided while lanes are parked drains them", async () => {
     await h.settle("D", 17);
     await h.settle("E", 18);
     assert.equal(h.rows.filter(({ step }) => step === "dispatch.lane_parked").length, 2);
+    const startedAtLatch = h.started.length;
     latched = true;
     await h.tick(20);
     assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
     await flush();
-    // W1-T7806 + W1-T9069: F was in flight at the latch; once it reports an estimate the woken lanes refill on the old
-    // code, because a 5-min src task ends before F's expected finish.
-    assert.equal(h.boundary("F", "implementing"), undefined, "F holds the restart open");
-    await flush();
-    assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_refilled").slice(-2)
-      .map(({ extra }) => [extra?.finished_task, extra?.waiting_on]), [["D", ["F"]], ["E", ["F"]]]);
-    assert.deepEqual(h.boundary("F"), material, "F reaches a boundary: every holdout can now yield");
-    await h.settle("G", 21);
-    await h.settle("H", 22);
     const held = h.rows.filter(({ step }) => step === "dispatch.lane_refill_held");
-    assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(), [["G", "stale code"], ["H", "stale code"]]);
+    assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(),
+      [["D", "stale code: no candidate runs as a child"], ["E", "stale code: no candidate runs as a child"]]);
     await h.tick(30);
-    assert.equal(h.started.length, 8, "F outliving the mean after the latch cannot renew refill");
+    assert.equal(h.started.length, startedAtLatch, "the lane in flight cannot renew refill");
     await h.settle("F", 31);
     assert.equal((await h.run).stopReason, "stale");
   } finally { await h.cleanup(); }
