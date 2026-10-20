@@ -1,0 +1,162 @@
+- id: W1-T10256
+  title: "THE MAC JANITOR RECLAIMED 0 MB WHILE THE DISK SAT AT 2.8-3.8 GB FREE — a hand cleanup then freed ~1.6 GB from five things no pass looks at (loose session-scratch files, ~/.cache/remudero-* test caches, ~/.npm/_cacache, idle clean worktrees whose HEAD is unpublished, dead worktree registrations); it also never rotates its own 19 MB of logs, and its low-space warning names no consumer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what the Mac janitor reclaims that it skips today, and what it reports when space runs low; the never-remove rules stay W1-T8861's
+  band_meaning: span
+  origin: "operator 2026-10-20: the janitor should be doing a better job of cleaning up; find ways to reduce the space each worktree needs"
+  plan_refs: [W1-T8863, W1-T8861, W1-T4804, W1-T4770, W1-T10257]
+  files:
+    - deploy/mac/remudero-janitor.sh
+    - deploy/mac/tmp-reclaim.sh
+    - deploy/workspace-retirement-guard.sh
+    - deploy/mac/JANITOR.md
+    - test/the-mac-janitor-reclaims-what-it-skipped.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-20: the Mac sits under 4 GB free and every author preflight returns NOT_RUN
+  attempts: 0
+  rationale: |
+    READ 2026-10-20 at origin/main 4c83ace0f, on the Mac as craigoleyagent (read-only).
+    OBSERVED, the janitor's own logs:
+    - The hourly passes reclaimed 0 MB. janitor.log 11:30Z: "removed=0 ... worktrees-skipped=16 ... free=2->2GiB" and
+      "WARN low-space: 2GiB free is under the 20GiB floor". tmp-reclaim.log 10:37Z: "Deleted: 0 entries, 0 MB ...
+      risky retained=28" and "session scratch dirs deleted: 0".
+    - Skip reasons in the last pass: 36 scratch, 14 unknown-directory, 9 ignored-or-unverified, 2 not-proven-published,
+      2 dirty, 2 non-remudero-origin.
+    - The disk sat at 2.8-3.8 GB free all day.
+    OBSERVED, a manual cleanup that afternoon freed ~1.6 GB, all from paths the janitor skips:
+    - ~/Remudero/.session-scratch: 1,536 regular FILES older than 3 days (~460 MB).
+      tmp-reclaim.sh line 409-411 retires only complete direct-child DIRECTORIES: "Loose files are deliberately left alone."
+    - ~/.cache/remudero-store-fill-*: 6 test-cache dirs from 10-14 (~225 MB). ~/.cache is outside every janitor root.
+      Their creator is not in core's src/test/scripts at 4c83ace0f (the core test uses mkdtemp under tmpdir()).
+    - ~/.npm/_cacache: ~316 MB, never age-pruned. remudero-janitor.sh line 996 prunes only worker-home/.npm/_cacache.
+    - Two linked worktrees under ~/Remudero/remudero/.claude/worktrees/ (~215 MB): clean, idle since 09-29 and 10-12,
+      branches deleted on origin, HEADs not on main. They are retained forever as not-proven-published.
+      They were bundled by hand (`git bundle create ... origin/main..HEAD`, verified) into ~/Remudero/worktree-bundles/
+      and then removed.
+    - 15 `git worktree` registrations pointed at deleted dirs. remudero-janitor.sh line 1177 deliberately never prunes them,
+      because a missing worktree can hold the only reflog of an unpublished detached HEAD.
+    OBSERVED, logs:
+    - janitor.log is 6.0 MB, tmp-reclaim.log 13 MB, janitor-decisions.tsv 5.2 MB, and
+      /tmp/remudero-janitor-craigoleyagent.log (the cron redirect) 1 MB.
+    - Nothing rotates any of them.
+    OBSERVED, what the low-space line cannot say:
+    - This account holds ~19 GB of the 193 GB used.
+    - The rest is the other account (craigoley) and system areas this account cannot read: Xcode CoreSimulator volumes,
+      Chrome code_sign_clone, Claude Desktop VM bundles, the operator's archived Codex chats.
+    - Swap (/System/Volumes/VM) is 7 GB (7 x 1 GiB swapfiles; `sysctl vm.swapusage` used 5.4 GB at 11:40Z).
+    - "WARN low-space: 2GiB free is under the 20GiB floor" names none of it, so the operator cannot tell where to act.
+    - The floor is fixed (MIN_FREE_GIB=20, line 63).
+    OWNERSHIP:
+    - W1-T8863 (merged) set six hours untouched as the window for the Azure host and tmp-reclaim.sh.
+    - W1-T8861 (merged) owns the never-remove rules.
+    - W1-T4804 (merged) projects time-to-full from the heartbeat, tiered by janitor passes.
+    - No queued shard or open PR on 2026-10-20 reclaims these five classes or rotates these logs.
+  design: |
+    THE WINDOW. Every new rung uses the existing six-hour mtime-and-ctime guard plus the process/CWD/open-file probes.
+    It derives nothing new: the operator ruled six hours untouched on 2026-10-12 (W1-T8863), and a longer window only
+    delays reclaim of what is already idle. No rung adds a GB floor, count cap or other fixed bound.
+    1. LOOSE SESSION-SCRATCH FILES (tmp-reclaim.sh).
+       - Regular files under ~/Remudero/.session-scratch, at any depth, are judged by their own age.
+       - A file is reclaimed once it and its enclosing direct-child tree pass the mixed-age leaf rule /private/tmp
+         already uses: the enclosing tree's activity is checked, and rechecked at each deletion boundary.
+       - The existing session_scratch_risk exclusions still apply: credential-like names, special files, scheduled log
+         paths, symlinks, files inside a Git checkout, and patch/diff/rej/orig evidence.
+       - Empty directories left behind are removed under the same guard.
+       - The summary line reports files and directories separately: `session scratch files deleted: N, M MB`.
+    2. ~/.cache/remudero-* CACHES (remudero-janitor.sh).
+       - A direct child of ~/.cache is a candidate when it is a real directory named `remudero-*` (never ~/.cache/remudero
+         itself, which holds the gh read-floor stamp and the host-memory peak store), owned by this account, holds no
+         .git, *.bundle or lock file, and has had every entry idle for six hours.
+       - Name the creator of remudero-store-fill-* in the receipt's rationale. If it is a test that leaks, file that leak
+         as its own task; do not fix it here.
+    3. NPM CACHE (remudero-janitor.sh).
+       - Prune $HOME/.npm/_cacache content files idle six hours (mtime and ctime) when no npm/npx process runs as this
+         account, then run `npm cache verify` so the index drops entries whose content is gone.
+       - When npm is not on cron's PATH, fall back to the existing whole-tree clean_artifact rule that worker-home's
+         _cacache already uses.
+       - _npx is pruned the same way.
+    4. BUNDLE THEN RETIRE AN IDLE CLEAN WORKTREE WHOSE HEAD IS UNPUBLISHED (remudero-janitor.sh,
+       workspace-retirement-guard.sh).
+       - Applies where the janitor today logs `SKIP not-proven-published` for a linked worktree that passes every other
+         retirement gate: clean, unlocked, owned, idle, not open.
+       - BUNDLE: write `git bundle create <dir>/<repo>-<worktree-name>-<head12>.bundle origin/main..HEAD` into
+         ~/Remudero/worktree-bundles. Reflog-only commits of that worktree that no ref reaches are bundled too.
+       - VERIFY: `git bundle verify` exits 0 against the parent repo, and `git bundle list-heads` names the exact HEAD.
+       - REACHABILITY: keep the branch ref. A detached HEAD first gets `refs/retired/<worktree-name>`, so the commit
+         stays reachable in the parent repo as well.
+       - REMOVE: only then run `git worktree remove`.
+       - Any bundle or verify failure, or an empty bundle where commits were expected, is KEEP. A commit is never dropped.
+       - Bundles never expire automatically, like orphan archives. The receipt logs the bundle path and size.
+    5. DEAD REGISTRATIONS (remudero-janitor.sh). For each `prunable` entry in `git worktree list --porcelain` of every
+       protected/parent repo the janitor already scans:
+       - First make its HEAD and reflog commits reachable. When a ref already reaches them, nothing is needed. When
+         none does, apply rule 4's bundle plus refs/retired/<id>.
+       - Then run `git worktree prune --expire=6.hours.ago`.
+       - A registration whose commits could not be secured holds the whole prune for that repo. The hold is logged
+         `SKIP prune-held <id>`.
+    6. LOG ROTATION (both scripts):
+       - Covers janitor.log, tmp-reclaim.log, coverage-reclaim.log, janitor-decisions.tsv and the cron redirect
+         /tmp/remudero-janitor-<user>.log.
+       - At pass start, copy-truncate each file (the cron shell holds an O_APPEND fd, so truncation is safe), then gzip
+         the copy.
+       - Keep rotated segments for the span the host-resource gardener reads (SAMPLE_RETENTION_MS, 14 days), so no
+         evidence it consumes is lost. The bound is that existing retention, not a byte size.
+       - Rotation never touches a log another account owns.
+    7. LOW-SPACE REPORT (remudero-janitor.sh). Replace the fixed 20 GiB `WARN low-space` floor with a projection:
+       - Record each pass's free bytes in a small samples file.
+       - When the projected time-to-full from those samples is inside a few of the janitor's own passes, log one
+         `low-space-report:` block. Use the same tiering W1-T4804 ruled: passes, not a GB floor.
+       - Report the top consumers this account can see: bounded `du -xsk` of $HOME's direct children and the known
+         roots, at most once per pass, with the existing inspection budget.
+       - Report swap from `sysctl vm.swapusage`.
+       - Report `unaccounted = used - seen - swap`, attributed to "other accounts and system areas this account cannot
+         read". The report names the action: the operator acts there.
+       - The EMERGENCY line and preflight-author's 20 GiB reserve are not changed here.
+    9. BROKEN ALTERNATES (remudero-janitor.sh). On the operator account the janitor skipped all 407 checkouts while its
+       error log repeated "unable to normalize alternate object path": a checkout whose objects/info/alternates (or a
+       worktree commondir) is relative or dangling fails every git probe and is skipped as unknown.
+       - Repair it when the target object store exists: rewrite the entry to that store's absolute path, then re-probe.
+       - When it cannot be repaired, classify the checkout by its working files alone, as "history unrecoverable", and
+         route it to rule 10's preserve step. It is never treated as clean.
+       - Log each one by name.
+    10. PRESERVE THEN RETIRE AN IDLE CHECKOUT WITH UNCOMMITTED WORK (operator ruling 2026-10-20, in chat: "file both
+       with the additions"). This supersedes W1-T8861's "dirty work is always kept in place": dirty work is now always
+       PRESERVED, then the checkout is retired. Applies to an idle (six-hour guard), unopened, owned checkout or worktree
+       whose only blocker is uncommitted or untracked work.
+       - Save under ~/Remudero-preserved/<checkout-name>-<head12>/:
+         - rule 4's verified bundle of unpublished commits;
+         - `git diff --binary HEAD` and `git diff --binary --cached`;
+         - a tar.gz of untracked files, excluding node_modules, coverage, dist, .turbo and other regenerable trees;
+         - a MANIFEST with path, branch, HEAD, remote, sizes and restore steps.
+       - Files with credential-like names (the existing session_scratch_risk set) are never archived. Their presence
+         keeps the whole checkout in place, logged `KEEP credential-named`.
+       - VERIFY every artifact (bundle verify, `tar -tzf`, diff non-empty when status said dirty) before removal. Any
+         failure is KEEP. Removal uses `git worktree remove --force` for a linked worktree, or the existing retirement
+         path for a clone.
+       - Preserved artifacts never expire automatically, and the receipt logs their path and size.
+    11. CODEX WORK-ARTIFACTS (remudero-janitor.sh). Put ~/.codex/work-artifacts in scope, under the same activity
+       guards: 39 GB on the operator account on 10-20. A git checkout inside it goes through rules 4 and 10.
+       Regenerable output (node_modules, coverage, dist, build caches) is removed after six idle hours. Any other file
+       is kept and counted in the low-space report.
+    12. RECEIPTS. Each new rung writes rows to janitor-decisions.tsv with the existing reason-code columns: removed,
+       bundled, prune-held, rotated.
+  acceptance:
+    - claim: "the janitor reclaims idle loose session-scratch files, ~/.cache/remudero-* caches and old npm cache content; bundles, verifies and keeps a ref before retiring an idle clean worktree with an unpublished HEAD; prunes dead registrations only once their commits are reachable; rotates its logs; and on a projected time-to-full reports visible consumers plus the unreadable remainder — while recent, open, dirty, credential-named and ~/.cache/remudero paths are kept"
+      proof: 'grep: test("W1-T10256: the Mac janitor reclaims what it skipped and never drops a commit" in test/the-mac-janitor-reclaims-what-it-skipped.test.ts'
+    - claim: "an idle checkout with uncommitted work is preserved (verified bundle, diff, untracked tar, manifest) and then retired; a credential-named file keeps it in place; a broken alternates entry is repaired or the checkout is classified by its working files, never treated as clean"
+      proof: 'grep: test("W1-T10256: uncommitted work is preserved before its checkout is retired" in test/the-mac-janitor-reclaims-what-it-skipped.test.ts'
+  falsifier: |
+    Restore "loose files are deliberately left alone": the 7 h-old fixture file in a mixed-age scratch dir survives, and
+    the test fails.
+    Drop the bundle step and keep the not-proven-published SKIP: the idle clean fixture worktree with an unpushed commit
+    survives, and the test fails.
+    Remove the worktree before the bundle is verified, or skip refs/retired for a detached HEAD: the test's
+    `git cat-file -e <sha>` after retirement fails, and the test fails.
+    Run a bare `git worktree prune` without securing a dead registration's detached HEAD: its commit is unreachable, and
+    the test fails.
+    Touch ~/.cache/remudero/gh-last-read: it must survive, or the test fails.
