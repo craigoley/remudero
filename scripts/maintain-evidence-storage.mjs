@@ -32,14 +32,14 @@ export function evidenceStorageConfig(home = homedir()) {
       || new Set(config.roots).size !== config.roots.length) throw Error('unverified-evidence-policy');
   return { enabled: config.enabled, roots: config.roots };
 }
-export function main(args = process.argv.slice(2), home = homedir()) {
+export function main(args = process.argv.slice(2), home = homedir(), deps = {}) {
   const command = args[0] ?? '--status';
   if (args.length > 1 || !['--status','--scheduled'].includes(command)) throw Error('usage: maintain-evidence-storage.mjs [--status|--scheduled]');
   const config = evidenceStorageConfig(home);
   if (command === '--status') { console.log(JSON.stringify({ schema: 'rmd-evidence-storage-status/v1', ...config, idleHours: 6, historyExpiry: false, createsSchedule: false })); return 0; }
   if (!config.enabled || config.roots.length === 0) { console.log(JSON.stringify({ disposition: 'NOT_RUN_POLICY_DISABLED', roots: config.roots.length })); return 0; }
   if (process.platform !== 'darwin') { console.log(JSON.stringify({ disposition: 'NOT_RUN_PLATFORM_UNQUALIFIED' })); return 0; }
-  const pressure = spawnSync('/usr/sbin/sysctl', ['-n','kern.memorystatus_vm_pressure_level'], { encoding: 'utf8', timeout: 3000 });
+  const pressure = (deps.readPressure ?? (() => spawnSync('/usr/sbin/sysctl', ['-n','kern.memorystatus_vm_pressure_level'], { encoding: 'utf8', timeout: 3000 })))();
   if (pressure.error || pressure.status !== 0 || pressure.stdout.trim() !== '1') { console.log(JSON.stringify({ disposition: 'NOT_RUN_MEMORY' })); return 0; }
   const state = join(home, '.local/state/remudero/evidence-maintenance');
   mkdirSync(state, { recursive: true, mode: 0o700 });
@@ -58,7 +58,7 @@ export function main(args = process.argv.slice(2), home = homedir()) {
     let cursor = 0;
     try { cursor = privateJson(cursorPath).nextRoot; } catch (e) { if (e.code !== 'ENOENT') throw e; }
     if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor >= config.roots.length) throw Error('invalid-root-cursor');
-    const result = compactEvidenceRoot(config.roots[cursor], { apply: true });
+    const result = (deps.compactRoot ?? compactEvidenceRoot)(config.roots[cursor], { apply: true });
     if (!owned()) throw Error('own-lock-changed');
     let receipt = null;
     // No-op scheduled passes do not create another immutable raw receipt.

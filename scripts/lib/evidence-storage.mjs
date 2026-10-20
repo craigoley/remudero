@@ -127,11 +127,12 @@ export function compressEvidenceFile(file, options = {}) {
   }
   return entry;
 }
-export function compactEvidenceRoot(root, { apply = false, now = Date.now(), maxEntries = 10000 } = {}) {
+export function compactEvidenceRoot(root, { apply = false, now = Date.now(), maxEntries = 10000, maxPricedBytes = 1024 ** 3 } = {}) {
   const s = lstatSync(root);
   if (!s.isDirectory() || s.uid !== process.getuid() || realpathSync(root) !== root) throw Error('unverified-evidence-root');
   privateParents(join(root, 'candidate'));
   if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 10000) throw Error('invalid-root-entry-budget');
+  if (!Number.isSafeInteger(maxPricedBytes) || maxPricedBytes < 1 || maxPricedBytes > 1024 ** 3) throw Error('invalid-root-byte-budget');
   const started = Date.now(), result = { entries: [], incomplete: false, historyDeleted: false, modelCalls: 0 };
   let inspected = 0, pricedBytes = 0;
   const directory = opendirSync(root), names = [];
@@ -146,7 +147,7 @@ export function compactEvidenceRoot(root, { apply = false, now = Date.now(), max
     if (name.startsWith('.') || !/\.(jsonl?|log|txt|lcov)$/.test(name) || /token|credential|secret|password/i.test(name)) continue;
     const path = join(root, name), file = lstatSync(path);
     if (!eligibleEvidence(file, now, process.getuid()) || file.size < 65536 || file.size > EVIDENCE_MAX_FILE_BYTES || file.blocks * 512 < file.size * .9) continue;
-    if (pricedBytes + file.size * 6 > 1024 ** 3 || result.entries.length >= 256) { result.incomplete = true; break; }
+    if (pricedBytes + file.size * 6 > maxPricedBytes || result.entries.length >= 256) { result.incomplete = true; break; }
     pricedBytes += file.size * 6;
     result.entries.push(compressEvidenceFile(path, { apply, now }));
   }

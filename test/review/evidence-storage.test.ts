@@ -86,6 +86,9 @@ test('evidence root inspection refuses before allocating beyond its explicit ent
   assert.throws(() => compactEvidenceRoot(dir, { maxEntries: 1 }), /root-entry-budget/);
   for (const maxEntries of [0, 10001, NaN]) assert.throws(() => compactEvidenceRoot(dir, { maxEntries }), /invalid-root-entry-budget/);
   assert.deepEqual(readdirSync(dir).sort(), ['one.txt', 'two.txt']);
+  const f = payload(t), bounded = compactEvidenceRoot(f.dir, { now: f.now, maxPricedBytes: 1 });
+  assert.equal(bounded.incomplete, true); assert.equal(bounded.entries.length, 0); assert.deepEqual(readFileSync(f.path), f.bytes);
+  for (const maxPricedBytes of [0, 1024 ** 3 + 1, NaN]) assert.throws(() => compactEvidenceRoot(f.dir, { maxPricedBytes }), /invalid-root-byte-budget/);
 });
 test('evidence compression refuses real fresh files and links without changing bytes', t => {
   const f = payload(t), link = join(f.dir, 'linked.log'); symlinkSync(f.path, link);
@@ -140,6 +143,36 @@ test('evidence maintenance CLI rejects apply, arbitrary roots and retention-expi
   for (const args of [['--apply'], ['--root=/'], ['--expire=1'], ['--scheduled','--force']]) assert.throws(() => main(args), /usage:/);
   const r = spawnSync(process.execPath, ['scripts/maintain-evidence-storage.mjs', '--force'], { encoding: 'utf8', timeout: 3000 });
   assert.equal(r.status, 1); assert.equal(JSON.parse(r.stderr).disposition, 'UNKNOWN');
+});
+test('enabled maintenance executes its real no-op defaults and preserves immutable non-no-op receipts', t => {
+  const home = fixture(t), root = join(home, 'evidence'); mkdirSync(root);
+  const config = join(home, '.config/remudero'); mkdirSync(config, { recursive: true });
+  writeFileSync(join(config, 'evidence-storage.json'), JSON.stringify({ schema: 'rmd-evidence-storage/v1', enabled: true, roots: [root] }), { mode: 0o600 });
+  const logs: string[] = []; t.mock.method(console, 'log', (s: string) => logs.push(s));
+  assert.equal(main(['--status'], home), 0); assert.equal(JSON.parse(logs.at(-1)!).enabled, true);
+  assert.equal(main(['--scheduled'], home), 0); // Real native pressure query and default compaction when normal.
+  if (process.platform !== 'darwin') return;
+  const normal = { readPressure: () => ({ status: 0, stdout: '1' }) };
+  assert.equal(main(['--scheduled'], home, normal), 0);
+  const state = join(home, '.local/state/remudero/evidence-maintenance');
+  assert.deepEqual(readdirSync(state), ['source-cursor.json']);
+  const uncertain = { ...normal, compactRoot: () => ({ entries: [{ path: 'fixture-only', disposition: 'UNKNOWN_AFTER_PUBLICATION' }], incomplete: true, historyDeleted: false as const, modelCalls: 0 as const }) };
+  assert.equal(main(['--scheduled'], home, uncertain), 0); const receipt = JSON.parse(logs.at(-1)!).receipt;
+  assert.equal(JSON.parse(logs.at(-1)!).disposition, 'UNKNOWN'); assert.equal(JSON.parse(readFileSync(receipt, 'utf8')).incomplete, true);
+  const retained = readFileSync(receipt); assert.equal(main(['--scheduled'], home, normal), 0); assert.deepEqual(readFileSync(receipt), retained);
+  assert.equal(existsSync(join(state, 'source-maintenance.lock')), false);
+  assert.equal(main(['--scheduled'], home, { readPressure: () => ({ status: 0, stdout: '2' }) }), 0); assert.equal(JSON.parse(logs.at(-1)!).disposition, 'NOT_RUN_MEMORY');
+});
+test('maintenance never steals an existing lock and releases only its own lock on invalid cursor', t => {
+  if (process.platform !== 'darwin') return;
+  const home = fixture(t), root = join(home, 'evidence'), config = join(home, '.config/remudero'); mkdirSync(root); mkdirSync(config, { recursive: true });
+  writeFileSync(join(config, 'evidence-storage.json'), JSON.stringify({ schema: 'rmd-evidence-storage/v1', enabled: true, roots: [root] }), { mode: 0o600 });
+  const state = join(home, '.local/state/remudero/evidence-maintenance'); mkdirSync(state, { recursive: true, mode: 0o700 });
+  const lock = join(state, 'source-maintenance.lock'); mkdirSync(lock); writeFileSync(join(lock, 'foreign'), 'retain');
+  const normal = { readPressure: () => ({ status: 0, stdout: '1' }) }, logs: string[] = []; t.mock.method(console, 'log', (s: string) => logs.push(s));
+  assert.equal(main(['--scheduled'], home, normal), 0); assert.equal(JSON.parse(logs.at(-1)!).disposition, 'NOT_RUN_EXISTING_LOCK'); assert.equal(readFileSync(join(lock, 'foreign'), 'utf8'), 'retain');
+  rmSync(lock, { recursive: true }); writeFileSync(join(state, 'source-cursor.json'), '{"nextRoot":99}', { mode: 0o600 });
+  assert.throws(() => main(['--scheduled'], home, normal), /invalid-root-cursor/); assert.equal(existsSync(lock), false);
 });
 test('evidence installer is explicit, quote-safe, preserves policy and adds no schedule', t => {
   const dir = fixture(t), prefix = join(dir, "account with ' quote"); mkdirSync(prefix, { mode: 0o700 });
