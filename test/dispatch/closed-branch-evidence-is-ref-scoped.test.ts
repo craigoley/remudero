@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lazyClosedUnmerged, runBranchDispatchOpts, runBranchStateFrom } from "../../src/lib/daemon.js";
-import { runDrain } from "../../src/lib/drain.js";
-import { loadPlanFromYaml } from "../../src/lib/plan.js";
+import { lazyClosedUnmerged, runBranchDispatchOpts, runBranchStateFrom } from "#src/lib/daemon.js";
+import { runDrain } from "#src/lib/drain.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
 
 const taskId = "A";
 const older = "run-A-1792500000000";
