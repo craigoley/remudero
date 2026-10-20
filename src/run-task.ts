@@ -1044,6 +1044,8 @@ import {
   parseProofAmendmentProposal,
   requestProofAmendment,
   requestScopeAmendment,
+  saveScopeAmendmentWork,
+  restoreScopeAmendmentWork,
   type ScopeAmendmentOutcome,
   type ScopeAmendmentRequest,
   type ProofAmendmentOutcome,
@@ -11493,6 +11495,7 @@ export async function runFixRung(opts: {
     proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
     scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
     scopeAmendmentPortsIo?: Parameters<typeof buildProofAmendmentWritePorts>[1];
+    scopeAmendmentGit?: typeof hostWorktreeGitAsync;
     /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
     worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
     /** W1-T4458 (i): test seam; production runs `git merge --no-commit --no-ff origin/main`. */
@@ -11925,7 +11928,7 @@ export async function runFixRung(opts: {
   // does not parse, in which case the pre-strike merge-conflict check below is skipped every
   // round (never a guessed number).
   const prNumber = prNumberFromRef(opts.prUrl);
-  const amendScope = async (paths: string[], changedPaths: string[], headSha: string): Promise<ScopeAmendmentOutcome> => {
+  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
       const body = await (deps.fetchPrBody ?? fetchPrBodyViaGh)(opts.prUrl);
@@ -11942,10 +11945,22 @@ export async function runFixRung(opts: {
     } catch (error) {
       outcome = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
     }
-    deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
-      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined });
+    let recovery: Record<string, unknown> = {};
+    if (saveWork && (outcome.kind === "created" || outcome.kind === "resumed")) {
+      try {
+        recovery = { recovery_status: "saved",
+          recovery_path: await saveScopeAmendmentWork(scopeWork(paths, outcome.amendmentNumber)) };
+      } catch (error) {
+        const reason = String(error);
+        recovery = { recovery_status: "unavailable", recovery_reason: reason };
+      }
+    }
+    if (outcome.kind !== "amendment_merged") deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
+      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery });
     return outcome;
   };
+  const scopeWork = (paths: string[], amendmentNumber: number) => ({ root: opts.config.root,
+    worktreePath: opts.worktreePath, taskId: opts.taskId, prNumber: prNumber!, amendmentNumber, paths });
   // W1-T2671: at most one base-gap read/update attempt per invocation. A successful update ends
   // this invocation because GitHub's update-branch endpoint is asynchronous and the current
   // worktree is now stale; the next level-triggered sweep reconstructs both CI and the checkout
@@ -13207,12 +13222,71 @@ export async function runFixRung(opts: {
     const pendingScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
       row.task_id === opts.taskId && row.pr_number === prNumber && row.head_sha === priorHeadSha &&
       ["created", "resumed", "branch_update_requested"].includes(String(row.outcome)));
+    let scopeMergeStartSha: string | undefined;
+    let scopeRecoveryEvidence: string | undefined;
     if (pendingScope && Array.isArray(pendingScope.paths)) {
       const paths = pendingScope.paths as string[];
       const resumed = await amendScope(paths, paths, priorHeadSha);
       if (resumed.kind === "refused") deps.log("fix.commit_refused", { head_sha: priorHeadSha,
         reason: resumed.detail, scope_amendment_detail: `NEEDS_SCOPE ${paths.join(",")}` });
-      return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      if (resumed.kind !== "amendment_merged") {
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      }
+      const git = (args: string[], input?: string) =>
+        (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { input, maxBuffer: 1 << 26 });
+      let mergeSha: string | undefined;
+      let mergeAttempted = false;
+      try {
+        if ((await git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL])).trim()) {
+          throw new Error("local scope merge requires a clean worktree");
+        }
+        scopeMergeStartSha = (await git(["rev-parse", "HEAD"])).trim();
+        await git(["fetch", "--no-tags", "origin", "main"]);
+        mergeAttempted = true;
+        await git(["merge", "--no-edit", "--no-ff", "refs/remotes/origin/main"]);
+        mergeSha = (await git(["rev-parse", "HEAD"])).trim();
+        const contract = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${opts.taskId}`,
+          opts.worktreePath, "plan/tasks.yaml", mergeSha, git);
+        const declaredFiles = contract.taskDeclaredFiles;
+        if (contract.divergence || declaredFiles === undefined || !paths.every((path) => declaredFiles.includes(path))) {
+          throw new Error(`the locally merged task contract does not admit the amendment paths: ${contract.divergence?.reason ?? JSON.stringify(contract.taskDeclaredFiles)}`);
+        }
+        opts.task = { ...opts.task, files: contract.taskDeclaredFiles, acceptance: contract.criteria };
+      } catch (error) {
+        let reason = `${String(error)}\n${String((error as { stdout?: unknown }).stdout ?? "")}\n${String((error as { stderr?: unknown }).stderr ?? "")}`;
+        if (mergeAttempted && mergeSha === undefined) try {
+          await git(["merge", "--abort"]);
+        } catch (abortError) {
+          const error = String(abortError);
+          reason += `; merge abort: ${error}`;
+        }
+        let update: { ok: boolean; error?: string };
+        try {
+          const ports = deps.scopeAmendmentWritePorts ?? buildProofAmendmentWritePorts({
+            taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config,
+            owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, prNumber: prNumber!,
+            ledgerLinesNow: roundLedger, log: deps.log, gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
+          }, deps.scopeAmendmentPortsIo);
+          update = ports.updateBranch(opts.prUrl, priorHeadSha);
+        } catch (updateError) {
+          update = { ok: false, error: String(updateError) };
+        }
+        deps.log("fix.scope_amendment", { outcome: "branch_update_requested", ...update, reason,
+          paths, head_sha: priorHeadSha, pr_number: prNumber, amendment_number: resumed.amendmentNumber, merged_locally: false });
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      }
+      let recovery: Record<string, unknown>;
+      try {
+        const restored = await restoreScopeAmendmentWork(scopeWork(paths, resumed.amendmentNumber));
+        recovery = { recovery_status: "restored", restored_paths: restored };
+        scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber}: ${restored.join(", ")} restored from the round that asked for scope.`;
+      } catch (error) {
+        const reason = String(error);
+        recovery = { recovery_status: "unavailable", recovery_reason: reason };
+        scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber} admitted ${paths.join(", ")}. Saved work unavailable: ${reason}. Repair these admitted paths against the red below.`;
+      }
+      deps.log("fix.scope_amendment", { outcome: "amendment_merged", merged_locally: true, merge_sha: mergeSha,
+        amendment_number: resumed.amendmentNumber, paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery });
     }
     // W1-T9807: a main-owned refusal is retried, without a worker, at the first head holding the main it compared.
     const lastScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" && row.task_id === opts.taskId && row.pr_number === prNumber);
@@ -13321,6 +13395,7 @@ export async function runFixRung(opts: {
         // read one shared value, never two independently derived ones.
         reachableRemedyFiles,
       }),
+      ...(scopeRecoveryEvidence ? [scopeRecoveryEvidence] : []),
       ...(refutedFlake ? [`this red reproduced on a rerun at ${priorHeadSha}; it is not a flake. Make a real fix; another FLAKE outcome will be recorded as a no-op without a rerun.`] : []),
       ...(proofRepairRound && proofDiscriminationNow
         ? proofRepairPromptLines({ proofs: proofDiscriminationNow.proofs, stageable: proofRepairStageable })
@@ -13435,6 +13510,8 @@ export async function runFixRung(opts: {
         }
       },
     });
+    // The unpublished local merge is the commit base; the push still leases the PR's original tip.
+    const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
@@ -14035,7 +14112,7 @@ export async function runFixRung(opts: {
           pr_number: prNumber, main_sha: mainTip.status === 0 ? mainTip.stdout.trim() : undefined,
           changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)), changed_paths_error: "error" in read ? read.error : undefined });
       } else try {
-        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha);
+        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true);
       } catch (error) {
         amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
@@ -14050,7 +14127,7 @@ export async function runFixRung(opts: {
       if (harnessCommitCount > 0) {
         let landing: FixRoundLanding | undefined;
         try {
-          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
           landing = await roundLanding(expectedHeadShaForPush);
           if (pushed && pushed !== "refused") return pushed;
         } catch (error) {
@@ -14129,7 +14206,7 @@ export async function runFixRung(opts: {
     let roundPush: FixRungOutcome | "refused" | undefined;
     let landing: FixRoundLanding = { landed: false, outcome: "failed", reason: "the push did not return" };
     try {
-      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
       landing = await roundLanding(expectedHeadShaForPush);
     } catch (error) {
       landing = pushThrew(error);
