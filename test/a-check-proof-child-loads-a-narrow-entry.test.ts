@@ -1,12 +1,13 @@
 // @census-reads: src/ — the import graph walked from src/check-proof-main.ts
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { stripComments } from "../src/lib/test-impact-map.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { makeRuntimeFixture } from "./helpers/native-runtime-fixture.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const entry = resolve(root, "src/check-proof-main.ts");
@@ -72,10 +73,9 @@ test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit c
 });
 
 function exportFixture(t: TestContext, baseSource: string) {
-  const fixture = gitRepo({ scope: t, kind: "narrow-export-observation" });
-  mkdirSync(resolve(fixture.dir, "src")); mkdirSync(resolve(fixture.dir, "test"));
-  symlinkSync(resolve(root, "node_modules"), resolve(fixture.dir, "node_modules"), "dir");
-  writeFileSync(resolve(fixture.dir, ".gitignore"), "node_modules\n");
+  const fixture = makeRuntimeFixture();
+  t.after(() => fixture.cleanup());
+  writeFileSync(resolve(fixture.dir, "package.json"), JSON.stringify({ private: true, type: "module" }));
   writeFileSync(resolve(fixture.dir, "src/a.ts"), baseSource);
   writeFileSync(resolve(fixture.dir, "test/probe.test.ts"),
     'import {test} from "node:test";import assert from "node:assert/strict";import {added} from "../src/a.js";test("observed CLI export",()=>assert.equal(added,3));\n');
