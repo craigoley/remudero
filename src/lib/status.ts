@@ -991,13 +991,28 @@ export function readMergeCreditedTaskIds(
   return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && hidden };
 }
 
-const creditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
+/** W1-T10048: the async credit scan's memo keeps a durable digest per rotation, so a restarted daemon's first pass
+ *  reads kilobytes of digests instead of decompressing every archive (about 309 MB per boot, OBSERVED 2026-10-17). */
+export function createCreditScanMemo(): LedgerRotationMemo {
+  return createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), {
+    pattern: /verdict/, holder: "status.credit-scan", durableDigest: { reducerVersion: "1" },
+  });
+}
+const creditScanMemo = createCreditScanMemo();
 const syncCreditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
 
 export async function readMergeCreditedTaskIdsAsync(
   path: string,
-  opts: { candidates?: Iterable<string>; readLive?: (path: string) => Iterable<Record<string, unknown>> } = {},
-): Promise<{ credited: Set<string>; filesRead: number; complete: boolean; budgetExhausted: boolean }> {
+  opts: {
+    candidates?: Iterable<string>;
+    readLive?: (path: string) => Iterable<Record<string, unknown>>;
+    /** W1-T10048: the rotation memo; a fresh one stands in for a restarted process. */
+    memo?: LedgerRotationMemo;
+  } = {},
+): Promise<{
+  credited: Set<string>; filesRead: number; complete: boolean; budgetExhausted: boolean;
+  digestHits: number; digestMisses: number; rotationsLoaded: number;
+}> {
   const credited = new Set<string>();
   const wanted = new Set(opts.candidates ?? []);
   let outstanding = wanted.size;
@@ -1010,12 +1025,28 @@ export async function readMergeCreditedTaskIdsAsync(
   };
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
   const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path);
-  const read = await readLedgerUnionRecordsMemoized(dirname(path), creditScanMemo, {
+  const memo = opts.memo ?? creditScanMemo;
+  const before = memo.retention();
+  let rotationsLoaded = 0;
+  const counted: LedgerRotationMemo = {
+    ...memo,
+    load: (entries) => {
+      rotationsLoaded += entries.length;
+      return memo.load(entries);
+    },
+  };
+  const read = await readLedgerUnionRecordsMemoized(dirname(path), counted, {
     liveFirst: true, order: "newest-first", dedupe: false, pattern: /verdict/,
     readLiveRecords: () => live, onRecord: take, satisfied: () => wanted.size > 0 && outstanding <= 0,
   });
+  const after = memo.retention();
   const complete = wanted.size === 0 ? true : outstanding <= 0;
-  return { credited, filesRead: read.filesRead, complete, budgetExhausted: false };
+  return {
+    credited, filesRead: read.filesRead, complete, budgetExhausted: false,
+    digestHits: (after.digestHits ?? 0) - (before.digestHits ?? 0),
+    digestMisses: (after.digestMisses ?? 0) - (before.digestMisses ?? 0),
+    rotationsLoaded,
+  };
 }
 
 /** The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST, stopping at
