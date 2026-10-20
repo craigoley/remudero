@@ -14,6 +14,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
+import { readOriginMainSha } from "./inbox.js";
 import { loadPlanFromYaml, newTestPath } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
@@ -55,42 +56,63 @@ export type CiFrictionCauseKind = "check" | "main_merge" | "conflict" | "fix_ref
 export type CiFrictionHandFix = { pr: number; at: string; files: string[] };
 export type CiFrictionHandFixRead = { state: "observed"; fixes: CiFrictionHandFix[]; asOf?: string; source?: "cache" | "api" } | { state: "unmeasured"; reason: string; fixes: CiFrictionHandFix[] };
 
-/** Collect one paginated list per pass; source changes come from local merge commits, not N PR API reads. */
+/** One paginated list, walked newest-updated-first. The cache keeps a `cursor` (the newest `updated_at` the last read
+ *  saw) and the `mainSha` that read was made against. A hand fix is a merged PR, so it can only arrive with a new
+ *  commit on origin/main: while that sha is unchanged the cached fixes answer with no gh call; once it moved, the
+ *  walk stops at the first page older than the cursor and merges into the cached fixes. Source changes come from
+ *  local merge commits, not N PR API reads. */
 export function readCiFrictionHandFixes(
   repoRoot: string, stateDir: string, owner: string, repo: string, clock: Clock = systemClock,
   run: (command: string, args: string[]) => string = (command, args) => command === "gh" ? ghExec(args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }) : execFileSync(command, args, { cwd: repoRoot, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }),
+  originMain: (root: string) => string | undefined = readOriginMainSha,
 ): CiFrictionHandFixRead {
   const since = clock.now() - 14 * 86_400_000;
-  const fixes = new Map<number, CiFrictionHandFix>();
+  const safeFile = (file: unknown): file is string => typeof file === "string" && /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..");
   try {
     const path = join(stateDir, "ci-friction-hand-fixes.json");
     const cached = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : undefined;
-    if (cached?.repository === `${owner}/${repo}` && cached.state === "observed" && Array.isArray(cached.fixes) &&
-      cached.fixes.every((fix: CiFrictionHandFix) => Number.isSafeInteger(fix.pr) && Number.isFinite(Date.parse(fix.at)) && Array.isArray(fix.files) && fix.files.every((file) => /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes(".."))) &&
-      clock.now() >= Date.parse(cached.asOf) && clock.now() - Date.parse(cached.asOf) < 600_000)
+    const valid = cached?.repository === `${owner}/${repo}` && cached.state === "observed" && Array.isArray(cached.fixes) &&
+      cached.fixes.every((fix: CiFrictionHandFix) => Number.isSafeInteger(fix.pr) && Number.isFinite(Date.parse(fix.at)) && Array.isArray(fix.files) && fix.files.every(safeFile));
+    const cursor = valid && typeof cached.cursor === "string" && Number.isFinite(Date.parse(cached.cursor)) ? Date.parse(cached.cursor) : undefined;
+    // Read before the walk: a commit that lands during it leaves the stored sha behind, so the next read is due.
+    const mainSha = originMain(repoRoot);
+    if (valid && cursor !== undefined && mainSha !== undefined && mainSha === cached.mainSha && Number.isFinite(Date.parse(cached.asOf)))
       return { state: "observed", fixes: cached.fixes.filter((fix: CiFrictionHandFix) => Date.parse(fix.at) >= since), asOf: cached.asOf, source: "cache" };
+    const fixes = new Map<number, CiFrictionHandFix>();
     const byPr: Record<string, { sha: string; files: string[] }> = {};
+    if (valid && cursor !== undefined)
+      for (const fix of cached.fixes as CiFrictionHandFix[]) {
+        if (Date.parse(fix.at) < since) continue;
+        fixes.set(fix.pr, { pr: fix.pr, at: fix.at, files: [...fix.files] });
+        const known = cached.byPr?.[fix.pr];
+        if (typeof known?.sha === "string" && Array.isArray(known.files) && known.files.every(safeFile)) byPr[fix.pr] = { sha: known.sha, files: [...known.files] };
+      }
+    // A cursor stops the walk at the first page older than it; the window edge still bounds a very old cache.
+    const stopAt = Math.max(cursor ?? -Infinity, since);
+    let newest = cursor ?? -Infinity;
     for (let page = 1; ; page++) {
       const rows = JSON.parse(run("gh", ["api", `repos/${owner}/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`]));
       if (!Array.isArray(rows)) throw new Error("hand-fix PR list is not an array");
       for (const row of rows) {
         if (!Number.isSafeInteger(row.number) || typeof row.updated_at !== "string" || !Number.isFinite(Date.parse(row.updated_at)))
           throw new Error("hand-fix PR list has an invalid identity or timestamp");
+        newest = Math.max(newest, Date.parse(row.updated_at));
         if (!/^run-unfiled-/.test(row.head?.ref ?? "") || !/^fix(?:\([^)]*\))?!?:/.test(row.title ?? "") || !row.merged_at) continue;
         const at = Date.parse(row.merged_at); // expiring-fixture: exempt -- tests inject Clock and exercise both window boundaries
         if (!Number.isFinite(at) || at < since || at > clock.now()) continue;
         if (!/^[0-9a-f]{40}$/.test(row.merge_commit_sha ?? "")) throw new Error(`hand-fix PR #${row.number} has no merge commit`);
         const prior = cached?.repository === `${owner}/${repo}` ? cached.byPr?.[row.number] : undefined;
-        const files: string[] = prior?.sha === row.merge_commit_sha && Array.isArray(prior.files) && prior.files.every((file: unknown) => typeof file === "string" && /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..")) ? prior.files :
+        const files: string[] = prior?.sha === row.merge_commit_sha && Array.isArray(prior.files) && prior.files.every(safeFile) ? prior.files :
           run("git", ["diff-tree", "--no-commit-id", "--name-only", "-r", row.merge_commit_sha])
-            .trim().split("\n").filter((file) => /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes(".."));
+            .trim().split("\n").filter(safeFile);
         byPr[row.number] = { sha: row.merge_commit_sha, files: [...new Set<string>(files)] };
         fixes.set(row.number, { pr: row.number, at: row.merged_at, files: [...new Set(files)] });
       }
-      if (rows.length < 100 || Date.parse(rows.at(-1).updated_at) < since) break;
+      if (rows.length < 100 || Date.parse(rows.at(-1).updated_at) < stopAt) break;
     }
     const result: CiFrictionHandFixRead = { state: "observed", fixes: [...fixes.values()].sort((a, b) => a.pr - b.pr), asOf: clock.iso(), source: "api" };
-    writeAtomic(path, JSON.stringify({ ...result, repository: `${owner}/${repo}`, byPr }) + "\n");
+    // The cursor moves only here, after every page was read; a throw above leaves the cache as it was.
+    writeAtomic(path, JSON.stringify({ ...result, repository: `${owner}/${repo}`, byPr, cursor: new Date(Number.isFinite(newest) ? newest : clock.now()).toISOString(), ...(mainSha === undefined ? {} : { mainSha }) }) + "\n");
     return result;
   } catch (error) {
     return { state: "unmeasured", reason: String((error as Error)?.message ?? error), fixes: [] };
