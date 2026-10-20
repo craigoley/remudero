@@ -37,8 +37,15 @@ test("cash HTTP refusals retain allowlisted rate evidence through every real ada
       assert.equal(calls, 1, "observing a refusal adds no paid retry");
       for (const literal of ['"retry_after_ms":1500', '"remaining_requests":0', '"remaining_tokens":42', `"request_id":"${requestId}"`]) {
         assert.ok(result.stderr.includes(literal), result.stderr);
-        assert.ok(allowance.includes(literal.replaceAll('"', '\\"')), "existing settlement reason retains the same evidence");
+        if (!model.startsWith("claude-"))
+          assert.ok(allowance.includes(literal.replaceAll('"', '\\"')), "existing settlement reason retains the same evidence");
       }
+      const [reservation] = Object.values(JSON.parse(allowance).reservations) as Array<{ reservedUsd: number; settledUsd: number | null }>;
+      assert.ok(reservation);
+      if (model.startsWith("claude-")) {
+        assert.equal(reservation.settledUsd, null, "Foundry Messages retains its conservative unsettled reservation");
+        assert.equal(result.budgetSettledUsd, reservation.reservedUsd);
+      } else assert.notEqual(reservation.settledUsd, null, "the existing Chat/Responses settlement path still runs");
       for (const hidden of [secret, "private response body", "private prompt", "authorization", "api-key", "set-cookie"])
         assert.equal(result.stderr.includes(hidden), false);
     });
@@ -87,4 +94,14 @@ test("cash HTTP observation leaves missing deployments and conservative settleme
     assert.equal(calls, 1);
     assert.equal(result.stderr.includes("retry_after"), false);
   }
+});
+
+test("cash HTTP diagnostics do not replace successful replies with response headers", async t => {
+  const { result, calls } = await refusal(t, new Response(JSON.stringify({ id: "fixture-success", model: "gpt-6-luna",
+    usage: { prompt_tokens: 10, completion_tokens: 2 }, choices: [{ message: { content: "accepted fixture" }, finish_reason: "stop" }],
+  }), { status: 200, headers: { "retry-after-ms": "123", "apim-request-id": requestId } }));
+  assert.equal(result.isError, false);
+  assert.equal(result.text, "accepted fixture");
+  assert.equal(result.stderr, "");
+  assert.equal(calls, 1);
 });
