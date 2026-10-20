@@ -11,6 +11,7 @@
   origin: "operator-approved three-daemon recovery, 2026-10-19: read-only PR12929 ledger evidence and unchanged-source offline replay"
   plan_refs: [W1-T7837, W1-T7850, W1-T8167, W1-T9732, W1-T9970, W1-T9502, W1-T100, W1-T9748]
   files:
+    - src/lib/ledger.ts
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/sweep/host-gap-pacing-counts-admitted-review-attempts.test.ts
@@ -94,3 +95,13 @@
     After natural adoption, join the request, admission and terminal witnesses at the exact PR/head/input.
     Verify that a denied request leaves completed-attempt pacing unchanged, while a genuine completed
     re-review earns its ordinary wait. PR12929 is a dated case, not permission to force its review/merge.
+
+    Separate plan-only scope amendment, 2026-10-20: the normal armed first push of the private build
+    was refused by the maintained ledger-rotation census. Its real consumer-derived assertion names
+    review.provider_provenance, not sweep.review_admitted (which is already registered), as missing
+    from DECISION_RELEVANT_LEDGER_STEPS. The build uses that existing per-review row to bind a
+    library-owned refusal to a unique admitted attempt without changing numeric worker IDs or
+    touching the separate reviewer instrument. Losing the carrier on rotation would erase real
+    attribution. Declare the existing ledger registration surface so the build can preserve it under
+    the unchanged per-step retention bound. No acceptance, risk, budget, threshold, step-name or
+    authority change; no build credit. The implementation remains separate and waits for this amendment.
