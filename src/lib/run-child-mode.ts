@@ -4,10 +4,11 @@
 // and never on a timer. The evidence window runs from the PREVIOUS daemon boot to now, so a promotion has seen one whole boot
 // cycle and the adoption pass of the boot that closed it. It PROMOTES shadow -> on only when, across that window, something
 // round-tripped the run-child contract, nothing failed it, the closing boot adopted every live child, no child was lost or
-// misidentified, and every measured probe tree peak fit the class estimate it was admitted under. It DEMOTES on -> shadow on any
-// contract mismatch, misidentified child or lost child. A loss whose stderr or detail names an outside kill (an OOM kill, a
-// container stop) is named as such and does not count against the contract; an OOM kill still holds promotion for its window.
-// There is no count and no cooldown: the window itself moves one boot at a time, so a re-promotion needs a fresh clean cycle.
+// misidentified, and every measured probe tree peak fit the class estimate it was admitted under. W1-T9089: it never
+// demotes on -> shadow, since the in-process restart path is retired; a contract mismatch, misidentified or lost child
+// keeps `on`, flags `contract_failing` and is escalated (`escalateRunChildContract`). A loss whose stderr or detail names
+// an outside kill (an OOM kill, a container stop) is named as such and does not count against the contract; an OOM kill
+// still holds promotion for its window. There is no count and no cooldown: the window moves one boot at a time.
 
 import { systemClock, type Clock } from "./clock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -71,6 +72,8 @@ export interface RunChildModeDecision {
   window_start: string | null;
   evidence: Omit<RunChildCycleEvidence, "adoption"> & { adoption: RunChildCycleEvidence["adoption"] | null };
   reason: string;
+  /** W1-T9089: `on` met a contract failure it cannot demote from; the daemon escalates it (`escalateRunChildContract`). */
+  contract_failing?: true;
 }
 
 export function emptyCycleEvidence(): RunChildCycleEvidence {
@@ -188,11 +191,13 @@ export function decideRunChildMode(evidence: RunChildModeEvidence): RunChildMode
     seen.misidentified ? `${seen.misidentified} misidentified child(ren)` : "",
     seen.lost ? `${seen.lost} lost child(ren)` : "",
   ].filter(Boolean);
-  if (charged.length) {
-    return decided("shadow", `${from === "on" ? "demoted" : "held"}: ${charged.join(", ")} since the previous boot`);
+  // W1-T9089: the in-process restart path is retired, so `on` keeps running children and escalates the failure.
+  if (charged.length && from === "on") {
+    return { ...decided("on", `stays on, escalated: ${charged.join(", ")} since the previous boot; auto no longer demotes`), contract_failing: true };
   }
+  if (charged.length) return decided("shadow", `held: ${charged.join(", ")} since the previous boot`);
   if (evidence.unread?.length) {
-    return decided("shadow", `${from === "on" ? "demoted" : "held"}: the evidence window is unreadable (${evidence.unread.join(", ")})`);
+    return decided(from, `${from === "on" ? "stays on" : "held"}: the evidence window is unreadable (${evidence.unread.join(", ")})`);
   }
   if (from === "on") {
     const outside = seen.oomKills + seen.containerStops;
@@ -295,4 +300,48 @@ export function createRunChildModeTracker(
       observe(RUN_CHILD_MODE_DECISION_STEP, row);
     },
   };
+}
+
+export const RUN_CHILD_CONTRACT_FAILING_STEP = "run_child.contract_failing";
+
+/** The escalation shape {@link escalateRunChildContract} raises; the caller's escalate path delivers it. */
+export interface RunChildContractEscalation {
+  class: "MANUAL"; taskId: string; summary: string; detail: string;
+  options: Array<{ label: string; detail: string }>; recommendation: string;
+}
+
+/**
+ * W1-T9089: the escalation `auto`'s demotion became. Raised once per evidence window (keyed on `window_start`, so a
+ * re-decision every dispatch pages once), through the caller's existing escalate path; the row names what failed.
+ * Returns whether this call escalated.
+ */
+export function escalateRunChildContract(
+  decision: RunChildModeDecision | undefined,
+  ports: {
+    escalate: (escalation: RunChildContractEscalation) => string | null | undefined;
+    log: (step: string, extra: Record<string, unknown>) => void;
+    escalated: Set<string>;
+  },
+): boolean {
+  if (decision === undefined || decision.contract_failing !== true) return false;
+  const key = decision.window_start ?? "no-window";
+  if (ports.escalated.has(key)) return false;
+  ports.escalated.add(key);
+  const issueUrl = ports.escalate({
+    class: "MANUAL",
+    taskId: "daemon",
+    summary: "run-child contract failing under mode on: auto no longer demotes",
+    detail: `${decision.reason}. Every build run is a child (W1-T9089, ADR 0007 A.10), so auto no longer demotes to ` +
+      "shadow: the lost-child path keeps each run's outcome correct, and the failing contract needs a fix. Evidence: " +
+      JSON.stringify(decision.evidence),
+    options: [
+      { label: "fix the run-child contract", detail: "Read the run_child.lost and run_child.settled rows the evidence counts." },
+      { label: "set sweep.runChild.mode to shadow", detail: "Holds runs off the child path by hand while the contract is repaired." },
+    ],
+    recommendation: "fix the run-child contract",
+  });
+  ports.log(RUN_CHILD_CONTRACT_FAILING_STEP, {
+    window_start: decision.window_start, reason: decision.reason, evidence: decision.evidence, issue_url: issueUrl ?? null,
+  });
+  return true;
 }

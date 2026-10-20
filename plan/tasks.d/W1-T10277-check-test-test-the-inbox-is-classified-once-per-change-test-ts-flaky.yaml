@@ -1,0 +1,44 @@
+- id: W1-T10277
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/the-inbox-is-classified-once-per-change.test.ts:flaky cost 14.2 PR minute(s) across 3 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.34
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/the-inbox-is-classified-once-per-change.test.ts:flaky"
+  files:
+    - src/lib/inbox.ts
+    - test/inbox/check-test-test-the-inbox-is-classified-once-per-change-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/the-inbox-is-classified-once-per-change.test.ts:flaky"
+      proof: "grep: test(\"W1-T10277: check:test:test/the-inbox-is-classified-once-per-change.test.ts:flaky is prevented, not retried\" in test/inbox/check-test-test-the-inbox-is-classified-once-per-change-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/the-inbox-is-classified-once-per-change.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/the-inbox-is-classified-once-per-change.test.ts:flaky cost 14.2 PR minute(s) (seven-day half-life) across 3 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/inbox.ts: test/the-inbox-is-classified-once-per-change.test.ts imports it
+    - test/the-inbox-is-classified-once-per-change.test.ts: named by the failing check
+    - the rounds name a failing test: test/the-inbox-is-classified-once-per-change.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13137 at 2026-10-20T16:21:11Z: hand fix PR #13137: src/lib/inbox.ts; minutes are the pass median proxy (5.946327777777777), not measured repair time
+    - PR #12643 (https://github.com/craigoley/remudero/pull/12643) at 2026-10-18T01:52:55.067Z: ci-log round — coverage-shard (8/8): test/a-test-imports-through-the-subpath-alias.test.ts; coverage-shard (1/8): test/the-inbox-is-classified-once-per-change.test.ts
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; an older sliced classification cannot overwrite a newer completed inbox generation, an ABA inbox input change cannot rejoin a superseded pending refresh; an older sliced classification cannot overwrite a newer completed inbox generation
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 163.760733
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:87:1'
+          |   failureType: 'testCodeFailure'
+          |   error: '3552 test files carry a location-relative specifier at HEAD, 3551 at merge base 26e44851a — import through #src/*, #scripts/* and #test/* (scripts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

@@ -237,7 +237,8 @@ test("scope amendments refuse shard drift and leave the implementation contract 
   amendments.requestScopeAmendment(request(), merged.deps);
   for (const [key, record] of merged.records) merged.records.set(key, { ...record, merged: true });
   assert.deepEqual(amendments.requestScopeAmendment(request(), { ...merged.deps,
-    updateBranch: () => ({ ok: false, error: "head moved" }) }), { kind: "branch_update_requested", ok: false, error: "head moved" });
+    updateBranch: () => assert.fail("the caller owns branch-update fallback after a merged amendment") }),
+  { kind: "amendment_merged", amendmentNumber: 99 });
 });
 
 test("scope amendments deduplicate a path set and preserve block files and other tasks", () => {

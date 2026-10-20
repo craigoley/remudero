@@ -1846,7 +1846,7 @@ test("W1-T4002: stillBlockedByPushedRunBranch — the one decision every selecti
     true,
     "FALSIFIER: a changed remote tip immediately loses the exception",
   );
-  const closedUnmerged = new Set(["W1-T999"]);
+  const closedUnmerged = new Set(["run-W1-T999-1790040200000"]);
   assert.equal(
     stillBlockedByPushedRunBranch("W1-T999", pushed, closedUnmerged, refs, []),
     false,

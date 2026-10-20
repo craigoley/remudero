@@ -3,7 +3,9 @@ import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import { censusRunawayThresholdMs, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE } from "../src/lib/ci-parity.js";
+import {
+  censusRunawayThresholdMs, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_REMEASURE_MARGIN, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
+} from "../src/lib/ci-parity.js";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore executable module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
@@ -14,7 +16,8 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SUITE = "test/source-census.test.ts";
 const SUBJECT = "src/subject.ts";
 const ADMITTED = { testFile: "test/admitted.test.ts", script: "census:fixture", walks: ["other/"] };
-const READER_POLICY = { floorMs: FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, multiple: FAST_GATE_CENSUS_RUNAWAY_MULTIPLE };
+const READER_POLICY = { floorMs: FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, multiple: FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
+  remeasureMargin: FAST_GATE_CENSUS_REMEASURE_MARGIN };
 const CENSUS = [
   'import assert from "node:assert/strict";',
   'import { readFileSync } from "node:fs";',
@@ -35,7 +38,8 @@ function fixture(t: TestContext, readers = true, baseRed = false) {
   put("package.json", '{"type":"module"}');
   put("src/lib/ci-parity.ts", [
     `export const CENSUS_ADMITTED_MEMBERS = [${JSON.stringify({ ...ADMITTED, verdict: { measuredMs: 1000 } })}];`,
-    `export { censusRunawayThresholdMs, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE } from ${JSON.stringify(join(ROOT, "src/lib/ci-parity.ts"))};`,
+    "export { censusRunawayThresholdMs, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE," +
+      ` FAST_GATE_CENSUS_REMEASURE_MARGIN } from ${JSON.stringify(join(ROOT, "src/lib/ci-parity.ts"))};`,
   ].join("\n"));
   if (readers) symlinkSync(join(ROOT, "src/lib/source-text-readers.ts"), join(repo.dir, "src/lib/source-text-readers.ts"));
   put(SUITE, CENSUS);

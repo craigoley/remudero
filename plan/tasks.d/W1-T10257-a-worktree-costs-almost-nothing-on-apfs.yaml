@@ -1,0 +1,95 @@
+- id: W1-T10257
+  title: "EVERY MAC WORKTREE WRITES ~128 MB OF FILES THE OPERATOR CHECKOUT ALREADY HOLDS — APFS can clone them for almost nothing (a cp -c of test/ cost ~3 MB of free space for 57 MB of files), so `rmd worktree add` cuts the worktree with --no-checkout, clones the checkout's unchanged tracked files copy-on-write, reconciles to the base with git, and falls back to a normal checkout off APFS"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — how a worktree's tracked files are materialized; branch naming, dependency linking and retirement are unchanged
+  band_meaning: span
+  origin: "operator 2026-10-20: the janitor should be doing a better job of cleaning up; find ways to reduce the space each worktree needs"
+  plan_refs: [W1-T5533, W1-T2622, W1-T10256]
+  files:
+    - src/lib/cow-worktree.ts
+    - src/lib/hand-worktree.ts
+    - src/lib/worktree-sites.ts
+    - src/run-task.ts
+    - docs/cli-reference.md
+    - deploy/mac/JANITOR.md
+    - doctrine/plan-and-task-hygiene/finish-owned-work.md
+    - test/a-worktree-costs-almost-nothing-on-apfs.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-20: the Mac sits under 4 GB free; every agent worktree is a full checkout
+  attempts: 0
+  rationale: |
+    READ 2026-10-20 at origin/main 4c83ace0f, on the Mac (APFS, `diskutil info /`: File System Personality APFS).
+    OBSERVED, cost of one checkout:
+    - A fresh `git worktree add` checkout is ~128 MB of tracked files: test 57 MB, plan 35 MB, src 22 MB (du -sk).
+    - node_modules is already symlinked or hard-linked, so it adds no cost.
+    - Each agent session makes one or more worktrees, and the disk sat at 2.8-3.8 GB free.
+    MEASURED, the payoff (one throwaway run):
+    - `cp -c -R test/` (APFS clonefile) moved `df -k /System/Volumes/Data` by 3,124 KiB.
+    - The same run included ~0.5 MB/s of background drift from other writers.
+    - du reports the clone as 58,728 KiB, because du cannot see shared blocks.
+    - So an unchanged file costs metadata, not data. A worktree that differs from the operator checkout by a few
+      files should cost single-digit MB instead of ~128 MB.
+    THE CODE:
+    - `rmd hand-worktree` (W1-T5533, src/lib/hand-worktree.ts) and the agent house rule
+      (`git worktree add ~/Remudero/lanes-wt/<name> -b <branch> origin/main`) both run a full checkout.
+    - worktreeAdd (worker.ts) does the same on Azure (ext4, no clone support; out of scope).
+    - src/lib/worktree-sites.ts (W1-T2622) censuses every raw `git worktree add` site, so a new site needs a row.
+    OWNERSHIP: no shard on main or open PR on 2026-10-20 changes how a worktree's files are materialized.
+  design: |
+    1. src/lib/cow-worktree.ts exports `addCowWorktree({ repoDir, dir, branch, base, donorDir, port })`.
+       - The port wraps git, file cloning and statfs, so tests can inject them.
+       - Steps:
+         a. Probe clone support ON THE TARGET VOLUME. Clone one donor file into the target parent with
+            `copyFileSync(src, dst, constants.COPYFILE_FICLONE_FORCE)`, which is clonefile(2) on macOS.
+            ENOTSUP, EXDEV, ENOSYS or any error means FALLBACK, never a partial clone.
+         b. `git worktree add --no-checkout --no-track -b <branch> <dir> <base>`.
+         c. Select the paths to clone: tracked paths where the donor's index blob equals `<base>`'s tree blob, and the
+            donor's working file is unmodified (absent from `git diff-files --name-only`).
+            Regular files only; symlinks and gitlinks are left to git.
+            The donor's uncommitted edits are never copied.
+         d. Clone each selected file with FICLONE_FORCE, creating parent directories as needed.
+         e. `git read-tree <base>`, then `git checkout-index -a -q`. This writes only the paths not cloned (changed or
+            missing), because an existing file is not overwritten without -f.
+         f. `git update-index -q --refresh`.
+         g. Assert `git status --porcelain --untracked-files=all` is empty, after excluding the dependency link.
+         h. If the status is not clean, rewrite with `git checkout-index -a -f` and report `reconciled-by-rewrite`.
+            The result is always a correct checkout of `<base>`.
+       - Returns `{ method: "clone" | "checkout", cloned, written, freeBytesBefore, freeBytesAfter }`.
+       - FALLBACK is a plain `git worktree add -b <branch> <dir> <base>`, with the reason printed.
+    2. CLI: `rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]`.
+       - The donor defaults to the repo's main worktree, the operator checkout.
+       - node_modules is symlinked from the donor, as the house rule does today.
+       - The command prints the method, the cloned/written counts and the measured `df` delta.
+       - `rmd hand-worktree` materializes through addCowWorktree too, keeping its hard-linked node_modules and all its
+         refusals.
+    3. worktree-sites.ts gets an `exempt` row for addCowWorktree's raw `git worktree add`, with a stated reason.
+       It cuts from the caller's named base, and currency is the caller's question, as with hand-worktree.
+    4. DOCS POINT TO IT:
+       - docs/cli-reference.md documents the command.
+       - deploy/mac/JANITOR.md "Preventing new validation growth" says Mac worktrees are made with `rmd worktree add`,
+         and why.
+       - doctrine/plan-and-task-hygiene/finish-owned-work.md names it as the way to create a disposable worktree.
+       - The operator's out-of-repo agent preamble (~/Remudero-notes/tools/agent-brief-preamble.md) is updated by the
+         operator session after merge. The builder cannot reach it.
+    5. MEASURE ON THE REAL VOLUME (the design's proof, recorded in the PR body by a Mac session after merge; the fleet
+       builder runs on ext4):
+       - Run `df -k /System/Volumes/Data` before and after three `rmd worktree add` calls off origin/main.
+       - Report the median per-worktree delta next to a plain `git worktree add` measured the same way.
+       - The claim stands only if the clone delta is a small fraction of the checkout delta.
+       - No fixed threshold is set. The number is reported, not gated.
+  acceptance:
+    - claim: "with clone support every unchanged tracked file is cloned and only changed or donor-dirty paths are written by git, the result is a clean checkout of the base with the donor's uncommitted edits absent, and without clone support it falls back to a normal checkout with the same tree"
+      proof: 'grep: test("W1-T10257: a worktree clones unchanged checkout files and falls back off APFS" in test/a-worktree-costs-almost-nothing-on-apfs.test.ts'
+    - claim: "the maintained hand-worktree entry calls the shared CoW materializer"
+      proof: 'grep: addCowWorktree( in src/lib/hand-worktree.ts'
+  falsifier: |
+    Clone every donor file instead of only the unchanged ones: the donor-dirty fixture file carries its uncommitted edit
+    into the new worktree, the status assertion is not clean, and the test fails.
+    Drop the FICLONE probe and clone unconditionally: the injected unsupported port throws and no worktree is made,
+    and the test fails.
+    Skip `checkout-index`: a path changed between donor HEAD and base is missing, and the test fails.

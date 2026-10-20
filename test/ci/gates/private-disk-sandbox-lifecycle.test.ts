@@ -10,29 +10,55 @@ import * as review from "#src/lib/review.js";
 import { preopenGateSandboxArgv } from "#src/lib/preopen-gate.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
-// The pre-migration reviewer gives this test RAM /tmp AND an already writable, disk-backed HOME. By the time this file
-// runs, test/setup/tmp-hygiene.ts has already REPLACED process.env.HOME with a RAM-backed test home, so the sandbox's
-// own HOME survives only as the parent of RMD_TEST_LIVE_DENY_ROOT (`<HOME>/Remudero`, set from the inherited HOME).
-// Use only an existing writable bind for nested fixtures — that HOME, else this checkout — and only if it is a real,
-// disk-backed directory owned by this uid; never grant or borrow another host root.
-const RAM_FS = [0x01021994n, 0x858458f6n], priorTmpdir = process.env.TMPDIR;
-const onDisk = (path: string): boolean => {
-  try {
-    const st = fs.lstatSync(path);
-    return st.isDirectory() && st.uid === process.geteuid?.() && !RAM_FS.includes(fs.statfsSync(path, { bigint: true }).type);
-  } catch { return false; }
-};
-if (process.platform === "linux" && RAM_FS.includes(fs.statfsSync(tmpdir(), { bigint: true }).type)) {
-  const liveRoot = process.env.RMD_TEST_LIVE_DENY_ROOT;
-  const candidates = [liveRoot === undefined ? undefined : dirname(liveRoot), process.cwd()];
-  const disk = candidates.find((path): path is string => path !== undefined && onDisk(path));
-  if (disk !== undefined) {
-    process.env.TMPDIR = disk;
-    after(() => { if (priorTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = priorTmpdir; });
+const RAM_FS = [0x01021994n, 0x858458f6n];
+const fsType = (path: string): bigint => fs.statfsSync(path, { bigint: true }).type;
+
+/** The pre-migration reviewer gives this test RAM /tmp AND an already writable, private disk HOME. The proof argv
+ *  preloads test/setup/tmp-hygiene.ts, which swaps HOME for an `rmd-test-home-*` under that RAM /tmp and keeps the
+ *  original only as `RMD_TEST_LIVE_DENY_ROOT=<HOME>/Remudero`. Either way, accept only that `rmd-proof-home-*`
+ *  directory itself — no symlink, this uid, 0700, disk-backed — never another host root or a durable HOME. */
+function proofScratchHome(env: NodeJS.ProcessEnv, tmpRoot: string, type = fsType, platform = process.platform): string | undefined {
+  if (platform !== "linux" || !RAM_FS.includes(type(tmpRoot))) return undefined;
+  const denyRoot = env.RMD_TEST_LIVE_DENY_ROOT;
+  for (const home of [env.HOME, denyRoot !== undefined && basename(denyRoot) === "Remudero" ? dirname(denyRoot) : undefined]) {
+    if (!home || !/^rmd-proof-home-/.test(basename(home))) continue;
+    const stat = fs.lstatSync(home, { throwIfNoEntry: false });
+    if (stat?.isDirectory() && stat.uid === process.geteuid?.() && (stat.mode & 0o777) === 0o700 && !RAM_FS.includes(type(home))) return home;
   }
+  return undefined;
+}
+
+// Use only that existing throwaway bind for nested fixtures.
+const priorTmpdir = process.env.TMPDIR, proofHome = proofScratchHome(process.env, tmpdir());
+if (proofHome !== undefined) {
+  process.env.TMPDIR = proofHome;
+  after(() => { if (priorTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = priorTmpdir; });
 }
 
 afterEach(() => review.setProofSandboxForTests());
+
+test("the reviewer's proof HOME is recovered from the tmp-hygiene preload, and nothing else is borrowed", (t) => {
+  const { dir } = ownedFixtureDir(t, "disk-sandbox-bootstrap");
+  const home = join(dir, "rmd-proof-home-fixture"), ram = join(dir, "ram"), testHome = join(ram, "rmd-test-home-fixture");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(testHome, { recursive: true });
+  // Only the old sandbox's RAM temp root is modelled; the proof HOME is a real private directory on this disk.
+  const type = (path: string): bigint => (path === ram || path.startsWith(`${ram}/`) ? RAM_FS[0]! : fsType(path));
+  const preloaded = { HOME: testHome, RMD_TEST_LIVE_DENY_ROOT: join(home, "Remudero") };
+  assert.equal(proofScratchHome(preloaded, ram, type, "linux"), home, "the preload's recorded original HOME");
+  assert.equal(proofScratchHome({ HOME: home }, ram, type, "linux"), home, "a directly inherited proof HOME");
+  assert.equal(proofScratchHome(preloaded, dir, type, "linux"), undefined, "a disk /tmp borrows nothing");
+  assert.equal(proofScratchHome(preloaded, ram, type, "darwin"), undefined, "off Linux borrows nothing");
+  assert.equal(proofScratchHome({ HOME: testHome, RMD_TEST_LIVE_DENY_ROOT: join(dir, "Remudero") }, ram, type, "linux"), undefined, "an arbitrary parent");
+  assert.equal(proofScratchHome({ HOME: testHome, RMD_TEST_LIVE_DENY_ROOT: join(home, "elsewhere") }, ram, type, "linux"), undefined, "a foreign deny root");
+  const link = join(dir, "rmd-proof-home-link");
+  symlinkSync(home, link);
+  assert.equal(proofScratchHome({ HOME: testHome, RMD_TEST_LIVE_DENY_ROOT: join(link, "Remudero") }, ram, type, "linux"), undefined, "a symlinked HOME");
+  chmodSync(home, 0o750);
+  assert.equal(proofScratchHome(preloaded, ram, type, "linux"), undefined, "a nonprivate HOME");
+  chmodSync(home, 0o700);
+  assert.equal(proofScratchHome(preloaded, ram, (path) => (path === home ? RAM_FS[1]! : type(path)), "linux"), undefined, "a RAM-backed HOME");
+});
 
 test("proof and preopen tmp binds belong to each throwaway home", (t) => {
   const { dir } = ownedFixtureDir(t, "disk-sandbox-argv");

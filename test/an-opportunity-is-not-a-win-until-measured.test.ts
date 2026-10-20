@@ -48,6 +48,31 @@ test("W1-T4950: merge without deployment is not a measured win", () => {
   assert.match(outcome.reason, /deployment/);
 });
 
+test("closure reconciliation refuses a future merge before recording delivery", () => {
+  const reading = evidence();
+  delete reading.deployment;
+  reading.pr!.mergedAt = new Date(clock.now() + 1).toISOString();
+  const result = reconcileOpportunityOutcomes(ports(reading))[0]!;
+  assert.equal(result.state, "unavailable");
+  assert.equal(result.pr, undefined, "an API-shaped future receipt is not observed merged work");
+  assert.equal(result.deployment, undefined);
+  assert.equal(result.measurement, undefined);
+  assert.equal(result.leadTimeMs, null);
+  assert.match(result.reason, /merge.*clock/);
+  assert.equal(reading.pr!.mergedAt, new Date(clock.now() + 1).toISOString(), "source is never rewritten");
+});
+
+test("closure reconciliation admits a merge at the observed clock without inventing deployment", () => {
+  const reading = evidence();
+  delete reading.deployment;
+  reading.pr!.mergedAt = clock.iso();
+  const result = reconcileOpportunityOutcomes(ports(reading))[0]!;
+  assert.equal(result.state, "merged");
+  assert.deepEqual(result.pr, reading.pr);
+  assert.equal(result.deployment, undefined);
+  assert.equal(result.measurement, undefined);
+});
+
 test("W1-T4950: same-repo before and after evidence decides help or harm", () => {
   for (const [after, expected] of [[4, "measured-helped"], [12, "measured-hurt"], [8, "deployed"]] as const) {
     const reading = evidence(after);

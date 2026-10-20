@@ -9,7 +9,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "declaration": true,
+    "declaration": false,
     "outDir": "dist",
     "rootDir": "."
   },
@@ -18,7 +18,12 @@
     "nodenext, types [node], no bundler resolution, no `jsx`). W1-T4566 then deleted apps/, the",
     "last browser-shaped tree, so this is the repository's one TypeScript config.",
     "packages/*/src STAYS: packages/api-client is consumed by src/ under Node rules as well as by the",
-    "browser bundle, so the root remains its type authority."
+    "browser bundle, so the root remains its type authority.",
+    "declaration is FALSE (operator ruling 2026-10-20): under --noEmit, TS 7 still computed declaration",
+    "diagnostics for every file, ~35% of the check's allocation, ~2 GB of its 5.1-5.3 GB peak and about half",
+    "its wall time. Nothing consumes tsc's .d.ts output: dist/child-entries is esbuild-built and",
+    "packages/api-client's .d.ts files are generated or hand-written. Accepted cost: declaration-only",
+    "diagnostics (TS2742, TS4xxx) are no longer reported, locally and in CI alike. Measurements: PR 13113."
   ],
   "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
