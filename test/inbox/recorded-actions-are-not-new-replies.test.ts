@@ -3,9 +3,9 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { answerThread, type InboxResponderDeps, type InboxThreadItem } from "../../src/lib/inbox-responder.js";
-import { appendThreadEvent, appendThreadMessage, inboxThreadId, inboxThreadIdentity, type ThreadEventKind } from "../../src/lib/inbox-thread.js";
-import { makeTempDir } from "../../src/lib/tmp.js";
+import { answerThread, type InboxResponderDeps, type InboxThreadItem } from "#src/lib/inbox-responder.js";
+import { appendThreadEvent, appendThreadMessage, inboxThreadId, inboxThreadIdentity, type ThreadEventKind } from "#src/lib/inbox-thread.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = makeTempDir("inbox-recorded-action");
