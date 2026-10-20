@@ -15,7 +15,7 @@
  * bundled main appends tsx's loader to `process.execArgv` at boot. Every such child inherits it, exactly as it did from
  * the tsx main, while this isolate never loads it; a child started from a bundle drops it (execArgvWithoutTsx).
  *
- * FALSIFIER: test/the-daemon-main-starts-from-its-bundle.test.ts.
+ * FALSIFIER: test/worker/the-daemon-main-starts-from-its-bundle.test.ts.
  */
 
 import { existsSync } from "node:fs";

@@ -41,7 +41,7 @@ export const WORKER_ENTRIES = Object.freeze([
   // bundlemain: every other module that starts a worker from its own URL. A bundled main has no tsx loader, so each
   // needs its own bundle: the benchmark cohort cadence, the git credential socket threads, the config measurement, and
   // the console projection, repository telemetry and plan reload workers that serve-side views start.
-  // test/daemon/the-daemon-main-starts-from-its-bundle.test.ts keeps this list complete.
+  // test/worker/the-daemon-main-starts-from-its-bundle.test.ts keeps this list complete.
   "src/lib/benchmark-cohort.ts", "src/lib/secret-boundary.ts", "src/lib/config-gardener.ts", "src/lib/console-projection-worker.ts",
   "src/lib/repo-dashboard-route.ts", "src/lib/serve-plan-reload.ts",
 ]);
