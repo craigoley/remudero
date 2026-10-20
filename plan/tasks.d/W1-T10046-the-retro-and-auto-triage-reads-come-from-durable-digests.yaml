@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/the-retro-and-auto-triage-reads-come-from-durable-digests.test.ts
-  status: queued
+  status: merged
   priority: 1  # about 530 MB of reads, 243 MB of it blocking the main thread, on every boot; boots ran about 2/h on 10-17
   attempts: 0
   rationale: |

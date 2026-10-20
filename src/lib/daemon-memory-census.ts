@@ -26,6 +26,7 @@ import { getHeapCodeStatistics, getHeapSpaceStatistics, getHeapStatistics } from
 import { systemClock, type Clock } from "./clock.js";
 import type { LedgerMemoHolderReading } from "./ledger-union.js";
 import type { HolderReading } from "./serve-memory.js";
+import { installSourceMapCount, sourceMapsParsed, type SourceMapsParsedReading } from "./source-map-count.js";
 
 export const DAEMON_MEMORY_STEP = "daemon.memory";
 export const DAEMON_MEMORY_SAMPLE_FAILED_STEP = "daemon.memory_sample_failed";
@@ -183,20 +184,23 @@ export function censusHolder(name: string, kind: string, calibrationKey: string,
  * THE SOURCE-MAP CACHE. tsx turns source maps on, and every formatted stack (read-plane.ts callerFrame on each sync
  * spawn, worker-heaps.ts spawnSite) parses and KEEPS the map of each module on it, for the life of the isolate.
  * OBSERVED offline by the W1-T9091 builder at a5d569886: all 587 maps add +134.5 MiB of heap. No public API sizes
- * Node's cache, and asking it (module.findSourceMap) would parse the very maps being counted, so the live holder is
- * the census's UPPER BOUND: every map of the daemon's module graph parsed (`parts.upper_bound`), and zero once source
- * maps are off. Which modules' maps are really parsed would need the stack formatters to count them (a follow-up).
+ * Node's cache, and asking it (module.findSourceMap) would parse the very maps being counted. W1-T9822: the stack
+ * formatter counts them instead (source-map-count.ts), so the holder is the maps PARSED x the census's per-map bytes
+ * (`parts.formatted_frames`, a lower bound: see that file), and the census's UPPER BOUND (every map of the daemon's
+ * module graph, `parts.upper_bound`) only when there is no count. Zero once source maps are off.
  */
 export function sourceMapCacheHolder(enabled: () => boolean = () => process.sourceMapsEnabled,
-  table: Readonly<Record<string, CensusCalibration>> = DAEMON_MEMORY_CALIBRATION): DaemonMemoryHolder {
+  table: Readonly<Record<string, CensusCalibration>> = DAEMON_MEMORY_CALIBRATION,
+  parsed: () => SourceMapsParsedReading = sourceMapsParsed): DaemonMemoryHolder {
   return {
     name: "source-map-cache",
     kind: "source-maps",
     size: (): DaemonHolderSize => {
       if (!enabled()) return { entries: 0, bytes: 0, basis: "census", parts: { source_maps_enabled: 0 } };
-      const calibrated = table["source-maps.module"];
-      const estimate = calibrated && censusEstimate("source-maps.module", calibrated.entries, table);
-      return estimate ? { ...estimate, parts: { upper_bound: 1 } } : { entries: 0, bytes: 0, basis: "census", parts: { uncalibrated: 1 } };
+      const count = parsed().parsed;
+      const estimate = censusEstimate("source-maps.module", count ?? table["source-maps.module"]?.entries ?? 0, table);
+      if (!estimate) return { entries: 0, bytes: 0, basis: "census", parts: { uncalibrated: 1 } };
+      return { ...estimate, parts: count === undefined ? { upper_bound: 1 } : { formatted_frames: 1 } };
     },
   };
 }
@@ -264,8 +268,11 @@ export interface DaemonHolderSources {
   tickRead?: () => Record<string, unknown> | undefined;
   /** ledger-union.ts's memo book. */
   ledgerMemos?: () => readonly LedgerMemoHolderReading[];
-  /** Whether this isolate source-maps its stacks (the source-map cache holder). */
+  /** Whether this isolate source-maps its stacks (the source-map cache holder). Given, the source-map count is
+   *  installed (W1-T9822) so the holder can size the maps parsed. */
   sourceMapsEnabled?: () => boolean;
+  /** The source-map count's install and read; default the process's own (source-map-count.ts). */
+  sourceMapCount?: { install: () => void; read: () => SourceMapsParsedReading };
   table?: Readonly<Record<string, CensusCalibration>>;
 }
 
@@ -293,7 +300,11 @@ export function daemonHolderSource(sources: DaemonHolderSources): () => DaemonMe
   }
   const ledgerMemos = sources.ledgerMemos;
   if (ledgerMemos) registry.addSource("ledger-memos", () => ledgerMemoBookHolders(ledgerMemos));
-  if (sources.sourceMapsEnabled) registry.add(sourceMapCacheHolder(sources.sourceMapsEnabled, sources.table));
+  if (sources.sourceMapsEnabled) {
+    const count = sources.sourceMapCount ?? { install: installSourceMapCount, read: sourceMapsParsed };
+    count.install();
+    registry.add(sourceMapCacheHolder(sources.sourceMapsEnabled, sources.table, count.read));
+  }
   return () => registry.holders();
 }
 
@@ -426,6 +437,8 @@ export interface DaemonMemorySampleIo {
   /** /proc/self/status's text. */
   procStatus?: () => string;
   sourceMapsEnabled?: () => boolean;
+  /** W1-T9822: the distinct source maps the stack formatter has parsed (source-map-count.ts). */
+  sourceMapsParsed?: () => SourceMapsParsedReading;
   uptimeSeconds?: () => number;
   /** Monotonic milliseconds, for slices and costs. */
   monotonicMs?: () => number;
@@ -512,6 +525,14 @@ export function capHolders(row: Record<string, unknown>, readings: readonly Daem
   return { ...row, holders: kept, ...(omittedCount > 0 ? { holders_omitted: { count: omittedCount, bytes: omittedBytes } } : {}) };
 }
 
+/** W1-T9822: the row's source maps. `source_maps_enabled` stays for its readers (the W1-T9647 census test and
+ *  scripts/daemon-heap-census.mts); `source_maps.parsed` is the formatter's count, absent when `parsed_basis` names
+ *  why there is none (not-installed, detached, failed). */
+function sourceMapFields(enabled: boolean, reading: SourceMapsParsedReading): Record<string, unknown> {
+  const parsed = reading.parsed === undefined ? {} : { parsed: reading.parsed };
+  return { source_maps_enabled: enabled, source_maps: { enabled, ...parsed, parsed_basis: reading.basis } };
+}
+
 /**
  * One `daemon.memory` row: process, heap spaces, heap and code statistics, source maps, and every holder, sized with
  * a yield between holders and inside any walk. Never a heap snapshot, a forced collection or an inspector session.
@@ -554,7 +575,7 @@ export async function sampleDaemonMemoryCensus(
       external_script_source_bytes: code.external_script_source_size,
     },
     heap_spaces: heapSpaces,
-    source_maps_enabled: (io.sourceMapsEnabled ?? (() => process.sourceMapsEnabled))(),
+    ...sourceMapFields((io.sourceMapsEnabled ?? (() => process.sourceMapsEnabled))(), io.sourceMapsParsed ? io.sourceMapsParsed() : sourceMapsParsed()),
     ...(context.bootHeadSha ? { boot_head_sha: context.bootHeadSha.slice(0, 12) } : {}),
     uptime_s: Math.round((io.uptimeSeconds ?? process.uptime)()),
   };

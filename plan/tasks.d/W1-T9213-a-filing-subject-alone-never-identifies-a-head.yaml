@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13 (\"go ahead with your recommended follow ups to fix and improve all of this\"): found while fixing #11319's head-identity-gate red"
   plan_refs: [W1-T1004, W1-T3706, W1-T3680, W1-T3388, W1-T3745]
   files: [scripts/head-identity-gate.mjs, test/a-filing-subject-alone-never-identifies-a-head.test.ts, test/a-non-code-head-is-identified-by-its-diff.test.ts, test/a-dependabot-head-is-identified-without-a-task.test.ts, test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts]
-  status: queued
+  status: merged
   priority: 1.5 # operator-2026-10-13: a merge gate's identity check can be satisfied by commit-subject wording alone
   attempts: 0
   rationale: |

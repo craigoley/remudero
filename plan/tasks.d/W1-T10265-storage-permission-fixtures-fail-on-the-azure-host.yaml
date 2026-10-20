@@ -10,7 +10,7 @@
   plan_refs: []  # the guards arrived in PR #12998 (evidence-storage) and PR #13009 (shared-workspace), neither carries a Remudero-Task trailer
   files:
     - docs/forensics/storage-permission-fixtures-on-the-azure-host.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (logs-8864/tscfix-pf-fails-main.log: the three files at main 4c83ace0f on this host, run under
