@@ -588,7 +588,7 @@ def main():
         say("HOLD", why, path)
 
     # Phase 2: retire, worktrees first so their common repository can unregister them.
-    retired = held = 0
+    retired = 0
     fresh = process_snapshot() if a.apply else snap
     if a.apply:
         for r in repos:
@@ -619,12 +619,10 @@ def main():
         except Hold as h:
             keep[r.path] = str(h)
             keep_closure(repos, keep, borrowers, lenders_ok)
-            held += 1
             say("HOLD", str(h), r.path)
         except OSError as error:
             keep[r.path] = f"remove-failed ({error.__class__.__name__})"
             keep_closure(repos, keep, borrowers, lenders_ok)
-            held += 1
             say("HOLD", f"remove-failed ({error.__class__.__name__})", r.path)
     for store in sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}):
         run(["git", "--git-dir", store, "worktree", "prune"])
@@ -633,7 +631,7 @@ def main():
         os.makedirs(os.path.dirname(stamp_file), exist_ok=True)
         open(stamp_file, "w").close()
         os.utime(stamp_file, (now, now))
-    say("summary", f"candidates={len(candidates)} retired={retired} held={len(keep) + held} apply={int(a.apply)}")
+    say("summary", f"candidates={len(candidates)} retired={retired} held={len(keep)} apply={int(a.apply)}")
     return 0
 
 

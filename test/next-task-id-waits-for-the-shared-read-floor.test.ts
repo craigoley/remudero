@@ -23,7 +23,9 @@ function fixture(t: TestContext, cooldown?: string, elapsedMs = 120_000) {
   const events: string[] = [];
   const warnings: string[] = [];
   const sleep = (ms: number) => {
-    assert.equal(existsSync(`${path}.lock`), true);
+    // W1-T10271: a floor wait sleeps OUTSIDE the shared lock. Held, every sibling gave up on it after
+    // 1 s, failed open and restamped, so the waiter's window restarted and core's waiter starved.
+    assert.equal(existsSync(`${path}.lock`), false);
     events.push(`sleep:${ms}`);
     now += ms;
   };
@@ -269,7 +271,7 @@ function runNextTaskId(t: TestContext, floor: "advisory" | undefined) {
     const sleeps = [];
     writeFileSync(${JSON.stringify(sleepsPath)}, JSON.stringify(sleeps));
     Atomics.wait = (_view, _index, _value, ms) => {
-      assert.equal(existsSync(stampPath + ".lock"), true, "sleep holds the shared lock");
+      assert.equal(existsSync(stampPath + ".lock"), false, "the floor wait leaves the shared lock free (W1-T10271)");
       assert.equal(Math.round(statSync(stampPath).mtimeMs), stampMs, "sleep precedes stamping");
       sleeps.push(ms);
       now += ms;

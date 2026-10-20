@@ -121,11 +121,11 @@ import {
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { resolveReleasedIds, closedUnmergedRunBranchTaskIds } from "./drain.js";
+import { resolveReleasedIds, closedUnmergedRunBranchRefs } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, type DispatchValueContext } from "./dispatch-value.js";
-import { GhJsonUnreadableResponseError } from "./github-transport.js";
+import { GhJsonUnreadableResponseError, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
@@ -1336,7 +1336,7 @@ export interface DaemonDeps {
   /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** Same contract as `DrainDeps.readClosedRunBranchPrs` (W1-T1207): raw `<head-ref>\t<unmerged>` rows, parsed by
-   *  `closedUnmergedRunBranchTaskIds`. W1-T9482: the daemon arm reads it too, lazily, only for a task holding a pushed
+   *  `closedUnmergedRunBranchRefs`. W1-T9482: the daemon arm reads it too, lazily, only for a task holding a pushed
    *  ref. Absent or throwing keeps every ref blocking. */
   readClosedRunBranchPrs?: () => string;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
@@ -1460,6 +1460,10 @@ export interface DaemonDeps {
    *  an exhaustion — the same fail-soft contract `readUsage` carries. Consulted on the same per-tick
    *  cadence as the headroom block, so no second rate-limit call is made per tick (W1-T372). */
   readGhQuota?: () => GhRateLimitBuckets;
+  /** W1-T10271: the gh read cadence since the previous poll, carried on that poll's `daemon.quota` row:
+   *  this process's reads stamped by floor mode and slots it yielded to a waiting gated read, and every
+   *  process's admitted gated reads. Defaults to {@link takeGhReadCadenceTally}. */
+  takeGhReadCadence?: () => GhReadCadenceTally;
   /** Called at most once per bucket per exhaustion episode, on the tick a bucket first crosses from
    *  having budget to having none. Trap: a bare zero check would re-fire every tick for up to an hour,
    *  so the loop latches per bucket. Unlike `onHeadroomBreach` this never pauses dispatch: it observes
@@ -1856,7 +1860,7 @@ export function lazyClosedUnmerged(read: (() => string) | undefined): (() => Rea
   return () => {
     if (set === undefined) {
       try {
-        set = closedUnmergedRunBranchTaskIds(read());
+        set = closedUnmergedRunBranchRefs(read());
       } catch (error) {
         void error; // unreadable closed-PR sweep: exclude nothing
         set = new Set();
@@ -6167,6 +6171,9 @@ export async function runDaemon(
     // dispatch is never paused on a bucket's account (W1-T372).
     if (deps.readGhQuota) {
       const quota = deps.readGhQuota();
+      // W1-T10271: the read cadence the floor was sized by, measured rather than inferred from quota
+      // deltas. Taken once per poll and carried on the first row written, so a sum never double counts.
+      let cadence: GhReadCadenceTally | undefined = (deps.takeGhReadCadence ?? takeGhReadCadenceTally)();
       for (const bucket of ["core", "graphql"] as const) {
         const reading = quota[bucket];
         if (!reading) continue;
@@ -6175,7 +6182,9 @@ export async function runDaemon(
           remaining: reading.remaining,
           resets_at: reading.resetsAt,
           poll_interval_ms: pollIntervalMs,
+          ...cadence,
         });
+        cadence = undefined;
         // A state transition, not a value check: an exhausted bucket stays exhausted every tick until it
         // resets, so alerting on the raw value would re-fire up to once a minute for an hour. The latch fires
         // only on the tick a bucket first reads exhausted, and clears the instant it reads positive.

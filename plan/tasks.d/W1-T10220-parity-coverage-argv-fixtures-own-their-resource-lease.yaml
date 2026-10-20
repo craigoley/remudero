@@ -10,7 +10,7 @@
   band_meaning: span
   budget_usd: 5.00
   priority: 1.5
-  status: queued
+  status: merged
   attempts: 0
   origin: "Operator-approved separate parity-resource repair, 2026-10-19; normal reservation refs/rmd-id/W1-T10220."
   plan_refs: [W1-T10094, W1-T10153, W1-T4951, W1-T4526, W1-T5655, W1-T5709]

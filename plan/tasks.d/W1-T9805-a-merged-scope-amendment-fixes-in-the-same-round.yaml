@@ -14,7 +14,7 @@
     - src/lib/proof-amendment.ts
     - src/run-task.ts
     - test/a-merged-scope-amendment-fixes-in-the-same-round.test.ts
-  status: queued
+  status: merged
   priority: 1  # raised 2026-10-17 (F17): on #12575 the merged amendment's file never came back at all, so the PR waited for a hand fix; before that, every merged scope amendment added one CI cycle (about 35 min on #12289)
   attempts: 0
   rationale: |

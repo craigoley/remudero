@@ -1,0 +1,136 @@
+- id: W1-T10256
+  title: "THE MAC JANITOR STILL SKIPS WHAT #13134 LEFT — loose session-scratch files, ~/.cache/remudero-* test caches and ~/.npm/_cacache are never reclaimed, a broken alternates entry is held for a person even when its object store exists, and the fixed 20 GiB low-space line names no consumer; reclaim those, repair the alternates, and report a projected low-space block"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the residual the Mac janitor reclaims and reports after #13134; the never-remove rules stay W1-T8861's and preserve-then-retire stays #13134's
+  band_meaning: span
+  origin: "operator 2026-10-20: the janitor should be doing a better job of cleaning up; find ways to reduce the space each worktree needs. Rescoped the same day after #13134 built preserve-then-retire."
+  plan_refs: [W1-T8863, W1-T8861, W1-T4804, W1-T4770, W1-T10257]
+  files:
+    - deploy/mac/remudero-janitor.sh
+    - deploy/mac/tmp-reclaim.sh
+    - deploy/mac/JANITOR.md
+    - test/the-mac-janitor-reclaims-what-it-skipped.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-20: the Mac sits under 4 GB free and every author preflight returns NOT_RUN
+  attempts: 0
+  rationale: |
+    RESCOPED 2026-10-20 against origin/main ffd28dbed, after #13134 (29bfb4333, merged 15:52Z).
+    WHAT #13134 ALREADY BUILT, so this task does NOT:
+    - deploy/mac/preserve-retire.py runs as the janitor's last phase (remudero-janitor.sh ~line 1299).
+    - It is opt-in per account through an owner-private ~/.local/state/remudero/preserve-retire.json.
+    - It saves unpublished commits (verified bundle), the uncommitted patch, untracked and ignored files, refs and a
+      restore MANIFEST to ~/Remudero-preserved, then retires the idle checkout.
+    - It scans ~/Remudero, ~/rmd-work, ~/.codex/work-artifacts and ~/Developer/remudero-operator-worktrees.
+    - It holds unreadable history for a person, including "alternate object store missing" (preserve-retire.py
+      resolve_git).
+    - It rotates the janitor's human log at 16 MiB, keeping one generation.
+    This shard's earlier rules 4 (bundle an unpublished worktree), 10 (preserve dirty work), 11 (Codex
+    work-artifacts) and the janitor.log half of rule 6 are therefore dropped. JANITOR.md "Preserve-then-retire
+    (opt-in per account)" is the contract for them.
+    THE RESIDUAL, observed on the Mac as craigoleyagent on 2026-10-20 (read-only):
+    - The hourly passes reclaimed 0 MB. janitor.log 11:30Z: "removed=0 ... free=2->2GiB" and
+      "WARN low-space: 2GiB free is under the 20GiB floor". tmp-reclaim.log 10:37Z: "Deleted: 0 entries, 0 MB".
+    - ~/Remudero/.session-scratch held 1,536 regular FILES older than 3 days (~460 MB). tmp-reclaim.sh line 410 retires
+      only complete direct-child directories: "Loose files are deliberately left alone."
+    - ~/.cache/remudero-store-fill-*: 6 test-cache dirs from 10-14 (~225 MB). ~/.cache is outside every janitor root.
+      Their creator is not in core's src/test/scripts at 4c83ace0f (the core test uses mkdtemp under tmpdir()).
+    - ~/.npm/_cacache: ~316 MB, never age-pruned. remudero-janitor.sh line 1000 prunes only worker-home/.npm/_cacache.
+    - On the operator account the janitor skipped all 407 checkouts while its error log repeated "unable to normalize
+      alternate object path". #13134 now HOLDS such a checkout for a person even when the object store it meant to
+      borrow from still exists, so the hold never clears by itself.
+    - The low-space line is a fixed floor (MIN_FREE_GIB=20, remudero-janitor.sh line 65; the WARN at line 1389). It
+      names nothing. This account holds ~19 GB of the 193 GB used. The rest is the other account and system areas this
+      account cannot read (Xcode CoreSimulator volumes, Chrome code_sign_clone, Claude Desktop VM bundles), plus swap
+      (/System/Volumes/VM, 7 x 1 GiB swapfiles; `sysctl vm.swapusage` used 5.4 GB at 11:40Z).
+    - preserve-retire is disabled on craigoleyagent: no config file exists, so #13134 reclaims nothing here yet.
+    NOT CARRIED HERE, named so they are not lost (each is its own item if wanted):
+    - #13134 rotates only janitor.log. tmp-reclaim.log (13 MB), janitor-decisions.tsv (5.2 MB) and the cron redirect
+      /tmp/remudero-janitor-<user>.log are still never rotated.
+    - #13134 prunes only the stores of worktrees it retired. 15 pre-existing dead `git worktree` registrations in other
+      stores stay (remudero-janitor.sh deliberately never prunes them).
+    OWNERSHIP:
+    - W1-T8863 (merged) set six hours untouched as the window for tmp-reclaim.sh.
+    - W1-T8861 (merged) owns the never-remove rules. #13134 owns preserve-then-retire.
+    - W1-T4804 (merged) projects time-to-full from the heartbeat, tiered by janitor passes.
+    - No queued shard or open PR on 2026-10-20 reclaims these classes or replaces the fixed low-space floor.
+  design: |
+    THE WINDOW. Every new rung uses the existing six-hour mtime-and-ctime guard plus the process/CWD/open-file probes.
+    It derives nothing new: the operator ruled six hours untouched on 2026-10-12 (W1-T8863). No rung adds a GB floor,
+    count cap or other fixed bound.
+    1. LOOSE SESSION-SCRATCH FILES (tmp-reclaim.sh).
+       - Regular files under ~/Remudero/.session-scratch, at any depth, are judged by their own age.
+       - A file is reclaimed once it and its enclosing direct-child tree pass the mixed-age leaf rule /private/tmp
+         already uses: the enclosing tree's activity is checked, and rechecked at each deletion boundary.
+       - The existing session_scratch_risk exclusions still apply: credential-like names, special files, scheduled log
+         paths, symlinks, files inside a Git checkout, and patch/diff/rej/orig evidence.
+       - Empty directories left behind are removed under the same guard.
+       - The summary line reports files and directories separately: `session scratch files deleted: N, M MB`.
+    2. ~/.cache/remudero-* CACHES (remudero-janitor.sh).
+       - A direct child of ~/.cache is a candidate when it is a real directory named `remudero-*`, owned by this
+         account, holds no .git, *.bundle or lock file, and has had every entry idle for six hours.
+       - NEVER: ~/.cache/remudero itself (the gh read-floor stamp and the host-memory peak store), the janitor's own
+         LOCK_DIR ~/.cache/remudero-janitor.lock (line 51), or any `*.lock` name.
+       - Name the creator of remudero-store-fill-* in the receipt's rationale. If it is a test that leaks, file that leak
+         as its own task; do not fix it here.
+    3. NPM CACHE (remudero-janitor.sh).
+       - Prune $HOME/.npm/_cacache content files idle six hours (mtime and ctime) when no npm/npx process runs as this
+         account, then run `npm cache verify` so the index drops entries whose content is gone.
+       - When npm is not on cron's PATH, fall back to the existing whole-tree clean_artifact rule that worker-home's
+         _cacache already uses.
+       - _npx is pruned the same way.
+    4. REPAIR A BROKEN ALTERNATES ENTRY (remudero-janitor.sh), before the checkout probes and before preserve-retire runs.
+       - A checkout whose objects/info/alternates entry is relative or dangling fails every git probe, and #13134 holds
+         it as history-unrecoverable.
+       - When the object store that entry meant exists (the relative path resolved against the checkout's original
+         objects dir, or a known lender in the same home whose objects dir holds the missing commits), rewrite the
+         entry to that store's absolute path, then re-probe with `git rev-parse HEAD` and `git fsck --connectivity-only`
+         bounded to HEAD.
+       - A repaired checkout is an ordinary candidate again: the janitor's own rules, then preserve-retire when enabled.
+       - When no such store exists, change nothing: #13134's hold stands.
+       - Keep the original alternates file beside it as `alternates.pre-repair` and log each repair by name. A re-probe
+         failure restores the original.
+    5. LOW-SPACE REPORT (remudero-janitor.sh). Replace the fixed 20 GiB `WARN low-space` floor with a projection:
+       - Record each pass's free bytes in a small samples file.
+       - When the projected time-to-full from those samples is inside a few of the janitor's own passes, log one
+         `low-space-report:` block. Use the same tiering W1-T4804 ruled: passes, not a GB floor.
+       - Report the top consumers this account can see: bounded `du -xsk` of $HOME's direct children and the known
+         roots, at most once per pass, with the existing inspection budget.
+       - Report swap from `sysctl vm.swapusage`.
+       - Report `unaccounted = used - seen - swap`, attributed to "other accounts and system areas this account cannot
+         read". The report names the action: the operator acts there.
+       - Report whether preserve-retire is enabled for this account and, when it is not, what its last dry-run would
+         have retired (count and bytes), so the operator can see the cost of the option below.
+       - The EMERGENCY line and preflight-author's 20 GiB reserve are not changed here.
+    6. RECEIPTS. Each new rung writes rows to janitor-decisions.tsv with the existing reason-code columns: removed,
+       repaired, repair-reverted, low-space-report.
+    OPTION FOR THE OPERATOR, NOT BUILT HERE: preserve-retire on by default for agent accounts.
+    - Today #13134 is opt-in per account, and craigoleyagent has no config, so its idle checkouts are held forever.
+    - Option A (default on for agent accounts): install-janitor.sh writes an owner-private preserve-retire.json with
+      `enabled: true` for an account the operator names as an agent account (for example craigoleyagent). Cost: work
+      that is never restored is gone after retain_days; every copy sits in ~/Remudero-preserved until then.
+    - Option B (stay opt-in, made visible): rule 5's report shows the dry-run reclaim, and the operator enables it per
+      account by hand.
+    - Option C (default on, longer retain): as A, with a longer retain_days for agent accounts.
+    - The builder implements only rule 5's visibility (B). It never writes preserve-retire.json and never changes
+      #13134's default. Flipping the default is the operator's ruling.
+  acceptance:
+    - claim: "the janitor reclaims idle loose session-scratch files, ~/.cache/remudero-* caches and old npm cache content, while recent, open, credential-named, ~/.cache/remudero and the janitor's own lock are kept"
+      proof: 'grep: test("W1-T10256: the Mac janitor reclaims the residual #13134 left and keeps what is live" in test/the-mac-janitor-reclaims-what-it-skipped.test.ts'
+    - claim: "a dangling alternates entry is rewritten to its existing object store and re-probed, a failed re-probe restores the original, and an entry with no store is left for #13134's hold"
+      proof: 'grep: test("W1-T10256: a broken alternates entry is repaired when its store exists" in test/the-mac-janitor-reclaims-what-it-skipped.test.ts'
+    - claim: "on a projected time-to-full the janitor logs one low-space-report block naming the visible top consumers, swap, the unreadable remainder and preserve-retire's state, in place of the fixed 20 GiB floor"
+      proof: 'grep: test("W1-T10256: a projected low-space report names consumers and the unreadable remainder" in test/the-mac-janitor-reclaims-what-it-skipped.test.ts'
+  falsifier: |
+    Restore "loose files are deliberately left alone": the 7 h-old fixture file in a mixed-age scratch dir survives, and
+    the first test fails.
+    Glob ~/.cache/remudero* without the exclusions: the fixture's ~/.cache/remudero/gh-last-read or
+    remudero-janitor.lock is removed, and the first test fails.
+    Hold every dangling alternates entry as today: the fixture checkout whose lender exists stays unreadable, and the
+    second test fails. Rewrite without re-probing: the fixture with a wrong store keeps the bad entry, and it fails.
+    Keep the fixed `MIN_FREE_GIB` floor: a fixture with 25 GiB free shrinking fast logs no report, and the third test
+    fails.

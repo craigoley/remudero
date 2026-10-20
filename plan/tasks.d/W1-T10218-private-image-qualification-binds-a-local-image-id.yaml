@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   budget_usd: 8.00
   priority: 1.2
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-console-follow-up:approved-safe-serve-adoption-2026-10-19"
   plan_refs: [W1-T2571, W1-T2867, W1-T10058]

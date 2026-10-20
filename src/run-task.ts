@@ -63,12 +63,13 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "n
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
+import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, setGhReadActorResolver, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -489,7 +490,7 @@ import { reapWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
-import { escalationSpoolDrain, spoolingIssueVoice } from "./lib/host-escalation-spool.js";
+import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { testPlaceOutcome } from "./lib/test-placement.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
@@ -1058,6 +1059,7 @@ import {
   isSpawnInfraBlockedError,
   LEDGER_COST_TAG_INFRA,
   DECISION_RELEVANT_LEDGER_STEPS,
+  deriveLedgerActor,
   markDaemonProcessActor,
   markLedgerProcessActor,
   MAX_RETAINED_LINES_PER_STEP,
@@ -2827,6 +2829,7 @@ import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
+import { installStarvationAlertSink } from "./lib/host-memory-admission.js";
 import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
@@ -16991,6 +16994,8 @@ export interface RunTaskContext {
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
   workerStateSensor: WorkerStateSensor;
+  /** Swaps the whole plan for one of this run's task after the body's last plan read, before the first agent wait. */
+  releasePlan?: () => void;
 }
 
 /**
@@ -17798,6 +17803,8 @@ async function runTask(
      * loads for itself exactly as it always has.
      */
     planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
+    /** A run child's collection at each agent wait, ledgered as {@link RUN_AGENT_WAIT_HEAP_STEP}; absent in-process. */
+    atAgentWait?: () => Promise<AgentWaitHeap>;
     /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
      *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
      *  task the projection already reports merged refuses at zero cost, verdict
@@ -18047,8 +18054,18 @@ async function runTask(
   // adapter's structural boundary proof below.  Ordinary runs keep the existing per-spawn auction.
   const cashContainmentState = { contained: false };
   const cashContainmentBoundary = opts.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
+  // A wait allocates almost nothing, so no GC would take the setup garbage before the kernel swapped it (agent-wait-heap.ts).
+  const observeAgentWait = (): void => {
+    if (!opts.atAgentWait) return;
+    const waitingOn = restartPhase.current;
+    opts.atAgentWait().then(
+      (heap) => log(RUN_AGENT_WAIT_HEAP_STEP, { waiting_on: waitingOn, ...heap }),
+      (error: unknown) => log(RUN_AGENT_WAIT_HEAP_STEP, { waiting_on: waitingOn, error: String((error as Error)?.message ?? error) }),
+    );
+  };
   const spawn: typeof spawnWorker = (requestedSpawnArgs) => {
     noteRestartPhase(restartPhase.current);
+    observeAgentWait();
     // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
     const socketPath = runChildCredentialSocket(opts.gitCredentialSocketPath);
     const spawnArgs = chainAbortSignal(socketPath
@@ -18392,6 +18409,10 @@ async function runTask(
       taskId,
       workerAbandonMs,
       workerStateSensor,
+      releasePlan: () => {
+        plan = { tasks: [task], byId: new Map([[task.id, task]]) };
+        ctx.plan = plan;
+      },
     };
     return await runTaskBody(ctx);
   });
@@ -19206,7 +19227,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     openTaskIds,
     opts,
     owner,
-    plan,
     planPath,
     recordDecisionFn,
     repoRoot,
@@ -19276,7 +19296,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // (lib/retro.ts's aggregateByClass) reads alongside this line's cost/verdict.
     task_class: taskClass,
     mount_class: mountClass,
-    task_shape: dispatchTaskShape({ task, tasks: plan.tasks, ledgerPath, lane: "run-task", reconUnavailableReason: "recon-not-yet-run" }),
+    task_shape: dispatchTaskShape({ task, tasks: ctx.plan.tasks, ledgerPath, lane: "run-task", reconUnavailableReason: "recon-not-yet-run" }),
     provider: mount.provider,
     worker_role: "implementer",
     budget_usd: budgetUsd,
@@ -19979,7 +19999,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T2920: `plan` (loaded a few lines above) already carries every task's `sourcePath`, so
     // this is a `Map.get` rather than the walk-and-reparse-every-shard fallback — the cost this
     // task exists to stop paying once per dispatch prompt.
-    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, plan));
+    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, ctx.plan));
+    ctx.releasePlan?.();
     // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
     // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
     // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
@@ -23393,11 +23414,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let spawnReviewer = false, reviewerMount: Mount | undefined;
   let settingsFile = "";
   if (executionMode === "semantic") {
-    // W1-T3387: an untrailered / unfiled PR is still a PR the fleet chose to review. No task id means
-    // nobody DECLARED a risk, not that the risk is low — so the `PR-<number>` identity (the one every
-    // ledger row above already uses) reviews under the default risk and a default hard cap instead of
-    // skipping the reviewer and letting the keyword floor decide alone.
-    if (!taskId || taskId === UNFILED_RUN_SENTINEL) {
+    // Unfiled PRs and exact generated lanes use bounded defaults; semantic review remains required.
+    // A missing real task shard still refuses rather than inheriting these defaults (W1-T3387).
+    if ((!taskId || taskId === UNFILED_RUN_SENTINEL) ||
+        (resolverDivergence === undefined && usesUntaskedReviewMetadata(taskId, view.headRefName))) {
       taskRisk ??= DEFAULT_RISK;
       taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
       log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
@@ -36110,7 +36130,7 @@ const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
  * paginated `pulls?state=closed` sweep, over the SAME `boardPrsRestArgs` shape `rmd reap-branches`
  * already reads (design (iii): "the capability is precedented and the cost is ONE additional
  * batched call per pass, never one lookup per branch"). Returns raw `<head-ref>\t<unmerged>` rows
- * for {@link closedUnmergedRunBranchTaskIds} (drain.ts) to parse ONCE PER PASS, above the dispatch
+ * for {@link closedUnmergedRunBranchRefs} (drain.ts) to parse ONCE PER PASS, above the dispatch
  * loop — never re-read per candidate, mirroring `readPushedRunBranchesOutput`'s own contract.
  *
  * `state=closed` returns BOTH merged and unmerged pull requests — GitHub has no separate
@@ -36127,7 +36147,7 @@ const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
  *
  * FAILS TOWARD STILL BLOCKING, THE OPPOSITE DIRECTION FROM `readPushedRunBranchesOutput`'s OWN
  * FAIL OPEN: a throw here (network blip, auth, rate limit) yields `""`, which parses to an EMPTY
- * exclusion set (drain.ts's `closedUnmergedRunBranchTaskIds("")`), so every pushed run branch
+ * exclusion set (drain.ts's `closedUnmergedRunBranchRefs("")`), so every pushed run branch
  * keeps blocking exactly as it did before this dependency existed — see that field's own doc for
  * why this direction, not the other one, is the only safe default for a guard deciding whether a
  * duplicate build starts.
@@ -36823,7 +36843,7 @@ async function drainCommand(
         // UNMERGED must stop blocking dispatch (a leftover, not a signal — design (i)), so the
         // predicate above needs the PR's state as well as the branch's existence. ONE batched,
         // paginated `pulls?state=closed` sweep per pass, parsed once by
-        // `closedUnmergedRunBranchTaskIds` (drain.ts) and subtracted from the pushed-branch set —
+        // `closedUnmergedRunBranchRefs` (drain.ts) and subtracted from the pushed-branch set —
         // never a second predicate threaded through the chain, and never one lookup per branch.
         readClosedRunBranchPrs: () => readRunBranchClosedPrsOutput(owner, repo),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
@@ -47345,7 +47365,8 @@ export async function inboxBakeoffCommand(
   const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
   const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
   try {
-    const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+    // Match the production draft rung: a monolith-only sample silently omits shard dependencies.
+    const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
     const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {
       const cash = candidate.billing === "cash";
       // A cash candidate is pinned by restricting the cash ladder to its one deployment; the subscription candidate
@@ -53437,7 +53458,7 @@ import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
 } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
-import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger } from "./lib/tick-read-worker.js";
+import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -54216,6 +54237,7 @@ export async function main(
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
+  setGhReadActorResolver((env) => deriveLedgerActor(env));
   // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
   // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
   // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and
@@ -54237,6 +54259,7 @@ export async function main(
   // W1-T7094: every worker start this process makes writes its counterfactual `memory_budget.shadow` row to the
   // ledger of the root that start names. The recorder never throws and never delays the start; SHADOW ONLY.
   installShadowMemorySink((path, row) => appendLedger(path, row));
+  installStarvationAlertSink(spoolingStarvationAlert({ source: "memory-budget", host: hostname(), clock: systemClock }));
   // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
   // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
