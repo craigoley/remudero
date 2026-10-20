@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { boundChildByLoopTime, childLoopBound, execFileLoopBounded } from "./loop-bounded-child.js";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -153,6 +153,18 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
 // 180 s floor is not applied here: the broker paces every session's reads from GitHub's own headers.
 // Writes and the budget probe never move. With no live broker every path below is unchanged, which is
 // every host but an operator's Mac.
+
+/** W1-T10279: one `gh` run for the Mac read broker's upstream calls, as a direct call would make it,
+ *  answering its stdout, stderr and exit code rather than throwing — the broker paces and caches
+ *  on all three. It lives here because this module owns every `gh` spawn (gh-transport census). */
+export function ghRunForBroker(args: string[], opts: { cwd?: string; maxBuffer: number }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve) => {
+    execFile("gh", args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: opts.maxBuffer, timeout: DEFAULT_GH_CALL_TIMEOUT_MS }, (err, stdout, stderr) => {
+      const code = (err as { code?: unknown } | null)?.code;
+      resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), exitCode: err ? (typeof code === "number" ? code : 1) : 0 });
+    });
+  });
+}
 
 /** The broker socket for this read, or `undefined` for today's direct, floored path. */
 function ghBrokerSocketFor(args: readonly string[], env: NodeJS.ProcessEnv | undefined): string | undefined {

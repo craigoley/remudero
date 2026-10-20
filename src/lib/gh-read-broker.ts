@@ -23,7 +23,7 @@
  * is the operator-approved exception (2026-10-20), an account-local helper installed like the Mac janitor
  * by deploy/mac/install-gh-read-broker.sh. It makes only GitHub READS, as the account's own `gh` identity.
  */
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync, chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync,
@@ -37,7 +37,7 @@ import {
   type GhBrokerClass, type GhBrokerOutcome, type GhBrokerProgress, type GhBrokerReadRequest, type GhBrokerResult,
 } from "./gh-read-broker-client.js";
 import {
-  classifyGhLimitFailure, DEFAULT_GH_CALL_TIMEOUT_MS, DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS,
+  classifyGhLimitFailure, DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghRunForBroker,
   ghArgvIsWrite, ghBrokerClassForActor, parseGhRateLimitHeaders, splitGhHeaderBlock,
 } from "./github-transport.js";
 import { deriveLedgerActor } from "./ledger.js";
@@ -265,12 +265,7 @@ export interface GhUpstreamResult {
 /** The account's own `gh`, as a direct call would run it. Injected in tests: no real `gh`, no network. */
 export type GhUpstreamExec = (args: string[], opts: { cwd?: string }) => Promise<GhUpstreamResult>;
 
-export const defaultGhUpstreamExec: GhUpstreamExec = (args, opts) => new Promise((resolve) => {
-  execFile("gh", args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS }, (err, stdout, stderr) => {
-    const code = (err as { code?: unknown } | null)?.code;
-    resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), exitCode: err ? (typeof code === "number" ? code : 1) : 0 });
-  });
-});
+export const defaultGhUpstreamExec: GhUpstreamExec = (args, opts) => ghRunForBroker(args, { cwd: opts.cwd, maxBuffer: 1 << 26 });
 
 export interface GhReadBrokerCounts {
   "hit-fresh": number;

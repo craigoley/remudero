@@ -5,7 +5,7 @@
  *   argv: <socket path> <class> <gh args...>
  * If the broker cannot be reached it runs `gh` itself, so a read is never lost to a broker restart.
  */
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { brokerGhRead, isGhBrokerClass } from "./lib/gh-read-broker-client.js";
 
 const [socketPath, cls, ...args] = process.argv.slice(2);
@@ -17,5 +17,9 @@ try {
 } catch (err) {
   // The broker went away after the caller saw its heartbeat: the read goes to gh directly instead.
   process.stderr.write(`gh-broker: unreachable (${String((err as Error)?.message ?? err)}); running gh directly\n`);
-  process.exitCode = spawnSync("gh", args, { stdio: "inherit" }).status ?? 1;
+  process.exitCode = await new Promise<number>((resolve) => {
+    const child = spawn("gh", args, { stdio: "inherit" });
+    child.on("error", () => resolve(1));
+    child.on("close", (code) => resolve(code ?? 1));
+  });
 }
