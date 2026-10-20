@@ -47364,7 +47364,8 @@ export async function inboxBakeoffCommand(
   const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
   const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
   try {
-    const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+    // Match the production draft rung: a monolith-only sample silently omits shard dependencies.
+    const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
     const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {
       const cash = candidate.billing === "cash";
       // A cash candidate is pinned by restricting the cash ladder to its one deployment; the subscription candidate
