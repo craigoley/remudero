@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync,
   readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { compactEvidenceRoot, compressEvidenceFile, eligibleEvidence, evidenceDigest,
@@ -12,7 +12,9 @@ import { evidenceStorageConfig, main } from '#scripts/maintain-evidence-storage.
 
 const uid = process.getuid!();
 function fixture(t: TestContext): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'rmd-evidence-storage-')));
+  // The production guard intentionally refuses world-writable ancestors such as
+  // Linux /tmp. Own the fixture beneath the account's private home instead.
+  const dir = realpathSync(mkdtempSync(join(homedir(), '.rmd-evidence-storage-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
