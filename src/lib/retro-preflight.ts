@@ -324,7 +324,9 @@ export function classifyPreflightOutput(output: string): PreflightOutcomeClassif
     const name = tap?.[1] ?? spec?.[1];
     if (name !== undefined) {
       settle();
-      pending = Buffer.from(name.trim(), "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8");
+      if (failing.size + cancelled.size < MAX_FAILING_TESTS) {
+        pending = Buffer.from(name.trim(), "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8");
+      }
       // The spec reporter prints no YAML block, so its verdict is settled on the next line.
       pendingCancelled = false;
       continue;
@@ -338,7 +340,7 @@ export function classifyPreflightOutput(output: string): PreflightOutcomeClassif
       if (/^\s*\.\.\.\s*$/.test(line) || (line.length > 0 && !/^\s/.test(line))) settle();
     }
 
-    if (failing.size + cancelled.size >= MAX_FAILING_TESTS) break;
+    // Bound retained names, not the scan: the real summary and cancellations can follow the cap.
   }
   settle();
 
