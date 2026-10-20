@@ -47,3 +47,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.93
+    reasons:
+      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The supplied rounds establish recurring failures, but do not establish flakiness or a shared root cause; the detailed excerpt shows an assertion failure about prompt and environment ordering.; on the change's description/files alone, no diff was read — The filing names src/lib/config.ts because the failing test imports it, but supplies no diagnosis connecting that file to a preventive remedy. The proposed finding cannot be verified from the evidence shown.; on the change's description/files alone, no diff was read — Acceptance checks for a test declaration via grep; that evidence alone cannot establish that the failure is prevented rather than retried."
+    judged_at: "2026-10-20T09:58:53.072Z"
+    pin: "35c21d86c8f6f68bcfb5db76666ebcd0e10cb8a5749fee92d75918fa0c81327f"
