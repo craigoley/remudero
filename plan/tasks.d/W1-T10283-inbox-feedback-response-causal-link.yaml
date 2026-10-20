@@ -11,6 +11,7 @@
   origin: feedback#console-inbox-causal-response-20261020
   plan_refs: ["§7B", "P25", "W1-T194", "W1-T4088", "W1-T9252"]
   files:
+    - src/cli/commands/daemon.ts
     - src/lib/inbox-thread.ts
     - src/lib/inbox-responder.ts
     - src/lib/inbox.ts
@@ -100,6 +101,13 @@
     receipts and same-committed-tree instrumented diff coverage, naming the SHA; helper-only mocks,
     test-title greps and a fabricated mutant result are not evidence.
   note: |
+    Scope correction: the production responder callback now lives in src/cli/commands/daemon.ts.
+    That callback forwards to fleetRatify.reframe and currently discards the returned handoff.
+    Add only this existing composition file so the already-required consumed input identity and
+    completion outcome can cross the real daemon callback, rather than a test-only replacement.
+    Retain the existing high-risk span, behavioral acceptance, action gates and single-writer
+    coordination with W1-T10272. This is not a risk ruling, release or runtime activation.
+
     Recovery preserves the original completed native triage and its W1-T10283 reservation on
     run-TRIAGE-console-inbox-causal-response-20261020-1792527686941. Its first push was refused
     locally for four identical whole-file acceptance proofs; nothing was published. Replace
