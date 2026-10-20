@@ -39,7 +39,7 @@ function rig(root: string, extraOptions: Record<string, unknown> = {}) {
     spawnArgs: { cwd: join(root, "wt"), settingsFile: join(root, "settings.json") } as never,
     task: { files: ["src/a.ts"], acceptance: [] } as never,
     provider: () => "claude",
-    log: (step, fields) => rows.push({ step, fields }),
+    log: (step: string, fields: Record<string, unknown>) => rows.push({ step, fields }),
     recyclePending: () => recyclePauseDetail(root),
     ...extraOptions,
   } as never, {
