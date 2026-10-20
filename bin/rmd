@@ -40,14 +40,6 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
   exec node "$DIR/scripts/rmd-help.mjs"
 fi
 
-# bundlemain (operator ruling 2026-10-19, extending docs/adr/0006-precompiled-daemon-child-entries.md): the daemon's own
-# long-lived main starts from the run-task bundle under plain node when scripts/build-child-entries.mjs vouches it is
-# current for this tree (building it once if stale), with its linked .map read through --enable-source-maps. tsx's
-# loader is NOT on this node line: loaded beside the bundle it transforms all 12 MB of it (OBSERVED offline 2026-10-20,
-# 956 MiB RSS against 198 MiB without it). The bundled main hands the loader to the children it starts from a .ts
-# source instead (src/lib/main-entry.ts). Any doubt (stale, unbuilt, a worker without a bundle, no map, a bundled boot of this source that never reached its
-# first tick, `dist/child-entries/main-entry.off`, or the resolver failing) execs the tsx line below, unchanged.
-# RMD_MAIN_ENTRY hands the choice to the daemon, which ledgers it (daemon.entry.selected).
 if [ "${1:-}" = "daemon" ]; then
   RMD_MAIN_CHOICE="$(node "$DIR/scripts/build-child-entries.mjs" --root "$DIR" --main-entry "$1" 2>/dev/null || true)"
   RMD_MAIN_KIND="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f1)"
