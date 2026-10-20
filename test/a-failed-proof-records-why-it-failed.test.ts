@@ -3,15 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   execWhitelistedProof, judgeReview, judgeReviewAsync, parseWhitelistedProof,
   ProofCannotLoadError, recordFailureTail, type ProofExecutor, type ReviewVerdict,
 } from "#src/lib/review.js";
 import { runReview } from "#src/run-task.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { REPO_ROOT as ROOT } from "#test/helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PROOF = "unit test: test/a-failed-proof-records-why-it-failed.test.ts";
 const CAUSE = "fatal: unable to access .git/config: Permission denied";
 const DIFF = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const a = 1;\n";
