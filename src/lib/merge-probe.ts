@@ -8,6 +8,7 @@ import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
 import {
   canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, seedBuildInfo, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES,
+  typecheckEnv,
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
@@ -238,8 +239,9 @@ function harnessTypecheck(
         };
         try {
           const tight = lowMemoryTypecheckArgs((testSlot?.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
+          // The proof env is an allowlist that drops an inherited GOMEMLIMIT, so the daemon's own limit is passed on.
           const child = spawnChild(process.execPath, [...mergedTypecheckArgv(tsc, self.buildInfo, config), ...tight], {
-            cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: proofChildEnv(home),
+            cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: typecheckEnv(proofChildEnv(home), process.env.GOMEMLIMIT),
           });
           timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MERGED_TYPECHECK_TIMEOUT_MS);
           const take = (chunk: Buffer) => { if (output.length < 1_000_000) output += chunk.toString("utf8"); };

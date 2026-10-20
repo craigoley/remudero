@@ -46,7 +46,7 @@ import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWind
 import type { ModelApproval } from "./config-schema.js";
 import {
   hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES,
-  TYPECHECK_WARM_PEAK_BYTES,
+  TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, testSlotExecutionAllowed, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
@@ -4351,7 +4351,7 @@ async function executeOpenWeightTool(
           argv,
           cwd: realpathSync(cwd),
           workerHome,
-          env: checkEnv,
+          env: args.check === "typecheck" ? typecheckEnv(checkEnv) : checkEnv,
         });
         ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode: 0, scopeRule });
         return { check: args.check, exitCode: 0, output: stdout.slice(-20_000), ...scoped };
