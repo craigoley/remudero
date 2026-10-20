@@ -155,7 +155,8 @@ test("an admitted host-gap refusal remains attributable after real ledger rotati
     const before = hostGapRereviewFacts(pr(), readLedgerLines(path));
     assert.equal(before.history.length, 1, "the real writer's exact carrier joins the library refusal");
     assert.equal(before.history[0]?.completed, true);
-    assert.equal(rotateLedger(path, { ceilingBytes: 1 }).rotated, true, "the real default rotation must run");
+    assert.equal(rotateLedger(path, { ceilingBytes: 1, now: () => new Date(NOW) }).rotated, true,
+      "the real default rotation runs in the same clock domain as its fixture rows");
     const retained = readLedgerLines(path);
     assert.equal(retained.filter(row => row.step === "sweep.review_admitted").length, 1,
       "positive control: rotation retains the admission");
