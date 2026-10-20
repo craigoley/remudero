@@ -1,0 +1,25 @@
+- id: W1-T10195
+  title: A follow-up that asks to wire a classifier that is not on main is closed on the record, not built
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=ef61c78978aec325
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9399-ci-friction-remedy-8cfe5bc13ae74a09.yaml
+  acceptance:
+    - claim: "W1-T9399's rationale records that the harvested follow-up to wire the classifier into fix round dispatch is moot, because mechanicalRatchetOf is absent from main and its PR #12776 landed no caller"
+      proof: "grep: follow-up to wire the classifier into fix round dispatch is moot in plan/tasks.d/W1-T9399-ci-friction-remedy-8cfe5bc13ae74a09.yaml"
+  origin: followup:DAEMON-1792325506022:2026-10-18T13:54:22.706Z:0
+  rationale: >-
+    From the 2026-10-18 follow-up on https://github.com/craigoley/remudero/pull/12776, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: Wire the classifier into fix round dispatch in `src/run-task.ts`;
+    the existing classifier has no caller, so it does not yet prevent the round required by
+    acceptance criterion 1. — from W1-T9399 (run DAEMON-1792325506022,
+    https://github.com/craigoley/remudero/pull/12776)

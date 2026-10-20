@@ -156,7 +156,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
 
   /** The same re-judgement a GET applies, so an event's etag is the one the refetch answers with. */
   const judge = (readModel: NonNullable<ViewEventsOptions["readModel"]>, entry: ViewBodyEntry, now: number): Judged => {
-    const sources = readModel.judge(entry.body.sources, now);
+    const sources = readModel.judge(entry.body.sources, now, { view: entry.view, key: entry.key });
     const stale = sources.some((source) => source.state !== "fresh");
     const etag = stale === entry.body.stale ? entry.etag : viewEtag(entry.view, entry.version, stale, entry.body.data);
     return { entry, etag, stale, asOf: oldestAsOf(sources), sources };

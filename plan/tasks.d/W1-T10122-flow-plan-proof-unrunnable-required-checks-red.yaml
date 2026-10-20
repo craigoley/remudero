@@ -1,0 +1,35 @@
+- id: W1-T10122
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — plan-proof-unrunnable:required checks red cost 2.47 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.32
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:plan-proof-unrunnable:required checks red"
+  files:
+    - src/lib/fix-lane-gardener.ts
+    - test/flow-plan-proof-unrunnable-required-checks-red.test.ts
+  acceptance:
+    - claim: "plan-proof-unrunnable:required checks red is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T10122: flow-plan-proof-unrunnable-required-checks-red clears without a person\" in test/flow-plan-proof-unrunnable-required-checks-red.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    plan-proof-unrunnable:required checks red cost 2.47 PR-hours; owner plan-repair
+    Owner plan-repair failed to clear eligible episodes.
+    Source owner: src/lib/fix-lane-gardener.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #12695: 2.23 PR-hours — required checks red — ci-log fix, fix round 1 — judge: escalate (This red was already escalated at the current head and red set; there is no f...) — NOT DISPATCHED this pass: this fix progress loop is already escalated; awaiting new evidence or an operator answer
+    - PR #11888: 0.23 PR-hours — required checks red — ci-log fix, fix round 1 — judge: continue (This is round 0 with no prior attempts, repeated diffs, or persistent reviewe...) — NOT DISPATCHED this pass: deferred to full sweep (light pass)
+    - PR #11619: 0.11 PR-hours — required checks red — ci-log fix, fix round 1 — judge: continue (Round count is 0 and no rounds have run against redClass acceptance-author-ga...) — mergeability unread this pass; inherited last known "clean" observed 2026-10-14T11:01:37.841Z for this exact head a91a120 (W1-T4470) — NOT DISPATCHED this pass: metadata-only red escalated: the body has no judgeable Acceptance block and the diff adds no test file, so no proof that misses at base is derivable; a generic block would pass at base and fail proof-discrimination; no fix worker dispatched
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The rationale groups an existing escalation awaiting evidence or an operator answer, a light-pass deferral, and a metadata-only proof failure as one owner failure; the supplied evidence does not establish a shared repairable cause.; on the change's description/files alone, no diff was read — Acceptance requires clearance without manual intervention, but the filing specifies no remedy or boundary preserving the cited escalation and proof requirements. Whether this changes review policy cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The declared grep proof checks for test-title text; it does not establish that automatic clearance preserves those requirements."
+    judged_at: "2026-10-18T08:04:31.645Z"
+    pin: "7ace295aca0a7674748a0054a1a541990e44d2b39ce087141a6f3a73947fe859"

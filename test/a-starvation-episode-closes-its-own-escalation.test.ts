@@ -10,6 +10,7 @@ import type { RunResult } from "../src/run-task.js";
 import { runDaemon, type StarvationCensus, type StarvationClearedInfo } from "../src/lib/daemon.js";
 import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger } from "../src/lib/ledger.js";
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
+// @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 /**
  * W1-T2476 — "A STARVATION EPISODE ENDS TWICE IN THE DAEMON'S OWN WORDS AND NOBODY OUTSIDE THE
@@ -534,7 +535,7 @@ test("REACHABILITY, end to end: runDaemon → escalateStarvation opens → the e
 // comment-stripped copy so a mention in prose can never satisfy it (the #339/W1-T281 bug class:
 // a proof that only greps a COMMENT passes on entirely unbuilt wiring).
 
-const RUN_TASK_SRC = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const RUN_TASK_SRC = readFileSync(fileURLToPath(new URL("../src/cli/commands/daemon.ts", import.meta.url)), "utf8") + "\n" + readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 /**
  * Source with COMMENT LINES dropped — what remains is code that actually runs.
  *
@@ -569,7 +570,7 @@ test("CONTROL: the comment-stripped source is not vacuous — it still carries t
   // If the stripper ate the file, the assertions above would pass or fail for the wrong reason.
   assert.match(
     RUN_TASK_CODE,
-    /import \{[\s\S]*escalateStarvationCleared,[\s\S]*\} from "\.\/lib\/escalation-catalogue\.js"/,
+    /import \{[\s\S]*escalateStarvationCleared\b[\s\S]*\} from "(?:\.\/|\.\.\/\.\.\/)lib\/escalation-catalogue\.js"/,
     "the function under test must be locally bound from the moved catalogue",
   );
   assert.match(

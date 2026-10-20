@@ -7,7 +7,7 @@
   risk: high
   band_meaning: blast-radius
   priority: 1.2
-  status: queued
+  status: merged
   attempts: 0
   author_class: operator
   origin: "ci-friction:check:ci-log:scan"

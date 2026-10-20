@@ -37,6 +37,7 @@ import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { judgeSource } from "./view-freshness.js";
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
+import { createViewHoldBook, type ThreadHolds } from "./worker-heaps.js";
 import { createWorkstreamsProjectionReuse, WORKSTREAMS_REUSE_AUDIT_MS } from "./workstreams-projection-reuse.js";
 
 export const WORKSTREAMS_VIEW_NAME = "workstreams";
@@ -270,7 +271,9 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: WorkstreamsData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   stages(): Record<string, number> | undefined;
+  heldSizes(): ThreadHolds;
 } {
+  const holds = createViewHoldBook();
   const debounceMs = opts.debounceMs ?? WORKSTREAMS_DEBOUNCE_MS;
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
@@ -433,6 +436,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
       if (pending) {
         const b = pending;
         body = { instances: b.instances.map((instance, i) => ({ instance: instance.name, activity: b.activities[i]! })) };
+        holds.account("workstreams:retained-body", body, body.instances.length, "instances");
         shown.set(body, { builtMs: b.now, entries: b.entries });
         builtFingerprint = b.fingerprint;
         dirtySince = b.dirtySince;
@@ -454,6 +458,19 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
     },
     /** `ReadModelView.stages`: each `<instance>.<stage>`'s ms in the last `materialize`, for `read_model.slow_view`. */
     stages: () => (Object.keys(ran).length > 0 ? { ...ran } : undefined),
+    heldSizes: () => {
+      for (const [name, map] of Object.entries({ instances: byName, "behind-memo": behindMemo, "gateway-sources": gatewaySources,
+        "legacy-memo-index": legacyMemos, "live-ledger-tails": liveLedgerTail, "reuse-audits": reuseAuditedAt })) {
+        if (map.size) holds.unsized(`workstreams:${name}`, map.size, "shared memo, source or closure state; exclusive bytes unavailable", "keys");
+        else holds.forget(`workstreams:${name}`);
+      }
+      if (body) holds.unsized("workstreams:shown", 1, "one WeakMap of paired bodies; live key count and retained bytes unavailable", "container");
+      holds.unsized("workstreams:projection-reuse", 1, "opaque reuse cache retains shared parsed rows and derived indexes", "container");
+      holds.unsized("workstreams:stage-timings", 1, "mutable timing record; retained byte size not measured", "container");
+      if (pending) holds.unsized("workstreams:pending-build", 1, "in-flight state aliases plans, gateways and activity rows", "container");
+      else holds.forget("workstreams:pending-build");
+      return holds.read();
+    },
     /**
      * The shadow side: what GET /v1/operator-activity answers over the same build's plan half, with its
      * activity read the route's way (the memoized ledger union) up to the ring's newest row, and of the live
@@ -472,6 +489,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
         const livePath = join(b.instance.ledgerDir, LEDGER_FILENAME);
         const union = readLedgerUnionBounded(livePath, { rotationRecords: pass.rotationRecords, ...(b.liveApplied ? { ledgerFs: appliedLedgerFs(livePath, b.liveApplied) } : {}) });
         pass.complete();
+        holds.known(`workstreams:legacy-rows@${instance}`, memo.retention().rows, memo.approxBytes());
         const rows = operatorActivityCandidates(union.filter((row) => !(Date.parse(String(row.ts)) > b.ringNewestMs)));
         return { instance, activity: buildOperatorActivityProjection({
           plan: b.plan, projection: b.projection, ledgerLines: withMeta(rows, union.present !== false), frontierLedgerLines: b.live,

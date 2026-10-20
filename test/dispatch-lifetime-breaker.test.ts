@@ -534,6 +534,9 @@ test("W1-T951: removing the durable credit lookup fails the positive test", () =
     cpSync(join(repoRoot, "src"), join(sandbox, "src"), { recursive: true });
     cpSync(join(repoRoot, "plan"), join(sandbox, "plan"), { recursive: true });
     cpSync(join(repoRoot, "test", "setup"), join(sandbox, "test", "setup"), { recursive: true });
+    // test/setup/retained-fixtures.ts re-exports `#scripts/lib/retained-fixtures.mjs`, which tmp-hygiene imports.
+    mkdirSync(join(sandbox, "scripts", "lib"), { recursive: true });
+    copyFileSync(join(repoRoot, "scripts", "lib", "retained-fixtures.mjs"), join(sandbox, "scripts", "lib", "retained-fixtures.mjs"));
     copyFileSync(join(repoRoot, targetTestFile), join(sandbox, targetTestFile));
     for (const f of ["package.json", "tsconfig.json"]) copyFileSync(join(repoRoot, f), join(sandbox, f));
     symlinkSync(join(repoRoot, "node_modules"), join(sandbox, "node_modules"));

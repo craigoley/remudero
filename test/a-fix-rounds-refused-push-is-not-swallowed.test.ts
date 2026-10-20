@@ -271,22 +271,25 @@ test("W1-T4693: a census-refused fix round writes fix.push_refused, never waits 
   }
 });
 
-test("W1-T4693: a non-census push failure is ledgered by class and ends the rung, never swallowed", async (t) => {
+test("W1-T4693: a non-census gate refusal reaches the next strike without waiting on the old head", async (t) => {
   const fx = buildFixture();
   try {
-    const run = await drive(fx, t, (cwd) => {
-      commitIn(cwd, "fix: trade the red for another", () => writeFileSync(join(cwd, "other.red"), "x\n"));
+    const run = await drive(fx, t, (cwd, strike) => {
+      if (strike === 1) commitIn(cwd, "fix: trade the red for another", () => writeFileSync(join(cwd, "other.red"), "x\n"));
+      else commitIn(cwd, "fix: clear the second gate", () => execFileSync("git", ["-C", cwd, "rm", "-q", "other.red"]));
     });
     assert.equal(run.error, undefined, `the run resolves; got ${String((run.error as Error)?.message)}`);
-    assert.equal(run.fixCalls.length, 1, "the failed push ends the rung — no strike is spent on the old head");
-    const failed = rows(run.ledger, "fix.push_failed");
-    assert.equal(failed.length, 1);
-    assert.equal(failed[0]!.cause, "git-push-failed");
-    assert.match(String(failed[0]!.error), /rule15-precheck/, "the hook's own text is kept");
-    assert.equal(rows(run.ledger, "fix.push_refused").length, 0);
-    assert.equal(ciPolls(run.ghCalls.slice(run.ghCallsAtFix[0])), 0, "no CI wait after the failed push");
-    const stood = rows(run.ledger, "fix.stood_down").concat(rows(run.ledger, "verdict")).map((r) => JSON.stringify(r));
-    assert.ok(stood.some((r) => r.includes("fix round push failed (git-push-failed)")), `the outcome names the failure; rows=${stood.join("\n")}`);
+    assert.equal(run.fixCalls.length, 2, "the second strike clears the new gate refusal");
+    const refused = rows(run.ledger, "fix.push_refused");
+    assert.equal(refused.length, 1);
+    assert.deepEqual(refused[0]!.censuses, ["rule15-precheck"]);
+    assert.match(String(refused[0]!.refusal), /rule15-precheck/, "the hook's own text is kept");
+    assert.equal(rows(run.ledger, "fix.push_failed").length, 0);
+    assert.equal(ciPolls(run.ghCalls.slice(run.ghCallsAtFix[0], run.ghCallsAtFix[1])), 0,
+      "no CI wait for the refused head");
+    assert.match(String(run.fixCalls[1]!.prompt), /rule15-precheck/, "the next strike receives the refusal");
+    assert.deepEqual(fx.hookLog().slice(-2).map((line) => line.split(" ")[0]), ["other", "accepted"],
+      "the repaired push passes through the hook");
   } finally {
     fx.cleanup();
   }

@@ -1,0 +1,107 @@
+- id: W1-T10221
+  title: "Host-gap re-review pacing counts admitted attempts, not denied or duplicate requests"
+  repo: remudero
+  depends_on: [W1-T9502]  # the separately owned judgment-reuse repair touches the same sweep bridges
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved three-daemon recovery, 2026-10-19: read-only PR12929 ledger evidence and unchanged-source offline replay"
+  plan_refs: [W1-T7837, W1-T7850, W1-T8167, W1-T9732, W1-T9970, W1-T9502, W1-T100, W1-T9748]
+  files:
+    - src/lib/ledger.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/sweep/host-gap-pacing-counts-admitted-review-attempts.test.ts
+    - test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts
+    - test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-19, PR12929 at head656d4540d05c8ad2cbc4eda478ad459f5668aa0a:
+    its 15:37:13 native review could not run three real titled proofs because proof_skip=cwd-missing.
+    The worktree-deletion cause remains closed inconclusive/unknown; this task does not reopen it.
+    Two host-gap request rows at16:57:55.934 and16:57:58.219 have the same review key, daemon run and
+    rereview_ordinal1. A third request at21:19:59.549 was positively refused by admission at21:24:01.167
+    with acted:false. At21:24:28 the sweep counted three prior requests and held re-review for313minutes.
+    The read-only live capture contained17,536 valid rows,52 sweep controls and newest21:27:58; no malformed
+    rows. The non-admission finding uses the positive refusal, not an archive-wide absence claim.
+    An unchanged-production-function replay passed2tests: the captured prefix yields the313minute hold;
+    omitting ONLY the positively denied request makes the same head, clock, source and duration eligible.
+    This counterfactual is observation evidence, not an implementation or a deletion falsifier.
+
+    On inspected mainb17a64b949c17c204b1fa97fb973f4395143a22f, hostGapRereviewFacts appends every
+    sweep.capped_host_gap_rereview / sweep.review_host_gap_rereview marker to history and treats its
+    timestamp as a start. hostGapProgressInput then maps every entry to completed:true. Those producers
+    run before semantic/memory admission; a request is demand, not proof that a reviewer ran.
+    The existing sweep.review_admitted and review terminal rows provide actual-attempt evidence, but
+    a daemon run_id spans many passes and is not a distinct review-attempt identity.
+
+    Ownership controls: all441 advertised heads /435 distinct commits were compared to main after the
+    22:39:06 normal fetch, case-insensitively;20 baseline shard matches, zero head-added/changed subject
+    records, seven explicitly handled unrelated histories. W7837/W7850 own host-gap routing/pacing;
+    W9970 owns a changed reviewer-image rerun, W9732 truthful owner-gone reasons, and W9502 shared reuse
+    of an unchanged judgment. None makes a denied request a completed review. This filing is not a
+    second implementation of those mechanisms.
+    The offline surface census also names W1-T100 and W1-T9748 because they declare the same two hot
+    files. Their full records were read: W100 routes red CI into the CI-log repair ladder; W9748 is
+    human-verified reconnaissance of declared-file provenance at staging. This task instead corrects
+    host-gap review-attempt attribution before pacing; it changes neither of those contracts. Keep
+    the necessary files and legacy controls declared instead of hiding the overlap by narrowing scope.
+  design: |
+    1. Keep the existing pre-admission request as the delivered-key release/idempotency demand. Do NOT
+       move that release after admission: doing so can strand the delivered verdict that must be retried.
+    2. Derive pacing/progress rounds from real admitted/terminal review evidence. A positively denied
+       request cannot increase completed rounds, no-op signals or the backoff multiplier. Two duplicate
+       demand markers cannot manufacture two completed attempts without two actual attempt witnesses.
+    3. Use a bounded exact attempt identity through the existing admission/terminal producers where the
+       current fields cannot distinguish attempts. Do not join all events by daemon run_id, count an
+       initial baseline review as a re-review, or rely on request timestamps being append-monotonic.
+       Legacy or partial attribution stays explicit unknown/incomplete, never fabricated completed work.
+       Preserve history; no mark, ledger or archive deletion and no new store or supervisor.
+    4. Preserve the existing observed-duration formula and thresholds, active-owner/claim exclusion,
+       semantic and memory admission, both host-gap routes and protected merge certification. Do not
+       cure the wait by manually posting a review, weakening a cap or renaming the real proof titles.
+    5. New tests use the computed test/sweep folder and the literal titles below. Replay the denied and
+       duplicate demand shapes, positive admitted/terminal re-reviews that still grow normal pacing,
+       a live owner, changed head/input, repeated refusal, and unknown legacy attribution. The two
+       declared legacy suites may gain honest admission/terminal fixture witnesses; keep their assertions
+       about actual review pacing, escalation and the absence of body/plan repair intact. Keep all
+       existing ledger-step names, pricing membership and normal entry-point coverage.
+  acceptance:
+    - claim: "a denied or duplicate request does not become completed review work or increase re-review backoff"
+      proof: "unit test: denied and duplicate host-gap requests are not completed review rounds"
+    - claim: "actual admitted re-reviews grow normal pacing once and a live owner still excludes another review"
+      proof: "unit test: admitted host-gap attempts grow pacing once and preserve live ownership"
+    - claim: "head and input identities stay separate and partial legacy evidence remains explicitly incomplete"
+      proof: "unit test: host-gap history separates changed inputs and incomplete legacy evidence"
+  falsifier: |
+    Keep all final test bytes, delete the actual-attempt fold and restore counting request markers:
+    the captured denied/duplicate test must fail functionally, then pass when restored. Mutate the
+    attribution to daemon-run-only or remove exact head/input separation: the distinct-attempt/changed
+    input case must fail. Positive admitted/terminal attempts must still grow the unchanged duration
+    formula; a test that merely sets all history to empty is not a valid repair. Retain real default
+    producer/catch coverage, caller and maintained census controls, exact-head full hosted gates and
+    stored-body acceptance. No deployment or live efficacy claim from offline replay alone.
+  note: |
+    Reserved normally as W1-T10221 by next-task-id --reserve on operator filing branch
+    codex/file-host-gap-attempts-20261019, sourceb17a64b949c17c204b1fa97fb973f4395143a22f.
+    The reservation's holder is this named branch, not unknown; no foreign reservation was deleted.
+    This is a plan-only filing, not implementation or task credit. Wait for W9502's protected merge
+    before building the overlapping sweep bridges; never race an active fleet repair.
+    After natural adoption, join the request, admission and terminal witnesses at the exact PR/head/input.
+    Verify that a denied request leaves completed-attempt pacing unchanged, while a genuine completed
+    re-review earns its ordinary wait. PR12929 is a dated case, not permission to force its review/merge.
+
+    Separate plan-only scope amendment, 2026-10-20: the normal armed first push of the private build
+    was refused by the maintained ledger-rotation census. Its real consumer-derived assertion names
+    review.provider_provenance, not sweep.review_admitted (which is already registered), as missing
+    from DECISION_RELEVANT_LEDGER_STEPS. The build uses that existing per-review row to bind a
+    library-owned refusal to a unique admitted attempt without changing numeric worker IDs or
+    touching the separate reviewer instrument. Losing the carrier on rotation would erase real
+    attribution. Declare the existing ledger registration surface so the build can preserve it under
+    the unchanged per-step retention bound. No acceptance, risk, budget, threshold, step-name or
+    authority change; no build credit. The implementation remains separate and waits for this amendment.

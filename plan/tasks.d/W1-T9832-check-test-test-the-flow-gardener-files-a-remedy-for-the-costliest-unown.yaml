@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.15
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts:flaky"

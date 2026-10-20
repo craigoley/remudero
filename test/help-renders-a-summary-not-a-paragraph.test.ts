@@ -141,6 +141,8 @@ const BASELINE_COMMAND_NAMES = [
   "host-alert",
   "impossible-canary", "inbox", "inbox-bakeoff", "init", "inspect", "install-checkout", "issues",
   "garden",
+  "gh",
+  "gh-broker",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "live-edits", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
   "peek", "plan", "plan-reconcile", "preflight", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
@@ -150,7 +152,7 @@ const BASELINE_COMMAND_NAMES = [
   "reframe",
   "risk-judge-eval",
   "rule", "relay", "release", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
-  "serve", "serve-plist", "skill", "skill-eval", "status", "stop", "sweep", "sync", "trace", "triage", "triage-outcomes", "up",
+  "serve", "serve-plist", "skill", "skill-eval", "status", "stop", "sweep", "sync", "test-place", "trace", "triage", "triage-outcomes", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
 ].sort();

@@ -111,6 +111,12 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
  * resolved every caller-chosen tree at its callers. Exact in both directions, so it only shrinks.
  */
 export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: string }>> = {
+  "src/cli/commands/daemon.ts": {
+    count: 3,
+    reason:
+      "CHECKOUT (W1-T6135): daemonCommand's 3 sites moved with it, still classed in RUN_TASK_WIDENED_SITES in " +
+      "test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
+  },
   "src/lib/benchmark-aa-readiness.ts": { count: 1, reason: "CHECKOUT: deriveRuntimePins reads the harness checkout it runs from (-C cwd)" },
   "src/lib/benchmark-run.ts": { count: 1, reason: "CHECKOUT: executingHarnessRevision reads the harness checkout (-C cwd)" },
   "src/lib/branch-reaper.ts": { count: 5, reason: "CHECKOUT: the reaper's injected exec(\"git\", …) steps run in the managed checkout" },
@@ -240,7 +246,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "the managed source checkout (-C repoDir)",
   },
   "src/run-task.ts": {
-    count: 70,
+    count: 66,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",

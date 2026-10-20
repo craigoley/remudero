@@ -1,0 +1,52 @@
+- id: W1-T10103
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:reviewer-unmet cost 178.6 PR minute(s) across 166 round(s) on 119 pull request(s), and rung 1's remedy did not move it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.06
+  status: merged
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:reviewer-unmet#r2"
+  files:
+    - src/lib/prompt-render.ts
+    - test/check-reviewer-unmet.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:reviewer-unmet"
+      proof: "grep: test(\"W1-T10103: check:reviewer-unmet is prevented, not retried\" in test/check-reviewer-unmet.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 2. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:reviewer-unmet's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 3."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:reviewer-unmet cost 178.6 PR minute(s) (seven-day half-life) across 166 fix round(s) on 119 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/prompt-render.ts: names "reviewer-unmet" (15 line(s))
+    - src/run-task.ts: names "reviewer-unmet" (9 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #12411 at 2026-10-17T03:40:32.521Z: reviewer-unmet round
+    - PR #12409 at 2026-10-16T20:37:13.052Z: reviewer-unmet round
+    - PR #12043 (https://github.com/craigoley/remudero/pull/12043) at 2026-10-16T01:42:22.941Z: reviewer-unmet round
+        failing tests: W1-T9503: a cause owned by a test alone escalates as no-owner; W1-T9503: a source-owned cause still drafts a record lint-plan admits
+    - PR #11515 at 2026-10-14T00:31:43.367Z: reviewer-unmet round
+    - PR #11255 (https://github.com/craigoley/remudero/pull/11255) at 2026-10-13T18:18:18.946Z: reviewer-unmet round
+        failing tests: W1-T9153: two concurrent approves on one path and neither loses its cwd; W1-T9153: an approve whose add threw removes nothing
+
+    WHAT THE LAST RUNG TRIED: W1-T6166 (files src/lib/prompt-render.ts, test/check-reviewer-unmet.test.ts) — did not fall: share of fix rounds 3.1% (6/194) before, 4.0% (8/199) after, over 3 day(s) each side.
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/lib/prompt-render.ts and test/check-reviewer-unmet.test.ts, which are an ordinary prompt-rendering source file and its test. Nothing in the description or files list touches secrets, credentials, auth, permissions, deletion of data or history, or merge/deploy/review policy."
+      - "The acceptance criterion is a grep for a named test in test/check-reviewer-unmet.test.ts, so it can be verified mechanically, and the filing was verified to cite 5 distinct PRs with both declared files existing at the base."
+      - "The family track record (28 merged, 40 declined, Beta mean 0.63) and the failed prior rung (W1-T6166 touched the same files and did not reduce the share) are concerns about effectiveness rather than danger. The description says to do something structurally different, but the declared file list is the same as the prior rung's. This points to a possible ineffective remedy, which the gardener's later measurement will catch and which CI and review also cover."
+      - "No bounded view of the actual change was supplied, so I cannot confirm scope beyond the declared files. The declared plan itself shows no operator-only decision and no irreversible action."
+    judged_at: "2026-10-18T01:22:07.969Z"
+    pin: "0cef46063f7bd1bbb317f6a994d3c03edb6de97caeecac23320e9b046f93dab6"

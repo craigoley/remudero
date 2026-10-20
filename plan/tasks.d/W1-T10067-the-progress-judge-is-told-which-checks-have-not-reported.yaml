@@ -14,7 +14,7 @@
     - src/lib/fix-progress-judge.ts
     - src/lib/sweep.ts
     - test/the-progress-judge-is-told-which-checks-have-not-reported.test.ts
-  status: queued
+  status: merged
   priority: 1  # a judge that reads an unreported check as fixed credits a round with progress it did not make, and the next verdict builds on it
   attempts: 0
   rationale: |

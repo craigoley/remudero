@@ -35,11 +35,12 @@ const TICK = { imageDriftOnly: true };
 
 /** serve as it ran after #8569 merged: the pre-change limits. */
 const OLD_LIMITS = { Memory: 5120 * MIB, MemorySwap: 6144 * MIB, CpuShares: 4096, MemoryReservation: 3072 * MIB };
-const ON_POLICY = { Memory: 7680 * MIB, MemorySwap: 8704 * MIB, CpuShares: 4096, MemoryReservation: 5120 * MIB };
+/** The policy since operator ruling 2026-10-19: 2 GiB of swap, and no reservation (memory.low protected nothing). */
+const ON_POLICY = { Memory: 7680 * MIB, MemorySwap: 9728 * MIB, CpuShares: 4096, MemoryReservation: 0 };
 const DRIFT: ResourcePolicyDrift[] = [
   { field: "Memory", expected: 7680 * MIB, actual: 5120 * MIB },
-  { field: "MemorySwap", expected: 8704 * MIB, actual: 6144 * MIB },
-  { field: "MemoryReservation", expected: 5120 * MIB, actual: 3072 * MIB },
+  { field: "MemorySwap", expected: 9728 * MIB, actual: 6144 * MIB },
+  { field: "MemoryReservation", expected: 0, actual: 3072 * MIB },
 ];
 
 interface Harness {
@@ -83,7 +84,7 @@ test("serve on its old limits is replaced once through the launcher naming each 
   assert.equal(out.replaced, true, out.reason);
   assert.equal(h.replaces, 1);
   assert.match(out.reason, new RegExp(`Memory expected=${7680 * MIB} actual=${5120 * MIB}`));
-  assert.match(out.reason, new RegExp(`MemoryReservation expected=${5120 * MIB} actual=${3072 * MIB}`));
+  assert.match(out.reason, new RegExp(`MemoryReservation expected=0 actual=${3072 * MIB}`));
   assert.doesNotMatch(out.reason, /CpuShares/, "a field that matches is not named");
   assert.deepEqual(h.rows.map((r) => r.step), ["deploy.serve_policy_replace", "deploy.serve_policy_replaced"]);
   assert.deepEqual(h.rows[1]!.data?.drift, DRIFT);
@@ -233,6 +234,23 @@ test("the shipped serve wiring reads the serve role against remudero-serve and r
 
     running = "false false";
     assert.equal(seams.serveHealthy!(), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("operator ruling 2026-10-19: serve's 5 GiB reservation and 1 GiB of swap read as drift, so the tick replaces it", () => {
+  const { root, env } = fixture();
+  // serve as it ran before the ruling: the 2026-10-02 limits, a 5 GiB memory.low and 1 GiB of swap.
+  const live = { Memory: 7680 * MIB, MemorySwap: 8704 * MIB, CpuShares: 4096, MemoryReservation: 5120 * MIB };
+  const exec = (cmd: string, args: string[]): string =>
+    cmd === "bash" ? execFileSync(cmd, args, { encoding: "utf8", env }) : JSON.stringify(live);
+  try {
+    const drift = realServePolicyDeps({ installPath: root, stateRoot: root }, exec).servePolicyDrift!();
+    assert.deepEqual(drift, [
+      { field: "MemorySwap", expected: 9728 * MIB, actual: 8704 * MIB },
+      { field: "MemoryReservation", expected: 0, actual: 5120 * MIB },
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -431,6 +449,35 @@ test("serve convergence cannot stop the console before pressure admission", () =
     assert.equal(admitted.out.replaced, true, admitted.out.reason);
     const calls = readFileSync(f.log, "utf8").split("\n").map((l) => /^docker (stats|stop|rm|run)\b/.exec(l)?.[1]).filter(Boolean);
     assert.deepEqual(calls, ["stats", "stats", "stop", "rm", "run"], "a fresh admission (twice) precedes the stop");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("the serve launcher's admission counts swap-in served from zswap: pswpin plus zswpin", () => {
+  // OPERATOR RULING 2026-10-19 (4): under zswap a swap-in from the compressed pool counts in zswpin, never pswpin.
+  const budget = loadHostMemoryBudgetPolicy(join(REPO_ROOT, "plan", "policy.yaml"));
+  const f = launcherFixture();
+  try {
+    // The launcher's own `sleep` between its two vmstat reads: the stand-in lands the second sample.
+    writeFileSync(join(f.root, "bin", "sleep"), "#!/usr/bin/env bash\ncp \"${FAKE_VMSTAT_AFTER}\" \"${RMD_SERVE_ADMIT_VMSTAT_PATH}\"\n");
+    chmodSync(join(f.root, "bin", "sleep"), 0o755);
+    writeFileSync(join(f.proc, "vmstat"), "pswpin 100\nzswpin 0\n");
+    writeFileSync(join(f.proc, "vmstat.after"), "pswpin 100\nzswpin 10000000\n");
+    f.env.FAKE_VMSTAT_AFTER = join(f.proc, "vmstat.after");
+    const seams = realServePolicyDeps({ installPath: f.root, stateRoot: f.root }, f.exec, undefined, () => budget);
+    const h = harness({ replaceServe: seams.replaceServe });
+    const out = runServePolicyCycle(h.deps, TICK);
+    assert.equal(out.replaced, false, out.reason);
+    assert.equal(h.rows.at(-1)!.data?.hold, "swap_in", out.reason);
+    assert.match(String(h.rows.at(-1)!.data?.detail ?? out.reason), /disk 0\.0 \+ zswap 200000000\.0, zswpin/);
+    assert.doesNotMatch(readFileSync(f.log, "utf8"), DESTRUCTIVE, "held before any destructive docker call");
+
+    // No zswpin line (zswap not compiled in): 0, named, and a calm host is admitted.
+    writeFileSync(join(f.proc, "vmstat"), "pswpin 100\n");
+    writeFileSync(join(f.proc, "vmstat.after"), "pswpin 100\n");
+    const calm = harness({ replaceServe: seams.replaceServe });
+    assert.equal(runServePolicyCycle(calm.deps, TICK).replaced, true);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

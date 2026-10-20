@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDispatchValueContext } from "../src/lib/dispatch-value.js";
+import { buildDispatchValueContext, dispatchUrgency } from "../src/lib/dispatch-value.js";
 import { dispatchOrder, nextRunnable, runnableCandidates } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { daemonCommand, dispatchValueContextForSelection, readDispatchFilingSnapshot } from "../src/run-task.js";
@@ -92,7 +92,13 @@ test("W1-T4064: open fanout adds impact and measured cost per merge changes the 
   const peer = task("W1-T1");
   const dates = new Map([...filed, [child.id, NOW - DAY], [peer.id, NOW - DAY]]);
   const context = calibrate([parent, child, peer], history, dates);
-  assert.equal(context.costOfDelayByTaskId!.get(parent.id), 2 * context.costOfDelayByTaskId!.get(peer.id)!);
+  const own = context.costOfDelayInputsByTaskId!.get(parent.id)!;
+  const childInputs = context.costOfDelayInputsByTaskId!.get(child.id)!;
+  const dependentValue = dispatchUrgency(1, childInputs.filing_age_ms / childInputs.median_wait_ms);
+  assert.equal(own.dependent_value, dependentValue);
+  assert.ok(context.costOfDelayByTaskId!.get(parent.id)! > context.costOfDelayByTaskId!.get(peer.id)!);
+  const expected = context.costOfDelayByTaskId!.get(peer.id)! * (own.urgency + dependentValue) / own.urgency;
+  assert.ok(Math.abs(context.costOfDelayByTaskId!.get(parent.id)! - expected) < expected * 1e-12);
   const expensive = history.map(row => row.cost_usd === undefined ? row : { ...row, cost_usd: 4 });
   const expensiveContext = calibrate([parent, child, peer], expensive, dates);
   assert.equal(expensiveContext.costOfDelayByTaskId!.get(parent.id), context.costOfDelayByTaskId!.get(parent.id)! / 2);

@@ -43,15 +43,32 @@
  *
  * SWAP-IN COUNTS ONLY WHILE IT PREDICTS STALL. A host swap-in rate past `swapInPagesPerSecMax` defers only when the
  * instance's verdicts over {@link SWAP_STALL_HISTORY_MS} with such a rate were followed by host PSI past its thresholds
- * within {@link SWAP_STALL_WINDOW_MS} more often than all verdicts, by over twice the sampling noise; too few of them,
- * the rate alone. Over the same rows that ratio was 0.95-1.02 (PSI some10 median 0.9 at ~1,245 pages/s): churn.
+ * within {@link SWAP_STALL_WINDOW_MS} more often than the verdicts WITHOUT it (the complement), by over twice the noise
+ * of that difference; too few swap-in verdicts, the rate alone. Over the same rows that ratio was 0.95-1.02 (PSI some10
+ * median 0.9 at ~1,245 pages/s): churn. OPERATOR RULING 2026-10-19: comparing against ALL verdicts compares a set with
+ * itself once swap-in is chronic (10-19: 82-84% of swap-in verdicts against 76-80% of all, ~95% of verdicts swapping),
+ * so a complement thinner than {@link SWAP_STALL_MIN_SAMPLES} means swap-in is not a discriminating signal and holds
+ * nothing ("swap-in chronic: no contrast").
+ * THE HISTORY OUTLIVES ITS READER. The relation and the PSI bound learn from the instance's pressure store, which no
+ * process id filters, so a daemon restart keeps them. A reader that could not read the store never replaces it: it may
+ * only create a missing one (OPERATOR RULING 2026-10-19 (2)). OBSERVED 10-15..10-19 on core: six resets of the store's
+ * history to nothing, none at a daemon boot (10-19 14:52Z fell between two verdicts of one daemon, 67 s apart); a read
+ * that failed and then wrote is the one path here that replaces a written history with an empty one.
+ *
+ * THE PSI START BOUND IS LEARNED LIKE SWAP-IN (W1-T10085). Host PSI full avg10 names "psi" past a bound learned from
+ * the instance's own admitted starts over the same windows, minimum and noise: the prior `psiFullAvg10Max` rises only
+ * to a level whose admitted starts were followed by harm (an oom_kill rise, or full avg60 past the PRIOR) no more often
+ * than every verdict in their band, and by no OOM kill. Unread or thin: the prior.
  *
  * NEVER WAITS. No lock is taken; a ledger reader that reports a held lock (EWOULDBLOCK/EAGAIN/EBUSY), an errno, or a
  * missing/unreadable/reset store yields a verdict naming that state as an uncertainty that WIDENS the margin. It is
  * never read as zero reservations. File reads are bounded (a ledger tail, a capped process count).
  */
 
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync, existsSync, fstatSync, linkSync, openSync, readFileSync, readSync, readdirSync, rmSync, writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -87,7 +104,7 @@ import {
   publishMemoryForecast, readCalibrationState, type JointEstimate, type MemoryForecast,
 } from "./host-memory-calibration.js";
 import { readHostServeEvidence, type HostServeReading } from "./host-serve-evidence.js";
-import { readDaemonFootprint, type FootprintSample } from "./daemon-footprint.js";
+import { readDaemonFootprint, type BootGrowth, type FootprintSample } from "./daemon-footprint.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { DAEMON_PID_ENV, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -281,15 +298,18 @@ export interface ShadowEntryInput {
 export interface ShadowInputs {
   jointClaim?: Extract<JointEstimate, { kind: "joint" }>;
   memAvailable: { mib: number } | { unread: string };
-  swapIn: { pagesPerSec: number } | { unmeasured: string };
+  swapIn: SwapInReading;
   psi: { someAvg10: number; someAvg60: number; fullAvg10?: number; fullAvg60?: number } | { unread: string };
   /** `highMib` is memory.high (reclaim and throttling begin there); `reclaimableMib` is inactive_file, page cache the
    *  kernel drops before it swaps anonymous memory. Both are optional, and absent means not subtracted. */
   container: { currentMib: number; maxMib: number | null; highMib?: number | null; reclaimableMib?: number } | { unread: string };
-  ledger: { state: ShadowLedgerState; dir?: string; reason?: string };
+  ledger: { state: ShadowLedgerState; dir?: string; reason?: string;
+    /** The maintained reader's enumeration counts. Missing is unknown, not a positively empty population.
+     * These qualify report-only RSS attribution; they do not alter the legacy admission calculation. */
+    counts?: HostMemoryReading["counts"] };
   entries: ShadowEntryInput[];
   /** The start this verdict is about. Its own reservation is counted even when the ledger could not show it. */
-  start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number };
+  start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number; estimateSource?: EstimateSource };
   /** `own` marks this container's daemon, whose growth also counts against the container ceiling. `typicalMib` is the
    *  part of `growthMib` its median footprint accounts for; absent, the whole growth is typical and it adds no tail. */
   daemonGrowth: Array<{
@@ -299,6 +319,8 @@ export interface ShadowInputs {
     lifetimePeakGrowthMib?: number; lifetimePeakBasis?: string;
     /** What the daemon's persisted footprint held for this verdict (daemon-footprint.ts), or why it was unread. */
     footprint?: string;
+    /** W1-T9982: "boot" while the daemon is inside the boot phase its earlier boots showed, else "steady", and why. */
+    phase?: "boot" | "steady"; phaseBasis?: string;
   }>;
   serve: { scenario: ServeScenario; basis: string };
   /** This container's OWN memory pressure now. Absent or unread: the static `containerReserveMib` below the ceiling
@@ -309,8 +331,49 @@ export interface ShadowInputs {
   swapStall?: SwapStallRelation;
   /** Whether projection flags predict this container's own pressure. Absent: the projection alone decides. */
   containerLift?: ContainerLift;
+  /** W1-T10085: the learned PSI full avg10 bound. Absent: the prior. */
+  psiBound?: PsiFullAvg10Bound;
+  /** W1-T10085: this verdict's stamp in the PSI record, so an admission can mark its start admitted. */
+  psiRecordAt?: number;
+  /** Opt-in counter-window evidence only; not atomic history, capacity, calibration or spawn authority. */
+  strictEvidence?: StrictPressureEvidence;
   /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
   reviewEstimateMib?: number;
+}
+
+/** The host swap-in's parts as every memory_budget row carries them (OPERATOR RULING 2026-10-19 (4)). Pure. */
+export function swapInRowFields(numbers: Pick<ShadowVerdict["numbers"], "swapInDiskPagesPerSec" | "swapInZswapPagesPerSec" | "swapInZswapBasis">): {
+  swap_in_disk: number | null; swap_in_zswap: number | null; swap_in_zswap_basis: string | null;
+} {
+  return { swap_in_disk: numbers.swapInDiskPagesPerSec, swap_in_zswap: numbers.swapInZswapPagesPerSec, swap_in_zswap_basis: numbers.swapInZswapBasis };
+}
+
+/**
+ * A swap-in rate, pages per second: OPERATOR RULING 2026-10-19 (4), the sum of `pswpin` (from the swap device) and
+ * `zswpin` (from zswap's compressed pool, which `pswpin` never counts once zswap is on), each part reported apart.
+ */
+export type SwapInReading =
+  | { pagesPerSec: number; diskPagesPerSec?: number; zswapPagesPerSec?: number; zswapBasis?: string }
+  | { unmeasured: string };
+
+/** `pswpin` and `zswpin` from a vmstat or memory.stat text; no pswpin: undefined. A kernel without zswap has no zswpin
+ *  line, read as 0 and named in `zswapBasis`. Pure. */
+export function swapInCounters(text: string): { pswpin: number; zswpin: number; zswapBasis: string } | undefined {
+  const pswpin = /^pswpin\s+(\d+)$/m.exec(text)?.[1];
+  if (pswpin === undefined) return undefined;
+  const zswpin = /^zswpin\s+(\d+)$/m.exec(text)?.[1];
+  return zswpin === undefined ? { pswpin: Number(pswpin), zswpin: 0, zswapBasis: "no zswpin line (zswap not compiled in): 0" }
+    : { pswpin: Number(pswpin), zswpin: Number(zswpin), zswapBasis: "zswpin" };
+}
+
+/** The rate between two counter samples `seconds` apart, its parts named. A prior without zswpin (written before the
+ *  ruling) counts no zswap swap-in for that one interval. Pure. */
+export function swapInRateOf(now: { pswpin: number; zswpin: number; zswapBasis: string },
+  prior: { pswpin: number; zswpin?: number }, seconds: number): Extract<SwapInReading, { pagesPerSec: number }> {
+  const diskPagesPerSec = Math.max(0, now.pswpin - prior.pswpin) / seconds;
+  const zswapPagesPerSec = prior.zswpin === undefined ? 0 : Math.max(0, now.zswpin - prior.zswpin) / seconds;
+  const zswapBasis = prior.zswpin === undefined ? "no prior zswpin sample: 0" : now.zswapBasis;
+  return { pagesPerSec: diskPagesPerSec + zswapPagesPerSec, diskPagesPerSec, zswapPagesPerSec, zswapBasis };
 }
 
 /** How often the host's swap-in past the threshold was followed by stall, against all verdicts. */
@@ -320,12 +383,32 @@ export type SwapStallRelation =
     samples: number;
     /** The share of them followed by a stall within {@link SWAP_STALL_WINDOW_MS}. */
     afterSwapIn: number;
-    /** The share of all closed verdicts followed by one. */
+    /** Verdicts with a measured swap-in at or below the threshold whose window has closed: the complement. */
+    without: number;
+    /** The share of the complement followed by a stall; null when it is thinner than {@link SWAP_STALL_MIN_SAMPLES},
+     *  so swap-in has no contrast to be judged against. */
+    afterWithout: number | null;
+    /** The share of all closed verdicts followed by one: reported, never the comparison. */
     afterAny: number;
-    /** Twice the sampling noise of `afterSwapIn`: the margin it must clear. */
-    noise: number;
+    /** Twice the standard error of `afterSwapIn - afterWithout`: the margin it must clear; null without a contrast. */
+    noise: number | null;
   }
   | { unlearned: string };
+
+/** W1-T10085: the level host PSI full avg10 must pass before a verdict names "psi", with the record behind it. */
+export interface PsiFullAvg10Bound {
+  bound: number;
+  prior: number;
+  basis: string;
+  /** Admitted starts above the prior with a closed window. */
+  samples: number;
+  /** At the bound's band: the share of its admitted starts followed by harm, of all its verdicts, and twice the noise. */
+  afterAdmitted: number | null;
+  afterBand: number | null;
+  noise: number | null;
+  /** Admitted starts above the prior followed by an oom_kill rise; null when oom_kill was unread on every one. */
+  ooms: number | null;
+}
 
 /** Projection flags followed by own pressure, compared with all closed verdicts. */
 export type ContainerLift =
@@ -340,8 +423,8 @@ export interface ContainerPressureSample {
 
 export type ContainerPressureInput =
   | {
-    /** memory.stat pswpin, pages per second since the instance's previous verdict. */
-    swapIn: { pagesPerSec: number } | { unmeasured: string };
+    /** memory.stat pswpin + zswpin, pages per second since the instance's previous verdict. */
+    swapIn: SwapInReading;
     /** memory.pressure. */
     psi: { someAvg10: number; fullAvg10?: number } | { unread: string };
     /** memory.events `high` crossings since the instance's previous verdict, when that was within
@@ -362,7 +445,7 @@ export interface ShadowClaim {
   workerClass: WorkerClass;
   estimateMib: number;
   typicalMib: number;
-  /** Resident rss+swap; null when the tree was unread (the whole estimate counts). */
+  /** Legacy RSS-plus-swap footprint, NOT physical resident RAM; null when unread (the whole estimate counts). */
   residentMib: number | null;
   /** In this container: its claim counts against the container ceiling. */
   own: boolean;
@@ -416,8 +499,14 @@ export interface ShadowVerdict {
     projectedAvailableAllPeaksMib: number | null;
     hostReserveMib: number;
     swapInPagesPerSec: number | null;
+    /** Its parts (OPERATOR RULING 2026-10-19 (4)): from the swap device (pswpin) and from zswap (zswpin), and how the
+     *  zswap part was read; null while the rate is unmeasured. */
+    swapInDiskPagesPerSec: number | null;
+    swapInZswapPagesPerSec: number | null;
+    swapInZswapBasis: string | null;
     /** Whether swap-in past the threshold counts: its learned relation to stall, or the rate alone while unlearned. */
     swapInBasis: string | null;
+    psiFullAvg10Bound: PsiFullAvg10Bound;
     psi: { someAvg10: number; someAvg60: number; fullAvg10?: number; fullAvg60?: number } | null;
     containerCurrentMib: number | null;
     containerMaxMib: number | null;
@@ -443,9 +532,17 @@ export interface ShadowVerdict {
     /** Its own pressure past the thresholds; `containerSighted` when that came with a crossing of its memory.high. */
     containerPressed: boolean;
     containerSighted: boolean;
-    /** Container memory no reservation's resident tree accounts for: gardens, measurement children, read-model threads. */
+    /** Legacy clamped difference against RSS-plus-swap footprints. Kept for historical replay, NOT physical attribution. */
     unreservedContainerMib: number | null;
     unreservedContainerShare: number | null;
+    legacyResidentBasis: "rss-plus-swap-footprint";
+    /** Sum of this container's measured reservation-tree RSS, not exclusive physical charge (shared pages can repeat).
+     * Null if the ledger, a tree's walk or any RSS reading is incomplete. No reservations in a present ledger is zero. */
+    reservationRssMib: number | null;
+    /** Approximate memory.current minus reservation RSS, NOT "native" or exact unreserved memory. May be negative:
+     * process RSS and cgroup charging have different sharing rules. Null when either side is unavailable. */
+    unattributedContainerMibApprox: number | null;
+    unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss";
   };
 }
 
@@ -599,8 +696,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     if (swapIn > policy.swapInPagesPerSecMax && relation.counts) reasons.add("swap-in");
   }
   const psi = "unread" in inputs.psi ? null : inputs.psi;
+  const psiBound = psiBoundFor(inputs.psiBound, policy);
   if (psi === null) widen("psi-unread", margin, (inputs.psi as { unread: string }).unread);
-  else if (psi.someAvg10 > policy.psiSomeAvg10Max || (psi.fullAvg10 ?? 0) > policy.psiFullAvg10Max) reasons.add("psi");
+  else if (psi.someAvg10 > policy.psiSomeAvg10Max || (psi.fullAvg10 ?? 0) > psiBound.bound) reasons.add("psi");
 
   let containerCurrent: number | null = null;
   let containerMax: number | null = null;
@@ -650,6 +748,16 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   }
 
   const unreserved = containerCurrent === null ? null : Math.max(0, containerCurrent - residentOwn);
+  const owned = inputs.entries.filter(entry => entry.status === "owned");
+  const counts = inputs.ledger.counts;
+  const populationKnown = inputs.ledger.state === "present" && counts !== undefined &&
+    Number.isSafeInteger(counts.live) && counts.live === inputs.entries.length &&
+    counts.unreadable === 0 && counts.uncertain === 0 && inputs.entries.every(entry => entry.status !== "uncertain");
+  const rssKnown = populationKnown && owned.every(entry => entry.walkComplete === true &&
+    "mib" in entry.resident && entry.resident.complete && entry.resident.rssMib !== undefined &&
+    Number.isFinite(entry.resident.rssMib) && entry.resident.rssMib >= 0);
+  const reservationRss = rssKnown ? owned.reduce((sum, entry) =>
+    sum + ("mib" in entry.resident ? entry.resident.rssMib! : 0), 0) : null;
   return {
     wouldAdmit: reasons.size === 0,
     reasons: [...reasons],
@@ -678,7 +786,11 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       projectedAvailableAllPeaksMib: projectedAllPeaks,
       hostReserveMib: policy.hostReserveMib,
       swapInPagesPerSec: swapIn,
+      swapInDiskPagesPerSec: "pagesPerSec" in inputs.swapIn ? inputs.swapIn.diskPagesPerSec ?? inputs.swapIn.pagesPerSec : null,
+      swapInZswapPagesPerSec: "pagesPerSec" in inputs.swapIn ? inputs.swapIn.zswapPagesPerSec ?? 0 : null,
+      swapInZswapBasis: "pagesPerSec" in inputs.swapIn ? inputs.swapIn.zswapBasis ?? "not read" : null,
       swapInBasis,
+      psiFullAvg10Bound: psiBound,
       psi,
       containerCurrentMib: containerCurrent,
       containerMaxMib: containerMax,
@@ -697,6 +809,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       containerSighted: pressure.sighted,
       unreservedContainerMib: unreserved,
       unreservedContainerShare: unreserved === null || !containerCurrent ? null : unreserved / containerCurrent,
+      legacyResidentBasis: "rss-plus-swap-footprint",
+      reservationRssMib: reservationRss,
+      unattributedContainerMibApprox: containerCurrent === null || reservationRss === null ? null : containerCurrent - reservationRss,
+      unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss",
     },
   };
 }
@@ -766,7 +882,8 @@ export interface SwapStallSample {
 /**
  * Whether the host's swap-in past the threshold has been followed by stall. Over the verdicts in the last
  * SWAP_STALL_HISTORY_MS whose SWAP_STALL_WINDOW_MS has closed, the share followed by a stalled verdict within that window,
- * for those with swap-in past the threshold against all of them, with twice the swap-in share's sampling noise.
+ * for those with swap-in past the threshold against those with a measured rate at or below it (the complement), with
+ * twice the standard error of the difference. A complement thinner than SWAP_STALL_MIN_SAMPLES has no contrast.
  */
 export function swapStallRelationOf(history: SwapStallSample[], now: number, policy: HostMemoryBudgetPolicy): SwapStallRelation {
   const closed = history.filter((s) => now - s.at >= SWAP_STALL_WINDOW_MS && now - s.at <= SWAP_STALL_HISTORY_MS)
@@ -787,8 +904,18 @@ export function swapStallRelationOf(history: SwapStallSample[], now: number, pol
     return { unlearned: `${swapping.length} of ${SWAP_STALL_MIN_SAMPLES} verdicts with swap-in past ${policy.swapInPagesPerSecMax} pages/s and a closed window` };
   }
   const afterAny = closed.filter((s) => followed(s.at)).length / closed.length;
-  const afterSwapIn = swapping.filter((s) => followed(s.at)).length / swapping.length;
-  return { samples: swapping.length, afterSwapIn, afterAny, noise: 2 * Math.sqrt(afterAny * (1 - afterAny) / swapping.length) };
+  const stalledAfterSwapIn = swapping.filter((s) => followed(s.at)).length;
+  const afterSwapIn = stalledAfterSwapIn / swapping.length;
+  const complement = closed.filter((s) => s.pagesPerSec !== null && s.pagesPerSec <= policy.swapInPagesPerSecMax);
+  if (complement.length < SWAP_STALL_MIN_SAMPLES) {
+    return { samples: swapping.length, afterSwapIn, without: complement.length, afterWithout: null, afterAny, noise: null };
+  }
+  const stalledWithout = complement.filter((s) => followed(s.at)).length;
+  const pooled = (stalledAfterSwapIn + stalledWithout) / (swapping.length + complement.length);
+  return {
+    samples: swapping.length, afterSwapIn, without: complement.length, afterWithout: stalledWithout / complement.length, afterAny,
+    noise: 2 * Math.sqrt(pooled * (1 - pooled) * (1 / swapping.length + 1 / complement.length)),
+  };
 }
 
 /** Same closed windows, history span, minimum and noise as the swap-in relation; the outcome is OWN pressure. */
@@ -831,12 +958,129 @@ function swapInPredictsStall(relation: SwapStallRelation | undefined): { counts:
   if (relation === undefined) return { counts: true, basis: "the rate alone: no swap-in history read" };
   if ("unlearned" in relation) return { counts: true, basis: `the rate alone: ${relation.unlearned}` };
   const pct = (v: number): string => `${Math.round(v * 100)}%`;
-  const counts = relation.afterSwapIn - relation.afterAny > relation.noise;
+  if (relation.afterWithout === null || relation.noise === null) {
+    return {
+      counts: false,
+      basis: `swap-in chronic: no contrast: ${relation.without} of ${SWAP_STALL_MIN_SAMPLES} verdicts without swap-in ` +
+        `and a closed window, against ${relation.samples} with it (${pct(relation.afterSwapIn)} of them and ` +
+        `${pct(relation.afterAny)} of all followed by stall)`,
+    };
+  }
+  const counts = relation.afterSwapIn - relation.afterWithout > relation.noise;
   return {
     counts,
     basis: `swap-in ${counts ? "predicts" : "does not predict"} stall: ${pct(relation.afterSwapIn)} of ${relation.samples} ` +
-      `swap-in verdicts were followed by one, against ${pct(relation.afterAny)} of all (noise ${pct(relation.noise)})`,
+      `swap-in verdicts were followed by one, against ${pct(relation.afterWithout)} of ${relation.without} without it ` +
+      `(noise ${pct(relation.noise)})`,
   };
+}
+
+/** One verdict in the PSI record: host full avg10 and avg60 (null: unread), whether its start was admitted, and the
+ *  cumulative /proc/vmstat oom_kill (null: unread). */
+export interface PsiStartSample {
+  at: number;
+  fullAvg10: number | null;
+  fullAvg60: number | null;
+  admitted: boolean;
+  oomKill: number | null;
+}
+
+/** The bound a verdict applies: the record's, never below the prior; no record read, the prior. */
+function psiBoundFor(learned: PsiFullAvg10Bound | undefined, policy: HostMemoryBudgetPolicy): PsiFullAvg10Bound {
+  const prior = policy.psiFullAvg10Max;
+  if (learned === undefined) return priorBound(prior, "no PSI record read", 0);
+  return { ...learned, prior, bound: Math.max(prior, learned.bound) };
+}
+
+function priorBound(prior: number, why: string, samples: number, at?: Partial<PsiFullAvg10Bound>): PsiFullAvg10Bound {
+  return { bound: prior, prior, basis: `the prior ${prior}: ${why}`, samples, afterAdmitted: null, afterBand: null,
+    noise: null, ooms: null, ...at };
+}
+
+/**
+ * W1-T10085: the PSI full avg10 bound learned from the record. A verdict is HARMED when, within SWAP_STALL_WINDOW_MS,
+ * oom_kill changed from its last reading or a later verdict read full avg60 past the PRIOR: the outcome never reads the
+ * learned bound. For each admitted level v above the prior, the admitted starts with closed windows in (prior, v] are
+ * compared with every verdict in that band; the bound is the largest v with SWAP_STALL_MIN_SAMPLES such starts, a lift
+ * within twice the noise, no OOM kill after one, and oom_kill read in the band. Otherwise the prior, and why.
+ */
+export function psiStartBoundOf(history: PsiStartSample[], now: number, policy: HostMemoryBudgetPolicy, unread?: string): PsiFullAvg10Bound {
+  const prior = policy.psiFullAvg10Max;
+  if (unread !== undefined) return priorBound(prior, unread, 0);
+  const sorted = history.filter((s) => s.at <= now).sort((x, y) => x.at - y.at);
+  const outcome = (i: number): { harmed: boolean; oom: boolean } => {
+    const s = sorted[i]!;
+    let read = s.oomKill;
+    for (let j = i - 1; read === null && j >= 0; j--) read = sorted[j]!.oomKill;
+    let stall = false;
+    let oom = false;
+    for (let j = i + 1; j < sorted.length && sorted[j]!.at <= s.at + SWAP_STALL_WINDOW_MS; j++) {
+      const later = sorted[j]!;
+      if (later.at === s.at) continue;
+      if ((later.fullAvg60 ?? 0) > prior) stall = true;
+      // A count that went down is a reboot: harm too.
+      if (later.oomKill !== null && read !== null && later.oomKill !== read) oom = true;
+    }
+    return { harmed: stall || oom, oom };
+  };
+  const band = sorted.map((s, i) => ({ s, i })).filter(({ s }) => s.fullAvg10 !== null && s.fullAvg10 > prior &&
+    now - s.at >= SWAP_STALL_WINDOW_MS && now - s.at <= SWAP_STALL_HISTORY_MS)
+    .map(({ s, i }) => ({ ...s, level: s.fullAvg10!, ...outcome(i) })).sort((x, y) => x.level - y.level);
+  const admitted = band.filter((s) => s.admitted);
+  const allOomUnread = admitted.every((s) => s.oomKill === null);
+  const ooms = allOomUnread ? null : admitted.filter((s) => s.oom).length;
+  if (admitted.length < SWAP_STALL_MIN_SAMPLES) {
+    return priorBound(prior, `${admitted.length} of ${SWAP_STALL_MIN_SAMPLES} admitted starts above it with a closed window`,
+      admitted.length, { ooms });
+  }
+  const pct = (v: number): string => `${Math.round(v * 100)}%`;
+  let learned: PsiFullAvg10Bound | undefined;
+  let refused = "";
+  let judged: Partial<PsiFullAvg10Bound> = {};
+  let inBand = 0;
+  let harmedInBand = 0;
+  let inAdmitted = 0;
+  let harmedAdmitted = 0;
+  let oomsAdmitted = 0;
+  let oomRead = false;
+  let levelAdmitted = false;
+  for (let k = 0; k < band.length; k++) {
+    const s = band[k]!;
+    inBand += 1;
+    if (s.harmed) harmedInBand += 1;
+    if (s.oomKill !== null) oomRead = true;
+    if (s.admitted) {
+      levelAdmitted = true;
+      inAdmitted += 1;
+      if (s.harmed) harmedAdmitted += 1;
+      if (s.oom) oomsAdmitted += 1;
+    }
+    // Judged once per admitted level, with every verdict at that level in the band.
+    if (k + 1 < band.length && band[k + 1]!.level === s.level) continue;
+    if (!levelAdmitted) continue;
+    levelAdmitted = false;
+    if (oomsAdmitted > 0) {
+      refused = `${oomsAdmitted} admitted start(s) at full avg10 ${prior}-${s.level} followed by an OOM kill`;
+      break;
+    }
+    if (inAdmitted < SWAP_STALL_MIN_SAMPLES) continue;
+    if (!oomRead) {
+      refused = `oom_kill unread on every verdict at full avg10 ${prior}-${s.level}`;
+      continue;
+    }
+    const afterAdmitted = harmedAdmitted / inAdmitted;
+    const afterBand = harmedInBand / inBand;
+    const noise = 2 * Math.sqrt(afterBand * (1 - afterBand) / inAdmitted);
+    const line = `${pct(afterAdmitted)} of ${inAdmitted} admitted starts at full avg10 ${prior}-${s.level} were followed by ` +
+      `stall or an OOM kill, against ${pct(afterBand)} of all ${inBand} verdicts in that band (noise ${pct(noise)})`;
+    if (afterAdmitted - afterBand > noise) {
+      refused = line;
+      judged = { afterAdmitted, afterBand, noise };
+      continue;
+    }
+    learned = { bound: s.level, prior, basis: `learned ${s.level}: ${line}`, samples: inAdmitted, afterAdmitted, afterBand, noise, ooms };
+  }
+  return learned ?? priorBound(prior, refused, admitted.length, { ooms, ...judged });
 }
 
 // ── the counterfactual review (pure, W1-T7095) ──────────────────────────────────────────────────────────────────
@@ -910,6 +1154,8 @@ export interface ShadowStart {
   reservationId?: string;
   /** Default: the ledger's unmeasured class estimate, which is what the start's reservation recorded. */
   estimateMib?: number;
+  /** Optional provenance for that exact numeric estimate; absence is unknown, never inferred from its value. */
+  estimateSource?: EstimateSource;
   /** The state root: the ledger names its instance (see `instance`), and its ledger holds daemon.alive and serve rows. */
   root: string;
 }
@@ -944,12 +1190,13 @@ export interface ShadowMemoryPorts {
   typical: (workerClass: WorkerClass) => number;
   /** W1-T9762: a class's measured survival at a live tree's age (host-memory-learning.ts). Absent: nothing decays. */
   survival?: (workerClass: WorkerClass, ageMs: number) => Survival;
-  /** Writes the instance's pressure store (its prior swap-in sample and its swap-in history). */
-  writeFile: (path: string, content: string) => void;
+  /** Writes the instance's pressure store (its prior swap-in sample and its swap-in history). `exclusive`: only create
+   *  it, throwing EEXIST over an existing file, for a writer that could not read what is there. */
+  writeFile: (path: string, content: string, options?: { exclusive?: boolean }) => void;
 }
 
 let installedSink: ShadowMemoryPorts["write"];
-let priorSwapIn: { at: number; pswpin: number } | undefined;
+let priorSwapIn: { at: number; pswpin: number; zswpin: number } | undefined;
 let tally = emptyShadowTally();
 let lastState: { scenario: ServeScenario; wouldAdmit: boolean } | undefined;
 const errorSeen = new Map<string, number>();
@@ -1037,11 +1284,24 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
     },
     calibrationObservation: at => kernelMemoryObservation(at),
     // Never creates the state directory: a root without one (a test's, a fresh checkout's) stores nothing.
-    writeFile: (path, content) => {
+    writeFile: (path, content, options) => {
       if (!existsSync(dirname(path))) throw Object.assign(new Error(`ENOENT: ${dirname(path)}`), { code: "ENOENT" });
-      writeAtomic(path, content, { tmpTag: "pressure-tmp" });
+      if (options?.exclusive) createWhole(path, content);
+      else writeAtomic(path, content, { tmpTag: "pressure-tmp" });
     },
   };
+}
+
+/** Create `path` holding `content` whole, or throw EEXIST and leave an existing file untouched: the stage is linked into
+ *  place, which never replaces a file, so a reader sees no file or all of it. */
+export function createWhole(path: string, content: string): void {
+  const stage = `${path}.pressure-tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(stage, content);
+    linkSync(stage, path);
+  } finally {
+    rmSync(stage, { force: true });
+  }
 }
 
 function readMemAvailable(read: ShadowMemoryPorts["readFile"]): ShadowInputs["memAvailable"] {
@@ -1055,22 +1315,21 @@ function readMemAvailable(read: ShadowMemoryPorts["readFile"]): ShadowInputs["me
 }
 
 function readSwapIn(read: ShadowMemoryPorts["readFile"], now: number, staleMs: number): ShadowInputs["swapIn"] {
-  let pswpin: number;
+  let counters: ReturnType<typeof swapInCounters>;
   try {
-    const raw = /^pswpin\s+(\d+)/m.exec(read("/proc/vmstat"))?.[1];
-    if (raw === undefined) return { unmeasured: "no pswpin line" };
-    pswpin = Number(raw);
+    counters = swapInCounters(read("/proc/vmstat"));
+    if (counters === undefined) return { unmeasured: "no pswpin line" };
   } catch (error) {
     const reason = reasonOf(error);
     return { unmeasured: reason };
   }
   const prior = priorSwapIn;
-  priorSwapIn = { at: now, pswpin };
+  priorSwapIn = { at: now, pswpin: counters.pswpin, zswpin: counters.zswpin };
   if (!prior) return { unmeasured: "first sample in this process" };
   const seconds = (now - prior.at) / 1000;
   if (seconds <= 0) return { unmeasured: "no elapsed time since the prior sample" };
   if (now - prior.at > staleMs) return { unmeasured: `stale: prior sample ${Math.round(seconds)}s old` };
-  return { pagesPerSec: Math.max(0, pswpin - prior.pswpin) / seconds };
+  return swapInRateOf(counters, prior, seconds);
 }
 
 function readPsi(read: ShadowMemoryPorts["readFile"], path = "/proc/pressure/memory"): ShadowInputs["psi"] {
@@ -1107,20 +1366,129 @@ export const CONTAINER_PRESSURE_FILE = "container-pressure.json";
 const SWAP_HISTORY_CAP = 4096;
 
 interface PressureStore {
-  prior?: { at: number; pswpin?: number; high?: number };
+  prior?: { at: number; pswpin?: number; zswpin?: number; high?: number };
   /** [at, pages/s or null, 1 when stalled]: compact, since the store is rewritten on every verdict. */
   swap: Array<[number, number | null, 0 | 1]>;
   /** [at, 1 when projection exceeds onset, 1 when under own pressure]. */
   container: Array<[number, 0 | 1, 0 | 1]>;
+  /** W1-T10085: [at, host full avg10, 1 when its start was admitted, cumulative oom_kill, host full avg60]. */
+  psi: PsiEntry[];
+  /** Why the store could not be read; the PSI bound then keeps the prior. */
+  unread?: string;
+  validationObservation?: StrictPressureSample;
+  validationMarker?: StrictPsiTarget;
+  validationMalformed?: true;
 }
 
-function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): PressureStore {
+type PsiEntry = [number, number | null, 0 | 1, number | null, number | null];
+
+export interface StrictPressureSample {
+  version: 1;
+  sampleId: string;
+  sampleAt: number;
+  generation: { bootId: string; cgroup: string; initStart: string };
+  counters: { hostPswpin: number; containerPswpin: number; high: number };
+}
+export interface StrictPsiTarget { sample: StrictPressureSample; row: PsiEntry }
+export type StrictPressureEvidence =
+  | { kind: "paired"; current: StrictPressureSample; prior: StrictPressureSample; marker: StrictPsiTarget;
+      elapsedMs: number; hostPagesPerSec: number; containerPagesPerSec: number; ceilingCrossings: number;
+      observationWrite: "returned" }
+  | { kind: "unavailable"; reasons: string[]; current?: StrictPressureSample; marker?: StrictPsiTarget;
+      observationWrite: "not-attempted" | "returned" | "unknown" };
+
+const STRICT_UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+type StrictRead<T> = { kind: "available"; value: T }
+  | { kind: "unavailable"; reason: "malformed" }
+  | { kind: "unavailable"; reason: "unreadable"; code: "EACCES" | "EPERM" | "ENOENT" | "EIO" | "ENOTDIR" | "EISDIR" | "UNKNOWN" };
+function strictReadErrorCode(error: unknown): Extract<StrictRead<never>, { reason: "unreadable" }>['code'] {
+  try {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+    return code === "EACCES" || code === "EPERM" || code === "ENOENT" || code === "EIO" ||
+      code === "ENOTDIR" || code === "EISDIR" ? code : "UNKNOWN";
+  } catch {
+    // A hostile diagnostic accessor is unknown, never an escaping error or private message.
+    return "UNKNOWN";
+  }
+}
+function strictReadIssue(family: "generation" | "counter", result: Exclude<StrictRead<unknown>, { kind: "available" }>): string {
+  return `strict-observation-${family}-${result.reason}${result.reason === "unreadable" ? `:${result.code}` : ""}`;
+}
+function strictGenerationOf(read: ShadowMemoryPorts["readFile"]): StrictRead<StrictPressureSample["generation"]> {
+  try {
+    const bootId = read("/proc/sys/kernel/random/boot_id").trim(), cgroup = read("/proc/self/cgroup").trim();
+    const init = parseProcStat(read("/proc/1/stat"));
+    if (!STRICT_UUID.test(bootId) || !/^0::\/[^\n]*$/.test(cgroup) || !init || init.start === "unknown") return { kind: "unavailable", reason: "malformed" };
+    return { kind: "available", value: { bootId, cgroup, initStart: init.start } };
+  } catch (error) { return { kind: "unavailable", reason: "unreadable", code: strictReadErrorCode(error) }; }
+}
+function sameStrictGeneration(a: StrictPressureSample["generation"], b: StrictPressureSample["generation"]): boolean {
+  return a.bootId === b.bootId && a.cgroup === b.cgroup && a.initStart === b.initStart;
+}
+function strictSampleOf(value: unknown): StrictPressureSample | undefined {
+  const s = value as Partial<StrictPressureSample> | null;
+  if (!s || s.version !== 1 || typeof s.sampleId !== "string" || !STRICT_UUID.test(s.sampleId) ||
+      typeof s.sampleAt !== "number" || !Number.isFinite(s.sampleAt) || s.sampleAt < 0 || !s.generation || !s.counters) return undefined;
+  const g = s.generation, c = s.counters;
+  if (typeof g.bootId !== "string" || !STRICT_UUID.test(g.bootId) || typeof g.cgroup !== "string" || !/^0::\/[^\n]*$/.test(g.cgroup) ||
+      typeof g.initStart !== "string" || !/^proc:\d+$/.test(g.initStart) ||
+      ![c.hostPswpin, c.containerPswpin, c.high].every(n => Number.isSafeInteger(n) && n >= 0)) return undefined;
+  return { version: 1, sampleId: s.sampleId, sampleAt: s.sampleAt,
+    generation: { bootId: g.bootId, cgroup: g.cgroup, initStart: g.initStart },
+    counters: { hostPswpin: c.hostPswpin, containerPswpin: c.containerPswpin, high: c.high } };
+}
+function strictPsiRowOf(value: unknown): PsiEntry | undefined {
+  if (!Array.isArray(value) || value.length !== 5 || !Number.isFinite(value[0]) || (value[2] !== 0 && value[2] !== 1) ||
+      ![value[1], value[3], value[4]].every(v => v === null || (typeof v === "number" && Number.isFinite(v)))) return undefined;
+  return [...value] as PsiEntry;
+}
+function sameStrictSample(a: StrictPressureSample, b: StrictPressureSample): boolean {
+  return a.sampleId === b.sampleId && a.sampleAt === b.sampleAt && sameStrictGeneration(a.generation, b.generation) &&
+    a.counters.hostPswpin === b.counters.hostPswpin && a.counters.containerPswpin === b.counters.containerPswpin && a.counters.high === b.counters.high;
+}
+function strictTargetOf(value: unknown): StrictPsiTarget | undefined {
+  const v = value as Partial<StrictPsiTarget> | null, sample = strictSampleOf(v?.sample), row = strictPsiRowOf(v?.row);
+  return sample && row && row[0] === sample.sampleAt && row[2] === 0 ? { sample, row } : undefined;
+}
+function strictCounter(read: ShadowMemoryPorts["readFile"], path: string, key: string): StrictRead<number> {
+  try {
+    const raw = new RegExp(`^${key}[ \\t]+(\\d+)$`, "m").exec(read(path))?.[1];
+    const n = raw === undefined ? NaN : Number(raw);
+    return Number.isSafeInteger(n) && n >= 0 ? { kind: "available", value: n } : { kind: "unavailable", reason: "malformed" };
+  } catch (error) { return { kind: "unavailable", reason: "unreadable", code: strictReadErrorCode(error) }; }
+}
+interface StrictGather {
+  generation: StrictRead<StrictPressureSample["generation"]>;
+  rawRead: ShadowMemoryPorts["readFile"];
+}
+type StrictWindowNumbers = Pick<Extract<StrictPressureEvidence, { kind: "paired" }>,
+  "prior" | "elapsedMs" | "hostPagesPerSec" | "containerPagesPerSec" | "ceilingCrossings">;
+function strictWindow(store: PressureStore, current: StrictPressureSample | undefined, policy: HostMemoryBudgetPolicy): string[] {
+  if (!current) return ["strict-observation-current-unavailable"];
+  if (store.validationMalformed) return ["strict-observation-malformed"];
+  if (store.unread !== undefined && store.unread !== "ENOENT") return ["strict-observation-history-unavailable"];
+  const prior = store.validationObservation;
+  if (!prior) return ["strict-observation-untagged"];
+  if (!sameStrictGeneration(prior.generation, current.generation)) return ["strict-observation-generation-mismatch"];
+  const elapsed = current.sampleAt - prior.sampleAt;
+  if (elapsed <= 0) return ["strict-observation-nonpositive-window"];
+  if (elapsed > policy.staleReadingMs) return ["strict-observation-stale"];
+  if (elapsed > CROSSING_WINDOW_MS) return ["strict-observation-crossing-stale"];
+  if (current.counters.hostPswpin < prior.counters.hostPswpin || current.counters.containerPswpin < prior.counters.containerPswpin ||
+      current.counters.high < prior.counters.high) return ["strict-observation-counter-reset"];
+  return [];
+}
+
+function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string, strictPsi = false): PressureStore {
   let parsed: Partial<PressureStore>;
   try {
     parsed = JSON.parse(read(path)) as Partial<PressureStore>;
   } catch (error) {
-    void error; // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
-    return { swap: [], container: [] };
+    // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
+    return { swap: [], container: [], psi: [], unread: error instanceof SyntaxError ? "unparseable" : reasonOf(error) };
+  }
+  if (strictPsi && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))) {
+    return { swap: [], container: [], psi: [], unread: "strict-psi-malformed" };
   }
   const finite = (...n: unknown[]): boolean => n.every((v) => typeof v === "number" && Number.isFinite(v));
   const prior = parsed.prior && finite(parsed.prior.at) ? parsed.prior : undefined;
@@ -1130,7 +1498,80 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
   const container = Array.isArray(parsed.container)
     ? parsed.container.filter((s) => Array.isArray(s) && finite(s[0]) && (s[1] === 0 || s[1] === 1) && (s[2] === 0 || s[2] === 1))
     : [];
-  return { ...(prior ? { prior } : {}), swap, container };
+  const nullable = (v: unknown): boolean => v === null || finite(v);
+  const psi = Array.isArray(parsed.psi)
+    ? parsed.psi.filter((s) => Array.isArray(s) && finite(s[0]) && nullable(s[1]) && (s[2] === 0 || s[2] === 1) &&
+      nullable(s[3]) && nullable(s[4]))
+    : [];
+  if (strictPsi && (!Array.isArray(parsed.psi) || psi.length !== parsed.psi.length || parsed.psi.some(s => s.length !== 5))) {
+    return { swap: [], container: [], psi: [], unread: "strict-psi-malformed" };
+  }
+  const validationObservation = strictSampleOf(parsed.validationObservation), validationMarker = strictTargetOf(parsed.validationMarker);
+  const validationMalformed = (parsed.validationObservation !== undefined && !validationObservation) ||
+    (parsed.validationMarker !== undefined && (!validationMarker || !validationObservation || !sameStrictSample(validationMarker.sample, validationObservation)));
+  return { ...(prior ? { prior } : {}), swap, container, psi,
+    ...(validationObservation ? { validationObservation } : {}), ...(validationMarker ? { validationMarker } : {}),
+    ...(validationMalformed ? { validationMalformed: true as const } : {}) };
+}
+
+function readOomKill(read: ShadowMemoryPorts["readFile"]): number | null {
+  try {
+    const raw = /^oom_kill (\d+)$/m.exec(read("/proc/vmstat"))?.[1];
+    return raw === undefined ? null : Number(raw);
+  } catch (error) {
+    void error; // Unread: this verdict carries no OOM reading, and a band with none keeps the prior.
+    return null;
+  }
+}
+
+export type StrictPsiStartMark =
+  | { kind: "recorded"; at: number; sampleId: string }
+  | { kind: "not-recorded"; reason: "unavailable" | "malformed" | "missing" | "ambiguous" | "already-recorded" | "changed"; at: number }
+  | { kind: "unknown"; reason: "write-failed"; at: number };
+
+/** The legacy three-argument boolean API and best-effort behavior remain unchanged. */
+export function markPsiStartAdmitted(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number): boolean {
+  return markPsiStart(ports, root, at);
+}
+
+/** A recorded strict result means this synchronous write returned, not cross-process atomicity or a child start. */
+export function markStrictPsiStartAdmitted(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, target: StrictPsiTarget): StrictPsiStartMark {
+  return markPsiStart(ports, root, target.sample.sampleAt, { target });
+}
+
+function markPsiStart(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number): boolean;
+function markPsiStart(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number,
+  options: { target: StrictPsiTarget }): StrictPsiStartMark;
+function markPsiStart(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number,
+  options?: { target: StrictPsiTarget }): boolean | StrictPsiStartMark {
+  const notRecorded = (reason: Extract<StrictPsiStartMark, { kind: "not-recorded" }>['reason']): boolean | StrictPsiStartMark =>
+    options ? { kind: "not-recorded", reason, at } : false;
+  let writing = false;
+  try {
+    const path = join(root, "state", CONTAINER_PRESSURE_FILE);
+    const { unread, validationMalformed, ...store } = readPressureStore(ports.readFile, path, options !== undefined);
+    if (options) {
+      if (!Number.isFinite(at)) return notRecorded("unavailable");
+      if (unread !== undefined) return notRecorded(unread === "unparseable" || unread === "strict-psi-malformed" ? "malformed" : "unavailable");
+      if (validationMalformed) return notRecorded("malformed");
+      const matches = store.psi.filter(([stamp]) => stamp === at);
+      if (matches.length !== 1) return notRecorded(matches.length === 0 ? "missing" : "ambiguous");
+      if (matches[0]![2] !== 0) return notRecorded("already-recorded");
+      const expected = strictTargetOf(options.target);
+      if (!expected || !store.validationObservation || !store.validationMarker ||
+          !sameStrictSample(expected.sample, store.validationObservation) || !sameStrictSample(expected.sample, store.validationMarker.sample) ||
+          JSON.stringify(expected.row) !== JSON.stringify(store.validationMarker.row) || JSON.stringify(expected.row) !== JSON.stringify(matches[0])) return notRecorded("changed");
+    }
+    const entry = unread === undefined ? store.psi.find(([stamp]) => stamp === at) : undefined;
+    if (entry === undefined) return notRecorded("missing");
+    entry[2] = 1;
+    writing = true;
+    ports.writeFile(path, `${JSON.stringify(store)}\n`);
+    return options ? { kind: "recorded", at, sampleId: options.target.sample.sampleId } : true;
+  } catch (error) {
+    void error; // Legacy remains best-effort; strict mode reports unknown if a write may already have had effects.
+    return options ? writing ? { kind: "unknown", reason: "write-failed", at } : { kind: "not-recorded", reason: "unavailable", at } : false;
+  }
 }
 
 /**
@@ -1140,16 +1581,15 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
  */
 function readContainerPressure(
   ports: ShadowMemoryPorts, root: string, now: number, policy: HostMemoryBudgetPolicy,
-  snapshot: ShadowInputs,
-): { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
+  snapshot: ShadowInputs, admitted: boolean, strict?: StrictGather,
+): Pick<ShadowInputs, "psiBound" | "psiRecordAt" | "strictEvidence" | "swapIn"> & { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
   const path = join(root, "state", CONTAINER_PRESSURE_FILE);
-  const store = readPressureStore(ports.readFile, path);
+  const store = readPressureStore(ports.readFile, path, strict !== undefined);
   const psi = readPsi(ports.readFile, "/sys/fs/cgroup/memory.pressure");
-  let pswpin: number | undefined;
-  let swapIn: { pagesPerSec: number } | { unmeasured: string };
+  let counters: ReturnType<typeof swapInCounters> = undefined;
+  let swapIn: SwapInReading;
   try {
-    const raw = /^pswpin (\d+)$/m.exec(ports.readFile("/sys/fs/cgroup/memory.stat"))?.[1];
-    pswpin = raw === undefined ? undefined : Number(raw);
+    counters = swapInCounters(ports.readFile("/sys/fs/cgroup/memory.stat"));
     swapIn = { unmeasured: "no pswpin in memory.stat" };
   } catch (error) {
     // No memory.stat: the container's swap-in is unmeasured and named; its PSI may still show its pressure.
@@ -1164,15 +1604,51 @@ function readContainerPressure(
   }
   const prior = store.prior;
   const fresh = prior !== undefined && now > prior.at && now - prior.at <= policy.staleReadingMs;
-  if (pswpin !== undefined) {
+  if (counters !== undefined) {
     if (!prior || prior.pswpin === undefined) swapIn = { unmeasured: "no prior sample in this instance" };
     else if (now <= prior.at) swapIn = { unmeasured: "no elapsed time since the prior sample" };
     else if (!fresh) swapIn = { unmeasured: `stale: prior sample ${Math.round((now - prior.at) / 1000)}s old` };
-    else swapIn = { pagesPerSec: Math.max(0, pswpin - prior.pswpin) / ((now - prior.at) / 1000) };
+    else swapIn = swapInRateOf(counters, { pswpin: prior.pswpin, ...(prior.zswpin !== undefined ? { zswpin: prior.zswpin } : {}) }, (now - prior.at) / 1000);
   }
   // A counter that went down belongs to a new cgroup (the container was recreated): its whole count is new.
-  const crossings = high === undefined || !fresh || prior!.high === undefined || now - prior!.at > CROSSING_WINDOW_MS ? null
+  let crossings = high === undefined || !fresh || prior!.high === undefined || now - prior!.at > CROSSING_WINDOW_MS ? null
     : high >= prior!.high ? high - prior!.high : high;
+  let current: StrictPressureSample | undefined, window: StrictWindowNumbers | undefined, issues: string[] = [], hostSwapIn = snapshot.swapIn;
+  if (strict) {
+    const hostCounter = strictCounter(ports.readFile, "/proc/vmstat", "pswpin");
+    // OPERATOR RULING 2026-10-19 (4): the counters are pswpin + zswpin; a kernel without zswap has no zswpin line (0).
+    const hostZswpin = strictCounter(ports.readFile, "/proc/vmstat", "zswpin");
+    const hostPswpin = hostCounter.kind === "available" ? hostCounter.value + (hostZswpin.kind === "available" ? hostZswpin.value : 0)
+      : undefined;
+    const pswpin = counters === undefined ? undefined : counters.pswpin + counters.zswpin;
+    const after = strictGenerationOf(strict.rawRead);
+    if (strict.generation.kind !== "available" || after.kind !== "available") {
+      issues.push("strict-observation-generation-unavailable");
+      for (const result of [strict.generation, after]) if (result.kind === "unavailable") issues.push(strictReadIssue("generation", result));
+    } else if (!sameStrictGeneration(strict.generation.value, after.value)) issues.push("strict-observation-generation-changed");
+    else if (!Number.isFinite(now) || now < 0) issues.push("strict-observation-clock-unavailable");
+    else if (hostPswpin === undefined || !Number.isSafeInteger(pswpin) || pswpin! < 0 || !Number.isSafeInteger(high) || high! < 0) {
+      issues.push("strict-observation-counter-unavailable");
+      if (hostCounter.kind === "unavailable") issues.push(strictReadIssue("counter", hostCounter));
+    } else current = { version: 1, sampleId: randomUUID(), sampleAt: now, generation: after.value,
+      counters: { hostPswpin, containerPswpin: pswpin!, high: high! } };
+    if (current) issues.push(...strictWindow(store, current, policy));
+    if (issues.length === 0 && current && store.validationObservation) {
+      const old = store.validationObservation, seconds = (current.sampleAt - old.sampleAt) / 1000;
+      window = { prior: old, elapsedMs: current.sampleAt - old.sampleAt,
+        hostPagesPerSec: (current.counters.hostPswpin - old.counters.hostPswpin) / seconds,
+        containerPagesPerSec: (current.counters.containerPswpin - old.counters.containerPswpin) / seconds,
+        ceilingCrossings: current.counters.high - old.counters.high };
+      hostSwapIn = { pagesPerSec: window.hostPagesPerSec };
+      swapIn = { pagesPerSec: window.containerPagesPerSec };
+      crossings = window.ceilingCrossings;
+    } else {
+      hostSwapIn = { unmeasured: issues.join("+") };
+      swapIn = { unmeasured: issues.join("+") };
+      crossings = null;
+    }
+  }
+  const observedSnapshot = strict ? { ...snapshot, swapIn: hostSwapIn } : snapshot;
   const containerPressure: ContainerPressureInput = {
     swapIn,
     psi: "unread" in psi ? psi : { someAvg10: psi.someAvg10, ...(psi.fullAvg10 !== undefined ? { fullAvg10: psi.fullAvg10 } : {}) },
@@ -1183,24 +1659,48 @@ function readContainerPressure(
   const containerLift = containerLiftOf(store.container.map(([at, projected, pressed]) => ({
     at, projected: projected === 1, pressed: pressed === 1,
   })), now);
-  const hostPsi = "unread" in snapshot.psi ? null : snapshot.psi;
+  const hostPsi = "unread" in observedSnapshot.psi ? null : observedSnapshot.psi;
   const stalled = hostPsi !== null && (hostPsi.someAvg10 > policy.psiSomeAvg10Max || (hostPsi.fullAvg10 ?? 0) > policy.psiFullAvg10Max);
-  const rate = "pagesPerSec" in snapshot.swapIn ? Math.round(snapshot.swapIn.pagesPerSec) : null;
+  const rate = "pagesPerSec" in observedSnapshot.swapIn ? Math.round(observedSnapshot.swapIn.pagesPerSec) : null;
   const swap = [...store.swap, [now, rate, stalled ? 1 : 0] as [number, number | null, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
+  const psiBound = psiStartBoundOf(store.psi.map(([at, fullAvg10, admit, oomKill, fullAvg60]) => ({
+    at, fullAvg10, fullAvg60, admitted: admit === 1, oomKill,
+  })), now, policy, store.unread === undefined ? undefined : `pressure store unread (${store.unread})`);
+  const psiRow: PsiEntry = [now, hostPsi?.fullAvg10 ?? null, admitted ? 1 : 0, readOomKill(ports.readFile), hostPsi?.fullAvg60 ?? null];
+  const psiSeries = [...store.psi, psiRow].filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
   // Evaluate the same pure projection as the caller, before storing this outcome; this row cannot train its own lift.
-  const numbers = evaluateShadowMemory({ ...snapshot, containerPressure, swapStall, containerLift }, policy).numbers;
+  const numbers = evaluateShadowMemory({ ...observedSnapshot, containerPressure, swapStall, containerLift }, policy).numbers;
   const flagged = numbers.containerProjectedMib !== null && numbers.containerOnsetMib !== null &&
     numbers.containerProjectedMib > numbers.containerOnsetMib;
   const container = [...store.container, [now, flagged ? 1 : 0, numbers.containerPressed ? 1 : 0] as [number, 0 | 1, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
-  const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap, container };
-  try {
-    ports.writeFile(path, `${JSON.stringify(next)}\n`);
-  } catch (error) {
-    void error; // Unwritable: this verdict still judges from its reading; the next one measures no rate and learns less.
+  const marker: StrictPsiTarget | undefined = current ? { sample: current, row: [...psiRow] } : undefined;
+  const tags = strict ? current ? { validationObservation: current, validationMarker: marker } : {}
+    : { ...(store.validationObservation ? { validationObservation: store.validationObservation } : {}),
+      ...(store.validationMarker ? { validationMarker: store.validationMarker } : {}) };
+  const next = { prior: { at: now, ...(counters !== undefined ? { pswpin: counters.pswpin, zswpin: counters.zswpin } : {}),
+    ...(high !== undefined ? { high } : {}) }, swap, container, psi: psiSeries, ...tags };
+  let observationWrite: "not-attempted" | "returned" | "unknown" = "not-attempted";
+  if (!strict || current) {
+    observationWrite = "unknown";
+    try {
+      // A store this reader could not read (an errno) may hold hours of history: it is only ever created, never
+      // replaced. An unparseable one cannot be a torn write (every write is whole) and is replaced, or it never learns.
+      if (store.unread !== undefined && store.unread !== "unparseable") ports.writeFile(path, `${JSON.stringify(next)}\n`, { exclusive: true });
+      else ports.writeFile(path, `${JSON.stringify(next)}\n`);
+      observationWrite = "returned";
+    } catch (error) {
+      void error; // A thrown writer may already have replaced the file; strict evidence never calls that persisted.
+    }
   }
-  return { containerPressure, swapStall, containerLift };
+  if (strict && observationWrite === "unknown") issues.push("strict-observation-write-failed");
+  const strictEvidence: StrictPressureEvidence | undefined = !strict ? undefined
+    : issues.length === 0 && current && marker && window && observationWrite === "returned"
+      ? { kind: "paired", current, marker, ...window, observationWrite }
+      : { kind: "unavailable", reasons: issues, ...(current ? { current } : {}), ...(marker ? { marker } : {}), observationWrite };
+  return { containerPressure, swapStall, containerLift, psiBound, psiRecordAt: now, swapIn: hostSwapIn,
+    ...(strictEvidence ? { strictEvidence } : {}) };
 }
 
 function readContainer(read: ShadowMemoryPorts["readFile"]): ShadowInputs["container"] {
@@ -1448,10 +1948,60 @@ export function daemonGrowthOf(
 /** The same split over the daemon's persisted footprint: every sample of the last hour, across restarts (a restarted
  *  daemon climbs back toward the instance's footprint, so a prior pid's samples still say what is typical). */
 export function footprintGrowthOf(
-  samples: readonly FootprintSample[], now: number, minSamples: number,
+  samples: readonly FootprintSample[], now: number, minSamples: number, boot?: number,
 ): SeriesGrowth {
   const recent = samples.filter((s) => s.at <= now && now - s.at <= HOUR_MS);
-  return seriesGrowth(recent.map((s) => s.bytes), minSamples, "daemon footprint sample(s)");
+  // W1-T9982: once the current generation has the samples a split needs, an earlier generation's never size it.
+  const own = boot === undefined ? [] : recent.filter((s) => s.boot === boot);
+  return seriesGrowth((own.length >= minSamples ? own : recent).map((s) => s.bytes), minSamples, "daemon footprint sample(s)");
+}
+
+/** W1-T9982: the generation of the newest sample that names one: the daemon generation now running. */
+export function currentBootOf(samples: readonly FootprintSample[]): number | undefined {
+  return samples.filter((s) => s.boot !== undefined).sort((a, b) => a.at - b.at).at(-1)?.boot;
+}
+
+export type BootPhase =
+  | { phase: "boot"; growthMib: number; typicalMib: number; basis: string; typicalBasis: string; earlierBoots: number }
+  | { phase: "steady"; phaseBasis: string };
+
+const MIB_BYTES = 1024 * 1024;
+
+/**
+ * W1-T9982: what the daemon will still grow while it is inside the boot phase its earlier boots showed. The phase is
+ * LEARNED: this generation is in it while its uptime is below the largest peak_uptime_ms among the earlier generations.
+ * Within it, the growth is the largest earlier (peak - first) less what this generation has already grown (current
+ * rss+swap - its own first reading); the typical part is the median of the same remainders. Anything else is steady.
+ */
+export function bootPhaseOf(
+  store: { samples: readonly FootprintSample[]; boots: readonly BootGrowth[] } | { unread: string },
+  now: number, currentMib: number | undefined,
+): BootPhase {
+  if ("unread" in store) return { phase: "steady", phaseBasis: `steady: the boot record is unread (${store.unread})` };
+  const current = currentBootOf(store.samples);
+  if (current === undefined) return { phase: "steady", phaseBasis: "steady: no sample names its generation" };
+  const earlier = store.boots.filter((b) => b.boot < current);
+  if (earlier.length === 0) return { phase: "steady", phaseBasis: "steady: no earlier boot recorded" };
+  const uptimeMs = Math.max(0, now - current);
+  const phaseMs = Math.max(...earlier.map((b) => b.peak_uptime_ms));
+  if (uptimeMs >= phaseMs) {
+    return { phase: "steady", phaseBasis: `steady: uptime ${Math.round(uptimeMs / 1000)} s is past the ${Math.round(phaseMs / 1000)} s its ${earlier.length} earlier boot(s) peaked by` };
+  }
+  const first = store.boots.find((b) => b.boot === current)?.first_bytes ??
+    store.samples.filter((s) => s.boot === current).sort((a, b) => a.at - b.at)[0]?.bytes;
+  const latest = store.samples.filter((s) => s.boot === current).sort((a, b) => a.at - b.at).at(-1)?.bytes;
+  const now_ = currentMib ?? (latest === undefined ? undefined : latest / MIB_BYTES);
+  if (first === undefined || now_ === undefined) return { phase: "steady", phaseBasis: "steady: this generation has no reading yet" };
+  const grown = Math.max(0, now_ - first / MIB_BYTES);
+  const remainders = earlier.map((b) => Math.max(0, b.peak_bytes - b.first_bytes) / MIB_BYTES).sort((a, b) => a - b);
+  const mid = remainders.length >> 1;
+  const median = remainders.length % 2 === 1 ? remainders[mid]! : (remainders[mid - 1]! + remainders[mid]!) / 2;
+  const growthMib = Math.max(0, remainders.at(-1)! - grown);
+  return {
+    phase: "boot", earlierBoots: earlier.length, growthMib, typicalMib: Math.min(growthMib, Math.max(0, median - grown)),
+    basis: `boot-phase: ${earlier.length} earlier boots, +${Math.round(remainders.at(-1)!)} MiB by uptime ${Math.round(phaseMs / 1000)} s`,
+    typicalBasis: `median of ${earlier.length} earlier boot(s)' growth, +${Math.round(median)} MiB, less ${Math.round(grown)} MiB already grown`,
+  };
 }
 
 function seriesGrowth(bytes: readonly number[], minSamples: number, unit: string): SeriesGrowth {
@@ -1492,9 +2042,15 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
   return { scenario: "serve-stopped", basis: `serve silent ${Math.round(age / 1000)}s` };
 }
 
-/** One bounded snapshot for one start. */
-export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy): ShadowInputs {
+/** One bounded snapshot for one start. `admitted`: its start runs whatever the verdict (a shadow-mode class). */
+export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy,
+  options: { admitted?: boolean; strictEvidence?: boolean } = {}): ShadowInputs {
   const now = ports.clock.now();
+  const strict: StrictGather | undefined = options.strictEvidence ? { generation: strictGenerationOf(ports.readFile), rawRead: ports.readFile } : undefined;
+  if (strict) {
+    const rawRead = ports.readFile, cache = new Map<string, string>();
+    ports = { ...ports, readFile: path => { if (!cache.has(path)) cache.set(path, rawRead(path)); return cache.get(path)!; } };
+  }
   const ledger = readLedgerState(ports, start.root);
   const recorded = ledger.reading?.entries ?? [];
   const residents = residentsOf(ports.readFile, recorded.map((entry) => entry.path), undefined, { includeRss: true });
@@ -1525,21 +2081,22 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   const others = [...new Set(entries.map((e) => e.owner.split("@")[0]!))].filter((name) => name !== instance)
     .map((name) => ({ instance: name, samples: 0, reason: "its daemon.alive rows are not readable from this instance" }));
   const container = readContainer(ports.readFile);
-  const swapIn = readSwapIn(ports.readFile, now, policy.staleReadingMs);
+  const swapIn = strict ? { unmeasured: "strict observation pending" } : readSwapIn(ports.readFile, now, policy.staleReadingMs);
   const psi = readPsi(ports.readFile);
   const inputs: ShadowInputs = {
     memAvailable: readMemAvailable(ports.readFile),
     swapIn,
     psi,
     container,
-    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
+    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}),
+      ...(ledger.reading ? { counts: ledger.reading.counts } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
     entries,
     start: startOf(start, ports, typical),
     daemonGrowth: [own, ...others],
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
   };
-  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs) };
+  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs, options.admitted === true, strict) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;
   if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce") {
     if (policy.jointQualification === undefined) throw new Error("joint enforce unavailable: qualification evidence is missing");
@@ -1605,6 +2162,7 @@ function startOf(
   const estimateMib = start.estimateMib ?? estimateOf(ports, start.workerClass);
   return {
     ...(start.reservationId ? { reservationId: start.reservationId } : {}),
+    ...(start.estimateSource === undefined ? {} : { estimateSource: start.estimateSource }),
     workerClass: start.workerClass, estimateMib, ...typical(start.workerClass, estimateMib),
   };
 }
@@ -1657,16 +2215,16 @@ export type SeriesGrowth = {
  */
 function daemonSeries(
   ports: ShadowMemoryPorts, tail: ReturnType<typeof readTailRows>, now: number, minSamples: number, root: string, pid?: number,
-): { series: SeriesGrowth; basis: string; footprint: string } {
+): { series: SeriesGrowth; basis: string; footprint: string; store: ReturnType<typeof readDaemonFootprint> } {
   const store = readDaemonFootprint(join(root, "state"), ports.readFile);
-  const fromStore = "unread" in store ? undefined : footprintGrowthOf(store.samples, now, minSamples);
+  const fromStore = "unread" in store ? undefined : footprintGrowthOf(store.samples, now, minSamples, currentBootOf(store.samples));
   const footprint = "unread" in store ? `unread: ${store.unread}` : `${store.source}: ${fromStore!.samples} sample(s) in the last hour`;
   const fromTail = "unread" in tail ? undefined : daemonGrowthOf(tail.rows, now, minSamples, pid);
   if (fromStore && (!fromTail || fromStore.samples >= fromTail.samples)) {
-    return { series: fromStore, basis: "daemon footprint", footprint };
+    return { series: fromStore, basis: "daemon footprint", footprint, store };
   }
-  if (fromTail) return { series: fromTail, basis: "daemon.alive rows", footprint };
-  return { series: { samples: 0, reason: `ledger tail unreadable: ${(tail as { unread: string }).unread}` }, basis: "none", footprint };
+  if (fromTail) return { series: fromTail, basis: "daemon.alive rows", footprint, store };
+  return { series: { samples: 0, reason: `ledger tail unreadable: ${(tail as { unread: string }).unread}` }, basis: "none", footprint, store };
 }
 
 /** This instance's daemon growth (W1-T9972): its last-hour series' peak less its current rss+swap (the proc's VmRSS +
@@ -1681,7 +2239,7 @@ function ownDaemonGrowth(
 ): Omit<ShadowInputs["daemonGrowth"][number], "instance"> {
   let procReason = "";
   const pid = ports.daemonPid();
-  const { series, basis, footprint } = daemonSeries(ports, tail, now, policy.daemonGrowthMinSamples, root, pid);
+  const { series, basis, footprint, store } = daemonSeries(ports, tail, now, policy.daemonGrowthMinSamples, root, pid);
   let proc: { growthMib: number; peakMib: number; residentMib: number; swapMib: number } | undefined;
   if (pid === undefined) procReason = "no daemon pid in this process";
   else {
@@ -1697,6 +2255,19 @@ function ownDaemonGrowth(
   }
   const lifetimeBasis = proc && `proc ${pid}: VmHWM ${Math.round(proc.peakMib)} MiB - VmRSS ${Math.round(proc.residentMib)} MiB`;
   const lifetime = proc ? { lifetimePeakGrowthMib: proc.growthMib, lifetimePeakBasis: lifetimeBasis! } : {};
+  // W1-T9982: inside the boot phase its earlier boots showed, the daemon is charged what they grew, less what it has.
+  const boot = bootPhaseOf(store, now, proc && proc.residentMib + proc.swapMib);
+  if (boot.phase === "boot") {
+    return {
+      samples: boot.earlierBoots, growthMib: Math.max(proc?.growthMib ?? 0, boot.growthMib), typicalMib: boot.typicalMib,
+      basis: boot.basis, typicalBasis: boot.typicalBasis, footprint, ...lifetime, phase: "boot",
+      phaseBasis: boot.basis,
+      currentBasis: proc
+        ? `proc ${pid}: VmRSS ${Math.round(proc.residentMib)} MiB + VmSwap ${Math.round(proc.swapMib)} MiB`
+        : "the latest sample",
+    };
+  }
+  const steady = { phase: "steady" as const, phaseBasis: boot.phaseBasis };
   if (series.peakMib !== undefined && series.medianMib !== undefined && series.latestMib !== undefined) {
     // The series is rss+swap, so the current reading is too: a swapped-out daemon does not raise its own tail.
     const current = proc ? proc.residentMib + proc.swapMib : series.latestMib;
@@ -1704,7 +2275,7 @@ function ownDaemonGrowth(
     const typicalMib = Math.min(growthMib, Math.max(0, series.medianMib - current));
     const unit = basis === "daemon footprint" ? "footprint sample(s)" : "sample row(s)";
     return {
-      samples: series.samples, growthMib, typicalMib, basis, footprint, ...lifetime,
+      samples: series.samples, growthMib, typicalMib, basis, footprint, ...lifetime, ...steady,
       currentBasis: proc
         ? `proc ${pid}: VmRSS ${Math.round(proc.residentMib)} MiB + VmSwap ${Math.round(proc.swapMib)} MiB`
         : "the latest sample",
@@ -1714,10 +2285,10 @@ function ownDaemonGrowth(
   if (proc) {
     return {
       samples: 1, growthMib: proc.growthMib, basis: `${lifetimeBasis} (the lifetime peak: ${series.reason})`,
-      typicalBasis: `all typical: ${series.reason}`, footprint, ...lifetime,
+      typicalBasis: `all typical: ${series.reason}`, footprint, ...lifetime, ...steady,
     };
   }
-  return { ...series, reason: `${procReason}; ${series.reason}`, footprint };
+  return { ...series, reason: `${procReason}; ${series.reason}`, footprint, ...steady };
 }
 
 // ── the recorder: never in the path ───────────────────────────────────────────────────────────────────────────────
@@ -1850,7 +2421,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
     const policy = ports.policy();
     const mode = hostMemoryBudgetModeFor(policy, start.workerClass);
     if (mode === "off") return { kind: "off" };
-    const inputs = gatherShadowInputs(start, ports, policy);
+    const inputs = gatherShadowInputs(start, ports, policy, { admitted: mode === "shadow" });
     const instance = instanceOf(ports, start.root);
     const now = ports.clock.now();
     const waitKey = `${instance}\u0000${start.workerClass}`;
@@ -1905,6 +2476,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
         scenario_basis: inputs.serve.basis,
         would_admit: verdict.wouldAdmit,
         reasons: verdict.reasons,
+        ...swapInRowFields(verdict.numbers),
         uncertainty: verdict.uncertainty,
         numbers: verdict.numbers,
         claims: verdict.claims,

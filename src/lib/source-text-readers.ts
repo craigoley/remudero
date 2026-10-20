@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 
 /**
  * WHICH TRACKED FILES A TEST SUITE READS AS TEXT — the population a source-text census walks, derived
@@ -23,6 +24,7 @@ import { join } from "node:path";
 /** A suite that cannot be placed by derivation names what it reads after this marker, e.g.
  *  `// @census-reads: src/lib/review.ts src/lib/*.ts — why`. `none` declares it reads no tracked text. */
 export const CENSUS_READS_MARKER = "@census-reads:";
+export const CENSUS_CLOSURE_MARKER = "@census-closure:";
 
 /** The marker test/source-text-assertion-census.test.ts reads as "this suite's SUBJECT is source
  *  text". Such a suite is census-shaped: it asserts over what a file says, so any edit there can move it. */
@@ -113,13 +115,34 @@ function walksFromArgs(args: string, roots: ReadonlySet<string>): string[] {
   return out;
 }
 
+const isExclusion = (lit: string): boolean => lit.startsWith(":!") || lit.startsWith(":^") || /^:\([^)]*exclude/.test(lit);
+
 /** The pathspecs of every `git ls-files`/`git grep` argv literal in the text. Exclusions (`:!`,
  *  `:(exclude)`) narrow a walk and are skipped; a grep pattern never names a tracked root. */
 function walksFromGitArgv(text: string, roots: ReadonlySet<string>): string[] {
   const out: string[] = [];
   for (const m of text.matchAll(/\[([^[\]]*["'`](?:ls-files|grep)["'`][^[\]]*)\]/g)) {
     for (const lit of literals(m[1])) {
-      if (lit.startsWith(":!") || lit.startsWith(":^") || /^:\([^)]*exclude/.test(lit)) continue;
+      if (isExclusion(lit)) continue;
+      const walk = toWalk(lit, roots);
+      if (walk) out.push(walk);
+    }
+  }
+  return out;
+}
+
+const GIT_SPAWN_ARGV = /\[[^[\]]*["'`](?:ls-files|grep|diff|status)["'`][^[\]]*\]/;
+
+/** W1-T10063: in a suite that spawns git, the literals after `"--"` in ANY array literal are a pathspec. A
+ *  helper (`gitGrepFiles(flags, [base, "--", "test"])`) takes its pathspec from the caller's array, so the
+ *  literal naming the subcommand and the pathspec sit in different arrays. */
+function walksFromPathspecArrays(text: string, roots: ReadonlySet<string>): string[] {
+  if (!GIT_SPAWN_ARGV.test(text)) return [];
+  const out: string[] = [];
+  for (const m of text.matchAll(/\[([^[\]]*["'`]--["'`][^[\]]*)\]/g)) {
+    const lits = literals(m[1]);
+    for (const lit of lits.slice(lits.indexOf("--") + 1)) {
+      if (isExclusion(lit)) continue;
       const walk = toWalk(lit, roots);
       if (walk) out.push(walk);
     }
@@ -129,15 +152,16 @@ function walksFromGitArgv(text: string, roots: ReadonlySet<string>): string[] {
 
 /** The `@census-reads:` declarations, or undefined when the file carries none. `none` declares a
  *  suite that reads no tracked text (its marker is about a fixture or its own output). */
-function declaredReads(text: string, roots: ReadonlySet<string>): { walks: string[]; none: boolean } | undefined {
+function declaredReads(text: string, roots: ReadonlySet<string>, marker = CENSUS_READS_MARKER): { walks: string[]; none: boolean } | undefined {
   let declared: { walks: string[]; none: boolean } | undefined;
   for (const line of text.split("\n")) {
     // Only a COMMENT line declares: the marker inside a fixture string is data, not this suite's claim.
-    if (!/^\s*(?:\/\/|\/?\*+)\s*@census-reads:/.test(line)) continue;
-    const at = line.indexOf(CENSUS_READS_MARKER);
+    const comment = /^\s*(?:\/\/|\/?\*+)\s*(.*)$/.exec(line)?.[1];
+    if (comment === undefined || !comment.startsWith(marker)) continue;
+    const at = line.indexOf(marker);
     declared ??= { walks: [], none: false };
     // Leading tokens only: a declaration may carry a reason after it, and a path in that prose is not a read.
-    for (const token of line.slice(at + CENSUS_READS_MARKER.length).trim().split(/\s+/)) {
+    for (const token of line.slice(at + marker.length).trim().split(/\s+/)) {
       const bare = token.replace(/[,;]$/, "");
       const walk = toWalk(bare, roots);
       if (bare === "none") declared.none = true;
@@ -146,6 +170,76 @@ function declaredReads(text: string, roots: ReadonlySet<string>): { walks: strin
     }
   }
   return declared;
+}
+
+/** Literal runtime imports, excluding comments, string contents and type-only declarations. */
+function runtimeSpecifiers(text: string): string[] {
+  const scanner = createScanner(true, undefined, text);
+  const tokens: { kind: SyntaxKind; value: string }[] = [];
+  const braceDepths: number[] = [];
+  for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
+    if ((kind === SyntaxKind.SlashToken || kind === SyntaxKind.SlashEqualsToken) &&
+        /^(?:=|\(|\[|\{|,|:|\?|return|case|=>|!|&&|\|\||\?\?)$/.test(tokens.at(-1)?.value ?? "=")) {
+      kind = scanner.reScanSlashToken();
+    }
+    if (kind === SyntaxKind.PrivateIdentifier && scanner.getTokenEnd() === scanner.getTokenStart()) {
+      kind = scanner.reScanHashToken();
+    }
+    if (kind === SyntaxKind.TemplateHead) braceDepths.push(0);
+    else if (kind === SyntaxKind.OpenBraceToken && braceDepths.length > 0) braceDepths[braceDepths.length - 1]++;
+    else if (kind === SyntaxKind.CloseBraceToken && braceDepths.length > 0) {
+      if (braceDepths[braceDepths.length - 1] === 0) {
+        kind = scanner.reScanTemplateToken(false);
+        if (kind === SyntaxKind.TemplateTail) braceDepths.pop();
+      } else braceDepths[braceDepths.length - 1]--;
+    }
+    tokens.push({ kind, value: kind === SyntaxKind.StringLiteral ? scanner.getTokenValue() : scanner.getTokenText() });
+  }
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
+    const next = tokens[i + 1];
+    const importing = token.kind === SyntaxKind.ImportKeyword;
+    if ((importing || token.kind === SyntaxKind.RequireKeyword) && next?.kind === SyntaxKind.OpenParenToken &&
+        tokens[i + 2]?.kind === SyntaxKind.StringLiteral) {
+      out.push(tokens[i + 2]!.value);
+      continue;
+    }
+    if (!importing && token.kind !== SyntaxKind.ExportKeyword) continue;
+    if (importing && next?.kind === SyntaxKind.StringLiteral) {
+      out.push(next.value);
+      continue;
+    }
+    if (!next || next.value === "type") continue;
+    if (!importing && next.kind !== SyntaxKind.OpenBraceToken && next.kind !== SyntaxKind.AsteriskToken) continue;
+    for (let j = i + 1; j < tokens.length; j += 1) {
+      const part = tokens[j]!;
+      if ([SyntaxKind.SemicolonToken, SyntaxKind.ImportKeyword, SyntaxKind.ExportKeyword].includes(part.kind)) break;
+      if (part.value !== "from" || tokens[j + 1]?.kind !== SyntaxKind.StringLiteral) continue;
+      const clause = tokens.slice(i + 1, j);
+      // An exclusively named clause with only `type T` members has no runtime edge.
+      const members = clause.slice(1, -1).map((t) => t.value).join(" ").split(",").filter((s) => s.trim());
+      const onlyTypes = clause[0]?.kind === SyntaxKind.OpenBraceToken &&
+        members.every((s) => /^\s*type\s+(?!as\b)\w/.test(s));
+      if (!onlyTypes) out.push(tokens[j + 1]!.value);
+      break;
+    }
+  }
+  return out;
+}
+
+function runtimeClosure(seed: string, paths: ReadonlySet<string>, readFile: (path: string) => string): string[] {
+  const seen = new Set<string>();
+  const queue = [seed];
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    if (seen.has(file) || !paths.has(file)) continue;
+    seen.add(file);
+    for (const spec of runtimeSpecifiers(readFile(file))) {
+      if (spec.startsWith(".")) queue.push(posix.normalize(posix.join(posix.dirname(file), spec)).replace(/\.js$/, ".ts"));
+    }
+  }
+  return [...seen];
 }
 
 /** Paths a `@source-text-subject: src/** — …` marker names before its prose begins. Only the
@@ -189,21 +283,26 @@ function withConstantsInlined(args: string, text: string): string {
  * PURE: what one suite's text reads, as walk prefixes. `roots` is the set of top-level tracked
  * names, so a literal is a read of the tree only when it starts at one of them.
  */
-export function sourceTextReaderOf(testFile: string, text: string, roots: ReadonlySet<string>): SourceTextReader {
+export function sourceTextReaderOf(
+  testFile: string, text: string, roots: ReadonlySet<string>,
+  closure: (seed: string) => readonly string[] = () => [],
+): SourceTextReader {
   const walks = new Set<string>();
   const readCall = /\breadFile(?:Sync)?\s*\(/g;
   for (let m = readCall.exec(text); m; m = readCall.exec(text)) {
     const args = withConstantsInlined(callArgs(text, m.index + m[0].length - 1), text);
     for (const walk of walksFromArgs(args, roots)) walks.add(walk);
   }
-  const gitWalks = walksFromGitArgv(text, roots);
+  const gitWalks = [...walksFromGitArgv(text, roots), ...walksFromPathspecArrays(text, roots)];
   for (const walk of gitWalks) walks.add(walk);
   const declared = declaredReads(text, roots);
   // A declaration is AUTHORITATIVE: it replaces what the text appears to read, so a suite whose
   // fixtures are read-call strings (a census of the census) names its real walk and nothing else.
   if (declared !== undefined) walks.clear();
   for (const walk of [...(declared?.walks ?? []), ...subjectMarkerWalks(text, roots)]) walks.add(walk);
-  const declaresSourceSubject = text.includes(SOURCE_TEXT_SUBJECT_MARKER) || declared !== undefined;
+  const seeds = declaredReads(text, roots, CENSUS_CLOSURE_MARKER);
+  for (const seed of seeds?.walks ?? []) for (const file of closure(seed)) walks.add(file);
+  const declaresSourceSubject = text.includes(SOURCE_TEXT_SUBJECT_MARKER) || declared !== undefined || seeds !== undefined;
   return {
     testFile,
     walks: [...walks].sort(),
@@ -224,7 +323,7 @@ export const SOURCE_TEXT_READER_PROBE_ARGV: readonly string[] = [
   "grep",
   "--untracked",
   "-lE",
-  `readFile(Sync)?[[:space:]]*\\(|ls-files|["'\`]grep["'\`]|${SOURCE_TEXT_SUBJECT_MARKER}|${CENSUS_READS_MARKER}`,
+  `readFile(Sync)?[[:space:]]*\\(|ls-files|["'\`](grep|diff|status)["'\`]|${SOURCE_TEXT_SUBJECT_MARKER}|${CENSUS_READS_MARKER}|${CENSUS_CLOSURE_MARKER}`,
   "--",
   "test/*.test.ts",
 ];
@@ -242,12 +341,12 @@ export function discoverSourceTextReaders(
   git: (args: readonly string[]) => string = checkoutGit(repoRoot),
   readFile: (path: string) => string = (path) => readFileSync(join(repoRoot, path), "utf8"),
 ): SourceTextReader[] {
-  const roots = new Set(
+  const paths = new Set(
     git(["ls-files", "--cached", "--others", "--exclude-standard"])
       .split("\n")
       .filter(Boolean)
-      .map((p) => p.split("/")[0]),
   );
+  const roots = new Set([...paths].map((p) => p.split("/")[0]));
   let hits: string[];
   try {
     hits = git([...SOURCE_TEXT_READER_PROBE_ARGV]).split("\n").map((s) => s.trim()).filter(Boolean);
@@ -258,7 +357,7 @@ export function discoverSourceTextReaders(
   }
   const out: SourceTextReader[] = [];
   for (const testFile of hits.sort()) {
-    const reader = sourceTextReaderOf(testFile, readFile(testFile), roots);
+    const reader = sourceTextReaderOf(testFile, readFile(testFile), roots, (seed) => runtimeClosure(seed, paths, readFile));
     if (reader.walks.length > 0 || reader.declaresSourceSubject) out.push(reader);
   }
   return out;

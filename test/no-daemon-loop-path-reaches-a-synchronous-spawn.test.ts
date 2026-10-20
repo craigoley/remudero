@@ -256,7 +256,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   runTaskBody: 2,
   runWipeTestPair: 1,
   serviceGit: 1,
-  shardAgeDays: 1,
   sleepSync: 3,
   sourceRepositoryFromCwd: 1,
   spawnPreparedProofSync: 1,

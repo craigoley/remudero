@@ -16,6 +16,19 @@ const TAIL = String.raw`See annotations below for details\.\n\n(\[View all branc
 const QUALITY_ONLY = new RegExp(String.raw`${HEAD}((?:${QUALITY_ROW})+)\n(?:${TOO_LARGE})?${TAIL}`);
 const SECTIONED = new RegExp(String.raw`${HEAD}(?:(Security Alerts:\n(?: \* [1-9][0-9]* (?:low|medium)\n)+)\n)?(?:((?:Other|Non-security) Alerts:\n(?:${QUALITY_ROW})+)\n)?(?:\n|${TOO_LARGE})?${TAIL}`);
 
+function completeBelowThresholdSections(sections, title) {
+  const declared = /^([1-9][0-9]*) new alerts?(?: including ([1-9][0-9]*) (low|medium) severity security vulnerabilit(?:y|ies))?$/.exec(title ?? '');
+  if (!declared || !Number.isSafeInteger(Number(declared[1]))) return false;
+  const levels = new Map(); let total = 0;
+  for (const row of [sections[1] ?? '', sections[2] ?? ''].join('\n').matchAll(/^ \* ([1-9][0-9]*) (low|medium|error|warning|note)(s?)$/gm)) {
+    const count = Number(row[1]);
+    if (!Number.isSafeInteger(count) || levels.has(row[2]) || (row[3] === 's' && count === 1)) return false;
+    levels.set(row[2], count); total += count;
+  }
+  if (!Number.isSafeInteger(total) || total !== Number(declared[1])) return false;
+  return declared[2] === undefined || (Number.isSafeInteger(Number(declared[2])) && levels.get(declared[3]) === Number(declared[2]));
+}
+
 export function classifyCodeScanningMergePolicy(input) {
   if (!input || !sha(input.headSha) || input.observedHeadSha !== input.headSha) return unknown('head-unavailable-or-changed');
   if (!Number.isSafeInteger(input.prNumber) || input.prNumber < 1) return unknown('pr-identity-unavailable');
@@ -62,7 +75,7 @@ export function classifyCodeScanningMergePolicy(input) {
   // quality-only findings do not become an unbounded hold. Unknown formats stay UNKNOWN.
   const sections = summary.match(SECTIONED);
   if (['success','failure'].includes(latest.conclusion) && sections && (sections[1] || sections[2]) && sections[3] === link &&
-      /^[1-9][0-9]* new alerts?(?: including .+)?$/.test(latest.output.title ?? '')) {
+      completeBelowThresholdSections(sections, latest.output.title)) {
     return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};
   }
   return unknown('security-analysis-failed-or-unrecognized');

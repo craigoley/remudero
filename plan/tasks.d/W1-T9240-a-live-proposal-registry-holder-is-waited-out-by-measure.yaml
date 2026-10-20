@@ -1,22 +1,56 @@
 - id: W1-T9240
-  title: "A LIVE PROPOSAL-REGISTRY HOLDER IS WAITED OUT BY MEASURE, NOT A FIXED 2000 MS — updateProposalRegistry throws after `opts.maxWaitMs ?? 2000` while a LIVE holder still owns the lock; no caller of its 27 passes a wait, its critical section re-reads every proposal shard and rewrites the blob, and on 2026-10-13 the daemon held it past the bound (self-healed)"
+  title: "WAIT FOR A LIVE PROPOSAL-REGISTRY HOLDER WITHOUT BLOCKING ITS RELEASE — give the retro publication path an asynchronous, deadline/cancellation-aware wait; indefinite synchronous polling can deadlock an async holder in the same process"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 6.00
-  risk: medium  # one concern: the registry lock's wait bound comes from the holder and the measured holds, not a constant; src/lib/inbox.ts and one new test
+  risk: high  # one concern across inbox, retro and the command: a registry contender must permit holder progress and cancellation
   band_meaning: span
   origin: "operator session 2026-10-13: an updateProposalRegistry call timed out on a lock the core daemon held; it cleared on its own"
-  plan_refs: [W1-T240, W1-T337, W1-T289, W1-T368, W1-T2490]
+  plan_refs: [W1-T240, W1-T337, W1-T289, W1-T368, W1-T2490, W1-T9443, W1-T132]
   files:
     - src/lib/inbox.ts
+    - src/lib/retro.ts
+    - src/run-task.ts
     - test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts
-  status: queued
-  priority: 2  # a thrown update loses that caller's proposal write for the pass; self-heals, so not urgent
+    - test/followup-routing-has-a-consumer.test.ts
+    - test/the-followup-retirement-arm-has-a-call-site.test.ts
+  status: merged
+  priority: 1  # observed again in the failed 2026-10-18 automated retro; do not clear its existing backoff
   attempts: 0
   rationale: |
+    CALLER-CENSUS SCOPE RECONCILIATION 2026-10-18:
+    The asynchronous production call also changes the literal call shape asserted by the existing routing and
+    retirement wiring suites. PR #12799's full hosted run exposed the retirement assertion as a real failure,
+    and its fleet repair is in flight; do not race that repair. Include both existing caller suites in this
+    task's files so the eventual async bridge can keep their reachability/ordering assertions accurate instead
+    of weakening them, leaving them red, or hiding a dead old call in a comment. No acceptance proof changes.
+    This scope-only amendment is separate from the build, carries no task trailer, and must merge first.
+    CONTRACT RECONCILIATION 2026-10-18, source 350a59d4dc273c65628bbb95be9d1416b6c678c2:
+    The original design below could not safely be implemented as an indefinite synchronous wait. Since W1-T9443,
+    pruneOrphanedDraftsAsync holds this same lock across awaited reads. updateProposalRegistry's default sleep is
+    execFileSync("sleep", ...): a sync contender in that process prevents its async holder from releasing the lock.
+    The same starvation prevents a timer-based cancellation from running. Pid liveness does not imply progress.
+    A bounded real-default reproduction at private evidence commit 9e5161793b6aac89e03fb72cf90ed5493add9b47
+    exercises a real prune holder and a synchronous contender with an explicit 80ms deadline: the holder's ready
+    release and cancellation callbacks cannot run until the contender throws. The asynchronous contender control
+    lets the same real holder release and completes. Two tests, zero failures, 256 MiB admitted low-footprint
+    scratch; this proves the contract hazard, not a production fix or full hosted qualification. Scratch was removed.
+    Node documents that execFileSync blocks the event loop: https://nodejs.org/api/child_process.html#synchronous-process-creation.
+    Today's actual retro failed at 10:54:51Z waiting for the parent daemon's live registry lock, not from OOM.
+    Its current retry backoff and cadence remain authoritative. The separate publication-before-acknowledgement
+    repair is PR #12799; coordinate with that bridge rather than reintroducing an early harvest acknowledgement.
+    Neither this amendment nor the eventual implementation may delete historical harvest marks or replay retired
+    proposals blindly. Historical reconciliation is a separate read-only obligation.
+    W1-T132 shares the retro/command files but owns merge-credit gathering, not registry acquisition or publication;
+    it is not superseded by this task. The 2026-10-18 ownership refresh covered 436 refs / 430 unique trees against
+    main 350a59d4, with 35 matching baseline records and no introduced matching owner. Seven unrelated-history heads
+    were compared as full trees rather than silently skipped. Dispatch/run refs for W1-T9240 were empty, and exact
+    merged trailer/branch searches returned no build; these are distinct checks, not an inference from status: queued.
+
+    HISTORICAL OBSERVATION (the diagnosis remains; the unsafe synchronous remedy is superseded by this design):
     OPERATOR-REPORTED 2026-10-13: an `updateProposalRegistry` call threw "timed out after 2000ms waiting for
     <registry>.lock (held by pid <daemon pid>)"; the lock was the core daemon's and was released later.
     Control: the Mac's live ledger (~/Remudero/state/ledger.ndjson) holds 384 rows stamped 2026-10-13 and none naming
@@ -35,37 +69,54 @@
     W1-T337 is related and different: it diagnosed test/inbox-registry-atomic.test.ts's intermittent ordering failure and
     shipped as #1326 ("force isPidAlive false on claim 2's nested reclaim"), a test fix that left the 2000 ms wait as it
     was. This task changes only how long a live holder is waited for.
-    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 342 open origin heads for `maxWaitMs` (main 0, no head more)
+    HISTORICAL OWNERSHIP CHECK: swept plan/ on origin/main and all 342 open origin heads for `maxWaitMs` (main 0, no head more)
     and updateProposalRegistry (22 shards on main, all callers of it, none on its wait). Control: `acceptance-author-gate`
     reads 93 shards on main and every head.
   design: |
-    No fixed wait. Remove the `2000` default and the doc comment's microseconds premise.
-    1. A DEAD HOLDER IS RECLAIMED, AS TODAY. `reclaimStaleLock` is unchanged.
-    2. A LIVE HOLDER IS WAITED OUT WHILE IT IS PLAUSIBLY WORKING. Each completed critical section records its hold time
-       (acquire to release) beside the lock (a small sidecar the next holder reads; a lost write of it is harmless). A
-       waiter seeing a live holder keeps polling while the lock's age (from the holder's `startedAt`) is within the
-       recorded holds' observed range, extended as longer holds are recorded; past it, it writes one ledger row
-       `proposal_registry.lock_wait_long` {holder pid, host, lock age, observed max hold} and keeps waiting while the
-       holder stays live and the lock keeps its identity.
-    3. THE CALLER'S OWN DEADLINE, WHERE IT HAS ONE. `maxWaitMs` stays as an option for a caller with a real deadline (a
-       daemon tick's remaining budget). On expiry it throws a typed error, and the row above is written first, so the
-       timeout is visible in the ledger rather than only in a caller's stderr.
-    4. A HOLDER THAT IS LIVE BUT WEDGED is the row's job to surface (one row per waited lock, escalation reads it), not a
-       timer's job to guess.
-    Tests go in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts with the existing injected
-    `isPidAlive`, `sleep` and `getProcessStartTime` seams and a fake clock.
+    1. PRESERVE THE LOCK AND SINGLE WRITER. Reuse the existing async acquisition and identity-checked dead-holder
+       reclamation, and share the existing locked read/modify/atomic-write body. Add an asynchronous registry update
+       entry point, not a second registry, parser or unsynchronised writer. Never steal a live lock or treat age as
+       proof of death. Existing synchronous callers retain a bounded compatibility path; do not remove its deadline.
+    2. WAIT WITHOUT STARVING THE HOLDER. The async entry point awaits between attempts. A same-process async holder
+       must be able to finish while a contender waits. A synchronous call that detects its own live process holding
+       the lock refuses with a typed retryable busy outcome rather than polling indefinitely. Do not convert that
+       refusal to success or silently discard the update.
+    3. REAL DEADLINE AND CANCELLATION. An async caller must supply a finite caller-owned wait budget or an owned
+       cancellation signal with a terminal lifecycle; an unbounded, uncancellable pairing refuses before polling.
+       Cancellation/deadline expiry must run while waiting, leave the holder's lock untouched, and prevent the update
+       callback from running. A canceled/expired waiter must never acquire later or acknowledge unpublished findings.
+       Derive the retro caller's budget from its real attempt lifetime, not a guessed larger version of 2000ms.
+    4. OBSERVABILITY IS NOT LIVENESS. Preserve the measured-hold sidecar as bounded evidence (one small record, no
+       history accumulation); crossing its observed hold range emits one proposal_registry.lock_wait_long row per
+       waited lock identity. A long-wait, busy, cancellation or deadline row names the actual holder and decision.
+       No reading of that sidecar may authorize lock deletion or extend the caller's deadline. Missing/unreadable
+       measurements are explicit, not fabricated zero-duration holds.
+    5. REACH THE FAILED CALLER. Thread the async writer through retro follow-up publication and await it at the real
+       command site, composing with #12799's publish-before-acknowledge bridge. Only a successful publication flushes
+       harvest/remeasurement acknowledgements; cancellation and acquisition failure keep the source retryable.
+       Do not migrate unrelated writers in this PR or change retry cadence, the retro marker, spend, caps or policy.
+    Tests go in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts. Include the real default async
+    acquisition/sleep and a real filesystem holder; fake-clock-only liveness tests cannot establish event-loop
+    progress. Test dead-holder reclamation, explicit deadlines, cancellation, same-process progress and publication
+    failure with the real writer. Keep every existing atomicity and identity-race suite passing.
   acceptance:
-    - claim: "a live holder that releases after longer than the old 2000 ms bound is waited out and the update lands"
-      proof: 'grep: test("W1-T9240: a live holder past two seconds is waited out and the update lands" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
-    - claim: "a wait past the observed hold range writes one lock_wait_long row naming the holder and keeps waiting"
-      proof: 'grep: test("W1-T9240: a wait past the observed holds writes one row and keeps waiting" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
-    - claim: "a caller's explicit maxWaitMs still throws a typed error, after writing the row"
-      proof: 'grep: test("W1-T9240: an explicit caller deadline throws after writing the row" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
-    - claim: "the registry lock writes the long-wait row"
-      proof: 'grep: proposal_registry\.lock_wait_long in src/lib/inbox.ts'
-    - claim: "the new test file passes"
+    - claim: "an asynchronous contender allows its live same-process holder to release and then commits the update"
+      proof: 'grep: test("W1-T9240: a same-process registry holder can release while its contender waits" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
+    - claim: "cancellation stops a waiting update before acquisition and does not steal the holder lock"
+      proof: 'grep: test("W1-T9240: cancellation leaves the live holder lock untouched and never runs the update" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
+    - claim: "the caller deadline remains bounded and reports the actual refusal"
+      proof: 'grep: test("W1-T9240: a caller deadline refuses a live holder with an attributable wait receipt" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
+    - claim: "a wait beyond observed holds reports once without changing identity-safe reclamation"
+      proof: 'grep: test("W1-T9240: long wait evidence does not authorize stealing a live lock" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
+    - claim: "the real retro publication boundary awaits registry success before acknowledging its source"
+      proof: 'grep: test("W1-T9240: canceled retro publication leaves harvest acknowledgements retryable" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
+    - claim: "the real-writer progress, cancellation, deadline, identity and publication suite passes"
       proof: "unit test: test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts"
   falsifier: |
-    Restore `?? 2000`: the first test throws at the fake clock's 2000 ms with the holder still live. Throw past the
-    observed range instead of writing the row: the second test fails. Skip the row on the explicit-deadline throw: the
-    third test finds no row.
+    Replace the asynchronous acquisition wait with the synchronous default: the same-process holder-progress
+    fixture must fail under its independent bounded watchdog, never hang the suite. Ignore cancellation: the
+    cancellation fixture must observe an illicit callback/acquisition or fail its independent bound. Remove the
+    deadline check: the deadline fixture fails its outer watchdog. Permit age-based deletion: the identity fixture
+    detects stealing the live lock. Move harvest acknowledgement ahead of awaited publication: cancellation leaves
+    an incorrect harvested receipt and the production-boundary test fails. Record removed/restored test summaries;
+    setup errors, zero matched tests and watchdog kills without the expected failed assertion are not proof.

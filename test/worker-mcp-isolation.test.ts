@@ -12,6 +12,11 @@ const rule = "mcp__knowledge__rule";
 const init = (servers: unknown = [], tools: unknown = []) => workerInitSummaryFromMessage({
   type: "system", subtype: "init", mcp_servers: servers, tools,
 });
+/** The success fold run-task.ts applies (terminalVerdictFields, implementAttemptOutcome), read off the fields it reads.
+ * Not imported: src/run-task.ts would join this suite to the affected-reach SCC. `{isError: true, subtype: "success"}`
+ * folds to success there, which is the hole this suite guards. */
+const graded = (r: { isError: boolean; subtype: string; apiError: boolean; usageRefusal?: unknown }) =>
+  !r.usageRefusal && (!r.isError || (r.subtype === "success" && !r.apiError));
 const approved = { mcpIsolation: "repo-knowledge-only" as const, mountProvider: "claude", tools: ["Read", "Bash"] };
 
 test("repo/knowledge isolation is opt-in and refuses unqualified routing, reuse and tool bounds", () => {
@@ -138,8 +143,38 @@ test("default workers keep no opt-in hook and opted-in unknown or leaked invento
   for (const events of [[], [{ type: "system", subtype: "init", mcp_servers: [], tools: ["mcp__external__delete"] }]]) {
     const { result } = await capture(t, true, events);
     assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_mcp_exposure", "callers grade {isError, subtype: success} as clean");
     assert.notEqual(result.mcpIsolation?.inventory, "observed-only");
   }
   const empty = await capture(t, true, [{ type: "system", subtype: "init", mcp_servers: [], tools: ["Read", "Bash"] }]);
   assert.equal(empty.result.isError, false);
+});
+
+test("an opted-in run with unknown inventory takes the error_mcp_exposure subtype and earns no credit", async t => {
+  // W1-T9573: no init event at all, so the inventory is unknown; the worker's own envelope still says "success".
+  const { result } = await capture(t, true, []);
+  assert.equal(result.mcpIsolation?.inventory, "unknown");
+  assert.equal(result.isError, true);
+  assert.equal(result.subtype, "error_mcp_exposure");
+  assert.equal(result.mcpIsolation?.original_subtype, "success", "the worker's own subtype stays on the evidence");
+  const row = workerLedgerFields(result);
+  assert.equal(row.verdict, "error_mcp_exposure");
+  assert.equal(row.mcp_isolation?.original_subtype, "success");
+  // Neither an API error nor a usage refusal carries the denial: the subtype alone must fail the run-task fold.
+  assert.equal(result.apiError, false);
+  assert.equal(result.usageRefusal, undefined);
+  assert.equal(graded(result), false);
+  assert.equal(graded({ ...result, subtype: "success" }), true, "control: the same run keeping subtype success is credited");
+});
+
+test("an opted-in run denied by both the opt-in and the default boundary keeps the worker's original subtype", async t => {
+  // A leaked account connector trips both rules on one run: the second denial must not record the first one's subtype.
+  const { result } = await capture(t, true, [{ type: "system", subtype: "init", mcp_servers: [],
+    tools: ["Read", "Bash", "mcp__claude_ai_Claude_Docs__search"] }]);
+  assert.equal(result.mcpIsolation?.inventory, "violated");
+  assert.equal(result.mcpExposure?.state, "exposed");
+  assert.equal(result.subtype, "error_mcp_exposure");
+  assert.equal(result.mcpIsolation?.original_subtype, "success");
+  assert.equal(result.mcpExposure?.original_subtype, "success", "never error_mcp_exposure");
+  assert.equal(graded(result), false);
 });

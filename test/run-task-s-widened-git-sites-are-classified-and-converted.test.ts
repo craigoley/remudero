@@ -41,6 +41,9 @@ const SOURCE = fileURLToPath(new URL(`../${FILE}`, import.meta.url));
 /** W1-T9722: the tick-read producer's declarations moved here; this table still classes their sites. */
 const MOVED_FILE = "src/lib/tick-read-worker.ts";
 const MOVED_SOURCE = fileURLToPath(new URL(`../${MOVED_FILE}`, import.meta.url));
+/** W1-T9333: daemonCommand moved here; this table still classes its sites. */
+const DAEMON_FILE = "src/cli/commands/daemon.ts";
+const DAEMON_SOURCE = fileURLToPath(new URL(`../${DAEMON_FILE}`, import.meta.url));
 
 type SiteClass = "CHECKOUT";
 
@@ -100,7 +103,6 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   refCommitMatchesDirtyRecovery: { count: 3, cls: "CHECKOUT", reason: FIX_CLONE },
   preserveFixHead: { count: 3, cls: "CHECKOUT", reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
-  shardAgeDays: { count: 1, cls: "CHECKOUT", reason: OWN },
   idCitedInSrc: { count: 1, cls: "CHECKOUT", reason: OWN },
   approveCommand: { count: 6, cls: "CHECKOUT", reason: "an approve worktree cut at origin/main whose only writes are the harness's shard and skill files, and the clone it ls-remotes" },
   bundleExportCommand: { count: 1, cls: "CHECKOUT", reason: OWN },
@@ -121,7 +123,7 @@ const sorted = (r: Record<string, number>): Record<string, number> =>
   Object.fromEntries(Object.entries(r).sort(([a], [b]) => a.localeCompare(b)));
 
 describe("W1-T6135: every widened git site left in run-task.ts is a classed CHECKOUT site", () => {
-  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}`;
+  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_SOURCE, "utf8")}`;
   const actual = widenedByFunction(text);
 
   it("the census sees the file: a positive control on the widened pattern", () => {
@@ -144,9 +146,11 @@ describe("W1-T6135: every widened git site left in run-task.ts is a classed CHEC
     const sum = Object.values(RUN_TASK_WIDENED_SITES).reduce((a, s) => a + s.count, 0);
     const entry = WIDENED_SITE_EXCEPTIONS[FILE];
     const moved = WIDENED_SITE_EXCEPTIONS[MOVED_FILE];
-    assert.ok(entry && moved, `${FILE} and ${MOVED_FILE} have widened exceptions`);
-    assert.equal(entry.count + moved.count, sum);
+    const daemon = WIDENED_SITE_EXCEPTIONS[DAEMON_FILE];
+    assert.ok(entry && moved && daemon, `${FILE}, ${MOVED_FILE} and ${DAEMON_FILE} have widened exceptions`);
+    assert.equal(entry.count + moved.count + daemon.count, sum);
     assert.match(moved.reason, /RUN_TASK_WIDENED_SITES/);
+    assert.match(daemon.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(entry.reason, /^CHECKOUT\b/);
     assert.match(entry.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(entry.reason, /run-task-s-widened-git-sites-are-classified-and-converted\.test\.ts/);

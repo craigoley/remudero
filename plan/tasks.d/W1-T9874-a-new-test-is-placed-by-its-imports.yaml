@@ -16,7 +16,8 @@
     - scripts/test-placement/subsystem-map.json
     - scripts/test-placement/test-folders.tsv
     - test/a-new-test-is-placed-by-its-imports.test.ts
-  status: queued
+    - "docs/operator-guide.md"
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

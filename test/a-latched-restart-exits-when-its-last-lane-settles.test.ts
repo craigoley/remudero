@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setImmediate as flush } from "node:timers/promises";
 import { runDaemon } from "../src/lib/daemon.js";
-import { FRESHNESS_COALESCE_WINDOW_MS } from "../src/lib/deploy-judge.js";
+import { DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS } from "../src/lib/deploy-judge.js";
 import { loadPlan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 
@@ -16,8 +16,11 @@ function deferred<T>() {
 }
 
 const windowMs = FRESHNESS_COALESCE_WINDOW_MS.value;
+// W1-T9089: the daemon's own code weighs the source floor of 1, so the advance carries the threshold's worth of commits.
 const stale = { stale: true as const, oldSha: "a".repeat(40), newSha: "b".repeat(40),
-  changes: [{ sha: "b".repeat(40), subject: "fix: refresh", files: ["src/lib/daemon.ts"] }] };
+  changes: Array.from({ length: DEPLOY_RESTART_SCORE_THRESHOLD.value }, (_, index) => ({
+    sha: index === 0 ? "b".repeat(40) : String(index).padStart(40, "e"), subject: "fix: refresh", files: ["src/lib/daemon.ts"],
+  })) };
 const result: RunResult = { taskId: "A", runId: "fixture", merged: true, verdict: "merged", costUsd: 0 };
 type PassMode = "completed" | "running" | "failed" | "boot-running" | "running-after-completed";
 
@@ -54,7 +57,7 @@ async function phase(t: TestContext, mode: PassMode = "completed", sweepWallCloc
       rows.push({ step, extra });
       if (step === "daemon.sweep.abandoned") abandoned.resolve();
     },
-  }, { laneCount: 1, max: 1, sweepRetriggerIntervalMs: 2 * windowMs, sweepWallClockBoundMs });
+  }, { freshnessMinLifetimeMs: 0, laneCount: 1, max: 1, sweepRetriggerIntervalMs: 2 * windowMs, sweepWallClockBoundMs });
   void run.then(() => { finished = true; });
   t.after(async () => {
     cleaning = true;
@@ -209,7 +212,7 @@ async function idleExit(t: TestContext, reviewerCodeStale = false) {
       rows.push({ step, extra });
       if (step === "review.stale_reviewer_restart_requested") callsAtRestartRequest = calls;
     },
-  });
+  }, { freshnessMinLifetimeMs: 0 });
   assert.equal(summary.stopReason, "stale");
   assert.equal(rows.find(({ step }) => step === "daemon_selfrestart_for_freshness")?.extra?.pre_exit_pass, "ran");
   return { calls, callsAtRestartRequest };

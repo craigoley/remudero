@@ -1,13 +1,72 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, fstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { gunzipSync, gzipSync } from 'node:zlib';
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
 import { renderCoverageSummary, stageRawCoverageFile } from '../scripts/coverage-merge-ratchet.mjs';
+// @ts-expect-error The production chunk codec is an executable .mjs module outside tsconfig.
+import { decodeCoverageChunk, encodeCoverageChunk, readCoverageChunkBytes } from '../scripts/lib/coverage-chunk-codec.mjs';
+
+test('lossless coverage chunk compression binds decoded Unicode bytes and does not expand small evidence', () => {
+  const source = JSON.stringify({ evidence: 'répétition 中文 🧪'.repeat(1000) });
+  const packed = encodeCoverageChunk(source);
+  assert.equal(packed.encoding, 'gzip');
+  assert.ok(packed.data.length < Buffer.byteLength(source) / 2);
+  assert.equal(packed.decodedBytes, Buffer.byteLength(source));
+  assert.equal(decodeCoverageChunk(packed.data, packed, packed.decodedBytes), source);
+  const small = encodeCoverageChunk('{}');
+  assert.equal(small.encoding, 'identity'); assert.equal(small.data.length, 2);
+  assert.equal(decodeCoverageChunk(small.data, small, 2), '{}');
+  assert.throws(() => decodeCoverageChunk(packed.data, { ...packed, sha256: '0'.repeat(64) }, packed.decodedBytes), /checksum mismatch/);
+});
+
+test('lossless coverage chunk decoding refuses unbounded expansion and malformed encoding metadata', () => {
+  const packed = encodeCoverageChunk('x'.repeat(1024 * 1024));
+  assert.throws(() => decodeCoverageChunk(packed.data, { ...packed, decodedBytes: 16 }, 16), { code: 'ERR_BUFFER_TOO_LARGE' });
+  for (const changed of [{ encoding: 'unknown' }, { decodedBytes: 0 }, { decodedBytes: Infinity },
+    { decodedBytes: packed.decodedBytes + 1 }, { sha256: 'not-a-digest' }]) {
+    assert.throws(() => decodeCoverageChunk(packed.data, { ...packed, ...changed }, packed.decodedBytes), /encoding metadata/);
+  }
+  assert.throws(() => decodeCoverageChunk(Buffer.from('not-gzip'), packed, packed.decodedBytes));
+});
+
+test('lossless coverage chunk reads refuse links directories and inconsistent lengths without changing evidence', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-codec-'));
+  try {
+    const file = join(root, 'chunk.json'); writeFileSync(file, '{}');
+    assert.equal(readCoverageChunkBytes(file, 2, 2).toString(), '{}');
+    assert.throws(() => readCoverageChunkBytes(file, 3, 3), /size mismatch/);
+    for (const size of [0, -1, 1.5, Infinity, 3]) assert.throws(() => readCoverageChunkBytes(file, size, 2), /byte bound/);
+    assert.throws(() => readCoverageChunkBytes(root, 1, 1), /size mismatch/);
+    symlinkSync(file, join(root, 'link'));
+    assert.throws(() => readCoverageChunkBytes(join(root, 'link'), 2, 2), /ELOOP/);
+    assert.equal(readFileSync(file, 'utf8'), '{}');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('lossless coverage chunk reads pin identity and close descriptors after mutations and short reads', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-codec-identity-'));
+  try {
+    const file = join(root, 'chunk.json');
+    for (const mutate of [() => appendFileSync(file, 'growth'),
+      () => { renameSync(file, file + '.old'); writeFileSync(file, '{}'); },
+      () => unlinkSync(file)]) {
+      writeFileSync(file, '{}'); let opened = -1;
+      assert.throws(() => readCoverageChunkBytes(file, 2, 2, { read(fd: number, data: Buffer, offset: number, length: number, position: number) {
+        opened = fd; const count = readSync(fd, data, offset, length, position); mutate(); return count;
+      } }), /changed coverage chunk|ENOENT/);
+      assert.throws(() => fstatSync(opened), { code: 'EBADF' });
+    }
+    writeFileSync(file, '{}'); let opened = -1;
+    assert.throws(() => readCoverageChunkBytes(file, 2, 2, { read(fd: number) { opened = fd; return 0; } }), /truncated/);
+    assert.throws(() => fstatSync(opened), { code: 'EBADF' });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('raw coverage staging uses a same-filesystem hard link, not a second multi-gigabyte copy', () => {
   const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-link-'));
@@ -107,6 +166,55 @@ function runCompactor(output: string, ...rawDirectories: string[]): string {
   );
 }
 
+test('coverage manifest reads reject replacement and growth before publishing LCOV', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'rmd-coverage-manifest-identity-')));
+  try {
+    const raw = join(root, 'raw'); mkdirSync(raw);
+    const probe = join(root, 'probe.mjs'), source = 'export const evidence = 1;\n';
+    writeFileSync(probe, source);
+    writeFileSync(join(raw, 'coverage-1-0000000000000-0.json'), JSON.stringify({ result: [{
+      scriptId: '1', url: `file://${probe}`, functions: [{ functionName: '',
+        ranges: [{ startOffset: 0, endOffset: source.length, count: 1 }], isBlockCoverage: true }],
+    }] }));
+    for (const mutation of ['replacement', 'growth']) {
+      const compact = join(root, mutation); runCompactor(compact, raw);
+      const manifest = join(compact, readdirSync(compact).find(name => /^coverage-corpus-/.test(name))!);
+      const output = join(root, `${mutation}.info`);
+      execFileSync(process.execPath, ['--expose-internals', '--input-type=module', '-e', `
+        import assert from 'node:assert/strict';
+        import fs from 'node:fs';
+        import { syncBuiltinESMExports } from 'node:module';
+        import { main } from './scripts/coverage-merge-ratchet.mjs';
+        const [manifest, output, compact, mutation, root] = process.argv.slice(1);
+        const original = { open: fs.openSync, stat: fs.fstatSync };
+        let targetFd = -1, mutated = false;
+        fs.openSync = (path, ...args) => {
+          const fd = original.open(path, ...args);
+          if (path === manifest) targetFd = fd;
+          return fd;
+        };
+        fs.fstatSync = (fd, ...args) => {
+          const stat = original.stat(fd, ...args);
+          if (fd === targetFd && !mutated) {
+            mutated = true;
+            if (mutation === 'replacement') {
+              fs.renameSync(manifest, root + '/original-manifest.json');
+              fs.writeFileSync(manifest, ' '.repeat(stat.size));
+            } else fs.appendFileSync(manifest, ' '.repeat(16));
+          }
+          return stat;
+        };
+        syncBuiltinESMExports();
+        try { await assert.rejects(main(['--output', output, compact]), /changed coverage chunk/); }
+        finally { fs.openSync = original.open; fs.fstatSync = original.stat; syncBuiltinESMExports(); }
+        assert.ok(mutated, 'the manifest must change after its descriptor size check');
+        assert.equal(fs.existsSync(output), false, 'changed input must publish no LCOV');
+        assert.throws(() => original.stat(targetFd), { code: 'EBADF' });
+      `, manifest, output, compact, mutation, root], { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' });
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 function pinnedNodeControl(root: string, rawDirectories: string[]): { lcov: string; order: number[]; reportPaths: string[] } {
   // Match the production merger's explicit input order: caller directory order, then sorted report paths.
   // Do not infer order from a separate process's directory enumeration; filesystems can return a different
@@ -142,8 +250,11 @@ function compactBundles(directory: string): Array<Record<string, unknown>> {
   const manifests = readdirSync(directory).filter(name => /^coverage-corpus-\d+-\d{13}\.json$/.test(name));
   assert.equal(manifests.length, 1, `expected one complete compact corpus in ${directory}`);
   const manifest = JSON.parse(readFileSync(join(directory, manifests[0]!), 'utf8'));
-  assert.equal(manifest.format, 'rmd-v8-coverage-corpus-v2');
-  const read = (chunks: Array<{ file: string }>, key: string) => chunks.flatMap(chunk => JSON.parse(readFileSync(join(directory, chunk.file), 'utf8'))[key]);
+  assert.equal(manifest.format, 'rmd-v8-coverage-corpus-v3');
+  const read = (chunks: Array<{ file: string; encoding: string }>, key: string) => chunks.flatMap(chunk => {
+    const data = readFileSync(join(directory, chunk.file));
+    return JSON.parse((chunk.encoding === 'gzip' ? gunzipSync(data) : data).toString('utf8'))[key];
+  });
   return [{ sourceMaps: read(manifest.mapChunks, 'sourceMaps'), reports: read(manifest.reportChunks, 'reports') }];
 }
 
@@ -231,8 +342,8 @@ test('chunked coverage refuses incomplete, mixed, unsafe and corrupt corpora bef
     const compact = join(root, 'compact');
     runCompactor(compact, raw);
     const manifestName = readdirSync(compact).find(name => /^coverage-corpus-/.test(name))!;
-    const saved = new Map(readdirSync(compact).map(name => [name, readFileSync(join(compact, name), 'utf8')]));
-    const baseline = JSON.parse(saved.get(manifestName)!);
+    const saved = new Map(readdirSync(compact).map(name => [name, readFileSync(join(compact, name))]));
+    const baseline = JSON.parse(saved.get(manifestName)!.toString('utf8'));
     const output = join(root, 'merged.info');
     runMerger(output, compact); assert.ok(statSync(output).size > 0); unlinkSync(output);
     const reset = () => {
@@ -240,13 +351,15 @@ test('chunked coverage refuses incomplete, mixed, unsafe and corrupt corpora bef
       for (const [name, source] of saved) writeFileSync(join(compact, name), source);
     };
     const manifest = (change: (value: typeof baseline) => void) => {
-      const value = JSON.parse(saved.get(manifestName)!); change(value);
+      const value = JSON.parse(saved.get(manifestName)!.toString('utf8')); change(value);
       writeFileSync(join(compact, manifestName), JSON.stringify(value));
     };
     const chunk = (key: 'mapChunks' | 'reportChunks', value: unknown) => manifest(valueManifest => {
       const descriptor = valueManifest[key][0]; const source = JSON.stringify(value);
-      writeFileSync(join(compact, descriptor.file), source);
-      descriptor.bytes = Buffer.byteLength(source); descriptor.sha256 = createHash('sha256').update(source).digest('hex');
+      const data = descriptor.encoding === 'gzip' ? gzipSync(source) : Buffer.from(source);
+      writeFileSync(join(compact, descriptor.file), data);
+      descriptor.bytes = data.length; descriptor.sha256 = createHash('sha256').update(source).digest('hex');
+      descriptor.decodedBytes = Buffer.byteLength(source);
     });
     const reject = (change: () => void, message: RegExp) => {
       reset(); change(); assert.throws(() => runMerger(output, compact), message);
@@ -264,6 +377,9 @@ test('chunked coverage refuses incomplete, mixed, unsafe and corrupt corpora bef
     reject(() => manifest(value => { value.reportChunks[0].bytes = value.maxChunkBytes + 1; }), /unsafe or invalid chunk metadata/);
     reject(() => manifest(value => { value.reportChunks[0].bytes += 1; }), /size mismatch/);
     reject(() => manifest(value => { value.reportChunks[0].sha256 = '0'.repeat(64); }), /checksum mismatch/);
+    reject(() => manifest(value => { value.reportChunks[0].encoding = 'unknown'; }), /unsafe or invalid chunk metadata/);
+    reject(() => manifest(value => { value.reportChunks[0].decodedBytes = value.maxChunkBytes + 1; }), /unsafe or invalid chunk metadata/);
+    reject(() => manifest(value => { value.reportChunks[0].decodedBytes += 1; }), /decoded size or checksum mismatch/);
     reject(() => manifest(value => { value.reportChunks[0].entries += 1; }), /invalid coverage chunk contents/);
     reject(() => manifest(value => { value.sourceMapCount += 1; }), /source-map count mismatch/);
     reject(() => manifest(value => { value.reportCount += 1; value.rawFileCount += 1; }), /process-report count mismatch/);
@@ -272,11 +388,40 @@ test('chunked coverage refuses incomplete, mixed, unsafe and corrupt corpora bef
     reject(() => writeOverLimitManifest(join(compact, manifestName)), /coverage file byte bound/);
     reject(() => chunk('reportChunks', null), /invalid coverage chunk contents/);
     for (const sourceMap of [null, [], 'invalid']) {
-      reject(() => chunk('mapChunks', { format: 'rmd-v8-coverage-corpus-v2', sourceMaps: [sourceMap] }), /invalid compact source map/);
+      reject(() => chunk('mapChunks', { format: baseline.format, sourceMaps: [sourceMap] }), /invalid compact source map/);
     }
-    const reports = JSON.parse(saved.get(baseline.reportChunks[0].file)!);
+    const original = saved.get(baseline.reportChunks[0].file)!;
+    const reports = JSON.parse((baseline.reportChunks[0].encoding === 'gzip' ? gunzipSync(original) : original).toString('utf8'));
     reject(() => chunk('reportChunks', { ...reports, reports: [{ ...reports.reports[0], result: [] }] }), /invalid compact process report/);
     reject(() => chunk('reportChunks', { ...reports, reports: [{ ...reports.reports[0], sourceMapRefs: { [profile.result[0]!.url]: 1 } }] }), /invalid source-map reference/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('compressed coverage replay preserves the full native LCOV and still accepts retained v2 corpora', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-codec-replay-'));
+  try {
+    const profile = realMappedProfile(root), raw = join(root, 'raw'); mkdirSync(raw);
+    writeFileSync(join(raw, 'coverage-1-0000000000000-0.json'), JSON.stringify(profile));
+    const compact = join(root, 'compact'); runCompactor(compact, raw);
+    const file = readdirSync(compact).find(name => /^coverage-corpus-/.test(name))!;
+    const manifest = JSON.parse(readFileSync(join(compact, file), 'utf8'));
+    assert.equal(manifest.format, 'rmd-v8-coverage-corpus-v3');
+    assert.ok([...manifest.mapChunks, ...manifest.reportChunks].some(chunk => chunk.encoding === 'gzip'));
+    const compressed = join(root, 'compressed.info'); runMerger(compressed, compact);
+    const native = pinnedNodeControl(root, [raw]);
+    assert.equal(readFileSync(compressed, 'utf8'), native.lcov);
+    for (const chunk of [...manifest.mapChunks, ...manifest.reportChunks]) {
+      const original = readFileSync(join(compact, chunk.file));
+      const source = JSON.parse((chunk.encoding === 'gzip' ? gunzipSync(original) : original).toString('utf8'));
+      source.format = 'rmd-v8-coverage-corpus-v2';
+      const text = JSON.stringify(source), name = chunk.file.replace(/\.gz$/, '');
+      unlinkSync(join(compact, chunk.file)); writeFileSync(join(compact, name), text);
+      Object.assign(chunk, { file: name, bytes: Buffer.byteLength(text), sha256: createHash('sha256').update(text).digest('hex') });
+      delete chunk.encoding; delete chunk.decodedBytes; delete chunk.decodedSha256;
+    }
+    manifest.format = 'rmd-v8-coverage-corpus-v2'; writeFileSync(join(compact, file), JSON.stringify(manifest));
+    const legacy = join(root, 'legacy.info'); runMerger(legacy, compact);
+    assert.equal(readFileSync(legacy, 'utf8'), native.lcov);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

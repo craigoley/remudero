@@ -19,7 +19,7 @@
     - src/lib/worker-heaps.ts
     - test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts
     - test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: serve is the largest single resident in the host budget
   attempts: 0
   rationale: |

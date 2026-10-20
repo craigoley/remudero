@@ -5,7 +5,8 @@ import { classificationSnapshotKey } from "./read-page.js";
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { ledgerProposalVerdicts, deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
+import { proposalVerdictsWithReceipts, readVerdictReceipts } from "./inbox-verdict-receipts.js";
+import { deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
@@ -438,7 +439,8 @@ export async function answerThread(threadId: string, deps: InboxResponderDeps): 
   if (all.status === "unresolved") throw new Error(all.reason);
   const stored = all.threads.get(threadId) ?? [];
   const last = stored[stored.length - 1];
-  if (!last || last.role !== "reply") return undefined;
+  // Action events already record an executed operation, not new input for the reply decider.
+  if (!last || last.role !== "reply" || hasThreadEvent(last.extra)) return undefined;
   const item = deps.readItems().find((i) => i.proposalId === proposalId);
   if (!item) return undefined;
 
@@ -537,7 +539,7 @@ export function registryThreadItems(stateDir: string, ledgerPath: string): Inbox
   const proposals = parseProposalRegistry(existsSync(`${stateDir}/inbox-proposals.json`) ? readFileSync(`${stateDir}/inbox-proposals.json`, "utf8") : undefined);
   const plainStore = readPlainStore(plainStorePath(stateDir));
   const lines = readLedgerLines(ledgerPath);
-  const verdicts = ledgerProposalVerdicts(lines);
+  const verdicts = proposalVerdictsWithReceipts(lines, readVerdictReceipts(stateDir));
   return proposals
     .filter((p) => inboxOwner(p) === "operator")
     .map((p) => ({

@@ -35,7 +35,7 @@
  *          trap CLAUDE.md documents fires if this test suite only ever proves the fake.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync, lstatSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -195,6 +195,7 @@ test("W1-T2777 (d): `failed` is unchanged — a symlink that threw is `failed`, 
       throw new Error("ENOENT");
     },
     resolveSource: () => "/src/node_modules",
+    realpath: (path) => path,
     symlink: () => {
       throw new Error("EPERM");
     },
@@ -217,6 +218,7 @@ test("W1-T2777 (d): a hasher that VIOLATES its documented non-throwing contract 
       throw new Error("ENOENT");
     },
     resolveSource: () => "/src/node_modules",
+    realpath: (path) => path,
     symlink: () => {
       /* succeeds — link is made */
     },
@@ -801,6 +803,49 @@ test("W1-T4356: a checkout git cannot read is refused and its lock released", as
     const lockPath = join(root, "state", "refresh.lock");
     await assert.rejects(refreshManagedCheckout(repoDir, lockPath, refreshLog().log), ManagedCheckoutRefreshRefusedError);
     assert.equal(existsSync(lockPath), false, "a refusal never strands the lock");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── 2026-10-17: the guard reads the install a linked node_modules resolves to ──
+//
+// A run child's install root is an ENGINE TREE whose node_modules links the canonical install. A restart re-installs that
+// install for main's lockfile; the engine's own package files stay at the revision it was cut from. Comparing against the
+// engine refused every implement run for 4 h (W1-T9089, W1-T9328, W1-T9297, W1-T8827, W1-T8959) while the install it
+// linked had matched main since 14:53Z.
+
+/** samePackageDrift, with the checkout's node_modules a LINK to an install whose marker records `markerFrom`'s inputs. */
+function linkedInstallDrift(root: string, markerFrom: "main" | "checkout"): { repoDir: string; wt: string } {
+  const { repoDir } = samePackageDrift(root);
+  rmSync(join(repoDir, "node_modules"), { recursive: true, force: true });
+  const install = join(root, "install");
+  mkdirSync(join(install, "node_modules"), { recursive: true });
+  writeFileSync(installHashMarkerPath(install), hashInstallInputs(markerFrom === "main" ? join(root, "seed") : repoDir));
+  symlinkSync(join(install, "node_modules"), join(repoDir, "node_modules"));
+  return { repoDir, wt: join(root, "wt") };
+}
+
+test("a lockfile guard admits a worktree whose linked install was re-installed for main, whatever the linking tree says", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}linked-install-current-`));
+  try {
+    const { repoDir, wt } = linkedInstallDrift(root, "main");
+    assert.notEqual(hashInstallInputs(repoDir), hashInstallInputs(join(root, "seed")), "the linking tree's own files are stale");
+    worktreeAdd(repoDir, wt, "run-linked-install-current", "origin/main", { warn: () => {}, refuseSamePackageLockfileMismatch: true });
+    assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true, "the worktree is linked, not refused");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a lockfile guard still refuses a worktree whose linked install records older inputs", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}linked-install-stale-`));
+  try {
+    const { repoDir, wt } = linkedInstallDrift(root, "checkout");
+    assert.throws(
+      () => worktreeAdd(repoDir, wt, "run-linked-install-stale", "origin/main", { warn: () => {}, refuseSamePackageLockfileMismatch: true }),
+      WorktreeNodeModulesRefusedError,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

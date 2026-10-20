@@ -1,0 +1,107 @@
+- id: W1-T10188
+  title: "Design deploy exit receipts and operator-approved recovery diagnosis"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  origin: feedback#fb-1791856366585-19538c
+  plan_refs: ["§4", "§7B", W1-T6160, W1-T6062, W1-T3199]
+  files: [plan/deploy-recovery-design.md]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=0834e700f1ab80c8
+  attempts: 0
+  rationale: |
+    Grounding in this checkout finds a commissioning-only receipt in commission_receipt and
+    commission_on_exit in deploy/recycle-container.sh. Ordinary recycle and host-update exits
+    do not share that receipt contract. The src/ search for recycle.git_author_commission
+    finds no consumer. Existing deploy-refusal-escalation.ts already supplies persistent-refusal
+    escalation, stable identity and host spooling; those are integration constraints, not missing
+    mechanisms to recreate. W1-T6160 owns commissioning; W1-T6062 owns repeated refusal escalation.
+    DECISIONS.md's change-and-risk deploy ruling remains authoritative: approving a suggested
+    recovery command must not impose a new approval gate on ordinary deploys.
+    External NanoClaw observations are motivation, not verified platform facts or authority.
+    The feedback requests design first because deploy lifecycle and untrusted log ingestion
+    cross consequential boundaries. This task produces a reviewable design, not deploy changes.
+  design: |
+    Write plan/deploy-recovery-design.md with the following named sections. Re-read the current
+    main versions through the worker's authorized repository access before writing the design;
+    record their SHA and symbol anchors, distinguish supplied historical claims from verified
+    facts, and sweep existing plan work and open PR heads before recommending successor tasks.
+
+    Current-main evidence:
+    Trace commission_receipt, commission_on_exit, recycle_cleanup_tmp and host_update_cleanup_tmp,
+    early refusals, signals, existing deploy refusal escalation/spooling and the core inbox ASK
+    producer. Account for replacement EXIT traps and preserve original exit status and cleanup.
+
+    Exit receipt contract:
+    Specify one stable receipt identity per invocation, script, instance (including unresolved
+    instance), phase reached, success/refused/failed outcome, recovery sentence and bounded log
+    tail. Cover ordinary and commissioning modes, preflight refusals, argument/help and maintenance
+    modes, signals and restart. State the unavoidable SIGKILL/host-loss limit explicitly. Choose
+    durable host-to-core transport using existing spool machinery where suitable; define unreadable
+    or unwritable transport behavior without falsely claiming delivery or masking script failure.
+    Define value-free precisely: allowlisted operational metadata, no author values, secrets,
+    environment dumps or arbitrary captured output. Specify byte/line bounds, sanitization before
+    persistence, unsafe-tail omission, retention, permissions and hostile receipt validation.
+
+    Contained diagnosis and ASK:
+    Define one bounded diagnosis per failed/refused receipt with only Read, Grep and Glob over an
+    explicit repo snapshot and sanitized receipt. Separate model API transport from tool egress;
+    deny tool network, writes, shell, credentials and filesystem escape using enforcement, not
+    prompt text. Treat logs and repo contents as untrusted data. Specify REASON and one COMMAND
+    or explicit none, strict parsing, time/token bounds and malformed/unavailable outcomes.
+    Stage the result through the existing inbox with approve/edit/reject semantics. Neither
+    staging nor approval in this proposal executes a command; any future execution must use
+    an independently authorized existing action path. Reconcile with W1-T6062 to avoid duplicate
+    operator asks and preserve change-and-risk gated ordinary deploys.
+
+    Idempotency and defect feedback:
+    Specify crash/restart-safe diagnosis, ASK and feedback identities keyed by receipt, including
+    crashes between publication and acknowledgement. Bound retries and distinguish unavailable
+    diagnosis from completed diagnosis. A diagnosed script defect becomes one linked feedback
+    entry naming the script and evidence through the normal capture/triage/machine-filing lanes;
+    it grants no direct source write or self-authorized repair. State who owns each transition.
+
+    Executable implementation acceptance:
+    Define fixture-based whole-file unit test proof paths under computed test/<folder>/ locations
+    for each proposed implementation slice, with explicit imports and expected assertions. Include
+    a real script run against stubbed host dependencies refusing at recycle preflight: exactly one
+    receipt and one staged ASK, zero executed commands. Include host-update failure and success,
+    redaction sentinels, malformed receipts/model output, sandbox escape attempts, duplicate receipt
+    replay, core restart at each acknowledgement boundary and unavailable transport/model outcomes.
+    Define positive controls and the remove-the-fix falsifier; no live deploy is acceptance evidence.
+
+    Bounded successor plan:
+    Recommend separately reviewable implementation slices with concrete files, dependencies,
+    executable proof paths and machine-filing risk/verification rationale. Identify overlap with
+    existing owners. Do not mint ids, file implementation shards, or change deployment authority in
+    this task. Human review accepts or revises this design before implementation is filed.
+  acceptance:
+    - claim: "the design records current-main evidence and defines exit delivery and redaction"
+      proof: "grep: Exit receipt contract in plan/deploy-recovery-design.md"
+    - claim: "the design specifies enforced read-only diagnosis and operator ASK semantics"
+      proof: "grep: Contained diagnosis and ASK in plan/deploy-recovery-design.md"
+    - claim: "the design specifies durable per-receipt deduplication and normal-lane defect feedback"
+      proof: "grep: Idempotency and defect feedback in plan/deploy-recovery-design.md"
+    - claim: "the design defines executable implementation proofs including the preflight refusal falsifier"
+      proof: "grep: Executable implementation acceptance in plan/deploy-recovery-design.md"
+    - claim: "the design bounds successor work for human review before implementation filing"
+      proof: "grep: Bounded successor plan in plan/deploy-recovery-design.md"
+  note: |
+    Design-only deliverable; grep proofs assert artifact structure and human verification judges
+    the design's substance. They do not claim the requested runtime behavior exists. High risk
+    deliberately retains the requested deploy review boundary. No platform-facts gap required web
+    research for intake. Intake inspected checkout symbols, not authenticated current-main or open
+    PR heads; the design worker must obtain that evidence before recommending implementation.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares plan/deploy-recovery-design.md, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-20T05:32:24.330Z"
+    pin: "96854775291e6dc1e4567f9dc1830311f7ae24bc4137e7ec47fa55243fefd045"

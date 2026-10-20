@@ -392,6 +392,52 @@ export function classTypical(workerClass: WorkerClass, opts: PeakStoreOptions = 
   return learnedClass(workerClass, opts).typical;
 }
 
+export type ValidationClassEstimate =
+  | { kind: "measured"; estimateMib: number; typicalMib: number; samples: number; basis: "legacy-compatible-tree-peaks" }
+  | { kind: "unavailable"; reason: string };
+
+/** Opt-in evidence for NEW validation; legacy partial reads/cache/estimator behavior stays unchanged.
+ * Completeness means the maintained bounded tail population, not all historical measurements. */
+export function readValidationClassEstimate(workerClass: WorkerClass, opts: PeakStoreOptions = {}): ValidationClassEstimate {
+  try {
+    const location = (opts.location ?? defaultMemoryLedgerLocation)();
+    if (location.scope !== "host") return { kind: "unavailable", reason: "estimate-store-local-or-unknown" };
+    let unavailable = false;
+    const samples = readPeakSamples(workerClass, {
+      ...opts, location: () => location,
+      list: dir => {
+        try { return (opts.list ?? readdirSync)(dir); }
+        catch (error) { unavailable = true; throw error; }
+      },
+      readTail: (path, bytes) => {
+        try {
+          const text = (opts.readTail ?? readFileTail)(path, bytes);
+          // Reuse the maintained parser; an omitted malformed record is uncertainty, not a smaller corpus.
+          if (parseSamples(text).length !== text.split("\n").filter(Boolean).length) unavailable = true;
+          return text;
+        } catch (error) { unavailable = true; throw error; }
+      },
+    });
+    if (unavailable) return { kind: "unavailable", reason: "estimate-population-incomplete" };
+    const now = (opts.clock ?? systemClock).now();
+    if (!Number.isFinite(now) || samples.some(s => !Number.isFinite(s.peakMib) || s.peakMib <= 0 || s.at > now ||
+        s.measurementBasis === "unknown" || s.measurementBasis === "process-hwm" ||
+        (s.measurementBasis === "concurrent-rss" && s.legacyPeakMib === undefined))) {
+      return { kind: "unavailable", reason: "estimate-basis-unavailable" };
+    }
+    // EXACT legacy metric: paired legacy HWM for concurrent samples, not a switch to an RSS/joint estimator.
+    const legacy = samples.map(s => s.measurementBasis === "concurrent-rss" ? { ...s, peakMib: s.legacyPeakMib! } : s);
+    const estimate = learnEstimate(legacy, DEFAULT_ESTIMATE_MIB[workerClass], now);
+    const typical = learnEstimate(legacy, DEFAULT_ESTIMATE_MIB[workerClass], now,
+      { ...ESTIMATE_LEARNING, quantile: ESTIMATE_LEARNING.typicalQuantile });
+    if (estimate.samples === 0) return { kind: "unavailable", reason: "no-measured-samples" };
+    return { kind: "measured", estimateMib: estimate.estimateMib, typicalMib: typical.estimateMib,
+      samples: estimate.samples, basis: "legacy-compatible-tree-peaks" };
+  } catch {
+    return { kind: "unavailable", reason: "estimate-reader-unavailable" };
+  }
+}
+
 /** W1-T9762: the class's measured survival at a live tree's age (see {@link survivalAt}). */
 export function classSurvival(workerClass: WorkerClass, ageMs: number, opts: PeakStoreOptions = {}): Survival {
   return survivalAt(learnedClass(workerClass, opts).timeToPeak, ageMs, (opts.clock ?? systemClock).now());

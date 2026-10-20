@@ -511,13 +511,15 @@ test("W1-T9647: the default seams read the real heap spaces and proc status", as
 test("W1-T9647: the source-map cache is the census's upper bound while maps are on, and nothing once they are off", async () => {
   const table: Record<string, CensusCalibration> = { "source-maps.module": { per_entry_bytes: 240_000, entries: 587, census_sha: "a".repeat(40), census_date: "2026-10-15" } };
   let enabled = true;
-  const holder = sourceMapCacheHolder(() => enabled, table);
+  // W1-T9822: with no source-map count the holder is the ceiling; a count is sized in its own test file.
+  const notCounted = () => ({ basis: "not-installed" as const });
+  const holder = sourceMapCacheHolder(() => enabled, table, notCounted);
   assert.deepEqual(holder.size!(), { entries: 587, bytes: 587 * 240_000, basis: "census", calibration: "source-maps.module@aaaaaaaaaaaa/2026-10-15", parts: { upper_bound: 1 } });
   enabled = false;
   assert.deepEqual(holder.size!(), { entries: 0, bytes: 0, basis: "census", parts: { source_maps_enabled: 0 } });
   assert.deepEqual(sourceMapCacheHolder(() => true, {}).size!(), { entries: 0, bytes: 0, basis: "census", parts: { uncalibrated: 1 } });
   assert.equal(typeof sourceMapCacheHolder().size!()!.bytes, "number");
-  const listed = daemonHolderSource({ sourceMapsEnabled: () => true, table })();
+  const listed = daemonHolderSource({ sourceMapsEnabled: () => true, table, sourceMapCount: { install: () => {}, read: notCounted } })();
   assert.equal(listed.find((h) => h.name === "source-map-cache")!.size!()!.bytes, 587 * 240_000);
   // A holder that cannot be dropped in-process is measured in a process of its own; one with neither is an error.
   const measured = await measureHeapHolders([

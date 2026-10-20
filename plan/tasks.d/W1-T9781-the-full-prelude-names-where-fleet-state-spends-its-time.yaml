@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 5.00
+  budget_usd: 11.50
   risk: medium  # Rule 19: one concern — telemetry fields on an existing row, no behaviour change
   band_meaning: span
   origin: "operator session 2026-10-16: agent F5, the 06:15:10Z and 05:32:39Z sweep.full_prelude rows, read-only on the host"

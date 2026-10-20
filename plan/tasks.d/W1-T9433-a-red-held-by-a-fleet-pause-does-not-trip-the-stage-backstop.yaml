@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 PR-queue review: why the fix lane escalated #11629 (W1-T9410's build PR) instead of fixing it"
   plan_refs: [W1-T5900, W1-T6405, W1-T9409, W1-T9410]
   files: [src/lib/sweep.ts, test/a-red-held-by-a-fleet-pause-does-not-trip-the-stage-backstop.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

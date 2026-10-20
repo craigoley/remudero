@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 6.00
-  risk: high  # Rule 19: one concern, how a worker spawn's site is captured; the kind text and which threads are tracked are unchanged
+  risk: high  # Rule 19: one concern, raw worker-site capture and reviewed diagnostic kind spelling; tracked IDs/counts and numeric accounting are unchanged
   band_meaning: blast-radius
   origin: 'W1-T9720 builder report (PR 12326), follow-up 1; coordinator brief batch1016 item 5'
   plan_refs: [W1-T9720, W1-T9647, W1-T9091, W1-T7092, W1-T5480]
@@ -14,8 +14,8 @@
     - src/lib/worker-heaps.ts
     - src/lib/read-plane.ts
     - src/lib/raw-call-sites.ts
-    - test/a-worker-spawn-names-its-site-without-source-maps.test.ts
-  status: queued
+    - test/memory/a-worker-spawn-names-its-site-without-source-maps.test.ts
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
@@ -42,24 +42,47 @@
   design: |
     1. trackWorkerThreads captures the spawn stack as raw V8 call sites, never as a formatted `.stack` while maps are
        on. Use the scoped capture W1-T9720 built in read-plane.ts (rawCallSites / siteText), extracted to one shared
-       helper, `rawCallSites` in src/lib/raw-call-sites.ts, that both modules import, not a second copy.
-    2. spawnSite keeps its output: `<module>:<function>`, with the same skipping of node:, this module and the spawn
-       helper, and the same bundle-header lookup (bundledModule reads raw bundle lines, which raw call sites keep). So
-       every `kind` on daemon.memory, serve-memory and worker-heaps rows reads as before.
+       helper, `rawCallSites` in src/lib/raw-call-sites.ts, that both modules import, not a second copy. Restore the exact
+       ambient formatter and limit on success and failure. Preserve worker capture's effective frame budget and
+       eligible-frame order; the helper's own frame consumes no eligible slot. Keep read-plane's existing capture
+       depth, siteText/caller/chain output and leaf filtering unchanged.
+    2. The tracked kind is canonical RAW/RUNTIME `<module>:<function>`: moduleName of the unmapped runtime file,
+       or the existing bundledModule header at its raw runtime line; function is the unmapped V8 frame's function
+       clause, or `<module>` when absent. Keep the same node:/worker-heaps/spawn-helper skips and bundle-header
+       lookup; never infer an original-source module from source-map metadata.
+       When no eligible frame exists, retain literal `unknown` and never omit a worker.
+       Keep spawnSite's existing string/undefined entry-point behavior.
+       Explicit reviewed difference: mapped nameless top-level and mapped anonymous callback sites formerly named
+       `anonymous-worker:<anonymous>` are `anonymous-worker:<module>`; unmapped module-level `<module>` stays unchanged.
+       Named-function, method and bundle controls remain exact. Enumerate/test any additional alias/receiver,
+       constructor/async/eval or original-module remapping differences before review; unenumerated differences,
+       helper-depth drift or new aggregation collisions HOLD qualification, not a formatted-stack fallback.
+       Retain current IDs, tracked population, exit/stop/subscription, sizing/unsized/pending/nested semantics,
+       counts, bytes, used-byte omission, holds/age/basis/reasons/residuals and grouping arithmetic. No new DTO
+       field, identity suffix, grouping algorithm, constant or map lookup. A label change must not hide changed
+       per-thread parts/accounting or merged buckets. Preserve all then-current unrelated holds/lifetime work.
     3. Measure the saving offline with the 9720 bench shape: N real worker spawns under tsx with maps on, maps parsed
        and heapUsed, main against head. Report it in the PR, OBSERVED with the method named.
     4. No new constant.
-    Tests go in test/a-worker-spawn-names-its-site-without-source-maps.test.ts, titled verbatim as in the proofs. One
-    test runs a real child node with --enable-source-maps and --import tsx, spawning a Worker from a module that
+    Tests go in test/memory/a-worker-spawn-names-its-site-without-source-maps.test.ts, titled verbatim as in the proofs.
+    This folder is computed from the representative's actual import/body text with the maintained placement data;
+    before implementation is published, re-run literal rmd test-place on the final physical test and current corpus.
+    Retain real imports and controls if it differs; reconcile scope through review, never force a bucket or flat test.
+    One test runs a real child node with --enable-source-maps and --import tsx, spawning a Worker from a module that
     ships a map. A formatted `.stack` in the same module is the positive control, so a zero is a measurement.
   acceptance:
     - claim: "tracking a worker spawn parses no source map, and a formatted stack in the same child does (positive control)"
-      proof: 'grep: test("W1-T9821: a tracked worker spawn parses no source map" in test/a-worker-spawn-names-its-site-without-source-maps.test.ts'
-    - claim: "the tracked kind still names the spawning module and function, including from a bundle frame"
-      proof: 'grep: test("W1-T9821: the spawn site still names its module and function" in test/a-worker-spawn-names-its-site-without-source-maps.test.ts'
+      proof: 'grep: test("W1-T9821: a tracked worker spawn parses no source map" in test/memory/a-worker-spawn-names-its-site-without-source-maps.test.ts'
+    - claim: "the tracked kind names its canonical raw runtime module and function, including a bundle frame; mapped nameless sites use the reviewed <module> spelling without changing tracked identities or accounting"
+      proof: 'grep: test("W1-T9821: the spawn site still names its module and function" in test/memory/a-worker-spawn-names-its-site-without-source-maps.test.ts'
     - claim: "trackWorkerThreads captures its spawn stack through the shared rawCallSites helper in src/lib/raw-call-sites.ts"
       proof: 'grep: rawCallSites( in src/lib/worker-heaps.ts'
   falsifier: |
     On origin/main, run the child: trackWorkerThreads formats `site.stack`, Node parses the spawning module's map,
-    and the first test fails on a non-zero count. The second test passes on main and at head. It guards against a
-    capture that loses the function name or the bundle module.
+    and the first test fails on a non-zero count with the same child's real-map positive control. In the naming
+    test, invariant named-function/method/unmapped-module/bundle controls pass on main and head; the two explicit
+    canonical mapped-nameless expectations fail on legacy main and pass at head. They do not assert universal
+    mapped-label equality. Add frame-budget and per-thread accounting/collision controls so lost workers,
+    helper-depth changes, new bucket merges or unreviewed label differences cannot pass as canonicalization.
+    Removing only mapped-capture prevention fails the map assertion; removing only canonical nameless handling
+    fails the named label assertions. Restore exact source and require all controls to pass; no guard/test waiver.

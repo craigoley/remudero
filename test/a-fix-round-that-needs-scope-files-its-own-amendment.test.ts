@@ -7,6 +7,7 @@ import * as amendments from "../src/lib/proof-amendment.js";
 import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
 import { runFixRung } from "./helpers/run-task-test.js";
 import { fixRoundTally } from "../src/lib/sweep.js";
+import { ENTANGLEMENT_EXEMPT_INSTRUMENTS } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -193,6 +194,25 @@ test("W1-T5534: a plan or instrument scope request is refused with no write", ()
   }
 });
 
+test("a Stryker registration file is grantable scope, and no other instrument is", () => {
+  // #12776: a task adding a classify.ts suite must register it, and review already admits exactly these two files.
+  assert.deepEqual([...amendments.SCOPE_GRANTABLE_INSTRUMENTS].sort(), ["scripts/mutation-relevant-paths.json", "stryker.conf.json"]);
+  for (const path of amendments.SCOPE_GRANTABLE_INSTRUMENTS) {
+    assert.ok(ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(path), `${path} is granted beyond review's entanglement exemption`);
+    const p = ports();
+    assert.equal(amendments.requestScopeAmendment(request([path]), p.deps).kind, "created", path);
+    assert.match(p.writes.at(-1)?.text ?? "", new RegExp(`"${path.replace(/\./g, "\\.")}"`));
+    const unchanged = ports();
+    assert.equal(amendments.requestScopeAmendment({ ...request([path]), changedPaths: [] }, unchanged.deps).kind, "refused", path);
+  }
+  for (const path of ["scripts/mutation-baseline.json", "scripts/mutation-ratchet.mjs", "scripts/clock-signature-baseline.json"]) {
+    const p = ports();
+    const outcome = amendments.requestScopeAmendment(request([path]), p.deps);
+    assert.equal(outcome.kind === "refused" ? outcome.reason : outcome.kind, "instrument-path", path);
+    assert.deepEqual(p.writes, []);
+  }
+});
+
 test("scope amendments refuse shard drift and leave the implementation contract unchanged", () => {
   for (const text of ["not yaml: [", shard.replace("files: [src/existing.ts]", "files: null"),
     shard + shard, shard.replace(taskId, "OTHER"), shard.replace("[src/existing.ts]", "[123]"),
@@ -217,7 +237,8 @@ test("scope amendments refuse shard drift and leave the implementation contract 
   amendments.requestScopeAmendment(request(), merged.deps);
   for (const [key, record] of merged.records) merged.records.set(key, { ...record, merged: true });
   assert.deepEqual(amendments.requestScopeAmendment(request(), { ...merged.deps,
-    updateBranch: () => ({ ok: false, error: "head moved" }) }), { kind: "branch_update_requested", ok: false, error: "head moved" });
+    updateBranch: () => assert.fail("the caller owns branch-update fallback after a merged amendment") }),
+  { kind: "amendment_merged", amendmentNumber: 99 });
 });
 
 test("scope amendments deduplicate a path set and preserve block files and other tasks", () => {

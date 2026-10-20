@@ -73,7 +73,7 @@ test("W1-T4945: an idle daemon takes a material advance at once", async () => {
         sweep: async () => ({}),
         checkFreshness: () => staleWith(["src/lib/inbox.ts"]),
       },
-      { sweepWallClockBoundMs: 60_000 },
+      { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 60_000 },
     ),
     5_000,
   );
@@ -109,7 +109,7 @@ test("W1-T4945: a busy daemon defers a low-weight advance to the next idle momen
       },
       checkFreshness: () => staleWith(["src/lib/inbox.ts"]),
     },
-    { sweepWallClockBoundMs: 60_000 },
+    { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 60_000 },
   );
   const summary = await within(daemon, 5_000);
   releaseSweep?.();
@@ -125,7 +125,7 @@ test("W1-T4945: a busy daemon defers a low-weight advance to the next idle momen
   assert.equal((summary as { stopReason: string }).stopReason, "stale");
 });
 
-test("W1-T4945: a change to the daemon own loop still drains and restarts while busy", async () => {
+test("W1-T4945: a change pressure at the threshold still drains and restarts while busy", async () => {
   const lines: Line[] = [];
   let releaseSweep: (() => void) | undefined;
   let passes = 0;
@@ -147,9 +147,15 @@ test("W1-T4945: a change to the daemon own loop still drains and restarts while 
         if (passes === 1) await new Promise<void>((resolve) => (releaseSweep = resolve));
         return {};
       },
-      checkFreshness: () => staleWith(["src/lib/daemon.ts"]),
+      // W1-T9089: the daemon's own code weighs the source floor of 1; the threshold's worth of source commits is the pressure.
+      checkFreshness: () => ({
+        stale: true as const, oldSha: OLD_SHA, newSha: NEW_SHA,
+        changes: Array.from({ length: DEPLOY_RESTART_SCORE_THRESHOLD.value }, (_, index) => ({
+          sha: index === 0 ? NEW_SHA : `${index}`.padStart(40, "c"), subject: "feat: x", files: ["src/lib/daemon.ts"],
+        })),
+      }),
     },
-    { sweepWallClockBoundMs: 24 * 60 * 60_000 },
+    { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * 60_000 },
   );
   const summary = await within(daemon, 5_000);
   releaseSweep?.();
@@ -194,7 +200,7 @@ test("W1-T4945: a deferred advance cannot wait indefinitely", async () => {
       },
       checkFreshness: () => staleWith(["src/lib/inbox.ts"]),
     },
-    { sweepWallClockBoundMs: 24 * 60 * 60_000 },
+    { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * 60_000 },
   );
   const summary = await within(daemon, 5_000);
   releaseSweep?.();
@@ -213,9 +219,9 @@ test("W1-T4945: a deferred advance cannot wait indefinitely", async () => {
   assert.ok(waitedMs <= DEPLOY_RESTART_RATE_CEILING_MS, `waited ${waitedMs} ms`);
 });
 
-test("freshness scoring: the daemon's own code is full weight, other runtime paths the floor, unreadable fails toward restarting", () => {
-  assert.equal(freshnessAdvanceWorth({ sha: "1", files: ["src/lib/drain.ts"] }).score, DEPLOY_RESTART_SCORE_THRESHOLD.value);
-  assert.equal(freshnessAdvanceWorth({ sha: "2", files: ["package-lock.json"] }).score, DEPLOY_RESTART_SCORE_THRESHOLD.value);
+test("freshness scoring: every runtime path weighs the source floor, the daemon's own code included; unreadable fails toward restarting", () => {
+  assert.equal(freshnessAdvanceWorth({ sha: "1", files: ["src/lib/drain.ts"] }).score, 1);
+  assert.equal(freshnessAdvanceWorth({ sha: "2", files: ["package-lock.json"] }).score, 0);
   assert.equal(freshnessAdvanceWorth({ sha: "3", files: ["src/lib/inbox.ts"] }).score, 1);
   assert.equal(freshnessAdvanceWorth({ sha: "4", files: ["plan/tasks.d/x.yaml"] }).score, 0);
   const unreadable = decideFreshnessRestart({ busy: true, staleSinceMs: 0, nowMs: 0, state: { total: 0, scoredShas: [] } });
