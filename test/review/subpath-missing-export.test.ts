@@ -31,7 +31,7 @@ test("verified local subpath exports discriminate actual Node head/base link out
   for (const root of [f.base, f.head]) f.put(root, "test/probe.test.ts", source);
   const env: NodeJS.ProcessEnv = { ...process.env, TSX_DISABLE_CACHE: "1" };
   delete env.NODE_TEST_CONTEXT;
-  delete env.NODE_V8_COVERAGE;
+  env.NODE_V8_COVERAGE = undefined;
   const run = (cwd: string) => spawnSync(process.execPath, ["--import", join(process.cwd(), "node_modules/tsx/dist/loader.mjs"),
     "--test", "--test-reporter=tap", "test/probe.test.ts"], { cwd, env,
     encoding: "utf8", timeout: 10000, maxBuffer: 1024 ** 2 });
@@ -88,4 +88,19 @@ test("subpath export attribution accepts an exact local mapping but refuses abse
   assert.match(String(baseLacksPrAddedExports(f.output("#widget"), f.base, f.head)), /base lacks export/);
   rmSync(join(f.base, "package.json"));
   assert.equal(baseLacksPrAddedExports(f.output("#widget"), f.base, f.head), undefined);
+});
+
+test("subpath export attribution refuses repeated substitutions and unsafe package files", t => {
+  const f = fixture(t);
+  for (const root of [f.base, f.head]) f.pkg(root, { "#src/*": "./src/**/*" });
+  assert.equal(baseLacksPrAddedExports(f.output(), f.base, f.head), undefined);
+
+  f.pkg(f.base);
+  rmSync(join(f.head, "package.json"));
+  symlinkSync(join(f.base, "package.json"), join(f.head, "package.json"));
+  assert.equal(baseLacksPrAddedExports(f.output(), f.base, f.head), undefined);
+
+  rmSync(join(f.head, "package.json"));
+  f.put(f.head, "package.json", JSON.stringify({ imports: { "#src/*": "./src/*" }, padding: "x".repeat(65536) }));
+  assert.equal(baseLacksPrAddedExports(f.output(), f.base, f.head), undefined);
 });

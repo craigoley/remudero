@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 
 /** One ESM link failure a base-side proof run printed: `importer` names `name` from `specifier`, which lacks it. */
@@ -35,13 +35,34 @@ function sourceCandidates(path: string): string[] {
   return [path];
 }
 
+function readConfinedFile(root: string, repoPath: string, maxBytes?: number): string | undefined {
+  const full = join(root, repoPath);
+  const fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    const physical = relative(realpathSync(root), realpathSync(full));
+    if (!stat.isFile() || physical.startsWith("..") || isAbsolute(physical)) return undefined;
+    if (maxBytes === undefined) return readFileSync(fd, "utf8");
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let used = 0;
+    while (used < buffer.length) {
+      const count = readSync(fd, buffer, used, buffer.length - used, null);
+      if (count === 0) break;
+      used += count;
+    }
+    return used > maxBytes ? undefined : buffer.toString("utf8", 0, used);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function readModule(root: string, repoPath: string): { path: string; text: string } | undefined {
   for (const candidate of sourceCandidates(repoPath)) {
-    const full = join(root, candidate);
-    if (existsSync(full)) {
-      const physical = relative(realpathSync(root), realpathSync(full));
-      if (physical.startsWith("..") || isAbsolute(physical) || !lstatSync(full).isFile()) return undefined;
-      return { path: candidate, text: readFileSync(full, "utf8") };
+    try {
+      const text = readConfinedFile(root, candidate);
+      return text === undefined ? undefined : { path: candidate, text };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
   return undefined;
@@ -52,12 +73,15 @@ function readModule(root: string, repoPath: string): { path: string; text: strin
 function subpathModule(root: string, importerRel: string, specifier: string): { path: string; binding: string } | undefined {
   if (!specifier.startsWith("#") || /[\\%?\0]/.test(specifier) || specifier.split("/").includes("..")) return undefined;
   for (let scope = dirname(importerRel);; scope = dirname(scope)) {
-    const file = join(root, scope, "package.json");
-    if (existsSync(file)) {
-      const st = lstatSync(file);
-      const physical = relative(realpathSync(root), realpathSync(file));
-      if (!st.isFile() || st.isSymbolicLink() || st.size > 65536 || physical.startsWith("..") || isAbsolute(physical)) return undefined;
-      const imports: unknown = JSON.parse(readFileSync(file, "utf8")).imports;
+    let packageText: string | undefined;
+    try {
+      packageText = readConfinedFile(root, join(scope, "package.json"), 65536);
+      if (packageText === undefined) return undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (packageText !== undefined) {
+      const imports: unknown = JSON.parse(packageText).imports;
       if (typeof imports !== "object" || imports === null || Array.isArray(imports)) return undefined;
       const matches = Object.entries(imports).flatMap<{ key: string; target: unknown; middle: string | undefined }>(([key, target]) => {
         const pieces = key.split("*");
@@ -70,7 +94,7 @@ function subpathModule(root: string, importerRel: string, specifier: string): { 
       const { key, target, middle } = matches[0]!;
       if (typeof target !== "string" || !target.startsWith("./") || /[\\%?#\0]/.test(target) ||
           target.split("/").includes("..") || target.split("*").length > (middle === undefined ? 1 : 2)) return undefined;
-      const mapped = middle === undefined ? target : target.replace("*", middle);
+      const mapped = middle === undefined ? target : target.replaceAll("*", middle);
       if (mapped.includes("*")) return undefined;
       const path = join(scope, mapped);
       if (path.startsWith("..") || isAbsolute(path)) return undefined;
