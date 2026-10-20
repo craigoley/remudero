@@ -207,14 +207,33 @@ test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — t
   // `resolvePlanCriteriaAtHead` assertion below) and this suite exercises it directly instead.
   const callSites = runTaskSrc.split("resolvePlanCriteriaForReview(").length - 1;
   assert.equal(callSites, 1, "exactly one definition and no call site; any second occurrence means it was wired somewhere new");
-  // Five calls: review command (async), fix-rung helper (sync + async), preflight proofs (sync),
-  // and W1-T9805's local scope merge (async). The last validates the widened contract before a
-  // worker runs; it never re-reviews an already merged PR. Pin its location and inputs below.
+  // `resolvePlanCriteriaAtHead` (imported from lib/review.ts) has exactly THREE intentional call
+  // sites: `reviewCommand`'s own `if (taskId)` branch, W1-T3557's dedicated fix-rung helper, and
+  // W1-T3738's local proof tier.
+  //
+  // THE THIRD IS THE POINT OF THAT TIER, NOT AN EROSION OF THIS ONE. What this census exists to
+  // refuse is a MERGED-ADJACENT path (a sweep, a retro) resolving head-bound criteria; the
+  // preflight tier is the opposite — it runs before a push exists, and it calls THIS resolver
+  // precisely so a local verdict cannot disagree with the gate about WHICH criteria a branch is
+  // judged on. A tier with its own parser would be worse than no tier. So the count rises by one
+  // and each site is still named below: a FOURTH is still refused, and so is moving any of the
+  // three somewhere new.
+  // W1-T7743: the daemon-side paths resolve through the AWAITED form, so the fix-rung helper has a sync and an async
+  // call and the count is four: review command (async), fix-rung helper (sync + async), preflight proofs (sync).
+  // W1-T9232: the review command reads the SAME plan at `origin/main` once, only when the head has no record of
+  // the task's own, to tell "built before its shard merged" from "no such task". Pinned below.
+  // W1-T9805 adds the sixth: the unpublished local scope merge validates its widened task contract.
+  // Both additions keep their location/input assertions; a seventh or a moved call is refused.
   const atHeadCallSites = runTaskSrc.split(/resolvePlanCriteriaAtHead(?:Async)?\(/).length - 1;
   assert.equal(
     atHeadCallSites,
-    5,
-    "only review-command, fix-rung-head-contract (sync and awaited), preflight-proofs and local scope-merge resolver calls are permitted",
+    6,
+    "only review-command (head and origin/main), fix-rung-head-contract (sync and awaited), preflight-proofs and local scope-merge resolver calls are permitted",
+  );
+  assert.match(
+    runTaskSrc,
+    /resolvePlanCriteriaAtHeadAsync\(body, subjectRepoDir, "plan\/tasks\.yaml", "origin\/main"\)[\s\S]{0,120}headLacksOwnTaskRecord\(resolved, atMain\)/,
+    "the fifth resolver call is the review command's origin/main read feeding headLacksOwnTaskRecord",
   );
   assert.match(
     runTaskSrc,

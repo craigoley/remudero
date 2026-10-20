@@ -1,0 +1,32 @@
+- id: W1-T10187
+  title: "THE CODE PR ready_to_merged STAGE SLOWED ON THE LIGHT SURFACE — p50 10.8 min against a 4.8 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:code:ready_to_merged:light"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-code-ready-to-merged-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the code ready_to_merged stage on the light surface returns under 2x its baseline p50"
+      proof: "grep: test(\"the code ready_to_merged stage recovers\" in test/sweep/the-code-ready-to-merged-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    code PRs, stage ready_to_merged on the light surface: p50 10.8 min against a 4.8 min baseline (rolling).
+    Last 24 h: n 7, p50 10.8, p90 131 min.
+    Slowest PRs: #12796 (131 min), #12797 (129.2 min), #12800 (15.2 min).
+    Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "high-risk verdict at confidence 0.60 — on the change's description/files alone, no diff was read — The filed task is a flow-latency regression on the ready_to_merged stage, which is the merge pipeline. Its own rationale says to \"find what these PRs share before changing a bound\", so the cause is undiagnosed. A fix could touch merge policy or timing bounds in src/lib/sweep.ts, and the description does not rule that out.; on the change's description/files alone, no diff was read — The acceptance criterion is a grep for a test name in a file that does not exist at the base. A grep for a test title confirms the test is present, not that the stage recovered, so the finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The evidence is thin: n=7, with two outliers at about 130 min that could be one-off causes. The author is a machine in the flow-regression family, which has 0 merged and 0 declined tasks and a Beta mean of 0.50, so there is no track record to support a lower rating."
+    judged_at: "2026-10-19T04:11:49.018Z"
+    pin: "0af8eb0eef022ddcff422b366ca3175bf7baa5b5ade0889c6d44ee7d11694772"

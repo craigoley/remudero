@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: gardener loop audit; operator ruling the same day (reuse unless main's change touches the PR's files or its proof tests' import closure)"
   plan_refs: [W1-T3704, W1-T5713, W1-T7735, W1-T8088]
   files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, test/a-refreshed-head-reuses-its-review-when-main-cannot-reach-the-pr.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

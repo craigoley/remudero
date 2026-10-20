@@ -1,0 +1,68 @@
+- id: W1-T10165
+  title: "Repository flow credits consumer task trailers through the shared prefix parser"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: feedback#fb-1791856366584-6a18c9
+  plan_refs: ["§7B", "W1-T4388", "W1-T8684"]
+  files:
+    - src/lib/repository-flow.ts
+    - test/deploy/repository-flow-consumer-trailer-credit.test.ts
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=df30fde24ce5f522
+  attempts: 0
+  rationale: |
+    Re-read in the triage checkout on 2026-10-18: captureRepositoryFlow still discovers
+    trailer candidates with a literal W/CONSOLE/SITE alternation that omits PORTAL.
+    Its native mergedTrailerLookup can only credit ids the candidate discovery supplies;
+    a merged PORTAL-T trailer on a non-run branch is therefore absent from deliveredTasks.
+    Branch credit remains an independent path and can hide this defect in ordinary fixtures.
+
+    The feedback's proposed source needs a correction: the CONSOLE/PORTAL/W1 names in
+    task-id-reservation.ts are a comment, not an exported accepted-prefix list.
+    parsePrefixedTaskId already accepts generic uppercase prefixes. W1-T4388 owns that
+    grammar; W1-T8684 requires trailer UNION branch delivery credit but does not specify
+    this missing consumer-trailer regression. The cited PORTAL-T4 and PORTAL-T27 examples
+    still appear in escalate.ts and run-task.ts respectively. No platform research is needed.
+    These observations describe the supplied checkout; no remote-main or open-head sweep
+    is claimed by this headless triage worker.
+  design: |
+    Replace the repository-flow candidate prefix enumeration with anchored trailer-value
+    extraction validated through the existing parsePrefixedTaskId export. Preserve the
+    existing W<n>-T<n> optional single-letter suffix behavior alongside that shared parser.
+    Do not replace the literal list with another list or treat a source comment as a registry.
+    SITE loses its special enumerated alias; generic parser acceptance remains authoritative.
+
+    Keep candidates separate from credit: use the existing mergedTrailerLookup for the
+    actual merged implementation-credit decision and union with native run-branch credit.
+    Preserve correction/plan-only refusals, repository scoping and unique-task counting.
+    No new network request, registry walk or change to reservation behavior is required.
+
+    Add a dedicated regression suite using real persisted open/closed board snapshots and
+    the default captureRepositoryFlow path with a fixed injected clock and private state.
+    A merged implementation PR on codex/repair with only Remudero-Task: PORTAL-T27 must
+    contribute one delivered task in both applicable windows and its UTC daily bucket.
+    Include a new generic consumer prefix to prove the solution is not another prefix list.
+    Exercise W1 letter-suffix and CONSOLE compatibility, duplicate branch/trailer credit,
+    unmerged PRs, prose mentions and malformed/trailing-suffix trailer values as controls.
+    Derive final test placement with rmd test-place from its imports; repository-flow maps
+    to deploy in the checked-in placement data. Keep imports focused on the collector and
+    its snapshot fixtures so the declared test/deploy path matches its subsystem.
+  acceptance:
+    - claim: "trailer-only merged PORTAL and generic consumer tasks reach repository-flow delivery counts through shared prefix parsing"
+      proof: "unit test: test/deploy/repository-flow-consumer-trailer-credit.test.ts"
+  falsifier: |
+    Restore only the old W/CONSOLE/SITE candidate alternation while retaining the new suite.
+    The PORTAL trailer-only and generic consumer fixtures must fail with a complete TAP
+    summary; restore the fix and require zero failures. A fixture with a run-PORTAL branch
+    is not the falsifier because independent branch credit masks the missing trailer path.
+  note: |
+    One acceptance concern: complete delivery-credit candidate discovery for consumer ids.
+    Medium risk reflects a cached analytics count, not a change to merge or dispatch authority.
+    Submit through the normal machine-filing judge; this proposal does not claim a judge
+    ruling, an executed future test, or verified live under-count magnitude.

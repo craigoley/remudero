@@ -14,7 +14,7 @@
     - src/lib/daemon.ts
     - src/lib/run-child.ts
     - test/a-run-child-lost-to-a-container-stop-ends-only-its-lane.test.ts
-  status: queued
+  status: merged
   priority: 1  # a lost child idled a lane 42 min, forced a pass-error restart, and spent a priority-1 resume
   attempts: 0
   rationale: |

@@ -693,6 +693,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
   "sweep.ci_timeout_refresh.escalated",
+  "sweep.own_task_record.refresh", // W1-T9232: the sweep's once-per-PR refresh bound reads it back.
+  "review.reviewer.skipped", // W1-T9232: ownTaskRecordMissingRow reads the cause row for the PR's head.
   "sweep.actions_incident_hold",
   "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
@@ -817,6 +819,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // `panel.escalation_marked_handled` stays out: it carries nothing a calibrator could read back.
   RISK_OVERRIDE_RECORDED_STEP,
   "daemon.boot",
+  // fixSeedRead needs both the empty boot census and later ownership/uncertainty:
+  // dropping either side changes whether an old fix can re-enter the checkout claim.
+  "run_child.adoption_pass",
+  "run_child.adopted",
+  "run_child.adoption_unreadable",
+  "run_child.adoption_misidentified",
   // impl-DF: the idle rung's reason tally. A HUMAN reads it to tell "starved of work" from
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",

@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator followthrough 2026-10-17: preserve actual author-validation diagnostics without retrying an unexplained timeout"
   plan_refs: [W1-T5617, W1-T5693, W1-T9919, W1-T9794]
-  files: [scripts/census-precheck.mjs, scripts/lib/retained-fixtures.mjs, test/setup/retained-fixtures.ts, test/setup/tmp-hygiene.ts, test/an-incomplete-census-capture-survives-its-producer-exit.test.ts, test/census-reader-runtime-calibration.test.ts]
+  files: [scripts/census-precheck.mjs, scripts/lib/retained-fixtures.mjs, scripts/lib/retained-fixtures.d.mts, test/setup/retained-fixtures.ts, test/setup/tmp-hygiene.ts, test/ci/gates/an-incomplete-census-capture-survives-its-producer-exit.test.ts, test/census-reader-runtime-calibration.test.ts]
   status: queued
   attempts: 0
   rationale: |

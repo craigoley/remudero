@@ -7,7 +7,7 @@
   risk: low
   priority: 3
   status: queued
-  # backlog gardener: band=3 evidence=3f683c34c39b5ffd
+  # backlog gardener: band=3 evidence=a949981ae097f181
   attempts: 0
   files:
     - src/lib/ledger.ts

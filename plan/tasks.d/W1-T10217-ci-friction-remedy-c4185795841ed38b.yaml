@@ -1,0 +1,42 @@
+- id: W1-T10217
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:mutation-ratchet cost 98.2 PR minute(s) across 12 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.06
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:mutation-ratchet"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/ci-friction-remedy-c4185795841ed38b.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:mutation-ratchet"
+      proof: "grep: test(\"W1-T10217: check:mutation-ratchet is prevented, not retried\" in test/gardeners/ci-friction-remedy-c4185795841ed38b.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:mutation-ratchet's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:mutation-ratchet cost 98.2 PR minute(s) across 12 red run(s) within the measured window on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job mutation-ratchet for mutation-ratchet
+
+    RECENT ROUNDS (newest first):
+    - PR #12776 (https://github.com/craigoley/remudero/pull/12776) at 2026-10-18T21:54:08.637Z: non-test paths need scope
+        failing tests: the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix); W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that returns clear
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/mutation-ratchet.test.ts:3:2331
+          | ✖ the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix) (276.007072ms)
+          |   AssertionError [ERR_ASSERTION]: test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts imports src/lib/classify.ts but is NOT in stryker's commandRunner, so its assertions kill no mutants and the score silently drops -- add it to stryker.conf.json (an instrument-only PR; Standing rule 25 forbids shipping that edit beside a src/ change). Command is: node --test --import
+    - PR #9415 at 2026-10-05T21:42:47.290Z: ci-log round — test-slow; ci; coverage-ratchet; ci-shard (4/8); coverage-shard (6/8); coverage-shard (7/8); mutation-ratchet; ci-shard (1/8); coverage-shard (1/8); coverage-shard (8/8); coverage-shard
+    - PR #9382 at 2026-10-05T20:28:48.688Z: ci-log round — ci; ci-shard (5/8); ci-shard (2/8); ci-shard (8/8); mutation-ratchet; acceptance-author-gate; scan-pr / osv-scan; License Review; commitlint; proof-discrimination; coverage-session-blan
+    - PR #9396 at 2026-10-05T20:28:19.090Z: ci-log round — test-slow; test-slow-shard (1/2); test-slow-shard (2/2); mutation-ratchet; unwired-gate; coverage-session-blanking; proof-discrimination
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

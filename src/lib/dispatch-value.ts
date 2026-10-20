@@ -37,6 +37,15 @@ export interface DispatchValueContext {
   readonly costOfDelayImputed?: readonly string[];
   /** W1-T9967: each tier's measured wait, highest tier first; the ready row reports it as `tier_waits`. */
   readonly costOfDelayTierWaits?: readonly TierWait[];
+  readonly costOfDelayDependentValues?: readonly DependentValueEntry[];
+  readonly costOfDelayDependentCycle?: readonly string[];
+}
+
+export interface DependentValueEntry {
+  readonly id: string;
+  readonly open_dependents: number;
+  readonly own_urgency: number;
+  readonly dependent_value: number;
 }
 
 export interface DispatchScoreInputs {
@@ -45,6 +54,7 @@ export interface DispatchScoreInputs {
   readonly filing_age_ms: number;
   readonly median_wait_ms: number;
   readonly urgency: number;
+  readonly dependent_value: number;
   readonly starts: number;
 }
 
@@ -63,6 +73,7 @@ export function explainDispatchScore(task: DispatchValueTask, context?: Dispatch
     stride_pass: context.stridePassByTaskId.get(task.id) ?? null,
     starts: inputs?.starts ?? null,
     open_dependents: context.openDependentFanoutByTaskId.get(task.id) ?? 0,
+    dependent_value: inputs?.dependent_value ?? null,
     imputed: context.costOfDelayImputed?.includes(task.id) ?? false,
   };
 }
@@ -146,16 +157,20 @@ export function filingDatesFromPlanHistory(history: string): Map<string, number>
 /** W1-T7534: the `dispatch.cost_of_delay.ready` row. Its dedup key is per plan tree while any open task is
  * unscored or imputed, or (W1-T9967) any tier wait is reported, so each is ledgered once per tree. */
 export function costOfDelayReadyRow(
-  planTreeSha: string, context: Pick<DispatchValueContext, "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits">,
-): { key: string; plan_tree_sha: string; unscored?: readonly string[]; imputed?: readonly string[]; tier_waits?: readonly TierWait[] } {
+  planTreeSha: string, context: Pick<DispatchValueContext, "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits" | "costOfDelayDependentValues" | "costOfDelayDependentCycle">,
+): { key: string; plan_tree_sha: string; unscored?: readonly string[]; imputed?: readonly string[]; tier_waits?: readonly TierWait[]; dependent_value?: readonly DependentValueEntry[]; dependent_cycle?: readonly string[] } {
   const unscored = context.costOfDelayUnscored ?? [];
   const imputed = context.costOfDelayImputed ?? [];
   const tierWaits = context.costOfDelayTierWaits ?? [];
-  if (unscored.length === 0 && imputed.length === 0 && tierWaits.length === 0) return { key: "ready", plan_tree_sha: planTreeSha };
+  const dependentValues = context.costOfDelayDependentValues ?? [];
+  const dependentCycle = context.costOfDelayDependentCycle ?? [];
+  if (unscored.length === 0 && imputed.length === 0 && tierWaits.length === 0 && dependentValues.length === 0 && dependentCycle.length === 0) return { key: "ready", plan_tree_sha: planTreeSha };
   return {
     key: `ready:${planTreeSha}`, plan_tree_sha: planTreeSha,
     ...(unscored.length === 0 ? {} : { unscored }), ...(imputed.length === 0 ? {} : { imputed }),
     ...(tierWaits.length === 0 ? {} : { tier_waits: tierWaits }),
+    ...(dependentValues.length === 0 ? {} : { dependent_value: dependentValues }),
+    ...(dependentCycle.length === 0 ? {} : { dependent_cycle: dependentCycle }),
   };
 }
 
@@ -427,6 +442,71 @@ export function priorityTiers(open: readonly Pick<DispatchValueTask, "priority">
   return task => (typeof task.priority === "number" && Number.isFinite(task.priority) ? task.priority : lowest + 1) - head;
 }
 
+/** W1-T10020: each dependent contributes once, at its own urgency discounted by longest open depth. */
+function dependentValue(
+  tasks: readonly DispatchValueTask[], tierOf: (task: DispatchValueTask) => number, waits: ReadonlyMap<string, number>,
+): { byTaskId: ReadonlyMap<string, number>; cycle: readonly string[] } {
+  const byId = new Map(tasks.map(task => [task.id, task]));
+  const reverse = new Map<string, Set<string>>();
+  for (const task of tasks) for (const id of task.depends_on) {
+    if (byId.has(id)) (reverse.get(id) ?? reverse.set(id, new Set()).get(id)!).add(task.id);
+  }
+  const levels = new Map<string, number | undefined>();
+  const stack: string[] = [];
+  const active = new Set<string>();
+  const indices = new Map<string, number>();
+  const low = new Map<string, number>();
+  const cycle = new Set<string>();
+  const visit = (id: string): void => {
+    const index = indices.size;
+    indices.set(id, index);
+    low.set(id, index);
+    stack.push(id);
+    active.add(id);
+    for (const dependency of byId.get(id)!.depends_on) {
+      if (!byId.has(dependency)) continue;
+      if (!indices.has(dependency)) {
+        visit(dependency);
+        low.set(id, Math.min(low.get(id)!, low.get(dependency)!));
+      } else if (active.has(dependency)) low.set(id, Math.min(low.get(id)!, indices.get(dependency)!));
+    }
+    if (low.get(id) !== index) return;
+    const members: string[] = [];
+    let member: string;
+    do {
+      member = stack.pop()!;
+      active.delete(member);
+      members.push(member);
+    } while (member !== id);
+    if (members.length > 1 || byId.get(id)!.depends_on.includes(id)) {
+      for (const member of members) { cycle.add(member); levels.set(member, undefined); }
+    } else {
+      const below = byId.get(id)!.depends_on.map(dependency => levels.get(dependency)).filter((level): level is number => level !== undefined);
+      levels.set(id, below.reduce((level, dependency) => Math.max(level, dependency + 1), 0));
+    }
+  };
+  for (const task of tasks) if (!indices.has(task.id)) visit(task.id);
+  const byTaskId = new Map<string, number>();
+  for (const task of tasks) {
+    let value = 0;
+    const level = levels.get(task.id);
+    if (level !== undefined) {
+      const seen = new Set([task.id]);
+      const pending = [...(reverse.get(task.id) ?? [])];
+      while (pending.length > 0) {
+        const id = pending.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const depth = levels.get(id);
+        if (depth !== undefined) value += dispatchUrgency(tierOf(byId.get(id)!) + depth - level, waits.get(id)!);
+        for (const dependent of reverse.get(id) ?? []) pending.push(dependent);
+      }
+    }
+    byTaskId.set(task.id, value);
+  }
+  return { byTaskId, cycle: [...cycle].sort() };
+}
+
 /** Pool ceil(sqrt(dated runs)) nearest runs, including every equal-distance group.
  * Grouped evidence retains its whole tally; no input order or fixed age bucket decides a tie. */
 export function validityShareNearAge(
@@ -463,7 +543,7 @@ export function validityShareNearAge(
   return { valid, total };
 }
 
-interface TierPass { readonly id: string; readonly tier: number; readonly blocked: boolean; readonly pass0: number; readonly passF: number }
+export interface TierPass { readonly id: string; readonly tier: number; readonly blocked: boolean; readonly pass0: number; readonly passF: number }
 
 /**
  * W1-T9968 (operator 2026-10-17: fan-out never jumps a tier): the no-fan-out passes fix which tier owns each
@@ -488,11 +568,33 @@ function fanoutWithinTier(passes: readonly TierPass[]): Map<string, number> {
   return stridePassByTaskId;
 }
 
+/** W1-T10028: each dealt pass map's slot inputs. Keyed by the map itself, so a context whose `stridePassByTaskId` was replaced has none and is never redealt. */
+const slotInputsByPassMap = new WeakMap<ReadonlyMap<string, number>, ReadonlyMap<string, TierPass>>();
+
+/** The slot inputs (tier, blocked, pass0, passF) behind a context's dealt passes, when it still holds the map they dealt. */
+export function stridePassInputs(context: DispatchValueContext | undefined): ReadonlyMap<string, TierPass> | undefined {
+  return context?.stridePassByTaskId === undefined ? undefined : slotInputsByPassMap.get(context.stridePassByTaskId);
+}
+
+/**
+ * W1-T10028: deal W1-T9968's slots over `ids` only — the tasks the selector can dispatch in this pass. A task the
+ * selector declines (verify: human, retired, blocked) must not hold a slot, or an eligible task of its tier takes
+ * it and jumps the tiers above. MEASURED 2026-10-17: W1-T9874 (P2) took W1-T9378's best P2 slot and sorted above
+ * about 10 eligible P1s. A context with no slot inputs (fallback, unscored) is returned unchanged.
+ */
+export function redealFanoutOver(context: DispatchValueContext | undefined, ids: ReadonlySet<string>): DispatchValueContext | undefined {
+  const inputs = stridePassInputs(context);
+  if (!context || inputs === undefined) return context;
+  const dealt = fanoutWithinTier([...inputs.values()].filter(entry => ids.has(entry.id)));
+  slotInputsByPassMap.set(dealt, inputs);
+  return Object.freeze({ ...context, stridePassByTaskId: dealt });
+}
+
 function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
-): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits"> }
+): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits" | "costOfDelayDependentValues" | "costOfDelayDependentCycle"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
   const starts = new Map<string, { id: string; at: number }>();
@@ -587,7 +689,15 @@ function costOfDelayContext(
     unitByTier.set(key, envelope);
   }
   // Priority weights the urgency (it is not a one-rank head start); an absent priority is the lowest tier.
-  const tierOf = priorityTiers(tasks.filter(task => openIds.has(task.id)));
+  const open = tasks.filter(task => openIds.has(task.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const tierOf = priorityTiers(open);
+  const ageById = new Map(open.map(task => {
+    const filedAt = snapshot.filedAtByTaskId.get(task.id);
+    const dated = filedAt !== undefined && Number.isFinite(filedAt) && filedAt <= nowMs;
+    return [task.id, dated ? nowMs - filedAt : 0] as const;
+  }));
+  const waits = new Map(open.map(task => [task.id, ageById.get(task.id)! / unitByTier.get(tierKey(task))!]));
+  const dependents = dependentValue(open, tierOf, waits);
   const samples = [...ages].sort(([a], [b]) => a - b);
   const valid = samples.reduce((sum, [, tally]) => sum + tally.valid, 0);
   const total = samples.reduce((sum, [, tally]) => sum + tally.total, 0);
@@ -596,8 +706,8 @@ function costOfDelayContext(
   const passes: TierPass[] = [];
   const costOfDelayInputsByTaskId = new Map<string, DispatchScoreInputs>();
   const costOfDelayImputed: string[] = [];
-  for (const task of [...tasks].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
-    if (!openIds.has(task.id)) continue;
+  const costOfDelayDependentValues: DependentValueEntry[] = [];
+  for (const task of open) {
     const filedAt = snapshot.filedAtByTaskId.get(task.id);
     // W1-T9323: an undatable task (an id the filing scan cannot read, a snapshot one selection behind, a
     // future date) is scored at age 0 and named as imputed, so it joins the stride order instead of trailing it.
@@ -605,17 +715,20 @@ function costOfDelayContext(
     if (!dated) costOfDelayImputed.push(task.id);
     const estimate = estimates.get(deriveTaskClass(task));
     if (!estimate || estimate.costPerAttempt <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-cost`] };
-    const age = dated ? nowMs - (filedAt as number) : 0;
+    const age = ageById.get(task.id)!;
     const share = validityShareNearAge(samples, age);
     const probability = share.total === 0 ? prior
       : (share.valid + DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (share.total + DISPATCH_VALUE_PRIOR_WEIGHT);
     const classScore = context.scoreByClass.get(deriveTaskClass(task));
-    // One unit is the task's own impact; open dependents add units. Posterior/cost-per-merge
-    // gives every class a share even when its raw merge count is zero.
+    // Posterior/cost-per-merge gives every class a share even when its raw merge count is zero.
     const mergeProbability = estimate.alpha / (estimate.alpha + estimate.beta);
-    const urgency = dispatchUrgency(tierOf(task), age / (unitByTier.get(tierKey(task)) as number));
-    const score0 = probability * (classScore ?? NaN) * mergeProbability * urgency;
-    const score = score0 * (1 + (context.openDependentFanoutByTaskId.get(task.id) ?? 0));
+    const urgency = dispatchUrgency(tierOf(task), waits.get(task.id)!);
+    const dependent_value = dependents.byTaskId.get(task.id)!;
+    const factor = probability * (classScore ?? NaN) * mergeProbability;
+    const score0 = factor * urgency;
+    const score = factor * (urgency + dependent_value);
+    const open_dependents = context.openDependentFanoutByTaskId.get(task.id) ?? 0;
+    if (open_dependents > 0) costOfDelayDependentValues.push({ id: task.id, open_dependents, own_urgency: urgency, dependent_value });
     // Each unique dispatch consumes one stride. Rebuilding from all starts survives restarts
     // and keeps a frequently selected high-score task from monopolizing a fixed frontier.
     const strides = 1 + (counts.get(task.id) ?? 0);
@@ -625,13 +738,16 @@ function costOfDelayContext(
     passes.push({ id: task.id, tier: tierKey(task), blocked: task.depends_on.some(id => openIds.has(id)), pass0, passF });
     costOfDelayInputsByTaskId.set(task.id, Object.freeze({
       priority_head_start: 2 ** -tierOf(task), filing_age_ms: age,
-      median_wait_ms: unitByTier.get(tierKey(task)) as number, urgency, starts: counts.get(task.id) ?? 0,
+      median_wait_ms: unitByTier.get(tierKey(task)) as number, urgency, dependent_value, starts: counts.get(task.id) ?? 0,
     }));
   }
   const stridePassByTaskId = fanoutWithinTier(passes);
+  slotInputsByPassMap.set(stridePassByTaskId, new Map(passes.map(entry => [entry.id, entry])));
   return {
     kind: "ready",
-    context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayInputsByTaskId, costOfDelayTierWaits, ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
+    context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayInputsByTaskId, costOfDelayTierWaits,
+      costOfDelayDependentValues, costOfDelayDependentCycle: dependents.cycle,
+      ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
   };
 }
 

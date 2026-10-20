@@ -7,6 +7,7 @@
   "test/session-limit-is-a-refusal-not-a-success.test.ts",
   "test/codex-quota-window-refusal.test.ts",
   "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts",
+  "test/cash-fallback-reads-the-remaining-allowance.test.ts",
   "stryker.conf.json",
   "scripts/mutation-ratchet.mjs",
   "scripts/mutation-baseline.json"

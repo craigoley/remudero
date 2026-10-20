@@ -37,9 +37,9 @@ export const FLOW_STATE_FILE = "flow-gardener.json";
 export const FLOW_REPORT_FILE = "flow-report.md";
 
 export type FlowClass = "plan" | "code" | "gardener";
-export const FLOW_STAGES = ["time_to_merge", "ci_wall_clock", "review_queue_wait", "ready_to_merged", "pushes", "branch_updates", "fix_rounds"] as const;
+export const FLOW_STAGES = ["time_to_merge", "ci_wall_clock", "review_queue_wait", "ready_to_merged", "pushes", "branch_updates", "fix_rounds", "idle_reviews"] as const;
 export type FlowStage = (typeof FLOW_STAGES)[number];
-const COUNT_STAGES: ReadonlySet<FlowStage> = new Set(["pushes", "branch_updates", "fix_rounds"]);
+const COUNT_STAGES: ReadonlySet<FlowStage> = new Set(["pushes", "branch_updates", "fix_rounds", "idle_reviews"]);
 
 /** A stage regresses when its 24 h p50 reaches this multiple of its baseline p50. BACKSTOP: the design's
  *  stated factor; the operator's 2026-10-05 day was ~2x a healthy one (code p90 109-120 min vs p50 38). */
@@ -76,11 +76,12 @@ const STAGE_OWNER: Readonly<Record<FlowStage, string>> = {
   pushes: "src/lib/sweep.ts",
   branch_updates: "src/lib/sweep.ts",
   fix_rounds: "src/lib/sweep.ts",
+  idle_reviews: "src/lib/sweep.ts",
 };
 
 const READ_STEPS = [
   "pr.opened", "pr.terminal", "sweep.review_eligible", "sweep.review_admitted", "review.posted",
-  "automerge.armed", "sweep.update_branch.updated", "fix.dispatch", "review.plan_only_reviewed",
+  "automerge.armed", "sweep.update_branch.updated", "fix.dispatch", "fix.done", "branch.update_requested", "review.plan_only_reviewed",
 ];
 export const ADMISSION_FLOW_STEP = "admission_flow.shadow";
 /** PRIMARY CONTROL: selected terminal evidence is normally limited to eight reads per off-loop pass. */
@@ -326,10 +327,36 @@ interface FlowPr {
   heads: number;
   updates: number;
   fixRounds: number;
+  /** Reviews spent on an unchanged PR (W1-T9048), by the refresh path (`via`) that made the update. */
+  idleReviews: Map<string, number>;
   reviewWait: Map<string, number>;
   reviewedMs?: number;
   armedMs?: number;
   armSurface: "light" | "full";
+}
+
+/** W1-T9048: a review is idle when it repeats the previous review's contract on a head reached only by a base
+ *  merge (the update's expected_head_sha is the previously reviewed head, or the own diff is unchanged), or
+ *  repeats the same head, with no fix push between. Each is attributed to the update's `via`. */
+export function idleReviewsOf(list: readonly Row[], fixTimes: readonly number[], mergedMs: number): Map<string, number> {
+  const out = new Map<string, number>();
+  const ts = (r: Row) => Date.parse(String(r.ts));
+  const reviews = list.filter((r) => r.step === "review.posted" && typeof r.head_sha === "string" && ts(r) <= mergedMs);
+  const updates = list.filter((r) => r.step === "sweep.update_branch.updated" || r.step === "branch.update_requested");
+  for (let i = 1; i < reviews.length; i++) {
+    const prev = reviews[i - 1]!, cur = reviews[i]!;
+    if (typeof cur.review_contract_digest !== "string" || cur.review_contract_digest !== prev.review_contract_digest) continue;
+    if (fixTimes.some((t) => t >= ts(prev) && t <= ts(cur))) continue;
+    let via: string | undefined;
+    if (cur.head_sha === prev.head_sha) via = "repeat";
+    else {
+      const update = updates.find((u) => u.expected_head_sha === prev.head_sha && ts(u) >= ts(prev) && ts(u) <= ts(cur));
+      const sameDiff = typeof cur.own_diff_digest === "string" && cur.own_diff_digest === prev.own_diff_digest;
+      if (update || sameDiff) via = typeof update?.via === "string" ? update.via : "unknown";
+    }
+    if (via !== undefined) out.set(via, (out.get(via) ?? 0) + 1);
+  }
+  return out;
 }
 
 const tsOf = (row: Row): number => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
@@ -347,8 +374,10 @@ function prNumberOf(row: Row): number | undefined {
 export function flowPrs(rows: readonly Row[]): FlowPr[] {
   const byPr = new Map<number, Row[]>();
   const fixesByTask = new Map<string, number[]>();
+  const fixPushesByTask = new Map<string, number[]>();
   for (const row of [...rows].sort((a, b) => tsOf(a) - tsOf(b))) {
     if (row.step === "fix.dispatch" && typeof row.task_id === "string") fixesByTask.set(row.task_id, [...(fixesByTask.get(row.task_id) ?? []), tsOf(row)]);
+    if ((row.step === "fix.done" || row.step === "fix.dispatch") && typeof row.task_id === "string") fixPushesByTask.set(row.task_id, [...(fixPushesByTask.get(row.task_id) ?? []), tsOf(row)]);
     const n = prNumberOf(row);
     if (n !== undefined) byPr.set(n, [...(byPr.get(n) ?? []), row]);
   }
@@ -385,6 +414,7 @@ export function flowPrs(rows: readonly Row[]): FlowPr[] {
       updates: list.filter((r) => r.step === "sweep.update_branch.updated").length,
       fixRounds: taskId === undefined || openedMs === undefined ? 0
         : (fixesByTask.get(taskId) ?? []).filter((ms) => ms >= openedMs && ms <= mergedMs).length,
+      idleReviews: idleReviewsOf(list, taskId === undefined ? [] : fixPushesByTask.get(taskId) ?? [], mergedMs),
       reviewWait,
       ...(reviewed ? { reviewedMs: tsOf(reviewed) } : {}),
       ...(armed ? { armedMs: tsOf(armed) } : {}),
@@ -417,6 +447,9 @@ export function flowSamples(prs: readonly FlowPr[], ci: (pr: FlowPr) => FlowCiRe
     if (pr.heads > 0) add("pushes", "all", pr.heads);
     add("branch_updates", "all", pr.updates);
     add("fix_rounds", "all", pr.fixRounds);
+    const idleTotal = [...pr.idleReviews.values()].reduce((a, b) => a + b, 0);
+    add("idle_reviews", "all", idleTotal);
+    for (const [via, n] of pr.idleReviews) add("idle_reviews", `via:${via}`, n);
   }
   return out;
 }

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: #11901's 3h42m landing, four head changes"
   plan_refs: [W1-T3560, W1-T3888, W1-T5748, W1-T9536]
   files: [src/lib/feedback-landing.ts, test/an-unchanged-landing-is-not-re-pushed-when-main-moves.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: each re-push costs a landing PR a full CI run and review; with pushes working again it fires on most sweeps while a landing is open
   attempts: 0
   rationale: |

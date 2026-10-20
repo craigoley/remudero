@@ -1,6 +1,6 @@
 import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { loadDefaultPolicy } from "./policy.js";
@@ -13,11 +13,39 @@ import { resolveTestPath } from "./test-path-resolver.js";
 import {
   explainGrepProofRefusal, explainUnitTestProofRefusal, materialiseBaseProofBlobs,
   parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath,
-  execWhitelistedProof, defaultProofSpawner, registerReviewerCheckout, type ProofSpawner,
+  execWhitelistedProof, defaultProofSpawner, proofFailureTail, registerReviewerCheckout, type ProofSpawner,
 } from "./review.js";
 
 const CHECK_PROOF_USAGE = "usage: rmd check-proof <proof> [--allow-full-suite] [--base <ref>] [--repo <owner/name>]";
 export const CHECK_PROOF_CHILD_ENTRY = "src/check-proof-main.ts";
+
+/** A missing materialised file alone proves nothing: independently read the literal Git tree. */
+export function verifyBaseGrepAbsence(
+  cwd: string, base: string, target: string,
+  git: typeof hostWorktreeGit = hostWorktreeGit,
+): { state: "absent"; tree: string } | { state: "unknown"; reason: string } {
+  const rel = posix.normalize(target).replace(/\/+$/, "");
+  if (!rel || rel === "." || posix.isAbsolute(rel) || rel === ".." || rel.startsWith("../") || rel.includes("\0")) {
+    return { state: "unknown", reason: "target is not a literal repository-relative path" };
+  }
+  try {
+    const tree = git(cwd, ["rev-parse", "--verify", "--end-of-options", `${base}^{tree}`]).trim();
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) return { state: "unknown", reason: "base tree identity is invalid" };
+    const options = { env: { GIT_LITERAL_PATHSPECS: "1" }, maxBuffer: 1 << 26 };
+    const list = (paths: string[]) => git(cwd, ["ls-tree", "-z", "--full-tree", tree, "--", ...paths], options);
+    if (list([rel]) !== "") return { state: "unknown", reason: "target exists in the base tree despite missing materialisation" };
+    const parts = rel.split("/");
+    const ancestors = parts.slice(1).map((_, i) => parts.slice(0, i + 1).join("/"));
+    // ls-tree cannot follow a symlink or gitlink; absence below one is not evidence about grep.
+    if (ancestors.length > 0 && list(ancestors).split("\0").some((row) => {
+      const tab = row.indexOf("\t");
+      return tab >= 0 && ancestors.includes(row.slice(tab + 1)) && !row.startsWith("040000 tree ");
+    })) return { state: "unknown", reason: "a non-directory ancestor prevents a literal tree comparison" };
+    return { state: "absent", tree };
+  } catch {
+    return { state: "unknown", reason: "base tree could not be read" };
+  }
+}
 
 /** Resolve the harness entry and tsx from this package, even when cwd is a consumer repository. */
 export function checkProofChildArgv(
@@ -479,7 +507,14 @@ export function checkProofCommand(
   // `defaultProofSpawner`, the identical primitive execWhitelistedProof would use by default) and
   // records what it observed on the side, purely so the diagnostics below (`exit:`, `hits:`) can
   // still be printed — this file never reads `diag` to decide the verdict.
-  let diag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
+  type SpawnDiagnostics = { stdout: string; stderr: string; status: number | null; signal: NodeJS.Signals | null };
+  // Use the reviewer's bounded, redacted tail: the CLI must preserve the runner's refusal evidence,
+  // not its entire output (or credentials), and must never turn that evidence into a new verdict.
+  function printFailureOutput(side: "head" | "base", observed: SpawnDiagnostics | undefined, tail?: string): void {
+    const kept = tail ?? proofFailureTail(observed?.stdout ?? "", observed?.stderr ?? "");
+    console.log(`${side} output:\n${kept === "" ? "(no output captured)" : kept}`);
+  }
+  let diag: SpawnDiagnostics | undefined;
   const capturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
     const proofPaths = grepTargetPath === undefined
       ? spawnArgs.filter((arg) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg))
@@ -502,16 +537,18 @@ export function checkProofCommand(
     }
     try {
       const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-      diag = { stdout: out, status: 0, signal: null };
+      diag = { stdout: out, stderr: "", status: 0, signal: null };
       return out;
     } catch (e) {
       const err = e as NodeJS.ErrnoException & {
         status?: number | null;
         signal?: NodeJS.Signals | null;
         stdout?: string | Buffer | null;
+        stderr?: string | Buffer | null;
       };
       diag = {
         stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
+        stderr: typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? ""),
         status: typeof err.status === "number" ? err.status : null,
         signal: err.signal ?? null,
       };
@@ -530,9 +567,10 @@ export function checkProofCommand(
       console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
       const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
       console.log(`hits:       ${hits}`);
-      if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
     }
-    console.log(`verdict:    exec_error — ${String((e as Error)?.message ?? e)}`);
+    printFailureOutput("head", diag);
+    // execFileSync's message repeats stderr; do not leak the unbounded, unredacted copy after the tail.
+    console.log(`verdict:    exec_error — ${proofFailureTail(String((e as Error)?.message ?? e).split("\n")[0])}`);
     // W1-T1224 (design (iv)): an ABSENT path is the one exec_error cause this task names — it
     // still reports exec_error and exit 4 exactly as before (no caller shifts), it simply gains
     // this line. Checked with existsSync rather than the classifier: there is no file text to
@@ -557,8 +595,9 @@ export function checkProofCommand(
     console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
     const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
     console.log(`hits:       ${hits}`);
-    if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
+    if (outcome !== "fail" && diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
   }
+  if (outcome === "fail") printFailureOutput("head", diag, w.failureTail);
   console.log(`verdict:    ${outcome}`);
   if (w.kind === "grep" && outcome !== "pass") {
     // W1-T1224: check-proof calls the classifier rather than deriving a cause of its own —
@@ -625,10 +664,17 @@ export function checkProofCommand(
             "            base_unreadable degrade the reviewer itself uses (W1-T460).",
         );
       } else if (baseGrepTargetPath !== undefined) {
+        const absence = grepTreeLacksTarget
+          ? verifyBaseGrepAbsence(process.cwd(), baseRef!, baseGrepTargetPath)
+          : { state: "unknown", reason: "no materialised base tree" } as const;
+        if (absence.state === "absent") {
+          console.log(`base:       ABSENT at ${baseRef} — ${baseGrepTargetPath}; verified literal tree ${absence.tree}.`);
+          console.log("discrimination: discriminates — this proof's target did not exist at the verified base tree.");
+          return headExit;
+        }
         console.log(
-          `base:       ABSENT at ${baseRef} — ${baseGrepTargetPath} did not exist there, so this proof could not\n` +
-            "            have matched before the work existed (a forward reference) — the strongest possible\n" +
-            "            form of discriminating.",
+          `base:       ABSENT at ${baseRef} — ${baseGrepTargetPath} was not materialised (possible forward reference).\n` +
+            `            Git-tree absence is unverified: ${absence.reason}; this is not evidence of discrimination.`,
         );
       } else {
         // (R-11) A `unit test:` proof with no checkout to run in. The worktree is the only base a
@@ -659,20 +705,22 @@ export function checkProofCommand(
       return headExit;
     }
 
-    let baseDiag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
+    let baseDiag: SpawnDiagnostics | undefined;
     const baseCapturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
       try {
         const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-        baseDiag = { stdout: out, status: 0, signal: null };
+        baseDiag = { stdout: out, stderr: "", status: 0, signal: null };
         return out;
       } catch (e) {
         const err = e as NodeJS.ErrnoException & {
           status?: number | null;
           signal?: NodeJS.Signals | null;
           stdout?: string | Buffer | null;
+          stderr?: string | Buffer | null;
         };
         baseDiag = {
           stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
+          stderr: typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? ""),
           status: typeof err.status === "number" ? err.status : null,
           signal: err.signal ?? null,
         };
@@ -684,6 +732,7 @@ export function checkProofCommand(
       baseOutcome = execWhitelistedProof(baseW, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
     } catch (e) {
       const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
+      printFailureOutput("base", baseDiag, baseDiag === undefined && typeof loadOutput === "string" ? proofFailureTail(loadOutput) : undefined);
       const missingExport =
         baseW.kind === "test" && typeof loadOutput === "string"
           ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
@@ -694,12 +743,13 @@ export function checkProofCommand(
         return headExit;
       }
       console.log(
-        `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
+        `base:       COULD NOT EXECUTE — ${proofFailureTail(String((e as Error)?.message ?? e).split("\n")[0])} — an environment gap, never\n` +
           "            evidence either way, same as the reviewer's own base_unknown degrade.",
       );
       console.log("discrimination: unknown — reported verdict above stands unchanged");
       return headExit;
     }
+    if (baseOutcome === "fail") printFailureOutput("base", baseDiag, baseW.failureTail);
     if (baseDiag && baseW.kind === "grep") {
       const baseHits = baseDiag.stdout.split("\n").filter((l) => l.trim() !== "").length;
       console.log(`base hits:  ${baseHits}`);

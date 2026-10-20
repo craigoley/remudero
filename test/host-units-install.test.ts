@@ -75,7 +75,7 @@ test("W1-T2877: check mode reports missing units and changes nothing, including 
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
     const dropinRelative = `systemd/user-${SESSION_UID}.slice.d/50-rmd-cap.conf`;
     assert.deepEqual(filesUnder(root), [
-      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-scratch-mounts", "rmd-relaunch.sh",
+      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-resource-policy", "bin/rmd-scratch-mounts", "rmd-relaunch.sh",
       "systemd/rmd-acr-login.service", "systemd/rmd-acr-login.timer",
       "systemd/rmd-fleet-watchdog.service", "systemd/rmd-fleet-watchdog.timer", "systemd/rmd-fleet.service",
       "systemd/rmd-reap-stray.service", "systemd/rmd-reap-stray.timer", dropinRelative,

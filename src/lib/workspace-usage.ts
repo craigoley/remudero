@@ -25,6 +25,16 @@ export interface WorkspaceUsageEvidence {
   cleanup: "confirmed" | "failed" | "unknown";
   samples: WorkspaceUsageSample[];
 }
+export interface WorkspaceScratchRoot { path: string; dev: number; ino: number; uid: number }
+
+/** Register only a producer's existing private directory. This observation grants no deletion authority. */
+export function pinWorkspaceScratchRoot(path: string): WorkspaceScratchRoot {
+  const original = lstatSync(path), canonical = realpathSync(path), st = lstatSync(canonical);
+  if (!original.isDirectory() || original.isSymbolicLink() || canonical === resolve(canonical, "..") ||
+      !st.isDirectory() || st.isSymbolicLink() || original.dev !== st.dev || original.ino !== st.ino ||
+      (process.getuid && st.uid !== process.getuid())) throw new Error("scratch root is not a private owned directory");
+  return { path: canonical, dev: st.dev, ino: st.ino, uid: st.uid };
+}
 export const GENERATED_WORKSPACE_ROOTS = ["coverage", "dist", ".cache", "test-results", "playwright-report", "node_modules/.cache"] as const;
 
 function dependencyMethod(root: string): WorkspaceUsageSample["dependencyMethod"] {
@@ -51,7 +61,7 @@ function dependencyMethod(root: string): WorkspaceUsageSample["dependencyMethod"
   }
 }
 
-export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly string[]; maxEntries?: number;
+export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly string[]; scratchRoots?: readonly WorkspaceScratchRoot[]; maxEntries?: number;
   maxMs?: number; clock?: Clock } = {}): WorkspaceUsageSample {
   const clock = opts.clock ?? samplingClock, start = clock.now();
   const maxEntries = opts.maxEntries ?? 2000, maxMs = opts.maxMs ?? 20;
@@ -77,22 +87,33 @@ export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly
   let total = 0, observed = false, incomplete = false;
   const seen = new Set<string>();
   const budget = () => result.entries < maxEntries && clock.now() - start < maxMs;
-  for (const name of opts.roots ?? GENERATED_WORKSPACE_ROOTS) {
+  const declared: Array<{ name: string; path: string; owned?: WorkspaceScratchRoot }> =
+    (opts.roots ?? GENERATED_WORKSPACE_ROOTS).map(name => ({ name, path: resolve(root, name) }));
+  for (const [index, owned] of (opts.scratchRoots ?? []).entries())
+    declared.push({ name: `external-scratch:${index}`, path: owned.path, owned });
+  for (const { name, path, owned } of declared) {
     if (!budget()) { incomplete = true; result.reasons.push("sampling-bound"); break; }
-    const path = resolve(root, name), rel = relative(root, path);
-    if (!rel || isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) {
+    const rel = relative(root, path);
+    if (!owned && (!rel || isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`))) {
       incomplete = true; result.reasons.push("generated-root-outside-workspace"); continue;
     }
     try {
-      let cursor = root, linked = false;
-      for (const part of rel.split(sep)) {
-        if (!budget()) { incomplete = true; linked = true; break; }
-        cursor = join(cursor, part); if (lstatSync(cursor).isSymbolicLink()) { linked = true; break; }
+      if (owned) {
+        const current = lstatSync(path);
+        if (!isAbsolute(path) || realpathSync(path) !== path || !current.isDirectory() || current.isSymbolicLink() ||
+            current.dev !== owned.dev || current.ino !== owned.ino || current.uid !== owned.uid ||
+            (process.getuid && current.uid !== process.getuid())) throw new Error("scratch identity changed");
+      } else {
+        let cursor = root, linked = false;
+        for (const part of rel.split(sep)) {
+          if (!budget()) { incomplete = true; linked = true; break; }
+          cursor = join(cursor, part); if (lstatSync(cursor).isSymbolicLink()) { linked = true; break; }
+        }
+        if (linked) { incomplete = true; result.reasons.push(`borrowed-root:${name}`); continue; }
       }
-      if (linked) { incomplete = true; result.reasons.push(`borrowed-root:${name}`); continue; }
     } catch (error) {
       // Only ENOENT proves an empty root; other failures retain a lower bound and their reason.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") { observed = true; continue; }
+      if (!owned && (error as NodeJS.ErrnoException).code === "ENOENT") { observed = true; continue; }
       incomplete = true; result.reasons.push(`root-unreadable:${name}`); continue;
     }
     const stack = [path];
@@ -121,7 +142,6 @@ export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly
         incomplete = true; result.reasons.push("entry-unreadable-or-changed");
       }
     }
-    if (!budget()) break;
   }
   result.generatedPathBytes = observed ? total : null;
   result.completeness = observed ? incomplete ? "lower-bound" : "complete" : "unknown";
