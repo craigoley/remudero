@@ -7,6 +7,7 @@ import { buildPlanPrBody } from "#src/lib/plan-pr-emitter.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const shellQuote = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`;
+const expectedBody = "Consumer proof fixture\n\nAcceptance:\n- the marker is proved against this consumer | grep: added in marker.txt\n";
 
 function consumer() {
   const fixture = gitRepo({ kind: "author-proof-consumer" });
@@ -57,7 +58,7 @@ test("author-time proofs run the harness narrow entry without the CLI socket loa
   const c = consumer();
   try {
     c.run(() => {
-      assert.match(c.body("grep: added in marker.txt", "HEAD~1"), /## Acceptance/);
+      assert.equal(c.body("grep: added in marker.txt", "HEAD~1"), expectedBody);
       assert.throws(() => c.body("grep: shared in marker.txt", "HEAD~1"), /passes at both head and base/);
       assert.throws(() => c.body("grep: absent in marker.txt", "HEAD~1"), /could not prove this head \(check-proof exit 1\)/);
       assert.equal(existsSync(c.attemptedCli), false, "the real caller never starts the socket-creating CLI");
@@ -69,7 +70,7 @@ test("author-time narrow proofs derive the base from the consumer checkout", () 
   const c = consumer();
   try {
     c.run(() => {
-      assert.match(c.body("grep: added in marker.txt"), /## Acceptance/);
+      assert.equal(c.body("grep: added in marker.txt"), expectedBody);
       assert.equal(existsSync(c.attemptedCli), false);
     });
   } finally { c.fixture.cleanup(); }
