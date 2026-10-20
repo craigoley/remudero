@@ -531,6 +531,7 @@ export interface ReviewEvidence {
   asyncExecProof?: AsyncProofExecutor;
   /** Already-observed form corrections only. The synchronous fold never spawns a file reader. */
   proofFormCorrections?: ReadonlyMap<string, string | undefined>;
+  missingExportNotes?: ReadonlyMap<string, string | undefined>;
   /** The task's DECLARED `files:` scope (W1-T322) — read ONLY for the INVERSE-SCOPE advisory, the direction {@link
    *  "../run-task.js".scopeGuardOutOfScopeFiles} cannot see: that guard flags a diff touching an UNDECLARED file, this
    *  flags a declared file the diff never touched. Advisory only; absent ⇒ it never fires. */
@@ -3620,6 +3621,7 @@ export interface ProofExecContext {
   cwd: string;
   /** Source observed by the bounded async review path, not an unverified report string. */
   proofFormCorrections?: ReadonlyMap<string, string | undefined>;
+  missingExportNotes?: ReadonlyMap<string, string | undefined>;
   exec?: ProofExecutor;
   /** (W1-T3525) mirrors {@link ReviewEvidence.target} — threaded into {@link parseWhitelistedProof} so
    *  a `unit test:` proof resolves against the SAME registered target every other consumer would, never
@@ -3789,6 +3791,7 @@ function classifyBaseProofOutcome(
   addedTestFiles?: ReadonlySet<string>,
   headCwd?: string,
   onMissingExport?: (note: string) => void,
+  missingExportNotes?: ReadonlyMap<string, string | undefined>,
 ): "stale" | "discriminates" | "base_unknown" | "base_unreadable" {
   const target = grepProofTargetPath(whitelisted);
   if (target !== undefined && baseUnreadablePaths?.has(target)) return "base_unreadable";
@@ -3814,7 +3817,7 @@ function classifyBaseProofOutcome(
     const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
     const note =
       whitelisted.kind === "test" && headCwd !== undefined && typeof loadOutput === "string"
-        ? baseLacksPrAddedExports(loadOutput, baseCwd, headCwd)
+        ? missingExportNotes?.get(JSON.stringify([baseCwd, headCwd, loadOutput]))
         : undefined;
     if (note === undefined) return "base_unknown";
     onMissingExport?.(note);
@@ -4099,7 +4102,7 @@ export function judgeCriterion(
                 execCtx.baseCwd !== undefined
                   ? classifyBaseProofOutcome(baseProofFor(criterion.proof, whitelisted, headResolution, execCtx.baseCwd, execCtx.target), exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles, execCtx.cwd, (note) => {
                       missingExportNote = note;
-                    })
+                    }, execCtx.missingExportNotes)
                   : undefined;
               if (baseOutcome === "base_unreadable") {
                 // The base tree exists and siblings were checked against it, but THIS proof's base blob never arrived,
@@ -5479,6 +5482,7 @@ export function judgeReview(
     ? {
         cwd: evidence.headCheckoutDir,
         proofFormCorrections: evidence.proofFormCorrections,
+        missingExportNotes: evidence.missingExportNotes,
         exec: proofMemo?.exec,
         target: evidence.target,
         baseCwd: evidence.baseCheckoutDir,
@@ -5765,6 +5769,7 @@ export async function judgeReviewAsync(
     | { error: unknown };
   const observed = new Map<string, Observation>();
   const proofFormCorrections = new Map<string, string | undefined>();
+  const missingExportNotes = new Map<string, string | undefined>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
   const asyncExec: AsyncProofExecutor = evidence.asyncExecProof ??
     (evidence.execProof ? async (w, cwd) => evidence.execProof!(w, cwd) : execWhitelistedProofAsync);
@@ -5786,7 +5791,7 @@ export async function judgeReviewAsync(
       pending.set(key, { whitelisted, cwd });
       throw new Error("async proof observation pending");
     };
-    const verdict = judgeReview(criteria, { ...evidence, execProof: replay, proofFormCorrections });
+    const verdict = judgeReview(criteria, { ...evidence, execProof: replay, proofFormCorrections, missingExportNotes });
     const pendingForms = verdict.criteria.filter(c => c.proof_exec === "executed_fail" && !proofFormCorrections.has(c.proof));
     if (pending.size === 0 && pendingForms.length === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
     for (const [key, { whitelisted, cwd }] of pending) {
@@ -5799,6 +5804,12 @@ export async function judgeReviewAsync(
       } catch (error) {
         // Preserve this exact proof error for the next deterministic verdict fold.
         observed.set(key, { error });
+        const output = (error as { loadOutput?: unknown })?.loadOutput;
+        if (whitelisted.kind === "test" && cwd === evidence.baseCheckoutDir && typeof output === "string") {
+          const noteKey = JSON.stringify([cwd, evidence.headCheckoutDir, output]);
+          if (!missingExportNotes.has(noteKey)) missingExportNotes.set(noteKey,
+            await baseLacksPrAddedExports(output, cwd, evidence.headCheckoutDir));
+        }
       }
     }
     for (const criterion of pendingForms) {
