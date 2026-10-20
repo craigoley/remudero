@@ -85,7 +85,7 @@
   acceptance:
     - claim: "with clone support every unchanged tracked file is cloned and only changed or donor-dirty paths are written by git, the result is a clean checkout of the base with the donor's uncommitted edits absent, and without clone support it falls back to a normal checkout with the same tree"
       proof: 'grep: test("W1-T10257: a worktree clones unchanged checkout files and falls back off APFS" in test/a-worktree-costs-almost-nothing-on-apfs.test.ts'
-    - claim: "`rmd hand-worktree` materializes its worktree through addCowWorktree, so the new module has a production caller"
+    - claim: "the maintained hand-worktree entry calls the shared CoW materializer"
       proof: 'grep: addCowWorktree( in src/lib/hand-worktree.ts'
   falsifier: |
     Clone every donor file instead of only the unchanged ones: the donor-dirty fixture file carries its uncommitted edit
