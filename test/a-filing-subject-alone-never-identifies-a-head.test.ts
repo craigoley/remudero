@@ -7,11 +7,11 @@
 // non-code diff, and an unreadable or empty diff fails closed.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCRIPT = join(__dirname, "..", "scripts", "head-identity-gate.mjs");
+const SCRIPT = join(REPO_ROOT, "scripts", "head-identity-gate.mjs");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so it is reached by dynamic import.
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
