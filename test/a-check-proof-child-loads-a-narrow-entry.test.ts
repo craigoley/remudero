@@ -131,3 +131,15 @@ test("the narrow observation protocol reads real fixtures and refuses invalid re
   assert.equal(extra.status, 0, extra.stderr);
   assert.equal(JSON.parse(extra.stdout), null);
 });
+
+test("an unavailable CLI export observation never produces an attribution", async () => {
+  const { cliMissingExportNote } = await import("../src/lib/check-proof.js");
+  const unavailable = (() => { throw new Error("controlled observer unavailable"); }) as typeof spawnSync;
+  assert.equal(cliMissingExportNote("controlled load error", root, root, unavailable), undefined);
+  for (const script of ["process.stdout.write('{')", "process.exitCode=1"]) {
+    const child = ((_file: string, _args: string[], options: Parameters<typeof spawnSync>[2]) =>
+      spawnSync(process.execPath, ["-e", script], options)) as typeof spawnSync;
+    assert.equal(cliMissingExportNote("controlled load error", root, root, child), undefined);
+  }
+  assert.equal(cliMissingExportNote(" ".repeat(4 * 1024 ** 2), root, root, unavailable), undefined);
+});

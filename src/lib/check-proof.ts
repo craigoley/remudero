@@ -65,12 +65,12 @@ export function checkProofObservationChildArgv(): string[] {
 }
 
 /** The synchronous CLI retains its reservation while a narrow child awaits confined reads. */
-function cliMissingExportNote(output: string, base: string, head: string): string | undefined {
+export function cliMissingExportNote(output: string, base: string, head: string, run = spawnSync): string | undefined {
   try {
     const input = JSON.stringify({ output, base, head });
     if (Buffer.byteLength(input) > PROOF_FILE_READ_BYTES) return undefined;
     const args = checkProofObservationChildArgv();
-    const child = spawnSync(process.execPath, args, { input, encoding: "utf8",
+    const child = run(process.execPath, args, { input, encoding: "utf8",
       env: { ...process.env, NODE_V8_COVERAGE: "" }, timeout: checkProofTimeoutMs(), maxBuffer: PROOF_FILE_READ_BYTES });
     if (child.error || child.signal || child.status !== 0) return undefined;
     const note: unknown = JSON.parse(child.stdout);
