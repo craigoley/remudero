@@ -90,7 +90,7 @@ test("source-reader qualification rejects source drift without another try", (t)
 });
 
 // The fast gate refuses a RUNAWAY only after the run plus one re-measure within FAST_GATE_CENSUS_REMEASURE_MARGIN
-// (ci-parity.ts); a loaded author host overran a 4000ms reader budget once on 2026-10-19 and the push was refused.
+// (ci-parity.ts); a loaded author host overran a 4000ms reader budget once on 2026-10-19 and the push was refused (PR 13042).
 const OVERRAN = { status: null, error: Object.assign(new Error("native step exceeded 4000 ms"), { code: "ERR_AUTHOR_STEP_TIMEOUT" }) };
 
 test("source-reader qualification re-measures one overrun and passes a re-measure within the fast gate's margin", (t) => {
