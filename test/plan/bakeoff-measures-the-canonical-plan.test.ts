@@ -112,4 +112,3 @@ test("a monolith-only plan still reaches one non-spending bakeoff replay", async
     assert.equal(replays, 1);
   });
 });
-
