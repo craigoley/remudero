@@ -30,7 +30,10 @@ function privateParents(file) {
   if (resolve(file) !== file) throw Error('noncanonical-path');
   for (let p = dirname(file); p !== '/'; p = dirname(p)) {
     const s = lstatSync(p);
-    if (!s.isDirectory() || s.isSymbolicLink() || (s.mode & 0o022)) throw Error('unsafe-parent');
+    // A sticky shared directory (Linux /tmp) owned by root or us cannot let another account
+    // rename or unlink our entries, so it is not a replaceable-parent hazard.
+    const stickyShared = (s.mode & 0o1000) !== 0 && (s.uid === 0 || s.uid === process.getuid());
+    if (!s.isDirectory() || s.isSymbolicLink() || ((s.mode & 0o022) && !stickyShared)) throw Error('unsafe-parent');
   }
 }
 function noOtherOpenFiles(file) {
