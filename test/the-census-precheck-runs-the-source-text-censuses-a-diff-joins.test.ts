@@ -38,7 +38,8 @@ function fixture(t: TestContext, readers = true, baseRed = false) {
   put("package.json", '{"type":"module"}');
   put("src/lib/ci-parity.ts", [
     `export const CENSUS_ADMITTED_MEMBERS = [${JSON.stringify({ ...ADMITTED, verdict: { measuredMs: 1000 } })}];`,
-    `export { censusRunawayThresholdMs, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE } from ${JSON.stringify(join(ROOT, "src/lib/ci-parity.ts"))};`,
+    "export { censusRunawayThresholdMs, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE," +
+      ` FAST_GATE_CENSUS_REMEASURE_MARGIN } from ${JSON.stringify(join(ROOT, "src/lib/ci-parity.ts"))};`,
   ].join("\n"));
   if (readers) symlinkSync(join(ROOT, "src/lib/source-text-readers.ts"), join(repo.dir, "src/lib/source-text-readers.ts"));
   put(SUITE, CENSUS);
