@@ -182,6 +182,12 @@
       "grepHint": "Dependency-PR review lane (W1-T54 + W1-T54b)"
     },
     {
+      "path": "docs/dependency-reuse-observations.md",
+      "title": "Dependency reuse observations",
+      "summary": "Enabling an account's existing dependency-seed configuration already routes new",
+      "grepHint": "Dependency reuse observations"
+    },
+    {
       "path": "docs/deploy-image-forensics.md",
       "title": "Deploy image forensics: the measured record behind `deploy/Dockerfile`",
       "summary": "Every incident, measurement and rejected alternative that `deploy/Dockerfile` used to carry inline,",
@@ -600,6 +606,12 @@
       "title": "status.ts comment forensics",
       "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status.ts` when its comments were compacted to the plain-language standa…",
       "grepHint": "status.ts comment forensics"
+    },
+    {
+      "path": "docs/forensics/storage-permission-fixtures-on-the-azure-host.md",
+      "title": "Storage permission fixtures: paired controls and Azure evidence limits",
+      "summary": "Paired worker controls reproduce ten storage refusals from the reported eleven; the preflight failure remains unattributed.",
+      "grepHint": "Storage permission fixtures: paired controls and Azure evidence limits"
     },
     {
       "path": "docs/forensics/sweep-map.md",

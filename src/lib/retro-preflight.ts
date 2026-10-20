@@ -55,9 +55,9 @@ export const RETRO_PREFLIGHT_STALL_MS = 15 * 60 * 1000;
 export const RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS = 60 * 60 * 1000;
 /**
  * Exit classes produced by the harness's own BOUNDS rather than by the suite under test
- * (W1-T2803). Each names a run that was terminated or never started, so none can carry a failing
- * test name and none can name a plan defect. {@link runRetroPrepublishPreflight} stands down on
- * these instead of resuming the Architect. `tests_failed` is deliberately absent — that is a real
+ * (W1-T2803). A terminated run may retain partial assertion or cancellation evidence, but the
+ * execution bound is not a completed suite verdict. {@link runRetroPrepublishPreflight} stands
+ * down rather than resuming the Architect against an unchanged bound. `tests_failed` is a real
  * verdict about the plan and is exactly what the repair rung is for.
  */
 const BOUND_FAILURE_CLASSES = new Set(["process_timeout", "output_limit_exceeded", "process_spawn_failed"]);
@@ -324,8 +324,10 @@ export function classifyPreflightOutput(output: string): PreflightOutcomeClassif
     const name = tap?.[1] ?? spec?.[1];
     if (name !== undefined) {
       settle();
-      pending = Buffer.from(name.trim(), "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8");
-      // The spec reporter prints no YAML block, so its verdict is settled on the next line.
+      if (failing.size + cancelled.size < MAX_FAILING_TESTS) {
+        pending = Buffer.from(name.trim(), "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8");
+      }
+      // Cap names, not totals; the spec reporter's verdict settles on the next line.
       pendingCancelled = false;
       continue;
     }
@@ -338,7 +340,6 @@ export function classifyPreflightOutput(output: string): PreflightOutcomeClassif
       if (/^\s*\.\.\.\s*$/.test(line) || (line.length > 0 && !/^\s/.test(line))) settle();
     }
 
-    if (failing.size + cancelled.size >= MAX_FAILING_TESTS) break;
   }
   settle();
 
@@ -587,14 +588,9 @@ export async function runRetroPrepublishPreflight(
   logAttempt(opts, 1, first);
   if (first.ok) return { ok: true, attempts: 1, suiteCount: first.suiteCount, repaired: false };
 
-  // W1-T2803: a BOUND failure carries no failing test and names no plan defect, so there is
-  // nothing for an Architect to repair. `repairPrompt` would render `failing_tests: - (no failing
-  // test name parsed)` — a killed run emits no `not ok` lines — and ask an opus-5 session to find a
-  // plan defect in a run that was terminated while passing. That is the empty-evidence shape the
-  // fix rung already refuses by name (`rung.empty_ci_failures`, "standing down rather than spending
-  // a strike on empty evidence"), one subsystem over. Standing down here is the COST half of this
-  // task: without it every future bound failure stays wired to a resumed Architect plus a second
-  // full attempt against an unchanged bound — the same wall clock for the same answer.
+  // W1-T2803: retain the stand-down, not its disproven empty-evidence premise. A timeout can
+  // follow real assertion failures; those names survive in the preceding failure row. They do
+  // not establish a completed suite verdict or justify a paid retry against an unchanged bound.
   //
   // ORDINARY failures are untouched: `tests_failed` still repairs and still re-runs, which is the
   // rung this preflight exists to drive. A stand-down on EVERY failure would delete it.
@@ -604,9 +600,12 @@ export async function runRetroPrepublishPreflight(
       exit_class: first.failure!.exitClass,
       elapsed_ms: first.elapsedMs,
       suite_count: first.suiteCount,
+      retained_failing_test_names: first.failure!.failingTests.length,
+      retained_cancelled_test_names: first.failure!.cancelledTests.length,
+      has_summary: first.failure!.hasSummary,
       reason:
-        "a bound failure carries no failing test and names no plan defect — standing down rather " +
-        "than resuming the producing session against empty evidence",
+        "preflight hit an execution bound or could not start; retained output is not a complete " +
+        "plan verdict — standing down rather than resuming against an unchanged bound",
       ...provenanceFields(opts.provenance),
     });
     return { ok: false, attempts: 1, suiteCount: first.suiteCount, repaired: false };

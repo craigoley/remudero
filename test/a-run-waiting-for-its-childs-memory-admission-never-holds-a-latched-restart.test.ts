@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
 import { after, test } from "node:test";
-import { runDaemon, type DaemonDeps, type DaemonFreshness, type RestartBoundary } from "#src/lib/daemon.js";
+import { runDaemon, type DaemonDeps, type DaemonFreshness } from "#src/lib/daemon.js";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { loadPlan, TaskAdmissionError, type Task } from "#src/lib/plan.js";
 import * as runChild from "#src/lib/run-child.js";
@@ -110,8 +110,6 @@ async function rig(options: {
       row.fields.task === task || row.fields.next_task === task || row.fields.task_id === task)),
     at: (minutes: number) => { now = epoch + minutes * minute; },
     tick: settleTick,
-    boundary: (id: string, waitingOn = "recon") =>
-      (runOptions.get(id)!.restartAtWorkerBoundary as RestartBoundary)({ waitingOn, runId: `${id}-run` }),
     latch: async () => {
       latched = true;
       h.at(1);
@@ -147,11 +145,8 @@ test("W1-T10000: a pending run child never holds a latched restart", async () =>
     const summary = await h.run;
     assert.equal(summary.stopReason, "stale");
     assert.deepEqual(h.aborted, ["A"], "the restart abandons the pending wait through its abort");
-    const cost = h.find("daemon.restart_latch_cost")[0]?.fields;
-    assert.deepEqual(cost?.holdouts, [], "a pending child is never a holdout");
-    for (const row of h.find("daemon.freshness_restart_waiting")) {
-      assert.deepEqual(row.fields.lanes, [], "a pending child is never in_process_work");
-    }
+    // W1-T9089: there is no latch left to hold, so no latch-cost or restart-waiting row is written at all.
+    assert.equal(h.find("daemon.restart_latch_cost").length + h.find("daemon.freshness_restart_waiting").length, 0);
   } finally { await h.close(); }
 
   // The abandoned launch never falls back in-process: runOne's child path refuses it as a lane-local admission error.
@@ -174,11 +169,8 @@ test("W1-T10000: a pending child admitted before the restart becomes a child", a
   try {
     assert.deepEqual(h.started, ["A", "B"]);
     await h.latch();
-    for (let i = 0; i < 5 && h.find("daemon.freshness_restart_waiting").length === 0; i++) await h.tick();
-    const waiting = h.find("daemon.freshness_restart_waiting")[0]?.fields;
-    assert.ok(waiting, "the restart waits on A, which runs in-process");
-    assert.deepEqual((waiting.lanes as Array<{ task: string }>).map((lane) => lane.task), ["A"], "B is not in_process_work");
-    assert.deepEqual((waiting.pending_children as Array<{ task: string }>).map((pending) => pending.task), ["B"]);
+    for (let i = 0; i < 5; i++) await h.tick();
+    assert.equal(h.done(), false, "the restart waits on A, which runs in-process");
     // B's admission comes through before the restart fires: it becomes a child the next daemon adopts.
     const child = new Promise<RunResult>(() => {});
     h.runOptions.get("B")!.onChild!({ started: true, runId: "B-run", dir: "d", pid: 1, settled: child, abort: async () => ({ signalled: false, reason: "n/a" }) } as never);
@@ -188,7 +180,7 @@ test("W1-T10000: a pending child admitted before the restart becomes a child", a
     assert.equal(h.done(), true, "with A settled only a child is left, and the restart fires");
     assert.equal((await h.run).stopReason, "stale");
     assert.deepEqual(h.aborted, [], "an admitted child is released to the next daemon, never abandoned");
-    assert.deepEqual(h.find("daemon.restart_latch_cost")[0]?.fields.holdouts, [{ task_id: "A", outcome: "finished" }]);
+    assert.equal(h.find("daemon.restart_latch_cost").length, 0, "W1-T9089: A was awaited, never held out");
   } finally { await h.close(); }
 });
 
@@ -324,36 +316,23 @@ test("W1-T10000: a carried wait that cannot be written never fails the abandonme
 });
 
 test("W1-T10000: a child refill that falls back in-process is judged as in-process", async () => {
-  for (const [spanMin, admitted] of [[30, false], [10, true]] as const) {
-    const h = await rig({ laneCount: 2, spanMin, runsAsChild: (task) => task.id === "C",
-      behaviour: (id) => id === "C" ? "falls-back" : "in-process" });
-    try {
-      await h.latch();
-      assert.equal(h.boundary("B"), material, "B yields at its unmeasured recon boundary");
-      await h.settle("A", 2);
-      assert.ok(h.started.includes("C"), "C refills as a runs_as_child admission");
-      assert.equal(h.find("dispatch.lane_refilled", "C")[0]?.fields.latch_admission, "runs_as_child");
-      await until("C's fallback", () => h.fallbackAnswers.has("C"));
-      assert.equal(h.fallbackAnswers.get("C"), admitted,
-        `C's ${spanMin}-minute class median against the drain's 19 minutes left decides whether it may run in-process`);
-      const held = h.find("daemon.admission_held").filter((row) => row.fields.runs_as_child === true);
-      if (!admitted) {
-        assert.equal(held.length, 1, "the refused fallback names why it was held");
-        assert.equal(held[0]!.fields.task, "C");
-        assert.equal(held[0]!.fields.fallback_reason, "no current engine tree for main");
-        assert.equal(held[0]!.fields.measured_length_ms, 30 * minute);
-        assert.equal(held[0]!.fields.time_left_ms, 19 * minute);
-      } else {
-        assert.equal(held.length, 0);
-        // Admitted as in-process work, it is judged as any fits_drain refill: it continues inside the drain, then yields.
-        h.at(4);
-        assert.equal(h.boundary("C"), undefined);
-        h.at(21);
-        assert.equal(h.boundary("C"), material);
-        assert.equal(h.find("daemon.restart_yield_asked", "C")[0]?.fields.reason, "latch_refill_past_restart");
-      }
-    } finally { await h.close(); }
-  }
+  // W1-T9089: C is admitted as a child after the restart was decided; in-process it would hold the exit it skipped.
+  const h = await rig({ laneCount: 2, runsAsChild: (task) => task.id === "C",
+    behaviour: (id) => id === "C" ? "falls-back" : "in-process" });
+  try {
+    await h.latch();
+    await h.settle("A", 2);
+    assert.ok(h.started.includes("C"), "C refills because it runs as a child");
+    assert.equal(h.find("dispatch.lane_refilled", "C")[0]?.fields.restart_decided, true);
+    await until("C's fallback", () => h.fallbackAnswers.has("C"));
+    assert.equal(h.fallbackAnswers.get("C"), false, "a child admitted after the decision may not run in-process");
+    const held = h.find("daemon.admission_held").filter((row) => row.fields.runs_as_child === true);
+    assert.equal(held.length, 1, "the refused fallback names why it was held");
+    assert.equal(held[0]!.fields.task, "C");
+    assert.equal(held[0]!.fields.reason, "restart decided");
+    assert.equal(held[0]!.fields.fallback_reason, "no current engine tree for main");
+    assert.equal(h.find("daemon.restart_yield_asked").length, 0);
+  } finally { await h.close(); }
 
   // runOne's child path asks before it stays in-process, and a refusal ends the lane as a lane-local admission error.
   const { runInChildWhenOn } = await import("#src/run-task.js");
@@ -366,20 +345,26 @@ test("W1-T10000: a child refill that falls back in-process is judged as in-proce
   const noEngine = async () => ({ started: false as const, reason: "no current engine tree for main" });
   const refuse = (reason: string) => { asked.push(reason); return false; };
   await assert.rejects(runInChildWhenOn({ ...base, mayRunInProcess: refuse }, { readMode: () => "on", spawn: noEngine as never }),
-    (error: unknown) => error instanceof TaskAdmissionError && /restart latched/.test(String(error)));
+    (error: unknown) => error instanceof TaskAdmissionError && /restart decided/.test(String(error)));
   await assert.rejects(runInChildWhenOn({ ...base, mayRunInProcess: refuse }, { readMode: () => "shadow" }), TaskAdmissionError);
   assert.deepEqual(asked, ["no current engine tree for main", "sweep.runChild.mode is not on"]);
   assert.equal(await runInChildWhenOn({ ...base, mayRunInProcess: () => true }, { readMode: () => "on", spawn: noEngine as never }), undefined);
 });
 
 test("W1-T10000: a pending run that falls back in-process under the latch is a holdout again", async () => {
+  // W1-T9089: no holdout is left; a run started before the restart may fall back in-process, and the restart awaits it.
   const h = await rig({ laneCount: 2, holdSweep: true, behaviour: (id) => id === "B" ? "pending" : "in-process" });
   try {
     await h.latch();
     const fallBack = h.runOptions.get("B")!.mayRunInProcess as (reason: string) => boolean;
     assert.equal(fallBack("the run child could not be started: spawn failed"), true, "a run started before the latch may run in-process");
-    for (let i = 0; i < 5 && h.find("daemon.freshness_restart_waiting").length === 0; i++) await h.tick();
-    const lanes = h.find("daemon.freshness_restart_waiting")[0]?.fields.lanes as Array<{ task: string; holdout: boolean }>;
-    assert.deepEqual(lanes.map((lane) => [lane.task, lane.holdout]), [["A", true], ["B", true]], "B is in-process work again, held for");
+    h.releaseSweep();
+    await h.settle("A", 2);
+    for (let i = 0; i < 5; i++) await h.tick();
+    assert.equal(h.done(), false, "B is in-process work again, awaited");
+    await h.settle("B", 3);
+    for (let i = 0; i < 20 && !h.done(); i++) await h.tick();
+    assert.equal((await h.run).stopReason, "stale");
+    assert.equal(h.find("daemon.restart_holdout").length, 0);
   } finally { await h.close(); }
 });

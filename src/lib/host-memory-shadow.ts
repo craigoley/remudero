@@ -303,7 +303,10 @@ export interface ShadowInputs {
   /** `highMib` is memory.high (reclaim and throttling begin there); `reclaimableMib` is inactive_file, page cache the
    *  kernel drops before it swaps anonymous memory. Both are optional, and absent means not subtracted. */
   container: { currentMib: number; maxMib: number | null; highMib?: number | null; reclaimableMib?: number } | { unread: string };
-  ledger: { state: ShadowLedgerState; dir?: string; reason?: string };
+  ledger: { state: ShadowLedgerState; dir?: string; reason?: string;
+    /** The maintained reader's enumeration counts. Missing is unknown, not a positively empty population.
+     * These qualify report-only RSS attribution; they do not alter the legacy admission calculation. */
+    counts?: HostMemoryReading["counts"] };
   entries: ShadowEntryInput[];
   /** The start this verdict is about. Its own reservation is counted even when the ledger could not show it. */
   start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number; estimateSource?: EstimateSource };
@@ -442,7 +445,7 @@ export interface ShadowClaim {
   workerClass: WorkerClass;
   estimateMib: number;
   typicalMib: number;
-  /** Resident rss+swap; null when the tree was unread (the whole estimate counts). */
+  /** Legacy RSS-plus-swap footprint, NOT physical resident RAM; null when unread (the whole estimate counts). */
   residentMib: number | null;
   /** In this container: its claim counts against the container ceiling. */
   own: boolean;
@@ -529,9 +532,17 @@ export interface ShadowVerdict {
     /** Its own pressure past the thresholds; `containerSighted` when that came with a crossing of its memory.high. */
     containerPressed: boolean;
     containerSighted: boolean;
-    /** Container memory no reservation's resident tree accounts for: gardens, measurement children, read-model threads. */
+    /** Legacy clamped difference against RSS-plus-swap footprints. Kept for historical replay, NOT physical attribution. */
     unreservedContainerMib: number | null;
     unreservedContainerShare: number | null;
+    legacyResidentBasis: "rss-plus-swap-footprint";
+    /** Sum of this container's measured reservation-tree RSS, not exclusive physical charge (shared pages can repeat).
+     * Null if the ledger, a tree's walk or any RSS reading is incomplete. No reservations in a present ledger is zero. */
+    reservationRssMib: number | null;
+    /** Approximate memory.current minus reservation RSS, NOT "native" or exact unreserved memory. May be negative:
+     * process RSS and cgroup charging have different sharing rules. Null when either side is unavailable. */
+    unattributedContainerMibApprox: number | null;
+    unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss";
   };
 }
 
@@ -737,6 +748,16 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   }
 
   const unreserved = containerCurrent === null ? null : Math.max(0, containerCurrent - residentOwn);
+  const owned = inputs.entries.filter(entry => entry.status === "owned");
+  const counts = inputs.ledger.counts;
+  const populationKnown = inputs.ledger.state === "present" && counts !== undefined &&
+    Number.isSafeInteger(counts.live) && counts.live === inputs.entries.length &&
+    counts.unreadable === 0 && counts.uncertain === 0 && inputs.entries.every(entry => entry.status !== "uncertain");
+  const rssKnown = populationKnown && owned.every(entry => entry.walkComplete === true &&
+    "mib" in entry.resident && entry.resident.complete && entry.resident.rssMib !== undefined &&
+    Number.isFinite(entry.resident.rssMib) && entry.resident.rssMib >= 0);
+  const reservationRss = rssKnown ? owned.reduce((sum, entry) =>
+    sum + ("mib" in entry.resident ? entry.resident.rssMib! : 0), 0) : null;
   return {
     wouldAdmit: reasons.size === 0,
     reasons: [...reasons],
@@ -788,6 +809,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       containerSighted: pressure.sighted,
       unreservedContainerMib: unreserved,
       unreservedContainerShare: unreserved === null || !containerCurrent ? null : unreserved / containerCurrent,
+      legacyResidentBasis: "rss-plus-swap-footprint",
+      reservationRssMib: reservationRss,
+      unattributedContainerMibApprox: containerCurrent === null || reservationRss === null ? null : containerCurrent - reservationRss,
+      unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss",
     },
   };
 }
@@ -2063,7 +2088,8 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     swapIn,
     psi,
     container,
-    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
+    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}),
+      ...(ledger.reading ? { counts: ledger.reading.counts } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
     entries,
     start: startOf(start, ports, typical),
     daemonGrowth: [own, ...others],

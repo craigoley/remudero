@@ -145,7 +145,7 @@ export interface AdmissionRequest {
   onShortfall?: "wait" | "defer";
   /** A "defer" caller's own pass cadence, and when it was last due if this process has not asked before (a restart).
    *  The due time seeds the streak at this process's first observed deferral, never a first ask's admission. */
-  deferral?: { cadenceMs: number; cadenceBasis: "measured" | "scheduled"; dueSinceMs?: number };
+  deferral?: { cadenceMs: number; cadenceBasis: "measured" | "carried" | "scheduled"; samples?: number; dueSinceMs?: number };
 }
 
 export type AdmissionOutcome =
@@ -753,7 +753,7 @@ async function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts, v
               agedRunning = key;
               write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: "aged", waited_ms: waitedMs,
                 seeded_ms: askedSince - since, deferred_since: fixedClock(since).iso(),
-                deferrals: streak?.deferrals ?? 0, cadence_ms: request.deferral!.cadenceMs, cadence_basis: request.deferral!.cadenceBasis,
+                deferrals: streak?.deferrals ?? 0, cadence_ms: request.deferral!.cadenceMs, cadence_basis: request.deferral!.cadenceBasis, cadence_samples: request.deferral!.samples ?? 0,
                 reasons: verdict.reasons, overrode: verdict.reasons, attempts: attempt, waited_ms_by_reason: waitedByReason,
                 ...swapInRowFields(verdict.numbers), numbers: verdict.numbers });
               const endAged = (): void => { if (agedRunning === key) agedRunning = undefined; };
@@ -786,7 +786,8 @@ async function admissionLoop(request: AdmissionRequest, ports: AdmissionPorts, v
               uncertainty: verdict.uncertainty, ...swapInRowFields(verdict.numbers), numbers: verdict.numbers, scenario: verdict.scenario, attempts: attempt,
               waited_ms: now - startedAt, deferred_since: fixedClock(streak.waitingSinceMs).iso(),
               seeded_ms: streak.askedSinceMs - streak.waitingSinceMs, deferrals: streak.deferrals,
-              cadence_ms: request.deferral?.cadenceMs ?? null, cadence_basis: request.deferral?.cadenceBasis ?? null, aged_blocked: agedBlock,
+              cadence_ms: request.deferral?.cadenceMs ?? null, cadence_basis: request.deferral?.cadenceBasis ?? null,
+              cadence_samples: request.deferral === undefined ? null : request.deferral.samples ?? 0, aged_blocked: agedBlock,
               ...starvationFields(starvation, now) });
             return { kind: "deferred", reasons: verdict.reasons };
           }

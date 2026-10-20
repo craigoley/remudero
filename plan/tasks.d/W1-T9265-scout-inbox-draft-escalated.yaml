@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
   priority: 1.55
   status: queued
@@ -11,6 +11,7 @@
   author_class: machine
   origin: "scout:inbox.draft_escalated"
   files:
+    - src/lib/scout-gardener.ts
     - test/scout-inbox-draft-escalated.test.ts
   acceptance:
     - claim: "inbox.draft_escalated stops recurring: its cause is fixed rather than its rows hidden"
@@ -21,14 +22,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "low"
-    action: proceed
-    confidence: 0.7
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
     reasons:
-      - "The declared files list contains only a single new test file (test/scout-inbox-draft-escalated.test.ts), which does not exist at the base. That is a low-footprint, additive change."
-      - "The description and acceptance criteria (a grep proof for a test name) do not indicate that the task touches secrets, credentials, auth, permissions, merge/deploy/infrastructure/review policy, or deletes data or history."
-      - "The task does not ask for an operator-only decision. It asks that a recurring ledger symptom be fixed at its cause, and the filed plan says that cause must be located first."
-      - "The family track record is empty (0 merged, 0 declined), so there is no evidence of failure. The task is also machine-authored, and its PR still has to pass CI and review."
-      - "The rows name no file, so the real fix may touch code outside the declared files list. This is a scope-drift concern worth watching in review, but the description alone does not show it reaching an escalation category."
-    judged_at: "2026-10-13T19:06:42.910Z"
-    pin: "e9c741803374b2dead9796742fa1768776cba290513403defd81d98c232ae9a4"
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The filing supplies recurrence counts but no diagnosed cause; it explicitly asks the builder to locate the emitter first. The supplied evidence cannot establish that these escalation rows represent a defect.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that cannot verify the claimed causal fix or cessation of live recurrence. This meets the gate’s escalation condition that the finding cannot be verified from what is shown."
+    judged_at: "2026-10-20T16:35:44.660Z"
+    pin: "210e450f1f58a5e894d6e0965b5e577571723aa7d4f26b47eafc52ab18235d19"
