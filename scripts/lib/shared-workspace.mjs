@@ -83,7 +83,9 @@ export async function createSharedWorkspace(taskId,{home=homedir(),readCapacity=
     const bare=git(['rev-parse','--is-bare-repository'])==='true';if(bare!==(config.poolKind==='qualified-bare'))throw Error('Git store kind changed');
     if(existsSync(join(common,'objects/info/alternates'))||process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES)throw Error('fragile Git alternates refused');
     if(bare){const proof=readPrivateJson(join(config.pool,'.rmd-git-pool-full-integrity.json'));if(proof.schema!=='rmd-git-pool-full-integrity/v1'||proof.pool!==config.pool||proof.qualification!==true||proof.disposition!=='PASS')throw Error('initial full bare-pool integrity proof required');}
-    git(['fetch','--quiet','origin','main']);git(['fsck','--connectivity-only','--no-reflogs','--no-dangling']);
+    // Bare stores need an explicit remote-tracking destination; FETCH_HEAD alone
+    // is not origin/main. Do not force a rewritten main or change pool config.
+    git(['fetch','--quiet','origin','refs/heads/main:refs/remotes/origin/main']);git(['fsck','--connectivity-only','--no-reflogs','--no-dangling']);
     const base=git(['rev-parse','origin/main^{commit}']);git(['worktree','add','--quiet','--no-track','-b',branch,path,base]);created=true;Object.assign(result,{path,branch,base});
     if(git(['rev-parse','--path-format=absolute','--git-common-dir'],path)!==common)throw Error('new workspace does not share expected Git objects');result.commonGitDir=common;
     result.dependencies=await materialize(path,{root:config.dependencyRoot,sourceDir:config.dependencyDonor,lockWaitMs:0,runInstall(){throw Error('fresh npm fallback refused; retain workspace for harness retirement');}});
