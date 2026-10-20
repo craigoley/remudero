@@ -327,7 +327,7 @@ export function classifyPreflightOutput(output: string): PreflightOutcomeClassif
       if (failing.size + cancelled.size < MAX_FAILING_TESTS) {
         pending = Buffer.from(name.trim(), "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8");
       }
-      // The spec reporter prints no YAML block, so its verdict is settled on the next line.
+      // Cap names, not totals; the spec reporter's verdict settles on the next line.
       pendingCancelled = false;
       continue;
     }
@@ -340,7 +340,6 @@ export function classifyPreflightOutput(output: string): PreflightOutcomeClassif
       if (/^\s*\.\.\.\s*$/.test(line) || (line.length > 0 && !/^\s/.test(line))) settle();
     }
 
-    // Bound retained names, not the scan: the real summary and cancellations can follow the cap.
   }
   settle();
 
