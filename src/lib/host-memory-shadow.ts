@@ -56,6 +56,7 @@
  * never read as zero reservations. File reads are bounded (a ledger tail, a capped process count).
  */
 
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -294,7 +295,7 @@ export interface ShadowInputs {
   ledger: { state: ShadowLedgerState; dir?: string; reason?: string };
   entries: ShadowEntryInput[];
   /** The start this verdict is about. Its own reservation is counted even when the ledger could not show it. */
-  start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number };
+  start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number; estimateSource?: EstimateSource };
   /** `own` marks this container's daemon, whose growth also counts against the container ceiling. `typicalMib` is the
    *  part of `growthMib` its median footprint accounts for; absent, the whole growth is typical and it adds no tail. */
   daemonGrowth: Array<{
@@ -320,6 +321,8 @@ export interface ShadowInputs {
   psiBound?: PsiFullAvg10Bound;
   /** W1-T10085: this verdict's stamp in the PSI record, so an admission can mark its start admitted. */
   psiRecordAt?: number;
+  /** Opt-in counter-window evidence only; not atomic history, capacity, calibration or spawn authority. */
+  strictEvidence?: StrictPressureEvidence;
   /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
   reviewEstimateMib?: number;
 }
@@ -1066,6 +1069,8 @@ export interface ShadowStart {
   reservationId?: string;
   /** Default: the ledger's unmeasured class estimate, which is what the start's reservation recorded. */
   estimateMib?: number;
+  /** Optional provenance for that exact numeric estimate; absence is unknown, never inferred from its value. */
+  estimateSource?: EstimateSource;
   /** The state root: the ledger names its instance (see `instance`), and its ledger holds daemon.alive and serve rows. */
   root: string;
 }
@@ -1272,17 +1277,120 @@ interface PressureStore {
   psi: PsiEntry[];
   /** Why the store could not be read; the PSI bound then keeps the prior. */
   unread?: string;
+  validationObservation?: StrictPressureSample;
+  validationMarker?: StrictPsiTarget;
+  validationMalformed?: true;
 }
 
 type PsiEntry = [number, number | null, 0 | 1, number | null, number | null];
 
-function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): PressureStore {
+export interface StrictPressureSample {
+  version: 1;
+  sampleId: string;
+  sampleAt: number;
+  generation: { bootId: string; cgroup: string; initStart: string };
+  counters: { hostPswpin: number; containerPswpin: number; high: number };
+}
+export interface StrictPsiTarget { sample: StrictPressureSample; row: PsiEntry }
+export type StrictPressureEvidence =
+  | { kind: "paired"; current: StrictPressureSample; prior: StrictPressureSample; marker: StrictPsiTarget;
+      elapsedMs: number; hostPagesPerSec: number; containerPagesPerSec: number; ceilingCrossings: number;
+      observationWrite: "returned" }
+  | { kind: "unavailable"; reasons: string[]; current?: StrictPressureSample; marker?: StrictPsiTarget;
+      observationWrite: "not-attempted" | "returned" | "unknown" };
+
+const STRICT_UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+type StrictRead<T> = { kind: "available"; value: T }
+  | { kind: "unavailable"; reason: "malformed" }
+  | { kind: "unavailable"; reason: "unreadable"; code: "EACCES" | "EPERM" | "ENOENT" | "EIO" | "ENOTDIR" | "EISDIR" | "UNKNOWN" };
+function strictReadErrorCode(error: unknown): Extract<StrictRead<never>, { reason: "unreadable" }>['code'] {
+  try {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+    return code === "EACCES" || code === "EPERM" || code === "ENOENT" || code === "EIO" ||
+      code === "ENOTDIR" || code === "EISDIR" ? code : "UNKNOWN";
+  } catch {
+    // A hostile diagnostic accessor is unknown, never an escaping error or private message.
+    return "UNKNOWN";
+  }
+}
+function strictReadIssue(family: "generation" | "counter", result: Exclude<StrictRead<unknown>, { kind: "available" }>): string {
+  return `strict-observation-${family}-${result.reason}${result.reason === "unreadable" ? `:${result.code}` : ""}`;
+}
+function strictGenerationOf(read: ShadowMemoryPorts["readFile"]): StrictRead<StrictPressureSample["generation"]> {
+  try {
+    const bootId = read("/proc/sys/kernel/random/boot_id").trim(), cgroup = read("/proc/self/cgroup").trim();
+    const init = parseProcStat(read("/proc/1/stat"));
+    if (!STRICT_UUID.test(bootId) || !/^0::\/[^\n]*$/.test(cgroup) || !init || init.start === "unknown") return { kind: "unavailable", reason: "malformed" };
+    return { kind: "available", value: { bootId, cgroup, initStart: init.start } };
+  } catch (error) { return { kind: "unavailable", reason: "unreadable", code: strictReadErrorCode(error) }; }
+}
+function sameStrictGeneration(a: StrictPressureSample["generation"], b: StrictPressureSample["generation"]): boolean {
+  return a.bootId === b.bootId && a.cgroup === b.cgroup && a.initStart === b.initStart;
+}
+function strictSampleOf(value: unknown): StrictPressureSample | undefined {
+  const s = value as Partial<StrictPressureSample> | null;
+  if (!s || s.version !== 1 || typeof s.sampleId !== "string" || !STRICT_UUID.test(s.sampleId) ||
+      typeof s.sampleAt !== "number" || !Number.isFinite(s.sampleAt) || s.sampleAt < 0 || !s.generation || !s.counters) return undefined;
+  const g = s.generation, c = s.counters;
+  if (typeof g.bootId !== "string" || !STRICT_UUID.test(g.bootId) || typeof g.cgroup !== "string" || !/^0::\/[^\n]*$/.test(g.cgroup) ||
+      typeof g.initStart !== "string" || !/^proc:\d+$/.test(g.initStart) ||
+      ![c.hostPswpin, c.containerPswpin, c.high].every(n => Number.isSafeInteger(n) && n >= 0)) return undefined;
+  return { version: 1, sampleId: s.sampleId, sampleAt: s.sampleAt,
+    generation: { bootId: g.bootId, cgroup: g.cgroup, initStart: g.initStart },
+    counters: { hostPswpin: c.hostPswpin, containerPswpin: c.containerPswpin, high: c.high } };
+}
+function strictPsiRowOf(value: unknown): PsiEntry | undefined {
+  if (!Array.isArray(value) || value.length !== 5 || !Number.isFinite(value[0]) || (value[2] !== 0 && value[2] !== 1) ||
+      ![value[1], value[3], value[4]].every(v => v === null || (typeof v === "number" && Number.isFinite(v)))) return undefined;
+  return [...value] as PsiEntry;
+}
+function sameStrictSample(a: StrictPressureSample, b: StrictPressureSample): boolean {
+  return a.sampleId === b.sampleId && a.sampleAt === b.sampleAt && sameStrictGeneration(a.generation, b.generation) &&
+    a.counters.hostPswpin === b.counters.hostPswpin && a.counters.containerPswpin === b.counters.containerPswpin && a.counters.high === b.counters.high;
+}
+function strictTargetOf(value: unknown): StrictPsiTarget | undefined {
+  const v = value as Partial<StrictPsiTarget> | null, sample = strictSampleOf(v?.sample), row = strictPsiRowOf(v?.row);
+  return sample && row && row[0] === sample.sampleAt && row[2] === 0 ? { sample, row } : undefined;
+}
+function strictCounter(read: ShadowMemoryPorts["readFile"], path: string, key: string): StrictRead<number> {
+  try {
+    const raw = new RegExp(`^${key}[ \\t]+(\\d+)$`, "m").exec(read(path))?.[1];
+    const n = raw === undefined ? NaN : Number(raw);
+    return Number.isSafeInteger(n) && n >= 0 ? { kind: "available", value: n } : { kind: "unavailable", reason: "malformed" };
+  } catch (error) { return { kind: "unavailable", reason: "unreadable", code: strictReadErrorCode(error) }; }
+}
+interface StrictGather {
+  generation: StrictRead<StrictPressureSample["generation"]>;
+  rawRead: ShadowMemoryPorts["readFile"];
+}
+type StrictWindowNumbers = Pick<Extract<StrictPressureEvidence, { kind: "paired" }>,
+  "prior" | "elapsedMs" | "hostPagesPerSec" | "containerPagesPerSec" | "ceilingCrossings">;
+function strictWindow(store: PressureStore, current: StrictPressureSample | undefined, policy: HostMemoryBudgetPolicy): string[] {
+  if (!current) return ["strict-observation-current-unavailable"];
+  if (store.validationMalformed) return ["strict-observation-malformed"];
+  if (store.unread !== undefined && store.unread !== "ENOENT") return ["strict-observation-history-unavailable"];
+  const prior = store.validationObservation;
+  if (!prior) return ["strict-observation-untagged"];
+  if (!sameStrictGeneration(prior.generation, current.generation)) return ["strict-observation-generation-mismatch"];
+  const elapsed = current.sampleAt - prior.sampleAt;
+  if (elapsed <= 0) return ["strict-observation-nonpositive-window"];
+  if (elapsed > policy.staleReadingMs) return ["strict-observation-stale"];
+  if (elapsed > CROSSING_WINDOW_MS) return ["strict-observation-crossing-stale"];
+  if (current.counters.hostPswpin < prior.counters.hostPswpin || current.counters.containerPswpin < prior.counters.containerPswpin ||
+      current.counters.high < prior.counters.high) return ["strict-observation-counter-reset"];
+  return [];
+}
+
+function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string, strictPsi = false): PressureStore {
   let parsed: Partial<PressureStore>;
   try {
     parsed = JSON.parse(read(path)) as Partial<PressureStore>;
   } catch (error) {
     // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
     return { swap: [], container: [], psi: [], unread: error instanceof SyntaxError ? "unparseable" : reasonOf(error) };
+  }
+  if (strictPsi && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))) {
+    return { swap: [], container: [], psi: [], unread: "strict-psi-malformed" };
   }
   const finite = (...n: unknown[]): boolean => n.every((v) => typeof v === "number" && Number.isFinite(v));
   const prior = parsed.prior && finite(parsed.prior.at) ? parsed.prior : undefined;
@@ -1297,7 +1405,15 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
     ? parsed.psi.filter((s) => Array.isArray(s) && finite(s[0]) && nullable(s[1]) && (s[2] === 0 || s[2] === 1) &&
       nullable(s[3]) && nullable(s[4]))
     : [];
-  return { ...(prior ? { prior } : {}), swap, container, psi };
+  if (strictPsi && (!Array.isArray(parsed.psi) || psi.length !== parsed.psi.length || parsed.psi.some(s => s.length !== 5))) {
+    return { swap: [], container: [], psi: [], unread: "strict-psi-malformed" };
+  }
+  const validationObservation = strictSampleOf(parsed.validationObservation), validationMarker = strictTargetOf(parsed.validationMarker);
+  const validationMalformed = (parsed.validationObservation !== undefined && !validationObservation) ||
+    (parsed.validationMarker !== undefined && (!validationMarker || !validationObservation || !sameStrictSample(validationMarker.sample, validationObservation)));
+  return { ...(prior ? { prior } : {}), swap, container, psi,
+    ...(validationObservation ? { validationObservation } : {}), ...(validationMarker ? { validationMarker } : {}),
+    ...(validationMalformed ? { validationMalformed: true as const } : {}) };
 }
 
 function readOomKill(read: ShadowMemoryPorts["readFile"]): number | null {
@@ -1310,19 +1426,53 @@ function readOomKill(read: ShadowMemoryPorts["readFile"]): number | null {
   }
 }
 
-/** W1-T10085: mark the start of the verdict stamped `at` admitted in the PSI record. Never throws; false when unmarked. */
+export type StrictPsiStartMark =
+  | { kind: "recorded"; at: number; sampleId: string }
+  | { kind: "not-recorded"; reason: "unavailable" | "malformed" | "missing" | "ambiguous" | "already-recorded" | "changed"; at: number }
+  | { kind: "unknown"; reason: "write-failed"; at: number };
+
+/** The legacy three-argument boolean API and best-effort behavior remain unchanged. */
 export function markPsiStartAdmitted(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number): boolean {
+  return markPsiStart(ports, root, at);
+}
+
+/** A recorded strict result means this synchronous write returned, not cross-process atomicity or a child start. */
+export function markStrictPsiStartAdmitted(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, target: StrictPsiTarget): StrictPsiStartMark {
+  return markPsiStart(ports, root, target.sample.sampleAt, { target });
+}
+
+function markPsiStart(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number): boolean;
+function markPsiStart(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number,
+  options: { target: StrictPsiTarget }): StrictPsiStartMark;
+function markPsiStart(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number,
+  options?: { target: StrictPsiTarget }): boolean | StrictPsiStartMark {
+  const notRecorded = (reason: Extract<StrictPsiStartMark, { kind: "not-recorded" }>['reason']): boolean | StrictPsiStartMark =>
+    options ? { kind: "not-recorded", reason, at } : false;
+  let writing = false;
   try {
     const path = join(root, "state", CONTAINER_PRESSURE_FILE);
-    const { unread, ...store } = readPressureStore(ports.readFile, path);
+    const { unread, validationMalformed, ...store } = readPressureStore(ports.readFile, path, options !== undefined);
+    if (options) {
+      if (!Number.isFinite(at)) return notRecorded("unavailable");
+      if (unread !== undefined) return notRecorded(unread === "unparseable" || unread === "strict-psi-malformed" ? "malformed" : "unavailable");
+      if (validationMalformed) return notRecorded("malformed");
+      const matches = store.psi.filter(([stamp]) => stamp === at);
+      if (matches.length !== 1) return notRecorded(matches.length === 0 ? "missing" : "ambiguous");
+      if (matches[0]![2] !== 0) return notRecorded("already-recorded");
+      const expected = strictTargetOf(options.target);
+      if (!expected || !store.validationObservation || !store.validationMarker ||
+          !sameStrictSample(expected.sample, store.validationObservation) || !sameStrictSample(expected.sample, store.validationMarker.sample) ||
+          JSON.stringify(expected.row) !== JSON.stringify(store.validationMarker.row) || JSON.stringify(expected.row) !== JSON.stringify(matches[0])) return notRecorded("changed");
+    }
     const entry = unread === undefined ? store.psi.find(([stamp]) => stamp === at) : undefined;
-    if (entry === undefined) return false;
+    if (entry === undefined) return notRecorded("missing");
     entry[2] = 1;
+    writing = true;
     ports.writeFile(path, `${JSON.stringify(store)}\n`);
-    return true;
+    return options ? { kind: "recorded", at, sampleId: options.target.sample.sampleId } : true;
   } catch (error) {
-    void error; // Unwritable: the record holds one admitted start fewer, so the bound learns more slowly.
-    return false;
+    void error; // Legacy remains best-effort; strict mode reports unknown if a write may already have had effects.
+    return options ? writing ? { kind: "unknown", reason: "write-failed", at } : { kind: "not-recorded", reason: "unavailable", at } : false;
   }
 }
 
@@ -1333,10 +1483,10 @@ export function markPsiStartAdmitted(ports: Pick<ShadowMemoryPorts, "readFile" |
  */
 function readContainerPressure(
   ports: ShadowMemoryPorts, root: string, now: number, policy: HostMemoryBudgetPolicy,
-  snapshot: ShadowInputs, admitted: boolean,
-): Pick<ShadowInputs, "psiBound" | "psiRecordAt"> & { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
+  snapshot: ShadowInputs, admitted: boolean, strict?: StrictGather,
+): Pick<ShadowInputs, "psiBound" | "psiRecordAt" | "strictEvidence" | "swapIn"> & { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
   const path = join(root, "state", CONTAINER_PRESSURE_FILE);
-  const store = readPressureStore(ports.readFile, path);
+  const store = readPressureStore(ports.readFile, path, strict !== undefined);
   const psi = readPsi(ports.readFile, "/sys/fs/cgroup/memory.pressure");
   let pswpin: number | undefined;
   let swapIn: { pagesPerSec: number } | { unmeasured: string };
@@ -1364,8 +1514,40 @@ function readContainerPressure(
     else swapIn = { pagesPerSec: Math.max(0, pswpin - prior.pswpin) / ((now - prior.at) / 1000) };
   }
   // A counter that went down belongs to a new cgroup (the container was recreated): its whole count is new.
-  const crossings = high === undefined || !fresh || prior!.high === undefined || now - prior!.at > CROSSING_WINDOW_MS ? null
+  let crossings = high === undefined || !fresh || prior!.high === undefined || now - prior!.at > CROSSING_WINDOW_MS ? null
     : high >= prior!.high ? high - prior!.high : high;
+  let current: StrictPressureSample | undefined, window: StrictWindowNumbers | undefined, issues: string[] = [], hostSwapIn = snapshot.swapIn;
+  if (strict) {
+    const hostCounter = strictCounter(ports.readFile, "/proc/vmstat", "pswpin");
+    const hostPswpin = hostCounter.kind === "available" ? hostCounter.value : undefined;
+    const after = strictGenerationOf(strict.rawRead);
+    if (strict.generation.kind !== "available" || after.kind !== "available") {
+      issues.push("strict-observation-generation-unavailable");
+      for (const result of [strict.generation, after]) if (result.kind === "unavailable") issues.push(strictReadIssue("generation", result));
+    } else if (!sameStrictGeneration(strict.generation.value, after.value)) issues.push("strict-observation-generation-changed");
+    else if (!Number.isFinite(now) || now < 0) issues.push("strict-observation-clock-unavailable");
+    else if (hostPswpin === undefined || !Number.isSafeInteger(pswpin) || pswpin! < 0 || !Number.isSafeInteger(high) || high! < 0) {
+      issues.push("strict-observation-counter-unavailable");
+      if (hostCounter.kind === "unavailable") issues.push(strictReadIssue("counter", hostCounter));
+    } else current = { version: 1, sampleId: randomUUID(), sampleAt: now, generation: after.value,
+      counters: { hostPswpin, containerPswpin: pswpin!, high: high! } };
+    if (current) issues.push(...strictWindow(store, current, policy));
+    if (issues.length === 0 && current && store.validationObservation) {
+      const old = store.validationObservation, seconds = (current.sampleAt - old.sampleAt) / 1000;
+      window = { prior: old, elapsedMs: current.sampleAt - old.sampleAt,
+        hostPagesPerSec: (current.counters.hostPswpin - old.counters.hostPswpin) / seconds,
+        containerPagesPerSec: (current.counters.containerPswpin - old.counters.containerPswpin) / seconds,
+        ceilingCrossings: current.counters.high - old.counters.high };
+      hostSwapIn = { pagesPerSec: window.hostPagesPerSec };
+      swapIn = { pagesPerSec: window.containerPagesPerSec };
+      crossings = window.ceilingCrossings;
+    } else {
+      hostSwapIn = { unmeasured: issues.join("+") };
+      swapIn = { unmeasured: issues.join("+") };
+      crossings = null;
+    }
+  }
+  const observedSnapshot = strict ? { ...snapshot, swapIn: hostSwapIn } : snapshot;
   const containerPressure: ContainerPressureInput = {
     swapIn,
     psi: "unread" in psi ? psi : { someAvg10: psi.someAvg10, ...(psi.fullAvg10 !== undefined ? { fullAvg10: psi.fullAvg10 } : {}) },
@@ -1376,30 +1558,45 @@ function readContainerPressure(
   const containerLift = containerLiftOf(store.container.map(([at, projected, pressed]) => ({
     at, projected: projected === 1, pressed: pressed === 1,
   })), now);
-  const hostPsi = "unread" in snapshot.psi ? null : snapshot.psi;
+  const hostPsi = "unread" in observedSnapshot.psi ? null : observedSnapshot.psi;
   const stalled = hostPsi !== null && (hostPsi.someAvg10 > policy.psiSomeAvg10Max || (hostPsi.fullAvg10 ?? 0) > policy.psiFullAvg10Max);
-  const rate = "pagesPerSec" in snapshot.swapIn ? Math.round(snapshot.swapIn.pagesPerSec) : null;
+  const rate = "pagesPerSec" in observedSnapshot.swapIn ? Math.round(observedSnapshot.swapIn.pagesPerSec) : null;
   const swap = [...store.swap, [now, rate, stalled ? 1 : 0] as [number, number | null, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
   const psiBound = psiStartBoundOf(store.psi.map(([at, fullAvg10, admit, oomKill, fullAvg60]) => ({
     at, fullAvg10, fullAvg60, admitted: admit === 1, oomKill,
   })), now, policy, store.unread === undefined ? undefined : `pressure store unread (${store.unread})`);
-  const psiSeries = [...store.psi, [now, hostPsi?.fullAvg10 ?? null, admitted ? 1 : 0, readOomKill(ports.readFile),
-    hostPsi?.fullAvg60 ?? null] as PsiEntry].filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
+  const psiRow: PsiEntry = [now, hostPsi?.fullAvg10 ?? null, admitted ? 1 : 0, readOomKill(ports.readFile), hostPsi?.fullAvg60 ?? null];
+  const psiSeries = [...store.psi, psiRow].filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
   // Evaluate the same pure projection as the caller, before storing this outcome; this row cannot train its own lift.
-  const numbers = evaluateShadowMemory({ ...snapshot, containerPressure, swapStall, containerLift }, policy).numbers;
+  const numbers = evaluateShadowMemory({ ...observedSnapshot, containerPressure, swapStall, containerLift }, policy).numbers;
   const flagged = numbers.containerProjectedMib !== null && numbers.containerOnsetMib !== null &&
     numbers.containerProjectedMib > numbers.containerOnsetMib;
   const container = [...store.container, [now, flagged ? 1 : 0, numbers.containerPressed ? 1 : 0] as [number, 0 | 1, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
+  const marker: StrictPsiTarget | undefined = current ? { sample: current, row: [...psiRow] } : undefined;
+  const tags = strict ? current ? { validationObservation: current, validationMarker: marker } : {}
+    : { ...(store.validationObservation ? { validationObservation: store.validationObservation } : {}),
+      ...(store.validationMarker ? { validationMarker: store.validationMarker } : {}) };
   const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap, container,
-    psi: psiSeries };
-  try {
-    ports.writeFile(path, `${JSON.stringify(next)}\n`);
-  } catch (error) {
-    void error; // Unwritable: this verdict still judges from its reading; the next one measures no rate and learns less.
+    psi: psiSeries, ...tags };
+  let observationWrite: "not-attempted" | "returned" | "unknown" = "not-attempted";
+  if (!strict || current) {
+    observationWrite = "unknown";
+    try {
+      ports.writeFile(path, `${JSON.stringify(next)}\n`);
+      observationWrite = "returned";
+    } catch (error) {
+      void error; // A thrown writer may already have replaced the file; strict evidence never calls that persisted.
+    }
   }
-  return { containerPressure, swapStall, containerLift, psiBound, psiRecordAt: now };
+  if (strict && observationWrite === "unknown") issues.push("strict-observation-write-failed");
+  const strictEvidence: StrictPressureEvidence | undefined = !strict ? undefined
+    : issues.length === 0 && current && marker && window && observationWrite === "returned"
+      ? { kind: "paired", current, marker, ...window, observationWrite }
+      : { kind: "unavailable", reasons: issues, ...(current ? { current } : {}), ...(marker ? { marker } : {}), observationWrite };
+  return { containerPressure, swapStall, containerLift, psiBound, psiRecordAt: now, swapIn: hostSwapIn,
+    ...(strictEvidence ? { strictEvidence } : {}) };
 }
 
 function readContainer(read: ShadowMemoryPorts["readFile"]): ShadowInputs["container"] {
@@ -1743,8 +1940,13 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
 
 /** One bounded snapshot for one start. `admitted`: its start runs whatever the verdict (a shadow-mode class). */
 export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy,
-  options: { admitted?: boolean } = {}): ShadowInputs {
+  options: { admitted?: boolean; strictEvidence?: boolean } = {}): ShadowInputs {
   const now = ports.clock.now();
+  const strict: StrictGather | undefined = options.strictEvidence ? { generation: strictGenerationOf(ports.readFile), rawRead: ports.readFile } : undefined;
+  if (strict) {
+    const rawRead = ports.readFile, cache = new Map<string, string>();
+    ports = { ...ports, readFile: path => { if (!cache.has(path)) cache.set(path, rawRead(path)); return cache.get(path)!; } };
+  }
   const ledger = readLedgerState(ports, start.root);
   const recorded = ledger.reading?.entries ?? [];
   const residents = residentsOf(ports.readFile, recorded.map((entry) => entry.path), undefined, { includeRss: true });
@@ -1775,7 +1977,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   const others = [...new Set(entries.map((e) => e.owner.split("@")[0]!))].filter((name) => name !== instance)
     .map((name) => ({ instance: name, samples: 0, reason: "its daemon.alive rows are not readable from this instance" }));
   const container = readContainer(ports.readFile);
-  const swapIn = readSwapIn(ports.readFile, now, policy.staleReadingMs);
+  const swapIn = strict ? { unmeasured: "strict observation pending" } : readSwapIn(ports.readFile, now, policy.staleReadingMs);
   const psi = readPsi(ports.readFile);
   const inputs: ShadowInputs = {
     memAvailable: readMemAvailable(ports.readFile),
@@ -1789,7 +1991,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
   };
-  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs, options.admitted === true) };
+  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs, options.admitted === true, strict) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;
   if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce") {
     if (policy.jointQualification === undefined) throw new Error("joint enforce unavailable: qualification evidence is missing");
@@ -1855,6 +2057,7 @@ function startOf(
   const estimateMib = start.estimateMib ?? estimateOf(ports, start.workerClass);
   return {
     ...(start.reservationId ? { reservationId: start.reservationId } : {}),
+    ...(start.estimateSource === undefined ? {} : { estimateSource: start.estimateSource }),
     workerClass: start.workerClass, estimateMib, ...typical(start.workerClass, estimateMib),
   };
 }

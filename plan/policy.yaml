@@ -930,9 +930,13 @@ sweep:
       origin: "proposal"
       min: 0
       max: 16384
-    # Pages per second (pswpin delta); 256 pages is 1 MiB/s at 4 KiB pages.
+    # Pages per second (pswpin delta); 8192 pages is 32 MiB/s at 4 KiB pages (256 was 1 MiB/s).
+    # Operator ruling 2026-10-19: chronic host swap-in ~2,300 pages/s since 10-07 held every review start;
+    # 8192 holds only severe spikes until the learned-relation fix lands. The loader requires the
+    # row's origin to stay "proposal" (HOST_MEMORY_BUDGET_ORIGIN), so the ruling is named here.
+    # The loader caches the policy per process, so the daemon reads a new value at its next restart.
     swapInPagesPerSecMax:
-      value: 256
+      value: 8192
       origin: "proposal"
       min: 0
       max: 1000000

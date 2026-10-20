@@ -174,7 +174,7 @@ export interface PersistedInbox extends PersistedInboxContent {
   generatedAt: string;
 }
 
-function validInboxSnapshot(value: Partial<PersistedInbox>): boolean {
+export function validInboxSnapshot(value: Partial<PersistedInbox>): boolean {
   if (value.snapshotKey === undefined && value.attentionCensus === undefined) return true;
   const census = value.attentionCensus;
   const scope = value.snapshotScope;

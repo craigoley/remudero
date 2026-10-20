@@ -8,8 +8,9 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { test } from "node:test";
 // @ts-ignore the executable .mjs module has no declaration file.
 import { LOCATION_RELATIVE_ERE, aliasFor, hasLocationRelativeSpecifier, main as codemodMain, rewriteSource } from "#scripts/test-location-codemod.mjs";
@@ -34,16 +35,26 @@ function gitGrepFiles(flags: string[], rest: string[]): string[] {
 const imp = (spec: string, name = "x"): string => `import { ${name} } from ${JSON.stringify(spec)};`;
 const dyn = (spec: string): string => `const m = await import(${JSON.stringify(spec)});`;
 
+function aliasFixtureRoot(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-alias-fixture-"));
+}
+
+function populateAliasPackage(dir: string): void {
+  const { type, imports } = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ type, imports }));
+  for (const name of ["src", "scripts", "test"]) symlinkSync(join(ROOT, name), join(dir, name), "dir");
+}
+
 test("W1-T9864: package.json declares the three subpath aliases", () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { imports?: Record<string, string> };
   assert.deepEqual(pkg.imports, { "#src/*": "./src/*", "#scripts/*": "./scripts/*", "#test/*": "./test/*" });
 });
 
 test("W1-T9864: a nested test importing through the aliases runs and typechecks", () => {
-  // state/ is gitignored and inside the package scope, so the nearest package.json (and its `imports`) applies.
-  mkdirSync(join(ROOT, "state"), { recursive: true });
-  const dir = mkdtempSync(join(ROOT, "state", "alias-probe-"));
+  // Scratch has a real package scope; its aliases read the actual, unchanged source donors.
+  const dir = aliasFixtureRoot();
   try {
+    populateAliasPackage(dir);
     const nested = join(dir, "a", "b", "c");
     mkdirSync(nested, { recursive: true });
     const probe = join(nested, "probe.ts");
@@ -66,9 +77,10 @@ test("W1-T9864: a nested test importing through the aliases runs and typechecks"
     assert.equal(ran, "alias-ok", "the aliases resolve to the .ts sources under tsx, from a nested folder");
 
     const tsconfig = join(dir, "tsconfig.json");
+    const { rootDir: _rootDir, ...compilerOptions } = JSON.parse(readFileSync(join(ROOT, "tsconfig.json"), "utf8")).compilerOptions;
     writeFileSync(
       tsconfig,
-      JSON.stringify({ extends: join(ROOT, "tsconfig.json"), compilerOptions: { noEmit: true, rootDir: ROOT }, include: [probe], exclude: [] }),
+      JSON.stringify({ compilerOptions: { ...compilerOptions, noEmit: true, typeRoots: [join(ROOT, "node_modules", "@types")] }, include: [probe], exclude: [] }),
     );
     const tsc = join(ROOT, "node_modules", ".bin", "tsc");
     execFileSync(tsc, ["-p", tsconfig], { cwd: ROOT, encoding: "utf8" });
@@ -162,7 +174,7 @@ test("W1-T9864: the codemod rewrites relative specifiers to the aliases", () => 
 });
 
 test("W1-T9864: the codemod writes a file in place, and --folder degrades when the placement table is absent", () => {
-  const root = mkdtempSync(join(ROOT, "state", "codemod-root-"));
+  const root = aliasFixtureRoot();
   const out = process.stdout.write.bind(process.stdout);
   const err = process.stderr.write.bind(process.stderr);
   let stderr = "";
@@ -185,7 +197,7 @@ test("W1-T9864: the codemod writes a file in place, and --folder degrades when t
 });
 
 test("W1-T9864: --folder selects the tests the placement table maps to that folder", () => {
-  const root = mkdtempSync(join(ROOT, "state", "codemod-root-"));
+  const root = aliasFixtureRoot();
   const out = process.stdout.write.bind(process.stdout);
   let stdout = "";
   try {
@@ -206,4 +218,40 @@ test("W1-T9864: --folder selects the tests the placement table maps to that fold
     process.stdout.write = out;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("alias fixture package uses supplied scratch and real source bindings", () => {
+  const donors = ["src/lib/ledger-path.ts", "test/helpers/git-repo.ts", "scripts/test-location-codemod.mjs"];
+  const before = donors.map((file) => readFileSync(join(ROOT, file)));
+  const dir = aliasFixtureRoot();
+  try {
+    assert.ok(dir.startsWith(realpathSync(tmpdir()) + sep), "the actual supplied temporary root owns every fixture write");
+    populateAliasPackage(dir);
+    const actual = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")), { type: actual.type, imports: actual.imports });
+    for (const name of ["src", "scripts", "test"]) assert.equal(realpathSync(join(dir, name)), realpathSync(join(ROOT, name)));
+    for (const [index, file] of donors.entries()) assert.deepEqual(readFileSync(join(dir, file)), before[index]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(existsSync(dir), false);
+  for (const [index, file] of donors.entries()) assert.deepEqual(readFileSync(join(ROOT, file)), before[index]);
+});
+
+test("alias codemod fixtures use supplied scratch without mutating donors", () => {
+  const donor = join(ROOT, "scripts", "test-location-codemod.mjs");
+  const before = readFileSync(donor);
+  const dir = aliasFixtureRoot();
+  try {
+    assert.ok(dir.startsWith(realpathSync(tmpdir()) + sep), "codemod output belongs to the supplied temporary root");
+    mkdirSync(join(dir, "test", "nested"), { recursive: true });
+    const target = join(dir, "test", "nested", "portable.test.ts");
+    writeFileSync(target, `${imp("../../src/lib/x.js")}\n`);
+    assert.equal(codemodMain(["--write", "test/nested/portable.test.ts"], dir), 0);
+    assert.equal(readFileSync(target, "utf8"), `${imp("#src/lib/x.js")}\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(existsSync(dir), false);
+  assert.deepEqual(readFileSync(donor), before);
 });

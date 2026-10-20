@@ -1,0 +1,93 @@
+- id: W1-T10204
+  title: "Design a fleet-ownership check before hand-route pushes and task-plan amendments"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  band_meaning: blast-radius
+  priority: 2
+  origin: feedback#fb-1791908319669-d9d257
+  plan_refs: ["§7B", W1-T5859, W1-T8264, W1-T3600, W1-T7762, W1-T8921]
+  files: [plan/fleet-ownership-write-boundary.md]
+  status: queued
+  attempts: 0
+  rationale: |
+    The standing doctrine leave-red-prs-to-the-fix-lane permits hand takeover only after
+    exhaustion or escalation. W1-T5859 supplies voluntary claims and W1-T8264 records
+    interventions; neither specifies a check at a hand-route write boundary. W1-T3600
+    concerns dependency eligibility, not ownership. The feedback reports a plan-amendment
+    race across #11225, #11201 and #11232. W1-T8921's retained correction independently
+    records that #11201's own fix round 277b273e4 made its proofs discriminate before
+    the amendment's asserted impossibility was corrected. Preserve that history; this
+    task neither reopens W1-T8921 nor treats an old checkpoint as current ownership.
+    Grounding leaves a repository-contract design gap, not a platform-facts gap.
+  design: |
+    Produce plan/fleet-ownership-write-boundary.md only. No enforcement, runtime changes,
+    live probes, claim mutations, auto-merge changes or amendments to historical tasks.
+    The document must contain the following named contracts and a concrete decision table.
+
+    Touched-task identity contract: derive targets from all outgoing ref updates and
+    semantic before/after changes to tasks.yaml and tasks.d shards, including deletions,
+    renames and multi-task edits. Reuse the existing run-branch extractor and PR task
+    identity rules; a TRIAGE or filing branch's own id is not the amended task's id.
+    Trace actual checkout symbols and callers rather than assuming an old task's
+    proposed script still exists. Distinguish direct PR-head writes from amendments
+    on another branch and identify the earliest observable boundary for each.
+
+    Ownership evidence contract: specify reads of refs/rmd-dispatch/<id>, their anchor
+    holder, PR identity/head, and existing fix-lane checkpoint/disposition evidence.
+    Bind evidence to repository, task, PR, head and round where applicable. Separate
+    owned, absent and unavailable evidence; preserve source, timestamp and failure.
+    A readable empty result requires a positive corpus control. Local shard status,
+    git identity, elapsed age alone and a generic handed_off run verdict do not prove
+    that a fleet fix lane relinquished ownership. Describe read cost, cache freshness,
+    concurrent head/claim changes and the residual check-to-write race honestly.
+
+    Write-boundary decision table: recommend refusal for a proven foreign live owner
+    with a due or in-flight round, admission for the evidenced authorized owner, and
+    a distinct UNKNOWN warning on unavailable evidence, consistent with the existing
+    hand-route precheck degradation policy. Explain which caller can apply a check
+    before a local plan write and which can only prevent publication at pre-push;
+    do not claim a hook intercepts arbitrary editor writes. Cover ordinary unrelated
+    pushes and fleet-owned repair/proof-amendment callers so the guard cannot block
+    its own authorized repair. Name any stronger policy requiring separate approval.
+
+    Handoff and expiry contract: define exact existing exhaustion/escalation signals
+    and an explicit handoff record binding recipient, target and evidence generation.
+    Exhaustion or escalation must permit authorized takeover without deleting a
+    contested claim. Specify how later terminal/merged evidence supersedes an old
+    checkpoint and how a resumed/new round invalidates stale authorization. Recent
+    evidence alone must never permanently lock finished work. No blanket bypass,
+    fleet auto-merge disablement or advisory-ignore mechanism.
+
+    Falsifier matrix: give fixture inputs and expected outcomes for a foreign live
+    owner, the same authorized owner, a plan amendment on a different branch,
+    multi-task edits, unreadable ref/ledger/PR evidence versus readable absence,
+    exhausted and explicitly handed-off ownership, stale authorization after a new
+    round, terminal finished work with a recent checkpoint, and unrelated work.
+    Define mutation checks that remove the ownership check or collapse UNKNOWN to
+    absent and make the corresponding fixtures fail. These are future executable
+    cases, not claims that enforcement or tests were implemented by this design PR.
+
+    Implementation slices: name bounded follow-up changes with actual source/hook
+    paths, nonempty files lists, imports-derived test placement and whole-file unit
+    proofs. File follow-ups only through a later authorized reservation workflow;
+    do not invent task ids or combine enforcement with this design task.
+  acceptance:
+    - claim: "The design specifies touched-task derivation and ownership sources with distinct unavailable evidence"
+      proof: "grep: Ownership evidence contract in plan/fleet-ownership-write-boundary.md"
+    - claim: "The design chooses the refusal, warning and authorized admission boundaries and states interception limits"
+      proof: "grep: Write-boundary decision table in plan/fleet-ownership-write-boundary.md"
+    - claim: "The design defines exhaustion, explicit handoff and terminal supersession without clearing contested claims"
+      proof: "grep: Handoff and expiry contract in plan/fleet-ownership-write-boundary.md"
+    - claim: "The design supplies discriminating fixture cases and bounded implementation follow-ups without enforcement"
+      proof: "grep: Falsifier matrix in plan/fleet-ownership-write-boundary.md"
+  falsifier: |
+    Reject the design if a live foreign-owner fixture reaches publication without a
+    conflict, if unavailable evidence reads as absent, if the authorized takeover
+    fixture is blocked, or if a finished PR is held solely by a recent checkpoint.
+    A document containing headings without concrete source paths, evidence fields,
+    expected fixture outcomes and a caller-by-caller boundary is not acceptance.

@@ -45,7 +45,16 @@ test("W1-T9057: fix.dispatch ledgers each failure's titles and a bounded excerpt
 
 test("W1-T9057: a drafted rationale carries each round's PR link, failing test titles and a log excerpt", () => {
   const FILE = "test/x.test.ts";
-  const log = LOG.replace("the first failing title", `the first failing title (${FILE})`);
+  const log = LOG.replace("the first failing title", `the first failing title (${FILE})`).replace(
+    "2026-10-13T00:59:02.100Z   AssertionError: expected 1 to equal 2",
+    [
+      "2026-10-13T00:59:02.100Z   ---",
+      `2026-10-13T00:59:02.100Z   location: '${FILE}:1:1'`,
+      "2026-10-13T00:59:02.100Z   failureType: 'testCodeFailure'",
+      "2026-10-13T00:59:02.100Z   error: 'expected 1 to equal 2'",
+      "2026-10-13T00:59:02.100Z   ...",
+    ].join("\n"),
+  );
   const records = [
     { step: "pr.opened", run_id: "run-1", pr_url: PR_URL, ts: TS },
     { step: "fix.dispatch", run_id: "run-1", round: 1, mode: "ci-log", head_sha: "aaa", elapsed_ms: 600_000, ts: "2026-10-13T01:00:00.000Z",

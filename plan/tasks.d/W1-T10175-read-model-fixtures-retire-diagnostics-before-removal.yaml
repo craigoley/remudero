@@ -11,7 +11,7 @@
   origin: "operator follow-through 2026-10-18: finish W1-T9501 and its observed Mac fixture failure after PR #12817 merged"
   plan_refs: [W1-T9501, W1-T5177, W1-T9937]
   files: [test/read-model-readers-never-contend-with-the-writer.test.ts, test/scout-read-model-materialize-failed.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

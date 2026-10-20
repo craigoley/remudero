@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { anchoredFixOutcome, decideFixOutcomeAction } from "../src/lib/fix-outcome.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
@@ -261,13 +261,22 @@ test("W1-T5532: the default base probe runs a failing test at the fetched main t
   symlinkSync(join(process.cwd(), "node_modules"), join(f.repo.dir, "node_modules"), "dir");
   mkdirSync(join(f.repo.dir, "test/setup"));
   writeFileSync(join(f.repo.dir, "test/setup/tmp-hygiene.ts"), "export {};\n");
-  writeFileSync(join(f.repo.dir, "package.json"), '{"type":"module"}\n');
+  // The probe must borrow an install built from the same inputs as its fixture checkout.
+  const installRoot = dirname(realpathSync(join(f.repo.dir, "node_modules")));
+  for (const name of ["package.json", "package-lock.json"]) {
+    copyFileSync(join(installRoot, name), join(f.repo.dir, name));
+  }
   writeFileSync(join(f.repo.dir, "test/existing.test.ts"), 'import { test } from "node:test"; import assert from "node:assert/strict"; test("broken main", () => assert.equal(1, 2));\n');
-  f.repo.git("add", "package.json", "test/existing.test.ts", "test/setup/tmp-hygiene.ts");
+  f.repo.git("add", "package.json", "package-lock.json", "test/existing.test.ts", "test/setup/tmp-hygiene.ts");
   f.repo.git("commit", "-qm", "broken main");
   f.run.ciFailures = [{ name: "ci", logTail: "not ok - test/existing.test.ts" }];
   const result = await runFixRung(f.run);
   assert.equal(result.strikes, 0, JSON.stringify(f.rows.filter((r) => /base_reproduction|base_red/.test(r.step))));
+  const reproduction = f.rows.find((r) => r.step === "sweep.base_reproduction");
+  assert.equal(reproduction?.setup_error, undefined);
+  assert.equal(reproduction?.verdict, "reproduced");
+  assert.deepEqual((reproduction?.files as { file: string; outcome: string }[]).map(({ file, outcome }) => ({ file, outcome })),
+    [{ file: "test/existing.test.ts", outcome: "fails" }]);
   const refund = f.rows.find((r) => r.step === "fix.strike_refunded");
   assert.equal(refund?.reason, "worker-base-red-verified");
   assert.equal(refund?.main_sha, f.repo.git("rev-parse", "HEAD"));

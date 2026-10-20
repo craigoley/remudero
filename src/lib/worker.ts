@@ -4854,6 +4854,8 @@ export function linkWorktreeNodeModules(
   worktreePath: string,
   deps: {
     resolveSource?: (repoDir: string) => string | undefined;
+    /** Pin the selected install outside private intermediate aliases before a worker's deny-read policy applies. */
+    realpath?: (path: string) => string;
     /** Throws when the path is absent. `lstat`, not `stat`, so a BROKEN symlink still counts as taken — linking over either
      * one would write INSIDE the existing target. */
     lstat?: (p: string) => unknown;
@@ -4877,18 +4879,22 @@ export function linkWorktreeNodeModules(
   }
   const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
   if (!source) return "no-source";
+  let physicalSource: string;
   try {
-    (deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir")))(source, dest);
+    // An engine lives under denied state/, even when its own link names a readable install.
+    // Link the resolved install directly; never broaden the worker's access to state or shared dependencies.
+    physicalSource = (deps.realpath ?? realpathSync)(source);
+    (deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir")))(physicalSource, dest);
   } catch {
-    // Symlink failed, so no lockfile compare is meaningful: there is nothing linked to compare against. Preserves the
+    // Resolution or symlink failed, so no lockfile compare is meaningful: nothing was linked. Preserves the
     // pre-W1-T2777 "failed" contract byte-identically.
     return "failed";
   }
   // LOCKFILE COMPARE AT SYMLINK TIME, the right moment: earlier misses that `resolveSource` may point at the install root,
-  // later runs after a worker has already seen "Cannot find module". Compared against `parentOf(source)`, not `repoDir`,
-  // because the hash inputs live beside `node_modules` (W1-T2777).
+  // later runs after a worker has already seen "Cannot find module". Compare against the physical install's parent,
+  // not `repoDir` or an engine alias: the installed hash inputs live beside node_modules (W1-T2777).
   const hashFn = deps.hashInstallInputs ?? ((d: string) => hashInstallInputs(d));
-  const nmSourceDir = dirname(source);
+  const nmSourceDir = dirname(physicalSource);
   let mismatch = false;
   try {
     // Both reads catch failures internally (see hashInstallInputs' contract). A missing file hashes as empty on both sides,
@@ -5784,6 +5790,9 @@ export function worktreeAdd(
     /** W1-T4193: set ONLY by runTaskBody's implement path. Refuses a same-package lockfile mismatch before linking;
      * absent, every caller keeps the warn-and-link baseline byte-identically. */
     refuseSamePackageLockfileMismatch?: boolean;
+    /** Trusted harness install context; a private fixture may supply its own install, never task data. */
+    typecheckInstallRoot?: string;
+    typecheckRename?: (from: string, to: string) => void;
     /** W1-T4260 seams for a CROSS-PACKAGE worktree's own dependency tree, each defaulting to the real thing: the deps root
      * (default `<config.root>/deps`, derived from `repoDir`), the installer (default `npm ci` under
      * {@link DEPS_INSTALL_TIMEOUT_MS}), the atomic rename, and the clock and sleep the lock wait reads. */
@@ -5887,6 +5896,41 @@ function finishWorktreeAdd(repoDir: string, worktreePath: string, deps: Worktree
   // tree's first `npm run typecheck` starts warm. Silent unless a seed existed and could not be written.
   const seed = refreshCanonicalSeed(worktreePath);
   if (seed === "mismatch" || seed === "unwritable") deps.log?.("worktree.typecheck_seed_failed", { worktreePath, outcome: seed });
+  routeFleetTscEntry(repoDir, worktreePath, deps);
+}
+
+/** W1-T9405: only a managed cut may change its linked, fleet-owned install; never an operator/CI donor. */
+function routeFleetTscEntry(repoDir: string, worktreePath: string, deps: WorktreeAddDepsArg): void {
+  const fleetRoot = dirname(dirname(resolve(repoDir)));
+  if (basename(dirname(resolve(repoDir))) !== "repos" || dirname(resolve(worktreePath)) !== join(fleetRoot, "worktrees")) return;
+  const log = deps.log;
+  let temporary: string | undefined;
+  try {
+    const source = join(worktreePath, "node_modules");
+    if (!lstatSync(source).isSymbolicLink()) return;
+    const modules = realpathSync(source), owner = dirname(modules), root = realpathSync(fleetRoot);
+    if (owner !== root && !owner.startsWith(root + sep)) return;
+    const harnessModules = realpathSync(join(deps.typecheckInstallRoot ?? installRootDir(), "node_modules"));
+    if (modules !== harnessModules) { log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "not-harness-install" }); return; }
+    const entry = join(owner, "scripts", "tsc-entry.mjs");
+    if (!existsSync(entry)) { log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "install-entry-absent" }); return; }
+    const bin = join(modules, ".bin", "tsc"), current = realpathSync(bin);
+    if (current === realpathSync(entry)) return;
+    if (current !== realpathSync(join(modules, "typescript", "bin", "tsc"))) {
+      log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "unexpected-tsc-entry" }); return;
+    }
+    const next = join(modules, ".bin", `.rmd-tsc-${process.pid}-${randomUUID()}`);
+    symlinkSync(entry, next); temporary = next;
+    (deps.typecheckRename ?? renameSync)(next, bin); temporary = undefined;
+    log?.("worktree.typecheck_entry", { worktreePath, entry });
+  } catch (error) {
+    log?.("worktree.typecheck_entry_failed", { worktreePath, error: String(error) });
+  } finally {
+    if (temporary) {
+      try { unlinkSync(temporary); }
+      catch (error) { log?.("worktree.typecheck_entry_failed", { worktreePath, cleanup: true, error: String(error) }); }
+    }
+  }
 }
 
 const execFilePromise = promisify(execFile);
@@ -6531,6 +6575,24 @@ export function pruneStaleRuns(
  * name; this reaper has no such urgency (W1-T378). */
 export const DEFAULT_WORKTREE_REAP_GRACE_MS = loadDefaultPolicy().values.worktreeReapGraceMs;
 
+// One process-local hold serves BOTH reapers. The review-specific sweep must not keep
+// a checkout that this module's general sweep removes before its proofs execute.
+const heldReviewWorktrees = new Set<string>();
+
+/** Protect the exact checkout for the complete review scope, regardless of its age. */
+export function holdReviewWorktree(worktreePath: string): void {
+  heldReviewWorktrees.add(resolve(worktreePath));
+}
+
+/** Called by the existing owned review teardown, not by elapsed time or a reaper. */
+export function releaseReviewWorktree(worktreePath: string): void {
+  heldReviewWorktrees.delete(resolve(worktreePath));
+}
+
+export function reviewWorktreeIsHeld(worktreePath: string): boolean {
+  return heldReviewWorktrees.has(resolve(worktreePath));
+}
+
 /** Directory names never descended into by {@link newestActivityMs} — see its doc. */
 const ACTIVITY_SKIP_DIRS = new Set([".git", "node_modules"]);
 
@@ -6539,6 +6601,8 @@ export const ACTIVITY_WALK_ENTRY_CAP = 20_000;
 
 /** Why {@link reapStaleWorktrees} left an entry alone — the "and why" half of its ledger row. */
 export type WorktreeKeepReason =
+  /** This process still owns the review using this exact checkout. */
+  | "live-review"
   /** A run lock naming a pid that is currently alive. */
   | "live-pid"
   /** Registered on a branch still live upstream (an open, unmerged PR). */
@@ -6923,6 +6987,11 @@ function* worktreeReapPass(
     }
     if (!isDir) continue;
     yield entryPath;
+
+    if (reviewWorktreeIsHeld(entryPath)) {
+      keep(name, "live-review");
+      continue;
+    }
 
     const lockRead = readRunLock(entryPath);
     if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid, lockRead.info)) {

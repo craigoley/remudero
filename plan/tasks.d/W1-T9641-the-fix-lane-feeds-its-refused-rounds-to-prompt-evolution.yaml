@@ -11,7 +11,7 @@
   origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
   plan_refs: [W1-T4665, W1-T7421, W1-T5535, W1-T9639, W1-T9640]
   files: [src/lib/prompt-evolution.ts, src/lib/fix-lane-gardener.ts, test/the-fix-lane-feeds-its-refused-rounds-to-prompt-evolution.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

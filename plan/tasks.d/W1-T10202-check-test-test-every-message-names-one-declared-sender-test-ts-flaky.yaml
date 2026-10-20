@@ -1,0 +1,47 @@
+- id: W1-T10202
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/every-message-names-one-declared-sender.test.ts:flaky cost 20.1 PR minute(s) across 9 round(s) on 9 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.28
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/every-message-names-one-declared-sender.test.ts:flaky"
+  files:
+    - src/lib/ledger.ts
+    - test/ledger/check-test-test-every-message-names-one-declared-sender-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/every-message-names-one-declared-sender.test.ts:flaky"
+      proof: "grep: test(\"W1-T10202: check:test:test/every-message-names-one-declared-sender.test.ts:flaky is prevented, not retried\" in test/ledger/check-test-test-every-message-names-one-declared-sender-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/every-message-names-one-declared-sender.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/every-message-names-one-declared-sender.test.ts:flaky cost 20.1 PR minute(s) (seven-day half-life) across 9 fix round(s) on 9 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ledger.ts: test/every-message-names-one-declared-sender.test.ts imports it
+    - test/every-message-names-one-declared-sender.test.ts: named by the failing check
+    - the rounds name a failing test: test/every-message-names-one-declared-sender.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12457 (https://github.com/craigoley/remudero/pull/12457) at 2026-10-16T23:10:12.551Z: ci-log round — comment-load-ratchet; coverage-shard (7/8): test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts; coverage-shard (4/8): test/every-message-names-one-declared-sender.test.ts; Sca
+        failing tests: W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment; a sync primitive handed over as a seam default counts, W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const, W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment; every raw task_id literal a producer writes to the ledger resolves to exactly one declared entry; selected serve composition forwards one shadow context to the real registry readiness and dashboard routes; selected registry shadow reaches real serve and discovery consumers
+        log excerpt:
+          | TO FIX, in this same PR, either way: (a) shorten the prose you added -- see docs/comment-standard.md
+          |   for what a comment must state and what may be cut; or (b) if the growth is right, record it in
+          |   scripts/comment-load-baseline.json so a reviewer reads the decision, setting:
+          |     "src/run-task.ts": 18500,
+          |   Re-run this script afterwards; it must print "OK". Recording is an ordinary, reviewed outcome, not a defeat.
+          |   THEN RE-DERIVE ANY FILE-COUNT CLAIM IN THE PR BODY from `git diff --name-only origin/main...HEAD`:
+          |   editing the baseline changes the diff, and `bodyContradictsDiff` fails a body
+    - PR #11070 at 2026-10-12T11:53:25Z: hand fix PR #11070: src/lib/config-schema.ts, src/lib/garden-registry.ts, src/lib/ledger.ts, src/lib/worker-containment.ts; minutes are the pass median proxy (5.9462166666666665), not measured repair
+    - PR #10868 at 2026-10-11T13:36:53Z: hand fix PR #10868: src/lib/daemon.ts, src/lib/ledger.ts; minutes are the pass median proxy (5.9462166666666665), not measured repair time
+    - PR #10316 (https://github.com/craigoley/remudero/pull/10316) at 2026-10-09T13:14:29.624Z: ci-log round — coverage-shard (5/8): test/every-message-names-one-declared-sender.test.ts
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts; every raw task_id literal a producer writes to the ledger resolves to exactly one declared entry
+    - PR #10146 at 2026-10-08T17:12:19.316Z: ci-log round — coverage-shard (3/8): test/every-message-names-one-declared-sender.test.ts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

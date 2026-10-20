@@ -23,7 +23,7 @@
     - AGENTS.md
     - doctrine/plan-and-task-hygiene/
     - test/new-test-minters-place-the-test.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

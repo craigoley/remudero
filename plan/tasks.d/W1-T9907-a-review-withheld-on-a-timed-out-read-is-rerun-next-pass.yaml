@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/sweep.ts
     - test/a-review-withheld-on-a-timed-out-read-is-rerun-next-pass.test.ts
-  status: queued
+  status: merged
   priority: 1  # it drove the plan-filing eligible-to-posted p90 to 41.6 min on 2026-10-16, and every filing holds the tasks it carries
   attempts: 0
   rationale: |

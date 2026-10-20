@@ -1067,7 +1067,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const backoffMs = Math.min(tickMs * 2 ** slot.state.failures, READ_MODEL_MAX_BACKOFF_MS);
     slot.backoffUntil = now + backoffMs;
     slot.state.reason = `tick failed: ${(error as Error).message}`;
-    log("read_model.tick_failed", { instance: slot.instance.name, error: (error as Error).message, failures: slot.state.failures, backoffMs });
+    const transactions = (error as Error & { readModelTransactions?: unknown }).readModelTransactions;
+    log("read_model.tick_failed", { instance: slot.instance.name, error: (error as Error).message, failures: slot.state.failures, backoffMs, ...(transactions === undefined ? {} : { transactions }) });
   }
 
   /**

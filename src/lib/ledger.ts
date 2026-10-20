@@ -819,6 +819,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // `panel.escalation_marked_handled` stays out: it carries nothing a calibrator could read back.
   RISK_OVERRIDE_RECORDED_STEP,
   "daemon.boot",
+  // fixSeedRead needs both the empty boot census and later ownership/uncertainty:
+  // dropping either side changes whether an old fix can re-enter the checkout claim.
+  "run_child.adoption_pass",
+  "run_child.adopted",
+  "run_child.adoption_unreadable",
+  "run_child.adoption_misidentified",
   // impl-DF: the idle rung's reason tally. A HUMAN reads it to tell "starved of work" from
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",

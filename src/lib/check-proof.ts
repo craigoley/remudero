@@ -1,6 +1,6 @@
 import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { loadDefaultPolicy } from "./policy.js";
@@ -18,6 +18,34 @@ import {
 
 const CHECK_PROOF_USAGE = "usage: rmd check-proof <proof> [--allow-full-suite] [--base <ref>] [--repo <owner/name>]";
 export const CHECK_PROOF_CHILD_ENTRY = "src/check-proof-main.ts";
+
+/** A missing materialised file alone proves nothing: independently read the literal Git tree. */
+export function verifyBaseGrepAbsence(
+  cwd: string, base: string, target: string,
+  git: typeof hostWorktreeGit = hostWorktreeGit,
+): { state: "absent"; tree: string } | { state: "unknown"; reason: string } {
+  const rel = posix.normalize(target).replace(/\/+$/, "");
+  if (!rel || rel === "." || posix.isAbsolute(rel) || rel === ".." || rel.startsWith("../") || rel.includes("\0")) {
+    return { state: "unknown", reason: "target is not a literal repository-relative path" };
+  }
+  try {
+    const tree = git(cwd, ["rev-parse", "--verify", "--end-of-options", `${base}^{tree}`]).trim();
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) return { state: "unknown", reason: "base tree identity is invalid" };
+    const options = { env: { GIT_LITERAL_PATHSPECS: "1" }, maxBuffer: 1 << 26 };
+    const list = (paths: string[]) => git(cwd, ["ls-tree", "-z", "--full-tree", tree, "--", ...paths], options);
+    if (list([rel]) !== "") return { state: "unknown", reason: "target exists in the base tree despite missing materialisation" };
+    const parts = rel.split("/");
+    const ancestors = parts.slice(1).map((_, i) => parts.slice(0, i + 1).join("/"));
+    // ls-tree cannot follow a symlink or gitlink; absence below one is not evidence about grep.
+    if (ancestors.length > 0 && list(ancestors).split("\0").some((row) => {
+      const tab = row.indexOf("\t");
+      return tab >= 0 && ancestors.includes(row.slice(tab + 1)) && !row.startsWith("040000 tree ");
+    })) return { state: "unknown", reason: "a non-directory ancestor prevents a literal tree comparison" };
+    return { state: "absent", tree };
+  } catch {
+    return { state: "unknown", reason: "base tree could not be read" };
+  }
+}
 
 /** Resolve the harness entry and tsx from this package, even when cwd is a consumer repository. */
 export function checkProofChildArgv(
@@ -636,10 +664,17 @@ export function checkProofCommand(
             "            base_unreadable degrade the reviewer itself uses (W1-T460).",
         );
       } else if (baseGrepTargetPath !== undefined) {
+        const absence = grepTreeLacksTarget
+          ? verifyBaseGrepAbsence(process.cwd(), baseRef!, baseGrepTargetPath)
+          : { state: "unknown", reason: "no materialised base tree" } as const;
+        if (absence.state === "absent") {
+          console.log(`base:       ABSENT at ${baseRef} — ${baseGrepTargetPath}; verified literal tree ${absence.tree}.`);
+          console.log("discrimination: discriminates — this proof's target did not exist at the verified base tree.");
+          return headExit;
+        }
         console.log(
-          `base:       ABSENT at ${baseRef} — ${baseGrepTargetPath} did not exist there, so this proof could not\n` +
-            "            have matched before the work existed (a forward reference) — the strongest possible\n" +
-            "            form of discriminating.",
+          `base:       ABSENT at ${baseRef} — ${baseGrepTargetPath} was not materialised (possible forward reference).\n` +
+            `            Git-tree absence is unverified: ${absence.reason}; this is not evidence of discrimination.`,
         );
       } else {
         // (R-11) A `unit test:` proof with no checkout to run in. The worktree is the only base a

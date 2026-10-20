@@ -47,6 +47,57 @@ export interface ScopeAmendmentState { number?: number; state: "pending" | "merg
 /** One reviewer `executed_fail` proof, identified by its claim and a digest of its recorded output. */
 export interface ReviewerProofFailure { claim: string; digest: string; excerpt?: string }
 
+/** One failing check's evidence, in the `ciFailureLedgerEntry` shape (ci-friction-gardener.ts, which this module
+ *  cannot import: it reaches sweep.ts, which imports this module). `unavailable` names why `excerpt` is null. */
+export interface FixProgressCheckEvidence {
+  check: string; signature: string | null; tests: string[]; excerpt: string | null; tail_source: string | null;
+  unavailable?: string;
+}
+
+/** W1-T9297: `supplied` when at least one failing check carried a readable log; else why none did. Absent
+ *  evidence is never an empty `checks` list. */
+export type FixProgressFailureEvidence =
+  | { supplied: true; checks: FixProgressCheckEvidence[] }
+  | { supplied: false; reason: string; checks?: FixProgressCheckEvidence[] };
+
+/** One failing check as the sweep reads it: its name and the tail of its log. */
+export interface FixProgressCiFailure {
+  name: string; logTail: string; tailSource?: string; logUnavailable?: { kind: string; detail?: string };
+}
+
+/** BACKSTOP (W1-T9297): the failing titles and log characters the judge's input keeps per failing check. */
+export const FIX_PROGRESS_EVIDENCE_TESTS_CAP = 5;
+/** BACKSTOP (W1-T9297): the excerpt's own bound, beside {@link FIX_PROGRESS_EVIDENCE_TESTS_CAP}. */
+export const FIX_PROGRESS_EVIDENCE_EXCERPT_CAP = 600;
+
+const stripLogTimestamp = (l: string): string => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
+
+function checkEvidenceOf(f: FixProgressCiFailure): FixProgressCheckEvidence {
+  const lines = f.logTail.split("\n").map(l => stripLogTimestamp(l).trimEnd());
+  if (lines.every(l => l.trim() === "")) {
+    const cause = f.logUnavailable ? [f.logUnavailable.kind, f.logUnavailable.detail].filter(Boolean).join(": ") : "empty log tail";
+    return { check: f.name, signature: null, tests: [], excerpt: null, tail_source: f.tailSource ?? null, unavailable: cause };
+  }
+  const titles = lines.flatMap(l => /^\s*not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(l)?.[1] ?? /^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(l)?.[1] ?? []);
+  const tests = [...new Set(titles)].slice(0, FIX_PROGRESS_EVIDENCE_TESTS_CAP);
+  const file = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(lines.join("\n"))?.[1];
+  const at = lines.findIndex(l => /^\s*not ok \d+ - |✖|\bFAIL\b|\bError\b|refused|BLOCKED/.test(l));
+  const from = at < 0 ? Math.max(0, lines.length - 12) : Math.max(0, at - 1);
+  return { check: f.name, signature: file ?? tests[0] ?? null, tests,
+    excerpt: lines.slice(from, from + 14).join("\n").trim().slice(0, FIX_PROGRESS_EVIDENCE_EXCERPT_CAP),
+    tail_source: f.tailSource ?? null };
+}
+
+/** W1-T9297: the failure evidence a judge input carries. PURE. `undefined` means the caller held none. */
+export function failureEvidenceOf(failures: readonly FixProgressCiFailure[] | undefined): FixProgressFailureEvidence {
+  if (failures === undefined) return { supplied: false, reason: "the caller supplied no CI failure evidence for this head" };
+  if (failures.length === 0) return { supplied: false, reason: "no failing CI check log was read for this head" };
+  const checks = failures.map(checkEvidenceOf);
+  if (checks.some(c => c.excerpt !== null)) return { supplied: true, checks };
+  return { supplied: false, checks,
+    reason: `${checks.length} failing check(s) named, none with a readable log: ${checks.map(c => `${c.check} (${c.unavailable})`).join("; ")}` };
+}
+
 export interface FixProgressInput {
   taskId?: string;
   prNumber?: number;
@@ -57,6 +108,9 @@ export interface FixProgressInput {
   pendingChecks?: string[];
   /** W1-T7762: the class of the red now judged ({@link fixRedClass}); a verdict is ruled on exactly one class. */
   redClass?: string;
+  /** W1-T9297: the failing checks' own evidence, or why there is none. The judge's checkout is not the PR head,
+   *  so this is the only place it can read the red it rules on. Always set by {@link buildFixProgressInput}. */
+  failureEvidence?: FixProgressFailureEvidence;
   rounds: FixProgressRound[];
   remedyHistory?: readonly Record<string, unknown>[];
   operatorAnswer?: string;
@@ -180,6 +234,8 @@ export function buildFixProgressInput(facts: {
   redClassNames?: readonly string[];
   /** W1-T10067: the head's required checks that have not concluded, at gate granularity. */
   pendingChecks?: readonly string[];
+  /** W1-T9297: the head's failing CI checks with their log tails; recorded as absent, with why, when not given. */
+  ciFailures?: readonly FixProgressCiFailure[];
 }): FixProgressInput {
   const rounds: FixProgressRound[] = [];
   const byId = new Map<string, FixProgressRound>();
@@ -281,7 +337,7 @@ export function buildFixProgressInput(facts: {
   const otherClassRounds = rounds.filter(r => r.redClass !== undefined && r.redClass !== checkClass).length;
   if (otherClassRounds > 0) signals.otherClassRounds = otherClassRounds;
   return { taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
-    strikesSpent: facts.strikesSpent ?? 0, currentRed, ...(pendingChecks.length > 0 ? { pendingChecks } : {}), redClass: fixRedClass(facts.redClassNames ?? currentRed), rounds,
+    strikesSpent: facts.strikesSpent ?? 0, currentRed, ...(pendingChecks.length > 0 ? { pendingChecks } : {}), redClass: fixRedClass(facts.redClassNames ?? currentRed), failureEvidence: failureEvidenceOf(facts.ciFailures), rounds,
     operatorAnswer: facts.operatorAnswer, formerCeiling: facts.formerCeiling, parkedReason: facts.parkedReason, signals,
     ...(persistentReviewerFailures.length > 0 ? { persistentReviewerFailures } : {}) };
 }

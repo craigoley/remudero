@@ -97,6 +97,18 @@ export function readCiFrictionHandFixes(
   }
 }
 
+/** A test file's red on the pull request that added that file is the PR's own development, not friction: W1-T9823
+ *  was filed on #12294's round, the PR that created its test. Every other round, and any round whose test has no
+ *  readable adding PR, is kept. */
+export function withoutBirthRounds(rounds: readonly CiFrictionRound[], search: Pick<OwnerSearch, "addedByPr">): CiFrictionRound[] {
+  const addedByPr = search.addedByPr;
+  if (!addedByPr) return [...rounds];
+  return rounds.filter((round) => {
+    const file = round.cause.kind === "check" ? /^test:(test\/[\w./-]+\.test\.[mc]?[jt]s)(?::flaky)?$/.exec(round.cause.name)?.[1] : undefined;
+    return file === undefined || addedByPr(file) !== round.pr;
+  });
+}
+
 /** The earliest time each cause was observed failing; a round with no readable `at` dates its cause from always. */
 function ciFrictionCauseFirstSeen(rounds: readonly CiFrictionRound[]): Map<string, number> {
   const first = new Map<string, number>();
@@ -428,7 +440,7 @@ const CI_RUNNER_TIMEOUT_LINE =
  *  its ceiling — the shapes whose red names no test on its own. `undefined` when the tail is none of them
  *  (or is a timeout that nevertheless names a real failing test), so the ordinary arms decide. */
 export function poolOrTimeoutSignature(lines: readonly string[]): string | undefined {
-  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").trim());
+  const bodies = lines.map((l) => stripLogTimestamp(l).trim());
   const defect = bodies.map((b) => /^pure-test-pool: POOL DEFECT\b.*?leaking file: (not isolated to one file|\S+)(?: \(first failing alongside it: ([^)]+)\))?/.exec(b)).find((m) => m);
   if (defect) {
     const leaker = defect[1]!;
@@ -439,11 +451,9 @@ export function poolOrTimeoutSignature(lines: readonly string[]): string | undef
   const poolFailed = bodies.some((b) => /^pure-test-pool: the pool of \d+ file\(s\) failed/.test(b));
   const isolatedPassed = bodies.some((b) => /^pure-test-pool: (?:every pooled file passes isolated|rerun run complete)/.test(b));
   const alsoFailsIsolated = bodies.some((b) => /^pure-test-pool: the pooled files also fail isolated/.test(b));
-  const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
   if (poolFailed && isolatedPassed && !alsoFailsIsolated) {
-    const firstNotOk = bodies.findIndex((b) => /^not ok \d+ - /.test(b));
-    const named = firstNotOk < 0 ? undefined : bodies.slice(firstNotOk).map((b) => testFileRe.exec(b)?.[1]).find((f) => f !== undefined);
-    return `pool failure: ${named ?? "pooled not ok"} fails pooled, passes isolated`;
+    const named = testRunnerFailureSignature(lines);
+    return `pool failure: ${named && named !== RED_WITH_NO_FAILING_TEST ? named : "pooled not ok"} fails pooled, passes isolated`;
   }
   if (!bodies.some((b) => CI_RUNNER_TIMEOUT_LINE.test(b))) return undefined;
   const runner = testRunnerFailureSignature(lines);
@@ -475,7 +485,7 @@ function namedRunnerFailures(bodies: readonly string[]): { named: string[]; firs
     const name = /^\s*not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(b)?.[1]
       ?? /^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(b)?.[1]
       ?? /^FLAKE-RETRY: .* — (?!\(no test name)(.+)$/.exec(b)?.[1]
-      ?? /COVERAGE-REPORT-FAILED: .*/.exec(b)?.[0];
+      ?? /^COVERAGE-REPORT-FAILED: .*/.exec(b)?.[0];
     if (name !== undefined && !/^failing tests:?$/.test(name.trim())) {
       if (firstNamedAt < 0) firstNamedAt = i;
       named.push(name.trim());
@@ -489,7 +499,8 @@ export const CI_FAILURE_TESTS_CAP = 5;
 /** BACKSTOP (W1-T9057): bounds the log characters a `fix.dispatch` row keeps per failing check. */
 export const CI_FAILURE_EXCERPT_CAP = 600;
 
-const stripLogTimestamp = (l: string): string => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
+// Strip only the transport prefix, never an ISO timestamp printed inside a TAP comment/title.
+const stripLogTimestamp = (l: string): string => l.replace(/^(?:[^\t]*\t[^\t]*\t)?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
 
 /** The distinct failing test titles a runner's log names (at most `cap`); `[]` for any other log. */
 export function testRunnerFailures(logTail: string, cap = CI_FAILURE_TESTS_CAP): string[] {
@@ -529,26 +540,87 @@ export function ciFailureLedgerEntry(f: { name: string; logTail: string; tailSou
   };
 }
 
-/** `undefined` when the tail is not a test runner's log; else its first structured failure (the
- *  failing test file, a failing test's name, a truncated coverage report, a named retry), or
- *  {@link RED_WITH_NO_FAILING_TEST} when the runner reported none. */
-export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
-  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
-  if (!isTestRunnerLog(bodies)) return undefined;
-  const { named, firstNamedAt } = namedRunnerFailures(bodies);
-  const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
-  const file = named.map((n) => testFileRe.exec(n)?.[1]).find((f) => f !== undefined);
-  if (file !== undefined) return file;
-  // A failing test named only by its title: the stack frame under the failure names its file. Only
-  // lines FROM the first failure on are read, and never a passing `ok`/`# Subtest` line.
-  if (firstNamedAt >= 0) {
-    for (const b of bodies.slice(firstNamedAt)) {
-      if (/^\s*(?:ok \d+ - |# Subtest: )/.test(b)) continue;
-      const frameFile = testFileRe.exec(b)?.[1];
-      if (frameFile !== undefined) return frameFile;
+/** A whole runner location/file-wrapper token, never a substring of a human-readable title. */
+function runnerTestFile(value: string): string | undefined {
+  const path = value.trim().replace(/^(['"])(.*)\1$/, "$2");
+  if (path.split("/").some(part => part === "." || part === "..")) return undefined;
+  return /^(?:(?:file:\/\/)?(?:\/[^/\r\n'"\0]+)*\/)?(test\/[\w./-]+\.test\.[mc]?[jt]s)(?::[1-9]\d*(?::[1-9]\d*)?)?$/.exec(path)?.[1];
+}
+
+const UNKNOWN_RUNNER_LOCATION = "unknown runner failure location";
+const runnerFrameFile = (line: string): string | undefined => {
+  const value = /^\s+(?:at )?[\w.$<>]+\s+\(([^()]+)\)\s*$/.exec(line)?.[1]
+    ?? /^\s+at ((?:file:\/\/\/|\/|test\/)\S+)\s*$/.exec(line)?.[1];
+  return value === undefined ? undefined : runnerTestFile(value);
+};
+
+/** Read only this TAP failure's own diagnostic keys, not scalar error/expected text or a later test. */
+function tapFailureLocation(bodies: readonly string[], at: number, indent: number): string | undefined {
+  const keyIndent = " ".repeat(indent + 2);
+  if (bodies[at + 1]?.trim() !== "---") {
+    const frames: string[] = [];
+    for (const line of bodies.slice(at + 1)) {
+      const file = runnerFrameFile(line);
+      if (file === undefined) break;
+      frames.push(file);
+    }
+    return frames.length ? new Set(frames).size === 1 ? frames[0] : UNKNOWN_RUNNER_LOCATION : undefined;
+  }
+  if (bodies[at + 1] !== keyIndent + "---") return UNKNOWN_RUNNER_LOCATION;
+  const locations: string[] = [], frames: string[] = [];
+  let closed = false, inStack = false;
+  for (const line of bodies.slice(at + 2)) {
+    if (line === keyIndent + "...") { closed = true; break; }
+    if (line.trim() && line.length - line.trimStart().length < keyIndent.length) break;
+    const key = line.startsWith(keyIndent) ? /^([\w]+):(?:\s*(.*))?$/.exec(line.slice(keyIndent.length)) : null;
+    if (key) {
+      inStack = key[1] === "stack" && /^[|>]/.test(key[2] ?? "");
+      if (key[1] === "location") locations.push(key[2] ?? "");
+    } else if (inStack) {
+      const file = runnerFrameFile(line);
+      if (file !== undefined) frames.push(file);
     }
   }
-  const first = named[0]?.replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "N").trim();
+  if (!closed) return UNKNOWN_RUNNER_LOCATION;
+  if (locations.length) {
+    const files = locations.map(runnerTestFile);
+    return files.every(file => file !== undefined) && new Set(files).size === 1 ? files[0] : UNKNOWN_RUNNER_LOCATION;
+  }
+  if (frames.length) return new Set(frames).size === 1 ? frames[0] : UNKNOWN_RUNNER_LOCATION;
+  // A literal file-wrapper title is itself runner identity; an arbitrary title is not.
+  const wrapper = /^\s*not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(bodies[at]!)?.[1];
+  return wrapper === undefined ? UNKNOWN_RUNNER_LOCATION : runnerTestFile(wrapper) ?? UNKNOWN_RUNNER_LOCATION;
+}
+
+/** `undefined` for non-runner logs; else its first bound failure, explicit unknown, or no-failure marker. */
+export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
+  const bodies = lines.map(stripLogTimestamp);
+  if (!isTestRunnerLog(bodies)) return undefined;
+  const { named, firstNamedAt } = namedRunnerFailures(bodies);
+  if (firstNamedAt < 0) return RED_WITH_NO_FAILING_TEST;
+  const title = named[0]!;
+  const tap = /^(\s*)not ok \d+ - /.exec(bodies[firstNamedAt]!);
+  if (tap) {
+    const location = tapFailureLocation(bodies, firstNamedAt, tap[1]!.length);
+    if (location !== undefined) return location;
+  } else if (/^\s*✖ /.test(bodies[firstNamedAt]!)) {
+    const summary = bodies.findIndex(line => /^✖ failing tests:?$/.test(line));
+    const locations: Array<string | undefined> = [];
+    for (let i = summary + 1; summary >= 0 && i < bodies.length - 1; i += 1) {
+      const header = /^test at (.+)$/.exec(bodies[i]!);
+      const repeated = /^✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(bodies[i + 1]!)?.[1];
+      if (header && repeated === title) locations.push(runnerTestFile(header[1]!));
+    }
+    if (locations.length) {
+      return locations.every(file => file !== undefined) && new Set(locations).size === 1 ? locations[0] : UNKNOWN_RUNNER_LOCATION;
+    }
+    if (summary >= 0) return UNKNOWN_RUNNER_LOCATION;
+  }
+  const wrapper = runnerTestFile(title);
+  if (wrapper !== undefined) return wrapper;
+  // Never hand an unbound title path to locateCiFrictionOwner through round.detail.
+  if (/test\/[\w./-]+\.test\.[mc]?[jt]s/.test(title)) return UNKNOWN_RUNNER_LOCATION;
+  const first = title.replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "N").trim();
   return first ? first.slice(0, 120) : RED_WITH_NO_FAILING_TEST;
 }
 
@@ -1014,9 +1086,19 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   const workflowGaps = new Map<string, string>();
   let workflowDocs: Array<{ file: string; document: ReturnType<typeof parseDocument> }> | undefined;
   const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
+  const addedBy = new Map<string, number | undefined>();
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
     readSource: (file) => git(["show", `${pinned()}:${file}`]),
+    addedByPr: (file) => {
+      if (!addedBy.has(file)) {
+        // The oldest commit adding the path; a squash merge's subject ends `(#N)`.
+        const first = git(["log", "--diff-filter=A", "--format=%s", pinned(), "--", file]).trim().split("\n").at(-1) ?? "";
+        const pr = /\(#(\d+)\)\s*$/.exec(first)?.[1];
+        addedBy.set(file, pr === undefined ? undefined : Number(pr));
+      }
+      return addedBy.get(file);
+    },
     workflowGaps: () => [...workflowGaps].map(([family, reason]) => ({ family, reason })),
     workflowOwner: (family) => {
       const source = pinned();
@@ -1513,7 +1595,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const records = sources.ledgerRecords();
       const plan = sources.planState();
       const ownerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
-      const ledgerRounds = ciFrictionRoundsFromLedger(records);
+      const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch);
       const hand = sources.handFixes?.();
       if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
       const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
@@ -1575,9 +1657,10 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
       const taskId = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const records = sources.ledgerRecords();
+      const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), sources.ownerSearch);
       const contents = ciFrictionShardYaml(
         { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([
-          ...ciFrictionRoundsFromLedger(records), ...ciFrictionHandFixRounds(sources.handFixes?.().fixes ?? [], ciFrictionRoundsFromLedger(records),
+          ...ledgerRounds, ...ciFrictionHandFixRounds(sources.handFixes?.().fixes ?? [], ledgerRounds,
             action.priced ?? [], sources.ownerSearch),
         ]), prior: action.decision.prior },
         taskId,

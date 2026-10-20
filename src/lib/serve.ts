@@ -2843,7 +2843,9 @@ function assembleServeRoutes(
   // keyed by it, and the legacy side was handed `panelGraphDeps` while the routes classified under a copy, so it
   // answered "serve has not classified the inbox yet" even while the thread list served a held classification.
   // W1-T5897: under the slow lane that classifies the inbox, no inbox read classifies on this thread; a new generation reads what it persisted.
-  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, readPlanSource: () => deps.board.planSource, ...(deps.readModel?.slowLane?.inbox ? { inboxFromSlowLane: true } : {}) };
+  const coreInbox = deps.readModel?.slowLane?.inbox;
+  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, readPlanSource: () => deps.board.planSource,
+    ...(coreInbox ? { inboxFromSlowLane: true, inboxAuditScope: panelGraphDeps.inboxAuditScope ?? { instance: CORE_INSTANCE, repository: coreInbox.repository } } : {}) };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
   // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it

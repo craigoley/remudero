@@ -1619,16 +1619,6 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
       finalExpiresAtMs = gate.recordedExpiresAtMs;
 
       if (gate.needsProvisioning) {
-        // A mismatch or staleness verdict means a LIVE keychain file may already sit at this path, and
-        // `create-keychain` refuses to overwrite one, so it must go first.
-        if (exists(opts.keychainPath)) {
-          try {
-            rmSync(opts.keychainPath, { force: true });
-          } catch {
-            // Best-effort; a real removal failure surfaces below as provision-failed when
-            // create-keychain hits the file it could not clear.
-          }
-        }
         // Read the item (attributes, then secret) BEFORE creating anything, so a locked or missing
         // credential leaves no half-provisioned keychain behind. INVARIANT: the `acct` attribute is
         // copied over unchanged as informational provenance ONLY — account-usage.ts measured it to be
@@ -1660,6 +1650,15 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
           );
         }
         const account = attrs.match(/"acct"<blob>="([^"]*)"/)?.[1] ?? "";
+        // Read the replacement credential before removing an existing worker store.
+        // A locked/missing login item must leave the prior store and sidecars intact.
+        if (exists(opts.keychainPath)) {
+          try {
+            rmSync(opts.keychainPath, { force: true });
+          } catch {
+            // A removal failure still surfaces as provision-failed when create-keychain refuses it.
+          }
+        }
         try {
           runner(["create-keychain", "-p", password, opts.keychainPath]);
           // No -l (lock on sleep) / no -u (lock after timeout): never auto-locks.
