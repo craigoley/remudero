@@ -14,7 +14,7 @@
     - src/lib/ci-friction-gardener.ts
     - test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts
     - test/w1-t5300-a-hand-fix-is-ci-friction-evidence.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # operator session 2026-10-13: ~870 REST page reads and ~1.6 GB of PR JSON a day, for a list that changes by a few rows between reads
   attempts: 0
   rationale: |
