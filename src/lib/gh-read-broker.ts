@@ -779,7 +779,10 @@ export async function serveGhReadBroker(opts: {
   const heartbeat = join(dir, GH_BROKER_HEARTBEAT);
   const beat = () => {
     try {
-      writeFileSync(heartbeat, `${intervalS}\n`, { mode: 0o600 });
+      // Written whole and renamed into place: a reader between a truncate and a write would see an empty
+      // heartbeat and call a live broker dead (the hook would floor, a transport read would not route).
+      writeFileSync(`${heartbeat}.tmp`, `${intervalS}\n`, { mode: 0o600 });
+      renameSync(`${heartbeat}.tmp`, heartbeat);
     } catch {
       // A missed beat only lets the hook fall back to its own floor for a while; serving goes on.
     }

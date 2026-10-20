@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  brokerGhRead, ghBrokerDir, ghBrokerRouteFor, ghReadBrokerLive,
+  brokerGhRead, ghBrokerDir, ghBrokerDirLive, ghBrokerRouteFor, ghReadBrokerLive,
   type GhBrokerProgress, type GhBrokerResult,
 } from "#src/lib/gh-read-broker-client.js";
 import {
@@ -57,8 +57,11 @@ function controlledExec() {
   return { exec, calls };
 }
 
+/** Waits on real time, not a count of turns: under a parallel flake screen a socket round trip can take
+ *  far longer than any fixed number of event-loop turns. */
 async function until(predicate: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 2_000 && !predicate(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+  const deadline = Date.now() + 30_000;
+  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 2));
   assert.ok(predicate(), `timed out waiting for ${what}`);
 }
 
@@ -411,7 +414,7 @@ test("W1-T10279: rmd gh prints what gh would, sends writes straight to gh, and n
   assert.deepEqual([summary.files, summary.reads, summary.served_without_upstream_share], [0, 0, null]);
 });
 
-test("W1-T10279: the transport's read entry points use a live broker instead of the floor", { timeout: 60_000 }, async (t) => {
+test("W1-T10279: the transport's read entry points use a live broker instead of the floor", { timeout: 180_000 }, async (t) => {
   const dir = tmp(t, "transport");
   // A separate process serves, as on a Mac: a synchronous read blocks this one while it waits.
   const bootstrap = join(dir, "serve.mjs");
@@ -432,7 +435,8 @@ test("W1-T10279: the transport's read entry points use a live broker instead of 
   const brokerDir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
   const child = spawn(process.execPath, ["--import", "tsx", bootstrap, brokerDir], { cwd: ROOT, stdio: "ignore" });
   t.after(() => child.kill());
-  for (let i = 0; i < 600 && !existsSync(join(brokerDir, "heartbeat")); i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+  // Until the child serves (its startup is slow under a parallel flake screen); the test's own timeout bounds it.
+  while (ghBrokerDirLive(brokerDir) === undefined) await new Promise((resolve) => setTimeout(resolve, 50));
   const shim = ghShim([{ when: "", stdout: "FALSIFIER: the real gh ran\n" }]);
   const saved = { cache: process.env.RMD_GH_CACHE_HOME, path: process.env.PATH };
   process.env.RMD_GH_CACHE_HOME = cache;
