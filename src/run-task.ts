@@ -9116,7 +9116,12 @@ async function runReview(args: {
   if (hasUnmet) {
     parts.push(
       `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
-        unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
+        visibleUnmet.map((c, i) => {
+          const tail = c.failureTail?.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+          return `${i + 1}. ${c.claim}\n   - ${reasons[i]}` + (tail
+            ? `\n\n   <details>\n   <summary>Proof failure output</summary>\n\n   <pre>${tail}</pre>\n   </details>\n`
+            : "");
+        }).join("\n") +
         (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
         `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
     );
