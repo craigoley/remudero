@@ -368,4 +368,7 @@ test("the starvation alert names the class, the held minutes, the queue, the rea
     reasons: ["psi"], holders: [], swapInBasis: "x" });
   assert.match(none.detail, /none measured/);
   assert.equal(e.class, "BLOCKED");
+  // The soft set is exactly the ruling's four; measured headroom and the container ceiling are never in it.
+  assert.deepEqual([...STARVATION_SOFT_REASONS].sort(), ["psi", "swap-in", "uncertainty", "unrealized-reservations"]);
+  for (const hard of ["memory-available", "container-ceiling"] as const) assert.equal(STARVATION_SOFT_REASONS.has(hard), false);
 });
