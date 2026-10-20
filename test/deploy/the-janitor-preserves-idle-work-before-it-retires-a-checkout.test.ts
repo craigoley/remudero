@@ -72,6 +72,25 @@ function helper(fx: Fx, args: string[] = ["--apply"], env: Record<string, string
   });
 }
 
+function janitor(fx: Fx, apply: boolean) {
+  return spawnSync("bash", [JANITOR, apply ? "--apply" : "--dry-run"], { encoding: "utf8", timeout: 120_000, env: {
+    ...GIT_ENV, HOME: fx.home, PATH: `${fx.bin}:${process.env.PATH}`, TMPDIR: fx.root,
+    REMUDERO_JANITOR_ACCOUNT_HOME: fx.home, REMUDERO_JANITOR_SCAN_ROOTS: fx.root,
+    REMUDERO_JANITOR_DIRECTORY_ROOTS: join(fx.home, "Remudero"),
+    REMUDERO_JANITOR_LOG: join(fx.root, "janitor.log"), REMUDERO_JANITOR_LOCK_DIR: join(fx.root, "janitor.lock"),
+    REMUDERO_JANITOR_DECISION_LOG: join(fx.root, "decisions.tsv"),
+  } });
+}
+
+function pythonProbe(fx: Fx, script: string) {
+  const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
+  writeFileSync(join(fx.bin, "python3"), `#!/bin/bash
+case " $* " in *"/preserve-retire.py "*) ${script} ;; esac
+exec '${native}' "$@"
+`, { mode: 0o755 });
+  return native;
+}
+
 function preserved(fx: Fx, rel: string): string {
   const root = join(fx.home, "Remudero-preserved");
   const name = readdirSync(root).find(n => n.startsWith(rel.replaceAll("/", "__") + "@"));
@@ -206,7 +225,7 @@ test("a worktree whose git dir is gone, a locked worktree, and an oversized untr
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("a refused worktree removal keeps its parent repository", () => {
+test("a refused worktree removal keeps its parent repository and counts each held repository once", () => {
   const fx = setup();
   try {
     const parent = clone(fx, "Remudero/parent");
@@ -222,6 +241,7 @@ exec '${nativeGit}' "$@"
     assert.equal(existsSync(child), true, r.stdout);
     assert.equal(existsSync(parent), true, r.stdout);
     assert.match(r.stdout, /HOLD has-kept-worktree .*Remudero\/parent/);
+    assert.match(r.stdout, /summary candidates=2 retired=0 held=2 apply=1/, "the refused child and retained parent are each counted once");
     assert.equal(git(child, "cat-file", "-t", "HEAD"), "commit");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
@@ -310,5 +330,51 @@ test("the janitor runs the preserve-then-retire phase and rotates its human log"
     assert.match(r.stdout, /preserve-retire: summary candidates=\d+ retired=0 held=\d+ apply=0/);
     assert.equal(existsSync(log + ".1"), true, "the oversized log was rotated");
     assert.ok(readFileSync(log, "utf8").length < 1024 * 1024, "the live log restarted small");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the janitor summary counts an actual preserved retirement in its total", () => {
+  const fx = setup();
+  try {
+    const repo = clone(fx, "Remudero/unpublished");
+    commit(repo, "work.ts", "export const work = true;\n", "unpublished work");
+    const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
+    pythonProbe(fx, `exec '${native}' "$@" --now ${NOW}`);
+    const r = janitor(fx, true);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(repo), false, r.stdout);
+    const summary = r.stdout.split("\n").find(l => l.includes("=== done:"));
+    assert.ok(summary, r.stdout);
+    assert.match(summary, /removed=1 removed-complete=yes/);
+    assert.match(summary, /preservation-status=completed preservation-retired=1 preservation-held=0 preservation-planned=0/);
+    assert.match(summary, /reclaimed-scope=legacy/);
+    const restored = restore(fx, preserved(fx, "Remudero/unpublished"), join(fx.root, "restored"));
+    assert.equal(readFileSync(join(restored, "work.ts"), "utf8"), "export const work = true;\n");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the janitor summary distinguishes dry-run, disabled, throttled and unknown preservation outcomes", () => {
+  const fx = setup();
+  try {
+    const output = join(fx.root, "preservation-output");
+    const exit = join(fx.root, "preservation-exit");
+    pythonProbe(fx, `cat '${output}'; exit "$(cat '${exit}')"`);
+    const cases = [
+      { apply: false, output: "summary candidates=2 retired=0 held=3 apply=0", exit: 0, fields: "preservation-status=completed preservation-retired=0 preservation-held=3 preservation-planned=2", complete: "yes" },
+      { apply: true, output: "disabled (no config)", exit: 0, fields: "preservation-status=disabled preservation-retired=0 preservation-held=unknown preservation-planned=0", complete: "yes" },
+      { apply: true, output: "skip ran within 6h", exit: 0, fields: "preservation-status=throttled preservation-retired=0 preservation-held=unknown preservation-planned=0", complete: "yes" },
+      { apply: true, output: "summary candidates=2 retired=2 held=3 apply=1", exit: 17, fields: "preservation-status=failed preservation-retired=unknown", complete: "no" },
+      { apply: true, output: "summary candidates=2 retired=999 held=3 apply=1", exit: 0, fields: "preservation-status=unverified preservation-retired=unknown", complete: "no" },
+      { apply: true, output: "summary candidates=2 retired=0 held=3 apply=0", exit: 0, fields: "preservation-status=unverified preservation-retired=unknown", complete: "no" },
+    ];
+    for (const c of cases) {
+      writeFileSync(output, `preserve-retire: ${c.output}\n`); writeFileSync(exit, String(c.exit));
+      const r = janitor(fx, c.apply);
+      assert.equal(r.status, 0, r.stderr + r.stdout);
+      const summary = r.stdout.split("\n").find(l => l.includes("=== done:"));
+      assert.ok(summary, r.stdout);
+      assert.ok(summary.includes(c.fields), summary);
+      assert.ok(summary.includes(`removed=0 removed-complete=${c.complete}`), summary);
+    }
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
