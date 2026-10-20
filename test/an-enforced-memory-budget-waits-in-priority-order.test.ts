@@ -852,11 +852,13 @@ test("W1-T10208: new validation never promotes a legacy memory escape to ready",
     const refused = await memoryAdmission.awaitValidationMemoryAdmission({ ...validationRequest, workerClass }, f.options);
     validationRefused(refused, "unsafe-without-live-work");
     assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
-    const legacy = await awaitMemoryAdmission({ ...request, workerClass }, f.options);
-    assert.equal(legacy.kind, "admitted");
-    if (legacy.kind === "admitted") {
-      assert.equal(legacy.tier, "nothing-to-wait-for"); legacy.reservation?.releaseOccupancy();
-    }
+    // The separate physical-pressure correction deliberately closes this legacy escape too.
+    // Cancel its first wait explicitly: this control must neither admit nor spin without a bound.
+    const stop = new AbortController(); f.w.onSleep = () => stop.abort();
+    const legacy = await awaitMemoryAdmission({ ...request, workerClass, signal: stop.signal }, f.options);
+    assert.equal(legacy.kind, "abandoned");
+    assert.deepEqual(f.w.sleeps, [5000], "observed host pressure waits before the caller cancels");
+    assert.equal(f.opens(), 0); assert.equal(f.marked(), false);
   }
   const f = validationFixture(); await f.prime();
   const unavailable = { withLock: () => { throw new Error("private-lock-unavailable"); } };
