@@ -75,6 +75,7 @@ test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit c
 function exportFixture(t: TestContext, baseSource: string) {
   const fixture = makeRuntimeFixture();
   t.after(() => fixture.cleanup());
+  fixture.git("add", "-f", "node_modules");
   writeFileSync(resolve(fixture.dir, "package.json"), JSON.stringify({ private: true, type: "module" }));
   writeFileSync(resolve(fixture.dir, "src/a.ts"), baseSource);
   writeFileSync(resolve(fixture.dir, "test/probe.test.ts"),
