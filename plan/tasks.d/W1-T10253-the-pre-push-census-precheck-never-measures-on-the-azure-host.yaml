@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: diagnose
-  verify: human  # an observation/decision record: installing a host package is an operator action
+  # an observation/decision record: installing a host package is an operator action
+  verify: human
   risk: low
   priority: 2
   origin: "coordinator brief file1020 item 4 (2026-10-20); push logs of every hand build in logs-8864"
@@ -84,3 +85,11 @@
   note: |
     Installing a host package is an OPERATOR ACTION; no worker or builder installs it. After the operator acts, the
     effect is one pre-push log whose census-precheck line reports measured counts instead of "skipped, NOT passed".
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.99
+    reasons:
+      - "high-risk verdict at confidence 0.99 — on the change's description/files alone, no diff was read — Acceptance criterion 3 explicitly requires asking an operator decision about installing a host package; the supplied escalation rule classifies operator-only decisions HIGH.; on the change's description/files alone, no diff was read — The declared scope is one forensic document, and the filed note reserves package installation to the operator; this verdict concerns the explicit decision requirement."
+    judged_at: "2026-10-20T16:30:44.103Z"
+    pin: "9cb9e867188022a780496c44116b5be3fa8178a2770354861936d07bf07be612"

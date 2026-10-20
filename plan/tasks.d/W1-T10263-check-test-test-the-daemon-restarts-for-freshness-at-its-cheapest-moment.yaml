@@ -44,3 +44,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filing supplies recurrence and shared-file associations, but no verified root cause connecting the cited rounds to one preventive remedy in src/lib/daemon.ts.; on the change's description/files alone, no diff was read — Several cited rounds are explicitly hand-fix time proxies; the newest excerpt names a different failing test file. These observations do not verify the specific finding underlying the proposed repair.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not establish the promised prevention of fix rounds. The gates explicitly require escalation when the finding cannot be verified from what is shown."
+    judged_at: "2026-10-20T16:32:46.301Z"
+    pin: "f8cbbd66960c4a5a9bca8b6030b57a4127d104cb1e5b81dfc73d911bb1b80453"
