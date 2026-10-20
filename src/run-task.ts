@@ -22692,7 +22692,7 @@ export function recordBakedClosureCatalog(
   prUrl: string,
   files: readonly string[],
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: { fetchBody?: (url: string) => string; editBody?: (url: string, body: string) => void } = {},
+  deps: Pick<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "fetchBody" | "editBody"> = {},
 ): void {
   if (files.length === 0) return;
   try {
