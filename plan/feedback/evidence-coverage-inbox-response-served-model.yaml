@@ -16,10 +16,24 @@ raw: >-
   gardener updates this entry in place while the gap persists.
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/13151
+summary:
+  headline: Restore or explain missing served-model evidence
+  what_happened: Only 23 of 42 joined worker calls in the inbox-response lane
+    recorded servedModel over the past seven days, below the 90% floor. This
+    chronic gap does not block PRs or work.
+  decision: Restore servedModel at the lane’s ledger write site, or document why
+    this lane legitimately lacks it.
+  options:
+    - label: Restore the field
+      consequence: Record servedModel on eligible inbox-response worker calls.
+      intent: approve
+    - label: Document the gap
+      consequence: Record why inbox-response legitimately does not provide servedModel.
+      intent: reframe
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
