@@ -177,12 +177,17 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef, changedPa
   const message = headCommitMessage ?? "";
   const subject = message.split("\n")[0] ?? "";
 
-  if (isFilingShapedSubject(subject)) {
+  // W1-T9213: A FILING SUBJECT ALONE NEVER IDENTIFIES A HEAD. The subject is forgeable free text, so
+  // it used to admit a `chore: tidy` head touching src/ before any diff was read. It is now a
+  // labelled case of the DIFF form: admitted only with a READABLE diff whose every path is non-code
+  // (an absent or empty diff fails closed, `isNonCodeHead`'s own contract).
+  const filingShaped = isFilingShapedSubject(subject);
+  if (filingShaped && isNonCodeHead({ changedPaths })) {
     return {
       ok: true,
       message:
-        `filing-shaped subject "${subject.trim()}" carries no Remudero-Task trailer by rule ` +
-        `(W1-T1004) — exempt from the head-identity check`,
+        `filing-shaped subject "${subject.trim()}" whose entire diff is non-code carries no ` +
+        `Remudero-Task trailer by rule (W1-T1004, W1-T9213) — exempt from the head-identity check`,
     };
   }
 
@@ -228,6 +233,16 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef, changedPa
     };
   }
 
+  // W1-T9213: a filing-worded head that is not wholly non-code names the paths that disqualify it.
+  const codePaths = Array.isArray(changedPaths) ? changedPaths.filter((path) => !isNonCodePath(path)) : [];
+  const filingNote = !filingShaped
+    ? ""
+    : codePaths.length > 0
+      ? ` Its subject "${subject.trim()}" is filing-worded, but a filing subject alone never identifies a head ` +
+        `and this diff touches code: ${codePaths.slice(0, 5).join(", ")}${codePaths.length > 5 ? ", …" : ""}.`
+      : ` Its subject "${subject.trim()}" is filing-worded, but a filing subject alone never identifies a head ` +
+        "and its diff could not be read or is empty.";
+
   return {
     ok: false,
     defect: "unidentified-head",
@@ -244,7 +259,8 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef, changedPa
       "none of this needs a force-push: push a NEW head commit (`git commit --allow-empty` is " +
       "enough) carrying `Remudero-Task: <id>` for a filed task that has not merged, or " +
       "`Remudero-Task: PR-<n>` with the pull request's own number for ad-hoc work — never an " +
-      "amend, a force-push or a new pull request.",
+      "amend, a force-push or a new pull request." +
+      filingNote,
   };
 }
 

@@ -576,6 +576,8 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  * docs/forensics/ledger.md#decision_relevant_ledger_steps.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
+  "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
+  "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
@@ -703,8 +705,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.fold_debt_pull.ingested", // W1-T7853: foldDebtRunIdsFromLedger dedups on it; lost, CI fold debt is pulled and landed again.
   "sweep.fold_debt_pull.dropped", // W1-T7853: the same dedup for a run whose PR closed unmerged or merged at a later head.
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
-  "sweep.capped_host_gap_rereview", // W1-T7837: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
-  "sweep.review_host_gap_rereview", // W1-T7850: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
+  "sweep.capped_host_gap_rereview", // W1-T7837: releases the delivered-review key; demand alone never spends an admitted attempt.
+  "sweep.review_host_gap_rereview", // W1-T7850: same demand release for a refused POST, not completed review work.
   "sweep.fix.checkout_claim_declined",
   "sweep.fix.dispatch_failed",
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
@@ -802,6 +804,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // archived away, a completed migration reads as `hold` and the rung submits it again.
   "dep-review.migrate.completed",
   "review.posted",
+  // W1-T10221: hostGapRereviewFacts joins library-owned refusals through this unique
+  // per-review carrier. Dropping it makes a completed admitted attempt look unfinished.
+  "review.provider_provenance",
   "sweep.review_requeued", // W1-T9970: sweep and review read this per-head image request after rotation.
   "review.skipped_stale_reviewer_code", // W1-T3691: preserve the daemon's freshness restart history across boots.
   // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.

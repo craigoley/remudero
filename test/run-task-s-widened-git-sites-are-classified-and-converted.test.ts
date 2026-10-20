@@ -103,7 +103,6 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   refCommitMatchesDirtyRecovery: { count: 3, cls: "CHECKOUT", reason: FIX_CLONE },
   preserveFixHead: { count: 3, cls: "CHECKOUT", reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
-  shardAgeDays: { count: 1, cls: "CHECKOUT", reason: OWN },
   idCitedInSrc: { count: 1, cls: "CHECKOUT", reason: OWN },
   approveCommand: { count: 6, cls: "CHECKOUT", reason: "an approve worktree cut at origin/main whose only writes are the harness's shard and skill files, and the clone it ls-remotes" },
   bundleExportCommand: { count: 1, cls: "CHECKOUT", reason: OWN },

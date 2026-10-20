@@ -1290,3 +1290,17 @@ Base lines 1540-1546; first words: "OPEN issues only, with body".
       // full-text search" — it was, via `gh`'s own implementation; that is now literally true.
       // THROWS on a `gh` failure (the caller degrades to no action this cycle, never "zero open").
 ```
+
+## Current locations (HEAD 2885cc81b)
+
+Re-located by grep at `2885cc81b` after the drift from the revision above (about 10k lines).
+Line numbers are presentation and will drift again; the symbol names are the durable reference.
+
+- `reportStuckStage` is not in `src/lib/escalate.ts`. It is a `const` arrow closure inside
+  `runSweep` in `src/lib/sweep.ts` (`runSweep` opens at line 16237; the closure is defined at
+  line 16369 and called at line 17816).
+- `matchDuplicateEscalation` is defined in `src/lib/escalate.ts` at line 1102 (non-exported).
+  It is called by `findDuplicateEscalation` at line 1158 and by `recordDuplicateEscalation` at
+  line 1187.
+- `openEscalationStandDownReason` is exported from `src/run-task.ts` at line 9895 and used at
+  line 10181. The quoted source comment at line 938 above points at it.

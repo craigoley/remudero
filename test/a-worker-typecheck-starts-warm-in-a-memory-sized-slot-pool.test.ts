@@ -171,7 +171,8 @@ test("a cold typecheck waits while the memory headroom cannot hold its peak plus
   const tight = { dir: slots, slots: 2, waitBoundMs: 0, memoryHeadroom: () => 1.5 * TYPECHECK_COLD_PEAK_BYTES, log: () => {} };
   assert.equal(runTypecheck(project.dir, [], { spawn: fakeTsc, testSlot: tight, log: (line) => short.push(line) }), 0);
   assert.match(short.join("\n"), /"slot":"wait_bound_exceeded"/, "two peaks do not fit in the headroom, so it did not take the free slot");
-  assert.match(short.join("\n"), /memory headroom 3840 MiB < 5120 MiB/);
+  const mib = (bytes: number) => Math.round(bytes / 1024 ** 2);
+  assert.match(short.join("\n"), new RegExp(`memory headroom ${mib(1.5 * TYPECHECK_COLD_PEAK_BYTES)} MiB < ${mib(2 * TYPECHECK_COLD_PEAK_BYTES)} MiB`));
   assert.deepEqual(during[0]?.map((r) => r.label), [NPM_TYPECHECK_SLOT_LABEL], "it ran unslotted, never refused");
 
   const roomy = { ...tight, memoryHeadroom: () => 2 * TYPECHECK_COLD_PEAK_BYTES };

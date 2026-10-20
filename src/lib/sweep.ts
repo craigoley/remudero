@@ -17,7 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeployDeps } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
@@ -424,8 +424,17 @@ export function isHostGapCriterion(
   );
 }
 
-/** One host-gap re-review already given this head: when requested, and the grades the superseded review carried. */
-export interface HostGapRereview { atMs: number; skips: readonly string[] }
+/** An attributed host-gap attempt. Missing `completed` preserves the prevalidated helper API. */
+export interface HostGapRereview { atMs: number; skips: readonly string[]; attemptId?: string; completed?: boolean }
+export interface HostGapAttribution {
+  state: "complete" | "incomplete";
+  currentInputKnown: boolean;
+  unattributedRequests: number;
+  incompleteAttempts: number;
+  unboundAdmissions: number;
+  unboundTerminals: number;
+}
+const completedHostGapCount = (history: readonly HostGapRereview[]): number => history.filter(r => r.completed !== false).length;
 
 /** The host problem behind a grade — the sentence an escalation carries. */
 export function hostGapProblem(skip: string): string {
@@ -449,6 +458,7 @@ export function hostGapRereviewWaitMs(observedReviewMs: number, priorRereviews: 
 
 export interface HostGapRereviewState {
   history: readonly HostGapRereview[];
+  attribution?: HostGapAttribution;
   skips: readonly string[];
   lastReviewAtMs?: number;
   observedReviewMs: number;
@@ -469,17 +479,18 @@ export function hostGapProgressInput(
 ): FixProgressInput {
   const currentRed = sortedUnique(state.skips.map((skip) => `host-gap:${skip}`));
   const rounds = state.history.map((entry, index) => ({
-    id: `host-gap:${index}`, dispatchedHead: base.headSha, pushedHead: base.headSha,
-    redBefore: sortedUnique(entry.skips.map((skip) => `host-gap:${skip}`)), completed: true,
+    id: entry.attemptId ?? `host-gap:${index}`, dispatchedHead: base.headSha, pushedHead: base.headSha,
+    redBefore: sortedUnique(entry.skips.map((skip) => `host-gap:${skip}`)), completed: entry.completed !== false,
   }));
   rounds.forEach((round, index) => Object.assign(round, { redAfter: rounds[index + 1]?.redBefore ?? currentRed }));
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-  return { taskId: base.taskId, prNumber: base.prNumber, headSha: base.headSha, strikesSpent: rounds.length, currentRed,
+  const completed = rounds.filter(r => r.completed);
+  return { taskId: base.taskId, prNumber: base.prNumber, headSha: base.headSha, strikesSpent: completed.length, currentRed,
     rounds: rounds as FixProgressInput["rounds"], formerCeiling: 1,
-    parkedReason: `host-gap-rereview: ${rounds.length} prior re-reviews, none ran a proof`,
-    signals: { noOpRounds: rounds.length,
-      identicalRedSets: rounds.filter((round) => same(round.redBefore, (round as { redAfter?: string[] }).redAfter)).length,
-      identicalDiffs: 0, oscillating: false, refusedRounds: 0, incompleteRounds: 0, reviewerOnlyFailurePersists: 0 } };
+    parkedReason: `host-gap-rereview: ${completed.length} completed re-reviews, ${rounds.length - completed.length} incomplete`,
+    signals: { noOpRounds: completed.length,
+      identicalRedSets: completed.filter((round) => same(round.redBefore, (round as { redAfter?: string[] }).redAfter)).length,
+      identicalDiffs: 0, oscillating: false, refusedRounds: 0, incompleteRounds: rounds.length - completed.length, reviewerOnlyFailurePersists: 0 } };
 }
 
 /** W1-T7837 — next step for a capped verdict whose every proof hit a host gap: never a body or shard
@@ -489,10 +500,10 @@ export async function planHostGapRereview(
   opts: FixProgressWitness & { judge?: FixProgressJudge; input: FixProgressInput; ledger?: readonly Record<string, unknown>[];
     log?: (step: string, fields: Record<string, unknown>) => void },
 ): Promise<HostGapRereviewAction> {
-  const prior = state.history.length;
+  const prior = completedHostGapCount(state.history);
   const problems = sortedUnique(state.skips.map(hostGapProblem)).join(", ");
   const anchor = Math.max(state.lastReviewAtMs ?? Number.NEGATIVE_INFINITY,
-    ...state.history.map((entry) => entry.atMs));
+    ...state.history.filter(entry => entry.completed !== false).map((entry) => entry.atMs));
   const waitMs = hostGapRereviewWaitMs(state.observedReviewMs, prior);
   if (Number.isFinite(anchor) && state.nowMs < anchor + waitMs) {
     return { kind: "hold", reason: `capped review could not run its proofs (${problems}) — a host gap, not a body defect; ` +
@@ -1534,10 +1545,10 @@ export interface BuildSweepEffectsDeps {
   plan: Plan;
   log: (step: string, extra?: Record<string, unknown>) => void;
   policy?: SweepPolicy;
-  reviewRunner?: (prNumber: number, isPlanFiling?: boolean) => Promise<number>;
+  reviewRunner?: (prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string) => Promise<number>;
   /** W1-T3798 — reuse/discrimination is an explicit mode, so the adapter can run the cheap
    *  deterministic path instead of silently treating both dispositions as a full review. */
-  reviewReuseRunner?: (pr: OpenPrView, mode: ReviewDispatchMode) => Promise<number>;
+  reviewReuseRunner?: (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string) => Promise<number>;
   /** The command the DEFAULT `reviewRunner` above calls. Separate from `reviewRunner` on purpose:
    *  overriding `reviewRunner` replaces the default outright and leaves its opt-in untested, while
    *  this seam keeps the default arm itself — the one that names `executionMode: "semantic"` — as
@@ -1551,7 +1562,7 @@ export interface BuildSweepEffectsDeps {
   reviewCommandImpl?: (
     pr: string,
     args: string[],
-    opts: { executionMode: "semantic"; planOnlyFiling?: boolean },
+    opts: { executionMode: "semantic"; planOnlyFiling?: boolean; reviewAttemptId?: string },
   ) => Promise<number>;
   spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   pushEmptyCommit?: typeof gitPushEmptyCommit;
@@ -2217,10 +2228,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
   // post-review lane still routes through reviewCommand, and nothing but `deps.reviewRunner`
   // can override it.
-  let reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
+  let reviewRunner: NonNullable<BuildSweepEffectsDeps["reviewRunner"]> = (prNumber, isPlanFiling, reviewAttemptId) =>
     reviewCommandImpl(String(prNumber), ["--repo", repo], {
       executionMode: "semantic",
       planOnlyFiling: isPlanFiling,
+      ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
     });
   if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
 
@@ -2818,7 +2830,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // (sweep.ts) still marks `acted:false` + `action_error` on this PR's
     // `sweep.disposed` line — this is a MORE SPECIFIC sibling record, not a
     // replacement for it.
-    postReview: async (pr, mode = { kind: "full-review" }) => {
+    postReview: async (pr, mode = { kind: "full-review" }, reviewAttemptId) => {
       await observePr(pr, "review");
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
@@ -2827,13 +2839,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         review_key: reviewOutcomeKeyForPr(pr),
         review_input_digest: pr.reviewInputDigest,
         review_mode: mode.kind,
+        ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId }),
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
       try {
         const exit =
           mode.kind === "full-review" || !deps.reviewReuseRunner
-            ? await reviewRunner(pr.prNumber, pr.isPlanFiling)
-            : await deps.reviewReuseRunner(pr, mode);
+            ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId)
+            : await deps.reviewReuseRunner(pr, mode, reviewAttemptId);
         log("sweep.post_review.done", {
           pr_number: pr.prNumber,
           head_sha: pr.headSha,
@@ -12572,7 +12585,8 @@ function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined
 }
 
 /** W1-T7837: the ledger step that records one host-gap re-review request. {@link priorActionsFromLedger}
- *  reads it to release the delivered-review key, and {@link hostGapRereviewFacts} to pace the next. */
+ *  reads it to release the delivered-review key; {@link hostGapRereviewFacts} reports unattributed
+ *  demand but derives pacing only from admitted attempts and their terminals. */
 export const HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
 
 /** W1-T7850: the ledger step that records one re-review of a verdict whose POST was refused because its reviewer
@@ -12757,39 +12771,69 @@ const rowMs = (row: Record<string, unknown>): number | undefined => {
   return Number.isNaN(at) ? undefined : at;
 };
 
-/** W1-T7837: what this PR head's own ledger history says about pacing its host-gap re-reviews — the
- *  re-reviews already requested, when the newest review posted, and the longest review duration
- *  observed for this input (a `review.posted` row less the nearest earlier row that started it: an
- *  acted post-review disposition or an earlier re-review request). `undefined` where nothing was dated. */
+/** W1-T10221: demand releases a key, but only an exact admitted attempt can spend a review round.
+ * Numeric review run IDs stay unchanged. A unique per-review carrier binds library-owned refusals;
+ * a missing/ambiguous carrier is incomplete, never a daemon-run or timestamp-order guess. */
 export function hostGapRereviewFacts(
-  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha">,
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha" | "reviewInputDigest">,
   lines: ReadonlyArray<Record<string, unknown>>,
-): { history: HostGapRereview[]; lastReviewAtMs?: number; observedReviewMs?: number } {
-  const history: HostGapRereview[] = [];
-  let lastReviewAtMs: number | undefined;
-  let observedReviewMs: number | undefined;
-  let startedAtMs: number | undefined;
-  for (const line of lines) {
-    if (line.head_sha !== pr.headSha) continue;
-    const at = rowMs(line);
-    if ((line.step === HOST_GAP_REREVIEW_STEP || line.step === REFUSED_POST_HOST_GAP_REREVIEW_STEP) && line.pr_url === pr.prUrl) {
-      if (at !== undefined) {
-        history.push({ atMs: at, skips: Array.isArray(line.skips) ? line.skips.filter((s): s is string => typeof s === "string")
-          : typeof line.host_gap === "string" ? [line.host_gap] : [] });
-        startedAtMs = at;
-      }
-    } else if (line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
-        line.disposition === "post-review" && line.acted === true) {
-      if (at !== undefined) startedAtMs = at;
-    } else if (line.step === "review.posted" && line.pr_url === pr.prUrl && at !== undefined) {
-      lastReviewAtMs = at;
-      if (startedAtMs !== undefined && at >= startedAtMs) {
-        observedReviewMs = Math.max(observedReviewMs ?? 0, at - startedAtMs);
-      }
-      startedAtMs = undefined;
+): { history: HostGapRereview[]; lastReviewAtMs?: number; observedReviewMs?: number; attribution: HostGapAttribution } {
+  const attribution: HostGapAttribution = { state: "complete", currentInputKnown: Boolean(pr.reviewInputDigest), unattributedRequests: 0, incompleteAttempts: 0,
+    unboundAdmissions: 0, unboundTerminals: 0 };
+  if (!pr.reviewInputDigest) return { history: [], attribution: { ...attribution, state: "incomplete" } };
+  const idPattern = new RegExp(`^review-PR${pr.prNumber}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, "i");
+  const validId = (id: unknown): id is string => typeof id === "string" && idPattern.test(id);
+  const scoped = lines.filter(row => row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
+    (row.review_input_digest === undefined || row.review_input_digest === pr.reviewInputDigest));
+  const admissions = new Map<string, { atMs: number; hostGap: boolean; skips: string[] }>();
+  const ambiguous = new Set<string>(), carriers = new Map<string, Set<string>>();
+  let requests = 0;
+  for (const row of scoped) {
+    if (row.step === HOST_GAP_REREVIEW_STEP || row.step === REFUSED_POST_HOST_GAP_REREVIEW_STEP) requests++;
+    if (row.step === "sweep.review_admitted") {
+      const atMs = rowMs(row), id = row.review_attempt_id;
+      if (row.review_input_digest !== pr.reviewInputDigest || !validId(id) || atMs === undefined ||
+        typeof row.host_gap_rereview !== "boolean") { attribution.unboundAdmissions++; continue; }
+      const entry = { atMs, hostGap: row.host_gap_rereview,
+        skips: sortedUnique(Array.isArray(row.skips) ? row.skips.filter((s): s is string => typeof s === "string") : []) };
+      if (admissions.has(id) && JSON.stringify(admissions.get(id)) !== JSON.stringify(entry)) ambiguous.add(id);
+      else admissions.set(id, entry);
+    }
+    if (row.step === "review.provider_provenance" && row.review_input_digest === pr.reviewInputDigest &&
+      typeof row.run_id === "string" && new RegExp(`^review-PR${pr.prNumber}-[0-9]+$`).test(row.run_id) && validId(row.review_attempt_id)) {
+      const ids = carriers.get(row.run_id) ?? new Set<string>();
+      ids.add(row.review_attempt_id); carriers.set(row.run_id, ids);
     }
   }
-  return { history, lastReviewAtMs, observedReviewMs };
+  for (const id of ambiguous) { admissions.delete(id); attribution.unboundAdmissions++; }
+  const terminals = new Map<string, number>();
+  for (const row of scoped) {
+    if (row.step !== "review.posted" && row.step !== "review.post_refused") continue;
+    const atMs = rowMs(row), bound = typeof row.run_id === "string" ? carriers.get(row.run_id) : undefined;
+    const id = row.review_attempt_id === undefined && bound?.size === 1 ? [...bound][0] : row.review_attempt_id;
+    const admission = validId(id) ? admissions.get(id) : undefined;
+    if (row.review_input_digest !== pr.reviewInputDigest || atMs === undefined || !validId(id) ||
+      !admission || atMs < admission.atMs) { attribution.unboundTerminals++; continue; }
+    terminals.set(id, Math.min(terminals.get(id) ?? Number.POSITIVE_INFINITY, atMs));
+  }
+  let lastReviewAtMs: number | undefined;
+  let observedReviewMs: number | undefined;
+  const history: HostGapRereview[] = [];
+  for (const [id, admission] of admissions) {
+    const ended = terminals.get(id);
+    if (ended !== undefined) {
+      lastReviewAtMs = Math.max(lastReviewAtMs ?? Number.NEGATIVE_INFINITY, ended);
+      observedReviewMs = Math.max(observedReviewMs ?? 0, ended - admission.atMs);
+    }
+    if (admission.hostGap) history.push({ attemptId: id, atMs: ended ?? admission.atMs,
+      skips: admission.skips, completed: ended !== undefined });
+  }
+  history.sort((a, b) => a.atMs - b.atMs || a.attemptId!.localeCompare(b.attemptId!));
+  attribution.unattributedRequests = history.length === 0 ? requests : 0;
+  attribution.incompleteAttempts = [...admissions.keys()].filter(id => !terminals.has(id)).length;
+  if (attribution.unattributedRequests + attribution.incompleteAttempts + attribution.unboundAdmissions + attribution.unboundTerminals > 0)
+    attribution.state = "incomplete";
+  return { history, lastReviewAtMs, observedReviewMs, attribution };
 }
 
 /**
@@ -13221,7 +13265,7 @@ export interface SweepDeps {
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
    *  with each review-input key claimed synchronously before scheduling. */
-  postReview?: (pr: OpenPrView, mode?: ReviewDispatchMode) => void | Promise<void>;
+  postReview?: (pr: OpenPrView, mode?: ReviewDispatchMode, reviewAttemptId?: string) => void | Promise<void>;
   /** W1-T3581 — provenance of the module graph THIS daemon process loaded at boot. A stale
    * reviewer-code refusal may bypass its ordinary time backoff only when this narrow predicate
    * proves the loaded code is at or after the refusal's recorded origin/main target. Omitted
@@ -17682,6 +17726,7 @@ export async function runSweep(
     reviewKey: string;
     mode: ReviewDispatchMode;
   }> = [];
+  const hostGapReviews = new Map<string, readonly string[]>();
   /** W1-T9047 — decides a `discriminate-only` mode by main's reach and ledgers one
    *  `sweep.review_reuse_reach` row per decision, a failed read's reason included. */
   const reviewModeWithReach = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<ReviewDispatchMode> => {
@@ -18111,7 +18156,7 @@ export async function runSweep(
     if (hostGapRefusal !== undefined && disposition === "post-review" && !hostGapRefusal.requestedForRefusal) {
       const skips = [hostGapRefusal.hostGap];
       const facts = hostGapRereviewFacts(pr, ledgerLines);
-      const paced = facts.history.length > 0;
+      const paced = completedHostGapCount(facts.history) > 0;
       const hostGapState = { history: facts.history, skips,
         ...(paced ? { lastReviewAtMs: Math.max(facts.lastReviewAtMs ?? Number.NEGATIVE_INFINITY, hostGapRefusal.attemptedAt ?? Number.NEGATIVE_INFINITY) } : {}),
         nowMs: now, observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
@@ -18130,7 +18175,7 @@ export async function runSweep(
             task_id: reviewOutcomeTaskIdFor(pr), step: REFUSED_POST_HOST_GAP_REREVIEW_STEP, pr_number: pr.prNumber,
             pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: reviewKey,
             refusal_at: hostGapRefusal.attemptedAt, host_gap: hostGapRefusal.hostGap,
-            rereview_ordinal: facts.history.length + 1, reason: hostGapPlan.reason });
+            rereview_ordinal: completedHostGapCount(facts.history) + 1, host_gap_attribution: facts.attribution, reason: hostGapPlan.reason });
         }
         prior.reviewDelivered.delete(reviewKey);
         hostGapRefusal.requestedForRefusal = true;
@@ -18142,6 +18187,8 @@ export async function runSweep(
         if (hostGapPlan.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
       }
     }
+    if (hostGapRefusal !== undefined && disposition === "post-review")
+      hostGapReviews.set(reviewOutcomeKeyForPr(pr), [hostGapRefusal.hostGap]);
     // W1-T9970 — a review failure the fix lane handed back is re-reviewed once on a newer reviewer image.
     if (disposition === "blocked-fixable") {
       runningImage ??= { sha: (deps.runtimeImageSha ?? readRuntimeImageSha)() };
@@ -18438,9 +18485,10 @@ export async function runSweep(
             appendLine(deps.ledgerPath, { ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId,
               task_id: reviewOutcomeTaskIdFor(pr), step: HOST_GAP_REREVIEW_STEP, pr_number: pr.prNumber,
               pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: reviewKey,
-              skips, rereview_ordinal: facts.history.length + 1, reason: hostGap.reason });
+              skips, rereview_ordinal: completedHostGapCount(facts.history) + 1, host_gap_attribution: facts.attribution, reason: hostGap.reason });
           }
           prior.reviewDelivered.delete(reviewKey);
+          hostGapReviews.set(reviewKey, skips);
           disposition = "post-review";
           reason = hostGap.reason;
         } else {
@@ -20729,6 +20777,8 @@ export async function runSweep(
       );
       return;
     }
+    const reviewAttemptId = `review-PR${job.pr.prNumber}-${randomUUID()}`;
+    const hostGapSkips = hostGapReviews.get(job.reviewKey);
     appendLine(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: job.pr.taskId ?? "SWEEP",
@@ -20739,6 +20789,9 @@ export async function runSweep(
       review_key: job.reviewKey,
       review_input_digest: job.pr.reviewInputDigest,
       review_mode: job.mode.kind,
+      review_attempt_id: reviewAttemptId,
+      host_gap_rereview: hostGapSkips !== undefined,
+      ...(hostGapSkips === undefined ? {} : { skips: [...hostGapSkips] }),
       ...(incompletePromiseHarvestFromLedger(job.pr, ledgerLines) ? { prior_cause: "promise-harvest-incomplete" } : {}),
       surface: deps.repairAdmissionSurface ?? "full",
       observation_version: 1,
@@ -20771,7 +20824,7 @@ export async function runSweep(
         if (postReview) {
           try {
           const reviewStartedAtMs = performance.now();
-          await postReview(job.pr, job.mode);
+          await postReview(job.pr, job.mode, reviewAttemptId);
           noteReviewDuration(performance.now() - reviewStartedAtMs);
           } catch (e) {
             acted = false;
@@ -20810,6 +20863,7 @@ export async function runSweep(
                 // retain the historical empty-task fallback.
                 task_id: reviewOutcomeTaskIdFor(job.pr),
                 step: "review.post_refused",
+                review_attempt_id: reviewAttemptId,
                 head_sha: job.pr.headSha,
                 ...(job.pr.reviewInputDigest !== undefined
                   ? { pr_url: job.pr.prUrl, review_input_digest: job.pr.reviewInputDigest }
@@ -22704,6 +22758,10 @@ export interface CreditBackfillSummary {
   /** Candidates suppressed by a durable backfill receipt. Summary-only so the fixed path remains
    * measurable without restoring the old per-candidate log loop. */
   durableReceiptSuppressions: number;
+  /** W1-T10048: rotations the walk loaded this pass, and how many came from a durable digest rather than the archive. */
+  creditScanRotationsLoaded: number;
+  creditScanDigestHits: number;
+  creditScanDigestMisses: number;
 }
 
 /** Credit-backfill-specific persistence seams. Production shares the existing atomic credit store;
@@ -22854,6 +22912,9 @@ export async function runCreditBackfill(
     creditScanFilesRead: creditScan.filesRead,
     creditScanUnknown,
     durableReceiptSuppressions,
+    creditScanRotationsLoaded: creditScan.rotationsLoaded,
+    creditScanDigestHits: creditScan.digestHits,
+    creditScanDigestMisses: creditScan.digestMisses,
   };
   log("sweep.credit_backfill.summary", {
     total: summary.total,
@@ -22864,6 +22925,9 @@ export async function runCreditBackfill(
     credit_scan_files_read: summary.creditScanFilesRead,
     credit_scan_unknown: summary.creditScanUnknown,
     durable_receipt_suppressions: summary.durableReceiptSuppressions,
+    credit_scan_rotations_loaded: summary.creditScanRotationsLoaded,
+    credit_scan_digest_hits: summary.creditScanDigestHits,
+    credit_scan_digest_misses: summary.creditScanDigestMisses,
   });
   return summary;
 }
@@ -23747,7 +23811,12 @@ export type EscalationTriageHistoryReader = ((stateDir: string) => Promise<Ledge
   current(stateDir: string): LedgerUnionRecordRead;
   /** W1-T9710: the last union pass's loop reads, parsed lines and seeded rotations. */
   lastPass(): IncrementalUnionPass;
+  /** W1-T10046: the last call's off-loop load: the rotations it loaded, and how many a durable digest answered. */
+  lastLoad(): EscalationTriageHistoryLoad;
 };
+
+/** What one {@link EscalationTriageHistoryReader} call loaded off the loop; a restarted reader's digest hits show here. */
+export interface EscalationTriageHistoryLoad { rotations: number; digestHits: number; digestMisses: number }
 
 /**
  * Builds the rung's history reader, once per daemon start (`buildSweepHook`), or once per call where no
@@ -23778,8 +23847,10 @@ export function createEscalationTriageHistoryReader(
     return `${s.size}:${s.mtimeMs}`;
   };
   let loaded = new Map<string, string>();
+  let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
   const current = (stateDir: string): LedgerUnionRecordRead => union(stateDir, { step: steps, refuseIncomplete: true });
   return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
+    lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
     let names: string[] = [];
     try {
       names = fsDeps.readdirSync(stateDir);
@@ -23804,6 +23875,8 @@ export function createEscalationTriageHistoryReader(
         holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       await memo.load(fresh);
+      const { digestHits = 0, digestMisses = 0 } = memo.retention();
+      lastLoad = { rotations: fresh.length, digestHits, digestMisses };
       // W1-T9710: hand the union what the load just kept, so its pass never re-reads those digests on the loop.
       for (const entry of fresh) {
         const key = stats.get(entry.path) as string;
@@ -23813,7 +23886,7 @@ export function createEscalationTriageHistoryReader(
     }
     loaded = stats;
     return current(stateDir);
-  }, { current, lastPass: union.lastPass });
+  }, { current, lastPass: union.lastPass, lastLoad: (): EscalationTriageHistoryLoad => ({ ...lastLoad }) });
 }
 
 /** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */

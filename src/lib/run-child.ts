@@ -11,6 +11,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rea
 import { basename, join } from "node:path";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
+import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import { type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions } from "./engine-tree.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
@@ -654,6 +655,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   let dir: string;
   let launch: EngineChildLaunch;
   let engineSha = "";
+  const nodeArgs = childHeapPolicyArgs();
   try {
     if (listEngines(input.stateRoot).length === 0) return unavailable("no engine tree has been built yet");
     const mainSha = (await (ports.mainSha ?? mainTipSha)(input.repoDir)).trim();
@@ -695,7 +697,8 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       reservationId: reservation.id ?? "", options: input.options,
     });
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
-    child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, launch.argv, {
+    // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
+    child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
       cwd: launch.cwd, env: { ...(ports.env ?? process.env) }, stderrFd,
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
@@ -721,6 +724,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   const abort = (): Promise<AbortRunChildOutcome> => abortRunChild(dir, abortPorts);
   log(RUN_CHILD_SPAWNED_STEP, {
     task_id: input.taskId, run_id: runId, child_pid: pid, entry_kind: launch.kind, entry_reason: launch.reason, engine_sha: engineSha,
+    node_args: nodeArgs,
   });
   const onAbort = (): void => {
     abort().catch((error: unknown) => log(RUN_CHILD_ABORT_STEP, { task_id: input.taskId, run_id: runId, error: reasonOf(error) }));

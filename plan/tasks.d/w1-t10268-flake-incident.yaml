@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -24,3 +24,13 @@
     CI runs: 39078684989, 39097405238, 39099810017, 39346158967, 39355044663.
     Retry outcomes: 4 recovered on retry, 1 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows, 5 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filing proposes a bounded repair in one existing test file, with acceptance requiring a test that forces the failing order and pins the cause."
+      - "Harness evidence reports failures across four unrelated PRs and four recoveries on retry, supporting investigation of intermittent failure."
+      - "The declared scope requests no secrets, permissions, deletion, deployment or review-policy changes, irreversible action, or operator preference decision."
+    judged_at: "2026-10-20T16:37:01.253Z"
+    pin: "9b0e40bc884e59edd482e1927075abb438bab1d4553578645044dd43808cd99d"

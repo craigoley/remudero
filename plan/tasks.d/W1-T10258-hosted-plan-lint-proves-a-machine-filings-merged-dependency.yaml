@@ -57,3 +57,11 @@
   falsifier: |
     Remove the producer step. The first test must report "dependency credit unavailable
     (UNKNOWN)" for W1-T9658-shaped evidence.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-20T16:30:44.104Z"
+    pin: "d205f2762aa11746d52e94483ace346ed2a0e3ed8fd9148701e2fcf7b76cec12"
