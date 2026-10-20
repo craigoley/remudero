@@ -38,6 +38,12 @@ export const CHILD_ENTRIES = Object.freeze([
 export const WORKER_ENTRIES = Object.freeze([
   "src/lib/read-model-worker.ts", "src/lib/read-model-slow-lane.ts", "src/lib/status.ts", "src/lib/board-worker.ts",
   "src/lib/tick-read-worker.ts",
+  // bundlemain: every other module that starts a worker from its own URL. A bundled main has no tsx loader, so each
+  // needs its own bundle: the benchmark cohort cadence, the git credential socket threads, the config measurement, and
+  // the console projection, repository telemetry and plan reload workers that serve-side views start.
+  // test/daemon/the-daemon-main-starts-from-its-bundle.test.ts keeps this list complete.
+  "src/lib/benchmark-cohort.ts", "src/lib/secret-boundary.ts", "src/lib/config-gardener.ts", "src/lib/console-projection-worker.ts",
+  "src/lib/repo-dashboard-route.ts", "src/lib/serve-plan-reload.ts",
 ]);
 /** A worker module's bundle file name: `src/lib/board-worker.ts` → `worker-lib-board-worker.mjs`. */
 export const workerBundleName = (module) => `worker-${module.replace(/^src\//, "").replace(/\.[cm]?[jt]sx?$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.mjs`;
@@ -48,7 +54,7 @@ export const MANIFEST_NAME = "manifest.json";
  * Bump this when the bundling recipe changes: a bundle from an older recipe must stop matching. 3: the bundled flag and
  * worker bundles. 4: keepNames, so a bundled function's stack frame carries its source name, not esbuild's renaming.
  */
-export const RECIPE_VERSION = 4;
+export const RECIPE_VERSION = 5;
 /** The manifest layout this file writes and the only one {@link childEntryIsCurrent} accepts (2: per-entry `sha256`). W1-T8777's
  *  `workers` list is additive: a manifest without one holds no worker bundle, and recipe 3 already retires older builds. */
 export const MANIFEST_SCHEMA = 2;
@@ -154,7 +160,8 @@ function moduleUrlPlugin(bundleDir) {
       // src/ also holds .mjs modules (e.g. src/lib/reservation-chain.mjs), so JS gets the prelude too.
       build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, (args) => {
         const rel = relative(bundleDir, args.path).split(sep).join("/");
-        const prelude = `const __rmd_module_url = new URL(${JSON.stringify(rel)}, __rmd_bundle_url).href;\n`;
+        // On the module's first line, not a line of its own: a linked map then names each frame's real source line.
+        const prelude = `const __rmd_module_url = new URL(${JSON.stringify(rel)}, __rmd_bundle_url).href; `;
         const ts = /\.[cm]?tsx?$/.test(args.path);
         const loader = args.path.endsWith("x") ? (ts ? "tsx" : "jsx") : ts ? "ts" : "js";
         const text = readFileSync(args.path, "utf8");
@@ -225,10 +232,17 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
       // esbuild renames a symbol that collides across the merged modules (`spawn` -> `spawn4`); keepNames restores each
       // function's own name, which V8 prints in a stack frame, so serve.memory names a bundled spawn site as tsx does.
       keepNames: true,
+      // bundlemain (operator ruling 2026-10-19): a LINKED map beside each bundle, so a process started with
+      // --enable-source-maps names its .ts frames; without sourcesContent, since a stack needs only the mappings.
+      sourcemap: "linked",
+      sourcesContent: false,
       plugins: [moduleUrlPlugin(layout)],
     });
     const output = result.outputFiles?.find((f) => f.path === join(layout, bundle));
+    const map = result.outputFiles?.find((f) => f.path === join(layout, `${bundle}.map`));
     rmSync(outfile, { force: true });
+    rmSync(`${outfile}.map`, { force: true });
+    if (map) writeFileSync(`${outfile}.map`, map.contents);
     if (output) writeFileSync(outfile, output.contents);
     const payload = readIfPresent(outfile) ?? Buffer.alloc(0);
     if (payload.length === 0) throw new Error(`${label}: esbuild reported success but wrote no bundle at ${outfile}`);
@@ -362,6 +376,84 @@ export function workerBundle(root, module, { outDir = OUT_DIR, treeHash, verifyS
   }
 }
 
+// ── bundlemain: the daemon's own main starts from the run-task bundle (operator ruling 2026-10-19) ─────────────────
+
+/** The `rmd` verbs whose long-lived main process bin/rmd starts from the run-task bundle when it is current. */
+export const BUNDLED_MAIN_VERBS = Object.freeze(["daemon"]);
+/** Written beside the bundle before a bundled main starts; settled by that main's first tick (ADR 0006 extension). */
+export const MAIN_ATTEMPT_NAME = "main-attempt.json";
+/** Present beside the bundle: every bundled main starts on tsx instead (the per-tree off switch). */
+export const MAIN_OFF_NAME = "main-entry.off";
+/** The env var bin/rmd hands the started main, `<kind>:<reason>`, so its boot row names the choice. */
+export const MAIN_ENTRY_ENV = "RMD_MAIN_ENTRY";
+
+const tsx = (reason) => ({ kind: "tsx", reason });
+
+/** The attempt marker beside the bundle, or null when there is none or it cannot be read as one. */
+export function readMainAttempt(root, outDir = OUT_DIR) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(resolve(root, outDir), MAIN_ATTEMPT_NAME), "utf8"));
+    return parsed && typeof parsed === "object" && typeof parsed.sourceHash === "string" ? parsed : null;
+  } catch (err) {
+    if (err?.code === "ENOENT") return null;
+    return { sourceHash: "unreadable", settled: false, reason: String(err?.code ?? err?.message ?? err).slice(0, 80) };
+  }
+}
+
+/** A bundled main reached its first tick: its source hash is proven to boot, and later boots of it stay bundled. */
+export function settleMainAttempt(root, outDir = OUT_DIR, now = () => new Date().toISOString()) {
+  const attempt = readMainAttempt(root, outDir);
+  if (!attempt || attempt.settled === true || attempt.sourceHash === "unreadable") return false;
+  writeAtomic(join(resolve(root, outDir), MAIN_ATTEMPT_NAME), `${JSON.stringify({ ...attempt, settled: true, settledAt: now() })}\n`);
+  return true;
+}
+
+/**
+ * Which entry `rmd <verb>` starts from in `root`: the run-task bundle under plain node when it is current for the tree
+ * AND every declared worker bundle is current AND its linked map is beside it AND no bundled boot of this source has
+ * failed before its first tick; tsx on any doubt, with the reason. A stale or missing build is built once here first.
+ * Never throws. A bundle choice writes the attempt marker; the main settles it at its first tick
+ * ({@link settleMainAttempt}), so an unsettled attempt for the same source demotes the next boot to tsx.
+ */
+export async function mainEntry(root, verb, { outDir = OUT_DIR, build = buildChildEntries, now = () => new Date().toISOString() } = {}) {
+  try {
+    root = resolve(root);
+    if (!BUNDLED_MAIN_VERBS.includes(verb)) return tsx("verb-not-bundled");
+    const dir = resolve(root, outDir);
+    if (existsSync(join(dir, MAIN_OFF_NAME))) return tsx("switched-off");
+    let treeHash = sourceHash(root);
+    let verdict = childEntryIsCurrent(root, "run-task", { outDir, treeHash });
+    let built = false;
+    // A current bundle without its map (a build from before recipe 5's maps) is rebuilt too: source maps stay on.
+    if (!verdict.current || !existsSync(`${verdict.bundle}.map`)) {
+      try {
+        await build({ root, outDir, layoutDir: outDir });
+      } catch (err) {
+        return tsx(`build-failed: ${String(err?.message ?? err).slice(0, 120)}`);
+      }
+      built = true;
+      treeHash = sourceHash(root);
+      verdict = childEntryIsCurrent(root, "run-task", { outDir, treeHash });
+      if (!verdict.current) return tsx(`stale-after-build: ${verdict.reason}`);
+    }
+    for (const module of WORKER_ENTRIES) {
+      const worker = workerBundle(root, module, { outDir, treeHash });
+      if (!worker.current) return tsx(`worker-not-bundled: ${module}: ${worker.reason}`);
+    }
+    if (!existsSync(`${verdict.bundle}.map`)) return tsx("map-missing");
+    const attempt = readMainAttempt(root, outDir);
+    if (attempt && attempt.sourceHash === treeHash && attempt.settled !== true) {
+      return tsx(`demoted: a bundled ${attempt.verb ?? verb} boot of this source never reached its first tick`);
+    }
+    if (!attempt || attempt.sourceHash !== treeHash) {
+      writeAtomic(join(dir, MAIN_ATTEMPT_NAME), `${JSON.stringify({ sourceHash: treeHash, verb, settled: false, at: now() })}\n`);
+    }
+    return { kind: "bundle", reason: built ? "built-at-boot" : verdict.reason, bundle: verdict.bundle };
+  } catch (err) {
+    return tsx(`resolver-error: ${String(err?.code ?? err?.message ?? err).slice(0, 80)}`);
+  }
+}
+
 async function main(argv) {
   const rootAt = argv.indexOf("--root");
   const root = rootAt >= 0 ? resolve(argv[rootAt + 1] ?? ".") : SELF_ROOT;
@@ -373,6 +465,13 @@ async function main(argv) {
       process.stderr.write(`CHILD-ENTRY HASH FAILED: ${err?.message ?? err}\n`);
       return 1;
     }
+  }
+  const mainAt = argv.indexOf("--main-entry");
+  if (mainAt >= 0) {
+    // bin/rmd reads one line, `<kind>\t<reason>\t<bundle>`, and execs the bundle only for kind `bundle`.
+    const choice = await mainEntry(root, argv[mainAt + 1] ?? "");
+    process.stdout.write(`${choice.kind}\t${choice.reason.replace(/[\t\n]/g, " ")}\t${choice.bundle ?? ""}\n`);
+    return 0;
   }
   if (argv.includes("--check")) {
     const results = CHILD_ENTRIES.map((e) => ({ name: e.name, ...childEntryIsCurrent(root, e.name) }));
