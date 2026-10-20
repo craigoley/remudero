@@ -14,7 +14,7 @@
     - src/lib/serve-slots.ts
     - test/a-serve-slot-builds-its-worker-bundles.test.ts
     - test/console-api/serve/a-memory-deferred-serve-slot-reuses-only-current-bundles.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

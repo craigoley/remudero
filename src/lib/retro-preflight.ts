@@ -58,10 +58,10 @@ export const RETRO_PREFLIGHT_STALL_MS = 15 * 60 * 1000;
  */
 export const RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS = 60 * 60 * 1000;
 /**
- * Exit classes produced by the harness's own BOUNDS rather than by the suite under test
- * (W1-T2803). Each names a run that was terminated or never started: any failing test it names is
- * a subset of an unfinished run, and a second attempt meets the same bound. {@link
- * runRetroPrepublishPreflight} stands down on these instead of resuming the Architect.
+ * Exit classes produced by the harness's own bounds rather than by the suite under test
+ * (W1-T2803). A terminated run may retain partial assertion or cancellation evidence, but it
+ * has no completed suite verdict. {@link runRetroPrepublishPreflight} stands down rather than
+ * retrying against an unchanged bound. `tests_failed` still enters the repair rung.
  */
 const BOUND_FAILURE_CLASSES = new Set(["process_timeout", "output_limit_exceeded", "process_spawn_failed"]);
 /** W1-T10144: the diff classes ci.yml's plan-reading lane narrows by changed paths (W1-T5698). */
@@ -666,23 +666,28 @@ export async function runRetroPrepublishPreflight(
   logAttempt(opts, 1, first);
   if (first.ok) return { ok: true, attempts: 1, suiteCount: first.suiteCount, repaired: false };
 
-  // W1-T2803: a BOUND failure stands down — a second attempt would meet the same bound for the same
-  // wall clock. W1-T10144: its reason is derived from the evidence: a run the bound stopped after
-  // a completed pass names real failing tests, so "no failing test" would be false on that row.
-  // ORDINARY failures are untouched: `tests_failed` still repairs and re-runs.
+  // W1-T2803: a bound failure stands down, even if it retained assertion names. Those names are
+  // partial evidence, not a completed suite verdict. W1-T10144: report the names without claiming
+  // the evidence is empty. Ordinary `tests_failed` still repairs and re-runs.
   if (BOUND_FAILURE_CLASSES.has(first.failure!.exitClass)) {
     const named = first.failure!.failingTests.length;
+    const interruption = first.failure!.exitClass === "process_spawn_failed"
+      ? "preflight could not start"
+      : "preflight hit an execution bound";
     opts.log("retro.preflight_repair_stood_down", {
       attempt: 1,
       exit_class: first.failure!.exitClass,
       elapsed_ms: first.elapsedMs,
       suite_count: first.suiteCount,
       failing_count: named,
+      retained_failing_test_names: named,
+      retained_cancelled_test_names: first.failure!.cancelledTests.length,
+      has_summary: first.failure!.hasSummary,
       reason: named === 0
-        ? "a bound failure carries no failing test and names no plan defect — standing down rather " +
-          "than resuming the producing session against empty evidence"
+        ? `the ${first.failure!.exitClass} failure carries no failing test name in retained output — ` +
+          `${interruption}; the suite verdict is incomplete, so standing down under the same conditions`
         : `the ${first.failure!.exitClass} bound stopped the run after it named ${named} failing test(s) — ` +
-          "a second attempt meets the same bound, so standing down rather than resuming the producing session",
+          `${interruption}; retained output is not a complete plan verdict, so standing down under the same conditions`,
       ...provenanceFields(opts.provenance),
     });
     return { ok: false, attempts: 1, suiteCount: first.suiteCount, repaired: false };

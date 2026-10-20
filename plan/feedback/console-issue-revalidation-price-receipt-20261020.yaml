@@ -1,0 +1,50 @@
+id: console-issue-revalidation-price-receipt-20261020
+ts: 2026-10-20T19:02:15.974Z
+raw: "Approved separate console telemetry follow-up: preserve the returned
+  monetary evidence of already-executed issue-revalidation judge attempts before
+  the default composition discards everything but text. Submitted by Codex for
+  the operator, not as an operator risk ruling or model verdict. Current source
+  issueRevalidationJudgeText returns only .text from its benchmarked
+  non-dispatch spawn; the existing assignment/attempt coverage receipt is not
+  itself a canonical monetary producer. A controlled retained-window audit
+  corroborates returned API prices without a dedicated monetary row joined to
+  those exact identities; do not publish operator logs, topology, live
+  identifiers or amounts, infer invoice totals, or turn coverage-only
+  worker.attempt rows into new money. This is separate from W1-T10160 / plan PR
+  #13008, which is narrowly approved for machine-filing judgments and remains
+  owned elsewhere. Do not expand that task or compete with its source owner.
+  Ground against current main, every open head, existing producers and claims;
+  file only a separately scoped atomically reserved task through ordinary
+  risk/scope/review/CI gates, or report positive existing ownership. Preserve
+  each actual final, fallback, malformed/interrupted and failed attempt before
+  parsing, using its immutable selection-assignment/run identity and exact
+  gardener parent provenance. Once-only receipts must deduplicate repeated
+  callbacks/same result objects and immutable attempts without collapsing
+  distinct attempts. Known nonzero price and real API zero remain reported;
+  absent price stays unknown; subscription placeholder zero and notional
+  estimates never become billed monetary zero. A telemetry failure must not
+  change the verdict, retry or provider result. Enumerate existing
+  observer/producer paths before choosing a minimal implementation; no
+  final-result-only logger that loses earlier paid fallback attempts,
+  double-counted canonical spend or guessed historical backfill. Test the real
+  default composition with only external provider work faked, collector
+  once-only accounting, foreign/ambiguous parent unattribution, all price modes,
+  malformed/interrupted/fallback results and dedup controls. Require complete
+  physical suite summaries, same-committed-tree instrumented coverage, actual
+  stored executable acceptance proofs, a deletion/restoration falsifier,
+  governed review, current-head hosted CI and protected merge. Deployment, a
+  natural adopted real call, cached API and signed-in UI are separate
+  follow-ups. Add no SDK/model call, retry, provider/model/mount, permission,
+  budget, billing-policy, cadence, service or guard change and no synthetic
+  production call for evidence. This is an intake work request, not a ruling,
+  task execution credit or live action. Keep CI infrastructure and Azure memory
+  with their existing owners. Field Trials is out of scope."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:57bc82a1-5811-4f10-8b43-a59df5554978
+thread_id: null

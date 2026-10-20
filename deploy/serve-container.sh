@@ -669,22 +669,29 @@ serve_replace_admission() {
   done
   { admit_number "${candidate}" && [ "${candidate%%.*}" -gt 0 ]; } ||
     serve_replace_hold peak_unknown "no positive candidate cold-start peak was given (${stage})"
-  local p1 p2 avail some full
+  local p1 p2 z1 z2 zbasis avail some full
   p1="$(awk '$1 == "pswpin" { print $2 }' "${ADMIT_VMSTAT_PATH}" 2>/dev/null || true)"
+  z1="$(awk '$1 == "zswpin" { print $2; f = 1 } END { if (!f) print 0 }' "${ADMIT_VMSTAT_PATH}" 2>/dev/null || true)"
   sleep "${ADMIT_SAMPLE_S}"
   p2="$(awk '$1 == "pswpin" { print $2 }' "${ADMIT_VMSTAT_PATH}" 2>/dev/null || true)"
+  z2="$(awk '$1 == "zswpin" { print $2; f = 1 } END { if (!f) print 0 }' "${ADMIT_VMSTAT_PATH}" 2>/dev/null || true)"
+  zbasis="zswpin"
+  awk '$1 == "zswpin" { f = 1 } END { exit !f }' "${ADMIT_VMSTAT_PATH}" 2>/dev/null || zbasis="no zswpin line (zswap not compiled in): 0"
   avail="$(awk '$1 == "MemAvailable:" { printf "%d\n", $2 / 1024 }' "${ADMIT_MEMINFO_PATH}" 2>/dev/null || true)"
   some="$(awk '$1 == "some" { for (i = 2; i <= NF; i++) if ($i ~ /^avg10=/) { sub(/^avg10=/, "", $i); print $i } }' "${ADMIT_PSI_PATH}" 2>/dev/null || true)"
   full="$(awk '$1 == "full" { for (i = 2; i <= NF; i++) if ($i ~ /^avg10=/) { sub(/^avg10=/, "", $i); print $i } }' "${ADMIT_PSI_PATH}" 2>/dev/null || true)"
   admit_number "${p1}" && admit_number "${p2}" || serve_replace_hold pressure_unread "${ADMIT_VMSTAT_PATH} pswpin unreadable (${stage})"
+  admit_number "${z1}" && admit_number "${z2}" || serve_replace_hold pressure_unread "${ADMIT_VMSTAT_PATH} zswpin unreadable (${stage})"
   admit_number "${avail}" || serve_replace_hold pressure_unread "${ADMIT_MEMINFO_PATH} MemAvailable unreadable (${stage})"
   admit_number "${some}" && admit_number "${full}" || serve_replace_hold pressure_unread "${ADMIT_PSI_PATH} some/full avg10 unreadable (${stage})"
   admit_number "${ADMIT_SAMPLE_S}" && awk -v s="${ADMIT_SAMPLE_S}" 'BEGIN { exit !(s > 0) }' ||
     serve_replace_hold pressure_unread "no swap-in window (${stage})"
-  local rate
-  rate="$(awk -v a="${p1}" -v b="${p2}" -v s="${ADMIT_SAMPLE_S}" 'BEGIN { d = b - a; if (d < 0) d = 0; printf "%.1f\n", d / s }')"
+  local rate disk_rate zswap_rate
+  disk_rate="$(awk -v a="${p1}" -v b="${p2}" -v s="${ADMIT_SAMPLE_S}" 'BEGIN { d = b - a; if (d < 0) d = 0; printf "%.1f\n", d / s }')"
+  zswap_rate="$(awk -v a="${z1}" -v b="${z2}" -v s="${ADMIT_SAMPLE_S}" 'BEGIN { d = b - a; if (d < 0) d = 0; printf "%.1f\n", d / s }')"
+  rate="$(awk -v a="${disk_rate}" -v b="${zswap_rate}" 'BEGIN { printf "%.1f\n", a + b }')"
   awk -v r="${rate}" -v m="${swap_max}" 'BEGIN { exit !(r > m) }' &&
-    serve_replace_hold swap_in "swap-in ${rate} pages/s > ${swap_max} (${stage})"
+    serve_replace_hold swap_in "swap-in ${rate} pages/s (disk ${disk_rate} + zswap ${zswap_rate}, ${zbasis}) > ${swap_max} (${stage})"
   awk -v a="${some}" -v b="${some_max}" -v c="${full}" -v d="${full_max}" 'BEGIN { exit !(a > b || c > d) }' &&
     serve_replace_hold psi "memory PSI some avg10 ${some} (max ${some_max}), full avg10 ${full} (max ${full_max}) (${stage})"
   local freed need
@@ -693,7 +700,7 @@ serve_replace_admission() {
   need="$(awk -v r="${reserve}" -v c="${candidate}" -v f="${freed}" 'BEGIN { x = c - f; if (x < 0) x = 0; printf "%d\n", r + x }')"
   [ "${avail}" -ge "${need}" ] ||
     serve_replace_hold host_headroom "MemAvailable ${avail} MiB < need ${need} MiB (reserve ${reserve} + candidate ${candidate} - freed ${freed}) (${stage})"
-  echo "serve-container: replace admitted (${stage}) — MemAvailable ${avail} MiB >= need ${need} MiB, swap-in ${rate} pages/s, PSI some ${some} full ${full}"
+  echo "serve-container: replace admitted (${stage}) — MemAvailable ${avail} MiB >= need ${need} MiB, swap-in ${rate} pages/s (disk ${disk_rate} + zswap ${zswap_rate}, ${zbasis}), PSI some ${some} full ${full}"
 }
 
 SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; dark until switched on

@@ -18301,6 +18301,66 @@ export async function runSweep(
     // W1-T9932: a plan-only red that is EVERY failure a classified infrastructure step takes W1-T3194's re-run,
     // admitted as that re-run is, and never the plan route: no plan repair is due (#12415).
     infrastructureBlockerByPr.delete(pr.prNumber);
+    // W1-T10260: cancellations belong to the bounded job retry lane before any plan repair.
+    if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true &&
+        (pr.cancelledRequiredChecks?.length ?? 0) > 0) {
+      let deferred = deps.dryRun ? "dry run" : !(deps.actionable?.("blocked-fixable") ?? true)
+        ? deps.standDownReasonFor?.("blocked-fixable") ?? "deferred to full sweep (light pass)" : undefined;
+      if (deferred === undefined && deps.liveCiRunForHead && await deps.liveCiRunForHead(pr))
+        deferred = "a CI run for this head is still live";
+      const rollup = deferred === undefined && deps.readCiGateRollup ? await deps.readCiGateRollup(pr) : undefined;
+      const fresh = new Set(stillRedRequiredNames([
+        ...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name),
+        ...pr.cancelledRequiredChecks!.map(c => c.name),
+      ], rollup));
+      const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
+      const deterministicTimeouts = new Set<string>();
+      const outcomes: string[] = [];
+      let escalated = false;
+      for (const check of cancelled) {
+        const key = `${pr.headSha}@${check.name}`;
+        const alreadyRequeued = incidentHolds.fresh.get(key) !== (check.runAttempt ?? null) &&
+          (requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt));
+        const decision = cancelledCheckRequeueDecision(alreadyRequeued);
+        const signature = deterministicTimeoutSignature(pr.ciFailures?.find(f => f.name === check.name)?.logTail);
+        if (decision.requeue && signature !== undefined) {
+          deterministicTimeouts.add(check.name);
+          if (deferred === undefined) appendLine(deps.ledgerPath, {
+            run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.check_requeue.skipped",
+            pr_number: pr.prNumber, head_sha: pr.headSha, check_name: check.name,
+            reason: "deterministic-timeout", signature,
+          });
+          continue;
+        }
+        if (deferred !== undefined) continue;
+        if (decision.requeue) {
+          const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), rollup);
+          if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
+          if (result.escalate && deps.escalateCancelledCheck) {
+            await deps.escalateCancelledCheck(pr, check, result.escalate, "requeue-deferral-backstop");
+            escalated = true;
+          }
+          outcomes.push(result.note ?? `re-queued "${check.name}"`);
+        } else {
+          const reason = signature === undefined ? decision.reason : `${decision.reason} — its log names: ${signature}`;
+          if (deps.escalateCancelledCheck) {
+            await deps.escalateCancelledCheck(pr, check, reason, "cancelled-twice");
+            escalated = true;
+          }
+          outcomes.push(`escalated "${check.name}" (${reason})`);
+        }
+      }
+      // Only ci and ci-gate downstream of this cancelled shard are explained by cancellation.
+      const genuine = [...fresh].filter(name => deterministicTimeouts.has(name) ||
+        (!cancelled.some(c => c.name === name) && name !== "ci-gate" &&
+          !(name === "ci" && pr.cancelledRequiredChecks!.some(c => /^ci-shard \(\d+\/\d+\)$/.test(c.name)))));
+      if (genuine.length === 0) {
+        infrastructureBlockerByPr.set(pr.prNumber, escalated ? "escalated" : "awaiting-ci");
+        disposition = "wait";
+        reason = deferred !== undefined ? `cancelled required check re-run deferred: ${deferred}`
+          : `cancelled required check(s): ${outcomes.join("; ") || "fresh CI rollup: green or in flight, no requeue"}`;
+      }
+    }
     if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
       const classified = withoutDownstreamGateFailure(pr.ciFailures ?? []).map((failure) => ({
         failure, signature: classifyCiInfrastructureFailure({ conclusion: failure.conclusion, logTail: failure.logTail }) }));
