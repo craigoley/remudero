@@ -1,4 +1,4 @@
-// test/a-run-child-releases-its-setup-before-the-agent-wait.test.ts — run children peak, then sit idle and swapped.
+// test/worker/a-run-child-releases-its-setup-before-the-agent-wait.test.ts — run children peak, then sit idle and swapped.
 //
 // OBSERVED 2026-10-19 (logs-8864/mempress-*): idle run-task children held about 1.9 GB of swap. The W1-T9338 run child peaked
 // at 915 MB and held 48 MB resident and 565 MB in swap while it waited on its agent; an automated retro child peaked at

@@ -6,7 +6,7 @@
 // src/run-task.ts); this module then starts one full collection through `vm.measureMemory` with `execution: "eager"`,
 // the documented Node API whose eager mode starts a GC at once. It never sets `--expose-gc`.
 //
-// FALSIFIER: test/a-run-child-releases-its-setup-before-the-agent-wait.test.ts.
+// FALSIFIER: test/worker/a-run-child-releases-its-setup-before-the-agent-wait.test.ts.
 import { getHeapStatistics } from "node:v8";
 import { measureMemory } from "node:vm";
 

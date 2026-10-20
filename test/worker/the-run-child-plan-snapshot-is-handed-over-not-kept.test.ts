@@ -1,6 +1,6 @@
-// test/the-run-child-plan-snapshot-is-handed-over-not-kept.test.ts — the seams behind a run child's setup release:
+// test/worker/the-run-child-plan-snapshot-is-handed-over-not-kept.test.ts — the seams behind a run child's setup release:
 // the plan snapshot it hands to runTask once, and the measurement around its agent-wait collection.
-// The end-to-end falsifier is test/a-run-child-releases-its-setup-before-the-agent-wait.test.ts.
+// The end-to-end falsifier is test/worker/a-run-child-releases-its-setup-before-the-agent-wait.test.ts.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
