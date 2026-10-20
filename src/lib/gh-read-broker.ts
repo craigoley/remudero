@@ -321,6 +321,7 @@ export class GhReadBroker {
   private readonly lastServed = new Map<string, string>();
   /** Reads accepted and not yet answered, from every client. */
   inProgress = 0;
+  private loggedDay: string | undefined;
   private invalidationOffset = 0;
   private seq = 0;
   private loginPromise: Promise<string> | undefined;
@@ -460,15 +461,11 @@ export class GhReadBroker {
     const logDir = join(this.dir, "log");
     try {
       mkdirSync(logDir, { recursive: true, mode: 0o700 });
-      const file = join(logDir, `requests-${day}.ndjson`);
-      let fresh = false;
-      try {
-        statSync(file);
-      } catch {
-        fresh = true; // the first line of a new day: rotate the old ones below
-      }
-      appendFileSync(file, `${JSON.stringify({ ts: clockFromMillisFn(() => nowMs).iso(), ...row })}\n`);
-      if (fresh) {
+      appendFileSync(join(logDir, `requests-${day}.ndjson`), `${JSON.stringify({ ts: clockFromMillisFn(() => nowMs).iso(), ...row })}\n`);
+      // Rotate on this process's first line and at each new day: decided in memory, never by a stat
+      // of the file just written (a check-then-act race on a file another broker could touch).
+      if (this.loggedDay !== day) {
+        this.loggedDay = day;
         const oldest = clockFromMillisFn(() => nowMs - this.logRetentionDays * 86_400_000).iso().slice(0, 10);
         for (const name of readdirSync(logDir)) {
           const d = /^requests-([0-9-]{10})\.ndjson$/.exec(name)?.[1];
@@ -767,7 +764,7 @@ export async function serveGhReadBroker(opts: {
   if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
     throw new Error(`gh-broker: ${dir} belongs to uid ${st.uid}, not this account (${process.getuid()}); refusing to serve it`);
   }
-  if ((st.mode & 0o077) !== 0) chmodSync(dir, 0o700);
+  chmodSync(dir, 0o700);
   const socketPath = join(dir, GH_BROKER_SOCKET);
   if (ghBrokerDirLive(dir)) {
     try {
