@@ -15,7 +15,7 @@
     - src/lib/gardener-runtime.ts
     - src/run-task.ts
     - test/a-deferred-garden-ages-against-its-own-due-interval.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: the aged rung's 60 s fallback turns garden enforcement into a one-minute delay
   attempts: 0
   rationale: |

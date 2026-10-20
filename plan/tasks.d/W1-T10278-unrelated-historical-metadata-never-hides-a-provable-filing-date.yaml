@@ -9,7 +9,7 @@
   budget_usd: 5.00
   risk: high
   priority: 3
-  status: queued
+  status: merged
   attempts: 0
   author_class: operator
   origin: "operator 2026-10-20: user requested the reproduced historical-YAML follow-up after PR13124 merged"
