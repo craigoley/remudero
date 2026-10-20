@@ -1299,6 +1299,7 @@ async function armAndLogOutcome(
     { ...(error !== undefined ? { outcome, error } : { outcome }), ...(headSha !== undefined ? { head_sha: headSha } : {}) },
     rateLimit,
     directMergePreflight,
+    typeof result === "string" ? undefined : result.ratchetJudge,
   );
   return outcome;
 }
