@@ -50,11 +50,16 @@ function fixture(t: TestContext) {
     return readCiDependencyEvidence(path, { ...context, digest: produced.digest, maxAgeMs: 60000,
       runnerTemp: root, ...expected });
   };
-  const lint = async (evidence: ReturnType<typeof readCiDependencyEvidence>["dependencyEvidence"]) => {
+  const lint = async (evidence: ReturnType<typeof readCiDependencyEvidence>["dependencyEvidence"], offline = true) => {
     const lines: string[] = [], original = { log: console.log, warn: console.warn, error: console.error };
     console.log = console.warn = console.error = (...parts: unknown[]) => void lines.push(parts.join(" "));
     try {
-      const code = await lintPlanCommand(["--base", base], { repoRoot: repo.dir, offline: true, dependencyEvidence: evidence });
+      const code = await lintPlanCommand(["--base", base], { repoRoot: repo.dir, dependencyEvidence: evidence,
+        ...(offline ? { offline: true } : {
+          loadConfig: () => { throw new Error("isolated fixture has no instance configuration"); },
+          resolveOwnerRepo: () => ({ owner: "fixture-owner", repo: "remudero" }),
+          openPlanShardSlugs: () => [],
+        }) });
       return { code, text: lines.join("\n") };
     } finally { Object.assign(console, original); }
   };
@@ -72,6 +77,8 @@ test("W1-T10258: hosted plan lint credits a merged dependency from same-run prod
   assert.deepEqual(receipt.dependencyEvidence({ id: "ZZ-T1" }), { state: "merged" });
   const verdict = await f.lint(receipt.dependencyEvidence);
   assert.equal(verdict.code, 0, verdict.text);
+  const online = await f.lint(receipt.dependencyEvidence, false);
+  assert.equal(online.code, 0, online.text);
   assert.equal(f.calls.filter(path => path.startsWith("search/issues?")).length, 2, "trailer and branch corpora are both observed");
   assert.ok(f.calls.some(path => path.includes("/files?")), "merge status alone never grants implementation credit");
   assert.equal(f.repo.git("status", "--porcelain"), before, "producer cannot persist native credit or change the candidate");
