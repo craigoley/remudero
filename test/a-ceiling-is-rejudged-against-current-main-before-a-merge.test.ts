@@ -1,0 +1,273 @@
+/**
+ * W1-T9962 — A RATCHET IS RE-JUDGED AGAINST CURRENT MAIN BEFORE THE SWEEP ARMS OR MERGES.
+ *
+ * 2026-10-16: #12428, #12388 (which lowered the src/run-task.ts row on a stale base) and #12437 each
+ * passed comment-load on its own base, and together took main over its recorded ceiling. The replay
+ * below rebuilds that shape in a real repository and judges each head on the main it would land on.
+ */
+import assert from "node:assert/strict";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import { attemptArm, logArmAttribution, type ArmDeps } from "../src/lib/arm-auto-merge.js";
+import { runStepsSync } from "../src/lib/git-push.js";
+import {
+  judgeMergedRatchets,
+  readMergedRatchetInputsSteps,
+  type MergedRatchetInputs,
+  type MergedRatchetJudgement,
+} from "../src/lib/merged-ratchet-verdict.js";
+import { planSafetyGitSync } from "../src/lib/plan-pr-merge-safety.js";
+import { runArmedRatchetRejudge, type ArmedStalledPr, type OpenPrView } from "../src/lib/sweep.js";
+import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+
+const FILE = "src/run-task.ts";
+const BASELINE = "scripts/comment-load-baseline.json";
+const N = 300;
+const OWNER = "craigoley";
+const REPO = "remudero";
+const url = (n: number) => `https://github.com/${OWNER}/${REPO}/pull/${n}`;
+
+function commit(repo: GitRepo, lines: string[], row: number, message: string): string {
+  mkdirSync(join(repo.dir, "src"), { recursive: true });
+  mkdirSync(join(repo.dir, "scripts"), { recursive: true });
+  writeFileSync(join(repo.dir, FILE), `${lines.join("\n")}\nexport const x = 1;\n`);
+  writeFileSync(join(repo.dir, BASELINE), `${JSON.stringify({ [FILE]: row }, null, 2)}\n`);
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", message);
+  return repo.git("rev-parse", "HEAD");
+}
+
+function linesAt(repo: GitRepo): string[] {
+  return repo.git("show", `HEAD:${FILE}`).split("\n").filter((l) => l.startsWith("//"));
+}
+
+/** The incident: main at N comment lines and row N; #12402 adds one on main; A (#12428) adds one on the
+ *  old base; B (#12388) trims one, merges main and records the shrunk row; C (#12437) adds one. */
+function incident() {
+  const origin = gitRepo({ kind: "ratchet-origin" });
+  const c = Array.from({ length: N }, (_, i) => `// c${i + 1}`);
+  const m0 = commit(origin, c, N, "m0: the recorded ceiling");
+  origin.git("checkout", "-q", "-b", "a", m0);
+  const a = commit(origin, [...c, "// a-bottom"], N + 1, "a: one line, row raised");
+  origin.git("checkout", "-q", "-b", "c", m0);
+  const cHead = commit(origin, [...c.slice(0, 100), "// c-mid", ...c.slice(100)], N + 1, "c: one line, row raised");
+  origin.git("checkout", "-q", "main");
+  const m1 = commit(origin, ["// main-top", ...c], N + 1, "m1: main grows the same file");
+  origin.git("checkout", "-q", "-b", "b", m0);
+  commit(origin, c.filter((l) => l !== "// c150"), N, "b: a worker trims a comment");
+  origin.git("merge", "-q", "--no-ff", "-m", "Merge branch 'main'", m1);
+  const b = commit(origin, linesAt(origin), N, "b: the ratchet records the shrunk row");
+  origin.git("checkout", "-q", "main");
+  origin.git("merge", "-q", "--no-ff", "-m", "merge a", "a");
+  const m2 = origin.git("rev-parse", "HEAD");
+  origin.git("merge", "-q", "--no-ff", "-m", "merge b", "b");
+  const m3 = origin.git("rev-parse", "HEAD");
+  for (const [n, sha] of [[12428, a], [12388, b], [12437, cHead]] as const) origin.git("update-ref", `refs/pull/${n}/head`, sha);
+  const clone = gitRepo({ cloneFrom: origin.dir, kind: "ratchet-clone" });
+  return { origin, clone, m0, m1, m2, m3, a, b, c: cHead };
+}
+
+/** Judge PR `n` merged onto `mainSha`, through the production merge-tree read. */
+function judgeOnto(fx: ReturnType<typeof incident>, n: number, mainSha: string): MergedRatchetJudgement {
+  fx.origin.git("update-ref", "refs/heads/judge-main", mainSha);
+  const rest = () => ({ base: { ref: "judge-main" } });
+  return judgeMergedRatchets(runStepsSync(readMergedRatchetInputsSteps({ owner: OWNER, repo: REPO, prNumber: n }, rest, planSafetyGitSync(fx.clone.dir))));
+}
+
+/** The head's own tree against its own base tree, counted with no merge: what its CI measured. */
+function judgeOwnTree(repo: GitRepo, base: string, head: string): MergedRatchetJudgement {
+  const read = (rev: string) => (path: string) => (repo.git("ls-tree", "--name-only", rev, "--", path) ? repo.git("show", `${rev}:${path}`) : null);
+  const changed = repo.git("diff", "--name-only", base, head).split("\n").filter(Boolean);
+  const measuredFiles = repo.git("ls-tree", "-r", "--name-only", head, "--", "src", "scripts").split("\n").filter(Boolean);
+  return judgeMergedRatchets({ mainSha: base, headSha: head, changed, measuredFiles, readMerged: read(head), readMain: read(base) });
+}
+
+function memoryInputs(merged: { count: number; row: number }, main: { count: number; row: number }): MergedRatchetInputs {
+  const text = (n: number) => `${Array.from({ length: n }, (_, i) => `// l${i}`).join("\n")}\n`;
+  const tree = (s: { count: number; row: number }) => (p: string) => (p === FILE ? text(s.count) : p === BASELINE ? JSON.stringify({ [FILE]: s.row }) : null);
+  return { mainSha: "main-sha", headSha: "head-sha", changed: [FILE, BASELINE], measuredFiles: [FILE, BASELINE], readMerged: tree(merged), readMain: tree(main) };
+}
+
+const CROSSING = judgeMergedRatchets(memoryInputs({ count: N + 2, row: N + 1 }, { count: N + 1, row: N + 1 }));
+const CLEAN = judgeMergedRatchets(memoryInputs({ count: N + 1, row: N + 1 }, { count: N, row: N + 1 }));
+
+function armDeps(over: Partial<ArmDeps> & { calls: string[] }): ArmDeps {
+  const { calls, ...rest } = over;
+  return {
+    headSha: () => "head-sha",
+    ledgerLines: () => [],
+    armAuto: () => { calls.push("armAuto"); },
+    mergeDirect: () => { calls.push("mergeDirect"); },
+    disableAuto: () => { calls.push("disableAuto"); },
+    readMergeFacts: () => ({ mergeable: "MERGEABLE", mergeableState: "clean", behindBy: 7 }),
+    updateBranch: () => { calls.push("updateBranch"); return { ok: true }; },
+    readPlanTouch: () => "untouched",
+    say: () => {},
+    ...rest,
+  };
+}
+
+test("W1-T9962: the 2026-10-16 replay refuses each of the three merges against the main it would have landed on", () => {
+  const fx = incident();
+  const a = judgeOnto(fx, 12428, fx.m1);
+  assert.equal(a.verdict, "crossing");
+  assert.deepEqual(a.rows.map((r) => [r.path, r.merged, r.prCeiling, r.mainCeiling]), [[FILE, N + 2, N + 1, N + 1]]);
+  const b = judgeOnto(fx, 12388, fx.m2);
+  assert.equal(b.verdict, "stale-lowering");
+  assert.deepEqual(b.rows.map((r) => [r.path, r.merged, r.prCeiling, r.mainCeiling, r.rederived]), [[FILE, N + 1, N, N + 1, N + 1]]);
+  const c = judgeOnto(fx, 12437, fx.m3);
+  assert.equal(c.verdict, "crossing");
+  assert.deepEqual(c.rows.map((r) => [r.path, r.merged, r.prCeiling, r.mainCeiling]), [[FILE, N + 2, N + 1, N]]);
+  assert.equal(c.mainSha, fx.m3);
+  assert.equal(c.headSha, fx.c);
+  // Each head on its own base: the merge is the head (behind_by 0), and the head's own count passes.
+  for (const [n, head, base] of [[12428, fx.a, fx.m0], [12388, fx.b, fx.m1], [12437, fx.c, fx.m0]] as const) {
+    assert.equal(judgeOnto(fx, n, base).verdict, "clean", `#${n} on its own base`);
+    const own = judgeOwnTree(fx.origin, base, head);
+    assert.equal(own.verdict, "clean", `#${n}'s own tree`);
+    assert.deepEqual(own.counted, ["comment-load", "clock-signature"]);
+  }
+});
+
+test("W1-T9962: a PR that crosses a ceiling only on current main is refreshed, not armed or merged", () => {
+  assert.equal(CROSSING.verdict, "crossing");
+  // Green on its own base: the same head against the base it was cut from.
+  assert.equal(judgeMergedRatchets(memoryInputs({ count: N + 1, row: N + 1 }, { count: N, row: N })).verdict, "clean");
+
+  const calls: string[] = [];
+  const result = attemptArm(url(12428), armDeps({ calls, readMergedRatchets: () => CROSSING }), "head-sha");
+  assert.equal(result.outcome, "direct-merge-updated");
+  assert.deepEqual(calls, ["updateBranch"], "updated once; never armed and never merged");
+  assert.equal(result.directMergePreflight?.reason, "ratchet_collision");
+  assert.equal(result.directMergePreflight?.remedy, "update-branch");
+
+  const rows: Array<[string, Record<string, unknown>]> = [];
+  logArmAttribution((step, extra = {}) => rows.push([step, extra]), result.outcome, url(12428), "W1-T9092", "sweep", {}, undefined,
+    result.directMergePreflight, result.ratchetJudge);
+  const updated = rows.find(([s]) => s === "automerge.direct_merge_updated")?.[1];
+  assert.equal(updated?.reason, "ratchet_collision");
+  assert.equal(updated?.prior_head_sha, "head-sha");
+  const decided = rows.find(([s]) => s === "sweep.ratchet_judge.decided")?.[1];
+  assert.equal(decided?.verdict, "crossing");
+  assert.equal(decided?.remedy, "update-branch");
+  assert.equal(decided?.rows_count, 1);
+
+  // One update per (PR, head): the head already refreshed for a collision waits for its new head.
+  const again: string[] = [];
+  const held = attemptArm(url(12428), armDeps({ calls: again, readMergedRatchets: () => CROSSING,
+    ledgerLines: () => [{ step: "automerge.direct_merge_updated", reason: "ratchet_collision", pr_url: url(12428), prior_head_sha: "head-sha" }] }), "head-sha");
+  assert.equal(held.outcome, "direct-merge-preflight-refused");
+  assert.deepEqual(again, []);
+
+  // A behind plan PR whose merged plan is safe takes the direct merge: the count holds that merge too.
+  const plan: string[] = [];
+  const planResult = attemptArm(url(12500), armDeps({ calls: plan, readMergedRatchets: () => CROSSING, readPlanTouch: () => "touched",
+    readPlanMergeSafety: () => ({ mergedTree: { state: "loads" }, prPlanPaths: ["plan/tasks.d/x.yaml"], mainPlanPaths: [] }) }), "head-sha");
+  assert.equal(planResult.outcome, "direct-merge-updated");
+  assert.equal(planResult.directMergePreflight?.reason, "ratchet_collision");
+  assert.deepEqual(plan, ["updateBranch"]);
+});
+
+test("W1-T9962: a ceiling lowered on a stale base is re-derived against current main", () => {
+  // #12388: the PR recorded N, main's row is N+1, and the merged tree counts N+1.
+  const stale = judgeMergedRatchets(memoryInputs({ count: N + 1, row: N }, { count: N + 1, row: N + 1 }));
+  assert.equal(stale.verdict, "stale-lowering");
+  assert.deepEqual(stale.rows.map((r) => ({ verdict: r.verdict, merged: r.merged, prCeiling: r.prCeiling, mainCeiling: r.mainCeiling, rederived: r.rederived })),
+    [{ verdict: "stale-lowering", merged: N + 1, prCeiling: N, mainCeiling: N + 1, rederived: N + 1 }]);
+  // Above main's own ceiling it is a crossing, re-derived to the value the gate prints to record.
+  const over = judgeMergedRatchets(memoryInputs({ count: N + 2, row: N }, { count: N + 1, row: N + 1 }));
+  assert.equal(over.verdict, "crossing");
+  assert.equal(over.rows[0]?.rederived, 500);
+  // A crossing main already carried, and this merge did not grow, is main's to repair.
+  assert.equal(judgeMergedRatchets(memoryInputs({ count: N + 2, row: N + 1 }, { count: N + 2, row: N + 1 })).verdict, "clean");
+  // The stale lowering holds the arm like a crossing does.
+  const calls: string[] = [];
+  const result = attemptArm(url(12388), armDeps({ calls, readMergedRatchets: () => stale }), "head-sha");
+  assert.equal(result.outcome, "direct-merge-updated");
+  assert.equal(result.directMergePreflight?.ratchetJudge?.rows[0]?.rederived, N + 1);
+  assert.deepEqual(calls, ["updateBranch"]);
+});
+
+test("W1-T9962: an armed PR is re-judged once per main tip and refreshed when main moved it over a ceiling", async () => {
+  const pr: OpenPrView = {
+    prNumber: 12437, prUrl: url(12437), taskId: "unfiled", headSha: "head-c", lastActivityAt: "2026-10-16T21:35:51.000Z",
+    reviewState: "success", checksState: "pending", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: true, mergeState: "behind",
+    changedFiles: [FILE],
+  };
+  const unarmed: OpenPrView = { ...pr, prNumber: 12999, prUrl: url(12999), headSha: "head-x", autoMergeArmed: false };
+  const ledger: Array<Record<string, unknown>> = [];
+  let mainTip = "main-1";
+  let verdict: MergedRatchetJudgement = CLEAN;
+  const reads: string[] = [];
+  const updates: ArmedStalledPr[] = [];
+  const disarms: string[] = [];
+  const deps = {
+    ledgerPath: "/dev/null/ledger.ndjson",
+    runId: "run-test",
+    readLedger: () => ledger,
+    appendLine: (_p: string, row: Record<string, unknown>) => { ledger.push(row); },
+    readMainTip: () => mainTip,
+    readMergedRatchets: async (p: OpenPrView) => { reads.push(`${p.prNumber}@${mainTip}`); return { ...verdict, mainSha: mainTip }; },
+    updateBranch: (t: ArmedStalledPr) => { updates.push(t); return "updated" as const; },
+    disarmAutoMerge: (u: string) => { disarms.push(u); return "disarmed" as const; },
+    now: () => Date.parse("2026-10-16T22:00:00.000Z"),
+  };
+
+  assert.deepEqual(await runArmedRatchetRejudge([pr, unarmed], deps), []);
+  assert.deepEqual(reads, ["12437@main-1"], "only the armed PR is judged");
+  assert.equal(ledger.find((r) => r.step === "sweep.ratchet_judge.decided")?.remedy, "proceed");
+
+  assert.deepEqual(await runArmedRatchetRejudge([pr], deps), []);
+  assert.deepEqual(reads, ["12437@main-1"], "a quiet main costs nothing: the (head, main tip) pair is judged once");
+
+  mainTip = "main-2";
+  verdict = CROSSING;
+  assert.deepEqual(await runArmedRatchetRejudge([pr], deps), [12437]);
+  assert.deepEqual(reads, ["12437@main-1", "12437@main-2"]);
+  assert.deepEqual(updates.map((u) => [u.prNumber, u.headSha, u.updateReason]), [[12437, "head-c", "ratchet-collision"]]);
+  const decided = ledger.filter((r) => r.step === "sweep.ratchet_judge.decided");
+  assert.deepEqual(decided.map((r) => [r.main_sha, r.verdict, r.remedy]), [["main-1", "clean", "proceed"], ["main-2", "crossing", "update-branch"]]);
+  assert.equal(ledger.find((r) => r.step === "sweep.refresh.decided")?.forced_by, "ratchet-collision");
+  assert.ok(ledger.some((r) => r.step === "sweep.update_branch.updated" && r.reason === "ratchet_collision"));
+  assert.deepEqual(disarms, [], "never disarmed");
+
+  mainTip = "main-3";
+  assert.deepEqual(await runArmedRatchetRejudge([pr], deps), [], "one update per (PR, head)");
+  assert.equal(updates.length, 1);
+  assert.equal(ledger.filter((r) => r.step === "sweep.ratchet_judge.decided").at(-1)?.remedy, "retry-later");
+});
+
+test("W1-T9962: a clean merge arms as today, an unreadable merge records unread, and a run-derived gate is named", () => {
+  const calls: string[] = [];
+  const clean = attemptArm(url(12600), armDeps({ calls, readMergedRatchets: () => CLEAN }), "head-sha");
+  assert.equal(clean.outcome, "armed");
+  assert.deepEqual(calls, ["armAuto"]);
+  assert.equal(clean.ratchetJudge?.verdict, "clean");
+
+  const thrown: string[] = [];
+  const unread = attemptArm(url(12601), armDeps({ calls: thrown, readMergedRatchets: () => { throw new Error("git merge-tree exited 128"); } }), "head-sha");
+  assert.equal(unread.outcome, "armed");
+  assert.deepEqual(thrown, ["armAuto"]);
+  assert.equal(unread.ratchetJudge?.verdict, "unread");
+  assert.match(unread.ratchetJudge?.reason ?? "", /merge-tree exited 128/);
+  const rows: Array<[string, Record<string, unknown>]> = [];
+  logArmAttribution((step, extra = {}) => rows.push([step, extra]), unread.outcome, url(12601), "W1-T1", "sweep", {}, undefined, undefined, unread.ratchetJudge);
+  const decided = rows.find(([s]) => s === "sweep.ratchet_judge.decided")?.[1];
+  assert.equal(decided?.verdict, "unread");
+  assert.equal(decided?.remedy, "proceed");
+  assert.match(String(decided?.reason), /merge-tree exited 128/);
+
+  // The production read with no base ref to merge onto is unread, never clean.
+  const noBase = judgeMergedRatchets(runStepsSync(readMergedRatchetInputsSteps({ owner: OWNER, repo: REPO, prNumber: 1 }, () => ({}), () => ({ status: 0, stdout: "" }))));
+  assert.equal(noBase.verdict, "unread");
+  assert.match(noBase.reason ?? "", /no base ref/);
+
+  for (const j of [CLEAN, unread.ratchetJudge!]) {
+    assert.ok(j.uncounted.some((g) => g.gate === "coverage" && g.class === "run-derived"));
+    assert.ok(j.uncounted.some((g) => g.gate === "mutation" && g.class === "run-derived"));
+    assert.ok(j.uncounted.some((g) => g.gate === "source-size" && g.class === "delta-only"));
+  }
+  assert.ok((decided?.uncounted_gates as string[]).includes("coverage:run-derived"));
+});
