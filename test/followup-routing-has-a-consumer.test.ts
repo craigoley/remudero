@@ -243,10 +243,10 @@ test("followupProposalId is stable across calls for the same candidate and names
 // beside the pre-existing `recordFollowupHarvest` call this task's recon confirmed IS reached
 // (the real-run-only, non-dry-run gate `recordFollowupHarvest`'s own comment names).
 
-test("retroCommand's real-run path calls routeFollowupsToRegistry right alongside recordFollowupHarvest", () => {
+test("retroCommand's real-run path awaits followup publication before acknowledging the harvest", () => {
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const anchor = src.indexOf("recordFollowupHarvest(gather.followups, { ledgerPath });");
-  assert.notEqual(anchor, -1, "the pre-existing, reached ledger-mark call must still be present");
+  const anchor = src.indexOf("await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,");
+  assert.notEqual(anchor, -1, "the real command must await its cancelable publication boundary");
   const nearby = src.slice(anchor, anchor + 1000);
   // W1-T2601 WIDENED, NOT WEAKENED: the path may now be carried in `followupRegistryPath` so the
   // producer and the retirement arm beside it provably share ONE registry rather than two identical
@@ -255,10 +255,10 @@ test("retroCommand's real-run path calls routeFollowupsToRegistry right alongsid
   // definition below, so this cannot admit a call aimed at some other registry.
   assert.match(
     nearby,
-    /routeFollowupsToRegistry\(gather\.followups, \{ registryPath: (join\(config\.root, "state", "inbox-proposals\.json"\)|followupRegistryPath) \}\);/,
-    "routeFollowupsToRegistry must be called on gather.followups, in the same real-run block as the ledger marks",
+    /publishFollowupHarvestAsync\(gather\.followups,\s*\{ registryPath: followupRegistryPath, ledgerPath \}, \{ signal,/,
+    "publication must use the gathered harvest, shared registry and ledger with the attempt's signal",
   );
-  if (/registryPath: followupRegistryPath \}\);/.test(nearby)) {
+  if (/registryPath: followupRegistryPath, ledgerPath/.test(nearby)) {
     assert.match(
       src,
       /const followupRegistryPath = join\(config\.root, "state", "inbox-proposals\.json"\);/,

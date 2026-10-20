@@ -2368,7 +2368,10 @@ function checkoutRunnerPath(whitelisted: WhitelistedProof, cwd: string): string 
 
 function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly string[], cwd: string): readonly string[] {
   const runner = checkoutRunnerPath(whitelisted, cwd);
-  return runner === undefined ? args : [runner, ...args.slice(1)];
+  if (runner === undefined) return args;
+  const rooted = [runner, ...args.slice(1)];
+  // Vite bundles config into node_modules/.vite-temp; a shared proof install is mounted read-only.
+  return lstatSync(join(cwd, "node_modules")).isSymbolicLink() ? [...rooted, "--configLoader", "native"] : rooted;
 }
 
 /** Refresh a reviewer-owned checkout once after measured module-load failure. Worktrees link the
@@ -8720,6 +8723,9 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * {@link INSTRUMENT_SURFACE_EXCLUSIONS} plus
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
+  "^scripts/preflight-author\\.mjs$",
+  "^scripts/calibrate-author-runtime\\.mjs$",
+  "^scripts/lib/author-step-capture\\.mjs$",
   "^src/lib/review\\.ts$",
   "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
@@ -8792,6 +8798,10 @@ const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
  * found eleven), where widening what refuses a PR must be
  * measured against real merged diffs first. */
 export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
+  "docs/docs-index.json":
+    "Generated document inventory (paths, titles, summaries and search hints), not validation rule logic. " +
+    "scripts/generate-docs-index.mjs --check and --check-paths still enforce freshness and path consistency; " +
+    "this exact data classification exempts neither the generator nor another JSON file or executable.",
   // ── verified non-instrument: content/data a gate validates, not the rule that validates it ──
   "openapi/daemon.yaml":
     "the daemon's API schema (content) — scripts/generate-api-client.mjs is the enforcement logic and is tracked below",

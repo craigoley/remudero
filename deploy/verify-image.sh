@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # verify-image — pull the published image and PROVE the toolchain is actually in it.
-#
 # WHY THIS EXISTS, AND IT IS NOT CONVENIENCE. Verifying by hand produced a confidently wrong
 # answer on 2026-08-08. Two commands were run back to back; the FIRST failed with a registry
 # authentication error, so nothing new came down, and the SECOND then ran the STALE LOCAL image
@@ -17,11 +16,11 @@
 # PLAIN BASH AND DOCKER, deliberately — the same discipline as scripts/fleet-heartbeat.sh. This
 # runs on a host that may have no node, no rmd and no checkout, and it must keep working when the
 # thing it is inspecting is broken.
-#
 # USAGE
 #   ./deploy/verify-image.sh                          # pull :latest and check it
 #   ./deploy/verify-image.sh --tag <sha>              # a specific tag instead of :latest
 #   ./deploy/verify-image.sh --expect sha256:<digest> # ALSO assert it is exactly the build's image
+#   ./deploy/verify-image.sh --local-image-id sha256:<64 lowercase hex> # offline local artifact
 #   REGISTRY=... IMAGE=... ./deploy/verify-image.sh    # retarget without editing this file
 #
 # The --expect form is the strongest available check and costs one paste: the ACR build workflow
@@ -34,18 +33,60 @@ REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
 EXPECT_DIGEST=""
+LOCAL_IMAGE_ID=""
+LOCAL_MODE=0
+EXPLICIT_REMOTE=0
+SHOW_HELP=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag)      TAG="${2:?--tag needs a value}"; shift 2 ;;
-    --expect)   EXPECT_DIGEST="${2:?--expect needs a sha256:... digest}"; shift 2 ;;
-    --registry) REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
-    --image)    IMAGE="${2:?--image needs a value}"; shift 2 ;;
-    -h|--help)  sed -n '1,30p' "$0"; exit 0 ;;
+    --local-image-id)
+      if [ "${LOCAL_MODE}" -eq 1 ] || [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "verify-image: --local-image-id needs one full image ID, once." >&2
+        exit 2
+      fi
+      LOCAL_IMAGE_ID="$2"; LOCAL_MODE=1; shift 2 ;;
+    --tag)      EXPLICIT_REMOTE=1; TAG="${2:?--tag needs a value}"; shift 2 ;;
+    --expect)   EXPLICIT_REMOTE=1; EXPECT_DIGEST="${2:?--expect needs a sha256:... digest}"; shift 2 ;;
+    --registry) EXPLICIT_REMOTE=1; REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
+    --image)    EXPLICIT_REMOTE=1; IMAGE="${2:?--image needs a value}"; shift 2 ;;
+    -h|--help)  SHOW_HELP=1; shift ;;
     *) echo "verify-image: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
 done
 
+if [ "${LOCAL_MODE}" -eq 1 ]; then
+  if [ "${EXPLICIT_REMOTE}" -ne 0 ]; then
+    echo "verify-image: --local-image-id conflicts with explicit remote image flags." >&2
+    exit 2
+  fi
+  case "${LOCAL_IMAGE_ID}" in
+    sha256:*) LOCAL_HEX="${LOCAL_IMAGE_ID#sha256:}" ;;
+    *) echo "verify-image: --local-image-id requires sha256: and 64 lowercase hex digits." >&2; exit 2 ;;
+  esac
+  case "${LOCAL_HEX}" in
+    ''|*[!0-9a-f]*) echo "verify-image: invalid local image ID." >&2; exit 2 ;;
+  esac
+  if [ "${#LOCAL_HEX}" -ne 64 ]; then
+    echo "verify-image: local image ID must contain exactly 64 hex digits." >&2
+    exit 2
+  fi
+fi
+if [ "${SHOW_HELP}" -eq 1 ]; then sed -n '1,31p' "$0"; exit 0; fi
+
+if [ "${LOCAL_MODE}" -eq 1 ]; then
+  REF="${LOCAL_IMAGE_ID}"
+  if ! LOCAL_INSPECTED_ID="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null)"; then
+    echo "verify-image: UNVERIFIED local image identity; refusing before probes." >&2
+    exit 1
+  fi
+  if [ "${LOCAL_INSPECTED_ID}" != "${LOCAL_IMAGE_ID}" ]; then
+    echo "verify-image: local image identity mismatch or unavailable; refusing before probes." >&2
+    exit 1
+  fi
+  AFTER="${LOCAL_INSPECTED_ID}"
+  echo "verify-image: local image ID under test: ${AFTER} (no registry or pull)"
+else
 REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"
 echo "verify-image: target ${REF}"
 
@@ -105,6 +146,18 @@ if [ -n "${EXPECT_DIGEST}" ]; then
   fi
   echo "verify-image: digest matches the expected build."
 fi
+fi
+
+if [ "${LOCAL_MODE}" -eq 1 ]; then
+  docker() {
+    if [ "${1:-}" = run ]; then
+      shift
+      command docker run --pull=never --network=none "$@"
+    else
+      command docker "$@"
+    fi
+  }
+fi
 
 # ── 5. THE CHECKS, RUN INSIDE THE IMAGE ──────────────────────────────────────────────────────
 # `--entrypoint /bin/sh` bypasses tini for the probe only; the image's own ENTRYPOINT is
@@ -162,7 +215,14 @@ fi
 # `docker inspect` renders an absent label as the literal `<no value>`, and an image built before
 # REQ 15 landed has no label at all. Both normalise to EMPTY here, and empty means the probe
 # reports UNKNOWN rather than a verdict - the same rule the declared-pin read above follows.
-LABEL_BUILD_SHA="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${REF}" 2>/dev/null || true)"
+if [ "${LOCAL_MODE}" -eq 1 ]; then
+  if ! LABEL_BUILD_SHA="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${REF}" 2>/dev/null)"; then
+    echo "verify-image: UNVERIFIED local image metadata; refusing before probes." >&2
+    exit 1
+  fi
+else
+  LABEL_BUILD_SHA="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${REF}" 2>/dev/null || true)"
+fi
 [ "${LABEL_BUILD_SHA}" = "<no value>" ] && LABEL_BUILD_SHA=""
 if [ -n "${LABEL_BUILD_SHA}" ]; then
   echo "verify-image: image LABEL declares build sha ${LABEL_BUILD_SHA}"
@@ -743,6 +803,10 @@ elif [ "${UNVERIFIED:-0}" -ne 0 ]; then
   echo "  Nothing above should be read as a statement about the image until it is re-run clean." >&2
 else
   echo "verify-image: FAILURES above, on ${AFTER}" >&2
-  echo "  This digest was pulled during THIS run, so a stale image is not the explanation." >&2
+  if [ "${LOCAL_MODE}" -eq 1 ]; then
+    echo "  The inspected local image ID was used without a pull; these are local probe findings." >&2
+  else
+    echo "  This digest was pulled during THIS run, so a stale image is not the explanation." >&2
+  fi
 fi
 exit "${RC}"

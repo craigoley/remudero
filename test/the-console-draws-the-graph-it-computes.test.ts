@@ -127,6 +127,7 @@ test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the 
     "POST /v1/inbox/approve",
     "POST /v1/inbox/archive",
     "POST /v1/inbox/decline",
+    "POST /v1/inbox/keep",
     "POST /v1/inbox/reframe",
     "POST /v1/inbox/restore",
     "POST /v1/inbox/snooze",

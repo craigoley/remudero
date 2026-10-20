@@ -65,6 +65,12 @@ export function renderDiffCoverageTargets(parsed: DiffCoverageTargets | undefine
     "Add a test that EXECUTES each listed line. A line in a `catch`/error arm needs a test that makes that",
     "call fail (inject the failing dependency). A seam's DEFAULT implementation needs one test that runs the",
     "real default rather than a fake. Do not reorder code, move lines, or add ignore comments to dodge the gate.",
+    // #12740 (W1-T9863): the gate blocked a script's `isMainModule` body, which only a separate process runs, and
+    // the line above forbade the one remedy the gate itself names. Its rules: scripts/diff-coverage.mjs BOUNDARY_CALL.
+    "One exception: a line inside a direct-run guard (`if (isMainModule(import.meta.url)) { … }`) runs only when the",
+    "file is executed as a process. Move that body into an exported `main(argv, deps)` that returns an exit code,",
+    "test `main` directly, and leave the guard holding only `process.exitCode = main(process.argv.slice(2));` under",
+    "`// diff-cov: process-boundary — <reason>`, the one directive the gate honours, and only on that exit glue.",
     verify,
     "This gate is deterministic: FLAKE and BASE_RED are the wrong outcomes for it; it fails the same way on rerun.",
   ];

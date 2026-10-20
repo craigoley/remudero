@@ -9,6 +9,11 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as memoryLearning from "../src/lib/host-memory-learning.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { readMemoryLedger, type HostMemoryLedgerOptions, type ProcessListing } from "../src/lib/host-memory-ledger.js";
@@ -232,4 +237,30 @@ test("a test run whose estimate store fails still opens, at the test class's pri
   assert.deepEqual(run?.estimateSource, { kind: "default-unmeasured" });
   assert.ok(logs.includes("estimate"), `the store failure is named: ${logs.join(",")}`);
   worker.releaseOccupancy();
+});
+
+test("W1-T10208: validation estimate evidence never upgrades an omitted or unknown sample", () => {
+  assert.equal(typeof memoryLearning.readValidationClassEstimate, "function", "the explicit evidence reader is absent");
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}validation-estimate-`));
+  const location = () => ({ dir: root, scope: "host" as const });
+  const opts = { location, instance: () => ({ name: "fixture" }), clock: fixedClock(NOW) };
+  try {
+    assert.equal(memoryLearning.readValidationClassEstimate("test", opts).kind, "unavailable");
+    for (let i = 0; i < 30; i += 1) assert.equal(memoryLearning.recordPeak("test", 900, opts), true);
+    const measured = memoryLearning.readValidationClassEstimate("test", opts);
+    assert.equal(measured.kind, "measured", JSON.stringify(measured));
+    if (measured.kind === "measured") { assert.equal(measured.samples, 30); assert.equal(measured.basis, "legacy-compatible-tree-peaks"); }
+    const path = join(root, "estimates", "fixture.ndjson");
+    const valid = readFileSync(path, "utf8");
+    for (const extra of ["null\n", "{bad\n", JSON.stringify({ c: "test", p: 900, at: new Date(NOW).toISOString(), basis: "unknown" }) + "\n"]) {
+      writeFileSync(path, valid + extra);
+      assert.equal(memoryLearning.readValidationClassEstimate("test", opts).kind, "unavailable");
+      memoryLearning.resetLearnedEstimateCacheForTests();
+      assert.ok(memoryLearning.classEstimate("test", opts).samples > 0, "legacy partial-sample learning is unchanged");
+    }
+    writeFileSync(path, valid);
+    mkdirSync(join(root, "estimates", "denied.ndjson"));
+    assert.equal(memoryLearning.readValidationClassEstimate("test", opts).kind, "unavailable", "real default directory read error cannot be omitted");
+    assert.equal(memoryLearning.readValidationClassEstimate("test", { ...opts, location: () => ({ dir: root, scope: "local" as const }) }).kind, "unavailable");
+  } finally { rmSync(root, { recursive: true, force: true }); memoryLearning.resetLearnedEstimateCacheForTests(); }
 });

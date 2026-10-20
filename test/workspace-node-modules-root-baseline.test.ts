@@ -45,6 +45,7 @@ test("linkWorktreeNodeModules's pre-existing outcome contract is untouched: alre
         throw new Error("ENOENT");
       },
       resolveSource: () => "/src/node_modules",
+      realpath: (path) => path,
       symlink: () => {
         throw new Error("EPERM");
       },

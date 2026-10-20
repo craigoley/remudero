@@ -23,10 +23,11 @@
 import { execFileSync } from "node:child_process";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { join, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
-import { DEFAULT_WORKTREE_REAP_GRACE_MS, worktreesDir, worktreeRemove } from "./worker.js";
+import { DEFAULT_WORKTREE_REAP_GRACE_MS, reviewWorktreeIsHeld, worktreesDir, worktreeRemove } from "./worker.js";
+export { holdReviewWorktree, releaseReviewWorktree, reviewWorktreeIsHeld } from "./worker.js";
 
 /** Exactly what `materializeReviewWorktree` mints (src/run-task.ts): `review-PR<n>-<epochMs>`.
  *  Anchored full-match, captured groups for the PR number and the creation instant — the sweep
@@ -102,21 +103,7 @@ export interface ReviewWorktreeSweepOptions {
  * into a missing cwd (ENOENT, ledgered as "bwrap is not installed"), capping the verdict at 0/3.
  * A SIGKILL empties this set with the process, so a stranded worktree is still reclaimed later.
  */
-const heldReviewWorktrees = new Set<string>();
-
-/** Mark `worktreePath` as one this process is reviewing in; {@link sweepStrandedReviewWorktrees} keeps it. */
-export function holdReviewWorktree(worktreePath: string): void {
-  heldReviewWorktrees.add(resolve(worktreePath));
-}
-
-/** The review using `worktreePath` is over (torn down, or its teardown failed): the sweep may reclaim it. */
-export function releaseReviewWorktree(worktreePath: string): void {
-  heldReviewWorktrees.delete(resolve(worktreePath));
-}
-
-export function reviewWorktreeIsHeld(worktreePath: string): boolean {
-  return heldReviewWorktrees.has(resolve(worktreePath));
-}
+// The existing API above now shares worker.ts's hold with the general sync/async reaper.
 
 /**
  * Reclaim `review-PR*` worktrees under `worktreesDir(config)` that this process did not create and

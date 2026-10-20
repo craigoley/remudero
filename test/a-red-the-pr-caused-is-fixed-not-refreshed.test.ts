@@ -135,7 +135,7 @@ function worker(): WorkerResult {
   };
 }
 
-async function fixRung(merged: Outcome | undefined, mainTip: string | null = MAIN) {
+async function fixRung(merged: Outcome | undefined, mainTip: string | null = MAIN, ledger?: Row[]) {
   const events: string[] = [];
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const outcome = await runFixRung({
@@ -153,6 +153,7 @@ async function fixRung(merged: Outcome | undefined, mainTip: string | null = MAI
       push: () => events.push("push"),
       issues: {} as IssueGateway,
       ledgerPath: "/tmp/w1-t8396-ledger.ndjson",
+      ...(ledger === undefined ? {} : { ledgerLines: () => ledger }),
       log: (step: string, extra?: Record<string, unknown>) => { events.push(step); logged.push({ step, extra }); },
       say: () => {},
       account: (result: WorkerResult) => result,
@@ -315,6 +316,51 @@ test("W1-T8396: an unrunnable or partial trial merge keeps today's refresh and n
   // The fix rung keeps today's refresh when main's tip is unreadable, and names why.
   const rung = await fixRung("fails", null);
   assert.equal(rung.outcome.outcome, "base_refreshed");
+  assert.equal(rung.logged.find((r) => r.step === "refresh.clearance")?.extra?.evidence, "unrunnable");
+});
+
+test("#12703: a refresh that already left this red is repeated only on a trial merge that clears it", async () => {
+  // #12703 took four main merges on its own census red: each refresh made a new head, main kept changing a
+  // path counted as reaching the red, and nothing short of a reproduced trial merge refused the next one.
+  const input = { failingTestFiles: [FILE, "test/other.test.ts"], reach: { counted: ["package.json"], complete: false }, priorRefresh: true };
+  const unwired = await assessRefreshClearance(input, undefined);
+  assert.deepEqual([unwired.refresh, unwired.evidence], [false, "unrunnable"]);
+  assert.equal(unwired.reason, "a refresh already left this red and the trial-merge probe is unwired");
+  const thrown = await assessRefreshClearance(input, async () => { throw new Error("merge conflict in src/lib/sweep.ts"); });
+  assert.deepEqual([thrown.refresh, thrown.evidence], [false, "unrunnable"]);
+  assert.match(thrown.reason, /^a refresh already left this red and the trial merge is unrunnable \(.*merge conflict/);
+  const partial = await assessRefreshClearance(input, async () => [
+    { file: FILE, outcome: "fails", duration_ms: 1, cached: false }, { file: "test/other.test.ts", outcome: "passes", duration_ms: 1, cached: false }]);
+  assert.deepEqual([partial.refresh, partial.evidence], [false, "partial"]);
+  const fileless = await assessRefreshClearance({ ...input, failingTestFiles: [] }, undefined);
+  assert.deepEqual([fileless.refresh, fileless.evidence], [false, "fileless"]);
+  assert.equal(fileless.reason, "a refresh already left this red and the red names no test file to probe");
+  const clear = await assessRefreshClearance(input, async () => [
+    { file: FILE, outcome: "passes", duration_ms: 1, cached: false }, { file: "test/other.test.ts", outcome: "passes", duration_ms: 1, cached: false }]);
+  assert.deepEqual([clear.refresh, clear.evidence], [true, "merged-probe"], "a trial merge that clears the red still earns the repeat");
+
+  // The fixed-on-main arm: the prior head's refresh left the same red, main changed a graph-blind root file,
+  // and the trial merge cannot run. The fix lane takes the red instead of a fifth merge.
+  const prior: Row = { ts: ago(40), run_id: "old", task_id: "W1-T8008", step: "sweep.base_fixed.refresh", pr_number: PR,
+    head_sha: OLD_HEAD, main_sha: "2".repeat(40), check_names: [CHECK], test_files: [FILE], outcome: "updated" };
+  const sweep = harness([mainHealth(), prior], { baseChanged: ["package.json"], merged: "unrunnable" });
+  await runSweep([redPr(), peer()], sweep.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(sweep.refreshed, []);
+  assert.deepEqual(sweep.fixed, [PR]);
+  assert.deepEqual([clearances(sweep.rows)[0]?.refresh, clearances(sweep.rows)[0]?.evidence], [false, "unrunnable"]);
+  assert.equal(clearances(sweep.rows)[0]?.reason, "a refresh already left this red and the trial merge is unrunnable");
+  // With live history spanning the PR's whole life and no prior refresh, the same trial merge still refreshes.
+  const span = ["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"]
+    .map((step): Row => ({ ts: ago(600), step, pr_number: 5000, outcome: "error: 422" }));
+  const first = harness([mainHealth(), ...span], { baseChanged: ["package.json"], merged: "unrunnable" });
+  await runSweep([redPr({ createdAt: ago(60) }), peer()], first.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(first.refreshed, [PR], JSON.stringify(clearances(first.rows)));
+
+  // The fix rung: its own earlier refresh left the same red, so an unreadable main tip spends the strike instead.
+  const rungPrior: Row = { step: "fix.base_refreshed", pr_number: PR, head_sha: OLD_HEAD, red_checks: [CHECK], test_files: [FILE] };
+  const rung = await fixRung("passes", null, [rungPrior]);
+  assert.equal(rung.events.includes("update-branch"), false);
+  assert.ok(rung.events.includes("spawn"));
   assert.equal(rung.logged.find((r) => r.step === "refresh.clearance")?.extra?.evidence, "unrunnable");
 });
 
