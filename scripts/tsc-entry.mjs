@@ -4,6 +4,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { constants } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { typecheckEnv } from '../src/lib/typecheck-buildinfo.ts';
 
 const owner = dirname(dirname(fileURLToPath(import.meta.url)));
 const compiler = join(owner, 'node_modules', 'typescript', 'bin', 'tsc');
@@ -56,7 +57,8 @@ export function runTscEntry(argv, cwd = process.cwd(), spawn = spawnSync) {
     ? ['--import', join(owner, 'node_modules', 'tsx', 'dist', 'loader.mjs'), join(owner, 'scripts', 'typecheck.mjs'), ...extra]
     : [compiler, ...argv];
   const result = spawn(process.execPath, args, {
-    cwd, stdio: 'inherit', env: routed ? { ...process.env, RMD_TSC_ENTRY: '1' } : process.env,
+    // Either way the compiler runs under the fleet's Go memory limit (TYPECHECK_GOMEMLIMIT) unless one is set.
+    cwd, stdio: 'inherit', env: typecheckEnv(routed ? { ...process.env, RMD_TSC_ENTRY: '1' } : process.env),
   });
   if (result.error) {
     process.stderr.write(`typecheck: could not run tsc: ${result.error.message}\n`);
