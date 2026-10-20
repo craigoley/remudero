@@ -453,3 +453,32 @@ test("serve convergence cannot stop the console before pressure admission", () =
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("the serve launcher's admission counts swap-in served from zswap: pswpin plus zswpin", () => {
+  // OPERATOR RULING 2026-10-19 (4): under zswap a swap-in from the compressed pool counts in zswpin, never pswpin.
+  const budget = loadHostMemoryBudgetPolicy(join(REPO_ROOT, "plan", "policy.yaml"));
+  const f = launcherFixture();
+  try {
+    // The launcher's own `sleep` between its two vmstat reads: the stand-in lands the second sample.
+    writeFileSync(join(f.root, "bin", "sleep"), "#!/usr/bin/env bash\ncp \"${FAKE_VMSTAT_AFTER}\" \"${RMD_SERVE_ADMIT_VMSTAT_PATH}\"\n");
+    chmodSync(join(f.root, "bin", "sleep"), 0o755);
+    writeFileSync(join(f.proc, "vmstat"), "pswpin 100\nzswpin 0\n");
+    writeFileSync(join(f.proc, "vmstat.after"), "pswpin 100\nzswpin 10000000\n");
+    f.env.FAKE_VMSTAT_AFTER = join(f.proc, "vmstat.after");
+    const seams = realServePolicyDeps({ installPath: f.root, stateRoot: f.root }, f.exec, undefined, () => budget);
+    const h = harness({ replaceServe: seams.replaceServe });
+    const out = runServePolicyCycle(h.deps, TICK);
+    assert.equal(out.replaced, false, out.reason);
+    assert.equal(h.rows.at(-1)!.data?.hold, "swap_in", out.reason);
+    assert.match(String(h.rows.at(-1)!.data?.detail ?? out.reason), /disk 0\.0 \+ zswap 200000000\.0, zswpin/);
+    assert.doesNotMatch(readFileSync(f.log, "utf8"), DESTRUCTIVE, "held before any destructive docker call");
+
+    // No zswpin line (zswap not compiled in): 0, named, and a calm host is admitted.
+    writeFileSync(join(f.proc, "vmstat"), "pswpin 100\n");
+    writeFileSync(join(f.proc, "vmstat.after"), "pswpin 100\n");
+    const calm = harness({ replaceServe: seams.replaceServe });
+    assert.equal(runServePolicyCycle(calm.deps, TICK).replaced, true);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});

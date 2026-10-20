@@ -410,3 +410,27 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
     }
   });
 });
+
+test("the tuner's swap-in counts what zswap serves: its counter is pswpin plus zswpin", () => {
+  // OPERATOR RULING 2026-10-19 (4): under zswap a swap-in from the compressed pool counts in zswpin, never pswpin.
+  for (const zswap of [true, false]) {
+    const h = host();
+    try {
+      const id = "c0ffee".padEnd(64, "0");
+      writeFileSync(join(h.root, "meminfo"), `MemTotal: ${HOST_KB} kB\nMemAvailable: ${1000 * 1024} kB\n`);
+      // No disk swap-in since the last tick; 60,000 pages from zswap (or, without zswap, 60,000 from disk).
+      writeFileSync(join(h.root, "vmstat"), zswap ? "pswpin 5000\nzswpin 60000\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n"
+        : "pswpin 65000\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n");
+      const then = Math.floor(Date.now() / 1000) - 300;
+      writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${CONSOLE}.txt`), `v1 ${then} ${id} 1124 25000 5000 30 0\n`);
+      const run = spawnSync("bash", [TUNER, "--container", CONSOLE, "--state-dir", join(h.root, "cfg")], { encoding: "utf8", env: h.env });
+      assert.equal(run.status, 0, run.stderr);
+      const basis = zswap ? "zswpin" : "no zswpin line \\(zswap not compiled in\\): 0";
+      assert.match(run.stdout, new RegExp(`swap-in rising \\(0 -> 800 KiB/s, pswpin\\+zswpin; ${basis}\\)`), run.stdout);
+      const sample = readFileSync(join(h.root, "cfg", "state", `memory-high-sample-${CONSOLE}.txt`), "utf8").split(" ");
+      assert.equal(sample[5], "65000", "the stored counter is the sum, so the next tick's delta counts zswap too");
+    } finally {
+      rmSync(h.root, { recursive: true, force: true });
+    }
+  }
+});
