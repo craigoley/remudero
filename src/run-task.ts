@@ -12276,11 +12276,14 @@ export async function runFixRung(opts: {
       return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
     }
 
-    // W1-T10029: revalidate reconstructed failed proofs before paying a worker to rediscover
-    // that they already pass. Unlike W1-T5334, this runs before the first fix dispatch.
+    // W1-T10029: revalidate concrete reconstructed failed proofs before the first dispatch on
+    // this head. A missing proof cannot be re-executed, and an earlier dispatch owns the
+    // progress decision for its head; neither is a fresh no-op prevention opportunity.
     if (!reconstructedReviewChecked && currentMergeConflict === undefined && !noReviewYet &&
       review.reviewerOutcome === "sweep-reconstructed" &&
-      review.criteria.some((criterion) => !criterion.met && criterion.proof_exec === "executed_fail")) {
+      review.criteria.some((criterion) => !criterion.met && criterion.proof_exec === "executed_fail" && criterion.proof.trim() !== "") &&
+      !(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))().some((row) =>
+        row.step === "fix.dispatch" && row.task_id === opts.taskId && row.head_sha === review.headSha)) {
       reconstructedReviewChecked = true;
       try {
         const body = await (deps.fetchPrBody ?? fetchPrBodyViaGh)(opts.prUrl);

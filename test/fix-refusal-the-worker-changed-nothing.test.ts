@@ -163,6 +163,26 @@ test("a reconstructed prose-only failure has no executed proof to revalidate", a
   } finally { f.clean(); }
 });
 
+test("a reconstructed failure without its proof stays with the dispatched worker", async () => {
+  const f = fixture();
+  f.options.initialReview.criteria[0].proof = "";
+  try {
+    await assert.rejects(runFixRung(f.options), f.reachedWorker);
+    assert.equal(f.reviewed.length, 0);
+    assert.equal(f.spawned.length, 1);
+  } finally { f.clean(); }
+});
+
+test("a prior fix dispatch on this head preserves the progress decision", async () => {
+  const f = fixture();
+  f.options.deps.ledgerLines = () => [{ step: "fix.dispatch", task_id: f.options.taskId, head_sha: "head" }];
+  try {
+    await assert.rejects(runFixRung(f.options), f.reachedWorker);
+    assert.equal(f.reviewed.length, 0);
+    assert.equal(f.spawned.length, 1);
+  } finally { f.clean(); }
+});
+
 test("pre-dispatch review reads the live body through the default gh reader", async () => {
   const f = fixture();
   const shim = ghShim([{ when: `pr view ${f.options.prUrl} --json body`, stdout: JSON.stringify({ body: "Live body from gh." }) }]);
