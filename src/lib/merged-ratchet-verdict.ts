@@ -103,7 +103,8 @@ export type MergedRatchetInputs =
   | { upToDate: true; mainSha: string; headSha: string }
   | { error: string; mainSha?: string; headSha?: string };
 
-const CLOCK_SCOPE_RE = /^src\/.+\.ts$/;
+/** The clock-signature census's own scope: a src TypeScript file. */
+export const CLOCK_SCOPE_RE = /^src\/.+\.ts$/;
 const CLOCK_FIELDS = ["legacy", "dateNow", "newDate"] as const;
 
 /** One count's verdict. Over the merged row but within main's: the PR's row was lowered on a stale
@@ -230,6 +231,9 @@ export function* readMergedRatchetInputsSteps(
   run: PlanSafetyGit,
 ): Steps<MergedRatchetInputs> {
   try {
+    // No managed clone, nothing to merge in: named before any REST read is spent on this PR.
+    const clone = yield* git(run, ["rev-parse", "--git-dir"]);
+    if (clone.status !== 0) return { error: failed("no managed clone: git rev-parse --git-dir", clone) };
     const pr = (yield* step(() => rest(singlePrRestArgs(target.owner, target.repo, target.prNumber)))) as { base?: { ref?: unknown } } | undefined;
     const baseRef = pr?.base?.ref;
     if (typeof baseRef !== "string") return { error: "the pull read named no base ref" };

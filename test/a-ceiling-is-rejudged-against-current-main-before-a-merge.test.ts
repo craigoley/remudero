@@ -10,17 +10,18 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { attemptArm, logArmAttribution, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import { runStepsSync } from "../src/lib/git-push.js";
+import { attemptArm, logArmAttribution, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { runStepsSync } from "#src/lib/git-push.js";
 import {
+  CLOCK_SCOPE_RE,
   judgeMergedRatchets,
   readMergedRatchetInputsSteps,
   type MergedRatchetInputs,
   type MergedRatchetJudgement,
-} from "../src/lib/merged-ratchet-verdict.js";
-import { planSafetyGitSync } from "../src/lib/plan-pr-merge-safety.js";
-import { runArmedRatchetRejudge, type ArmedStalledPr, type OpenPrView } from "../src/lib/sweep.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/merged-ratchet-verdict.js";
+import { planSafetyGitSync } from "#src/lib/plan-pr-merge-safety.js";
+import { runArmedRatchetRejudge, type ArmedStalledPr, type OpenPrView } from "#src/lib/sweep.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const FILE = "src/run-task.ts";
 const BASELINE = "scripts/comment-load-baseline.json";
@@ -182,6 +183,17 @@ test("W1-T9962: a ceiling lowered on a stale base is re-derived against current 
   assert.equal(over.rows[0]?.rederived, 500);
   // A crossing main already carried, and this merge did not grow, is main's to repair.
   assert.equal(judgeMergedRatchets(memoryInputs({ count: N + 2, row: N + 1 }, { count: N + 2, row: N + 1 })).verdict, "clean");
+  // The clock-signature rows follow the same rule, inside CLOCK_SCOPE_RE only: a test file is never counted.
+  const clockBaseline = "scripts/clock-signature-baseline.json";
+  const twice = "export const a = Date.now() + Date.now();\n";
+  const clockTree = (row: number) => (p: string) => p === clockBaseline ? JSON.stringify({ "src/lib/x.ts": { dateNow: row }, "test/x.test.ts": { dateNow: 0 } })
+    : p === "src/lib/x.ts" || p === "test/x.test.ts" ? twice : null;
+  const clock = judgeMergedRatchets({ mainSha: "m", headSha: "h", changed: ["src/lib/x.ts", "test/x.test.ts"], measuredFiles: [],
+    readMerged: clockTree(1), readMain: clockTree(2) });
+  assert.equal(CLOCK_SCOPE_RE.test("test/x.test.ts"), false);
+  assert.equal(CLOCK_SCOPE_RE.test("src/lib/x.ts"), true);
+  assert.deepEqual(clock.rows.map((r) => [r.gate, r.path, r.field, r.verdict, r.merged, r.prCeiling, r.mainCeiling, r.rederived]),
+    [["clock-signature", "src/lib/x.ts", "dateNow", "stale-lowering", 2, 1, 2, 2]]);
   // The stale lowering holds the arm like a crossing does.
   const calls: string[] = [];
   const result = attemptArm(url(12388), armDeps({ calls, readMergedRatchets: () => stale }), "head-sha");

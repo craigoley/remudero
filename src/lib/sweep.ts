@@ -4313,7 +4313,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     // W1-T528 — the action half of W1-T520; see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
-    readMergedRatchets: (pr) => readMergedRatchetsAsync(pr.prUrl),
+    readMergedRatchets: (pr) => readMergedRatchetsAsync(pr.prUrl, () => config),
 
     // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
     mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
@@ -21274,7 +21274,7 @@ export async function runArmedRatchetRejudge(
       judge = judgeMergedRatchets({ error: String((e as Error)?.message ?? e) });
     }
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RATCHET_JUDGE_DECIDED_STEP, pr_number: pr.prNumber,
-      pr_url: pr.prUrl, lane: "sweep-armed", ...ratchetJudgeLedgerFields(judge), head_sha: pr.headSha, main_sha: mainTip,
+      lane: "sweep-armed", ...ratchetJudgeLedgerFields(judge), head_sha: pr.headSha, main_sha: mainTip,
       ...(judge.mainSha !== undefined && judge.mainSha !== mainTip ? { merged_main_sha: judge.mainSha } : {}) };
     const spent = ledgerLines.some((l) => (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") &&
       l.pr_number === pr.prNumber && l.head_sha === pr.headSha);

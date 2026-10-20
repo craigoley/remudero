@@ -678,7 +678,6 @@ export function realArmDeps(
     readPlanTouch: (prUrl, headSha) => runStepsSync(cachedPlanTouchSteps(prUrl, headSha, ghJson)),
     readPlanMergeSafety: (prUrl) => runStepsSync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJson, planSafetyGitSync)),
     readOwnFiles: (prUrl) => runStepsSync(ownFilesSteps(prUrl, ghJson)),
-    readMergedRatchets: (prUrl) => runStepsSync(mergedRatchetsInClone(prUrl, loadConfigImpl, ghJson, planSafetyGitSync)),
     sleepSync: (ms) => {
       if (ms <= 0) return;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -2057,7 +2056,7 @@ export function logArmAttribution(
   const judge = ratchetJudge ?? directMergePreflight?.ratchetJudge;
   if (judge) {
     const remedy = directMergePreflight?.reason === "ratchet_collision" ? directMergePreflight.remedy : "proceed";
-    log("sweep.ratchet_judge.decided", { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane, ...ratchetJudgeLedgerFields(judge), remedy, outcome });
+    log("sweep.ratchet_judge.decided", { task_id: taskId, pr_number: prNumber, lane, ...ratchetJudgeLedgerFields(judge), remedy, outcome });
   }
   const ghFields = rateLimit
     ? { gh_bucket: rateLimit.bucket, gh_bucket_resets_at: rateLimit.resetsAt, gh_bucket_operation: rateLimit.operation }
