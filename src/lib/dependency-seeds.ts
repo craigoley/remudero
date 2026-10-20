@@ -129,6 +129,8 @@ export interface DependencySeedReuseReport {
   reuseShare: number | null;
   methods: Record<SeedMethod, number>;
   reasons: string[];
+  failures: { scope: "registration" | "generation" | "store"; reason: string }[];
+  failuresTruncated: boolean;
   cleanupAuthorized: false;
 }
 
@@ -140,9 +142,13 @@ export function observeDependencySeedReuse(root: string, maxRecords = 5000): Dep
     version: 1, assurance: "registered-provisioning-metadata-only", state: "complete",
     observedGenerations: 0, readableRegistrations: 0, knownProvisioningRegistrations: 0,
     freshInstallGenerations: 0, reusedRegistrations: 0, unknownRegistrations: 0, reuseShare: null,
-    methods: { "apfs-clone": 0, "readonly-links": 0, "private-copy": 0 }, reasons: [], cleanupAuthorized: false,
+    methods: { "apfs-clone": 0, "readonly-links": 0, "private-copy": 0 }, reasons: [], failures: [], failuresTruncated: false, cleanupAuthorized: false,
   };
-  const note = (reason: string): void => { if (!report.reasons.includes(reason) && report.reasons.length < 8) report.reasons.push(reason); };
+  const note = (scope: "registration" | "generation" | "store", reason: string): void => {
+    if (!report.reasons.includes(reason) && report.reasons.length < 8) report.reasons.push(reason);
+    if (report.failures.length < 8) report.failures.push({ scope, reason });
+    else report.failuresTruncated = true;
+  };
   const entries = (path: string, limit: number, reason: string): string[] => {
     const dir = opendirSync(path), names: string[] = [];
     try {
@@ -196,16 +202,23 @@ export function observeDependencySeedReuse(root: string, maxRecords = 5000): Dep
             report.knownProvisioningRegistrations++;
             report.methods[p.method!]++;
             if (p.installed) sawFreshInstall = true; else report.reusedRegistrations++;
-          } catch (e) { report.unknownRegistrations++; report.state = "partial"; note((e as Error).message); }
+          } catch (e) {
+            const reason = e instanceof Error ? e.message : String(e);
+            report.unknownRegistrations++; report.state = "partial"; note("registration", reason);
+          }
         }
         if (sawFreshInstall) report.freshInstallGenerations++;
       } catch (e) {
-        report.state = "partial"; note((e as Error).message);
-        if ((e as Error).message === "registration inspection bound") break;
+        const reason = e instanceof Error ? e.message : String(e);
+        report.state = "partial"; note("generation", reason);
+        if (reason === "registration inspection bound") break;
       }
     }
     if (report.state === "complete" && report.knownProvisioningRegistrations > 0) report.reuseShare = report.reusedRegistrations / report.knownProvisioningRegistrations;
-  } catch (e) { report.state = "unknown"; note((e as Error).message); }
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    report.state = "unknown"; note("store", reason);
+  }
   return report;
 }
 

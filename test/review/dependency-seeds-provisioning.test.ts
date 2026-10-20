@@ -35,6 +35,7 @@ test('dependency provisioning records one fresh generation and a real reuse with
   assert.equal(f.installs,1);assert.equal(report.state,'complete');assert.equal(report.observedGenerations,1);
   assert.equal(report.knownProvisioningRegistrations,2);assert.equal(report.freshInstallGenerations,1);
   assert.equal(report.reusedRegistrations,1);assert.equal(report.reuseShare,.5);assert.equal(report.cleanupAuthorized,false);
+  assert.deepEqual(report.failures,[]);assert.equal(report.failuresTruncated,false);
   for(const n of readdirSync(f.consumers)){const p=join(f.consumers,n);assert.equal(lstatSync(p).mode&0o077,0);assert.equal(JSON.parse(readFileSync(p,'utf8')).provisioning.version,1);}
   assert.deepEqual(readdirSync(f.first.seed).sort(),['consumers','node_modules','package-lock.json','package.json','ready.json']);
 });
@@ -42,6 +43,7 @@ test('legacy provisioning observations stay unknown rather than inventing zero i
   const f=registeredFixture(t),path=join(f.consumers,readdirSync(f.consumers)[0]),row=JSON.parse(readFileSync(path,'utf8'));delete row.provisioning;writeFileSync(path,JSON.stringify(row));
   const report=observeDependencySeedReuse(f.store);assert.equal(report.state,'partial');assert.equal(report.unknownRegistrations,1);assert.equal(report.reuseShare,null);
   assert.ok(report.reasons.includes('legacy or incomplete provisioning observation'));
+  assert.deepEqual(report.failures,[{scope:'registration',reason:'legacy or incomplete provisioning observation'}]);
 });
 test('foreign consumer namespaces and symbolic metadata cannot become observed reuse',t=>{
   const f=registeredFixture(t),paths=readdirSync(f.consumers).map(n=>join(f.consumers,n));
@@ -52,11 +54,20 @@ test('foreign consumer namespaces and symbolic metadata cannot become observed r
 test('registry inspection bounds preserve null rates and do not rewrite a single consumer',t=>{
   const f=registeredFixture(t),before=readdirSync(f.consumers).map(n=>readFileSync(join(f.consumers,n),'utf8'));
   const report=observeDependencySeedReuse(f.store,1);assert.equal(report.state,'partial');assert.equal(report.reuseShare,null);assert.ok(report.reasons.includes('registration inspection bound'));
+  assert.deepEqual(report.failures,[{scope:'generation',reason:'registration inspection bound'}]);
   assert.deepEqual(readdirSync(f.consumers).map(n=>readFileSync(join(f.consumers,n),'utf8')),before);
   assert.equal(observeDependencySeedReuse(f.store,5001).state,'unknown');
 });
 test('missing and malformed stores never produce a positive observation or cleanup authority',t=>{
-  const f=fixture(t);for(const root of [join(f.root,'missing'),f.root]){const r=observeDependencySeedReuse(root);assert.equal(r.state,'unknown');assert.equal(r.reuseShare,null);assert.equal(r.cleanupAuthorized,false);}
+  const f=fixture(t);for(const root of [join(f.root,'missing'),f.root]){const r=observeDependencySeedReuse(root);assert.equal(r.state,'unknown');assert.equal(r.reuseShare,null);assert.equal(r.cleanupAuthorized,false);assert.equal(r.failures.length,1);assert.equal(r.failures[0].scope,'store');assert.match(r.failures[0].reason,/ENOENT/);}
+});
+test('bounded diagnostic samples declare truncation without inventing complete reuse rates',t=>{
+  const f=registeredFixture(t);for(const n of readdirSync(f.consumers))rmSync(join(f.consumers,n));
+  for(let i=0;i<9;i++)writeFileSync(join(f.consumers,`unrecognized-${i}`),'{}',{mode:0o600});
+  const report=observeDependencySeedReuse(f.store);
+  assert.equal(report.state,'partial');assert.equal(report.unknownRegistrations,9);assert.equal(report.reuseShare,null);
+  assert.equal(report.failures.length,8);assert.equal(report.failuresTruncated,true);
+  for(const failure of report.failures)assert.deepEqual(failure,{scope:'registration',reason:'unrecognized registry row'});
 });
 test('normal seed CLI priming and reporting use real defaults without enabling or installing a service',t=>{
   const f=fixture(t),checkout=f.checkout('cli'),store=join(f.root,'seeds'),script=resolve('scripts/dependency-seeds.mjs');
