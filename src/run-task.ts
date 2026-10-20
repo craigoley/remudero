@@ -1528,6 +1528,8 @@ import {
   buildDepReviewEscalation,
   reconcileDepReviewHold,
   reconcileDependabotRefresh,
+  dependabotCommandAnswer,
+  type DependabotIssueComment,
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
   reconcileDependabotStaleEvent,
@@ -23744,6 +23746,10 @@ export interface DepReviewPrMutations {
   close(prUrl: string, opts: { comment: string; deleteBranch: false }): void;
   /** W1-T9828: the REST title PATCH under the daemon's own gh identity, so `pull_request.edited` fires. */
   retitle?(prUrl: string, title: string): Promise<void>;
+  /** W1-T9994: the guarded REST update-branch with an expected head. Absent ⇒ unavailable, never a command. */
+  updateBranch?(prNumber: number, expectedHeadSha: string): Promise<{ ok: boolean; error?: string }>;
+  /** W1-T9994: the PR's issue comments since an ISO time, to read Dependabot's answer to a command. */
+  comments?(prNumber: number, sinceIso: string): Promise<readonly DependabotIssueComment[]>;
 }
 
 export async function defaultDepReviewRetitle(prUrl: string, title: string): Promise<void> {
@@ -23770,6 +23776,19 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
       ghExec(["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
     },
     retitle: defaultDepReviewRetitle,
+    async updateBranch(prNumber, expectedHeadSha) {
+      assertLiveWriteAllowed("gh-pr-update-branch", `refreshing the base of ${repoArg}#${prNumber}`);
+      try {
+        await ghTextAsync(ghUpdateBranchArgv(owner, repo, prNumber, expectedHeadSha));
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: String((error as Error)?.message ?? error) };
+      }
+    },
+    async comments(prNumber, sinceIso) {
+      const pages = await ghJsonAsync(["api", "--paginate", "--slurp", `repos/${repoArg}/issues/${prNumber}/comments?since=${sinceIso}`]);
+      return (pages as DependabotIssueComment[][]).flat();
+    },
   };
 }
 
@@ -23931,10 +23950,20 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   if (result.decision === "hold") {
     const refreshFlag = flagValue(rest, "--dependabot-refresh");
     try {
-      const refresh = reconcileDependabotRefresh({
+      const mutations = deps.prMutations ?? defaultDepReviewPrMutations(owner, repo);
+      const refresh = await reconcileDependabotRefresh({
         statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, result,
-        cause: DEPENDABOT_REFRESH_CAUSES.find((cause) => cause === refreshFlag), commits: view.commits, nowMs: clock.now(),
-        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body), log,
+        cause: DEPENDABOT_REFRESH_CAUSES.find((cause) => cause === refreshFlag), nowMs: clock.now(),
+        updateBranch: async (expected) => await mutations.updateBranch?.(view.number, expected) ?? { ok: false, error: "update-branch unavailable" },
+        readComments: async (since) => {
+          if (!mutations.comments) throw new Error("comment read unavailable");
+          return await mutations.comments(view.number, since);
+        },
+        escalate: (refreshed) => escalate(buildDepReviewEscalation({ prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+          body: view.body ?? "", semverLevel: result.semverLevel,
+          hold: { headSha: view.headRefOid, redChecks: result.redChecks, advisoryRed: result.advisoryRed, refresh: refreshed } }),
+        { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+        log,
       });
       if (refresh !== "none") console.log(`dependabot refresh ${refresh}: ${view.url}`);
     } catch (error) {
@@ -23995,6 +24024,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     });
 
     const prMutations = deps.prMutations ?? defaultDepReviewPrMutations(owner, repo);
+    const ignoreAtMs = clock.now();
     try {
       prMutations.comment(view.url, DEPENDABOT_IGNORE_MAJOR_COMMAND);
       log("dep-review.migrate.ignore_commented", {
@@ -24034,6 +24064,16 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       });
       console.log(`migration feedback captured (${entry.id}) and ignore commented, but close failed; will retry: ${view.url}`);
       return 1;
+    }
+
+    try { // W1-T9994: the ignore command has no REST counterpart, so a refusal is ledgered for the operator.
+      const answer = dependabotCommandAnswer(await prMutations.comments?.(view.number, fixedClock(ignoreAtMs).iso()) ?? [], ignoreAtMs);
+      if (answer.kind === "refused") {
+        log("dep-review.refresh_refused", { pr_number: view.number, head_sha: view.headRefOid, command: DEPENDABOT_IGNORE_MAJOR_COMMAND,
+          cause: "migrate", reply: answer.reply });
+      }
+    } catch (e) {
+      log("dep-review.migrate.answer_unread", { pr_number: view.number, head_sha: view.headRefOid, error: String((e as Error)?.message ?? e) });
     }
 
     log("dep-review.migrate.completed", {
