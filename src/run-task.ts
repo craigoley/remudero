@@ -28545,6 +28545,9 @@ export function readReservationHolder(
  *  CLI dispatch below) omit `deps` entirely and get the real functions, same DI shape as
  *  `runTask`'s `opts.config ?? loadConfig()` / `opts.github ?? ghGateway(...)`. */
 export type LintPlanStatusDeps = {
+  /** A CI adapter may supply independently verified, invocation-bound dependency evidence.
+   * Offline callers still perform no GitHub/config writes. Omitted preserves the native store path. */
+  dependencyEvidence?: (task: Task) => DependencyMergeEvidence;
   /**
    * Checkout that owns an explicit `--plan` path and its `--base` reads. Omitted by the CLI;
    * tests use a throwaway clone so a fixture mutation cannot be observed by sibling test workers.
@@ -29797,6 +29800,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // Read only for a changed machine task's non-retired dependency. Never enter loadConfig offline.
   let offlineCredit: { store: CreditStore; repository: string; overrides: readonly CreditOverrideRow[] } | { reason: string } | undefined;
   const dependencyEvidence = (candidate: Task): DependencyMergeEvidence => {
+    if (offline && deps.dependencyEvidence) return deps.dependencyEvidence(candidate);
     if (!offline) {
       const projected = dependencyStatusByTaskId?.get(candidate.id);
       return !projected || projected.indeterminate
