@@ -1,4 +1,4 @@
-import { parseDocument } from "yaml";
+import { isMap, isScalar, isSeq, parseDocument, visit } from "yaml";
 import { join, relative, sep } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -180,6 +180,36 @@ function historyChanges(ctx: TaskFilingHistoryInvocation, commits: Commit[]): Ma
   return result;
 }
 
+/** Metadata may have duplicate keys; direct record identity must remain positively unambiguous. */
+function historicalRecordCounts(text: string, candidates: ReadonlySet<string>): Map<string, number> {
+  const doc = parseDocument(text, { uniqueKeys: true });
+  if (doc.errors.some(error => error.code !== "DUPLICATE_KEY")) unavailable("unsupported historical plan YAML");
+  // Preserve the old zero-alias contract without converting unrelated metadata into native objects.
+  visit(doc, { Alias() { unavailable("unsupported historical plan aliases"); } });
+  if (!isSeq(doc.contents) || (doc.contents.tag !== undefined && doc.contents.tag !== "tag:yaml.org,2002:seq"))
+    unavailable("unsupported historical plan container shape");
+  const counts = new Map<string, number>(), stringTag = "tag:yaml.org,2002:str";
+  for (const record of doc.contents.items) {
+    if (!isMap(record) || (record.tag !== undefined && record.tag !== "tag:yaml.org,2002:map"))
+      unavailable("unsupported historical task record shape");
+    const identities = record.items.filter(pair => {
+      if (!isScalar(pair.key) || typeof pair.key.value !== "string" ||
+          (pair.key.tag !== undefined && pair.key.tag !== stringTag))
+        unavailable("unsupported historical task identity key");
+      if (pair.key.value === "<<") unavailable("unsupported historical task identity merge");
+      return pair.key.value === "id";
+    });
+    // The AST retains duplicate pairs, including quoted/escaped spellings of the same id key.
+    if (identities.length !== 1) unavailable("ambiguous historical task identity");
+    const identity = identities[0]!.value;
+    if (!isScalar(identity) || typeof identity.value !== "string" ||
+        (identity.tag !== undefined && identity.tag !== stringTag))
+      unavailable("unsupported historical task identity value");
+    if (candidates.has(identity.value)) counts.set(identity.value, (counts.get(identity.value) ?? 0) + 1);
+  }
+  return counts;
+}
+
 function historyBlobs(ctx: TaskFilingHistoryInvocation, changes: Map<string, Change[]>): Map<string, Map<string, number>> {
   const ids = [...new Set([...changes.values()].flatMap(rows => rows.flatMap(c => [c.old, c.next])).filter(id => !ZERO.test(id)))];
   debit(ctx, "blobReads", ids.length);
@@ -215,19 +245,7 @@ function historyBlobs(ctx: TaskFilingHistoryInvocation, changes: Map<string, Cha
       const text = historyUtf8(output.subarray(offset, offset + sizes[i]!));
       offset += sizes[i]!;
       if (output[offset++] !== 10) unavailable("incomplete historical blob bytes");
-      const doc = parseDocument(text, { uniqueKeys: true });
-      if (doc.errors.length) unavailable("unsupported historical plan YAML");
-      let value: unknown;
-      try { value = doc.toJS({ maxAliasCount: 0 }); }
-      catch { throw new HistoryUnavailable("unsupported historical plan aliases"); }
-      if (!Array.isArray(value)) unavailable("unsupported historical plan container shape");
-      const counts = new Map<string, number>();
-      for (const record of value) {
-        if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.id !== "string")
-          unavailable("unsupported historical task record shape");
-        if (ctx.candidates.has(record.id)) counts.set(record.id, (counts.get(record.id) ?? 0) + 1);
-      }
-      result.set(ids[i]!, counts);
+      result.set(ids[i]!, historicalRecordCounts(text, ctx.candidates));
     }
     if (offset !== output.length) unavailable("unexpected historical blob bytes");
   }
