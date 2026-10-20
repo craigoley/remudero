@@ -108,8 +108,8 @@ export function ciDependencyEvidenceForInvocation(argv, env = process.env, cwd =
 
 /** Read only the changed machine filings' dependency closure from immutable Git objects. */
 export function ciDependencyClosure(checkout, head, base) {
-  const git = (args, input) => gitOrThrow(args, { cwd: checkout, input });
-  const at = ref => loadPlanAtRef(checkout, 'plan/tasks.yaml', ref, git);
+  const git = args => gitOrThrow(args, { cwd: checkout });
+  const at = ref => loadPlanAtRef(checkout, 'plan/tasks.yaml', ref);
   const plan = at(head), before = at(base), ids = new Set();
   const pending = plan.tasks.filter(task => task.author_class === 'machine' &&
     !(task.status === 'blocked' && task.retirement !== undefined) &&

@@ -162,7 +162,7 @@ test("producer dependency closure is transitive, bounded and unavailable tasks n
   const [task] = parse(original);
   f.put("plan/tasks.d/ZZ-T2-filing.yaml", stringify([{ ...task, depends_on: ["ZZ-T404"] }]));
   f.repo.git("add", "."); f.repo.git("commit", "-qm", "test: missing dependency");
-  assert.throws(() => ciDependencyClosure(f.repo.dir, f.repo.git("rev-parse", "HEAD"), f.context.base), /dependency task absent/);
+  assert.throws(() => ciDependencyClosure(f.repo.dir, f.repo.git("rev-parse", "HEAD"), f.context.base), /dependency task absent|depends_on unknown task/);
   const tasks = Array.from({ length: 33 }, (_, index) => ({ ...task, id: `ZZ-T${100 + index}`, depends_on: [] }));
   f.put("plan/tasks.yaml", stringify(tasks));
   f.put("plan/tasks.d/ZZ-T2-filing.yaml", stringify([{ ...task, depends_on: tasks.map(row => row.id) }]));
