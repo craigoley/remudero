@@ -12,7 +12,12 @@ const PROOF = "test/back-to-back-self-merges-share-one-daemon-restart.test.ts";
 const MINUTE = 60_000;
 const START = Date.parse("2026-10-07T00:00:00Z");
 const window = { value: 10 * MINUTE, reason: "measured follow-on boots were 1–10 minutes apart" };
-const changes = (sha: string) => [{ sha, files: ["src/lib/daemon.ts"] }];
+// W1-T9089: the daemon's own code weighs the source floor of 1 like any other source, so an advance carries the
+// threshold's worth of source commits to be a window-held change; its newest commit is the advance's sha.
+const changes = (sha: string) => [
+  ...Array.from({ length: judge.DEPLOY_RESTART_SCORE_THRESHOLD.value - 1 }, (_, index) => ({ sha: `${sha}-pad-${index}`, files: ["src/lib/daemon.ts"] })),
+  { sha, files: ["src/lib/daemon.ts"] },
+];
 // A lifetime long past the 2026-10-17 minimum, so these cases measure the window and the horizon alone.
 const lifetimeStartedAtMs = -24 * 60 * MINUTE;
 

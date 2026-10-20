@@ -467,7 +467,7 @@ import {
   type OpenPrCheck,
   resolveReleasedIds,
 } from "./lib/drain.js";
-import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type DaemonFreshness, type RestartBoundary, type RestartBoundaryContext, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
+import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
@@ -2832,7 +2832,6 @@ import { materializeWorkerHome, perRunWorkerHomeDir, sweepStaleWorkerHomes, swee
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
-import { withTouchedDeclarations } from "./lib/advance-declarations.js";
 import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
@@ -3354,8 +3353,6 @@ export function watchDispatchSpawn(
     log: (step: string, fields: Record<string, unknown>) => void;
     /** The daemon's recycle-PAUSE reader: a pending recycle ends the round on the checkpoint path. */
     recyclePending?: () => string | undefined;
-    /** W1-T8139: the daemon's restart latch, read in-process (never the fetching freshness read): a latched restart ends the round too. */
-    restartPending?: () => string | undefined;
   },
   seams: {
     runWatchdog?: typeof runQuietWorkerWatchdog;
@@ -3392,7 +3389,6 @@ export function watchDispatchSpawn(
     nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
       === "delivered" ? "delivered" : "unsupported",
     ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),
-    ...(watch.restartPending ? { restartPending: watch.restartPending } : {}),
     endRound: async (reason, trigger) => {
       if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
       const cwd = spawnArgs.cwd;
@@ -3473,19 +3469,6 @@ export function freshnessYieldRows(a: {
       ...(a.freshness ? { old_sha: a.freshness.oldSha, new_sha: a.freshness.newSha } : { trigger: "recycle", detail: a.recycle }), ...undeclared } },
     { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: a.waitingOn, branch: a.branch, head_sha: a.headSha, ...undeclared } },
   ];
-}
-
-/** W1-T8139: the daemon's restart latch as the watchdog's pending-yield read: the in-process `restartAtWorkerBoundary`
- * only (never the fetching `externalWaitFreshness`), named by the sha pair it waits on. Undefined without a daemon. */
-export function restartLatchDetail(
-  latch: RestartBoundary | undefined,
-  context?: () => RestartBoundaryContext,
-): (() => string | undefined) | undefined {
-  if (!latch) return undefined;
-  return () => {
-    const freshness = latch(context?.());
-    return freshness ? `daemon restart latched: ${freshness.oldSha.slice(0, 9)}..${freshness.newSha.slice(0, 9)}` : undefined;
-  };
 }
 
 export function roundEndedHandoffRows(
@@ -7444,12 +7427,11 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
 /** W1-T5282 — the daemon's two freshness reads of `repoDir`, both awaited: a sync `git fetch` here stalled the
  *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
-  const localGit: AsyncGitRunner = deps.git ? async (args) => deps.git!(args) : asyncGit(repoDir);
   // W1-T9092: an advance is material only when it touches the import closure of the entry this process started from.
   const closureGit: ClosureGit = deps.git ? async (args) => deps.git!(args) : daemonClosureGit(repoDir);
   const entry = daemonProcessEntry(repoDir);
   const read = (): Promise<DaemonFreshness> =>
-    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit))
+    checkServiceFreshnessAsync(repoDir, env, deps)
       .then((svc) => withDaemonClosure(svc, (sha) => daemonProcessClosure(closureGit, sha, entry))).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
@@ -16853,7 +16835,6 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   claimReserver?: DispatchClaimReserverAsync;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
-  restartAtWorkerBoundary?: RestartBoundary;
   externalWaitRecycle?: () => string | undefined;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
@@ -17780,8 +17761,6 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: ExternalWaitFreshness;
-    /** The daemon asks this run to yield or grants it a measured, bounded holdout at its current phase. */
-    restartAtWorkerBoundary?: RestartBoundary;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
@@ -17985,7 +17964,6 @@ async function runTask(
     const watchedSpawn = watchDispatchSpawn(rawSpawn, {
       enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
       provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)),
-      restartPending: restartLatchDetail(opts.restartAtWorkerBoundary, () => ({ waitingOn: restartPhase.current, runId })),
     });
     return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
@@ -20303,9 +20281,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string, phase = waitingOn): Promise<RunResult | undefined> => {
       noteRestartPhase(phase === "checkpoint" ? "checkpointed" : phase === "decision" ? "implementing" : phase);
-      const freshness = opts.restartAtWorkerBoundary
-        ? opts.restartAtWorkerBoundary({ waitingOn: restartPhase.current, runId })
-        : await opts.externalWaitFreshness?.();
+      const freshness = await opts.externalWaitFreshness?.();
       const recycle = freshness ? undefined : (opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)))();
       if (!freshness && !recycle) return undefined;
       let undeclared: readonly string[] = [];
@@ -21267,8 +21243,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       : undefined;
     if (handoffDeclined) log("run.handoff_declined", { trigger: "pr_open", reason: handoffDeclined, pr_url: prUrl });
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
-      externalWaitFreshness: opts.restartAtWorkerBoundary
-        ? () => opts.restartAtWorkerBoundary!({ waitingOn: "ci", runId }) : opts.externalWaitFreshness,
+      externalWaitFreshness: opts.externalWaitFreshness,
       externalWaitRecycle: opts.externalWaitRecycle,
       handOffAtPrOpen: opts.handOffAtPrOpen === true && handoffDeclined === undefined,
     });
@@ -38945,7 +38920,7 @@ export async function runInChildWhenOn(
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const inProcess = (reason: string): undefined => {
     if (input.mayRunInProcess?.(reason) === false) {
-      throw new TaskAdmissionError(`restart latched: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
+      throw new TaskAdmissionError(`restart decided: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
     }
     return undefined;
   };
@@ -38981,6 +38956,19 @@ export async function daemonCommand(
   return daemonCommandFromModule(rest, deps, daemonCommandHost());
 }
 
+/**
+ * W1-T9089: the daemon wiring's answer to a failing run-child contract. With the in-process restart path retired, `auto`
+ * no longer demotes; each `contract_failing` decision escalates once per evidence window through `deliver`, the
+ * daemon's existing escalate path, and ledgers `run_child.contract_failing`. Returns the per-decision hook.
+ */
+export function daemonRunChildContract(
+  deliver: (escalation: RunChildContractEscalation) => string | null | undefined,
+  log: (step: string, extra: Record<string, unknown>) => void,
+): (decision: RunChildModeDecision | undefined) => boolean {
+  const escalated = new Set<string>();
+  return (decision) => escalateRunChildContract(decision, { escalate: deliver, log, escalated });
+}
+
 /** W1-T9333: the run-task.ts symbols the moved `daemonCommand` reaches, built per call (no top-level TDZ). */
 function daemonCommandHost(): DaemonCommandHost {
   return {
@@ -39011,6 +38999,7 @@ function daemonCommandHost(): DaemonCommandHost {
     daemonDefaultBuildSweepHook,
     daemonDefaultBuildSweepLightHook,
     daemonFreshnessReads,
+    daemonRunChildContract,
     daemonGardenPassSpawn,
     daemonMemoryTelemetryReader,
     daemonPlanReaders,
@@ -53274,7 +53263,9 @@ import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
 import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, runChildModeIsOn, spawnRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
 import { type RunChildMode } from "./lib/policy.js";
-import { type RunChildModeEvidence } from "./lib/run-child-mode.js";
+import {
+  escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
+} from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };

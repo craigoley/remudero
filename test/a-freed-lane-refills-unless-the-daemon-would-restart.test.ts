@@ -43,8 +43,11 @@ const staleWith = (files: string[]) => ({
   stale: true as const,
   oldSha: "a".repeat(40),
   newSha: "b".repeat(40),
-  changes: [{ sha: "b".repeat(40), subject: "feat: x", files }],
+  // One commit per file: W1-T9089 weighs every source commit alike, so a material advance is a threshold of them.
+  changes: files.map((file, n) => ({ sha: n.toString(16).padStart(40, "b"), subject: "feat: x", files: [file] })),
 });
+/** W1-T9089: with the self-path list retired, a restart-worthy advance is a threshold's worth (18) of source commits. */
+const MATERIAL = Array.from({ length: 18 }, (_, n) => `src/lib/module-${n}.ts`);
 
 /** A and B are held open until released; C completes at once. Freshness reads fresh until `goStale` flips it. */
 function harness(staleFiles: string[] | undefined) {
@@ -57,10 +60,8 @@ function harness(staleFiles: string[] | undefined) {
   let nowMs = Date.now();
   const sleeps: Array<ReturnType<typeof deferred<void>>> = [];
   const startedWhileARan: string[] = [];
-  const boundaries = new Map<string, () => unknown>();
-  const runOne = (id: string, options?: { restartAtWorkerBoundary: () => unknown }): Promise<RunResult> => {
+  const runOne = (id: string): Promise<RunResult> => {
     started.push(id);
-    if (options) boundaries.set(id, options.restartAtWorkerBoundary);
     if (!aSettled && id !== "A") startedWhileARan.push(id);
     if (started.includes("A") && started.includes("B")) bothStarted.resolve();
     if (id === "A" || id === "B") return release[id].promise;
@@ -99,8 +100,6 @@ function harness(staleFiles: string[] | undefined) {
       await drainMicrotasks();
     },
     advanceClock: (ms: number) => { nowMs += ms; },
-    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
-    boundary: (id: string) => boundaries.get(id)?.(),
     settleA: () => {
       aSettled = true;
       release.A.resolve(okResult("A"));
@@ -127,7 +126,7 @@ test("W1-T5083: a deferred low-weight advance does not hold a freed lane", async
 });
 
 test("W1-T5083: an advance that would restart the daemon still holds the freed lane after the quiet window", async () => {
-  const h = harness(["src/lib/daemon.ts"]);
+  const h = harness(MATERIAL);
   await h.bothStarted.promise;
   h.goStale();
   await h.tick();
@@ -138,13 +137,12 @@ test("W1-T5083: an advance that would restart the daemon still holds the freed l
   h.advanceClock(FRESHNESS_COALESCE_WINDOW_MS.value);
   await h.tick(); // past the window: the dispatch tick decides to restart
   assert.ok(h.steps.some((l) => l.step === "daemon.freshness_decision" && l.extra?.action === "restart"));
-  // W1-T7806: a lane in flight at the latch holds refill open until it reaches a boundary or settles.
-  assert.ok(h.boundary("A"), "A reaches a worker boundary and reads the latched restart");
+  // W1-T9089: A in flight at the decision is awaited; no daemon latch reaches into it.
   h.release.B.resolve(okResult("B"));
   await drainMicrotasks();
   assert.deepEqual(h.startedWhileARan, ["B"], "nothing admitted onto B's freed lane");
   const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
-  assert.equal(held?.extra?.reason, "stale code");
+  assert.equal(held?.extra?.reason, "stale code: no candidate runs as a child");
   const released = h.steps.filter((l) => l.step === "daemon.freshness_coalesced").at(-1);
   assert.equal(released?.extra?.reason, "window_quiet");
   assert.equal(released?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value);
@@ -153,7 +151,7 @@ test("W1-T5083: an advance that would restart the daemon still holds the freed l
 });
 
 test("W1-T5083: a coalesced self-path advance refills a freed lane during the hold", async () => {
-  const h = harness(["src/lib/daemon.ts"]);
+  const h = harness(MATERIAL);
   await h.bothStarted.promise;
   h.goStale();
   await h.tick();
