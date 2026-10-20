@@ -192,7 +192,7 @@ test("W1-T9761: a restart does not reset the wait of a deferred garden", async (
     const spawnIn = (stateRoot: string, w: World) => childGardenPassSpawn({ execPath: process.execPath, execArgv: [], entry: script,
       ionice: "/nonexistent-ionice", setPriority: () => undefined, log: () => undefined, root: stateRoot, admission: ports(w),
       reserve: () => ports(w).openReservation!({ workerClass: "garden", root: stateRoot }) });
-    const deferral: GardenDeferral = { cadenceMs: CADENCE_MS, cadenceBasis: "scheduled", firstAsk: true };
+    const deferral: GardenDeferral = { cadenceMs: CADENCE_MS, cadenceBasis: "scheduled", samples: 0, firstAsk: true };
     // The previous daemon generation's runtime file: gate last completed ten cadences ago.
     const lastCompletedAt = new Date(NOW - 10 * CADENCE_MS).toISOString();
     mkdirSync(join(root, "state"));
@@ -259,8 +259,8 @@ test("W1-T9761: the garden loop hands its spawn its measured cadence and ends a 
   mock.timers.enable({ apis: ["setInterval"] });
   const w = fresh();
   try {
-    assert.equal(registry.gardenCadence?.([0, 10], 5).cadenceBasis, "scheduled", "one gap is not a measurement");
-    assert.equal(registry.gardenCadence?.([0, 10, 30, 60], 5).cadenceMs, 20, "the median of an odd count of gaps");
+    assert.equal(registry.gardenCadence?.([10], 5).cadenceBasis, "scheduled", "one interval is not a measurement");
+    assert.equal(registry.gardenCadence?.([10, 30, 20], 5).cadenceMs, 20, "the median of an odd count of intervals");
     const seen: GardenDeferral[] = [];
     const outcomes: GardenPassOutcome[] = [0, 0, 0, { kind: "deferred", reason: "memory-budget-shortfall" }, 0];
     const due = [true, false, true, true, true];

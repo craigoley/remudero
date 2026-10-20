@@ -52,7 +52,7 @@ test("tsc gets fewer checkers under low injected headroom, scaled to the shortfa
   assert.deepEqual(lowMemoryTypecheckArgs(0.8 * TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_COLD_PEAK_BYTES), ["--checkers", "3"]);
   assert.deepEqual(lowMemoryTypecheckArgs(0.5 * TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_COLD_PEAK_BYTES), ["--checkers", "2"]);
   assert.deepEqual(lowMemoryTypecheckArgs(-1 * GiB, TYPECHECK_COLD_PEAK_BYTES), ["--checkers", "2"], "never below the measured floor");
-  assert.deepEqual(lowMemoryTypecheckArgs(1 * GiB, TYPECHECK_WARM_PEAK_BYTES), ["--checkers", "3"], "a warm check is judged by its own peak");
+  assert.deepEqual(lowMemoryTypecheckArgs(0.8 * TYPECHECK_WARM_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES), ["--checkers", "3"], "a warm check is judged by its own peak");
 });
 
 test("npm run typecheck and rmd preflight's typecheck pass the low-memory flags only when the injected headroom is tight", (t) => {

@@ -42,3 +42,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.93
+    reasons:
+      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The supplied excerpt names multiple failing tests and workflow checks but provides no diagnosis connecting them to the proposed preopen-gate.ts remedy; the finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not establish that the test passes or that fix-round dispatch is prevented."
+    judged_at: "2026-10-20T16:34:45.521Z"
+    pin: "2c347746cd21ae21200106161e8abe8f2367dab09307f5d7fcd500ef4589b19d"
