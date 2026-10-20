@@ -17,8 +17,8 @@ import { resetShadowMemoryStateForTests, type HostMemoryBudgetPolicy } from "../
 import type { LedgerLine } from "../src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-10-16T16:00:00.000Z");
 const MIB = 1024 * 1024;
 const TICK_MS = 60_000;
