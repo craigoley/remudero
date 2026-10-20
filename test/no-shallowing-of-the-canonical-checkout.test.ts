@@ -470,16 +470,20 @@ test("findForbiddenFlagHits + hasSelfCreatedGitSource: a seeded test/ fixture th
   assert.match(message, /--depth/);
 });
 
+// Build synthetic imports from specifier values, as the subpath-alias census's own fixtures do.
+const sharedGitImport = (specifier = "./helpers/git-repo.js", binding = "gitRepo", typeOnly = false): string =>
+  `import${typeOnly ? " type" : ""} { ${binding} } from ${JSON.stringify(specifier)}; `;
+
 test("W1-T10210: shallow fixture census recognizes only initialized shared Git sources", () => {
   for (const source of [
-    'import { gitRepo } from "./helpers/git-repo.js"; const source = gitRepo();',
-    'import { gitRepo } from "./helpers/git-repo.js"; const source = gitRepo({});',
-    'import { gitRepo as makeRepo } from "./helpers/git-repo.js"; const source = makeRepo({kind: "origin", bare: true, seedCommit: false});',
-    'import { gitRepo } from "#test/helpers/git-repo.js"; function fixture() { return gitRepo({kind: "source"}); }',
+    sharedGitImport() + 'const source = gitRepo();',
+    sharedGitImport() + 'const source = gitRepo({});',
+    sharedGitImport("./helpers/git-repo.js", "gitRepo as makeRepo") + 'const source = makeRepo({kind: "origin", bare: true, seedCommit: false});',
+    sharedGitImport("#test/helpers/git-repo.js") + 'function fixture() { return gitRepo({kind: "source"}); }',
   ]) assert.equal(hasSelfCreatedGitSource(source), true, source);
   const nested = "test/nested/fixture.test.ts";
-  assert.equal(hasSelfCreatedGitSource('import { gitRepo } from "../helpers/git-repo.ts"; gitRepo({branch: "fixture"});', nested), true);
-  assert.equal(hasSelfCreatedGitSource('import { gitRepo } from "./helpers/git-repo.js"; gitRepo();', nested), false,
+  assert.equal(hasSelfCreatedGitSource(sharedGitImport("../helpers/git-repo.ts") + 'gitRepo({branch: "fixture"});', nested), true);
+  assert.equal(hasSelfCreatedGitSource(sharedGitImport() + 'gitRepo();', nested), false,
     "a same-named helper at another relative path is not the shared initializer");
   const fixture = "test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts";
   assert.equal(hasSelfCreatedGitSource(readFileSync(join(REPO_ROOT, fixture), "utf8"), fixture), true,
@@ -487,12 +491,12 @@ test("W1-T10210: shallow fixture census recognizes only initialized shared Git s
 });
 
 test("shared fixture census keeps clone-only, unknown and shadowed constructors unproven", () => {
-  const imported = 'import { gitRepo } from "./helpers/git-repo.js"; ';
+  const imported = sharedGitImport();
   for (const source of [
     'const gitRepo = unknownFactory; gitRepo();',
-    'import { gitRepo } from "./other-helper.js"; gitRepo();',
-    'import type { gitRepo } from "./helpers/git-repo.js"; gitRepo();',
-    'import { gitRepo } from "test/helpers/git-repo.js"; gitRepo();',
+    sharedGitImport("./other-helper.js") + 'gitRepo();',
+    sharedGitImport("./helpers/git-repo.js", "gitRepo", true) + 'gitRepo();',
+    sharedGitImport("test/helpers/git-repo.js") + 'gitRepo();',
     imported + 'gitRepo({cloneFrom: "/canonical"});',
     imported + 'gitRepo({cloneFrom: undefined});',
     imported + 'gitRepo({...options});',
@@ -509,7 +513,7 @@ test("shared fixture census keeps clone-only, unknown and shadowed constructors 
     imported + 'object.gitRepo();',
     imported + 'gitRepo(...options);',
     imported + 'gitRepo({}, unknown);',
-    'import { gitRepo } from "./helpers/git-repo.js"; const source = gitRepo({',
+    imported + 'const source = gitRepo({',
   ]) assert.equal(hasSelfCreatedGitSource(source), false, source);
   assert.equal(hasSelfCreatedGitSource(readFileSync(join(REPO_ROOT, "test/measurement-cadence.test.ts"), "utf8")), true,
     "the existing literal-init control remains recognized");
