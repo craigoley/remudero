@@ -18,7 +18,10 @@
     - src/lib/instance-inbox-proposal.ts
     - src/run-task.ts
     - test/inbox/inbox-feedback-response-causal-link.test.ts
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=feb9a487f7353c77
+  # backlog gardener: placed=2026-10-20T22:55:06.900Z
   attempts: 0
   rationale: |
     Grounded against CLAUDE.md, MASTER-PLAN.md, both task surfaces, LEARNINGS.md and DECISIONS.md.
