@@ -1,0 +1,101 @@
+- id: W1-T10275
+  title: "THE AUTOMATED RETRO'S LEDGER READ STOPS ONCE ITS CAP IS FULL, READING NEWEST-FIRST — `readRetroLedgerNdjson` walks every rotation in its window oldest-first and evicts as it goes, so on 2026-10-20 05:06Z it read about 2.54M rows to keep the newest 138,357 (dropped_bytes 1,368,421,371 against a 96 MiB cap); read the live file and rotations newest-first and stop opening rotations once RETRO_LEDGER_MAX_BYTES / RETRO_LEDGER_MAX_ROWS is reached, keeping the same rows and an honest truncation report"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the ORDER and STOP of the retro child's own ledger read; which rows it keeps, the caps, and every miner downstream are unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020b item 1 (2026-10-20); follow-up named in the child-heap hand fix PR #13138 (logs-8864/childheap-pr-body.md, section \"The retro's ledger read\"; benches in logs-8864/childheap-work/)"
+  plan_refs: [W1-T3229, W1-T3239, W1-T10046, W1-T9710, W1-T9119, W1-T10144]
+  files:
+    - src/lib/retro.ts
+    - src/lib/ledger-union.ts
+    - test/learning/the-retro-ledger-read-stops-at-its-cap-newest-first.test.ts
+  status: queued
+  priority: 2  # about 30 s and 1.2+ GB of rows parsed per automated retro that are thrown away; grows daily while the marker is frozen
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger union (read-only; rotations of 10-15..10-20 plus live, by hand with zgrep over each form),
+    `retro.ledger_read.truncated` rows (all since_ts 2026-10-04T10:45:50.161Z, max_bytes 100663296, max_rows 350000):
+    - 10-18 10:47Z: rows_kept 139,771, dropped_rows 2,123,596, dropped_bytes 1,166,588,286
+    - 10-19 05:13Z: 138,356 kept, 2,252,608 dropped, 1,259,528,914 B
+    - 10-19 14:26Z: 141,674 kept, 2,297,180 dropped, 1,292,860,686 B (the brief's "1.29 GB on 10-19")
+    - 10-19 22:23Z: 138,383 kept, 2,338,129 dropped, 1,321,995,884 B
+    - 10-20 05:06Z: 138,357 kept, 2,402,683 dropped, 1,368,421,371 B
+    So each automated retro reads, stringifies and evicts about 17x the rows it keeps, and the waste grows every day.
+    OBSERVED offline by the child-heap builder (logs-8864/childheap-work/retro-bench.mts and retro-matrix.jsonl:
+    `readRetroLedgerNdjson` then `parseLedger` over a COPY of the core state, the 10-19 window, --max-old-space-size=1792,
+    n=2 per arm, 2026-10-19 ~16:30-17:40Z): rows_kept 142,742, dropped_rows 2,309,906 (1,241 MB), wall 29-36 s,
+    process high-water 710-741 MB at default heap growth and 669-676 MB with --heap-growing-percent=50.
+    WHY THE WINDOW IS SO WIDE (OBSERVED, read-only): state/last-retro.json is dated 2026-10-06 11:59Z (ts
+    2026-10-06T10:45:50.161Z), so `retroLedgerWindowSince` reaches back to 10-04 (marker minus RETRO_LEDGER_WINDOW_LEAD_MS).
+    The marker is frozen because each retro ends "prepublish validation failed ... marker unchanged": retro.preflight_failed
+    with exit_class process_timeout at about 3600 s on 10-19 15:49Z and 10-20 06:31Z. That symptom is W1-T10144's
+    (queued, verify: human), not this task's. 277 rotations (221.9 MB gzip) are cut after 10-04T10Z; 28 (28.5 MB) after
+    10-19T05Z. INFERRED: a newest-first read that stops at the cap opens roughly the newest day of rotations instead of
+    sixteen days, so about one tenth of the gzip bytes; the saving is largest exactly while the marker stays frozen,
+    and still real after it moves: about 92 MB of rows a day (1.46 GB over the 16-day window), so a normal window of the
+    48 h lead plus up to a day holds two to three times the cap.
+    READ at origin/main e4f73f7ea (symbols, not lines):
+    - src/lib/retro.ts `readRetroLedgerNdjson`: `for await (const row of openLedgerUnion(stateDir, { sinceTs, dedupe: false }))`
+      re-serialises each row (`JSON.stringify`), keeps an insertion-ordered Map as the retained window and evicts the
+      OLDEST entry while bytes + cost > maxBytes or size >= maxRows. Survivors are therefore the newest rows of the stream.
+      `RetroLedgerRead.droppedRows/droppedBytes` count every evicted row exactly.
+    - src/lib/ledger-union.ts `openLedgerUnion`: entries are the listed rotations in name order then the live file;
+      `rotationBeforeWindow` skips a rotation cut before sinceTs; there is no newest-first or stop-early option.
+    - run-task.ts `retroCommand` is the only production caller (one call, then `reportRetroLedgerTruncation` and
+      `retroLedgerScopeNote`).
+    - The W1-T9710 digests do not help here: they are per-slice projections (`slice: { holder, steps, project, version }`),
+      and the retro needs every step's whole row. Reading newest-first is the lever, not a digest.
+    NOT COVERED ELSEWHERE: W1-T10046 (queued, PR #13016) moves the DAEMON's retro-trigger check and auto-triage read to
+    digests and never touches `readRetroLedgerNdjson`; PR #13138's own body says so ("This PR does not change that read").
+    W1-T3229 and W1-T3239 (merged) built the byte/row caps this task keeps. W1-T9119 (queued) gates the trigger, not the
+    child's read. Swept origin/main plan/tasks.d and the plan trees of open PR heads #13115, #13008, #13138, #13016, #13105,
+    #13036 (2026-10-20 15:20Z) for readRetroLedgerNdjson, RETRO_LEDGER_MAX_BYTES and retro.ledger_read.truncated: only
+    W1-T3229 and W1-T3239 on every head.
+  design: |
+    1. NEWEST-FIRST, STOP AT THE CAP. Read the live file first, then rotations in descending cut order, never a rotation
+       cut before sinceTs. Rows inside one file keep their file order. Keep a file's newest rows that fit; once the byte
+       or row cap is reached, open no further rotation. Emit the retained rows OLDEST-FIRST as today (every miner and
+       `parseLedger` expect that order). Dedupe keeps the newest copy of an identical line, as today.
+    2. SAME ROWS. On any corpus whose rotations sort by cut stamp, the new read returns byte-identical `ndjson` and the
+       same `rowsKept` as the current oldest-first read; the test proves it against the current implementation kept as
+       a reference in the test.
+    3. HONEST TRUNCATION. A read that stopped early cannot count the rows it never opened. Keep `droppedRows` /
+       `droppedBytes` for rows read and not kept, and add `unreadRotations` (count) and `unreadRotationBytes` (on-disk
+       bytes) plus the oldest kept row's ts. `reportRetroLedgerTruncation` writes them on `retro.ledger_read.truncated`
+       (existing fields unchanged in meaning), and `retroLedgerScopeNote` says "N older rotation(s) were not read", so the
+       report never presents a cut window as complete (the W1-T3229 contract).
+    4. ORDER YOU CANNOT PROVE, YOU DO NOT ASSUME. A rotation with no parseable cut stamp makes the pass fall back to the
+       current oldest-first walk for that read and say so on the row (`order: "oldest-first-fallback"`, with the name).
+    5. MEASURED IN PRODUCTION. Every retro read writes one row (step constant beside the truncation step, e.g.
+       `retro.ledger_read`) with rotations_opened, unread_rotations, rows_read, rows_kept, bytes_read and ms, so the
+       saving per retro is visible and a later task can tune from it. No new threshold, env var or cap: the caps stay
+       RETRO_LEDGER_MAX_BYTES and RETRO_LEDGER_MAX_ROWS.
+    6. TESTS in test/learning/the-retro-ledger-read-stops-at-its-cap-newest-first.test.ts (`rmd test-place` on a stub
+       importing retro.ts and ledger-union.ts printed test/learning/ at medium confidence; re-run it on the real file),
+       with gzip and plain rotation fixtures plus a live file, counting opened files through the union's io seam.
+       `test(` titles verbatim as in the proofs.
+  acceptance:
+    - claim: "the newest-first read keeps exactly the rows, in the same order, that the oldest-first read kept"
+      proof: "unit test: W1-T10275: the newest-first retro read keeps the rows the oldest-first read kept"
+    - claim: "once the cap is full no older rotation is opened"
+      proof: "unit test: W1-T10275: the retro read opens no rotation older than the one that filled its cap"
+    - claim: "a read that stopped early reports the rotations it never opened, on the row and in the scope note"
+      proof: "unit test: W1-T10275: a retro read that stopped early reports the rotations it never opened"
+    - claim: "a rotation with no orderable stamp sends that read back to oldest-first and says so"
+      proof: "unit test: W1-T10275: an unorderable rotation sends the retro read back to oldest-first"
+  falsifier: |
+    At origin/main the read walks every rotation in the window, so the second test (count of opened rotations on a
+    corpus whose newest file alone fills the cap) fails, and the truncation row has no unread-rotation fields, so the third
+    fails. Reverse the order without the stop and the second still fails; stop without re-ordering the output and the
+    first fails on row order.
+  note: |
+    Builds alone; no dependency. It does not unfreeze the marker (W1-T10144's symptom) and does not change the retro's
+    second read, `followupLedgerUnionNdjson` (run-task.ts: a 30-day, step-filtered `resolveLedgerUnion`), which also walks
+    its window; that read is NOT in this task's scope. EFFECT, measured after merge: on the next automated retro the
+    new row's rotations_opened is a small fraction of the rotations cut since its since_ts, rows_kept matches the prior
+    retro's order of magnitude, and `daemon.retro_subprocess.terminal` duration_ms drops by the read's share.

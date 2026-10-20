@@ -17,10 +17,19 @@ const at = (minutesAgo: number): string => new Date(NOW - minutesAgo * MIN).toIS
 const PR_URL = "https://github.com/acme/remudero/pull/10783";
 const HEAD = "2fd447d7e";
 const VANISHED = "/nonexistent/worktrees/reviewer-e6cb1f765599";
+const DIGEST = "vanished-review-input";
+const attemptId = (n: number) => `review-PR10783-00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const admitted = (minutesAgo: number, n: number, hostGap: boolean): Record<string, unknown> => ({
+  ts: at(minutesAgo), step: "sweep.review_admitted", task_id: "W1-T7850", pr_number: 10783,
+  pr_url: PR_URL, head_sha: HEAD, review_input_digest: DIGEST, review_attempt_id: attemptId(n),
+  host_gap_rereview: hostGap, skips: ["cwd-missing"],
+});
 
-const refusal = (minutesAgo: number, extra: Record<string, unknown>): Record<string, unknown> => ({
+const refusal = (minutesAgo: number, extra: Record<string, unknown>, attempt?: number): Record<string, unknown> => ({
   ts: at(minutesAgo), task_id: "W1-T7850", step: "review.post_refused", pr_url: PR_URL, head_sha: HEAD,
   attempted_state: "success", reviewer_code_freshness: "unreadable",
+  review_input_digest: DIGEST,
+  ...(attempt === undefined ? {} : { run_id: `review-PR10783-${1000 + attempt}`, review_attempt_id: attemptId(attempt) }),
   reviewer_code_reason: `git fetch origin failed in ${VANISHED}`, ...extra,
 });
 
@@ -28,6 +37,7 @@ const openPr = (): OpenPrView => ({
   prNumber: 10783, prUrl: PR_URL, taskId: "W1-T7850", headSha: HEAD, headRefName: "run-W1-T7850-1",
   checksState: "green", reviewState: "pending", reviewPendingSince: at(30), unmetCriteria: [], priorStrikes: 0,
   autoMergeArmed: false, lastActivityAt: at(30), ciFailures: [],
+  reviewInputDigest: DIGEST,
 });
 
 interface Harness { rows: Record<string, unknown>[]; effects: string[]; deps: SweepDeps; judged: FixProgressInput[] }
@@ -116,25 +126,26 @@ test("W1-T7850: a vanished-worktree refusal is re-reviewed at the same head with
 
 test("W1-T7850: a repeat vanished-worktree refusal is paced and then escalated", async () => {
   // One re-review was already requested for the first refusal, and a second refusal followed 2m ago.
-  // An earlier 2m review (disposed, then posted) gives the pace its observed duration.
+  // An earlier 2m review (admitted, then posted) and the actual re-review supply its duration.
   const earlier = [
-    { ts: at(50), task_id: "W1-T7850", step: "sweep.disposed", pr_number: 10783, head_sha: HEAD, disposition: "post-review", acted: true },
-    { ts: at(48), task_id: "W1-T7850", step: "review.posted", pr_url: PR_URL, head_sha: HEAD, state: "success" },
+    admitted(50, 0, false),
+    { ts: at(48), task_id: "W1-T7850", step: "review.posted", pr_url: PR_URL, head_sha: HEAD, state: "success",
+      run_id: "review-PR10783-1000", review_attempt_id: attemptId(0), review_input_digest: DIGEST },
   ];
-  const rows = [
+  const rows = (latestRefusal: number) => [
     ...earlier,
     refusal(40, { reviewer_code_host_gap: "cwd-missing" }),
     { ts: at(38), task_id: "W1-T7850", step: REFUSED_POST_HOST_GAP_REREVIEW_STEP, pr_number: 10783, pr_url: PR_URL,
-      head_sha: HEAD, refusal_at: Date.parse(at(40)), host_gap: "cwd-missing" },
-    refusal(2, { reviewer_code_host_gap: "cwd-missing" }),
+      head_sha: HEAD, review_input_digest: DIGEST, refusal_at: Date.parse(at(40)), host_gap: "cwd-missing" },
+    admitted(38, 1, true), refusal(latestRefusal, { reviewer_code_host_gap: "cwd-missing" }, 1),
   ];
-  const held = harness([...rows]);
+  const held = harness(rows(2));
   const heldResult = await runSweep([openPr()], held.deps);
   assert.equal(heldResult.actions[0]!.disposition, "wait");
   assert.match(heldResult.actions[0]!.reason, /host gap/);
   assert.deepEqual(held.effects, []);
 
-  const escalating = harness([...rows.slice(0, 4), refusal(35, { reviewer_code_host_gap: "cwd-missing" })],
+  const escalating = harness(rows(35),
     async () => ({ verdict: "escalate", loop: "no-op", reason: "same gap twice" }) as never);
   const escalated = await runSweep([{ ...openPr(), reviewPendingSince: at(60) }], escalating.deps);
   assert.equal(escalated.actions[0]!.disposition, "blocked-ambiguous");

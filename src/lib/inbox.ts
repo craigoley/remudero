@@ -2440,6 +2440,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               subtype: escalated.subtype,
               ...workerLedgerFields(escalated),
             });
+            lastWorker = escalated;
             const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"), proposal, currentPlanText);
             if (candidate) {
               parsed = composeDraftStamp(proposal.id, candidate, deps.clock);
@@ -2458,12 +2459,13 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         const refusal = lastWorker?.usageRefusal;
         // W1-T3350: the four ways a parse can fail are FOUR reasons, not one string, and the
         // counts ride alongside so a rate spike has a shape a reader can act on.
-        const failure = describeDraftParseFailure([lastWorker?.text ?? "", (lastWorker?.blocks ?? []).join("\n")].join("\n"));
+        const failure = describeDraftParseFailure([lastWorker?.text ?? "", (lastWorker?.blocks ?? []).join("\n")].filter(Boolean).join("\n"));
         const error = refusal
           ? `refused by the account before any output: ${refusal.matched}`
           : (failure.reason ?? "no FRAGMENT/STAMP markers in worker output");
         deps.log("inbox.draft_error", {
           proposal_id: proposal.id,
+          ...(lastWorker ? { provider: lastWorker.provider, model: draftWorkerModel(lastWorker), selection_assignment_id: lastWorker.selectionAssignmentId } : {}),
           error,
           fragments: failure.fragments,
           stamps: failure.stamps,

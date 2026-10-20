@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {closeSync,constants,fstatSync,openSync,readSync,realpathSync,statSync} from 'node:fs';
-import {join,sep} from 'node:path';
+import {dirname,join,sep} from 'node:path';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const atom=part=>part!=='.'&&part!=='..'&&!part.includes('\0');
 const boundedRead=path=>{
@@ -15,6 +16,33 @@ const boundedRead=path=>{
   return buffer.subarray(0,used);
  }finally{closeSync(fd);}
 };
+
+// W1-T9405 deliberately puts tsc outside node_modules to retain fleet admission.
+// This is one exact install-owned tracked entry, never permission for arbitrary escapes.
+function compilerWrapperTools(path,dependencyRoot,lock) {
+ const owner=dirname(dependencyRoot),relative='scripts/tsc-entry.mjs',entry=join(owner,relative);
+ if(path!==entry||realpathSync(entry)!==entry)throw Error('dependency tool escapes installed donor: tsc');
+ const locked=lock.packages['node_modules/typescript'];
+ if(!locked||locked.link||typeof locked.version!=='string')throw Error('wrapped compiler requires a locked typescript package');
+ const compiler=realpathSync(join(dependencyRoot,'typescript/bin/tsc'));
+ if(!compiler.startsWith(dependencyRoot+sep))throw Error('wrapped compiler escapes installed donor');
+ const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith('GIT_')));
+ Object.assign(env,{GIT_OPTIONAL_LOCKS:'0',GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_NO_REPLACE_OBJECTS:'1'});
+ const git=args=>{
+  const r=spawnSync('git',['-c','core.fsmonitor=false',...args],{cwd:owner,env,timeout:2000,maxBuffer:4*1024*1024});
+  if(r.error||r.signal||r.status!==0)throw Error('tracked compiler wrapper observation unavailable');
+  return r.stdout;
+ };
+ if(realpathSync(git(['rev-parse','--show-toplevel']).toString().trim())!==owner)throw Error('compiler wrapper owner is not the repository root');
+ const head=git(['rev-parse','--verify','HEAD^{commit}']).toString().trim();
+ const tracked=git(['ls-tree',head,'--',relative]).toString();
+ if(!/^100(?:644|755) blob [a-f0-9]+\tscripts\/tsc-entry\.mjs\n$/.test(tracked))throw Error('compiler wrapper is not a tracked regular file');
+ const bytes=boundedRead(entry),trackedBytes=git(['cat-file','blob',head+':'+relative]);
+ if(!bytes.equals(trackedBytes))throw Error('compiler wrapper differs from tracked bytes');
+ const compilerBytes=boundedRead(compiler);
+ if(git(['rev-parse','--verify','HEAD^{commit}']).toString().trim()!==head)throw Error('compiler wrapper owner changed during measurement');
+ return [['tsc-wrapper',hash(bytes)],['tsc-compiler',hash(compilerBytes)]];
+}
 
 /** Cheap metadata/tool precheck, NOT a byte attestation or authority to reuse tests.
  * Records the real dependency donor so disappearance through a symlink is visible.
@@ -41,8 +69,10 @@ export function authorDependencyProvenance(root) {
   const tools=[];
   for(const name of ['tsx','tsc','commitlint']) {
    const path=realpathSync(join(root,'node_modules/.bin',name));
-   if(!path.startsWith(dependencyRoot+sep))throw Error(`dependency tool escapes installed donor: ${name}`);
-   tools.push([name,hash(boundedRead(path))]);
+   if(!path.startsWith(dependencyRoot+sep)) {
+    if(name!=='tsc')throw Error(`dependency tool escapes installed donor: ${name}`);
+    tools.push(...compilerWrapperTools(path,dependencyRoot,lock));
+   }else tools.push([name,hash(boundedRead(path))]);
   }
   const after=statSync(realpathSync(join(root,'node_modules')));
   if(identity.dev!==after.dev||identity.ino!==after.ino)throw Error('dependency donor changed during measurement');

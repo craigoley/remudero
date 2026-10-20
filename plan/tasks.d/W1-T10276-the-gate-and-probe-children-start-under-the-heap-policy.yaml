@@ -1,0 +1,84 @@
+- id: W1-T10276
+  title: "THE PRE-OPEN GATE'S `preflight --fast` CHILD AND THE SHADOW-PROBE CHILD START UNDER THE DAEMON'S HEAP GROWTH PERCENT — PR #13138 puts `childHeapPolicyArgs()` on the run child's and the automated retro child's command lines only, so these two node children still grow at V8's default factor; and 65 of 69 pre-open gates are spawned from INSIDE a run child, where `childHeapPolicyArgs()` returns [] because only the daemon applies the policy"
+  repo: remudero
+  depends_on: []  # needs PR #13138 (a hand fix with no plan task id) merged first; see the note
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern, which node flags two existing child spawns carry; what the gate and the probe run and decide is unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020b item 2 (2026-10-20); follow-up to the child-heap hand fix PR #13138 (logs-8864/childheap-pr-body.md)"
+  plan_refs: [W1-T9082, W1-T9619, W1-T8778, W1-T9106, W1-T10275]
+  files:
+    - src/lib/daemon-memory-policy.ts
+    - src/lib/preopen-gate.ts
+    - src/lib/run-child.ts
+    - test/ci/gates/the-gate-and-probe-children-start-under-the-heap-policy.test.ts
+  status: queued
+  dispatch_hold: true  # hold until PR #13138 merges; a person removes this line then (see note)
+  priority: 2
+  attempts: 0
+  rationale: |
+    DEPENDS ON PR #13138 MERGING (open at filing, head b58db9176, "fix(run-child): release the setup plan and collect
+    before each agent wait"); its commits carry `Remudero-Task: PR-13138`, not a plan task id, so `depends_on` cannot name
+    it. Do not build before it merges.
+    READ at PR #13138 head b58db9176 (symbols, not lines):
+    - src/lib/daemon-memory-policy.ts `childHeapPolicyArgs()` returns `[--heap-growing-percent=<n>]` only after
+      `applyDaemonMemoryPolicy` set the module's `childHeapGrowingPercent`; in any other process it returns []. NODE_OPTIONS
+      refuses the flag, so it must ride the child's own command line.
+    - It is added to `spawnRunChild` (run-child.ts) and `runAutomatedRetroSubprocess` (retro-subprocess.ts) only.
+    READ at origin/main e4f73f7ea:
+    - src/lib/run-child.ts `startRunChildProbe` (the W1-T9082 shadow probe; the daemon calls it from daemon.ts beside an
+      in-process run) spawns `process.execPath, launch.argv` with no node flags.
+    - src/lib/preopen-gate.ts `defaultRunGate` → `preopenGateLaunch`: a bundle launch is `{ file: process.execPath, args:
+      launch.argv }` run inside the sandbox argv; the fallback `preopenGateCommand` starts the harness `bin/rmd` (tsx),
+      where no node flag can be passed at all. `runPreopenGate` is called from run-task.ts `runTask`.
+    OBSERVED, core ledger (40 newest rotations plus live, 2026-10-18T13:57Z..2026-10-20T15:09Z, read-only):
+    - 69 `child_entry.spawned` rows with verb "preflight --fast" (run_id PREOPEN-GATE-<pid>), all kind bundle. Joining
+      each row's host + actor_pid to `run_child.spawned` host + child_pid: 65 were spawned by a run child; 4 match none
+      (3 from the daemon, pid 126 on container 8a353e86e898; 1 at 10-18T13:58Z, a minute into the window, whose spawn
+      row may predate it).
+      So for most gates the spawning process is a run child, which #13138 starts WITH the flag on its command line but
+      which never runs `applyDaemonMemoryPolicy`: a one-line `childHeapPolicyArgs()` at the gate spawn would hand the
+      gate [] there.
+    - 3 `run_child.shadow` rows on 10-20 (entry_kind bundle): child_max_rss_bytes 345,092,096 / 347,373,568 /
+      350,085,120 against a class estimate of 671,088,640.
+    INFERRED, not measured: both children are node processes that parse a plan or run a gate and then exit; #13138's
+    offline matrix measured growth 50 trimming a run child's setup high-water 530/514 MB to 467/468 MB, so a similar
+    trim is expected here. The new row fields below make it measurable.
+    NOT COVERED ELSEWHERE: W1-T9106 (queued) learns the DAEMON's own heap ceiling; W1-T9082 and W1-T9619 (merged) built
+    the probe and the gate launch. Swept origin/main plan/tasks.d and the plan trees of open PR heads #13115, #13008,
+    #13138, #13016, #13105, #13036 (2026-10-20 15:20Z) for childHeapPolicyArgs, heap-growing-percent, preopenGateLaunch
+    and startRunChildProbe: no shard on any head puts the flag on either child.
+  design: |
+    1. A PROCESS THAT WAS STARTED WITH THE FLAG PASSES IT ON. `childHeapPolicyArgs()` returns the applied policy's flag
+       when the daemon set it, else the `--heap-growing-percent=` flag in this process's own `process.execArgv` (a run
+       child started by #13138), else []. One source of truth for both cases; no env var, no new constant.
+    2. THE SHADOW PROBE. `startRunChildProbe`'s default spawn starts `process.execPath` with `[...childHeapPolicyArgs(),
+       ...launch.argv]`, and the `run_child.shadow` row carries `node_args`.
+    3. THE PRE-OPEN GATE. A bundle launch puts `childHeapPolicyArgs()` before `launch.argv` in the args the sandbox runs;
+       the `child_entry.spawned` row carries `node_args`. The `bin/rmd` (tsx) fallback cannot take a node flag: it
+       records `node_args: []` with `node_args_unavailable: "tsx launcher"`, never a silent omission.
+    4. TESTS in test/ci/gates/the-gate-and-probe-children-start-under-the-heap-policy.test.ts (`rmd test-place` on a stub
+       importing daemon-memory-policy.ts, preopen-gate.ts and run-child.ts printed test/ci/gates/ at low confidence,
+       runner-up memory-budget; re-run it on the real file and use what it prints), `test(` titles verbatim as in the
+       proofs. Inject the spawn seams; one test starts a real node child with the flag in execArgv to prove design 1.
+  acceptance:
+    - claim: "the pre-open gate's bundle child starts with the heap growth flag, and the row names it"
+      proof: "unit test: W1-T10276: the pre-open gate child starts under the heap growth percent"
+    - claim: "the shadow-probe child starts with the heap growth flag, and the row names it"
+      proof: "unit test: W1-T10276: the shadow-probe child starts under the heap growth percent"
+    - claim: "a run child started with the flag passes it to a gate it spawns"
+      proof: "unit test: W1-T10276: a run child passes its own heap growth flag to the gate it spawns"
+    - claim: "a tsx-launched gate records why it carries no flag"
+      proof: "unit test: W1-T10276: a tsx-launched gate records why it carries no heap flag"
+  falsifier: |
+    At PR #13138's head neither spawn carries the flag and `childHeapPolicyArgs()` returns [] in a process that did not
+    apply the policy, so all four tests fail. Add the call at the two spawn sites without design 1 and the third test
+    still fails, which is the 65-of-69 case.
+  note: |
+    ORDER: build only after PR #13138 merges (it creates `childHeapPolicyArgs`); `dispatch_hold` keeps the fleet off it
+    until then, and whoever sees #13138 merge removes that line in a plan-only PR. EFFECT, measured after merge: every
+    `child_entry.spawned` row with verb "preflight --fast" and kind bundle, and every `run_child.shadow` row, carries
+    `node_args` naming the growth flag.

@@ -19,6 +19,8 @@
 # follows an artifact symlink, and never touches protected, dirty, or open
 # trees. Worktree deletion uses Git; branch refs are retained. A standalone
 # clone's object store, marked data and unversioned source/reports stay protected.
+# The one exception is the opt-in preserve-then-retire phase (preserve-retire.py):
+# it retires such a checkout only after saving and verifying a copy of that work.
 #
 # Why this exists: src/lib/tmp.ts's sweepStaleTempDirs() roots at os.tmpdir()
 # (/var/folders/... on macOS) and so structurally cannot see the disposable
@@ -257,6 +259,8 @@ done
 
 NOW=$(date +%s)
 mkdir -p "$(dirname "$LOG")"
+# Rotate the human log at 16 MiB and keep one previous generation; it grew unbounded before.
+if [ -f "$LOG" ] && [ ! -L "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 16777216 ]; then mv -f "$LOG" "$LOG.1"; fi
 DECISION_LOG="${REMUDERO_JANITOR_DECISION_LOG:-$USER_HOME/.local/state/remudero/janitor-decisions.tsv}"
 mkdir -p "$(dirname "$DECISION_LOG")" && : >> "$DECISION_LOG" || exit 2
 log() {
@@ -1288,6 +1292,16 @@ if [ "$APPLY" = 1 ] && [ -x "$evidence_helper" ] && [ ! -L "$evidence_helper" ] 
   else
     log "WARN bounded-evidence: $evidence_output"
   fi
+fi
+# Opt-in preserve-then-retire phase (JANITOR.md "Preserve-then-retire"). It saves and verifies
+# the work this pass held, then retires the idle checkout. Without its owner-private config the
+# helper reports "disabled" and changes nothing; a dry run only plans.
+if [ -f "$SCRIPT_DIR/preserve-retire.py" ] && command -v python3 >/dev/null 2>&1; then
+  preserve_mode=()
+  [ "$APPLY" != 1 ] || preserve_mode=(--apply)
+  while IFS= read -r preserve_line; do log "$preserve_line"; done < <(
+    python3 -I "$SCRIPT_DIR/preserve-retire.py" --home "$USER_HOME" "${preserve_mode[@]+"${preserve_mode[@]}"}" 2>&1
+    printf 'preserve-retire: exit %s\n' "$?")
 fi
 AFTER=$(free_gib)
 log "=== done: removed=$removed reclaimed=$((reclaimed_kb/1024))M planned=$planned estimated=$((estimated_kb/1024))M worktrees-removed=$removed_worktrees worktrees-planned=$planned_worktrees worktrees-skipped=$skipped_worktrees live-skip=$skipped_live cwd-skip=$skipped_cwd owner-skip=$skipped_owner open-skip=$skipped_open young-skip=$skipped_young free=${BEFORE}->${AFTER}GiB ==="

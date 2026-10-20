@@ -8,6 +8,7 @@ import test from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { reviewCommand, UNTASKED_REVIEW_BUDGET_USD } from "../src/run-task.js";
 import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "../src/lib/required-semantic-review.js";
+import { loadPlanAtRef } from "../src/lib/plan.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
@@ -66,6 +67,27 @@ test("a derived task id whose shard is missing refuses semantic review before an
   assert.equal(args, undefined);
   const skips = ledger.filter((r) => r.step === "review.reviewer.skipped");
   assert.deepEqual(skips.map((r) => r.reason), ["head-task-metadata-unavailable"]);
+});
+
+test("a resolved shard without budget_usd runs the semantic reviewer under the default review cap, visibly", async () => {
+  // Budget is optional in a shard (builds default it); 182 of 523 queued shards had none on 2026-10-20, and each
+  // review of such a PR was refused after #12954 instead of reviewed. Pick one at HEAD rather than pin an id.
+  const shard = [...loadPlanAtRef(REPO_ROOT, "plan/tasks.yaml", HEAD).byId.values()]
+    .find((t) => t.budget_usd === undefined && (t.acceptance?.length ?? 0) > 0);
+  assert.ok(shard, "the plan at HEAD must hold a shard with acceptance and no budget_usd for this case to measure anything");
+  const { args, ledger, code } = await review(`Remudero-Task: ${shard.id}`);
+
+  assert.equal(code, 0, "a shard that resolved must be reviewed, not refused");
+  assert.equal(args.task.id, shard.id);
+  assert.equal(args.spawnReviewer, true);
+  assert.equal(args.requireSemanticReview, true, "the defaults change the cap, never the required-semantic policy");
+  assert.equal(args.budgetUsd, UNTASKED_REVIEW_BUDGET_USD);
+  assert.equal(args.task.risk, shard.risk);
+  assert.ok(args.reviewerMount);
+  const defaults = ledger.filter((r) => r.step === "review.reviewer.metadata_defaults");
+  assert.deepEqual(defaults.map((r) => [r.task, r.missing, r.task_risk, r.hard_cap_usd]),
+    [[shard.id, ["budget_usd"], shard.risk, UNTASKED_REVIEW_BUDGET_USD]]);
+  assert.ok(!ledger.some((r) => r.step === "review.reviewer.skipped" || r.step === "review.semantic_setup_refused"));
 });
 
 const unfiledHead = "run-unfiled-1791211800000";
