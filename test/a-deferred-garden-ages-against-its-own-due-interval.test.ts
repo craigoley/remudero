@@ -9,14 +9,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mock, test } from "node:test";
 
-import { ENFORCE_ADMIT_STEP, ENFORCE_DEFER_STEP, resetMemoryAdmissionStateForTests, type AdmissionPorts, type AdmissionRequest } from "../src/lib/host-memory-admission.js";
-import type { HostMemoryReading, ReadingEntry } from "../src/lib/host-memory-ledger.js";
-import { childGardenPassSpawn, gardenCadenceWithCarried, startGardenOffLoop, type GardenDeferral, type GardenPassOutcome } from "../src/lib/garden-registry.js";
-import { createGardenerRuntimeWriter, readGardenerRuntime, type GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
-import { resetShadowMemoryStateForTests, type HostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
-import type { LedgerLine } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { ENFORCE_ADMIT_STEP, ENFORCE_DEFER_STEP, resetMemoryAdmissionStateForTests, type AdmissionPorts, type AdmissionRequest } from "#src/lib/host-memory-admission.js";
+import type { HostMemoryReading, ReadingEntry } from "#src/lib/host-memory-ledger.js";
+import { childGardenPassSpawn, gardenCadenceWithCarried, startGardenOffLoop, type GardenDeferral, type GardenPassOutcome } from "#src/lib/garden-registry.js";
+import { createGardenerRuntimeWriter, readGardenerRuntime, type GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
+import { resetShadowMemoryStateForTests, type HostMemoryBudgetPolicy } from "#src/lib/host-memory-shadow.js";
+import type { LedgerLine } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const NOW = Date.parse("2026-10-16T16:00:00.000Z");
