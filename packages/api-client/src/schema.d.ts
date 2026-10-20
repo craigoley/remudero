@@ -2679,6 +2679,9 @@ export interface components {
       lastCompletedAt: string | null;
       lastSuccessAt: string | null;
       lastFailureAt: string | null;
+      /** The median time from a completed pass to the first ask of the next one, carried across restarts. */
+      dueIntervalMedianMs: number | null;
+      dueIntervalSamples: number;
     };
     /** Bounded registered off-loop gardener receipts. Counters cover this daemon run only. Completed means process exit zero, not a measured improvement. Host/fleet scope is not attributed to a repository. Missing cost or outcome attribution is never zero. */
     GardenersResult: {
