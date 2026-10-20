@@ -100,11 +100,11 @@ test("W1-T10258: hosted plan lint keeps a dependency UNKNOWN without valid produ
 
 test("producer accepts the trailer and run-branch union but refuses non-merged, foreign, plan-only and unproven ancestry", async t => {
   const f = fixture(t);
-  for (const patch of [{ body: "no trailer" }, { head: { ref: "other" } }]) {
+  for (const patch of [{ body: "no trailer" }, { body: null }, { head: { ref: "other" } }]) {
     const produced = await produceCiDependencyEvidence(f.context, { request: path => path.endsWith("/pulls/17") ? { ...f.pr, ...patch } : f.request(path) });
     assert.equal(f.consume(produced).dependencyEvidence({ id: "ZZ-T1" }).state, "merged");
   }
-  const invalid = [{ merged: false }, { state: "open" }, { body: "Remudero-Task: ZZ-T10", head: { ref: "run-ZZ-T10-123" } },
+  const invalid = [{ merged: false }, { state: "open" }, { body: {} }, { body: "Remudero-Task: ZZ-T10", head: { ref: "run-ZZ-T10-123" } },
     { html_url: "https://github.com/foreign/repo/pull/17" }, { base: { ref: "main", repo: { full_name: "foreign/repo" } } },
     { merge_commit_sha: "a".repeat(40) }, { changed_files: 0 }, { changed_files: 3001 },
     { merged_at: new Date(f.context.nowMs + 1000).toISOString() }];
