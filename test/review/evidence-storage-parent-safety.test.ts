@@ -59,21 +59,21 @@ test('evidence compaction refuses a non-sticky writable ancestor and preserves i
 
 test('evidence compaction refuses foreign sticky ownership without changing live ownership', t => {
   const f = fixture(t, homedir(), 0o1777); if (refusesUnqualifiedPlatform(f)) return;
-  const original = fs.lstatSync;
+  const original = fs.lstatSync, descriptor = Object.getOwnPropertyDescriptor(fs, 'lstatSync')!;
   // Only this fixture metadata is substituted. Production uses the real default
   // lstat seam, and finally restores its ESM binding even if an assertion fails.
-  fs.lstatSync = new Proxy(original, { apply(fn, receiver, args) {
+  Object.defineProperty(fs, 'lstatSync', { ...descriptor, value: new Proxy(original, { apply(fn, receiver, args) {
     const stat = Reflect.apply(fn, receiver, args) as fs.Stats;
     return args[0] === f.base ? new Proxy(stat, { get(value, key, receiver) {
       return key === 'uid' ? process.getuid!() + 1 : Reflect.get(value, key, receiver);
     } }) : stat;
-  } });
+  } }) });
   syncBuiltinESMExports();
   try {
     const result = compressEvidenceFile(f.path, { apply: true, now: f.now });
     assert.equal(result.disposition, 'KEEP'); assert.equal(result.reason, 'unsafe-parent');
     assert.deepEqual(fs.readFileSync(f.path), f.bytes);
-  } finally { fs.lstatSync = original; syncBuiltinESMExports(); }
+  } finally { Object.defineProperty(fs, 'lstatSync', descriptor); syncBuiltinESMExports(); }
 });
 
 test('evidence compaction still refuses shared publication beneath a trusted sticky ancestor', t => {
