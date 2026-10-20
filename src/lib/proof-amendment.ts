@@ -18,8 +18,8 @@
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
@@ -519,7 +519,7 @@ export function newAmendedBlockers(baseText: string, amendedText: string, label:
  *  trailing comment replaced to name the subsystems and the amendment PR), and `band_meaning: span`
  *  is added only when the task declares none. Returns `undefined` when the task's mapping is not in
  *  an editable block shape. */
-function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prNumber: number): string | undefined {
+function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prNumber: number, build = false): string | undefined {
   let text = source;
   const find = () => {
     const doc = parseDocument(text);
@@ -529,7 +529,7 @@ function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prN
   };
   const lineEnd = (at: number) => { const i = text.indexOf("\n", at); return i < 0 ? text.length : i; };
   const lineStart = (at: number) => text.lastIndexOf("\n", at - 1) + 1;
-  const comment = `# Rule 19 span: widened to ${subsystems} by a scope amendment for #${prNumber}`;
+  const comment = `# Rule 19 span: widened to ${subsystems} by a scope amendment for ${build ? "its build" : `#${prNumber}`}`;
   let task = find();
   if (!task) return undefined;
   const risk = task.get("risk", true);
@@ -558,6 +558,8 @@ function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prN
 
 export interface ScopeAmendmentRequest {
   readonly taskId: string;
+  readonly kind?: "build";
+  readonly importers?: readonly string[];
   readonly prNumber: number;
   readonly prUrl: string;
   readonly headSha: string;
@@ -579,14 +581,25 @@ export const SCOPE_GRANTABLE_INSTRUMENTS: ReadonlySet<string> = new Set(["stryke
 
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
   const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
-  if (!Number.isSafeInteger(request.prNumber) || request.prNumber <= 0) return refuse("invalid-pr", "no implementation PR number");
+  const build = request.kind === "build";
+  if (build ? request.prNumber !== 0 || taskIdFromRunBranch(request.headRef) !== request.taskId
+    : !Number.isSafeInteger(request.prNumber) || request.prNumber <= 0) {
+    return refuse("invalid-pr", build ? "no matching build identity" : "no implementation PR number");
+  }
   // W1-T6465: identity is the trailer OR the run-<taskId>-<epochMs> head ref, as head-identity-gate
   // admits; every identity the PR does carry must name THIS task, so a conflicting one still refuses.
   const identities = [request.trailerTaskId, taskIdFromRunBranch(request.headRef)].filter((id) => id !== undefined && id !== "");
   if (identities.length === 0 || identities.some((id) => id !== request.taskId)) {
     return refuse("no-task-trailer", "the implementation PR must carry the matching task trailer or run-<taskId>-<epochMs> head");
   }
-  const paths = [...new Set(request.paths)].sort();
+  const buildShard = build ? deps.findShard(deps.repoDir, request.taskId) : undefined;
+  const buildDoc = buildShard ? parseDocument(buildShard.text) : undefined;
+  const buildTask = isSeq(buildDoc?.contents) ? buildDoc.contents.items.find((t) => isMap(t) && String(t.get("id")) === request.taskId) : undefined;
+  const buildFiles = isMap(buildTask) ? buildTask.get("files", true) : undefined;
+  const declared = isSeq(buildFiles) ? buildFiles.toJSON() as string[] : [];
+  const importers = build ? (request.importers ?? []).filter((path) => !declared.some((surface) =>
+    path === surface || path.startsWith(`${surface.replace(/\/$/, "")}/`))) : [];
+  const paths = [...new Set([...request.paths, ...importers])].sort();
   if (paths.length === 0) return refuse("no-paths", "the worker requested no paths");
   for (const path of paths) {
     if (/^(?:\/|[A-Za-z]:)/.test(path) || /[\\\x00-\x1f\x7f]/.test(path) ||
@@ -602,14 +615,14 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     if (!request.changedPaths.includes(path)) return refuse("path-not-changed", path);
   }
   const digest = createHash("sha256").update(paths.join("\0")).digest("hex").slice(0, 20);
-  const key = `scope:${request.taskId}:${request.prNumber}:${digest}`;
+  const key = build ? `scope:${request.taskId}:build:${request.headRef}:${digest}` : `scope:${request.taskId}:${request.prNumber}:${digest}`;
   const existing = deps.lookupIdentity(key);
-  if (existing?.merged) {
+  if (existing?.merged && !build) {
     const result = deps.updateBranch(request.prUrl, request.headSha);
     return { kind: "branch_update_requested", ...result };
   }
   if (existing) return { kind: "resumed", amendmentUrl: existing.amendmentUrl, amendmentNumber: existing.amendmentNumber };
-  const branch = `scope-amendment/${request.taskId}-${request.prNumber}`;
+  const branch = build ? `scope-amendment/${request.taskId}-build-${digest}` : `scope-amendment/${request.taskId}-${request.prNumber}`;
   const probed = deps.probeExisting(branch);
   if (probed) {
     deps.recordIdentity(key, { amendmentUrl: probed.prUrl, amendmentNumber: probed.prNumber, merged: false });
@@ -655,7 +668,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     const sizing = verdict.blockers.filter((v) => v.check === "sizing" && verdict!.task !== undefined && verdict!.task.risk !== "high");
     if (sizing.length === verdict.blockers.length) {
       const subsystems = /\((.*?)\) at risk:/.exec(sizing[0]!.message)?.[1] ?? "more than one subsystem";
-      const raised = raiseRiskToHigh(text, request.taskId, subsystems, request.prNumber);
+      const raised = raiseRiskToHigh(text, request.taskId, subsystems, request.prNumber, build);
       if (raised !== undefined && parseDocument(raised).errors.length === 0) {
         text = raised;
         riskRaise = { subsystems };
@@ -666,7 +679,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   if (verdict && verdict.blockers.length > 0) {
     return refuse("amended-shard-lint", verdict.blockers.map((v) => `${v.check}: ${v.message}`).join("; "));
   }
-  const wp = deps.worktreePathFor(request.taskId, request.prNumber);
+  const wp = deps.worktreePathFor(build ? `${request.taskId}-build-${digest}` : request.taskId, request.prNumber);
   deps.worktreeAdd(deps.repoDir, wp, branch);
   try {
     const currentShard = deps.findShard(wp, request.taskId);
@@ -675,7 +688,8 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     }
     deps.writeFile(join(wp, shard.path), text);
     deps.gitAdd(wp, shard.path);
-    const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for #${request.prNumber}`;
+    const target = build ? "its build" : `#${request.prNumber}`;
+    const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for ${target}`;
     const sha = deps.gitCommit(wp, riskRaise
       ? `${title}\n\nAppend validated worker paths to files and raise risk to high: the task linter counted ` +
         `${riskRaise.subsystems} (Rule 19 sizing). band_meaning: span is added only when none was declared.`
@@ -683,9 +697,9 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     deps.gitPush(wp, branch, sha);
     const created = deps.createPr({ title, head: branch, base: "main",
       body: (riskRaise
-        ? `Scope amendment for #${request.prNumber}. ${shard.path}'s files list changes and its risk is raised to high ` +
+        ? `Scope amendment for ${target}. ${shard.path}'s files list changes and its risk is raised to high ` +
           `because the task linter counted ${riskRaise.subsystems} (Rule 19 sizing); band_meaning: span is added only when none was declared.\n\n`
-        : `Scope amendment for #${request.prNumber}. Only ${shard.path}'s files list changes.\n\n`) +
+        : `Scope amendment for ${target}. Only ${shard.path}'s files list changes.\n\n`) +
         renderAcceptanceBlock([...additions.map((path) => ({ claim: `files includes ${path}`,
           proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` })),
           ...(riskRaise ? [{ claim: `risk is raised to high for ${riskRaise.subsystems}`, proof: `grep: ^ *risk: high in ${shard.path}` }] : [])]) });
@@ -693,5 +707,118 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
   } finally {
     deps.worktreeRemove(deps.repoDir, wp);
+  }
+}
+
+export interface BuildScopeRecovery {
+  version: 1;
+  taskId: string;
+  branch: string;
+  amendmentUrl: string;
+  headSha: string;
+  patch: string;
+  committedPaths: string[];
+  companions: Array<{ path: string; bytes: string; mode: number }>;
+}
+
+export type BuildScopeRecoveryRead =
+  | { status: "verified"; path: string; data: BuildScopeRecovery }
+  | { status: "missing" | "unverifiable"; path: string; reason: string };
+
+function safeRecoveryPath(path: string): boolean {
+  return path.length > 0 && !/^(?:\/|[A-Za-z]:)/.test(path) && !/[\\\x00-\x1f\x7f]/.test(path) &&
+    path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+}
+
+const recoveryDigest = (data: unknown): string => createHash("sha256").update(JSON.stringify(data)).digest("hex");
+
+export function readBuildScopeRecovery(path: string, taskId: string): BuildScopeRecoveryRead {
+  try {
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    const data = saved.data as BuildScopeRecovery;
+    if (saved.digest !== recoveryDigest(data) || data.version !== 1 || data.taskId !== taskId ||
+        taskIdFromRunBranch(data.branch) !== taskId || !/^[a-f0-9]{40,64}$/.test(data.headSha) ||
+        typeof data.amendmentUrl !== "string" || typeof data.patch !== "string" || !data.patch ||
+        !Array.isArray(data.committedPaths) || !data.committedPaths.every((p) => typeof p === "string" && safeRecoveryPath(p)) ||
+        !Array.isArray(data.companions) || data.companions.length === 0 || !data.companions.every((c) =>
+          typeof c.path === "string" && safeRecoveryPath(c.path) && typeof c.bytes === "string" &&
+          Buffer.from(c.bytes, "base64").toString("base64") === c.bytes && (c.mode === 0o644 || c.mode === 0o755))) {
+      return { status: "unverifiable", path, reason: "recovery checksum or manifest does not verify" };
+    }
+    return { status: "verified", path, data };
+  } catch (error) {
+    return { status: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverifiable", path, reason: String(error) };
+  }
+}
+
+/** The commit is pinned independently of the disposable run ref. Read back the complete byte manifest before cleanup. */
+export function saveBuildScopeRecovery(input: {
+  root: string; taskId: string; branch: string; amendmentUrl: string; worktreePath: string; headSha: string;
+  companions: readonly string[]; git: (args: string[]) => string;
+}): string {
+  const { taskId, branch, amendmentUrl, headSha, git } = input;
+  const companions = input.companions.map((path) => {
+    if (!safeRecoveryPath(path)) throw new Error(`unsafe recovery path: ${path}`);
+    assertRecoveryParents(input.worktreePath, path);
+    const fullPath = join(input.worktreePath, path);
+    const stat = lstatSync(fullPath);
+    if (!stat.isFile()) throw new Error(`companion is not a regular file: ${path}`);
+    return { path, bytes: readFileSync(fullPath).toString("base64"), mode: stat.mode & 0o111 ? 0o755 : 0o644 };
+  });
+  const data: BuildScopeRecovery = { version: 1, taskId, branch, amendmentUrl, headSha, companions,
+    patch: git(["diff", "--binary", `${headSha}^`, headSha]),
+    committedPaths: git(["diff", "--name-only", "-z", `${headSha}^`, headSha]).split("\0").filter(Boolean) };
+  const digest = recoveryDigest(data);
+  const directory = join(input.root, "state", "recovery", "build-scope", taskId);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, `${digest}.json`);
+  writeFileSync(path, JSON.stringify({ data, digest }), { mode: 0o600 });
+  const saved = readBuildScopeRecovery(path, taskId);
+  if (saved.status !== "verified" || recoveryDigest(saved.data) !== digest) throw new Error(`scope recovery did not verify: ${path}`);
+  const ref = `refs/rmd-recovery/build-scope/${taskId}/${digest}`;
+  git(["update-ref", ref, headSha]);
+  if (git(["rev-parse", ref]).trim() !== headSha) throw new Error(`scope recovery commit did not verify: ${ref}`);
+  const pointer = join(directory, "latest.json");
+  writeFileSync(`${pointer}.tmp`, JSON.stringify({ path, amendmentUrl, paths: [...data.committedPaths, ...companions.map((c) => c.path)] }), { mode: 0o600 });
+  renameSync(`${pointer}.tmp`, pointer);
+  return path;
+}
+
+function assertRecoveryParents(root: string, path: string): void {
+  let parent = root;
+  for (const part of path.split("/").slice(0, -1)) {
+    parent = join(parent, part);
+    if (existsSync(parent) && (!lstatSync(parent).isDirectory() || lstatSync(parent).isSymbolicLink())) {
+      throw new Error(`unsafe recovery parent: ${parent}`);
+    }
+  }
+}
+
+export function restoreBuildScopeRecovery(
+  saved: BuildScopeRecovery, worktreePath: string, git: (args: string[]) => string,
+): void {
+  for (const c of saved.companions) {
+    assertRecoveryParents(worktreePath, c.path);
+    if (existsSync(join(worktreePath, c.path))) throw new Error(`recovery companion already exists: ${c.path}`);
+  }
+  const patchPath = join(worktreePath, ".rmd-build-scope.patch");
+  try {
+    writeFileSync(patchPath, saved.patch);
+    git(["apply", "--check", "--3way", patchPath]);
+    git(["apply", "--3way", patchPath]);
+    for (const c of saved.companions) {
+      const path = join(worktreePath, c.path);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, Buffer.from(c.bytes, "base64"));
+      chmodSync(path, c.mode);
+      if (readFileSync(path).toString("base64") !== c.bytes) throw new Error(`restored companion differs: ${c.path}`);
+    }
+    git(["reset", "--mixed", "HEAD"]);
+  } catch (error) {
+    git(["reset", "--hard", "HEAD"]);
+    for (const c of saved.companions) rmSync(join(worktreePath, c.path), { force: true });
+    throw error;
+  } finally {
+    rmSync(patchPath, { force: true });
   }
 }
