@@ -40,7 +40,8 @@ import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
+import { parseSync, type Identifier, type CallExpression, type AssignmentExpression, type Node } from "@swc/core";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -152,11 +153,77 @@ function formatHit(h: FlagHit): string {
  *  clones from — the property rationale (2) names as currently unwritten and ungated. A presence
  *  check over the file's own text (this is a source-scan ratchet, design (i)), not a full data-
  *  flow proof — but a real assertion, not a convention nobody reads. */
-function hasSelfCreatedGitSource(source: string): boolean {
-  return /(?:\bgit\s*\(\s*\[\s*["'`]init["'`]|execFileSync\(\s*["'`]git["'`]\s*,\s*\[\s*["'`]init["'`]|spawn(?:Sync)?\(\s*["'`]git["'`]\s*,\s*\[\s*["'`]init["'`])/.test(
+function hasSelfCreatedGitSource(source: string, file = "test/fixture.test.ts"): boolean {
+  if (/(?:\bgit\s*\(\s*\[\s*["'`]init["'`]|execFileSync\(\s*["'`]git["'`]\s*,\s*\[\s*["'`]init["'`]|spawn(?:Sync)?\(\s*["'`]git["'`]\s*,\s*\[\s*["'`]init["'`])/.test(
     source,
-  );
+  )) return true;
+  return hasSharedGitInitializer(source, file);
 }
+
+/** SWC's binding context distinguishes an imported helper from a same-named local function. */
+function sharedBindingKey(node: Identifier): string | undefined {
+  const context = (node as Identifier & { ctxt?: number }).ctxt;
+  return Number.isInteger(context) ? `${node.value}:${context}` : undefined;
+}
+
+function hasSharedGitInitializer(source: string, file: string): boolean {
+  let tree: ReturnType<typeof parseSync>;
+  try { tree = parseSync(source, { syntax: "typescript", target: "es2022" }); }
+  catch { return false; /* An unparseable constructor is not proven initialization. */ }
+  const factories = new Set<string>();
+  for (const item of tree.body) {
+    if (item.type !== "ImportDeclaration" || item.typeOnly) continue;
+    const module = item.source.value;
+    const path = module === "#test/helpers/git-repo.js" ? "test/helpers/git-repo.js"
+      : module.startsWith(".") ? posix.normalize(posix.join(posix.dirname(file), module)) : undefined;
+    if (path === undefined || !["test/helpers/git-repo.js", "test/helpers/git-repo.ts"].includes(path)) continue;
+    for (const specifier of item.specifiers) {
+      if (specifier.type !== "ImportSpecifier" || specifier.isTypeOnly ||
+          (specifier.imported?.value ?? specifier.local.value) !== "gitRepo") continue;
+      const key = sharedBindingKey(specifier.local);
+      if (key !== undefined) factories.add(key);
+    }
+  }
+  if (factories.size === 0) return false;
+  const calls: CallExpression[] = [];
+  const written = new Set<string>();
+  const recordWrite = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    const node = value as Node;
+    if (node.type === "Identifier") {
+      const key = sharedBindingKey(node as Identifier);
+      if (key !== undefined) written.add(key);
+    }
+    for (const child of Object.values(value)) if (Array.isArray(child)) child.forEach(recordWrite);
+    else if (child && typeof child === "object") recordWrite(child);
+  };
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    if (!value || typeof value !== "object") return;
+    const node = value as Node;
+    if (node.type === "CallExpression") calls.push(node as CallExpression);
+    if (["AssignmentExpression", "ForOfStatement", "ForInStatement"].includes(node.type))
+      recordWrite((node as AssignmentExpression).left);
+    if (node.type === "UpdateExpression") recordWrite((node as Node & { argument?: unknown }).argument);
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(tree);
+  return calls.some(call => {
+    if (call.callee.type !== "Identifier") return false;
+    const key = sharedBindingKey(call.callee);
+    if (key === undefined || !factories.has(key) || written.has(key)) return false;
+    if (call.arguments.length === 0) return true;
+    if (call.arguments.length !== 1 || call.arguments[0]!.spread) return false;
+    const options = call.arguments[0]!.expression;
+    return options.type === "ObjectExpression" && options.properties.every(property => {
+      if (property.type !== "KeyValueProperty" ||
+          !["Identifier", "StringLiteral"].includes(property.key.type)) return false;
+      const name = (property.key as Identifier | { value: string }).value;
+      return ["kind", "bare", "branch", "seedCommit", "scope"].includes(name);
+    });
+  });
+}
+
 
 // ────────────────────────────────────── exemptions (design (ii)) ──────────────────────────────
 
@@ -331,7 +398,7 @@ test("no-shallowing-of-the-canonical-checkout: every test/ fixture that shallow-
     const hits = findForbiddenFlagHits(source, file);
     if (hits.length === 0) continue;
     filesWithHits.push(file);
-    if (!hasSelfCreatedGitSource(source)) violations.push(...hits);
+    if (!hasSelfCreatedGitSource(source, file)) violations.push(...hits);
   }
 
   // Positive control: the three fixtures rationale (1)/(2) names must actually be found by this
@@ -401,6 +468,51 @@ test("findForbiddenFlagHits + hasSelfCreatedGitSource: a seeded test/ fixture th
   assert.match(message, /test\/fixture-missing-init\.test\.ts/);
   assert.match(message, /:2:/);
   assert.match(message, /--depth/);
+});
+
+test("W1-T10210: shallow fixture census recognizes only initialized shared Git sources", () => {
+  for (const source of [
+    'import { gitRepo } from "./helpers/git-repo.js"; const source = gitRepo();',
+    'import { gitRepo } from "./helpers/git-repo.js"; const source = gitRepo({});',
+    'import { gitRepo as makeRepo } from "./helpers/git-repo.js"; const source = makeRepo({kind: "origin", bare: true, seedCommit: false});',
+    'import { gitRepo } from "#test/helpers/git-repo.js"; function fixture() { return gitRepo({kind: "source"}); }',
+  ]) assert.equal(hasSelfCreatedGitSource(source), true, source);
+  const nested = "test/nested/fixture.test.ts";
+  assert.equal(hasSelfCreatedGitSource('import { gitRepo } from "../helpers/git-repo.ts"; gitRepo({branch: "fixture"});', nested), true);
+  assert.equal(hasSelfCreatedGitSource('import { gitRepo } from "./helpers/git-repo.js"; gitRepo();', nested), false,
+    "a same-named helper at another relative path is not the shared initializer");
+  const fixture = "test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts";
+  assert.equal(hasSelfCreatedGitSource(readFileSync(join(REPO_ROOT, fixture), "utf8"), fixture), true,
+    "the actual helper-built local source is recognized without adding raw fixture setup");
+});
+
+test("shared fixture census keeps clone-only, unknown and shadowed constructors unproven", () => {
+  const imported = 'import { gitRepo } from "./helpers/git-repo.js"; ';
+  for (const source of [
+    'const gitRepo = unknownFactory; gitRepo();',
+    'import { gitRepo } from "./other-helper.js"; gitRepo();',
+    'import type { gitRepo } from "./helpers/git-repo.js"; gitRepo();',
+    'import { gitRepo } from "test/helpers/git-repo.js"; gitRepo();',
+    imported + 'gitRepo({cloneFrom: "/canonical"});',
+    imported + 'gitRepo({cloneFrom: undefined});',
+    imported + 'gitRepo({...options});',
+    imported + 'gitRepo({[key]: value});',
+    imported + 'gitRepo(options);',
+    imported + 'gitRepo({__proto__: options});',
+    imported + 'gitRepo({get kind() { return "source"; }});',
+    imported + 'function fixture(gitRepo: any) { return gitRepo(); }',
+    imported + 'const fixture = (gitRepo: any) => gitRepo();',
+    imported + 'function fixture() { const gitRepo = unknownFactory; return gitRepo(); }',
+    imported + 'gitRepo = replacement; gitRepo();',
+    imported + 'gitRepo++; gitRepo();',
+    imported + 'for (gitRepo of alternatives) {} gitRepo();',
+    imported + 'object.gitRepo();',
+    imported + 'gitRepo(...options);',
+    imported + 'gitRepo({}, unknown);',
+    'import { gitRepo } from "./helpers/git-repo.js"; const source = gitRepo({',
+  ]) assert.equal(hasSelfCreatedGitSource(source), false, source);
+  assert.equal(hasSelfCreatedGitSource(readFileSync(join(REPO_ROOT, "test/measurement-cadence.test.ts"), "utf8")), true,
+    "the existing literal-init control remains recognized");
 });
 
 // ════════════════════════════════════════ acceptance (4) ══════════════════════════════════════
