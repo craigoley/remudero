@@ -223,6 +223,18 @@ test("W1-T10279: pacing follows retry-after, x-ratelimit and secondary-limit ref
   assert.equal(pacer.secondaryRefusals, 0);
   pacer.record(300_000, secondary);
   assert.equal(pacer.holdUntilMs, 360_000, "a new streak starts again at the floor");
+  // THE MEASURED THROTTLE TEXT (September, cao825): "API rate limit exceeded for user ID 4397075" while
+  // core and graphql both read 5000/5000, used 0. With no reading at all, and with that full reading,
+  // it is the SECONDARY limit: the gap widens and the limiter holds from GitHub's one minute.
+  for (const headers of ["", "X-Ratelimit-Remaining: 5000\r\nX-Ratelimit-Used: 0\r\nX-Ratelimit-Reset: 4000"]) {
+    const throttled = new GhLimiterPacer(1_500);
+    const verdict = throttled.record(1_000, { headers, stderr: "API rate limit exceeded for user ID 4397075.", exitCode: 1 });
+    assert.equal(verdict, "secondary", `headers: ${JSON.stringify(headers)}`);
+    assert.equal(throttled.gapMs, 3_000);
+    assert.equal(throttled.holdUntilMs, 1_000 + 60_000);
+    throttled.record(70_000, { headers, stderr: "API rate limit exceeded for user ID 4397075.", exitCode: 1 });
+    assert.equal(throttled.holdUntilMs, 70_000 + 120_000, "a second in a row doubles the hold");
+  }
   // The primary budget is spread over the time left to its reset.
   const spread = new GhLimiterPacer(1_500);
   spread.lastStartMs = 10_000;
