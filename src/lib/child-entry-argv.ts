@@ -10,8 +10,11 @@
 //
 // W1-T9601: a miss for the daemon's OWN tree (this package's root, where garden children and the harness-rooted gate
 // and check-proof children start) asks the store to build that tree once per source hash, so the next launch hits.
+import { fork, type ChildProcess, type ForkOptions } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker, type WorkerOptions } from "node:worker_threads";
 import {
@@ -197,6 +200,53 @@ export function startWorker(
     }
   }
   return construct(self, options);
+}
+
+/** {@link forkWorkerEntry}'s answer: the child, which entry it runs, and how long the spawn held the calling thread. */
+export interface WorkerEntryFork {
+  child: ChildProcess;
+  /** `override` for a caller's own module (a test's); otherwise as {@link startWorker} decided for the module. */
+  kind: "bundle" | "tsx" | "override";
+  /** The synchronous part of the spawn: the parent's page tables are copied on the calling thread (W1-T9754's bench). */
+  spawnSyncMs: number;
+}
+
+/**
+ * C5: start a module's worker entry as a SHORT-LIVED CHILD PROCESS rather than a thread, so everything its work
+ * allocated returns to the OS when it exits; a thread that exits leaves much of its peak in the parent's allocator.
+ * The entry is the one {@link startWorker} would start, by the same per-module decision, so a child is a bundle
+ * exactly when that module's threads are. A bundle child that exits non-zero before its first message demotes the
+ * module as a thread would: a child that says it is ready before its work starts is never demoted by that work.
+ */
+export function forkWorkerEntry(
+  selfUrl: string | URL,
+  args: readonly string[],
+  options: ForkOptions & { execArgv: string[] },
+  opts: Omit<StartWorkerOpts, "construct"> & { spawn?: typeof fork } = {},
+): WorkerEntryFork {
+  const spawn = opts.spawn ?? fork;
+  const launch = (url: string | URL, execArgv: string[], kind: WorkerEntryFork["kind"]): WorkerEntryFork => {
+    const started = performance.now();
+    const child = spawn(fileURLToPath(url), [...args], { ...options, execArgv });
+    return { child, kind, spawnSyncMs: performance.now() - started };
+  };
+  if (opts.override) return launch(opts.override, options.execArgv, "override");
+  if (runsBundled()) return launch(bundledWorkerUrl(selfUrl), execArgvWithoutTsx(options.execArgv), "bundle");
+  const self = new URL(selfUrl);
+  let bundle: URL | undefined;
+  // startWorker's own decision, made once per module (worker.entry_resolved); its constructor only reports the URL.
+  startWorker(self, { execArgv: options.execArgv }, { ...opts, construct: (url) => {
+    if (String(url) !== self.href) bundle = new URL(url);
+    return new EventEmitter() as unknown as Worker;
+  } });
+  if (bundle === undefined) return launch(self, options.execArgv, "tsx");
+  const path = fileURLToPath(self);
+  const module = relative(path.slice(0, path.lastIndexOf(`${sep}src${sep}`)), path).split(sep).join("/");
+  const forked = launch(bundle, execArgvWithoutTsx(options.execArgv), "bundle");
+  let spoke = false;
+  forked.child.once("message", () => { spoke = true; });
+  forked.child.once("exit", (code) => { if (code !== 0 && !spoke) demote(path, module, `bundle-child-exit-before-first-message: ${code}`); });
+  return forked;
 }
 
 /** Keyed by the module's absolute path: two trees in one process never share a decision. */

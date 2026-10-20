@@ -12,6 +12,7 @@
  * branch. The branch body is {@link runReadModelWorker}, named so a test can run it in-process,
  * where coverage is recorded.
  */
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -82,7 +83,7 @@ import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeap
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
-import { startWorker } from "./child-entry-argv.js";
+import { forkWorkerEntry, startWorker, type WorkerEntryFork } from "./child-entry-argv.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
 /** The SSE publisher's cadence (design §1.1). */
@@ -106,9 +107,13 @@ export const READ_MODEL_CHECK_SHARE = 0.02;
  * short ticks and every lease is renewed on schedule between them.
  */
 export const READ_MODEL_PASS_SHARE = 0.5;
-/** BACKSTOP: the oracle thread's heap; a slice that outgrows it kills that thread, never serve's. */
+/** BACKSTOP: the oracle's heap, thread or child; a slice that outgrows it kills that runner, never serve. */
 export const READ_MODEL_ORACLE_HEAP_MB = 1_024;
 const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
+/** C5: the argument that makes this module, started as a process, run one oracle slice and exit. */
+const READ_MODEL_ORACLE_CHILD_ARG = "--remudero-read-model-oracle-child";
+/** C5: written as each oracle child exits: what it cost to start, and its peak resident size, all returned by its exit. */
+export const READ_MODEL_ORACLE_CHILD_STEP = "read_model.oracle_child_exited";
 /**
  * The share of each pass kept for view bodies, and of worker time they may take: a view that cost
  * `c` ms is not rebuilt for `c / share` ms. Measured on the host's core ledger as three instances,
@@ -662,6 +667,116 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
 interface ReadModelOracleData {
   kind: typeof READ_MODEL_ORACLE_KIND;
   escalationRepository?: string;
+}
+
+/** C5: the parent's execArgv with the oracle's own heap ceiling in place of any the parent carries. */
+export function oracleChildExecArgv(inherited: readonly string[]): string[] {
+  return [...inherited.filter((flag) => !/^--max[-_]old[-_]space[-_]size=/.test(flag)), `--max-old-space-size=${READ_MODEL_ORACLE_HEAP_MB}`];
+}
+
+type OracleChildMessage = { type?: string; id?: number; result?: OracleSliceResult; maxRssBytes?: number };
+
+/**
+ * C5: each slice runs in a short-lived CHILD PROCESS that exits when it has answered, so what the slice read and
+ * built returns to the OS, where a long-lived thread kept it between slices (serve.memory 10-19/20: the oracle
+ * thread's heap 115 MiB p50, 604 MiB max, while a slice runs ~4% of the time). Results, deaths and close keep
+ * {@link threadOracle}'s contract; each exit writes {@link READ_MODEL_ORACLE_CHILD_STEP} with what the slice cost.
+ */
+export function childOracle(opts: {
+  workerUrl?: URL;
+  escalationRepository?: string;
+  log: (step: string, extra: Record<string, unknown>) => void;
+  clock?: Clock;
+  fork?: typeof forkWorkerEntry;
+}): ReadModelOracle {
+  const clock = opts.clock ?? systemClock;
+  let seq = 0;
+  let running: ChildProcess | undefined;
+  let closed = false;
+  return {
+    run: (request, done) => {
+      const id = ++seq;
+      const started = clock.now();
+      let launched: WorkerEntryFork;
+      try {
+        launched = (opts.fork ?? forkWorkerEntry)(import.meta.url, [READ_MODEL_ORACLE_CHILD_ARG, opts.escalationRepository ?? ""],
+          { execArgv: oracleChildExecArgv(process.execArgv), serialization: "advanced", stdio: ["ignore", "inherit", "inherit", "ipc"] },
+          { override: opts.workerUrl });
+      } catch (error) {
+        const message = String((error as Error)?.message ?? error);
+        opts.log("read_model.oracle_failed", { error: message });
+        return done({ ok: false, error: `the oracle child could not start: ${message}`, leaseLost: false });
+      }
+      const { child } = launched;
+      running = child;
+      let answer: OracleChildMessage | undefined;
+      let readyMs: number | undefined;
+      let failure = "";
+      let finished = false;
+      const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
+        if (finished) return;
+        finished = true;
+        if (running === child) running = undefined;
+        if (closed) return;
+        if (!answer) done({ ok: false, error: `the oracle child exited with code ${code}${signal ? ` (${signal})` : ""}${failure}`, leaseLost: false, died: true });
+        opts.log(READ_MODEL_ORACLE_CHILD_STEP, {
+          instance: request.instance, outcome: !answer ? "died" : answer.result?.ok ? "ok" : "failed", code, signal, entry: launched.kind,
+          spawn_sync_ms: Math.round(launched.spawnSyncMs * 10) / 10, ready_ms: readyMs ?? null, wall_ms: clock.now() - started,
+          child_max_rss_bytes: answer?.maxRssBytes ?? null,
+        });
+      };
+      child.on("message", (msg: OracleChildMessage) => {
+        if (msg?.type === "ready") readyMs ??= clock.now() - started;
+        if (msg?.type !== "done" || msg.id !== id || answer) return;
+        answer = msg;
+        if (!closed) done(msg.result!);
+      });
+      child.on("error", (error) => {
+        failure = `: ${error.message}`;
+        opts.log("read_model.oracle_failed", { error: error.message });
+        // A child that never started has no exit to wait for.
+        if (child.pid === undefined) finish(null, null);
+      });
+      child.on("exit", finish);
+      child.send({ type: "check", id, request });
+    },
+    close: () => {
+      closed = true;
+      const child = running;
+      running = undefined;
+      child?.kill();
+    },
+  };
+}
+
+/**
+ * C5: this process's peak resident size since its exec, from VmHWM. Not getrusage's maxRSS: Linux carries a forked
+ * child's maxRSS over from its parent at the fork, so serve's gigabytes would read as the child's. Undefined where
+ * it cannot be read (no /proc), and the row then says null, never a guess.
+ */
+export function residentPeakBytes(statusPath = "/proc/self/status"): number | undefined {
+  try {
+    const kb = /^VmHWM:\s+(\d+) kB$/m.exec(readFileSync(statusPath, "utf8"))?.[1];
+    return kb === undefined ? undefined : Number(kb) * 1024;
+  } catch (error) {
+    // An unreadable status is an unknown peak (null on the row), never a slice that fails for want of a metric.
+    void error;
+    return undefined;
+  }
+}
+
+/** C5: an oracle child's body: answer one slice, with the child's peak resident size, then exit. */
+export function runReadModelOracleChild(
+  proc: { on(event: "message", run: (msg: { type?: string; id?: number; request?: OracleSliceRequest }) => void): unknown; send(message: unknown, sent: () => void): unknown },
+  escalationRepository: string,
+  exit: () => void,
+  clock: Clock = systemClock,
+): void {
+  runReadModelOracleWorker({
+    on: (event, run) => proc.on(event, run),
+    postMessage: (value) => void proc.send({ ...(value as object), maxRssBytes: residentPeakBytes() }, exit),
+  }, { kind: READ_MODEL_ORACLE_KIND, ...(escalationRepository ? { escalationRepository } : {}) }, clock);
+  proc.send({ type: "ready" }, () => {});
 }
 
 /** The oracle thread's body: attach to each store once, run each slice, post its result. */
@@ -2034,7 +2149,8 @@ export function runReadModelWorker(
           ...(repositoryFlow ? { repositoryFlow } : {}) } } : body) });
     });
   } });
-  const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
+  // C5: one short-lived child per slice, so a slice's memory leaves serve when it is done.
+  const oracleRunner = childOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
   const ticker = createReadModelTicker({
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,
     integrityCheck: threadIntegrityCheck(), ...(escalation ? { escalation } : {}),
@@ -2090,6 +2206,10 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === RE
 }
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_ORACLE_KIND && parentPort) {
   runReadModelOracleWorker(parentPort, workerData as ReadModelOracleData);
+}
+if (isMainThread && process.argv[2] === READ_MODEL_ORACLE_CHILD_ARG && process.send) {
+  runReadModelOracleChild({ on: (event, run) => process.on(event, run), send: (message, sent) => process.send!(message, undefined, undefined, sent) },
+    process.argv[3] ?? "", () => process.exit(0));
 }
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_INTEGRITY_KIND && parentPort) {
   parentPort.postMessage(checkReadModelIntegrity((workerData as { request: IntegrityRequest }).request));
