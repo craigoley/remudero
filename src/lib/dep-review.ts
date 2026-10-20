@@ -1251,18 +1251,18 @@ export type DependabotRefreshOutcome = "requested" | "unanswered" | "refused" | 
  *  command Dependabot refuses from this identity. An earlier command record is answered by reading
  *  Dependabot's reply once per pass; a refusal is ledgered and stops pinning the head. Only a refused
  *  update-branch escalates, once, quoting the reply. */
-export function reconcileDependabotRefresh(args: {
+export async function reconcileDependabotRefresh(args: {
   statePath: string;
   prNumber: number;
   headSha: string;
   result: DepReviewResult;
   cause: DependabotRefreshCause | undefined;
   nowMs: number;
-  updateBranch: (expectedHeadSha: string) => { ok: boolean; error?: string };
-  readComments: (sinceIso: string) => readonly DependabotIssueComment[];
+  updateBranch: (expectedHeadSha: string) => Promise<{ ok: boolean; error?: string }>;
+  readComments: (sinceIso: string) => Promise<readonly DependabotIssueComment[]>;
   escalate: (refresh: DependabotRefreshRecord) => string | null | undefined;
   log: (step: string, extra: Record<string, unknown>) => void;
-}): DependabotRefreshOutcome {
+}): Promise<DependabotRefreshOutcome> {
   if (args.result.decision !== "hold" || args.result.redChecks.length === 0) return "none";
   const state = readRefreshState(args.statePath, args.headSha);
   const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
@@ -1285,10 +1285,10 @@ export function reconcileDependabotRefresh(args: {
     return "escalated";
   };
 
-  const refreshByUpdateBranch = (record: DependabotRefreshRecord): DependabotRefreshOutcome => {
-    const outcome = ((): { ok: boolean; error?: string } => {
+  const refreshByUpdateBranch = async (record: DependabotRefreshRecord): Promise<DependabotRefreshOutcome> => {
+    const outcome = await (async (): Promise<{ ok: boolean; error?: string }> => {
       try {
-        return args.updateBranch(args.headSha);
+        return await args.updateBranch(args.headSha);
       } catch (error) {
         return { ok: false, error: String((error as Error)?.message ?? error) };
       }
@@ -1311,11 +1311,11 @@ export function reconcileDependabotRefresh(args: {
   const prior = state.refreshes?.find((r) => r.headSha === args.headSha);
   if (prior !== undefined) {
     if (prior.updateFailed) return escalateOnce(prior);
-    if (prior.command === DEPENDABOT_UPDATE_BRANCH_COMMAND && prior.via === undefined) return refreshByUpdateBranch(prior);
+    if (prior.command === DEPENDABOT_UPDATE_BRANCH_COMMAND && prior.via === undefined) return await refreshByUpdateBranch(prior);
     const read = prior.answer === undefined && prior.via === undefined && prior.delivered
-      ? ((): { answer?: DependabotCommandAnswer; error?: string } => {
+      ? await (async (): Promise<{ answer?: DependabotCommandAnswer; error?: string }> => {
         try {
-          return { answer: dependabotCommandAnswer(args.readComments(fixedClock(prior.requestedAtMs).iso()), prior.requestedAtMs) };
+          return { answer: dependabotCommandAnswer(await args.readComments(fixedClock(prior.requestedAtMs).iso()), prior.requestedAtMs) };
         } catch (error) {
           return { error: String((error as Error)?.message ?? error) };
         }
@@ -1330,7 +1330,7 @@ export function reconcileDependabotRefresh(args: {
       args.log("dep-review.refresh_refused", { ...at, command: prior.command, cause: prior.cause, reply: read.answer.reply,
         requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs });
     }
-    if (prior.answer === "refused") return prior.via === undefined ? refreshByUpdateBranch(prior) : "refused";
+    if (prior.answer === "refused") return prior.via === undefined ? await refreshByUpdateBranch(prior) : "refused";
     args.log("dep-review.refresh_unanswered", {
       ...at, command: prior.command, cause: prior.cause, delivered: prior.delivered,
       requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs,
@@ -1345,7 +1345,7 @@ export function reconcileDependabotRefresh(args: {
   };
   state.refreshes = [...(state.refreshes ?? []), record];
   save();
-  return refreshByUpdateBranch(record);
+  return await refreshByUpdateBranch(record);
 }
 
 

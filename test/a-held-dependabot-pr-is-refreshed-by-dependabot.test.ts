@@ -203,11 +203,11 @@ function commandFixture(t: TestContext): CommandFixture {
         comments.push({ url, body });
       },
       close: () => { throw new Error("a refresh never closes the PR"); },
-      updateBranch: (prNumber, expectedHeadSha) => {
+      updateBranch: async (prNumber, expectedHeadSha) => {
         updates.push({ prNumber, expectedHeadSha });
         return updateError === undefined ? { ok: true } : { ok: false, error: updateError };
       },
-      comments: () => replies,
+      comments: async () => replies,
     },
   };
   return {
@@ -363,7 +363,7 @@ test("W1-T9584: an own red on a Dependabot head posts no command", async (t) => 
   assert.equal(f.ledger().filter((r) => r.step === "dep-review.decided").at(-1)?.decision, "hold", "the hold stands");
 });
 
-test("W1-T9584: invalid refresh history refuses to forget requested heads", (t) => {
+test("W1-T9584: invalid refresh history refuses to forget requested heads", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9584-invalid-history-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const statePath = join(root, "hold.json");
@@ -383,15 +383,15 @@ test("W1-T9584: invalid refresh history refuses to forget requested heads", (t) 
     writeFileSync(statePath, saved);
     const comments: string[] = [];
     const logs: string[] = [];
-    assert.throws(() => reconcileDependabotRefresh({
+    await assert.rejects(() => reconcileDependabotRefresh({
       statePath, prNumber: 11793, headSha: HEAD, nowMs: NOW + 120_000,
       result: {
         decision: "hold", semverLevel: "patch", pinOnly: false, offendingFiles: [],
         redChecks: ["coverage-ratchet"], migrationBumps: [], reason: "checks are red",
       },
       cause: "base-red-recovered",
-      updateBranch: () => { comments.push("update-branch"); return { ok: true }; },
-      readComments: () => [], escalate: () => "https://example.test/issues/1",
+      updateBranch: async () => { comments.push("update-branch"); return { ok: true }; },
+      readComments: async () => [], escalate: () => "https://example.test/issues/1",
       log: (step) => { logs.push(step); },
     }), { message: "invalid dependency refresh state; refusing to forget requested heads" }, description);
     assert.equal(readFileSync(statePath, "utf8"), saved, `${description}: preserve the durable history`);
@@ -681,7 +681,7 @@ test("W1-T9994: the migrate branch ledgers a refused ignore command and still co
       captureMigrationFeedback: (({ id }: { id: string }) => ({ id })) as never,
       prMutations: {
         comment: () => {}, close: () => {},
-        comments: () => { if (answer === "throw") throw new Error("comments unavailable"); return answer; },
+        comments: async () => { if (answer === "throw") throw new Error("comments unavailable"); return answer; },
       },
       issues: { create: () => "https://github.com/craigoley/remudero/issues/999", listOpen: () => [], closeWithComment() {} },
     };
