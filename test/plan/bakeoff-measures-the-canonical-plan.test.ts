@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { test } from "node:test";
 import { parse, stringify } from "yaml";
 import { inboxBakeoffCommand } from "#src/run-task.js";
@@ -16,6 +16,7 @@ const proposal = { id: "fixture-canonical-plan", summary: "Use the existing shar
 
 async function withFixture(shard: string | undefined, run: (ports: {
   seed: string;
+  currentProductionTasks: () => ReturnType<typeof loadPlan>["tasks"];
   command: (replay: Parameters<typeof inboxBakeoffCommand>[2]) => Promise<number>;
 }) => Promise<void>): Promise<void> {
   const origin = gitRepo({ bare: true, kind: "bakeoff-canonical-origin" });
@@ -51,7 +52,13 @@ async function withFixture(shard: string | undefined, run: (ports: {
       assert.ok(args.at(-1));
       execFileSync("git", ["clone", "--quiet", origin.dir, args.at(-1)!], { stdio: "ignore" });
     };
-    await run({ seed: seed.dir, command: (replay) => inboxBakeoffCommand(["--sample", "1"], noSpend, replay, clone) });
+    const currentProductionTasks = () => {
+      const listing = execFileSync("git", ["-C", join(stateRoot, "repos", "remudero"), "worktree", "list", "--porcelain"], { encoding: "utf8" });
+      const lanes = listing.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => line.slice(9)).filter((path) => path.startsWith(join(stateRoot, "worktrees") + sep));
+      assert.equal(lanes.length, 1, "the active fixture has exactly one owned measured worktree");
+      return loadPlan(join(lanes[0]!, "plan", "tasks.yaml")).tasks;
+    };
+    await run({ seed: seed.dir, currentProductionTasks, command: (replay) => inboxBakeoffCommand(["--sample", "1"], noSpend, replay, clone) });
     const registered = execFileSync("git", ["-C", join(stateRoot, "repos", "remudero"), "worktree", "list", "--porcelain"], { encoding: "utf8" });
     assert.equal(registered.split("\n").filter((line) => line.startsWith("worktree ")).length, 1, "success and loader failure retire only the owned temporary lane worktree");
     assert.equal(spawns, 0, "the test never calls a provider");
@@ -67,14 +74,14 @@ async function withFixture(shard: string | undefined, run: (ports: {
 
 test("the bakeoff measures the canonical plan including shard-only dependencies", async () => {
   const title = "A whole finding in a shard must reach the measured prompt without being clipped";
-  await withFixture(stringify([task("SHARD-T2", title)]), async ({ seed, command }) => {
+  await withFixture(stringify([task("SHARD-T2", title)]), async ({ seed, currentProductionTasks, command }) => {
     const productionTasks = loadPlan(join(seed, "plan", "tasks.yaml")).tasks;
     assert.deepEqual(productionTasks.map((row) => row.id), ["BASE-T1", "SHARD-T2"], "positive control opens both real plan forms");
     let replays = 0;
     assert.equal(await command(async ({ planText }) => {
       replays++;
       assert.deepEqual(parse(planText).map((row: { id: string }) => row.id), productionTasks.map((row) => row.id), "no shard-only dependency disappears from the measured input");
-      assert.deepEqual(parse(planText), parse(stringify(productionTasks)), "the measured replay receives the same canonical materialization as production");
+      assert.deepEqual(parse(planText), parse(stringify(currentProductionTasks())), "the measured replay receives the same canonical materialization from its actual worktree, including source provenance");
       const prompt = inboxDraftPrompt(proposal, planText, "fixture-no-provider");
       assert.ok(prompt.includes("SHARD-T2"));
       assert.ok(prompt.includes(title), "whole titles remain available to dependency grounding");
