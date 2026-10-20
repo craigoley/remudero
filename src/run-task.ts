@@ -1,5 +1,8 @@
 import { daemonCommand as daemonCommandFromModule, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
+import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
+  type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
+import type { DependencyMergeEvidence } from "./lib/plan.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
@@ -29539,20 +29542,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
-  // W1-T324: matched as a standalone token, same discipline as every other boolean flag in
-  // this file — never a substring match against a proof body that could legitimately quote
-  // "--all". Meaningless (and silently ignored) in --base mode: --base's own scope already
-  // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
+  // W1-T324: a standalone token, never a substring match on a proof body quoting "--all".
+  // Ignored in --base mode, whose own scope already defines what is in-bounds.
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true;
   const checkoutRoot = deps.repoRoot ?? repoRoot;
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
-  // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
-  // here, BY NAME — before any --base/git-show plumbing gets a chance to mis-report it
-  // as a base-resolution failure (the #271 fixture's second false green: `relative(
-  // repoRoot, planPath)` used to yield a `../../..` path that `git show <base>:<that>`
-  // died on as though the BASE ref were the problem, never naming the real one).
+  // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
+  // plumbing can mis-report it as a base-resolution failure (the #271 fixture's false green).
   if (planPathArg !== undefined && isPathOutsideRoot(checkoutRoot, planPath)) {
     console.error(
       `### rmd lint-plan: --plan ${planPath} resolves OUTSIDE the repo root ${checkoutRoot} — ` +
@@ -29622,21 +29620,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       writeFileSync(tmpFile, oldRaw, "utf8");
       materializeOriginShards(checkoutRoot, dirname(relPath), tmpDir, undefined, scopeBase);
       // A BASE THAT DOES NOT PARSE IS NOT THIS PR'S DEFECT, AND MUST NOT BE ITS FAILURE.
-      // `loadPlan` refuses a tree carrying a duplicate id, and the base tree is whatever
-      // origin/main happens to be — so one bad merge to main turned this REQUIRED check red on
-      // every open PR at once, including the plan-repair PR that would have fixed it. That is a
-      // deadlock: the gate proving the plan loads cannot pass while the plan does not load, and
-      // the only exit was an admin merge (the W1-T488 repair, #1820, went out that way).
-      //
-      // So the PARSED comparison degrades and the RAW one carries on. Everything below that
-      // needs `oldPlan` is skipped — `oldById`, `newTaskIds` and `newMonolithIds` are all
-      // already `| undefined` and every consumer already guards them, so this is a state the
-      // code was built to hold rather than a new one. `rawChangedTaskIds` further down needs
-      // only the base's raw TEXT, which is on disk regardless of whether it parses, so the
-      // changed-tasks scope survives and the check still lints exactly this PR's own tasks.
-      //
-      // FAIL-CLOSED IS PRESERVED WHERE IT BELONGS: a broken HEAD plan still fails, loudly and
-      // earlier — `loadPlan(planPath)` above this block throws before any of it runs.
+      // `loadPlan` refuses a duplicate id, and the base tree is whatever origin/main is — one bad
+      // merge turned this REQUIRED check red on every open PR, including the repair PR (W1-T488,
+      // #1820, went out by admin merge). So the PARSED comparison degrades and the RAW one carries
+      // on: everything needing `oldPlan` is skipped (those sets are already `| undefined` and
+      // guarded), while `rawChangedTaskIds` needs only the base's raw TEXT, so the changed-tasks
+      // scope survives. A broken HEAD plan still fails loudly earlier, at `loadPlan(planPath)`.
       let oldPlan: Plan | undefined;
       try {
         oldPlan = loadPlan(tmpFile);
@@ -29748,20 +29737,72 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // trap, `gh` unauthenticated/unavailable): `statusResolvable` stays false and the check
   // is skipped rather than redding a plan-only PR during a GitHub outage.
   let statusByTaskId: Map<string, StatusProjection> | undefined;
+  let dependencyStatusByTaskId: Map<string, StatusProjection> | undefined;
   let statusResolvable = false;
   if (!offline && scope && scope.size > 0) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
       const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
       const github = (deps.ghGateway ?? ghGateway)(owner, repo);
-      const scopedPlan: Plan = { tasks: plan.tasks.filter((t) => scope!.has(t.id)), byId: new Map() };
-      statusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, { ledgerPath: ledgerPathFor(config), github });
+      const evidenceIds = new Set(scope);
+      const pending = [...scope];
+      while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
+        if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
+      }
+      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
+      dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
+        ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
+      });
+      // Dependency-only evidence must not widen duplicate/post-merge credit; extra projection rows stay as before.
+      statusByTaskId = new Map([...dependencyStatusByTaskId].filter(([id]) => scope!.has(id) || !evidenceIds.has(id)));
       statusResolvable = true;
     } catch {
       statusByTaskId = undefined;
       statusResolvable = false;
     }
   }
+
+  // Read only for a changed machine task's non-retired dependency. Never enter loadConfig offline.
+  let offlineCredit: { store: CreditStore; repository: string; overrides: readonly CreditOverrideRow[] } | { reason: string } | undefined;
+  const dependencyEvidence = (candidate: Task): DependencyMergeEvidence => {
+    if (!offline) {
+      const projected = dependencyStatusByTaskId?.get(candidate.id);
+      return !projected || projected.indeterminate
+        ? { state: "unknown", reason: "online dependency credit projection unavailable or indeterminate" }
+        : { state: projected.merged ? "merged" : "unmerged" };
+    }
+    if (!offlineCredit) {
+      const configured = existingCliRootWithoutConfig();
+      if (configured.state !== "present" || !configured.root || !configured.root.trim() ||
+        !isAbsolute(configured.root) || configured.root.includes("\0")) {
+        offlineCredit = { reason: `instance config/root unavailable: ${configured.state}${configured.reason ? ` (${configured.reason})` : ""}; an explicit usable absolute root is required` };
+      } else {
+        const ledgerPath = join(configured.root, "state", LEDGER_FILENAME);
+        const creditRead: { value?: CreditReadState } = {};
+        const store = loadCreditStore(defaultCreditStorePath(ledgerPath), undefined, state => { creditRead.value = state; });
+        const overrideRead: { value?: CreditReadState } = {};
+        const overrides = loadCreditOverrides(() => readFileSync(defaultCreditOverridePath(ledgerPath), "utf8"), state => { overrideRead.value = state; });
+        if (creditRead.value?.state !== "present") offlineCredit = { reason: creditRead.value && "reason" in creditRead.value ? creditRead.value.reason : "native credit read unavailable" };
+        else if (!overrideRead.value || overrideRead.value.state !== "present" && overrideRead.value.state !== "missing" ||
+          overrides.refused.length > 0 || overrides.rows.some(row => !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(row.task) || !Number.isSafeInteger(row.pr) || row.pr <= 0)) {
+          offlineCredit = { reason: overrideRead.value && "reason" in overrideRead.value ? overrideRead.value.reason : "credit overrides malformed or contain invalid/refused rows" };
+        } else {
+          try {
+            const origin = hostWorktreeGit(checkoutRoot, ["remote", "get-url", "origin"]).trim();
+            const repository = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(origin)?.[1];
+            offlineCredit = !repository || repository.split("/").some(part => part === "." || part === "..")
+              ? { reason: "credit repository origin unavailable or not a canonical github.com repository" }
+              : { store, repository, overrides: overrides.rows };
+          } catch {
+            offlineCredit = { reason: "credit repository origin unavailable" };
+          }
+        }
+      }
+    }
+    return "reason" in offlineCredit ? { state: "unknown", reason: offlineCredit.reason }
+      : durableDependencyCredit(offlineCredit.store, candidate.id, offlineCredit.repository, offlineCredit.overrides);
+  };
 
   // W1-T1076: the duplicate corpus, resolved ONCE here and ONLY in changed-tasks scope — see the
   // section comment ahead of `openPlanShardSlugs` for why the whole-plan pass gets nothing. Its
@@ -29942,6 +29983,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         plan,
         releasedIds: releasedIdsForAdmission,
         isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
+        dependencyEvidence,
         pathExists: opts.moduleExists,
         pathExistsAtBase,
       };
@@ -53388,14 +53430,25 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
 
 /** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
  *  (`~/Remudero`). Never `loadConfig()`, which can create the config and call `resolveClaudeBin()`. */
-function cliLedgerPathWithoutConfig(): string {
-  let root = join(homedir(), "Remudero");
+function existingCliRootWithoutConfig(): { state: "present" | "missing" | "unreadable" | "corrupt"; root?: string; reason?: string } {
+  let text: string;
   try {
-    const parsed = JSON.parse(readFileSync(instanceConfigPath(), "utf8")) as { root?: unknown };
-    if (typeof parsed.root === "string" && parsed.root !== "") root = parsed.root;
-  } catch {
-    // deliberate: an absent or unreadable config names no root, so the documented default stands.
+    text = readFileSync(instanceConfigPath(), "utf8");
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException)?.code === "ENOENT";
+    return { state: missing ? "missing" : "unreadable", reason: missing ? "instance config absent" : "instance config unreadable" };
   }
+  try {
+    const parsed = JSON.parse(text) as { root?: unknown };
+    return { state: "present", ...(typeof parsed.root === "string" && parsed.root !== "" ? { root: parsed.root } : {}) };
+  } catch {
+    return { state: "corrupt", reason: "instance config could not be decoded" };
+  }
+}
+
+function cliLedgerPathWithoutConfig(): string {
+  // Keep the diagnostic sink's exact old fallback/string semantics; admission validates separately.
+  const root = existingCliRootWithoutConfig().root ?? join(homedir(), "Remudero");
   return join(root, "state", LEDGER_FILENAME);
 }
 
