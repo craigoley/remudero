@@ -104,6 +104,7 @@ test('closed evidence compresses through a pinned descriptor and retains ordinar
   const before = lstatSync(f.path), result = compressEvidenceFile(f.path, { apply: true, now: f.now });
   assert.equal(result.disposition, 'LOSSLESSLY_COMPRESSED', result.reason);
   assert.equal(result.copyMethod, 'pinned-fd-fcopyfile');
+  assert.equal(result.publicationMethod, 'pinned-directory-atomic-exchange');
   assert.deepEqual(readFileSync(f.path), f.bytes);
   assert.ok(lstatSync(f.path).blocks < before.blocks);
   assert.deepEqual(readdirSync(f.dir), ['closed.log']);
@@ -126,6 +127,26 @@ test('post-publication public-path writer is not overwritten and the original is
   const result = compressEvidenceFile(f.path, { apply: true, now: f.now, afterPublish: ({ path }) => writeFileSync(path, 'new public writer content') });
   assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION'); assert.ok(result.retainedOriginalPath);
   assert.equal(readFileSync(f.path, 'utf8'), 'new public writer content'); assert.deepEqual(readFileSync(result.retainedOriginalPath), f.bytes);
+});
+test('an atomic writer in the final publication gap keeps its actual displaced inode', t => {
+  const f = payload(t); if (platformRefusal(f.path, f.now)) return;
+  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, beforeExchange: () => {
+    const newer = join(f.dir, 'atomic-writer'); writeFileSync(newer, 'newer atomic writer bytes', { mode: 0o600 }); renameSync(newer, f.path);
+  } });
+  assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION');
+  assert.equal(result.reason, 'detached-original-changed');
+  assert.equal(readFileSync(result.retainedDisplacedPath!, 'utf8'), 'newer atomic writer bytes');
+  assert.deepEqual(readFileSync(result.retainedOriginalPath!), f.bytes);
+  assert.deepEqual(readFileSync(f.path), f.bytes);
+});
+test('an unverified exchange receipt retains both names and never retries or cleans the displaced slot', t => {
+  const f = payload(t); if (platformRefusal(f.path, f.now)) return;
+  const held = join(f.dir, 'removed-public-held');
+  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, beforeExchange: () => renameSync(f.path, held) });
+  assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION'); assert.equal(result.reason, 'exchange-outcome-unverified');
+  assert.equal(existsSync(f.path), false); assert.deepEqual(readFileSync(held), f.bytes);
+  assert.deepEqual(readFileSync(result.retainedOriginalPath!), f.bytes);
+  assert.deepEqual(readFileSync(result.retainedDisplacedPath!), f.bytes);
 });
 test('a replaced stage pathname is refused before publication and its new bytes are retained', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;

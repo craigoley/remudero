@@ -55,11 +55,17 @@ There is no package download, SDK/model call, native compilation or Linux
 compression fallback. Missing OS helpers refuse the file.
 
 Source identity and bytes, compressed bytes and metadata, open-file state and
-the ordinary reader path are checked. An original recovery link remains until
-the detached original is verified unchanged and unused after publication. A
+the ordinary reader path are checked through retained descriptors. Publication
+uses Apple's `renameatx_np(RENAME_SWAP)` under a pinned directory descriptor,
+not an ordinary overwriting rename: even a newer atomic write in the final
+check-to-publication interval retains its actual displaced inode. An original
+recovery link also remains until the displaced original is verified unchanged
+and unused after publication. A
 late writer or incomplete read-back produces `UNKNOWN_AFTER_PUBLICATION` and
 retains that recovery path; it never reports a lossless success or overwrites a
 new public-path write. An operator must reconcile an UNKNOWN before any retry.
+An exchange timeout or missing terminal receipt may be post-syscall: both names
+are retained, with no fallback, cleanup of the displaced name or automatic retry.
 
 No-op passes do not create another immutable raw receipt. Meaningful results and
 incomplete/failed publication evidence remain private and retained; the current
@@ -79,4 +85,5 @@ prior failed receipts. The ordinary author's 20-GiB reserve is not lowered by
 this helper.
 
 The metadata API is specified in Apple's maintained
-[copyfile header](https://github.com/apple-oss-distributions/copyfile/blob/main/copyfile.h).
+[copyfile header](https://github.com/apple-oss-distributions/copyfile/blob/main/copyfile.h)
+and [rename manual](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/rename.2).

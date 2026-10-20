@@ -15,7 +15,7 @@ node_path=$(command -v node) || { printf 'Node is required\n' >&2; exit 2; }
 case "$node_path" in /*) ;; *) printf 'Absolute Node executable required\n' >&2; exit 2 ;; esac
 node_major=$("$node_path" -p 'process.versions.node.split(".")[0]')
 [ "$node_major" -ge 24 ] || { printf 'Node 24 or later required\n' >&2; exit 2; }
-version=$("$node_path" --input-type=module -e 'import {readFileSync} from "node:fs"; import {createHash} from "node:crypto"; const h=createHash("sha256");for(const p of process.argv.slice(1))h.update(readFileSync(p));console.log(h.digest("hex"));' "$source_root/scripts/maintain-evidence-storage.mjs" "$source_root/scripts/lib/evidence-storage.mjs" "$source_root/scripts/lib/evidence-fd-snapshot.py")
+version=$("$node_path" --input-type=module -e 'import {readFileSync} from "node:fs"; import {createHash} from "node:crypto"; const h=createHash("sha256");for(const p of process.argv.slice(1))h.update(readFileSync(p));console.log(h.digest("hex"));' "$source_root/scripts/maintain-evidence-storage.mjs" "$source_root/scripts/lib/evidence-storage.mjs" "$source_root/scripts/lib/evidence-fd-snapshot.py" "$source_root/scripts/lib/evidence-fd-exchange.py")
 dest="$install_home/.local/share/remudero/evidence-tools/$version"
 bin="$install_home/.local/bin"
 config="$install_home/.config/remudero"
@@ -23,7 +23,7 @@ for path in "$install_home/.local" "$install_home/.local/share" "$install_home/.
   [ ! -L "$path" ] || { printf 'Refuse linked install path\n' >&2; exit 2; }
 done
 mkdir -p "$dest/lib" "$bin" "$config"
-for script in maintain-evidence-storage.mjs lib/evidence-storage.mjs lib/evidence-fd-snapshot.py; do
+for script in maintain-evidence-storage.mjs lib/evidence-storage.mjs lib/evidence-fd-snapshot.py lib/evidence-fd-exchange.py; do
   if [ -e "$dest/$script" ] || [ -L "$dest/$script" ]; then
     [ ! -L "$dest/$script" ] && cmp -s "$source_root/scripts/$script" "$dest/$script" || { printf 'Existing version changed; refusing overwrite\n' >&2; exit 2; }
   else

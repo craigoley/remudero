@@ -1,9 +1,9 @@
 // Local closed-evidence compaction. Never expires history or follows artifact links.
 import { constants, openSync, closeSync, readSync, fstatSync, lstatSync, opendirSync,
-  realpathSync, linkSync, renameSync, unlinkSync, fsyncSync, statfsSync } from 'node:fs';
+  realpathSync, linkSync, unlinkSync, fsyncSync, statfsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const EVIDENCE_IDLE_MS = 6 * 60 * 60 * 1000;
@@ -43,12 +43,15 @@ function samePayloadMetadata(a, b) {
   return ['dev','ino','size','mode','uid','gid','mtimeMs'].every(k => a[k] === b[k]);
 }
 export function compressEvidenceFile(file, options = {}) {
-  const { apply = false, now = Date.now(), beforePublish = () => {}, afterPublish = () => {} } = options;
+  const { apply = false, now = Date.now(), beforePublish = () => {}, beforeExchange = () => {}, afterPublish = () => {} } = options;
   const entry = { path: file, disposition: 'KEEP' };
-  let fd, stagedFd, stagedIdentity, snapshot, stage, backup, published = false;
+  let fd, dirfd, stagedFd, stagedIdentity, snapshot, stage, backup, exchangeAttempted = false;
   try {
     if (process.platform !== 'darwin') throw Error('platform-not-qualified');
     privateParents(file);
+    dirfd = openSync(dirname(file), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
+    const directory = fstatSync(dirfd);
+    if (!directory.isDirectory() || directory.uid !== process.getuid() || (directory.mode & 0o022)) throw Error('unverified-publication-directory');
     fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const original = fstatSync(fd);
     if (!eligibleEvidence(original, now, process.getuid())) throw Error('recent-foreign-linked-or-not-private');
@@ -92,40 +95,52 @@ export function compressEvidenceFile(file, options = {}) {
     backup = join(dirname(file), '.rmd-evidence-original-' + randomUUID());
     linkSync(file, backup);
     if (!samePayloadMetadata(original, lstatSync(backup)) || lstatSync(backup).nlink !== 2) throw Error('recovery-link-race');
-    renameSync(stage, file);
-    stage = undefined;
-    published = true;
-    afterPublish({ path: file, original: backup });
-    // The detached original must still be unchanged AND unused. A pre-rename
+    beforeExchange();
+    // A normal rename would silently unlink a newer inode created after the last
+    // check. An atomic exchange always leaves that actual displaced inode named.
+    exchangeAttempted = true;
+    const exchanged = spawnSync('/usr/bin/python3', ['-I', fileURLToPath(new URL('./evidence-fd-exchange.py', import.meta.url)), basename(stage), basename(file)], {
+      stdio: ['ignore','pipe','pipe',dirfd], timeout: 5000, encoding: 'utf8', maxBuffer: 65536,
+    });
+    // A timeout can be after the syscall. Never assume an unsuccessful receipt
+    // means nothing happened, clean either name, or retry the exchange.
+    if (exchanged.error || exchanged.status !== 0 || exchanged.stderr || exchanged.stdout !== 'EXCHANGED_AND_SYNCED\n') throw Error('exchange-outcome-unverified');
+    entry.publicationMethod = 'pinned-directory-atomic-exchange';
+    afterPublish({ path: file, original: stage });
+    // The displaced original must still be unchanged AND unused. A pre-exchange
     // writer can hold that inode even after the public pathname is replaced.
-    noOtherOpenFiles(backup);
+    noOtherOpenFiles(stage);
     const detached = fstatSync(fd);
-    if (!samePayloadMetadata(original, detached) || detached.nlink !== 1
+    if (!samePayloadMetadata(original, detached) || detached.nlink !== 2
+        || !sameEvidenceIdentity(detached, lstatSync(stage))
         || !sameEvidenceIdentity(detached, lstatSync(backup))
         || evidenceDigest(fd, original.size) !== entry.sha256
         || !sameEvidenceIdentity(detached, fstatSync(fd))) throw Error('detached-original-changed');
-    // Keep the verified staged descriptor across rename instead of reopening a
+    // Keep the verified staged descriptor across exchange instead of reopening a
     // pathname whose earlier metadata check can no longer authorize an open.
     const output = fstatSync(stagedFd);
     if (evidenceDigest(stagedFd, original.size) !== entry.sha256
         || !sameEvidenceIdentity(output, fstatSync(stagedFd))
         || !sameEvidenceIdentity(output, lstatSync(file))) throw Error('published-reader-changed');
-    const dirfd = openSync(dirname(file), constants.O_RDONLY);
-    try { fsyncSync(dirfd); } finally { closeSync(dirfd); }
-    if (!sameEvidenceIdentity(detached, fstatSync(fd)) || !sameEvidenceIdentity(detached, lstatSync(backup))) throw Error('original-changed-before-release');
+    fsyncSync(dirfd);
+    if (!sameEvidenceIdentity(detached, fstatSync(fd)) || !sameEvidenceIdentity(detached, lstatSync(stage))
+        || !sameEvidenceIdentity(detached, lstatSync(backup))) throw Error('original-changed-before-release');
+    unlinkSync(stage); stage = undefined;
     unlinkSync(backup); backup = undefined;
     entry.disposition = 'LOSSLESSLY_COMPRESSED';
     entry.afterAllocatedBytes = output.blocks * 512;
     entry.allocatedSavingBytes = entry.beforeAllocatedBytes - entry.afterAllocatedBytes;
   } catch (error) {
     entry.reason = error.message;
-    if (published) entry.disposition = 'UNKNOWN_AFTER_PUBLICATION';
+    if (exchangeAttempted) entry.disposition = 'UNKNOWN_AFTER_PUBLICATION';
     if (backup) entry.retainedOriginalPath = backup;
+    if (exchangeAttempted && stage) entry.retainedDisplacedPath = stage;
   } finally {
     if (fd !== undefined) closeSync(fd);
     if (stagedFd !== undefined) closeSync(stagedFd);
+    if (dirfd !== undefined) closeSync(dirfd);
     if (snapshot) { try { unlinkSync(snapshot); } catch (e) { if (e.code !== 'ENOENT') entry.snapshotCleanup = 'UNKNOWN'; } }
-    if (stage) { try {
+    if (stage && !exchangeAttempted) { try {
       if (!stagedIdentity || !sameEvidenceIdentity(stagedIdentity, lstatSync(stage))) throw Error('unverified-stage-cleanup');
       unlinkSync(stage);
     } catch { entry.stageCleanup = 'UNKNOWN_RETAINED'; } }
