@@ -756,13 +756,16 @@ export async function serveGhReadBroker(opts: {
   dir: string;
   broker: GhReadBroker;
   heartbeatIntervalS?: number;
+  /** The account uid the broker serves: this process's own by default. */
+  uid?: number;
 }): Promise<GhReadBrokerServer> {
   const { dir, broker } = opts;
   const intervalS = opts.heartbeatIntervalS ?? GH_BROKER_HEARTBEAT_INTERVAL_S;
+  const uid = opts.uid ?? process.getuid?.();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const st = statSync(dir);
-  if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
-    throw new Error(`gh-broker: ${dir} belongs to uid ${st.uid}, not this account (${process.getuid()}); refusing to serve it`);
+  if (uid !== undefined && st.uid !== uid) {
+    throw new Error(`gh-broker: ${dir} belongs to uid ${st.uid}, not this account (${uid}); refusing to serve it`);
   }
   chmodSync(dir, 0o700);
   const socketPath = join(dir, GH_BROKER_SOCKET);

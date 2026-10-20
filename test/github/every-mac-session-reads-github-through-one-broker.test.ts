@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer, connect } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
@@ -503,8 +504,9 @@ test("W1-T10279: the real upstream executor shells out to the account's own gh",
   // A real broker with the default executor, clock and disk measurement serves through the shim too.
   const dir = tmp(t, "real");
   const broker = new GhReadBroker(dir);
-  const result: GhBrokerResult = await broker.read({ op: "read", args: ["repo", "view", "repos/o/r/pulls/1"], class: "interactive", caller: "s" });
+  const result: GhBrokerResult = await broker.read({ op: "read", args: ["api", "repos/o/r/pulls/1"], class: "interactive", caller: "s" });
   assert.equal(result.stdout, "{}\n");
+  assert.equal((broker.status() as { cache_entries: number }).cache_entries, 1, "stored, its budget read off the real disk");
 });
 
 test("W1-T10279: the installer describes a per-account launchd agent and --dry-run changes nothing", (t) => {
@@ -523,4 +525,51 @@ test("W1-T10279: the installer describes a per-account launchd agent and --dry-r
   assert.equal(spawnSync("bash", [INSTALLER, "--rmd", "relative/rmd"], { encoding: "utf8", env }).status, 2);
   assert.equal(spawnSync("bash", [INSTALLER, "--bogus"], { encoding: "utf8", env }).status, 2);
   // The installing path itself is the operator's step after merge: no test runs it.
+});
+
+test("W1-T10279: the broker refuses what it cannot read, evicts to its disk share and serves only its own uid", { timeout: 60_000 }, async (t) => {
+  // The cache budget is a share of the free disk: with none free, every write evicts the older entries.
+  const dir = tmp(t, "evict");
+  const clock = virtualClock();
+  let n = 0;
+  const exec: GhUpstreamExec = async (args) => (args[1] === "user" ? ok("octo\n") : (n += 1, http("200 OK", ["Cache-Control: max-age=60"], `{"n":${n}}`)));
+  const broker = new GhReadBroker(dir, exec, clockFromMillisFn(clock.now), clock.sleep, () => 0);
+  const read = (pr: number) => broker.read({ op: "read", args: ["api", `repos/o/r/pulls/${pr}`], class: "interactive", caller: "s" });
+  await read(1);
+  await read(2);
+  assert.equal((await read(2)).outcome, "hit-fresh", "the newest entry is kept");
+  assert.equal((await read(1)).outcome, "upstream-200", "the least recently used one was evicted");
+
+  // A request that is not JSON is refused, as gh refuses a bad flag.
+  const cache = tmp(t, "garbled");
+  const brokerDir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
+  const server = await serveGhReadBroker({ dir: brokerDir, broker: new GhReadBroker(brokerDir, exec, clockFromMillisFn(clock.now), clock.sleep, () => 1e12) });
+  t.after(() => server.close());
+  const reply = await new Promise<string>((resolve, reject) => {
+    const socket = connect(server.socketPath);
+    let text = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.write("not json\n"));
+    socket.on("data", (chunk: string) => { text += chunk; });
+    socket.on("end", () => resolve(text));
+    socket.on("error", reject);
+  });
+  assert.deepEqual(JSON.parse(reply), { type: "result", stdout: "", stderr: "gh-broker: unreadable request\n", exitCode: 2, outcome: "refused" });
+
+  // A reply that is not JSON is a broker fault: the client rejects, and its caller takes the direct path.
+  const liar = createServer((conn) => conn.end("garbage\n"));
+  const liarPath = join(tmp(t, "liar"), "liar.sock");
+  await new Promise<void>((resolve) => liar.listen(liarPath, resolve));
+  t.after(() => liar.close());
+  await assert.rejects(brokerGhRead(liarPath, ["api", "x"]), /unreadable reply line/);
+
+  // Another account's directory is never served.
+  await assert.rejects(serveGhReadBroker({ dir: tmp(t, "foreign"), broker, uid: 999_999 }), /belongs to uid [0-9]+, not this account \(999999\)/);
+
+  // A torn last line in the request log is not a request.
+  const logDir = join(tmp(t, "torn"), "log");
+  mkdirSync(logDir, { recursive: true });
+  writeFileSync(join(logDir, "requests-2026-10-20.ndjson"), '{"ts":"2026-10-20T00:00:00.000Z","outcome":"hit-fresh","class":"agent"}\n{"ts":"2026-10-20T00:0');
+  const summary = summariseGhBrokerLog(join(logDir, ".."), 0);
+  assert.deepEqual([summary.reads, summary.upstream_calls, summary.served_without_upstream_share], [1, 0, 1]);
 });
