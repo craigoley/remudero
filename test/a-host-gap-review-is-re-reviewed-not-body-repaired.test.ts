@@ -12,26 +12,30 @@ const NOW = Date.parse("2026-10-11T12:00:00Z");
 const at = (minutesAgo: number): string => new Date(NOW - minutesAgo * MIN).toISOString();
 const PR_URL = "https://github.com/acme/remudero/pull/10741";
 const HEAD = "3fb4aab41";
+const DIGEST = "host-gap-input";
+const attemptId = (n: number) => `review-PR10741-00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 const criterion = (n: number, proof_exec: string, proof_skip?: string) => ({
   claim: `claim ${n}`, proof: `unit test: proof ${n}`, met: true, reason: "keyword floor", proof_exec,
   ...(proof_skip !== undefined ? { proof_skip } : {}),
 });
 
-const reviewPosted = (criteria: ReturnType<typeof criterion>[], minutesAgo: number): Record<string, unknown> => ({
+const reviewPosted = (criteria: ReturnType<typeof criterion>[], minutesAgo: number, attempt = 0): Record<string, unknown> => ({
   ts: at(minutesAgo), task_id: "W1-T7837", step: "review.posted", pr_url: PR_URL, head_sha: HEAD,
   state: "success", capped: true, plan_only: false,
+  run_id: `review-PR10741-${1000 + attempt}`, review_attempt_id: attemptId(attempt), review_input_digest: DIGEST,
   decision_verdict: { state: "success", capped: true, planOnly: false, criteria },
 });
 
-const postReviewDisposed = (minutesAgo: number): Record<string, unknown> => ({
-  ts: at(minutesAgo), task_id: "W1-T7837", step: "sweep.disposed", pr_number: 10741, head_sha: HEAD,
-  disposition: "post-review", acted: true,
+const reviewAdmitted = (minutesAgo: number, attempt = 0, hostGap = false): Record<string, unknown> => ({
+  ts: at(minutesAgo), task_id: "W1-T7837", step: "sweep.review_admitted", pr_number: 10741, head_sha: HEAD,
+  pr_url: PR_URL, review_input_digest: DIGEST, review_attempt_id: attemptId(attempt),
+  host_gap_rereview: hostGap, skips: ["runner-absent"],
 });
 
 const rereviewRow = (minutesAgo: number, skips: string[]): Record<string, unknown> => ({
   ts: at(minutesAgo), task_id: "W1-T7837", step: HOST_GAP_REREVIEW_STEP, pr_number: 10741,
-  pr_url: PR_URL, head_sha: HEAD, skips,
+  pr_url: PR_URL, head_sha: HEAD, review_input_digest: DIGEST, skips,
 });
 
 const RUNNER_ABSENT = [
@@ -44,6 +48,7 @@ const openPr = (): OpenPrView => ({
   prNumber: 10741, prUrl: PR_URL, taskId: "W1-T7837", headSha: HEAD, headRefName: "run-W1-T7837-1",
   checksState: "green", reviewState: "success", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false,
   lastActivityAt: at(30), ciFailures: [],
+  reviewInputDigest: DIGEST,
 });
 
 interface Harness { rows: Record<string, unknown>[]; effects: string[]; deps: SweepDeps; judged: FixProgressInput[] }
@@ -66,8 +71,8 @@ function harness(rows: Record<string, unknown>[], judge?: SweepDeps["fixProgress
 }
 
 test("W1-T7837: a capped review whose proofs all hit a host gap is re-reviewed at the same head", async () => {
-  // The review took 10m (disposed at -40m, posted at -30m); it is now 30m after the post, past the 10m pace.
-  const h = harness([postReviewDisposed(40), reviewPosted(RUNNER_ABSENT, 30)]);
+  // The review took 10m (admitted at -40m, posted at -30m); it is now 30m after the post, past the 10m pace.
+  const h = harness([reviewAdmitted(40), reviewPosted(RUNNER_ABSENT, 30)]);
   const result = await runSweep([openPr()], h.deps);
   const action = result.actions[0]!;
   assert.equal(action.disposition, "post-review");
@@ -85,7 +90,7 @@ test("W1-T7837: a capped review whose proofs all hit a host gap is re-reviewed a
 test("W1-T7837: a stale proof beside a host gap still routes to body repair", async () => {
   const mixed = [criterion(1, "not_executable", "runner-absent"), criterion(2, "executed_stale"),
     criterion(3, "not_executable", "prose-no-match")];
-  const h = harness([postReviewDisposed(40), reviewPosted(mixed, 30)]);
+  const h = harness([reviewAdmitted(40), reviewPosted(mixed, 30)]);
   const result = await runSweep([openPr()], h.deps);
   const action = result.actions[0]!;
   assert.equal(action.disposition, "blocked-fixable");
@@ -117,14 +122,14 @@ test("W1-T7837: host-gap re-reviews are paced from the observed history", async 
   assert.equal(hostGapRereviewWaitMs(10 * MIN, 2), 30 * MIN);
   assert.equal(hostGapRereviewWaitMs(4 * MIN, 0), 4 * MIN, "a faster review is paced faster: no fixed interval");
 
-  // The duration comes from the ledger: disposed -> review.posted for this head (10m here, 4m below).
-  const slow = hostGapRereviewFacts(openPr(), [postReviewDisposed(40), reviewPosted(RUNNER_ABSENT, 30)]);
-  const fast = hostGapRereviewFacts(openPr(), [postReviewDisposed(34), reviewPosted(RUNNER_ABSENT, 30)]);
+  // The duration comes from the ledger: admission -> review.posted for this head (10m here, 4m below).
+  const slow = hostGapRereviewFacts(openPr(), [reviewAdmitted(40), reviewPosted(RUNNER_ABSENT, 30)]);
+  const fast = hostGapRereviewFacts(openPr(), [reviewAdmitted(34), reviewPosted(RUNNER_ABSENT, 30)]);
   assert.equal(slow.observedReviewMs, 10 * MIN);
   assert.equal(fast.observedReviewMs, 4 * MIN);
 
   // 5m after a 10m review's post: held, and the hold names the host gap with no row written and no review run.
-  const early = harness([postReviewDisposed(15), reviewPosted(RUNNER_ABSENT, 5)]);
+  const early = harness([reviewAdmitted(15), reviewPosted(RUNNER_ABSENT, 5)]);
   const held = await runSweep([openPr()], early.deps);
   assert.equal(held.actions[0]!.disposition, "wait");
   assert.match(held.actions[0]!.reason, /host gap/);
@@ -132,7 +137,7 @@ test("W1-T7837: host-gap re-reviews are paced from the observed history", async 
   assert.equal(early.rows.some((row) => row.step === HOST_GAP_REREVIEW_STEP), false);
 
   // The same age admits a faster-reviewing input, and a second gap waits twice as long as the first.
-  const quick = harness([postReviewDisposed(9), reviewPosted(RUNNER_ABSENT, 5)]);
+  const quick = harness([reviewAdmitted(9), reviewPosted(RUNNER_ABSENT, 5)]);
   assert.equal((await runSweep([openPr()], quick.deps)).actions[0]!.disposition, "post-review");
 
   const state: HostGapRereviewState = { history: [{ atMs: NOW - 15 * MIN, skips: ["runner-absent"] }],
@@ -162,8 +167,8 @@ test("W1-T7837: every host-gap grade names its own host problem", () => {
 
 test("W1-T7837: a persisting host gap escalates through the fix-progress judge", async () => {
   // Two reviews already ran at this head and graded runner-absent; the second re-review is due.
-  const rows = () => [postReviewDisposed(200), reviewPosted(RUNNER_ABSENT, 190),
-    rereviewRow(180, ["runner-absent"]), reviewPosted(RUNNER_ABSENT, 170)];
+  const rows = () => [reviewAdmitted(200), reviewPosted(RUNNER_ABSENT, 190),
+    rereviewRow(180, ["runner-absent"]), reviewAdmitted(180, 1, true), reviewPosted(RUNNER_ABSENT, 170, 1)];
 
   const escalating = harness(rows(), async () => ({ verdict: "escalate", loop: "runner never appears",
     reason: "the same skip on every re-review" }));
