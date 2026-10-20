@@ -84,13 +84,13 @@
     Azure memory and Field Trials remain outside this task.
   acceptance:
     - claim: "Real default delivery and completion retain exact same-repository/proposal/thread input identity; distinct identical-text inputs stay distinct and foreign ambiguous missing and legacy identities remain unknown without history mutation"
-      proof: "unit test: test/inbox/inbox-feedback-response-causal-link.test.ts"
+      proof: "unit test: inbox causal delivery preserves exact scope and treats legacy or ambiguous links as unknown"
     - claim: "Equal timestamps historical backfill two replies during a decider call and a newer reframe during an older draft never falsely acknowledge or overwrite newer direction; genuine linked completion advances only consumed inputs"
-      proof: "unit test: test/inbox/inbox-feedback-response-causal-link.test.ts"
+      proof: "unit test: inbox causal completion cannot consume or overwrite newer concurrent direction"
     - claim: "Duplicate and restarted completion callbacks and action-success followed by answer-append-failure resume acknowledgement without repeating the action; incoming and mirrored-event deduplication remain separate"
-      proof: "unit test: test/inbox/inbox-feedback-response-causal-link.test.ts"
+      proof: "unit test: inbox causal restart resumes a failed acknowledgement without repeating an executed action"
     - claim: "The production composition preserves recorded-action exclusion explicit supersession approval and hold precedence and all existing action gates while exposing unknown versus linked completion"
-      proof: "unit test: test/inbox/inbox-feedback-response-causal-link.test.ts"
+      proof: "unit test: inbox causal composition preserves approval hold supersession and recorded-event gates"
   falsifier: |
     Delete only the new source forwarding of consumed input identity through the default asynchronous
     responder/draft completion path, leaving real stores and test inputs intact. Require real assertion
@@ -100,6 +100,13 @@
     receipts and same-committed-tree instrumented diff coverage, naming the SHA; helper-only mocks,
     test-title greps and a fabricated mutant result are not evidence.
   note: |
+    Recovery preserves the original completed native triage and its W1-T10283 reservation on
+    run-TRIAGE-console-inbox-causal-response-20261020-1792527686941. Its first push was refused
+    locally for four identical whole-file acceptance proofs; nothing was published. Replace
+    only those proofs with distinct literal behavioral test-title requirements. These are forward
+    implementation requirements, not tests already run or proof of a working causal join.
+    The native refusal and original commit remain retained; no second triage or ID mint is used.
+
     Reserved id W1-T10283 supplied by this triage harness; no independent mint or reservation change.
     This filing is a work proposal, not operator risk approval, a model verdict or deployment authority.
     Normal risk/scope/review/CI gates apply. No depends_on W1-T10272 is invented while its plan exists
