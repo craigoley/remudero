@@ -20,3 +20,11 @@
     The ledger step inbox.recommendation_refused carries a failure shape and landed rows in both halves of the trailing 7 days: 7 in the older half, 36 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.68
+    reasons:
+      - "low-confidence verdict (0.68 < 0.8) — on the change's description/files alone, no diff was read — The declared files list contains only a new test file under test/gardeners/, with no secrets, auth, deletion, deploy or review-policy surface shown.; on the change's description/files alone, no diff was read — The acceptance criterion is a grep for a named test, so the finding can be checked from what is shown, and no operator-only decision is requested.; on the change's description/files alone, no diff was read — The description says the code writing the step is not yet located, so the true fix scope is unknown. The scout family's track record (0 merged, 1 declined) is weak. Neither is evidence of a protected-area touch, and CI and review still apply."
+    judged_at: "2026-10-20T05:33:12.662Z"
+    pin: "da1683a9140d7e0ae433381d91685c0c8419c82446e3e9252478dc6f58bc88b4"

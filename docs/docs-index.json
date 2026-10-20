@@ -848,6 +848,12 @@
       "grepHint": "Native hash-locked Semgrep Community Edition"
     },
     {
+      "path": "docs/shared-git-storage.md",
+      "title": "Account-private shared Git workspaces",
+      "summary": "Stage new unfiled author work in linked worktrees sharing one existing account's",
+      "grepHint": "Account-private shared Git workspaces"
+    },
+    {
       "path": "docs/system-diagrams.md",
       "title": "System diagrams",
       "summary": "Three Mermaid diagrams of how remudero actually runs: the two hosts, the daemon loop, and the",
