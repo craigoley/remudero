@@ -439,7 +439,8 @@ export async function answerThread(threadId: string, deps: InboxResponderDeps): 
   if (all.status === "unresolved") throw new Error(all.reason);
   const stored = all.threads.get(threadId) ?? [];
   const last = stored[stored.length - 1];
-  if (!last || last.role !== "reply") return undefined;
+  // Action events already record an executed operation, not new input for the reply decider.
+  if (!last || last.role !== "reply" || hasThreadEvent(last.extra)) return undefined;
   const item = deps.readItems().find((i) => i.proposalId === proposalId);
   if (!item) return undefined;
 

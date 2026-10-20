@@ -484,6 +484,8 @@ test("identical real async reads are single-flight and spawn gh once", async () 
     const stamp = ghReadCadenceStampPath(process.env) as string;
     const past = Math.floor(Date.now() / 1000) - 5_000;
     utimesSync(stamp, past, past);
+    // W1-T10271: an admitted enforced read also stamps the gated window, which holds the floor too.
+    utimesSync(`${stamp}.gated`, past, past);
     await ghJsonAsync(["api", "repos/o/r/pulls/42"]);
     assert.equal(shim.calls().length, 2, "a later settled read must spawn again");
   } finally {
