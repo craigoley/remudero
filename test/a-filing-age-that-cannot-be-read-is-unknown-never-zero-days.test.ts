@@ -346,12 +346,15 @@ test("W1-T10210: replacement refs cannot manufacture a later introduction", t =>
 
 test("W1-T10210: incomplete promisor history cannot fetch objects during an age read", async t => {
   const f = historyCase(); t.after(() => f.repo.cleanup());
-  f.repo.git("config", "uploadpack.allowFilter", "true");
+  const origin = join(f.repo.dir, "origin.git");
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", origin], { stdio: "pipe" });
+  f.repo.git("push", "--quiet", origin, "HEAD:refs/heads/main");
+  execFileSync("git", ["--git-dir", origin, "config", "uploadpack.allowFilter", "true"], { stdio: "pipe" });
   const blob = f.repo.git("rev-parse", "HEAD:plan/tasks.yaml").trim();
   const commit = f.repo.git("rev-parse", "HEAD").trim();
   const clone = (name: string): string => {
     const dir = join(f.repo.dir, name);
-    execFileSync("git", ["clone", "--quiet", "--no-checkout", "--filter=blob:none", `file://${f.repo.dir}`, dir], { stdio: "pipe" });
+    execFileSync("git", ["clone", "--quiet", "--no-checkout", "--filter=blob:none", `file://${origin}`, dir], { stdio: "pipe" });
     return dir;
   };
   const localObjects = (dir: string): string => hostWorktreeGit(dir,
@@ -373,6 +376,17 @@ test("W1-T10210: incomplete promisor history cannot fetch objects during an age 
     if (result.state === "unknown") assert.match(result.reason, /promisor/);
     assert.equal(localObjects(dir), before, "no promised blob was fetched or written by history resolution");
   });
+});
+
+test("W1-T10210: historical containers ignore uncommitted layout overrides", t => {
+  const f = historyCase(); t.after(() => f.repo.cleanup());
+  const read = () => resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+  const before = read(); assert.equal(before.state, "qualified");
+  mkdirSync(join(f.repo.dir, ".remudero"), { recursive: true });
+  for (const override of ["{ invalid", "[]", JSON.stringify({ planDir: "roadmap", planMonolith: "roadmap/tasks.yaml" })]) {
+    writeFileSync(join(f.repo.dir, ".remudero", "layout.json"), override);
+    assert.deepEqual(read(), before, "working-tree layout cannot alter the pinned historical containers or birth");
+  }
 });
 
 test("W1-T10210: unsupported historical encoding, aliases and oversized blobs remain unknown", async t => {

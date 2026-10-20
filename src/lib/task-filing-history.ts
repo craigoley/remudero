@@ -1,5 +1,7 @@
 import { parseDocument } from "yaml";
+import { join, relative, sep } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { hostWorktreeGit, type HostWorktreeGitOptions } from "./worktree-git.js";
 
 export interface FilingHistoryLimits {
@@ -52,6 +54,7 @@ export interface TaskFilingHistoryInvocation {
   readonly limits: Readonly<FilingHistoryLimits>;
   readonly usage: FilingHistoryLimits;
   readonly readGit: typeof hostWorktreeGit;
+  readonly containers: { monolith: string; shards: string };
   revision?: string;
   results?: ReadonlyMap<string, TaskFilingHistory>;
   failure?: string;
@@ -66,7 +69,11 @@ export function createTaskFilingHistoryInvocation(
     const k = key as keyof FilingHistoryLimits;
     return !Number.isSafeInteger(limits[k]) || limits[k] < 0 || limits[k] > FILING_HISTORY_LIMITS[k];
   });
+  // Historical containers use house defaults, never an uncommitted working-tree override.
+  const layout = resolveRepoLayout(root, () => undefined);
+  const gitPath = (path: string): string => relative(root, path).split(sep).join("/");
   return { root, candidates: new Set(ids), limits, readGit: options.readGit ?? hostWorktreeGit,
+    containers: { monolith: gitPath(layout.planMonolith), shards: gitPath(join(layout.planDir, "tasks.d")) },
     usage: { commitVisits: 0, blobReads: 0, decodedBytes: 0, metadataBytes: 0, stateEntries: 0 },
     ...(invalid ? { failure: "invalid filing-history limits" } : {}) };
 }
@@ -140,14 +147,17 @@ function historyGraph(ctx: TaskFilingHistoryInvocation): Commit[] {
   return commits;
 }
 
-function recognized(path: string): boolean {
-  return path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.(?:yaml|yml)$/.test(path);
+function recognized(path: string, ctx: TaskFilingHistoryInvocation): boolean {
+  const prefix = ctx.containers.shards + "/";
+  return path === ctx.containers.monolith ||
+    (path.startsWith(prefix) && /^[^/]+\.(?:yaml|yml)$/.test(path.slice(prefix.length)));
 }
 
 function historyChanges(ctx: TaskFilingHistoryInvocation, commits: Commit[]): Map<string, Change[]> {
   const input = commits.map(c => [c.oid, ...c.parents.slice(0, 1)].join(" ")).join("\n") + "\n";
   const raw = metadata(ctx, ["diff-tree", "--stdin", "-r", "--root", "--raw", "-z", "--no-renames",
-    "--no-abbrev", "--always", "--no-ext-diff", "--no-textconv", "--", "plan/tasks.yaml", "plan/tasks.d/"], input);
+    "--no-abbrev", "--always", "--no-ext-diff", "--no-textconv", "--",
+    ctx.containers.monolith, ctx.containers.shards + "/"], input);
   const result = new Map<string, Change[]>();
   const wanted = new Set(commits.map(c => c.oid));
   const parts = raw.split("\0");
@@ -161,7 +171,7 @@ function historyChanges(ctx: TaskFilingHistoryInvocation, commits: Commit[]): Ma
     const match = /^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]+) ([0-9a-f]+) [AMDT]$/.exec(part);
     if (!match || !list || i + 1 >= parts.length - 1) unavailable("incomplete history diff");
     const path = historyUtf8(Buffer.from(parts[++i]!, "latin1"));
-    if (!recognized(path)) continue;
+    if (!recognized(path, ctx)) continue;
     if (![match[1], match[2]].every(mode => ["000000", "100644", "100755"].includes(mode!)) ||
         ![match[3], match[4]].every(oid => OID.test(oid!))) unavailable("unsupported plan container object");
     list.push({ path, old: match[3]!, next: match[4]! });
@@ -262,7 +272,7 @@ function recordStates(ctx: TaskFilingHistoryInvocation, commits: Commit[], chang
         else if (count === 1 && !prior.some(p => p.count === 1)) {
           if (prior.some(p => p.seen)) reason = "ambiguous task deletion/reintroduction in filing history";
           else if (!path) unavailable("missing task introduction path");
-          else birth = { commit: commit.oid, path, source: path === "plan/tasks.yaml" ? "embedded" : "shard", committerSeconds: commit.seconds };
+          else birth = { commit: commit.oid, path, source: path === ctx.containers.monolith ? "embedded" : "shard", committerSeconds: commit.seconds };
         }
         next.set(id, { count, seen, path, birth, reason });
       }
