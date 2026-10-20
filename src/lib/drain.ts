@@ -204,7 +204,8 @@ export function stillBlockedByPushedRunBranch(
 ): boolean {
   if (pushedRunBranches === undefined || !pushedRunBranches.has(taskId)) return false;
   // A closed older PR says nothing about a newly pushed sibling of the same task.
-  const refsForTask = pushedRunRefs.filter((r) => r.taskId === taskId && !closedUnmergedRunBranches?.has(r.ref));
+  const refsForTask = pushedRunRefs.filter((r) => r.taskId === taskId &&
+    (closedUnmergedRunBranches === undefined || !closedUnmergedRunBranches.has(r.ref)));
   return unmatchedRunRefsRemainBlocking(refsForTask, planOnlyReceipts, orphan);
 }
 
