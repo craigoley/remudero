@@ -1,6 +1,6 @@
 // Account-private linked workspaces. No clone, fresh npm fallback, pruning or filed-task dispatch.
 import {constants,openSync,closeSync,fstatSync,lstatSync,readSync,realpathSync,existsSync,statfsSync,mkdtempSync,writeFileSync} from 'node:fs';
-import {dirname,join,resolve,sep} from 'node:path';
+import {basename,dirname,join,resolve,sep} from 'node:path';
 import {homedir} from 'node:os';
 import {spawnSync} from 'node:child_process';
 import {captureStepSync} from './author-step-capture.mjs';
@@ -48,8 +48,10 @@ export function readSharedWorkspaceCapacity(parent) {
 export async function borrowedWorkspaceWorker() {
   if(!process.env.RMD_TEST_SLOT_PARENT)return{admitted:false,reason:'no inherited genuine worker'};
   if(process.env.RMD_TEST_SLOT_PARENT.length>MAX_JSON_BYTES)throw Error('oversized inherited worker claim');
-  const {testSlotProcessFacts,testSlotHasAncestor}=await import('../../src/lib/test-slot.ts');
-  const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT),fd=openSync(claim.path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+  const {testSlotProcessFacts,testSlotHasAncestor,resolveTestSlotDir}=await import('../../src/lib/test-slot.ts');
+  const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT);
+  if(typeof claim.path!=='string'||dirname(claim.path)!==resolveTestSlotDir().dir||!/^slot-[1-9][0-9]*\.json$/.test(basename(claim.path)))throw Error('inherited reservation outside configured pool');
+  const fd=openSync(claim.path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
   try{
     const s=fstatSync(fd);if(!s.isFile()||s.uid!==process.getuid()||s.size>MAX_JSON_BYTES)throw Error('unverified inherited reservation');
     const bytes=Buffer.alloc(s.size+1),n=readSync(fd,bytes,0,bytes.length,0),held=JSON.parse(bytes.subarray(0,n).toString('utf8'));
