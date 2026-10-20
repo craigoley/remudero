@@ -1922,22 +1922,32 @@ export function spawnRmdReviewForFreshTree(
   });
 }
 
-export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode">): string[] {
+function acceptedReviewAttemptId(value: unknown, prNumber?: number): string | undefined {
+  return typeof value === "string" && value.length <= 80 &&
+    /^review-PR[1-9][0-9]*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) &&
+    (prNumber === undefined || value.startsWith(`review-PR${prNumber}-`)) ? value : undefined;
+}
+
+export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "reviewAttemptId">): string[] {
+  const attemptId = acceptedReviewAttemptId(opts.reviewAttemptId);
   return [
     ...(opts.planOnlyFiling === undefined ? [] : [opts.planOnlyFiling ? "--plan-only-filing" : "--not-plan-only-filing"]),
     ...(opts.executionMode === undefined ? [] : ["--execution-mode", opts.executionMode]),
+    ...(attemptId === undefined ? [] : ["--review-attempt-id", attemptId]),
   ];
 }
 
 /** W1-T9727 — a fresh-tree review child is handed no start reading, so it takes its own (see {@link reviewCommand}). */
 export const JUDGE_AT_OWN_START_FLAG = "--judge-at-own-start";
 
-export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart"> {
+export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId"> {
   const mode = flagValue(rest, "--execution-mode");
+  const reviewAttemptId = acceptedReviewAttemptId(flagValue(rest, "--review-attempt-id"));
   return {
     ...(rest.includes(JUDGE_AT_OWN_START_FLAG) ? { judgeAtOwnStart: true } : {}),
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
     ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
+    ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
   };
 }
 
@@ -2349,9 +2359,10 @@ export function buildSweepEffects(
   );
   const reviewFallbackRunner =
     deps.reviewRunner ??
-    ((_prNumber: number, isPlanFiling?: boolean) => {
+    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string) => {
       const args = ["--repo", deps.repo];
-      const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling };
+      const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling,
+        ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }) };
       return deps.reviewCommandImpl
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
         : reviewerCodeGate.call(String(_prNumber), args, opts);
@@ -2363,7 +2374,14 @@ export function buildSweepEffects(
   const buildBaseProofReuse =
     (deps.buildBaseProofDirImpl as typeof buildBaseProofDir | undefined) ?? buildBaseProofDir;
   const reviewReuseExecProof = deps.reviewReuseExecProofImpl as ProofExecutor | undefined;
-  const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<number> => {
+  const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string): Promise<number> => {
+    const reuseRunId = reviewAttemptId === undefined ? deps.runId : `review-PR${pr.prNumber}-${systemClock.now()}`;
+    if (reviewAttemptId !== undefined) {
+      const key = { taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber), prUrl: pr.prUrl, headSha: pr.headSha };
+      appendLedger(deps.ledgerPath, { run_id: reuseRunId, task_id: key.taskId, step: "review.provider_provenance",
+        ...reviewProviderProvenanceLedgerFields(resolveReviewProviderProvenance(readLedgerLines(deps.ledgerPath), key), key),
+        review_attempt_id: reviewAttemptId, review_input_digest: pr.reviewInputDigest });
+    }
     const fallbackToFullReview = async (reason: string): Promise<number> => {
       deps.log("sweep.review_reuse_discrimination_fallback", {
         pr_number: pr.prNumber,
@@ -2373,7 +2391,7 @@ export function buildSweepEffects(
         fallback_reason: reason,
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId);
     };
 
     if (mode.kind === "discriminate-only") {
@@ -2433,7 +2451,7 @@ export function buildSweepEffects(
                 taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
                 evidence: reviewEvidenceStrength(verdict.criteria),
                 ledgerPath: deps.ledgerPath,
-                runId: deps.runId,
+                runId: reuseRunId,
                 prUrl: pr.prUrl,
                 reviewInputDigest: pr.reviewInputDigest,
                 reviewEngineRevision: REVIEW_ENGINE_REVISION,
@@ -2443,7 +2461,8 @@ export function buildSweepEffects(
                 exitCode = 1;
               } else {
                 appendLedger(deps.ledgerPath, {
-                  run_id: deps.runId,
+                  run_id: reuseRunId,
+                  ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId }),
                   task_id: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
                   step: "review.posted",
                   context: REVIEW_CONTEXT,
@@ -2497,7 +2516,7 @@ export function buildSweepEffects(
     const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId);
     }
     const reusedStatus = await postReviewStatusGuarded({
       owner: deps.owner,
@@ -2508,7 +2527,7 @@ export function buildSweepEffects(
       taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
       evidence: reviewEvidenceStrength(verdict.criteria ?? []),
       ledgerPath: deps.ledgerPath,
-      runId: deps.runId,
+      runId: reuseRunId,
       prUrl: pr.prUrl,
       reviewInputDigest: pr.reviewInputDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
@@ -2516,7 +2535,8 @@ export function buildSweepEffects(
     });
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
     appendLedger(deps.ledgerPath, {
-      run_id: deps.runId,
+      run_id: reuseRunId,
+      ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId }),
       task_id: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
       step: "review.posted",
       context: REVIEW_CONTEXT,
@@ -22730,6 +22750,8 @@ export function repairRetroChangesetClaim(
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 interface ReviewCommandDeps {
+  /** Bounded admission identity, separate from the existing worker/run and ownership conventions. */
+  reviewAttemptId?: string;
   contributorAdmission?: AdmissionObserver;
   fetchView?: (args: string[]) => unknown;
   loadConfig?: () => Config;
@@ -23242,8 +23264,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
   const runId = `review-PR${view.number}-${Date.now()}`;
+  const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review",
+      ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }), ...extra });
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
   await observeAdmissionDisposition(config.contributorAdmission,
     { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root, log,
