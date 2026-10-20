@@ -7215,20 +7215,22 @@ export function reviewerVerdictContract(count: number): string {
 
 /** (W1-T2263) Widened off the original bare verdict-line pattern with a trailing capture group for whatever the
  *  reviewer wrote after the token, SAME LINE ONLY — the character class excludes `\r`/`\n`, so a clause can never span
- *  lines by construction. {@link parseReviewerVerdicts} still reads only groups 1 and 2, so its return is
- *  byte-identical; {@link parseReviewerVerdictClauses} reads group 3. One regex, two readers. */
+ *  lines by construction. {@link parseReviewerVerdicts} reads groups 1 and 2 for observed verdicts;
+ *  {@link parseReviewerVerdictClauses} reads group 3. One regex, two readers. */
 const REVIEW_VERDICT_LINE_RE = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL)\b([^\r\n]*)/gi;
 
 /** Parse the reviewer's `REVIEW_VERDICT <n>: PASS|FAIL` lines into a semantic array index-aligned to the criteria.
- *  `FAIL` ⇒ `false`, forcing that criterion to fail; `PASS` or absent ⇒ `undefined`, deferring to the mechanical
- *  floor. Advisory and downgrade-only, so unparseable output yields an all-`undefined` array, fail-closed. */
+ *  `FAIL` is `false`, an observed `PASS` is `true`, and missing output remains `undefined`. The required
+ *  semantic-completion gate must distinguish a real PASS from missing evidence. Certification is still
+ *  downgrade-only: judgeCriterion consults only `semantic === false`, so true never rescues a failed floor. */
 export function parseReviewerVerdicts(text: string, count: number): (boolean | undefined)[] {
   const semantic: (boolean | undefined)[] = new Array(count).fill(undefined);
   for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
     const n = Number(m[1]) - 1;
     if (n < 0 || n >= count) continue;
-    // Only ever record a downgrade; a PASS leaves the floor to decide.
+    // A witnessed FAIL wins even if a later line says PASS. Presence is not certification.
     if (m[2].toUpperCase() === "FAIL") semantic[n] = false;
+    else if (semantic[n] !== false) semantic[n] = true;
   }
   return semantic;
 }
