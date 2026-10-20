@@ -98,7 +98,7 @@ test('inherited reservation fixtures require the real ancestor start, nonce, poo
   const owned=lstatSync(path),old=process.env.RMD_TEST_SLOT_PARENT;
   t.after(()=>{const current=lstatSync(path);assert.equal(current.ino,owned.ino);assert.equal(current.dev,owned.dev);rmSync(path);});
   const claim={pid:process.ppid,nonce:held.ownerNonce,start,concurrency:1,path};
-  const read=async(value:unknown)=>{process.env.RMD_TEST_SLOT_PARENT=typeof value==='string'?value:JSON.stringify(value);try{return await borrowedWorkspaceWorker();}catch(e){return{admitted:false,reason:(e as Error).message};}};
+  const read=async(value:unknown):Promise<Awaited<ReturnType<typeof borrowedWorkspaceWorker>>>=>{process.env.RMD_TEST_SLOT_PARENT=typeof value==='string'?value:JSON.stringify(value);try{return await borrowedWorkspaceWorker();}catch(e){return{admitted:false,reason:(e as Error).message};}};
   try{
     const positive=await read(claim);assert.equal(positive.admitted,true,JSON.stringify(positive));
     assert.equal(typeof positive.verify,'function');
