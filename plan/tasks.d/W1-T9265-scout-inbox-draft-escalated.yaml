@@ -6,6 +6,9 @@
   verify: human
   risk: low
   priority: 1.55
+  # refusal-amendment (W1-T9265, run DAEMON-1792519019872@eb9b1b5559a89f4ef98b80225d84d7bbdb0da969, 2026-10-20T18:53:32.868Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The test requires suppressing scout classification, while acceptance requires fixing recurrence without hiding rows.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
