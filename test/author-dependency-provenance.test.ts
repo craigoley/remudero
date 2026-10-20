@@ -53,6 +53,8 @@ test('author dependency precheck admits only the install-owned tracked wrapper w
  writeFileSync(f.entry,'// modified admission wrapper\n');
  assert.equal(authorDependencyProvenance(f.view).state,'unavailable','a modified tracked path is not a tracked-byte attestation');
  writeFileSync(f.entry,before);assert.equal(authorDependencyProvenance(f.view).state,'present');
+ unlinkSync(join(f.donor,'.bin/tsx'));symlinkSync(f.entry,join(f.donor,'.bin/tsx'));
+ assert.equal(authorDependencyProvenance(f.view).state,'unavailable','the wrapper exception never applies to another tool');
 });
 
 test('author dependency precheck refuses foreign untracked and symlinked wrapper escapes',t=>{
@@ -95,9 +97,10 @@ test('author dependency wrapper attestation ignores inherited foreign Git routin
 
 test('author dependency precheck refuses ancestor resolution when the checkout donor is missing',t=>{
  const root=mkdtempSync(join(tmpdir(),'rmd-dependency-fallback-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
- const view=join(root,'view'),ancestor=join(root,'node_modules/pkg');mkdirSync(view);mkdirSync(ancestor,{recursive:true});
+ const view=join(root,'view'),payload=join(root,'ancestor-payload'),ancestor=join(payload,'pkg');mkdirSync(view);mkdirSync(ancestor,{recursive:true});
  writeFileSync(join(ancestor,'package.json'),JSON.stringify({name:'pkg',version:'1.0.0',main:'index.js'}));
  writeFileSync(join(ancestor,'index.js'),'module.exports = true;');
+ symlinkSync(payload,join(root,'node_modules'));
  writeFileSync(join(view,'package.json'),JSON.stringify({name:'fixture'}));
  writeFileSync(join(view,'package-lock.json'),JSON.stringify({lockfileVersion:3,packages:{'node_modules/pkg':{version:'1.0.0'}}}));
  symlinkSync(join(root,'vanished-donor'),join(view,'node_modules'));
