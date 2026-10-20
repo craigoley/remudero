@@ -52,8 +52,11 @@
     summary at line 92 lists them as NOT MEASURED; 18 of the 57 `*push*.log` files in logs-8864 carry that line.
     READ at origin/main e4f73f7ea: hooks/pre-push's sandboxed `runSuites` throws that message whenever
     `readerRuntimePolicy !== undefined`, BEFORE `createPrePushSandboxRunner` is called, so it does not depend on bwrap.
-    INFERRED from that code, not yet re-measured: a push made after 14:51Z still skips those suites. No push log in
-    logs-8864 postdates the install (checked 15:14Z), so section 1 re-measures it with one push.
+    OBSERVED after the install, logs-8864/file1020b-push.log (this filing's own first push, 16:20:09Z): no bwrap line at
+    all, lint-plan-precheck now runs in the sandbox ("OK -- the plan lint passes on this diff"), and census-precheck still
+    prints "census suites NOT MEASURED" for the 3 admitted suites of that plan-only diff
+    (architect-lane-master-plan-commit, every-shard-on-main-is-lintable, task-linter-wiring), each with the reader
+    message. So the reader arm alone now keeps census-precheck from measuring; a code push admits more suites (76 above).
     Not a new task: section 2 already asks why the reader arm refuses and what measuring it would take. These facts
     narrow it; the acceptance proofs are unchanged.
   design: |
