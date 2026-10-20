@@ -92,7 +92,7 @@ test("admitted host-gap attempts grow pacing once and preserve live ownership", 
     const again = await runSweep([pr()], { ...deps, runId: "another-daemon-pass" });
     assert.equal(calls, 1, "a live same-input review owns the slot; no second effect");
     assert.ok(again.actions.every(a => !a.acted));
-    const admission = liveRows.find(r => r.step === "sweep.review_admitted");
+    const admission = liveRows.find(r => r.step === "sweep.review_admitted" && r.review_attempt_id === handedRunId);
     assert.equal(admission?.review_attempt_id, handedRunId);
     assert.equal(admission?.host_gap_rereview, true);
     const inFlight = hostGapProgressInput(pr(), state(hostGapRereviewFacts(pr(), liveRows)));
@@ -154,17 +154,20 @@ test("default review bridges and the real refusal logger preserve admitted attem
     assert.match(String(carrier?.run_id), /^review-PR10221-[0-9]+$/, "existing numeric review run convention survives");
     assert.equal(carrier?.review_input_digest, DIGEST);
 
+    for (const attemptId of [id(5), id(5).replace("PR10221", "PR10222")]) {
     const code = await reviewCommand("10221", ["--repo", "acme/missing-subject"], {
-      reviewAttemptId: id(5), enforceReviewSubjectCheckout: true,
+      reviewAttemptId: attemptId, enforceReviewSubjectCheckout: true,
       resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }), loadConfig: () => config,
       fetchView: () => ({ body: "", html_url: URL, head: { ref: "run-unfiled-1", sha: HEAD }, number: 10221 }),
       fetchHead: () => { throw Error("missing subject must refuse before fetch"); },
       postReviewPending: async () => { throw Error("missing subject must refuse before a status"); },
     });
     assert.equal(code, 1);
-    const refusal = readLedgerLines(ledgerPath).find(r => r.step === "review.subject_refused");
-    assert.equal(refusal?.review_attempt_id, id(5), "the REAL logger wrote admission attribution, not a fake callback");
-    assert.equal(typeof refusal?.review_input_digest, "string");
+    const refusal = readLedgerLines(ledgerPath).findLast(r => r.step === "review.subject_refused");
+    assert.equal(refusal?.review_attempt_id, attemptId === id(5) ? id(5) : undefined,
+      "the REAL logger binds only this PR's admitted identity, never a foreign PR's nonce");
+    if (attemptId === id(5)) assert.equal(typeof refusal?.review_input_digest, "string");
     assert.match(String(refusal?.run_id), /^review-PR10221-[0-9]+$/);
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
