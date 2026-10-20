@@ -280,3 +280,17 @@ test("bundlemain: a build materialized from the shared store keeps its linked ma
     rmSync(store, { recursive: true, force: true });
   }
 });
+
+test("bundlemain: the bundle script prints the launcher's one-line answer for --main-entry", () => {
+  const root = makeTree();
+  try {
+    // The repo's own script, so a coverage run credits its CLI arm; it reads the fixture only as data.
+    const answer = (verb: string): string[] => execFileSync(process.execPath, [SCRIPT, "--root", root, "--main-entry", verb], { encoding: "utf8" })
+      .replace(/\n$/, "").split("\t");
+    assert.deepEqual(answer("daemon"), ["bundle", "built-at-boot", out(root, "run-task.mjs")]);
+    assert.deepEqual(answer("daemon").slice(0, 1), ["tsx"], "the unsettled attempt demotes the next boot");
+    assert.deepEqual(answer("serve"), ["tsx", "verb-not-bundled", ""]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

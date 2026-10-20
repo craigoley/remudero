@@ -16,18 +16,19 @@ The operator ruled on 2026-10-19: "Run the four daemon main processes from prebu
 (extending ADR 0006, the one-way door you held for W1-T9117), keeping source maps on through a linked map file?
 → Yes, build it".
 
-Measured offline on 2026-10-20 (node 24.21.0, tsx 4.23.15), in processes the builder started itself, n=3 interleaved.
-Each process loaded `src/run-task.ts`'s whole static graph, which includes the daemon command, and exited through
-`inspect --help`. Raw rows are in logs-8864/bundlemain-measure.jsonl.
+Measured offline on 2026-10-20 (node 24.21.0, tsx 4.23.15), in processes the builder started itself, n=3 interleaved,
+two sessions. Each process loaded `src/run-task.ts`'s whole static graph, which includes the daemon command, and
+exited through `inspect --help`. Raw rows: logs-8864/bundlemain-measure.jsonl (tsx cache cold, just after `npm ci`)
+and bundlemain-measure2.jsonl (tsx cache warm).
 
-| entry | RSS after load | heap after GC | after one formatted stack | load to exit |
-|---|---|---|---|---|
-| tsx CLI (today), child process | 498-596 MiB | 105 MiB | heap 121 MiB (2 maps) | 5.9-6.6 s warm, 34.7 s cold |
-| bundle, `node --enable-source-maps` | 198-204 MiB | 43 MiB | RSS 348-351 MiB, heap 188 MiB (1 map) | 0.8-0.9 s |
-| bundle with `--import tsx` beside it | 956-958 MiB | 188 MiB | heap 718 MiB | 3.3-3.6 s |
+| entry | RSS after load | heap after GC | after one formatted stack | every reachable map parsed | load to exit |
+|---|---|---|---|---|---|
+| tsx (`node --import tsx`), cache warm | 304-307 MiB | 104 MiB | 307-309 MiB (2 maps) | 466-467 MiB, heap 250 MiB (626 maps) | 1.4-1.7 s |
+| tsx, cache cold | 498-596 MiB, plus a 20 MiB esbuild child | 105 MiB | 500-597 MiB | 616-622 MiB | 5.7-6.6 s (34.7 s first) |
+| bundle, `node --enable-source-maps` | 198-204 MiB | 43 MiB | 348-351 MiB, heap 188 MiB (1 map) | 364-367 MiB, heap 203 MiB (102 maps) | 0.8-0.9 s |
+| bundle with `--import tsx` beside it | 954-960 MiB | 188 MiB | 1035-1047 MiB, heap 718 MiB | 1045-1057 MiB | 3.0-3.8 s |
 
-Parsing every map the process could reach: 616-622 MiB RSS and 251 MiB heap under tsx (626 maps), against 364-367 MiB
-and 203 MiB for the bundle (102 maps: the bundle's one, plus node_modules' own).
+`bin/rmd`'s tsx line also keeps a tsx CLI parent process beside the daemon: 54 MiB RSS of its own (n=3).
 
 ## Decision
 
@@ -56,15 +57,21 @@ ADR 0006 decision 1 is superseded for the daemon verb only.
 
 ## Consequences
 
-- OBSERVED offline: about 300 MiB less RSS at load per daemon (198 against about 530), and about 150-250 MiB less once
-  stacks are formatted. Boot loads in under a second, against 6 s warm and 35 s cold. No tsx CLI parent process or
-  esbuild service sits beside the daemon. INFERRED for the fleet until `daemon.memory` and `daemon.alive` rows confirm
-  it per `boot_head_sha`: the three daemons on one host would save about 0.5-0.9 GiB.
-- The bundle's map is ONE map. The first stack formatted through any bundled frame parses all of it: +145 MiB of heap,
-  OBSERVED. Under tsx the cost grew per module touched, up to 146 MiB for all 626. `daemon.memory`'s
-  `source_maps.parsed` (W1-T9822) counts this as 1. Its per-map calibration (240,549 B, measured on per-module maps)
-  therefore under-sizes the bundle's map, and a follow-up should size it by the map's own bytes.
-- A boot whose tree has no current build spends about 5.4 s and about 264 MiB peak in esbuild before the daemon
-  starts (OBSERVED, `--main-entry` cold build). A tree with a current build spends about 0.1-0.8 s hashing.
+- OBSERVED offline, per daemon, with the 54 MiB tsx parent counted:
+  - no stack formatted through the bundle: 198-204 MiB against about 360 MiB warm (about -160 MiB);
+  - one stack formatted: 349 against about 361 (about -12 MiB);
+  - every reachable map parsed: 365 against about 520 (about -155 MiB).
+
+  A cold tsx cache, after any source change, peaked at 500-600 MiB. The bundle has no such peak, and it loads in
+  under a second. INFERRED for the fleet until `daemon.memory` and `daemon.alive` rows confirm it per
+  `boot_head_sha`: from about 0 to about 0.5 GiB across the three daemons on one host, depending on how much of
+  the bundle's map their formatted stacks pull in.
+- The bundle's map is ONE map, so the first stack formatted through any bundled frame parses all of it: +145 MiB of
+  heap, OBSERVED. Under tsx the cost grew per module touched, up to 146 MiB for all 626. This is the price of keeping
+  maps on through a linked file. `daemon.memory`'s `source_maps.parsed` (W1-T9822) counts it as 1, and its per-map
+  calibration (240,549 B, measured on per-module maps) under-sizes the bundle's map. A follow-up should size a map by
+  its own bytes.
+- A boot whose tree has no current build spends about 5.4 s and 264 MiB peak in esbuild before the daemon starts
+  (OBSERVED, `--main-entry` cold build). A boot with a current build spends 0.1-0.8 s hashing the tree.
 - Rollback is a revert of bin/rmd. It takes effect at each daemon's next start, and no bundle needs deleting. The
-  per-tree `main-entry.off` file needs no deploy.
+  per-tree `dist/child-entries/main-entry.off` file is a rollback that needs no deploy.
