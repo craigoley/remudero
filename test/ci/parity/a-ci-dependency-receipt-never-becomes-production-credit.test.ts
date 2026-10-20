@@ -7,6 +7,11 @@ import { execFileSync } from 'node:child_process';
 import { CI_DEPENDENCY_EVIDENCE_SCHEMA, ciDependencyEvidenceForInvocation, readCiDependencyEvidence, type CiDependencyEvidenceContext } from '#scripts/lib/ci-dependency-evidence.mjs';
 import { ownedFixtureDir } from '#test/helpers/owned-fixture-dir.js';
 import { gitRepo } from '#test/helpers/git-repo.js';
+import { lintPlanCommand } from '#src/run-task.js';
+import { parseTasksFromYaml } from '#src/lib/plan.js';
+import { taskRulingPin } from '#src/lib/task-linter.js';
+import { recordFilingRiskRuling } from '#src/lib/risk-judge.js';
+import { stringify } from 'yaml';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), producerSha = 'c'.repeat(40);
 const repository = 'fixture-owner/remudero';
@@ -136,4 +141,53 @@ test('CI dependency receipt: actual invocation binds git head base and clean pla
   assert.equal(ciDependencyEvidenceForInvocation(['--base', 'HEAD'], env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown', 'ignored shards are still consumed plan inputs');
   writeFileSync(join(repo.dir, 'plan/tasks.yaml'), '# dirty\n[]\n');
   assert.equal(ciDependencyEvidenceForInvocation(['--base', 'HEAD'], env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown');
+});
+
+test('CI dependency receipt: merge-base invocation binds the fork rather than a moving main tip', t => {
+  const f = fixture(t), repo = gitRepo({ scope: t, kind: 'ci-receipt-fork' });
+  const fork = repo.git('rev-parse', 'HEAD');
+  repo.git('branch', 'feature');
+  repo.git('commit', '--allow-empty', '-qm', 'test: main advances');
+  repo.git('checkout', '-q', 'feature');
+  repo.git('commit', '--allow-empty', '-qm', 'test: feature advances');
+  const head = repo.git('rev-parse', 'HEAD');
+  const env: NodeJS.ProcessEnv = { GITHUB_ACTIONS: 'true', GITHUB_WORKSPACE: repo.dir,
+    GITHUB_REPOSITORY: repository, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2', RUNNER_TEMP: f.expected.runnerTemp,
+    RMD_CI_DEPENDENCY_EVIDENCE: f.path, RMD_CI_DEPENDENCY_PRODUCER_SHA: producerSha,
+    RMD_CI_DEPENDENCY_DIGEST: f.write({ ...observation(), head, base: fork, observedAtMs: Date.now() }) };
+  assert.deepEqual(ciDependencyEvidenceForInvocation(['--base', 'main', '--merge-base'], env, repo.dir)!({ id: 'ZZ-T1' }), { state: 'merged' });
+  assert.equal(ciDependencyEvidenceForInvocation(['--base', 'main'], env, repo.dir)!({ id: 'ZZ-T1' }).state, 'unknown');
+});
+
+test('online filing lint consumes verified dependency evidence while retaining its online checks', async t => {
+  const repo = gitRepo({ scope: t, kind: 'online-dependency-evidence' });
+  mkdirSync(join(repo.dir, 'plan/tasks.d'), { recursive: true });
+  mkdirSync(join(repo.dir, 'src/lib'), { recursive: true });
+  writeFileSync(join(repo.dir, 'src/lib/subject.ts'), 'export const value = 1;\n');
+  mkdirSync(join(repo.dir, 'test'));
+  writeFileSync(join(repo.dir, 'test/proof.test.ts'), 'import { test } from "node:test"; test("controlled dependency evidence fixture", () => {});\n');
+  const record = (id: string, depends: string[], machine = false) => `- id: ${id}\n  title: "A dependency evidence fixture ${id}"\n  repo: remudero\n  depends_on: [${depends.join(', ')}]\n  type: implement\n  verify: human\n  risk: low\n  status: queued\n  attempts: 0\n  ${machine ? 'author_class: machine\n  origin: flow-blocker:own-red:required checks red' : 'origin: fixture'}\n  files: [src/lib/subject.ts, test/proof.test.ts]\n  acceptance:\n    - claim: "The controlled fixture holds"\n      proof: "unit test: controlled dependency evidence fixture"\n`;
+  writeFileSync(join(repo.dir, 'plan/tasks.yaml'), record('ZZ-T1', []));
+  repo.git('add', '.'); repo.git('commit', '-qm', 'test: dependency plan');
+  const base = repo.git('rev-parse', 'HEAD');
+  const pending = parseTasksFromYaml(record('ZZ-T2', ['ZZ-T1'], true).replace('verify: human', 'verify: auto'), 'online-evidence-fixture')[0]!;
+  const admitted = recordFilingRiskRuling(pending, { verdict: 'operator', action: 'proceed', confidence: 1,
+    reasons: ['isolated fixture ruling'], judgedAt: new Date(0).toISOString() }, taskRulingPin);
+  writeFileSync(join(repo.dir, 'plan/tasks.d/ZZ-T2-filing.yaml'), stringify([admitted]));
+  repo.git('add', '.'); repo.git('commit', '-qm', 'test: machine filing');
+  const effects: string[] = [], lines: string[] = [];
+  const original = { log: console.log, warn: console.warn, error: console.error };
+  console.log = console.warn = console.error = (...parts: unknown[]) => void lines.push(parts.join(' '));
+  try {
+    const result = await lintPlanCommand(['--base', base], { repoRoot: repo.dir,
+      loadConfig: () => { effects.push('online-config'); throw new Error('fixture has no instance configuration'); },
+      resolveOwnerRepo: () => ({ owner: 'fixture-owner', repo: 'remudero' }),
+      openPlanShardSlugs: () => { effects.push('online-open-heads'); return []; },
+      dependencyEvidence: task => { effects.push('verified:' + task.id); return { state: 'merged' }; } });
+    assert.ok(effects.includes('online-config'), 'online projection is still attempted');
+    assert.ok(effects.includes('online-open-heads'), 'the duplicate/open-head check remains online');
+    assert.ok(effects.includes('verified:ZZ-T1'), 'dependency evidence reaches the actual admission gate: ' + lines.join('\n'));
+    assert.ok(!lines.join('\n').includes('dependency credit unavailable (UNKNOWN)'), lines.join('\n'));
+    assert.equal(result, 0, lines.join('\n'));
+  } finally { Object.assign(console, original); }
 });

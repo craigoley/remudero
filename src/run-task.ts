@@ -29943,7 +29943,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // Read only for a changed machine task's non-retired dependency. Never enter loadConfig offline.
   let offlineCredit: { store: CreditStore; repository: string; overrides: readonly CreditOverrideRow[] } | { reason: string } | undefined;
   const dependencyEvidence = (candidate: Task): DependencyMergeEvidence => {
-    if (offline && deps.dependencyEvidence) return deps.dependencyEvidence(candidate);
+    if (deps.dependencyEvidence) return deps.dependencyEvidence(candidate);
     if (!offline) {
       const projected = dependencyStatusByTaskId?.get(candidate.id);
       return !projected || projected.indeterminate
