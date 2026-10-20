@@ -97,7 +97,10 @@ import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
 import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
 import { loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
-import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor } from "../../lib/run-child-mode.js";
+import {
+  bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor,
+  type RunChildContractEscalation, type RunChildModeDecision,
+} from "../../lib/run-child-mode.js";
 import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFailuresAsync, mergeLogEvidenceByRoot } from "../../lib/tick-read-worker.js";
 
 /**
@@ -139,6 +142,7 @@ export interface DaemonCommandHost {
   readonly daemonDefaultBuildSweepHook: HostFn;
   readonly daemonDefaultBuildSweepLightHook: HostFn;
   readonly daemonFreshnessReads: HostFn;
+  readonly daemonRunChildContract: HostFn;
   readonly daemonGardenPassSpawn: HostFn;
   readonly daemonMemoryTelemetryReader: HostFn;
   readonly daemonPlanReaders: HostFn;
@@ -249,6 +253,8 @@ export async function daemonCommand(
     runDaemon?: typeof runDaemon;
     runTask?: DaemonCommandHost["runTask"];
     readRunChildMode?: () => RunChildMode;
+    /** W1-T9089: delivers `run_child.contract_failing`'s escalation; production raises it through `escalate`. */
+    runChildContractEscalate?: (escalation: RunChildContractEscalation) => string | null | undefined;
     /** Command seams for the selected-repository PR-action wiring test. Production keeps the
      * established fix/review implementations; tests inject terminal fakes without touching GitHub. */
     fixCommand?: DaemonCommandHost["fixCommand"];
@@ -937,8 +943,15 @@ export async function daemonCommand(
     adoptedRunIds.add(child.runId);
     void child.settled.then(() => adoptedRunIds.delete(child.runId), () => adoptedRunIds.delete(child.runId));
   }
+  // W1-T9089: a failing contract under `on` no longer demotes; it escalates once per evidence window.
+  const childContract: (decision: RunChildModeDecision | undefined) => boolean =
+    host.daemonRunChildContract(deps.runChildContractEscalate ?? raiseDuplicate, log);
   // Once per boot, after the adoption pass the decision reads: `auto` ledgers what it decided and why.
-  if (bootChildPolicy.mode === "auto") childModeTracker.record(runChildModeFor("auto", childModeTracker.evidence()).decision, log, true);
+  if (bootChildPolicy.mode === "auto") {
+    const bootDecision = runChildModeFor("auto", childModeTracker.evidence()).decision;
+    childModeTracker.record(bootDecision, log, true);
+    childContract(bootDecision);
+  }
   // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
   // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
   // though the closure is invoked after that write. See the crashLoopCheck argument below.
@@ -1406,6 +1419,7 @@ export async function daemonCommand(
           const dispatchPolicy = readRunChildPolicy(childPolicy);
           const dispatchMode = dispatchPolicy.mode === undefined ? undefined : runChildModeFor(dispatchPolicy.mode, childModeTracker.evidence());
           childModeTracker.record(dispatchMode?.decision, log);
+          childContract(dispatchMode?.decision);
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
           const inChild = await runInChildWhenOn({
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
@@ -1438,7 +1452,6 @@ export async function daemonCommand(
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).externalWaitFreshness,
-            restartAtWorkerBoundary: runOptions?.restartAtWorkerBoundary,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,

@@ -32,6 +32,7 @@ import {
   TYPECHECK_COLD_PEAK_BYTES,
   TYPECHECK_WARM_PEAK_BYTES,
   typecheckArgs,
+  typecheckEnv,
   worktreeBuildInfoPath,
   type SeedOutcome,
 } from "./typecheck-buildinfo.js";
@@ -42,8 +43,10 @@ export const NPM_TYPECHECK_SLOT_LABEL = "typecheck:npm";
 /** The buildinfo's name in the worktree root when the git dir is not writable. */
 export const WORKTREE_BUILDINFO_NAME = ".rmd-typecheck.tsbuildinfo";
 
-/** Runs tsc with stdio inherited; returns its exit status (null when it was killed or never started). */
-export type TypecheckRunSpawn = (file: string, args: readonly string[], cwd: string) => { status: number | null; error?: Error };
+/** Runs tsc with stdio inherited in `env`; returns its exit status (null when it was killed or never started). */
+export type TypecheckRunSpawn = (
+  file: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv,
+) => { status: number | null; error?: Error };
 
 export interface TypecheckRunOptions {
   spawn?: TypecheckRunSpawn;
@@ -54,8 +57,8 @@ export interface TypecheckRunOptions {
   log?: (line: string) => void;
 }
 
-const inheritSpawn: TypecheckRunSpawn = (file, args, cwd) => {
-  const r = spawnSync(file, [...args], { cwd, stdio: "inherit" });
+const inheritSpawn: TypecheckRunSpawn = (file, args, cwd, env) => {
+  const r = spawnSync(file, [...args], { cwd, stdio: "inherit", env });
   return { status: r.status, ...(r.error ? { error: r.error } : {}) };
 };
 
@@ -111,7 +114,9 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
     const headroom = (opts.testSlot?.memoryHeadroom ?? readMemoryHeadroom)();
     const tight = lowMemoryTypecheckArgs(headroom, cold ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
     if (tight.length > 0) log(JSON.stringify({ step: "typecheck.low_memory", headroomMiB: Math.round(headroom! / 1024 ** 2), args: tight }));
-    const res = (opts.spawn ?? inheritSpawn)(join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root);
+    const res = (opts.spawn ?? inheritSpawn)(
+      join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, typecheckEnv(process.env),
+    );
     if (res.error) {
       log(`typecheck: could not run tsc: ${res.error.message}`);
       return 127;

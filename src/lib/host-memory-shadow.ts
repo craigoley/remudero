@@ -43,8 +43,17 @@
  *
  * SWAP-IN COUNTS ONLY WHILE IT PREDICTS STALL. A host swap-in rate past `swapInPagesPerSecMax` defers only when the
  * instance's verdicts over {@link SWAP_STALL_HISTORY_MS} with such a rate were followed by host PSI past its thresholds
- * within {@link SWAP_STALL_WINDOW_MS} more often than all verdicts, by over twice the sampling noise; too few of them,
- * the rate alone. Over the same rows that ratio was 0.95-1.02 (PSI some10 median 0.9 at ~1,245 pages/s): churn.
+ * within {@link SWAP_STALL_WINDOW_MS} more often than the verdicts WITHOUT it (the complement), by over twice the noise
+ * of that difference; too few swap-in verdicts, the rate alone. Over the same rows that ratio was 0.95-1.02 (PSI some10
+ * median 0.9 at ~1,245 pages/s): churn. OPERATOR RULING 2026-10-19: comparing against ALL verdicts compares a set with
+ * itself once swap-in is chronic (10-19: 82-84% of swap-in verdicts against 76-80% of all, ~95% of verdicts swapping),
+ * so a complement thinner than {@link SWAP_STALL_MIN_SAMPLES} means swap-in is not a discriminating signal and holds
+ * nothing ("swap-in chronic: no contrast").
+ * THE HISTORY OUTLIVES ITS READER. The relation and the PSI bound learn from the instance's pressure store, which no
+ * process id filters, so a daemon restart keeps them. A reader that could not read the store never replaces it: it may
+ * only create a missing one (OPERATOR RULING 2026-10-19 (2)). OBSERVED 10-15..10-19 on core: six resets of the store's
+ * history to nothing, none at a daemon boot (10-19 14:52Z fell between two verdicts of one daemon, 67 s apart); a read
+ * that failed and then wrote is the one path here that replaces a written history with an empty one.
  *
  * THE PSI START BOUND IS LEARNED LIKE SWAP-IN (W1-T10085). Host PSI full avg10 names "psi" past a bound learned from
  * the instance's own admitted starts over the same windows, minimum and noise: the prior `psiFullAvg10Max` rises only
@@ -57,7 +66,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync } from "node:fs";
+import {
+  closeSync, existsSync, fstatSync, linkSync, openSync, readFileSync, readSync, readdirSync, rmSync, writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -287,12 +298,15 @@ export interface ShadowEntryInput {
 export interface ShadowInputs {
   jointClaim?: Extract<JointEstimate, { kind: "joint" }>;
   memAvailable: { mib: number } | { unread: string };
-  swapIn: { pagesPerSec: number } | { unmeasured: string };
+  swapIn: SwapInReading;
   psi: { someAvg10: number; someAvg60: number; fullAvg10?: number; fullAvg60?: number } | { unread: string };
   /** `highMib` is memory.high (reclaim and throttling begin there); `reclaimableMib` is inactive_file, page cache the
    *  kernel drops before it swaps anonymous memory. Both are optional, and absent means not subtracted. */
   container: { currentMib: number; maxMib: number | null; highMib?: number | null; reclaimableMib?: number } | { unread: string };
-  ledger: { state: ShadowLedgerState; dir?: string; reason?: string };
+  ledger: { state: ShadowLedgerState; dir?: string; reason?: string;
+    /** The maintained reader's enumeration counts. Missing is unknown, not a positively empty population.
+     * These qualify report-only RSS attribution; they do not alter the legacy admission calculation. */
+    counts?: HostMemoryReading["counts"] };
   entries: ShadowEntryInput[];
   /** The start this verdict is about. Its own reservation is counted even when the ledger could not show it. */
   start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number; estimateSource?: EstimateSource };
@@ -327,6 +341,41 @@ export interface ShadowInputs {
   reviewEstimateMib?: number;
 }
 
+/** The host swap-in's parts as every memory_budget row carries them (OPERATOR RULING 2026-10-19 (4)). Pure. */
+export function swapInRowFields(numbers: Pick<ShadowVerdict["numbers"], "swapInDiskPagesPerSec" | "swapInZswapPagesPerSec" | "swapInZswapBasis">): {
+  swap_in_disk: number | null; swap_in_zswap: number | null; swap_in_zswap_basis: string | null;
+} {
+  return { swap_in_disk: numbers.swapInDiskPagesPerSec, swap_in_zswap: numbers.swapInZswapPagesPerSec, swap_in_zswap_basis: numbers.swapInZswapBasis };
+}
+
+/**
+ * A swap-in rate, pages per second: OPERATOR RULING 2026-10-19 (4), the sum of `pswpin` (from the swap device) and
+ * `zswpin` (from zswap's compressed pool, which `pswpin` never counts once zswap is on), each part reported apart.
+ */
+export type SwapInReading =
+  | { pagesPerSec: number; diskPagesPerSec?: number; zswapPagesPerSec?: number; zswapBasis?: string }
+  | { unmeasured: string };
+
+/** `pswpin` and `zswpin` from a vmstat or memory.stat text; no pswpin: undefined. A kernel without zswap has no zswpin
+ *  line, read as 0 and named in `zswapBasis`. Pure. */
+export function swapInCounters(text: string): { pswpin: number; zswpin: number; zswapBasis: string } | undefined {
+  const pswpin = /^pswpin\s+(\d+)$/m.exec(text)?.[1];
+  if (pswpin === undefined) return undefined;
+  const zswpin = /^zswpin\s+(\d+)$/m.exec(text)?.[1];
+  return zswpin === undefined ? { pswpin: Number(pswpin), zswpin: 0, zswapBasis: "no zswpin line (zswap not compiled in): 0" }
+    : { pswpin: Number(pswpin), zswpin: Number(zswpin), zswapBasis: "zswpin" };
+}
+
+/** The rate between two counter samples `seconds` apart, its parts named. A prior without zswpin (written before the
+ *  ruling) counts no zswap swap-in for that one interval. Pure. */
+export function swapInRateOf(now: { pswpin: number; zswpin: number; zswapBasis: string },
+  prior: { pswpin: number; zswpin?: number }, seconds: number): Extract<SwapInReading, { pagesPerSec: number }> {
+  const diskPagesPerSec = Math.max(0, now.pswpin - prior.pswpin) / seconds;
+  const zswapPagesPerSec = prior.zswpin === undefined ? 0 : Math.max(0, now.zswpin - prior.zswpin) / seconds;
+  const zswapBasis = prior.zswpin === undefined ? "no prior zswpin sample: 0" : now.zswapBasis;
+  return { pagesPerSec: diskPagesPerSec + zswapPagesPerSec, diskPagesPerSec, zswapPagesPerSec, zswapBasis };
+}
+
 /** How often the host's swap-in past the threshold was followed by stall, against all verdicts. */
 export type SwapStallRelation =
   | {
@@ -334,10 +383,15 @@ export type SwapStallRelation =
     samples: number;
     /** The share of them followed by a stall within {@link SWAP_STALL_WINDOW_MS}. */
     afterSwapIn: number;
-    /** The share of all closed verdicts followed by one. */
+    /** Verdicts with a measured swap-in at or below the threshold whose window has closed: the complement. */
+    without: number;
+    /** The share of the complement followed by a stall; null when it is thinner than {@link SWAP_STALL_MIN_SAMPLES},
+     *  so swap-in has no contrast to be judged against. */
+    afterWithout: number | null;
+    /** The share of all closed verdicts followed by one: reported, never the comparison. */
     afterAny: number;
-    /** Twice the sampling noise of `afterSwapIn`: the margin it must clear. */
-    noise: number;
+    /** Twice the standard error of `afterSwapIn - afterWithout`: the margin it must clear; null without a contrast. */
+    noise: number | null;
   }
   | { unlearned: string };
 
@@ -369,8 +423,8 @@ export interface ContainerPressureSample {
 
 export type ContainerPressureInput =
   | {
-    /** memory.stat pswpin, pages per second since the instance's previous verdict. */
-    swapIn: { pagesPerSec: number } | { unmeasured: string };
+    /** memory.stat pswpin + zswpin, pages per second since the instance's previous verdict. */
+    swapIn: SwapInReading;
     /** memory.pressure. */
     psi: { someAvg10: number; fullAvg10?: number } | { unread: string };
     /** memory.events `high` crossings since the instance's previous verdict, when that was within
@@ -391,7 +445,7 @@ export interface ShadowClaim {
   workerClass: WorkerClass;
   estimateMib: number;
   typicalMib: number;
-  /** Resident rss+swap; null when the tree was unread (the whole estimate counts). */
+  /** Legacy RSS-plus-swap footprint, NOT physical resident RAM; null when unread (the whole estimate counts). */
   residentMib: number | null;
   /** In this container: its claim counts against the container ceiling. */
   own: boolean;
@@ -445,6 +499,11 @@ export interface ShadowVerdict {
     projectedAvailableAllPeaksMib: number | null;
     hostReserveMib: number;
     swapInPagesPerSec: number | null;
+    /** Its parts (OPERATOR RULING 2026-10-19 (4)): from the swap device (pswpin) and from zswap (zswpin), and how the
+     *  zswap part was read; null while the rate is unmeasured. */
+    swapInDiskPagesPerSec: number | null;
+    swapInZswapPagesPerSec: number | null;
+    swapInZswapBasis: string | null;
     /** Whether swap-in past the threshold counts: its learned relation to stall, or the rate alone while unlearned. */
     swapInBasis: string | null;
     psiFullAvg10Bound: PsiFullAvg10Bound;
@@ -473,9 +532,17 @@ export interface ShadowVerdict {
     /** Its own pressure past the thresholds; `containerSighted` when that came with a crossing of its memory.high. */
     containerPressed: boolean;
     containerSighted: boolean;
-    /** Container memory no reservation's resident tree accounts for: gardens, measurement children, read-model threads. */
+    /** Legacy clamped difference against RSS-plus-swap footprints. Kept for historical replay, NOT physical attribution. */
     unreservedContainerMib: number | null;
     unreservedContainerShare: number | null;
+    legacyResidentBasis: "rss-plus-swap-footprint";
+    /** Sum of this container's measured reservation-tree RSS, not exclusive physical charge (shared pages can repeat).
+     * Null if the ledger, a tree's walk or any RSS reading is incomplete. No reservations in a present ledger is zero. */
+    reservationRssMib: number | null;
+    /** Approximate memory.current minus reservation RSS, NOT "native" or exact unreserved memory. May be negative:
+     * process RSS and cgroup charging have different sharing rules. Null when either side is unavailable. */
+    unattributedContainerMibApprox: number | null;
+    unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss";
   };
 }
 
@@ -681,6 +748,16 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   }
 
   const unreserved = containerCurrent === null ? null : Math.max(0, containerCurrent - residentOwn);
+  const owned = inputs.entries.filter(entry => entry.status === "owned");
+  const counts = inputs.ledger.counts;
+  const populationKnown = inputs.ledger.state === "present" && counts !== undefined &&
+    Number.isSafeInteger(counts.live) && counts.live === inputs.entries.length &&
+    counts.unreadable === 0 && counts.uncertain === 0 && inputs.entries.every(entry => entry.status !== "uncertain");
+  const rssKnown = populationKnown && owned.every(entry => entry.walkComplete === true &&
+    "mib" in entry.resident && entry.resident.complete && entry.resident.rssMib !== undefined &&
+    Number.isFinite(entry.resident.rssMib) && entry.resident.rssMib >= 0);
+  const reservationRss = rssKnown ? owned.reduce((sum, entry) =>
+    sum + ("mib" in entry.resident ? entry.resident.rssMib! : 0), 0) : null;
   return {
     wouldAdmit: reasons.size === 0,
     reasons: [...reasons],
@@ -709,6 +786,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       projectedAvailableAllPeaksMib: projectedAllPeaks,
       hostReserveMib: policy.hostReserveMib,
       swapInPagesPerSec: swapIn,
+      swapInDiskPagesPerSec: "pagesPerSec" in inputs.swapIn ? inputs.swapIn.diskPagesPerSec ?? inputs.swapIn.pagesPerSec : null,
+      swapInZswapPagesPerSec: "pagesPerSec" in inputs.swapIn ? inputs.swapIn.zswapPagesPerSec ?? 0 : null,
+      swapInZswapBasis: "pagesPerSec" in inputs.swapIn ? inputs.swapIn.zswapBasis ?? "not read" : null,
       swapInBasis,
       psiFullAvg10Bound: psiBound,
       psi,
@@ -729,6 +809,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       containerSighted: pressure.sighted,
       unreservedContainerMib: unreserved,
       unreservedContainerShare: unreserved === null || !containerCurrent ? null : unreserved / containerCurrent,
+      legacyResidentBasis: "rss-plus-swap-footprint",
+      reservationRssMib: reservationRss,
+      unattributedContainerMibApprox: containerCurrent === null || reservationRss === null ? null : containerCurrent - reservationRss,
+      unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss",
     },
   };
 }
@@ -798,7 +882,8 @@ export interface SwapStallSample {
 /**
  * Whether the host's swap-in past the threshold has been followed by stall. Over the verdicts in the last
  * SWAP_STALL_HISTORY_MS whose SWAP_STALL_WINDOW_MS has closed, the share followed by a stalled verdict within that window,
- * for those with swap-in past the threshold against all of them, with twice the swap-in share's sampling noise.
+ * for those with swap-in past the threshold against those with a measured rate at or below it (the complement), with
+ * twice the standard error of the difference. A complement thinner than SWAP_STALL_MIN_SAMPLES has no contrast.
  */
 export function swapStallRelationOf(history: SwapStallSample[], now: number, policy: HostMemoryBudgetPolicy): SwapStallRelation {
   const closed = history.filter((s) => now - s.at >= SWAP_STALL_WINDOW_MS && now - s.at <= SWAP_STALL_HISTORY_MS)
@@ -819,8 +904,18 @@ export function swapStallRelationOf(history: SwapStallSample[], now: number, pol
     return { unlearned: `${swapping.length} of ${SWAP_STALL_MIN_SAMPLES} verdicts with swap-in past ${policy.swapInPagesPerSecMax} pages/s and a closed window` };
   }
   const afterAny = closed.filter((s) => followed(s.at)).length / closed.length;
-  const afterSwapIn = swapping.filter((s) => followed(s.at)).length / swapping.length;
-  return { samples: swapping.length, afterSwapIn, afterAny, noise: 2 * Math.sqrt(afterAny * (1 - afterAny) / swapping.length) };
+  const stalledAfterSwapIn = swapping.filter((s) => followed(s.at)).length;
+  const afterSwapIn = stalledAfterSwapIn / swapping.length;
+  const complement = closed.filter((s) => s.pagesPerSec !== null && s.pagesPerSec <= policy.swapInPagesPerSecMax);
+  if (complement.length < SWAP_STALL_MIN_SAMPLES) {
+    return { samples: swapping.length, afterSwapIn, without: complement.length, afterWithout: null, afterAny, noise: null };
+  }
+  const stalledWithout = complement.filter((s) => followed(s.at)).length;
+  const pooled = (stalledAfterSwapIn + stalledWithout) / (swapping.length + complement.length);
+  return {
+    samples: swapping.length, afterSwapIn, without: complement.length, afterWithout: stalledWithout / complement.length, afterAny,
+    noise: 2 * Math.sqrt(pooled * (1 - pooled) * (1 / swapping.length + 1 / complement.length)),
+  };
 }
 
 /** Same closed windows, history span, minimum and noise as the swap-in relation; the outcome is OWN pressure. */
@@ -863,11 +958,20 @@ function swapInPredictsStall(relation: SwapStallRelation | undefined): { counts:
   if (relation === undefined) return { counts: true, basis: "the rate alone: no swap-in history read" };
   if ("unlearned" in relation) return { counts: true, basis: `the rate alone: ${relation.unlearned}` };
   const pct = (v: number): string => `${Math.round(v * 100)}%`;
-  const counts = relation.afterSwapIn - relation.afterAny > relation.noise;
+  if (relation.afterWithout === null || relation.noise === null) {
+    return {
+      counts: false,
+      basis: `swap-in chronic: no contrast: ${relation.without} of ${SWAP_STALL_MIN_SAMPLES} verdicts without swap-in ` +
+        `and a closed window, against ${relation.samples} with it (${pct(relation.afterSwapIn)} of them and ` +
+        `${pct(relation.afterAny)} of all followed by stall)`,
+    };
+  }
+  const counts = relation.afterSwapIn - relation.afterWithout > relation.noise;
   return {
     counts,
     basis: `swap-in ${counts ? "predicts" : "does not predict"} stall: ${pct(relation.afterSwapIn)} of ${relation.samples} ` +
-      `swap-in verdicts were followed by one, against ${pct(relation.afterAny)} of all (noise ${pct(relation.noise)})`,
+      `swap-in verdicts were followed by one, against ${pct(relation.afterWithout)} of ${relation.without} without it ` +
+      `(noise ${pct(relation.noise)})`,
   };
 }
 
@@ -1086,12 +1190,13 @@ export interface ShadowMemoryPorts {
   typical: (workerClass: WorkerClass) => number;
   /** W1-T9762: a class's measured survival at a live tree's age (host-memory-learning.ts). Absent: nothing decays. */
   survival?: (workerClass: WorkerClass, ageMs: number) => Survival;
-  /** Writes the instance's pressure store (its prior swap-in sample and its swap-in history). */
-  writeFile: (path: string, content: string) => void;
+  /** Writes the instance's pressure store (its prior swap-in sample and its swap-in history). `exclusive`: only create
+   *  it, throwing EEXIST over an existing file, for a writer that could not read what is there. */
+  writeFile: (path: string, content: string, options?: { exclusive?: boolean }) => void;
 }
 
 let installedSink: ShadowMemoryPorts["write"];
-let priorSwapIn: { at: number; pswpin: number } | undefined;
+let priorSwapIn: { at: number; pswpin: number; zswpin: number } | undefined;
 let tally = emptyShadowTally();
 let lastState: { scenario: ServeScenario; wouldAdmit: boolean } | undefined;
 const errorSeen = new Map<string, number>();
@@ -1179,11 +1284,24 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
     },
     calibrationObservation: at => kernelMemoryObservation(at),
     // Never creates the state directory: a root without one (a test's, a fresh checkout's) stores nothing.
-    writeFile: (path, content) => {
+    writeFile: (path, content, options) => {
       if (!existsSync(dirname(path))) throw Object.assign(new Error(`ENOENT: ${dirname(path)}`), { code: "ENOENT" });
-      writeAtomic(path, content, { tmpTag: "pressure-tmp" });
+      if (options?.exclusive) createWhole(path, content);
+      else writeAtomic(path, content, { tmpTag: "pressure-tmp" });
     },
   };
+}
+
+/** Create `path` holding `content` whole, or throw EEXIST and leave an existing file untouched: the stage is linked into
+ *  place, which never replaces a file, so a reader sees no file or all of it. */
+export function createWhole(path: string, content: string): void {
+  const stage = `${path}.pressure-tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(stage, content);
+    linkSync(stage, path);
+  } finally {
+    rmSync(stage, { force: true });
+  }
 }
 
 function readMemAvailable(read: ShadowMemoryPorts["readFile"]): ShadowInputs["memAvailable"] {
@@ -1197,22 +1315,21 @@ function readMemAvailable(read: ShadowMemoryPorts["readFile"]): ShadowInputs["me
 }
 
 function readSwapIn(read: ShadowMemoryPorts["readFile"], now: number, staleMs: number): ShadowInputs["swapIn"] {
-  let pswpin: number;
+  let counters: ReturnType<typeof swapInCounters>;
   try {
-    const raw = /^pswpin\s+(\d+)/m.exec(read("/proc/vmstat"))?.[1];
-    if (raw === undefined) return { unmeasured: "no pswpin line" };
-    pswpin = Number(raw);
+    counters = swapInCounters(read("/proc/vmstat"));
+    if (counters === undefined) return { unmeasured: "no pswpin line" };
   } catch (error) {
     const reason = reasonOf(error);
     return { unmeasured: reason };
   }
   const prior = priorSwapIn;
-  priorSwapIn = { at: now, pswpin };
+  priorSwapIn = { at: now, pswpin: counters.pswpin, zswpin: counters.zswpin };
   if (!prior) return { unmeasured: "first sample in this process" };
   const seconds = (now - prior.at) / 1000;
   if (seconds <= 0) return { unmeasured: "no elapsed time since the prior sample" };
   if (now - prior.at > staleMs) return { unmeasured: `stale: prior sample ${Math.round(seconds)}s old` };
-  return { pagesPerSec: Math.max(0, pswpin - prior.pswpin) / seconds };
+  return swapInRateOf(counters, prior, seconds);
 }
 
 function readPsi(read: ShadowMemoryPorts["readFile"], path = "/proc/pressure/memory"): ShadowInputs["psi"] {
@@ -1249,7 +1366,7 @@ export const CONTAINER_PRESSURE_FILE = "container-pressure.json";
 const SWAP_HISTORY_CAP = 4096;
 
 interface PressureStore {
-  prior?: { at: number; pswpin?: number; high?: number };
+  prior?: { at: number; pswpin?: number; zswpin?: number; high?: number };
   /** [at, pages/s or null, 1 when stalled]: compact, since the store is rewritten on every verdict. */
   swap: Array<[number, number | null, 0 | 1]>;
   /** [at, 1 when projection exceeds onset, 1 when under own pressure]. */
@@ -1469,11 +1586,10 @@ function readContainerPressure(
   const path = join(root, "state", CONTAINER_PRESSURE_FILE);
   const store = readPressureStore(ports.readFile, path, strict !== undefined);
   const psi = readPsi(ports.readFile, "/sys/fs/cgroup/memory.pressure");
-  let pswpin: number | undefined;
-  let swapIn: { pagesPerSec: number } | { unmeasured: string };
+  let counters: ReturnType<typeof swapInCounters> = undefined;
+  let swapIn: SwapInReading;
   try {
-    const raw = /^pswpin (\d+)$/m.exec(ports.readFile("/sys/fs/cgroup/memory.stat"))?.[1];
-    pswpin = raw === undefined ? undefined : Number(raw);
+    counters = swapInCounters(ports.readFile("/sys/fs/cgroup/memory.stat"));
     swapIn = { unmeasured: "no pswpin in memory.stat" };
   } catch (error) {
     // No memory.stat: the container's swap-in is unmeasured and named; its PSI may still show its pressure.
@@ -1488,11 +1604,11 @@ function readContainerPressure(
   }
   const prior = store.prior;
   const fresh = prior !== undefined && now > prior.at && now - prior.at <= policy.staleReadingMs;
-  if (pswpin !== undefined) {
+  if (counters !== undefined) {
     if (!prior || prior.pswpin === undefined) swapIn = { unmeasured: "no prior sample in this instance" };
     else if (now <= prior.at) swapIn = { unmeasured: "no elapsed time since the prior sample" };
     else if (!fresh) swapIn = { unmeasured: `stale: prior sample ${Math.round((now - prior.at) / 1000)}s old` };
-    else swapIn = { pagesPerSec: Math.max(0, pswpin - prior.pswpin) / ((now - prior.at) / 1000) };
+    else swapIn = swapInRateOf(counters, { pswpin: prior.pswpin, ...(prior.zswpin !== undefined ? { zswpin: prior.zswpin } : {}) }, (now - prior.at) / 1000);
   }
   // A counter that went down belongs to a new cgroup (the container was recreated): its whole count is new.
   let crossings = high === undefined || !fresh || prior!.high === undefined || now - prior!.at > CROSSING_WINDOW_MS ? null
@@ -1500,7 +1616,11 @@ function readContainerPressure(
   let current: StrictPressureSample | undefined, window: StrictWindowNumbers | undefined, issues: string[] = [], hostSwapIn = snapshot.swapIn;
   if (strict) {
     const hostCounter = strictCounter(ports.readFile, "/proc/vmstat", "pswpin");
-    const hostPswpin = hostCounter.kind === "available" ? hostCounter.value : undefined;
+    // OPERATOR RULING 2026-10-19 (4): the counters are pswpin + zswpin; a kernel without zswap has no zswpin line (0).
+    const hostZswpin = strictCounter(ports.readFile, "/proc/vmstat", "zswpin");
+    const hostPswpin = hostCounter.kind === "available" ? hostCounter.value + (hostZswpin.kind === "available" ? hostZswpin.value : 0)
+      : undefined;
+    const pswpin = counters === undefined ? undefined : counters.pswpin + counters.zswpin;
     const after = strictGenerationOf(strict.rawRead);
     if (strict.generation.kind !== "available" || after.kind !== "available") {
       issues.push("strict-observation-generation-unavailable");
@@ -1559,13 +1679,16 @@ function readContainerPressure(
   const tags = strict ? current ? { validationObservation: current, validationMarker: marker } : {}
     : { ...(store.validationObservation ? { validationObservation: store.validationObservation } : {}),
       ...(store.validationMarker ? { validationMarker: store.validationMarker } : {}) };
-  const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap, container,
-    psi: psiSeries, ...tags };
+  const next = { prior: { at: now, ...(counters !== undefined ? { pswpin: counters.pswpin, zswpin: counters.zswpin } : {}),
+    ...(high !== undefined ? { high } : {}) }, swap, container, psi: psiSeries, ...tags };
   let observationWrite: "not-attempted" | "returned" | "unknown" = "not-attempted";
   if (!strict || current) {
     observationWrite = "unknown";
     try {
-      ports.writeFile(path, `${JSON.stringify(next)}\n`);
+      // A store this reader could not read (an errno) may hold hours of history: it is only ever created, never
+      // replaced. An unparseable one cannot be a torn write (every write is whole) and is replaced, or it never learns.
+      if (store.unread !== undefined && store.unread !== "unparseable") ports.writeFile(path, `${JSON.stringify(next)}\n`, { exclusive: true });
+      else ports.writeFile(path, `${JSON.stringify(next)}\n`);
       observationWrite = "returned";
     } catch (error) {
       void error; // A thrown writer may already have replaced the file; strict evidence never calls that persisted.
@@ -1965,7 +2088,8 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     swapIn,
     psi,
     container,
-    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
+    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}),
+      ...(ledger.reading ? { counts: ledger.reading.counts } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
     entries,
     start: startOf(start, ports, typical),
     daemonGrowth: [own, ...others],
@@ -2352,6 +2476,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
         scenario_basis: inputs.serve.basis,
         would_admit: verdict.wouldAdmit,
         reasons: verdict.reasons,
+        ...swapInRowFields(verdict.numbers),
         uncertainty: verdict.uncertainty,
         numbers: verdict.numbers,
         claims: verdict.claims,

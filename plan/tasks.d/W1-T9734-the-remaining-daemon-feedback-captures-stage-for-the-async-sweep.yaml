@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 11.50
   risk: high  # Rule 19: one concern — the remaining daemon-path captures stage for the per-poll async sweep, W1-T9615's pattern; what is captured and landed is unchanged
   band_meaning: span
   origin: "operator session 2026-10-15 filing agent F4 lead 6: the runInTree census row's 'Still sync' list on run-W1-T9696-1792093598744 (e02b93474)"

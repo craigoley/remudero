@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test, type TestContext } from "node:test";
+import { FAST_GATE_CENSUS_REMEASURE_MARGIN } from "#src/lib/ci-parity.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-ignore executable gate module.
 import { censusReaderBudget, main as censusMain, runCensusSuitesViaChild } from "#scripts/census-precheck.mjs";
 
 // @census-reads: none — runtime contexts belong to isolated fixture repositories.
-const POLICY = { floorMs: 1000, multiple: 4 };
+const POLICY = { floorMs: 1000, multiple: 4, remeasureMargin: FAST_GATE_CENSUS_REMEASURE_MARGIN };
 const FILE = "test/reader.test.ts";
 const PASS = "TAP version 13\nok 1 - reader works\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
 const FAIL = `TAP version 13\nnot ok 1 - reader fails\n  ---\n  location: '${FILE}:1:1'\n  ...\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n`;
@@ -44,6 +45,8 @@ test("source-reader runtime refuses absent stale malformed and other-context cal
   for (const policy of [null, {}, { floorMs: 0, multiple: 4 }, { floorMs: 1000, multiple: NaN }]) {
     assert.throws(() => censusReaderBudget(good, "head-A", policy, 10001), /UNKNOWN/);
   }
+  assert.equal(censusReaderBudget(good, "head-A", POLICY, 10001, 1.1), 39600);
+  for (const margin of [0.9, NaN, Infinity]) assert.throws(() => censusReaderBudget(good, "head-A", POLICY, 10001, margin), /UNKNOWN/);
   assert.equal(censusReaderBudget({ ...good, elapsedMs: 16000 }, "head-A", POLICY, 10001), 60000);
   assert.throws(() => censusReaderBudget({ ...good, elapsedMs: 60001 }, "head-A", POLICY, 10001), /exceeded.*backstop/);
   assert.throws(() => censusReaderBudget(good, "head-A", { floorMs: Number.MAX_VALUE, multiple: 4 }, 10001), /UNKNOWN/);
@@ -56,7 +59,7 @@ test("source-reader calibration caps its budget rather than rejecting a healthy 
       bounds.push(options.timeout); return { status: 0, stdout: PASS };
     } }), []);
   assert.deepEqual(bounds, [60000, 60000]);
-  const overrun = [0, 18000, 18001, 18002, 79003];
+  const overrun = [0, 18000, 18001, 18002, 79003, 79004, 140005];
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
     now: () => overrun.shift()!, readContext: () => "same-runtime-input", run: () => ({ status: 0, stdout: PASS }) }), /exceeded.*60000ms/);
 });
@@ -77,15 +80,46 @@ test("source-reader calibration never retries a failed assertion or learns incom
     priority, readContext: () => "same", run: () => result }), /UNKNOWN|0 tests|summary|exited 2|SIGTERM|ETIMEDOUT|incomplete/);
 });
 
-test("source-reader qualification rejects source drift and a new runtime overrun without another try", (t) => {
+test("source-reader qualification rejects source drift without another try", (t) => {
   const repo = fixture(t); let calls = 0;
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
     readContext: () => calls ? "changed" : "original", run: () => { calls++; return { status: 0, stdout: PASS }; } }), /inputs changed/);
   assert.equal(calls, 1);
-  const time = [0, 1000, 1001, 1002, 6002]; calls = 0;
+  assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], priority,
+    readerRuntimePolicy: { floorMs: 1000, multiple: 4 }, run: () => assert.fail("no child without a re-measure margin") }), /invalid calibration policy/);
+});
+
+// The fast gate refuses a RUNAWAY only after the run plus one re-measure within FAST_GATE_CENSUS_REMEASURE_MARGIN
+// (ci-parity.ts); a loaded author host overran a 4000ms reader budget once on 2026-10-19 and the push was refused (PR 13042).
+const OVERRAN = { status: null, error: Object.assign(new Error("native step exceeded 4000 ms"), { code: "ERR_AUTHOR_STEP_TIMEOUT" }) };
+
+test("source-reader qualification re-measures one overrun and passes a re-measure within the fast gate's margin", (t) => {
+  const repo = fixture(t), lines: string[] = [];
+  t.mock.method(console, "log", (...parts: unknown[]) => { lines.push(parts.join(" ")); });
+  for (const first of ["late", "stopped"]) {
+    const time = first === "late" ? [0, 1000, 1001, 1002, 6002, 6003, 10303] : [0, 1000, 1001, 1002, 5002, 6003, 10303],
+      bounds: number[] = [];
+    assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
+      now: () => time.shift()!, readContext: () => "same", run: (_f: string, _a: string[], options: { timeout: number }) => {
+        bounds.push(options.timeout);
+        return bounds.length === 2 && first === "stopped" ? OVERRAN : { status: 0, stdout: PASS };
+      } }), []);
+    assert.deepEqual(bounds, [60000, 4000, 4400]);
+    const runtime = JSON.parse(lines.filter((line) => line.startsWith("census-reader-runtime: ")).at(-1)!.slice(23));
+    assert.equal(runtime.budgetMs, 4400);
+    assert.equal(runtime.measuredMs, 4300);
+    assert.match(runtime.remeasuredAfter, first === "late" ? /took 5000ms against 4000ms/ : /stopped at its 4000ms bound/);
+  }
+});
+
+test("source-reader qualification refuses a reader that overruns both samples", (t) => {
+  const repo = fixture(t);
+  const late = [0, 1000, 1001, 1002, 6002, 6003, 11003];
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    now: () => time.shift()!, readContext: () => "same", run: () => { calls++; return { status: 0, stdout: PASS }; } }), /exceeded.*4000ms/);
-  assert.equal(calls, 2);
+    now: () => late.shift()!, readContext: () => "same", run: () => ({ status: 0, stdout: PASS }) }), /exceeded its 4000ms measured budget/);
+  let calls = 0;
+  assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
+    readContext: () => "same", run: () => (calls++ === 0 ? { status: 0, stdout: PASS } : OVERRAN) }), /could not run to completion/);
 });
 
 test("source-reader calibration exercises real native context and children without a synthetic pass", (t) => {
@@ -155,6 +189,12 @@ test("source-reader native timeout preserves its started runaway and closed capt
     const [started, pid] = readFileSync(join(repo.dir, "started-control"), "utf8").split(" ");
     assert.equal(started, marker);
     assert.throws(() => process.kill(Number(pid), 0), { code: "ESRCH" }, "the SIGTERM-ignoring runaway outlived its capture");
+    assert.equal(native.parentTracking.ownerPid, process.pid);
+    assert.ok(Number.isSafeInteger(native.parentTracking.childPid) && native.parentTracking.childPid > 0);
+    assert.throws(() => process.kill(native.parentTracking.childPid, 0), { code: "ESRCH" }, "the owned test runner must close as well as its runaway test-file child");
+    const retained = lstatSync(dir);
+    assert.ok(retained.isDirectory() && !retained.isSymbolicLink() && retained.uid === process.getuid!());
+    rmSync(dir, { recursive: true }); // Only this closed, verified expected timeout fixture; failed assertions retain it.
     return true;
   });
 });

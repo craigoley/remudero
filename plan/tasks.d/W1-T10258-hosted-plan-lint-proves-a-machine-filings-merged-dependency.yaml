@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: high
   band_meaning: span
@@ -57,3 +57,11 @@
   falsifier: |
     Remove the producer step. The first test must report "dependency credit unavailable
     (UNKNOWN)" for W1-T9658-shaped evidence.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-20T18:45:34.674Z"
+    pin: "35dcee8c005074b65501b3d101af3c6e82661597645ca8d7a154c9e242d22c2e"

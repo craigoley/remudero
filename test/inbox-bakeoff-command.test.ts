@@ -17,7 +17,7 @@ test("inbox-bakeoff command runs its orchestration through injected, non-spendin
   const origin = gitRepo({ bare: true, kind: "inbox-bakeoff-origin" });
   const seed = gitRepo({ kind: "inbox-bakeoff-seed" });
   mkdirSync(join(seed.dir, "plan"), { recursive: true });
-  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "- id: W1-T1\n  status: queued\n");
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "- id: W1-T1\n  title: fixture dependency\n  repo: remudero\n  type: implement\n  verify: auto\n  depends_on: []\n  files: [src/fixture.ts]\n  acceptance: []\n  status: queued\n");
   seed.git("add", "plan/tasks.yaml");
   seed.git("commit", "--quiet", "-m", "fixture");
   seed.addRemote("origin", origin.dir);

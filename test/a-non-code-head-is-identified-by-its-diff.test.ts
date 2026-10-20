@@ -114,10 +114,11 @@ test("an UNREADABLE diff refuses rather than admitting", () => {
 // ── Criterion 4: every subject spelling admitted today is still admitted ────────────────────────
 
 test("the four pre-existing admitted forms are untouched", () => {
+  // W1-T9213: a filing subject is admitted only together with a wholly non-code diff.
   const filing = evaluateHeadIdentityGate({
     headCommitMessage: "docs: update\n",
     headRef: "plan/whatever",
-    changedPaths: ["src/run-task.ts"],
+    changedPaths: ["docs/guide.md"],
   });
   assert.equal(filing.ok, true);
   assert.match(filing.message, /filing-shaped subject/);
@@ -127,8 +128,8 @@ test("the four pre-existing admitted forms are untouched", () => {
     headRef: "chore/tidy",
     changedPaths: ["src/run-task.ts"],
   });
-  assert.equal(chore.ok, true);
-  assert.match(chore.message, /filing-shaped subject/);
+  assert.equal(chore.ok, false, "a filing subject alone never identifies a head that touches code");
+  assert.equal(chore.defect, "unidentified-head");
 
   const runShaped = evaluateHeadIdentityGate({
     headCommitMessage: "fix(drain): stop a stuck run branch\n",

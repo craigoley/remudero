@@ -1,0 +1,98 @@
+- id: W1-T10278
+  title: "Unrelated historical metadata never hides a provable task filing date"
+  repo: remudero
+  depends_on: [W1-T10210]
+  plan_refs: [W1-T10210, W1-T8827]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  priority: 3
+  status: merged
+  attempts: 0
+  author_class: operator
+  origin: "operator 2026-10-20: user requested the reproduced historical-YAML follow-up after PR13124 merged"
+  files: [src/lib/task-filing-history.ts, test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts, test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts]
+  rationale: |
+    PR13124 introduced bounded structured filing history and merged at c2f819cc091e146f6d21258c18eeb60c778fcf0a.
+    Its native review captured a concrete high-severity advisory at task-filing-history.ts's strict YAML
+    rejection. An independent read-only replay at approved head7101cfa1 returns unknown for W3-T7 and
+    W1-T12e because unrelated historical snapshots contain duplicate priority keys.
+    The exact resolver blob population was surveyed: 9835/9835 blobs,176927345 bytes, with the cited
+    malformed blob as a positive control. Four blobs have one DUPLICATE_KEY error on priority; each
+    document has one record and one explicit id. Their OIDs are1690ab920196990d20caa5a5240fa135e37e240b,
+    2f80252c9882de9da9eb34aebea763baae094df9,00ac30cd8d74c8f794fe235fc644c9ed99195670,
+    and645870d8144698e275c3837224ee235f4d9b9282. A controlled one-blob correction still refused.
+    Renaming only the four duplicate metadata keys in a read-only injected stream, without changing
+    identity, ancestry, timestamps or byte lengths, qualified both named tasks at their original
+    embedded introduction commits within the unchanged aggregate budget. This is causal research,
+    not a production fix. Repairing current YAML cannot remove old malformed blobs from history.
+    Fresh main1b653f0 and all16 open PR trees were read from exact ls-remote heads. Whole-tree subject
+    counts have a real current resolver positive control and no added covering mechanism. Older heads
+    carry earlier W1-T10210 plan variants; they are not new repair ownership. The registered recovered
+    worktrees show no uncommitted target-path changes; this cannot see other chats' unregistered work.
+    Recheck main, open heads, ownership, dispatch/run refs, private work and API merge credit before build.
+  design: |
+    Change only the historical record-identity reader and its two existing consumer behavior fixtures.
+    Keep the recognized containers and exact structured identity; never treat filenames, references,
+    prose occurrences or regex matches as records. Read the existing bounded parseDocument AST rather
+    than constructing native metadata objects solely to read id. Retain strict YAML parsing and
+    classify its errors. Permit duplicate non-identity metadata keys only when the syntax and
+    top-level sequence/record mapping structure positively prove exactly one direct string id per
+    record. Do not clear doc.errors, globally turn off uniqueKeys, or accept last-key-wins identity.
+    Duplicate id fields remain unknown even when their values agree or their keys use equivalent
+    quoted/escaped spellings. Missing/non-string/collection identity, alias records/keys/values,
+    merge-derived identity and unsupported key/identity/record shapes or tags remain unknown.
+    Keep alias refusal across the historical document, preserving the existing zero-alias contract.
+    Syntax and unsupported-shape errors must not be hidden behind the duplicate-metadata exception.
+    Nested metadata id fields and dependency/prose references are not top-level task identity.
+    Reject an invocation when a historical record's exact identity cannot be proved; preserve a loud
+    distinct unknown reason. Never fabricate zero or silently drop a potentially relevant record.
+
+    Keep immutable HEAD pinning, complete original-parent ancestry, no lazy fetching, hardened Git
+    reads, exact identity counts, moves/renames, deletion/reintroduction and incomparable-birth
+    refusal. Preserve every finite commit/blob/decoded/metadata/state-entry bound and debit, shared
+    invocation reuse, absence of persistent caches/writes and the existing error envelope. Add no
+    fresh per-task allowance, unbounded walk/output, timeout policy, exemption, baseline increase,
+    scanner ignore, author/coverage/security/review waiver, deployment or live product write.
+
+    Extend the existing real-Git filing fixture with explicit identity/timestamps, an unrelated
+    malformed metadata snapshot that is later repaired, and an embedded candidate that moves to a
+    shard and is renamed. Prove original commit/path/source/time provenance, multiple candidates and
+    measured same-day zero. Include nested duplicate metadata, quoted/equivalent identity keys,
+    duplicate identity with equal/different values, aliases, merge keys, unsupported syntax/shape
+    and a wrong-id/reference-only control. The old strict parser must fail the positive regression
+    while the genuine-unknown controls still execute and pass.
+    Add shared-invocation reuse and exhaustion controls without raising any resource bound.
+    Drive parkedVerifyHumanShards through loadPlan on the repaired current tree, proving the
+    unrelated malformed past does not become a zero/unknown age or alter age-excluded judgment
+    identity. Extend the lifetime fixture to prove qualified historical age still wins over a newer
+    ledger observation, with existing ledger fallback/unknown, wording, proposal and identity
+    controls unchanged. Existing tests keep their paths; create no new flat test file.
+    Beside symbol callers, run the applicable census-membership floor. Verify the committed-tree
+    source SF record and diff coverage, ordinary author admission, actual stored canonical proofs,
+    full hosted CI/security/native review and API-confirmed merge. After the fix, repeat an
+    unmodified real-history replay for W3-T7 and W1-T12e with the original introduction provenance,
+    a controlled complete blob population and unchanged measured aggregate bounds. Qualify all
+    claims by exact source and pinned repository revision; source merge is not runtime adoption.
+  acceptance:
+    - claim: "Unrelated duplicate historical metadata preserves exact embedded and moved task introduction"
+      proof: "unit test: W1-T10278: unrelated duplicate metadata preserves exact filing history"
+    - claim: "Ambiguous identity, aliases and unsupported historical syntax remain explicitly unknown"
+      proof: "unit test: W1-T10278: ambiguous structured identity stays unknown"
+    - claim: "Metadata identity parsing retains one finite shared history allowance"
+      proof: "unit test: W1-T10278: duplicate metadata preserves shared history limits"
+    - claim: "The parked-task consumer preserves measured ages and age-excluded identity despite unrelated malformed history"
+      proof: "unit test: W1-T10278: parked ages survive unrelated historical metadata errors"
+    - claim: "The lifetime consumer preserves qualified filing age ahead of ledger fallback and existing proposal policy"
+      proof: "unit test: W1-T10278: lifetime ages survive unrelated historical metadata errors"
+  falsifier: |
+    Remove only the production structured-identity repair in a private committed variant, keeping
+    the new fixtures/assertions, original age adapter, shared budgets and both consumers intact.
+    The unrelated-duplicate metadata positives must fail their intended date/provenance assertions;
+    ambiguity/alias/syntax and budget refusal controls must still execute and pass. Restore the fix
+    byte-for-byte and require passing physical-suite TAP summaries on the same candidate.
+    A setup/import failure, ghost path, wrapper-only match, absent summary, capacity refusal,
+    injected counterfactual or static report cannot qualify the production repair.
+

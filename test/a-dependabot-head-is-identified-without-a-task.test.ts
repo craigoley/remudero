@@ -199,7 +199,7 @@ test("the three pre-existing admitted forms are untouched", () => {
   const filing = evaluateHeadIdentityGate({
     headCommitMessage: "chore(plan): file something\n",
     headRef: "plan/whatever",
-    changedPaths: undefined,
+    changedPaths: ["plan/tasks.d/W1-T1.yaml"],
   });
   assert.equal(filing.ok, true);
   assert.match(filing.message, /filing-shaped subject/);

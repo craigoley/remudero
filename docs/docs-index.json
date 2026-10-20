@@ -116,6 +116,12 @@
       "grepHint": "Audit fixtures"
     },
     {
+      "path": "docs/audits/head-identity-gate-open-plan-pr-exposure.md",
+      "title": "Open plan PR exposure to head-identity-gate (W1-T9376)",
+      "summary": "The October 20, 2026 snapshot contains one qualifying open PR, #13008. It is not exposed to the historical synthetic-merge checkout failure; its observed gate…",
+      "grepHint": "Open plan PR exposure to head-identity-gate (W1-T9376)"
+    },
+    {
       "path": "docs/audits/pr-4045-stale-head-fix-race-2026-09.md",
       "title": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)",
       "summary": "Scope: W1-T4464. Read-only forensic pass: one artifact plus its docs-index entry; no source,",
@@ -186,6 +192,12 @@
       "title": "Dependency-PR review lane (W1-T54 + W1-T54b)",
       "summary": "`remudero-review` is a REQUIRED status check on `main` (see",
       "grepHint": "Dependency-PR review lane (W1-T54 + W1-T54b)"
+    },
+    {
+      "path": "docs/dependency-reuse-observations.md",
+      "title": "Dependency reuse observations",
+      "summary": "Enabling an account's existing dependency-seed configuration already routes new",
+      "grepHint": "Dependency reuse observations"
     },
     {
       "path": "docs/deploy-image-forensics.md",
@@ -606,6 +618,12 @@
       "title": "status.ts comment forensics",
       "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status.ts` when its comments were compacted to the plain-language standa…",
       "grepHint": "status.ts comment forensics"
+    },
+    {
+      "path": "docs/forensics/storage-permission-fixtures-on-the-azure-host.md",
+      "title": "Storage permission fixtures: paired controls and Azure evidence limits",
+      "summary": "Paired worker controls reproduce ten storage refusals from the reported eleven; the preflight failure remains unattributed.",
+      "grepHint": "Storage permission fixtures: paired controls and Azure evidence limits"
     },
     {
       "path": "docs/forensics/sweep-map.md",
