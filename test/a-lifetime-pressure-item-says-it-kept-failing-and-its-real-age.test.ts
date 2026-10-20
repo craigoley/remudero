@@ -219,3 +219,29 @@ test("W1-T10210: callers share one aggregate filing-history budget (lifetime rou
       [`verify-human:${ID}`, `verify-human:${secondId}`].sort());
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
+
+test("W1-T10278: lifetime ages survive unrelated historical metadata errors", async () => {
+  const f = fixture(true);
+  try {
+    commitShard(f.dir, 30);
+    const unrelated = join(f.dir, "plan", "tasks.d", "unrelated-metadata.yaml");
+    writeFileSync(unrelated, "- id: UNRELATED\n  priority: 1\n  priority: 2\n");
+    commitShard(f.dir, 20);
+    writeFileSync(unrelated, "- id: UNRELATED\n  priority: 2\n");
+    commitShard(f.dir, 10);
+    writeLedger(f.ledgerPath, [
+      { ts: new Date(NOW_MS - 50 * DAY_MS).toISOString(), task: ID, step: "first-seen-context" },
+      ...failedAttempts(4, 3),
+    ]);
+    const result = await route(f);
+    assert.match(result.prompts[0]!, /AGE: 30 days since filing/,
+      "original qualified Git age wins over the ledger after unrelated metadata was repaired");
+    assert.match(result.summaries[0]!, /4 attempts over 30 days/);
+    assert.deepEqual(result.ids, [`verify-human:${ID}`]);
+    const base: ShardUnderJudgement = { id: ID, title: "t", rationale: "", acceptance: [],
+      ageDays: 30, observationKey: "same-source", depsAllMerged: true, citedInSrc: false };
+    assert.equal(observedStateKey(base), observedStateKey({ ...base, ageDays: null, ageUnknownReason: "unreadable" }));
+    assert.equal(automationProposalFromJudgedShard(base, { decision: "automate", reason: "fixture" }).id,
+      automationProposalFromJudgedShard({ ...base, ageDays: null }, { decision: "automate", reason: "fixture" }).id);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
