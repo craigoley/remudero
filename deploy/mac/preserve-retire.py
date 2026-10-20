@@ -59,30 +59,33 @@ class Repo:
 
 # ---------- configuration ----------
 
-def private_file(path, uid):
-    """Owner-private regular file below parents that no other account can write."""
+def private_file(path, uid, home):
+    """Owner-private regular file inside `home`, whose folders up to and including `home`
+    are owned by this account and not writable by others. Above `home` is the OS's concern."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         return None
+    if not path.startswith(home + "/"):
+        return False
     if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_mode & 0o077:
         return False
     parent = os.path.dirname(path)
     while True:
         pst = os.lstat(parent)
-        if stat.S_ISLNK(pst.st_mode) or pst.st_mode & 0o022 or pst.st_uid not in (uid, 0):
+        if stat.S_ISLNK(pst.st_mode) or pst.st_mode & 0o022 or pst.st_uid != uid:
             return False
-        if parent == os.path.dirname(parent) or pst.st_uid == 0:
+        if parent == home:
             return True
         parent = os.path.dirname(parent)
 
 
 def load_config(home, path):
-    ok = private_file(path, os.getuid())
+    ok = private_file(os.path.abspath(path), os.getuid(), home)
     if ok is None:
         return None, "disabled (no config)"
     if not ok:
-        return None, "refused: config must be an owner-private 0600 file below private parents"
+        return None, "refused: config must be an owner-private 0600 file inside the home, below private parents"
     try:
         raw = json.load(open(path))
     except (OSError, ValueError) as error:

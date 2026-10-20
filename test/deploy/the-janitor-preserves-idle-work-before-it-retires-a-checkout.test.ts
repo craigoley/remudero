@@ -228,6 +228,10 @@ test("without an owner-private config the phase changes nothing, and a dry run p
     assert.equal(loose.status, 2);
     assert.match(loose.stdout, /refused: config must be an owner-private 0600 file/);
     writeConfig(fx, {});
+    chmodSync(join(fx.home, ".local/state"), 0o775);
+    const shared = helper(fx);
+    assert.equal(shared.status, 2, "a parent inside the home that others can write voids the config");
+    chmodSync(join(fx.home, ".local/state"), 0o700);
     const dry = helper(fx, []);
     assert.equal(dry.status, 0, dry.stderr + dry.stdout);
     assert.match(dry.stdout, /WOULD-RETIRE clone .*Remudero\/idle/);
