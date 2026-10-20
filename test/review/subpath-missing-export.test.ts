@@ -29,8 +29,11 @@ test("verified local subpath exports discriminate actual Node head/base link out
   const f = fixture(t);
   const source = 'import {test} from "node:test";import assert from "node:assert/strict";import {added} from "#src/a.js";test("actual alias export",()=>assert.equal(added,3));\n';
   for (const root of [f.base, f.head]) f.put(root, "test/probe.test.ts", source);
+  const env = { ...process.env, TSX_DISABLE_CACHE: "1" };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_V8_COVERAGE;
   const run = (cwd: string) => spawnSync(process.execPath, ["--import", join(process.cwd(), "node_modules/tsx/dist/loader.mjs"),
-    "--test", "--test-reporter=tap", "test/probe.test.ts"], { cwd, env: { ...process.env, TSX_DISABLE_CACHE: "1" },
+    "--test", "--test-reporter=tap", "test/probe.test.ts"], { cwd, env,
     encoding: "utf8", timeout: 10000, maxBuffer: 1024 ** 2 });
   const head = run(f.head), base = run(f.base);
   assert.equal(head.error, undefined); assert.equal(base.error, undefined);
@@ -62,7 +65,9 @@ test("subpath export attribution respects the nearest package scope and refuses 
   f.pkg(f.base, { "#src/*": "./src/*" });
   f.pkg(f.base, { "#src/*": "../src/*" }, "test/package.json");
   assert.equal(baseLacksPrAddedExports(f.output(), f.base, f.head), undefined);
+  rmSync(join(f.base, "test/package.json"));
   for (const root of [f.base, f.head]) f.pkg(root, { "#src/*": "./linked/*" });
+  f.put(f.base, "linked/a.ts", "export const existing = 1;\n");
   f.put(f.dir, "external/a.ts", "export const added = 3;\n");
   symlinkSync(join(f.dir, "external"), join(f.head, "linked"));
   assert.equal(baseLacksPrAddedExports(f.output(), f.base, f.head), undefined);
