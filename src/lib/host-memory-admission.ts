@@ -101,10 +101,11 @@ export function reservedWorkRunning(inputs: Pick<ShadowInputs, "entries">): bool
  * Projected container claims are deliberately excluded: the existing minimum-progress escape still applies. */
 function observedMemoryShortfall(verdict: Pick<ShadowVerdict, "reasons" | "numbers">):
   "memory-available" | "container-sighted" | "swap-in" | "psi" | undefined {
-  for (const reason of verdict.reasons) {
-    if (reason === "memory-available" || reason === "swap-in" || reason === "psi") return reason;
-    if (reason === "container-ceiling" && verdict.numbers.containerSighted) return "container-sighted";
-  }
+  // Keep the aged rung's existing measured-headroom/ceiling precedence when several reasons coexist.
+  if (verdict.reasons.includes("memory-available")) return "memory-available";
+  if (verdict.reasons.includes("container-ceiling") && verdict.numbers.containerSighted) return "container-sighted";
+  if (verdict.reasons.includes("swap-in")) return "swap-in";
+  if (verdict.reasons.includes("psi")) return "psi";
   return undefined;
 }
 
