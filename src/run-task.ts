@@ -1064,6 +1064,8 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
+import { createTaskFilingHistoryInvocation, resolveTaskFilingHistory,
+  type FilingHistoryOptions, type TaskFilingHistoryInvocation } from "./lib/task-filing-history.js";
 import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "./lib/required-semantic-review.js";
 import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
@@ -48046,15 +48048,16 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   runId: string;
   shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
   clock?: Clock;
+  filingHistory?: FilingHistoryOptions;
 };
 
 function lifetimeShardAge(
   taskId: string,
-  root: string,
   nowMs: number,
   rows: readonly Record<string, unknown>[],
+  filingHistory: TaskFilingHistoryInvocation,
 ): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
-  const fromGit = shardAgeDays(taskId, root, nowMs);
+  const fromGit = shardAgeDays(taskId, nowMs, filingHistory);
   if (fromGit.ageDays !== null) return fromGit;
   let first: number | undefined;
   for (const row of rows) {
@@ -48083,6 +48086,7 @@ export async function routeAdaptiveLifetimePressure(
 ): Promise<VerifyHumanRouteResult> {
   const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
   const nowMs = (deps.clock ?? systemClock).now();
+  const filingHistory = createTaskFilingHistoryInvocation(deps.root, tasks.map(task => task.id), deps.filingHistory);
   const shards: ShardUnderJudgement[] = [];
   const infraOnly: string[] = [];
   const rulings = new Map<string, VerifyHumanVerdict>();
@@ -48124,7 +48128,7 @@ export async function routeAdaptiveLifetimePressure(
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
       route: "lifetime-pressure",
       attributableDispatches,
-      ...lifetimeShardAge(task.id, deps.root, nowMs, rows),
+      ...lifetimeShardAge(task.id, nowMs, rows, filingHistory),
       depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: idCitedInSrc(task.id, deps.root),
       evidence,
@@ -48495,10 +48499,10 @@ export function planTaskLanded(task: Task | undefined, ledgerCredited?: Readonly
 
 /** The parked population, as {@link ShardUnderJudgement} — the ONE place plan records become
  *  judgeable input. Reads the plan and greps src/; writes nothing. */
-export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>): ShardUnderJudgement[] {
+export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): ShardUnderJudgement[] {
   const nowMs = clock.now();
   const out: ShardUnderJudgement[] = [];
-  for (const task of plan.tasks) {
+  const candidates = plan.tasks.filter(task => {
     // The machine-filing judge routes AND releases every machine record and every operator record that
     // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
     // W1-T4860: "queued" and "landed" read the credit the dispatcher and board use, not the raw yaml `status:` —
@@ -48506,14 +48510,17 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, 
     // W1-T9043: a machine record the judge ESCALATED to a person is admitted too, so it rides the 14/30/60-day
     // age-band re-asks a person already reads; an unjudged machine record stays the machine-filing judge's alone.
     const heldForAPerson = task.author_class === "machine" ? parkedEscalation(task) : isRulingShaped(task);
-    if (task.verify !== "human" || task.status !== "queued" || planTaskLanded(task, ledgerCredited) || !heldForAPerson) continue;
+    return task.verify === "human" && task.status === "queued" && !planTaskLanded(task, ledgerCredited) && heldForAPerson;
+  });
+  const filingHistory = createTaskFilingHistoryInvocation(root, candidates.map(task => task.id), filingHistoryOptions);
+  for (const task of candidates) {
     const deps = task.depends_on ?? [];
     out.push({
       id: task.id,
       title: task.title ?? task.id,
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
-      ...shardAgeDays(task.id, root, nowMs),
+      ...shardAgeDays(task.id, nowMs, filingHistory),
       depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
       citedInSrc: idCitedInSrc(task.id, root),
       ...(() => {
@@ -48558,19 +48565,13 @@ export function shardEvidence(task: Task): string | undefined {
   return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
-/** Days since the shard's file first appeared in git history, or `null` with the reason it could
+/** Days since the exact task record was introduced in qualified Git history, or `null` with the reason it could
  *  not be read — never 0, which reads as "filed today" (#7911). Age is CONTEXT for the judge,
  *  never a threshold — nothing here decides anything from it. */
-function shardAgeDays(taskId: string, root: string, nowMs: number): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
-  const shardFile = `plan/tasks.d/${taskId}-*.yaml`;
-  let out: string;
-  try {
-    out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)${shardFile}`], { encoding: "utf8" }).trim();
-  } catch {
-    return { ageDays: null, ageUnknownReason: "git log failed: no git, or the root is not a repository" };
-  }
-  if (!out) return { ageDays: null, ageUnknownReason: `no commit adds ${shardFile}; the record may be embedded in plan/tasks.yaml` };
-  return { ageDays: Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000)) };
+function shardAgeDays(taskId: string, nowMs: number, invocation: TaskFilingHistoryInvocation): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
+  const history = resolveTaskFilingHistory(taskId, invocation);
+  if (history.state === "unknown") return { ageDays: null, ageUnknownReason: history.reason };
+  return { ageDays: Math.max(0, Math.floor((nowMs - history.committerSeconds * 1000) / 86400000)) };
 }
 
 /** Whether anything under src/ cites this id — evidence the work may already have landed under
