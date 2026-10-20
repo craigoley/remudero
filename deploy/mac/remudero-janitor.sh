@@ -1296,15 +1296,52 @@ fi
 # Opt-in preserve-then-retire phase (JANITOR.md "Preserve-then-retire"). It saves and verifies
 # the work this pass held, then retires the idle checkout. Without its owner-private config the
 # helper reports "disabled" and changes nothing; a dry run only plans.
+preserve_status=unavailable
+preserve_retired=unknown; preserve_held=unknown; preserve_planned=unknown
+preserve_confirmed=0; preserve_complete=no
 if [ -f "$SCRIPT_DIR/preserve-retire.py" ] && command -v python3 >/dev/null 2>&1; then
   preserve_mode=()
   [ "$APPLY" != 1 ] || preserve_mode=(--apply)
-  while IFS= read -r preserve_line; do log "$preserve_line"; done < <(
+  preserve_previous=""; preserve_last=""
+  while IFS= read -r preserve_line; do
+    log "$preserve_line"
+    preserve_previous=$preserve_last; preserve_last=$preserve_line
+  done < <(
     python3 -I "$SCRIPT_DIR/preserve-retire.py" --home "$USER_HOME" "${preserve_mode[@]+"${preserve_mode[@]}"}" 2>&1
     printf 'preserve-retire: exit %s\n' "$?")
+  preserve_status=failed
+  if [ "$preserve_last" = 'preserve-retire: exit 0' ]; then
+    preserve_status=unverified
+    # Only the successful helper's terminal summary contributes; earlier path logs can contain newlines.
+    preserve_pattern='^preserve-retire: summary candidates=([0-9]{1,9}) retired=([0-9]{1,9}) held=([0-9]{1,9}) apply=([01])$'
+    if [[ "$preserve_previous" =~ $preserve_pattern ]]; then
+      preserve_candidates=$((10#${BASH_REMATCH[1]}))
+      preserve_count=$((10#${BASH_REMATCH[2]}))
+      preserve_hold_count=$((10#${BASH_REMATCH[3]}))
+      preserve_apply=${BASH_REMATCH[4]}
+      if [ "$preserve_apply" = "$APPLY" ] && [ "$preserve_count" -le "$preserve_candidates" ] &&
+        { [ "$APPLY" = 1 ] || [ "$preserve_count" = 0 ]; }; then
+        preserve_status=completed; preserve_complete=yes
+        preserve_retired=$preserve_count; preserve_confirmed=$preserve_count
+        preserve_held=$preserve_hold_count; preserve_planned=0
+        [ "$APPLY" = 1 ] || preserve_planned=$preserve_candidates
+      fi
+    else
+      case "$preserve_previous" in
+        'preserve-retire: disabled (no config)'|'preserve-retire: disabled (config enabled=false)')
+          preserve_status=disabled ;;
+        'preserve-retire: skip ran within '*h)
+          preserve_status=throttled ;;
+      esac
+      if [ "$preserve_status" = disabled ] || [ "$preserve_status" = throttled ]; then
+        preserve_retired=0; preserve_planned=0; preserve_complete=yes
+      fi
+    fi
+  fi
 fi
 AFTER=$(free_gib)
-log "=== done: removed=$removed reclaimed=$((reclaimed_kb/1024))M planned=$planned estimated=$((estimated_kb/1024))M worktrees-removed=$removed_worktrees worktrees-planned=$planned_worktrees worktrees-skipped=$skipped_worktrees live-skip=$skipped_live cwd-skip=$skipped_cwd owner-skip=$skipped_owner open-skip=$skipped_open young-skip=$skipped_young free=${BEFORE}->${AFTER}GiB ==="
+removed_total=$((removed+removed_worktrees+preserve_confirmed))
+log "=== done: removed=$removed_total removed-complete=$preserve_complete reclaimed=$((reclaimed_kb/1024))M reclaimed-scope=legacy planned=$planned estimated=$((estimated_kb/1024))M worktrees-removed=$removed_worktrees worktrees-planned=$planned_worktrees worktrees-skipped=$skipped_worktrees preservation-status=$preserve_status preservation-retired=$preserve_retired preservation-held=$preserve_held preservation-planned=$preserve_planned live-skip=$skipped_live cwd-skip=$skipped_cwd owner-skip=$skipped_owner open-skip=$skipped_open young-skip=$skipped_young free=${BEFORE}->${AFTER}GiB ==="
 
 # Inspect only the selected Core checkout's declared proof runners. Core can
 # use node:test with tsx without declaring Vitest. Prefer an executable install
