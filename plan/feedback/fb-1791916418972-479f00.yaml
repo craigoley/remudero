@@ -10,10 +10,11 @@ raw: |
   Automatic triage should ground this diagnostic against the merged fix and use its existing already-decided path. The original pending repair above is historical evidence. The separate lifecycle-owner question remains in fb-1791908207465-93d619.
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
