@@ -11,11 +11,14 @@
   origin: feedback#console-inbox-causal-response-20261020
   plan_refs: ["§7B", "P25", "W1-T194", "W1-T4088", "W1-T9252"]
   files:
+    - src/cli/commands/daemon.ts
     - src/lib/inbox-thread.ts
     - src/lib/inbox-responder.ts
     - src/lib/inbox.ts
     - src/lib/panel-graph.ts
     - src/lib/instance-inbox-proposal.ts
+    - src/lib/instance-inbox-contract.ts
+    - openapi/daemon.yaml
     - src/run-task.ts
     - test/inbox/inbox-feedback-response-causal-link.test.ts
   priority: 2
@@ -103,6 +106,21 @@
     receipts and same-committed-tree instrumented diff coverage, naming the SHA; helper-only mocks,
     test-title greps and a fabricated mutant result are not evidence.
   note: |
+    Scope correction: the production responder callback now lives in src/cli/commands/daemon.ts.
+    That callback forwards to fleetRatify.reframe and currently discards the returned handoff.
+    Add only this existing composition file so the already-required consumed input identity and
+    completion outcome can cross the real daemon callback, rather than a test-only replacement.
+    Retain the existing high-risk span, behavioral acceptance, action gates and single-writer
+    coordination with W1-T10272. This is not a risk ruling, release or runtime activation.
+
+    The instance-inbox-contract deliver boundary currently calls the source write handler with
+    the original context, unlike its scoped read path. Include that wrapper to forward only its
+    already-validated repository/instance binding to capture; never trust a client's repository
+    label or recover scope from the account's selected repository. Preserve all existing scope,
+    actor, receipt, snapshot and confirmation refusals. Include openapi/daemon.yaml to document
+    the optional structured input/completion metadata on the existing thread message contract;
+    this does not authorize a new endpoint, permission or operational action.
+
     Recovery preserves the original completed native triage and its W1-T10283 reservation on
     run-TRIAGE-console-inbox-causal-response-20261020-1792527686941. Its first push was refused
     locally for four identical whole-file acceptance proofs; nothing was published. Replace
