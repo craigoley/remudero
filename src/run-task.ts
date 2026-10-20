@@ -35940,7 +35940,7 @@ const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
  * paginated `pulls?state=closed` sweep, over the SAME `boardPrsRestArgs` shape `rmd reap-branches`
  * already reads (design (iii): "the capability is precedented and the cost is ONE additional
  * batched call per pass, never one lookup per branch"). Returns raw `<head-ref>\t<unmerged>` rows
- * for {@link closedUnmergedRunBranchTaskIds} (drain.ts) to parse ONCE PER PASS, above the dispatch
+ * for {@link closedUnmergedRunBranchRefs} (drain.ts) to parse ONCE PER PASS, above the dispatch
  * loop — never re-read per candidate, mirroring `readPushedRunBranchesOutput`'s own contract.
  *
  * `state=closed` returns BOTH merged and unmerged pull requests — GitHub has no separate
@@ -35957,7 +35957,7 @@ const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
  *
  * FAILS TOWARD STILL BLOCKING, THE OPPOSITE DIRECTION FROM `readPushedRunBranchesOutput`'s OWN
  * FAIL OPEN: a throw here (network blip, auth, rate limit) yields `""`, which parses to an EMPTY
- * exclusion set (drain.ts's `closedUnmergedRunBranchTaskIds("")`), so every pushed run branch
+ * exclusion set (drain.ts's `closedUnmergedRunBranchRefs("")`), so every pushed run branch
  * keeps blocking exactly as it did before this dependency existed — see that field's own doc for
  * why this direction, not the other one, is the only safe default for a guard deciding whether a
  * duplicate build starts.
@@ -36653,7 +36653,7 @@ async function drainCommand(
         // UNMERGED must stop blocking dispatch (a leftover, not a signal — design (i)), so the
         // predicate above needs the PR's state as well as the branch's existence. ONE batched,
         // paginated `pulls?state=closed` sweep per pass, parsed once by
-        // `closedUnmergedRunBranchTaskIds` (drain.ts) and subtracted from the pushed-branch set —
+        // `closedUnmergedRunBranchRefs` (drain.ts) and subtracted from the pushed-branch set —
         // never a second predicate threaded through the chain, and never one lookup per branch.
         readClosedRunBranchPrs: () => readRunBranchClosedPrsOutput(owner, repo),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
