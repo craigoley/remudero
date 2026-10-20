@@ -344,6 +344,37 @@ test("W1-T10210: replacement refs cannot manufacture a later introduction", t =>
   assert.equal(grafted.state, "unknown");
 });
 
+test("W1-T10210: incomplete promisor history cannot fetch objects during an age read", async t => {
+  const f = historyCase(); t.after(() => f.repo.cleanup());
+  f.repo.git("config", "uploadpack.allowFilter", "true");
+  const blob = f.repo.git("rev-parse", "HEAD:plan/tasks.yaml").trim();
+  const commit = f.repo.git("rev-parse", "HEAD").trim();
+  const clone = (name: string): string => {
+    const dir = join(f.repo.dir, name);
+    execFileSync("git", ["clone", "--quiet", "--no-checkout", "--filter=blob:none", `file://${f.repo.dir}`, dir], { stdio: "pipe" });
+    return dir;
+  };
+  const localObjects = (dir: string): string => hostWorktreeGit(dir,
+    ["cat-file", "--batch-all-objects", "--batch-check=%(objectname)"]).trim();
+  const control = clone("fetch-positive-control");
+  const missing = localObjects(control);
+  assert.ok(missing.split("\n").includes(commit), "local-object query sees the same committed corpus");
+  assert.ok(!missing.split("\n").includes(blob), "the filtered clone genuinely lacks the plan blob");
+  hostWorktreeGit(control, ["cat-file", "-e", blob], { env: { GIT_NO_LAZY_FETCH: "0" } });
+  assert.ok(localObjects(control).split("\n").includes(blob), "ordinary Git really can retrieve the promised object from this local remote");
+  for (const oldGit of [false, true]) await t.test(oldGit ? "older Git that ignores the no-lazy-fetch variable" : "the real default Git seam", () => {
+    const dir = clone(oldGit ? "old-git-subject" : "default-subject");
+    const before = localObjects(dir);
+    assert.ok(!before.split("\n").includes(blob));
+    const options: FilingHistoryOptions = oldGit ? { readGit: (root, args, opts) =>
+      hostWorktreeGit(root, args, { ...opts, env: { ...opts?.env, GIT_NO_LAZY_FETCH: "0" } }) } : {};
+    const result = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(dir, ["W1-T9003"], options));
+    assert.equal(result.state, "unknown", "a read must not hydrate this incomplete repository");
+    if (result.state === "unknown") assert.match(result.reason, /promisor/);
+    assert.equal(localObjects(dir), before, "no promised blob was fetched or written by history resolution");
+  });
+});
+
 test("W1-T10210: unsupported historical encoding, aliases and oversized blobs remain unknown", async t => {
   for (const [name, content, reason] of [
     ["invalid UTF-8", Buffer.from([0xff]), /UTF-8/],
