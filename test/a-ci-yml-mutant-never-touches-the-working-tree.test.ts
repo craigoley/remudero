@@ -197,8 +197,9 @@ test(`${PROOF}: a batch runs as real suite processes side by side, and a batch t
   try {
     f.write("test/pass.test.ts", 'import { test } from "node:test";\ntest("passes", () => {});\n');
     f.write("test/fail.test.ts", 'import assert from "node:assert/strict";\nimport { test } from "node:test";\ntest("fails", () => assert.fail("red"));\n');
-    const started = join(f.parent, "slow-started");
-    f.write("test/slow.test.ts", `import { writeFileSync } from "node:fs";\nimport { test } from "node:test";\nwriteFileSync(${JSON.stringify(started)}, "");\ntest("slow", () => new Promise((done) => setTimeout(done, 60000)));\n`);
+    const started = join(f.parent, "slow-started"), finished = join(f.parent, "slow-finished");
+    f.write("test/slow.test.ts", `import { writeFileSync } from "node:fs";\nimport { test } from "node:test";\nwriteFileSync(${JSON.stringify(started)}, "");\n` +
+      `test("slow", async () => { await new Promise((done) => setTimeout(done, 60000)); writeFileSync(${JSON.stringify(finished)}, ""); });\n`);
     f.write("test/setup/tmp-hygiene.ts", "export {};\n");
     // Node otherwise refuses a child test runner invoked from a test file.
     delete process.env.NODE_TEST_CONTEXT;
@@ -206,9 +207,9 @@ test(`${PROOF}: a batch runs as real suite processes side by side, and a batch t
     assert.deepEqual(await suiteVerdicts(["test/pass.test.ts", "test/fail.test.ts", "test/slow.test.ts"], f.repo.dir, 1),
       [{ failed: false }, { failed: true }, null], "after the first failure a later suite cannot be the first catcher, so it never starts");
     assert.equal(existsSync(started), false);
-    const t0 = Date.now();
     assert.deepEqual(await suiteVerdicts(["test/fail.test.ts", "test/slow.test.ts"], f.repo.dir, 2), [{ failed: true }, null], "and one already running is stopped");
-    assert.ok(Date.now() - t0 < 30000, "the stopped suite's 60 s test did not hold the pool");
+    // Unstopped, the pool would wait out the slow suite, whose last act writes this marker.
+    assert.equal(existsSync(finished), false, "the stopped suite never ran to its end");
     const missing = join(f.parent, "no-such-checkout");
     assert.deepEqual(suitesFailTogether(["test/pass.test.ts"], missing), [{ failed: undefined }], "no verdict list");
     assert.deepEqual(await suiteVerdicts(["test/pass.test.ts"], missing), [{ failed: undefined }], "a child that cannot start");
