@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse, stringify } from "yaml";
@@ -176,6 +176,7 @@ test("producer default transport executes real GET-only gh children and never si
     { when: "/pulls/17", stdout: JSON.stringify(f.pr) },
     { when: "search/issues?", stdout: JSON.stringify({ incomplete_results: false, total_count: 1, items: [{ number: 17, pull_request: {} }] }) },
   ]);
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const oldPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${oldPath}`;
   try {
