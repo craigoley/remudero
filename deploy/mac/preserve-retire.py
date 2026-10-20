@@ -578,8 +578,21 @@ def main():
     # Phase 2: retire, worktrees first so their common repository can unregister them.
     retired = held = 0
     fresh = process_snapshot() if a.apply else snap
+    if a.apply:
+        for r in repos:
+            if r.path in keep:
+                continue
+            try:
+                if fresh is None or in_use(r.path, fresh) or recent_path(r, cutoff):
+                    keep[r.path] = "became-active-before-retire"
+            except OSError:
+                keep[r.path] = "activity-unverified-before-retire"
+        keep_closure(repos, keep, borrowers, lenders_ok)
     order = sorted((r for r in repos if r.path not in keep), key=lambda r: (r.kind != "worktree", -r.path.count("/")))
     for r in order:
+        if r.path in keep:
+            say("HOLD", keep[r.path], r.path)
+            continue
         if not a.apply:
             say("WOULD-RETIRE", r.kind, r.path)
             continue
@@ -592,9 +605,13 @@ def main():
             retired += 1
             say("RETIRED", r.kind, r.path)
         except Hold as h:
+            keep[r.path] = str(h)
+            keep_closure(repos, keep, borrowers, lenders_ok)
             held += 1
             say("HOLD", str(h), r.path)
         except OSError as error:
+            keep[r.path] = f"remove-failed ({error.__class__.__name__})"
+            keep_closure(repos, keep, borrowers, lenders_ok)
             held += 1
             say("HOLD", f"remove-failed ({error.__class__.__name__})", r.path)
     for store in sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}):

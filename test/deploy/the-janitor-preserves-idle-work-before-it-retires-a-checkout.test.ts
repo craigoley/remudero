@@ -193,6 +193,26 @@ test("a worktree whose git dir is gone, a locked worktree, and an oversized untr
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
+test("a refused worktree removal keeps its parent repository", () => {
+  const fx = setup();
+  try {
+    const parent = clone(fx, "Remudero/parent");
+    const child = join(fx.home, "Remudero/child");
+    git(parent, "worktree", "add", "--quiet", "-b", "child", child);
+    const nativeGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(join(fx.bin, "git"), `#!/bin/bash
+case " $* " in *" worktree remove "*) echo "fixture removal refused" >&2; exit 1;; esac
+exec '${nativeGit}' "$@"
+`, { mode: 0o755 });
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(child), true, r.stdout);
+    assert.equal(existsSync(parent), true, r.stdout);
+    assert.match(r.stdout, /HOLD has-kept-worktree .*Remudero\/parent/);
+    assert.equal(git(child, "cat-file", "-t", "HEAD"), "commit");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
 test("a bare repository's unpublished refs are bundled before it is retired", () => {
   const fx = setup();
   try {
