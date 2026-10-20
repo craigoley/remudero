@@ -13,7 +13,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
-import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerResult } from "./gh-read-broker-client.js";
+import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
@@ -160,6 +160,11 @@ function ghBrokerSocketFor(args: readonly string[], env: NodeJS.ProcessEnv | und
   return ghBrokerRouteFor(env ?? process.env);
 }
 
+/** The broker class this process reads as, in W1-T10271's priority order (see {@link ghBrokerClassForActor}). */
+function ghBrokerClassOf(env: NodeJS.ProcessEnv | undefined): GhBrokerClass {
+  return ghBrokerClassForActor(ghReadActorResolver(env ?? process.env));
+}
+
 /** A brokered failure shaped like the `execFile` error a direct `gh` would have thrown. */
 function ghBrokerExecError(args: readonly string[], result: GhBrokerResult): Error {
   return Object.assign(new Error(`Command failed: gh ${args.join(" ")}\n${result.stderr}`), {
@@ -176,7 +181,7 @@ async function ghBrokeredAsync(args: readonly string[]): Promise<string | undefi
   if (socket === undefined) return undefined;
   let result: GhBrokerResult;
   try {
-    result = await brokerGhRead(socket, args);
+    result = await brokerGhRead(socket, args, { class: ghBrokerClassOf(undefined) });
   } catch {
     // The broker went away between the liveness read and the request: take the direct path, paced
     // by the floor as before, rather than fail a read the direct path could still make.
@@ -193,7 +198,7 @@ export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string |
   const socket = ghBrokerSocketFor(args, opts.env);
   // W1-T3297: otherwise this overload spawns the real `gh`, so the cadence floor applies.
   if (socket === undefined) applyGhReadCadence(args);
-  const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args);
+  const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args, ghBrokerClassOf(opts.env));
   return ghExecFile(spawned.file, spawned.args, opts) as string | Buffer;
 }
 
@@ -222,7 +227,7 @@ export function ghJson(
     refuseSentinelGhToken("gh", args, undefined);
     const socket = ghBrokerSocketFor(execArgs, undefined);
     if (socket === undefined) applyGhReadCadence(args);
-    else spawned = ghBrokerClientSpawn(socket, execArgs);
+    else spawned = ghBrokerClientSpawn(socket, execArgs, ghBrokerClassOf(undefined));
   }
   const out = exec(spawned.file, spawned.args, {
     encoding: "utf8",
@@ -1103,6 +1108,13 @@ export function ghReadTicketDir(stampPath: string): string {
  *  ahead of the automation that can always try again next tick. `actor` is a ledger actor (ledger.ts). */
 export function ghReadTicketRank(actor: string): number {
   return actor === "daemon" || actor === "run_child" || actor === "worker" || actor === "service" || actor === "host_automation" ? 1 : 0;
+}
+
+/** W1-T10279: the Mac read broker's class for a ledger actor, in the same order: a worker is an agent;
+ *  any other automation is background; an operator, or a caller nobody can name, is interactive. */
+export function ghBrokerClassForActor(actor: string): GhBrokerClass {
+  if (actor === "worker") return "agent";
+  return ghReadTicketRank(actor) === 0 ? "interactive" : "background";
 }
 
 function compareGhReadTickets(a: GhReadTicket, b: GhReadTicket): number {

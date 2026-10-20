@@ -38,7 +38,7 @@ import {
 } from "./gh-read-broker-client.js";
 import {
   classifyGhLimitFailure, DEFAULT_GH_CALL_TIMEOUT_MS, DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS,
-  ghArgvIsWrite, parseGhRateLimitHeaders, splitGhHeaderBlock,
+  ghArgvIsWrite, ghBrokerClassForActor, parseGhRateLimitHeaders, splitGhHeaderBlock,
 } from "./github-transport.js";
 import { deriveLedgerActor } from "./ledger.js";
 
@@ -864,10 +864,7 @@ export const GH_COMMAND_USAGE = "usage: rmd gh [--class interactive|agent|backgr
 
 /** The class a caller gets when it names none: W1-T10271's priority order, read from the actor. */
 export function defaultGhBrokerClass(env: NodeJS.ProcessEnv = process.env): GhBrokerClass {
-  const actor = deriveLedgerActor(env);
-  if (actor === "worker") return "agent";
-  if (actor === "daemon" || actor === "run_child" || actor === "service" || actor === "host_automation") return "background";
-  return "interactive";
+  return ghBrokerClassForActor(deriveLedgerActor(env));
 }
 
 /** The repository a porcelain read names, without a network call or a git spawn: `-R`, else GH_REPO. An

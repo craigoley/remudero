@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -460,7 +460,11 @@ test("W1-T10279: the transport's read entry points use a live broker instead of 
   assert.deepEqual(lines.slice(1), ["second line"]);
   assert.equal(shim.calls().length, 0, "no read reached gh");
   // A broker that went away after its heartbeat was read: the sync client entry runs gh itself.
-  const fallback = spawnSync(process.execPath, ["--import", "tsx", join(ROOT, "src/gh-read-broker-client-main.ts"), join(dir, "nowhere.sock"), "api", "x"],
+  // Every brokered read carried this process's class: an unnamed caller is interactive (W1-T10271's order).
+  const logged = readdirSync(join(brokerDir, "log")).flatMap((name) => readFileSync(join(brokerDir, "log", name), "utf8").trim().split("\n"));
+  assert.ok(logged.length >= 5, `${logged.length} logged reads`);
+  assert.deepEqual([...new Set(logged.map((line) => (JSON.parse(line) as { class: string }).class))], ["interactive"]);
+  const fallback = spawnSync(process.execPath, ["--import", "tsx", join(ROOT, "src/gh-read-broker-client-main.ts"), join(dir, "nowhere.sock"), "agent", "api", "x"],
     { cwd: ROOT, encoding: "utf8", env: process.env });
   assert.equal(fallback.status, 0, fallback.stderr);
   assert.match(fallback.stdout, /^FALSIFIER: the real gh ran\n/);

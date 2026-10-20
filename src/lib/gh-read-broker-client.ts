@@ -195,6 +195,6 @@ const CLIENT_MAIN = fileURLToPath(new URL("../gh-read-broker-client-main.ts", im
  * sync path keeps its one synchronous spawn and only changes what it spawns. If the broker cannot be
  * reached, the entry runs `gh` itself.
  */
-export function ghBrokerClientSpawn(socketPath: string, args: readonly string[]): { file: string; args: string[] } {
-  return { file: process.execPath, args: [...loaderExecArgv(process.execArgv), CLIENT_MAIN, socketPath, ...args] };
+export function ghBrokerClientSpawn(socketPath: string, args: readonly string[], cls: GhBrokerClass): { file: string; args: string[] } {
+  return { file: process.execPath, args: [...loaderExecArgv(process.execArgv), CLIENT_MAIN, socketPath, cls, ...args] };
 }
