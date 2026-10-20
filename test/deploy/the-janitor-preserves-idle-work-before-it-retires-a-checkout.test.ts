@@ -241,6 +241,7 @@ exec '${nativeGit}' "$@"
     assert.equal(existsSync(child), true, r.stdout);
     assert.equal(existsSync(parent), true, r.stdout);
     assert.match(r.stdout, /HOLD has-kept-worktree .*Remudero\/parent/);
+    assert.match(r.stdout, /summary candidates=2 retired=0 held=2 apply=1/, "the refused child and retained parent are each counted once");
     assert.equal(git(child, "cat-file", "-t", "HEAD"), "commit");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
