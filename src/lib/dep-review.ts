@@ -1149,7 +1149,7 @@ export interface DependabotRefreshRecord {
 // command", #11968 at 20:45:17Z), yet a posted command read `delivered: true` for hours. The answer is read.
 
 /** The wording Dependabot answers a command from a commenter without push access, seeded with #11968's reply. */
-export const DEPENDABOT_REFUSAL_RE = /only users with push access can use that command/i;
+export const DEPENDABOT_REFUSAL_WORDING = "only users with push access can use that command";
 export const DEPENDABOT_UPDATE_BRANCH_COMMAND = "update-branch";
 
 /** The fields of one REST issue comment a command answer reads. */
@@ -1167,9 +1167,10 @@ export function dependabotCommandAnswer(comments: readonly DependabotIssueCommen
   for (const comment of comments) {
     const created = Date.parse(comment.created_at ?? "");
     if (!Number.isFinite(created) || created < sinceSecond) continue;
-    if (!isDependabotAuthor({ login: comment.user?.login ?? "" })) continue;
+    const login = comment.user?.login;
+    if (login === undefined || !isDependabotAuthor({ login })) continue;
     const body = comment.body ?? "";
-    if (DEPENDABOT_REFUSAL_RE.test(body)) return { kind: "refused", reply: body.split("\n")[0].trim() };
+    if (body.toLowerCase().includes(DEPENDABOT_REFUSAL_WORDING)) return { kind: "refused", reply: body.split("\n")[0].trim() };
   }
   return { kind: "none" };
 }
@@ -1285,12 +1286,13 @@ export function reconcileDependabotRefresh(args: {
   };
 
   const refreshByUpdateBranch = (record: DependabotRefreshRecord): DependabotRefreshOutcome => {
-    let outcome: { ok: boolean; error?: string };
-    try {
-      outcome = args.updateBranch(args.headSha);
-    } catch (error) {
-      outcome = { ok: false, error: String((error as Error)?.message ?? error) };
-    }
+    const outcome = ((): { ok: boolean; error?: string } => {
+      try {
+        return args.updateBranch(args.headSha);
+      } catch (error) {
+        return { ok: false, error: String((error as Error)?.message ?? error) };
+      }
+    })();
     if (outcome.ok) {
       record.via = "update-branch";
       record.delivered = true;
@@ -1310,21 +1312,23 @@ export function reconcileDependabotRefresh(args: {
   if (prior !== undefined) {
     if (prior.updateFailed) return escalateOnce(prior);
     if (prior.command === DEPENDABOT_UPDATE_BRANCH_COMMAND && prior.via === undefined) return refreshByUpdateBranch(prior);
-    let readError: string | undefined;
-    if (prior.answer === undefined && prior.via === undefined && prior.delivered) {
-      try {
-        const answer = dependabotCommandAnswer(args.readComments(fixedClock(prior.requestedAtMs).iso()), prior.requestedAtMs);
-        if (answer.kind === "refused") {
-          prior.answer = "refused";
-          prior.answeredAtMs = args.nowMs;
-          prior.reply = answer.reply;
-          save();
-          args.log("dep-review.refresh_refused", { ...at, command: prior.command, cause: prior.cause, reply: answer.reply,
-            requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs });
+    const read = prior.answer === undefined && prior.via === undefined && prior.delivered
+      ? ((): { answer?: DependabotCommandAnswer; error?: string } => {
+        try {
+          return { answer: dependabotCommandAnswer(args.readComments(fixedClock(prior.requestedAtMs).iso()), prior.requestedAtMs) };
+        } catch (error) {
+          return { error: String((error as Error)?.message ?? error) };
         }
-      } catch (error) {
-        readError = String((error as Error)?.message ?? error);
-      }
+      })()
+      : {};
+    const readError = read.error;
+    if (read.answer?.kind === "refused") {
+      prior.answer = "refused";
+      prior.answeredAtMs = args.nowMs;
+      prior.reply = read.answer.reply;
+      save();
+      args.log("dep-review.refresh_refused", { ...at, command: prior.command, cause: prior.cause, reply: read.answer.reply,
+        requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs });
     }
     if (prior.answer === "refused") return prior.via === undefined ? refreshByUpdateBranch(prior) : "refused";
     args.log("dep-review.refresh_unanswered", {
