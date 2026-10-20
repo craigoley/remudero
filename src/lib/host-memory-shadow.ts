@@ -292,7 +292,10 @@ export interface ShadowInputs {
   /** `highMib` is memory.high (reclaim and throttling begin there); `reclaimableMib` is inactive_file, page cache the
    *  kernel drops before it swaps anonymous memory. Both are optional, and absent means not subtracted. */
   container: { currentMib: number; maxMib: number | null; highMib?: number | null; reclaimableMib?: number } | { unread: string };
-  ledger: { state: ShadowLedgerState; dir?: string; reason?: string };
+  ledger: { state: ShadowLedgerState; dir?: string; reason?: string;
+    /** The maintained reader's enumeration counts. Missing is unknown, not a positively empty population.
+     * These qualify report-only RSS attribution; they do not alter the legacy admission calculation. */
+    counts?: HostMemoryReading["counts"] };
   entries: ShadowEntryInput[];
   /** The start this verdict is about. Its own reservation is counted even when the ledger could not show it. */
   start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number; estimateSource?: EstimateSource };
@@ -690,8 +693,11 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
 
   const unreserved = containerCurrent === null ? null : Math.max(0, containerCurrent - residentOwn);
   const owned = inputs.entries.filter(entry => entry.status === "owned");
-  const rssKnown = inputs.ledger.state === "present" && !inputs.entries.some(entry => entry.status === "uncertain") &&
-    owned.every(entry => entry.walkComplete === true &&
+  const counts = inputs.ledger.counts;
+  const populationKnown = inputs.ledger.state === "present" && counts !== undefined &&
+    Number.isSafeInteger(counts.live) && counts.live === inputs.entries.length &&
+    counts.unreadable === 0 && counts.uncertain === 0 && inputs.entries.every(entry => entry.status !== "uncertain");
+  const rssKnown = populationKnown && owned.every(entry => entry.walkComplete === true &&
     "mib" in entry.resident && entry.resident.complete && entry.resident.rssMib !== undefined &&
     Number.isFinite(entry.resident.rssMib) && entry.resident.rssMib >= 0);
   const reservationRss = rssKnown ? owned.reduce((sum, entry) =>
@@ -1984,7 +1990,8 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     swapIn,
     psi,
     container,
-    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
+    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}),
+      ...(ledger.reading ? { counts: ledger.reading.counts } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
     entries,
     start: startOf(start, ports, typical),
     daemonGrowth: [own, ...others],

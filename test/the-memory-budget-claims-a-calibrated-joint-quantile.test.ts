@@ -57,10 +57,26 @@ test("W1-T8879: legacy residents keep their shape while the real calibration gat
     priorityPolicy: () => { throw new Error("not a gather input"); },
   };
   const start = { root: "/fixture/core", workerClass: "implement" as const, estimateMib: 512 };
-  assert.deepEqual(gatherShadowInputs(start, ports, policy).entries.map(e => e.resident), expected,
+  const gathered = gatherShadowInputs(start, ports, policy);
+  assert.deepEqual(gathered.entries.map(e => e.resident), expected,
     "the production gather opts in, not just the isolated reader test");
   assert.equal(evaluateShadowMemory(gatherShadowInputs(start, ports, policy), policy).numbers.reservationRssMib, 300,
     "the actual nested-tree gather supplies RSS attribution without counting a process twice or adding swap");
+  assert.deepEqual(gathered.ledger.counts, ports.readLedger(start.root)!.counts,
+    "the actual gather forwards the maintained reader's population counts, not an invented empty population");
+  const readLedger = ports.readLedger;
+  for (const unreadable of [1, 2]) {
+    ports.readLedger = root => {
+      const reading = readLedger(root)!;
+      return { ...reading, counts: { ...reading.counts, unreadable } };
+    };
+    const incomplete = gatherShadowInputs(start, ports, policy);
+    assert.equal(incomplete.ledger.counts?.unreadable, unreadable);
+    assert.equal(evaluateShadowMemory(incomplete, policy).numbers.reservationRssMib, null,
+      "readable own trees cannot hide another unreadable reservation record");
+    assert.equal(evaluateShadowMemory(incomplete, policy).numbers.unattributedContainerMibApprox, null);
+  }
+  ports.readLedger = readLedger;
   files["/proc/12/status"] = "VmSwap: 102400 kB\n";
   assert.deepEqual(residentsOf(readFile, paths, undefined, { includeRss: true })[1], { mib: 100, complete: true },
     "a missing RSS reading stays missing, never measured zero");
