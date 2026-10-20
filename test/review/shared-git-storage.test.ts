@@ -3,6 +3,7 @@ import {spawnSync} from 'node:child_process';
 import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
 import {homedir,hostname} from 'node:os';import{join,resolve}from'node:path';import test,{type TestContext}from'node:test';
 import {readSharedGitPolicy,readSharedWorkspaceCapacity,borrowedWorkspaceWorker,createSharedWorkspace} from '#scripts/lib/shared-workspace.mjs';
+import {pathToFileURL} from 'node:url';
 import {main} from '#scripts/shared-workspace.mjs';
 import {resolveTestSlotDir,testSlotProcessFacts} from '#src/lib/test-slot.js';
 function fixture(t:TestContext){
@@ -85,7 +86,7 @@ test('shared workspace CLI status is read-only and rejects filed tasks and overr
 });
 test('native capacity and inherited-worker diagnostics never create or reclaim reservations',async()=>{
   const c=readSharedWorkspaceCapacity(homedir());assert.equal(typeof c.admitted,'boolean');assert.equal(c.minimumFreeBytes,2*1024**3);assert.ok(Number.isSafeInteger(c.freeBytes));
-  const probe="import{borrowedWorkspaceWorker}from'./scripts/lib/shared-workspace.mjs';console.log(JSON.stringify(await borrowedWorkspaceWorker()));";
+  const probe=`import{borrowedWorkspaceWorker}from${JSON.stringify(pathToFileURL(resolve('scripts/lib/shared-workspace.mjs')).href)};console.log(JSON.stringify(await borrowedWorkspaceWorker()));`;
   const p=spawnSync(process.execPath,['--input-type=module','-e',probe],{encoding:'utf8',timeout:3000,env:{...process.env,RMD_TEST_SLOT_PARENT:''}});
   assert.equal(p.status,0,p.stderr);assert.deepEqual(JSON.parse(p.stdout),{admitted:false,reason:'no inherited genuine worker'});
   assert.equal(typeof borrowedWorkspaceWorker,'function');
