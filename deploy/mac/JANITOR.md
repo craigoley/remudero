@@ -272,3 +272,16 @@ phase did not stamp are never touched. After expiry, unpublished work exists now
 else, so set `retain_days` to how long you might want it back.
 
 The janitor's human log now rotates at 16 MiB, keeping one previous generation.
+
+The final `=== done:` line counts successful artifact removals, published worktree
+removals and preservation retirements together in `removed`. The
+`preservation-status`, `preservation-retired`, `preservation-held` and
+`preservation-planned` fields expose the last phase separately. A failed helper or
+unreadable terminal summary reports unknown counts and `removed-complete=no`;
+`removed` then includes only confirmed earlier removals. Disabled and throttled
+passes report zero retirements, with held repositories unknown because no scan ran.
+
+`reclaimed-scope=legacy` makes the existing byte estimate's scope explicit: it
+excludes the preservation phase. The `free=before->afterGiB` readings cover the
+whole pass and can also reflect concurrent writers. `planned` retains its legacy
+scope; `preservation-planned` is separate and can overlap with those dry-run plans.
