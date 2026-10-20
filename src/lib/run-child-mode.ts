@@ -323,7 +323,7 @@ export function escalateRunChildContract(
     escalated: Set<string>;
   },
 ): boolean {
-  if (!decision?.contract_failing) return false;
+  if (decision === undefined || decision.contract_failing !== true) return false;
   const key = decision.window_start ?? "no-window";
   if (ports.escalated.has(key)) return false;
   ports.escalated.add(key);

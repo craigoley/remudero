@@ -4288,7 +4288,7 @@ export async function runDaemon(
 
   // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
   let freshnessDecidedAtMs: number | undefined;
-  const freshnessPhases: { decision_to_latch?: number; pre_exit_pass?: number; drain?: number } = {};
+  const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
     const nowMs = daemonClock.now();
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
@@ -7010,7 +7010,7 @@ export async function runDaemon(
         const conclude = (): Task | undefined | Promise<Task | undefined> => {
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
-            const latched = refillClosed ?? (restartDecided && !runsAsChild(next) ? "restart decided" : undefined) ??
+            const latched = refillClosed ?? (restartDecided && !runsAsChild(next) ? "stale code" : undefined) ??
               (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
             if (latched !== undefined) {
               reason = `${latched} (decided while the refill read was in flight)`;
@@ -7021,7 +7021,7 @@ export async function runDaemon(
             log("dispatch.lane_refill_held", {
               lane,
               finished_task: finished.id,
-              reason: reason ?? (heldForRestart ? "restart decided: no candidate runs as a child" : refillDeferrals.length > 0
+              reason: reason ?? (heldForRestart ? "stale code: no candidate runs as a child" : refillDeferrals.length > 0
                 ? `priority reservation: ${refillDeferrals.map((d) => `${d.task.id} deferred for waiting ${d.waiting.id}`).join(", ")}`
                 : "no disjoint runnable task within the lane budget"),
               ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs, ...(measuredRefillBound ? { refill_bound_ms: refillBoundMs } : {}) } : {}),
@@ -7098,7 +7098,7 @@ export async function runDaemon(
           laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
         });
         const reason = refillClosed ??
-          (restartDecided && !runsAsChild(task) ? "restart decided" : undefined) ??
+          (restartDecided && !runsAsChild(task) ? "stale code" : undefined) ??
           (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined) ??
           (!refill ? "missing refill snapshot" : undefined) ??
           (passIds.has(task.id) ? "already dispatched this phase" : undefined) ??
@@ -7242,6 +7242,8 @@ export async function runDaemon(
       } finally {
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
+        // W1-T9089: the lanes phase is the wait from a mid-phase decision until the pool settled or detached its children.
+        if (restartDecided) freshnessPhases.lanes = Math.max(0, daemonClock.now() - restartWait.decidedAtMs);
         // W1-T10000: the pool released every run waiting for its child's admission; the restart abandons each wait.
         const abandoning = [...pendingChildren.values()];
         pendingChildren.clear();

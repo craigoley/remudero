@@ -142,7 +142,7 @@ test("W1-T5083: an advance that would restart the daemon still holds the freed l
   await drainMicrotasks();
   assert.deepEqual(h.startedWhileARan, ["B"], "nothing admitted onto B's freed lane");
   const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
-  assert.equal(held?.extra?.reason, "restart decided: no candidate runs as a child");
+  assert.equal(held?.extra?.reason, "stale code: no candidate runs as a child");
   const released = h.steps.filter((l) => l.step === "daemon.freshness_coalesced").at(-1);
   assert.equal(released?.extra?.reason, "window_quiet");
   assert.equal(released?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value);

@@ -359,7 +359,7 @@ test("W1-T7697: freed lanes keep refilling while one slow lane holds the phase",
     await h.settle("E", 21);
     assert.equal(h.started.length, 6, "an in-process refill is held once the restart is decided");
     assert.equal(h.rows.find(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.finished_task === "E")?.extra?.reason,
-      "restart decided: no candidate runs as a child");
+      "stale code: no candidate runs as a child");
     await h.settle("F", 31);
     await h.settle("A", 66);
     assert.equal((await h.run).stopReason, "stale");
@@ -492,7 +492,7 @@ test("a restart decided while lanes are parked drains them", async () => {
     await flush();
     const held = h.rows.filter(({ step }) => step === "dispatch.lane_refill_held");
     assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(),
-      [["D", "restart decided: no candidate runs as a child"], ["E", "restart decided: no candidate runs as a child"]]);
+      [["D", "stale code: no candidate runs as a child"], ["E", "stale code: no candidate runs as a child"]]);
     await h.tick(30);
     assert.equal(h.started.length, startedAtLatch, "the lane in flight cannot renew refill");
     await h.settle("F", 31);

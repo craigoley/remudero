@@ -97,7 +97,7 @@ test("W1-T9089: a restart decided mid-phase holds an in-process refill and await
     await h.settle("B", 6);
     assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"], "no refill starts on the old code in-process");
     assert.equal(h.rows.find(({ step }) => step === "dispatch.lane_refill_held")?.extra?.reason,
-      "restart decided: no candidate runs as a child");
+      "stale code: no candidate runs as a child");
     await h.settle("A", 30);
     await h.settle("C", 40);
     assert.equal((await h.run).stopReason, "stale", "the restart fires once its in-process lanes have settled");

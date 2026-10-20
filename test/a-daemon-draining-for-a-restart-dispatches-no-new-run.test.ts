@@ -150,7 +150,7 @@ test("W1-T6274: a pending freshness restart refuses a new dispatch and says why"
     assert.deepEqual(h.started, ["A", "B"], "C is not dispatched onto B's freed lane");
     const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
     // W1-T9089: the merged-set read resolves after the decision, so its candidates are already held for the restart.
-    assert.match(String(held?.extra?.reason), /^restart decided/);
+    assert.match(String(held?.extra?.reason), /^stale code/);
     h.release.A.resolve(okResult("A"));
     assert.equal((await h.run).stopReason, "stale", "the in-flight run finishes and the daemon restarts");
   });
@@ -161,7 +161,7 @@ test("W1-T6274: a restart decided while a refill's run-branch read is in flight 
   await settled(h, async () => {
     assert.deepEqual(h.started, ["A", "B"], "C is not dispatched onto B's freed lane");
     const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
-    assert.match(String(held?.extra?.reason), /^restart decided/);
+    assert.match(String(held?.extra?.reason), /^stale code/);
     h.release.A.resolve(okResult("A"));
     assert.equal((await h.run).stopReason, "stale");
   });

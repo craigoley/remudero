@@ -136,7 +136,8 @@ test("W1-T10057: the exit row splits the restart into its phases", async t => {
     const phases = h.row("daemon.freshness_exit")?.phases_ms;
     assert.ok(phases, "the real exit row must carry measured phase lengths");
     assert.equal(phases.decision_to_latch, 0);
-    assert.equal(phases.holdouts, 20);
+    assert.equal(phases.lanes, 20, "W1-T9089: the in-process lane is awaited, never held out");
+    assert.equal("holdouts" in phases, false);
     assert.equal(phases.pre_exit_pass, 7);
     assert.equal(phases.drain, 0);
     assert.equal(phases.total, 27);
