@@ -1,5 +1,5 @@
 // Local closed-evidence compaction. Never expires history or follows artifact links.
-import { constants, openSync, closeSync, readSync, fstatSync, lstatSync, readdirSync,
+import { constants, openSync, closeSync, readSync, fstatSync, lstatSync, opendirSync,
   realpathSync, linkSync, renameSync, unlinkSync, fsyncSync, statfsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -127,15 +127,21 @@ export function compressEvidenceFile(file, options = {}) {
   }
   return entry;
 }
-export function compactEvidenceRoot(root, { apply = false, now = Date.now() } = {}) {
+export function compactEvidenceRoot(root, { apply = false, now = Date.now(), maxEntries = 10000 } = {}) {
   const s = lstatSync(root);
   if (!s.isDirectory() || s.uid !== process.getuid() || realpathSync(root) !== root) throw Error('unverified-evidence-root');
   privateParents(join(root, 'candidate'));
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 10000) throw Error('invalid-root-entry-budget');
   const started = Date.now(), result = { entries: [], incomplete: false, historyDeleted: false, modelCalls: 0 };
   let inspected = 0, pricedBytes = 0;
-  const dir = readdirSync(root);
-  if (dir.length > 10000) throw Error('root-entry-budget');
-  for (const name of dir.sort()) {
+  const directory = opendirSync(root), names = [];
+  try {
+    for (let next = directory.readSync(); next; next = directory.readSync()) {
+      if (names.length === maxEntries) throw Error('root-entry-budget');
+      names.push(next.name);
+    }
+  } finally { directory.closeSync(); }
+  for (const name of names.sort()) {
     if (Date.now() - started >= 45000 || ++inspected > 10000) { result.incomplete = true; break; }
     if (name.startsWith('.') || !/\.(jsonl?|log|txt|lcov)$/.test(name) || /token|credential|secret|password/i.test(name)) continue;
     const path = join(root, name), file = lstatSync(path);

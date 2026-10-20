@@ -1,20 +1,24 @@
 #!/usr/bin/env node
 // Explicit opt-in, account-private policy; absence is NOT permission to scan.
-import { constants, openSync, closeSync, readFileSync, fstatSync, lstatSync, realpathSync,
+import { constants, openSync, closeSync, readFileSync, readSync, fstatSync, lstatSync, realpathSync,
   mkdirSync, writeFileSync, renameSync, rmdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { compactEvidenceRoot } from './lib/evidence-storage.mjs';
+import { compactEvidenceRoot, sameEvidenceIdentity } from './lib/evidence-storage.mjs';
 
 function privateJson(path, maxBytes = 16384) {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const s = fstatSync(fd);
     if (!s.isFile() || s.uid !== process.getuid() || s.nlink !== 1 || (s.mode & 0o077) || s.size > maxBytes) throw Error('unverified-private-json');
-    return JSON.parse(readFileSync(fd, 'utf8'));
+    const bytes = Buffer.alloc(s.size + 1);
+    let used = 0;
+    while (used < bytes.length) { const n = readSync(fd, bytes, used, bytes.length - used, used); if (!n) break; used += n; }
+    if (used !== s.size || !sameEvidenceIdentity(s, fstatSync(fd)) || !sameEvidenceIdentity(s, lstatSync(path))) throw Error('private-json-changed');
+    return JSON.parse(bytes.subarray(0, used).toString('utf8'));
   } finally { closeSync(fd); }
 }
 export function evidenceStorageConfig(home = homedir()) {

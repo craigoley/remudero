@@ -81,6 +81,12 @@ test('evidence root refuses symlinked roots and never recursively enters checkou
   assert.equal(compactEvidenceRoot(source).entries.length, 0);
   assert.equal(readFileSync(join(source, 'nested/closed.log'), 'utf8'), 'retained');
 });
+test('evidence root inspection refuses before allocating beyond its explicit entry budget', t => {
+  const dir = fixture(t); writeFileSync(join(dir, 'one.txt'), 'retain'); writeFileSync(join(dir, 'two.txt'), 'retain');
+  assert.throws(() => compactEvidenceRoot(dir, { maxEntries: 1 }), /root-entry-budget/);
+  for (const maxEntries of [0, 10001, NaN]) assert.throws(() => compactEvidenceRoot(dir, { maxEntries }), /invalid-root-entry-budget/);
+  assert.deepEqual(readdirSync(dir).sort(), ['one.txt', 'two.txt']);
+});
 test('evidence compression refuses real fresh files and links without changing bytes', t => {
   const f = payload(t), link = join(f.dir, 'linked.log'); symlinkSync(f.path, link);
   for (const path of [f.path, link]) assert.equal(compressEvidenceFile(path, { apply: true }).disposition, 'KEEP');
