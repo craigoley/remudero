@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import {
-  closedUnmergedRunBranchTaskIds,
+  closedUnmergedRunBranchRefs,
   nextRunnable,
+  parsePushedRunRefs,
   runBranchTaskIds,
   runDrain,
+  stillBlockedByPushedRunBranch,
   type DrainDeps,
   type MergedSet,
 } from "../src/lib/drain.js";
@@ -53,16 +55,16 @@ function lsRemoteRunBranches(...taskIds: string[]): string {
   return taskIds.map((id, i) => `abc123def4560${i}\trefs/heads/run-${id}-178688648869${i}`).join("\n");
 }
 
-/** Raw `pulls?state=closed` rows ({@link closedUnmergedRunBranchTaskIds}'s own input shape). */
+/** Raw `pulls?state=closed` rows ({@link closedUnmergedRunBranchRefs}'s own input shape). */
 function closedPrRows(...entries: Array<{ ref: string; merged: boolean }>): string {
   return entries.map((e) => `${e.ref}\t${!e.merged}`).join("\n");
 }
 
 const okResult = (id: string): RunResult => ({ taskId: id, runId: id + "-run", merged: true, costUsd: 0.5, verdict: "merged" });
 
-// ── PURE PARSER: closedUnmergedRunBranchTaskIds ─────────────────────────────────────────────────
+// ── PURE PARSER: closedUnmergedRunBranchRefs ─────────────────────────────────────────────────
 
-test("W1-T1207: closedUnmergedRunBranchTaskIds names only the unmerged-closed rows, by the SAME taskIdFromRunBranch extractor runBranchTaskIds already uses", () => {
+test("W1-T1207: closedUnmergedRunBranchRefs names only the exact unmerged-closed refs, validated by taskIdFromRunBranch", () => {
   const raw = [
     // `head.ref` from the REST API is a BARE branch name (never `refs/heads/...`) — the same
     // shape `readRunBranchClosedPrsOutput` (run-task.ts) emits.
@@ -72,23 +74,23 @@ test("W1-T1207: closedUnmergedRunBranchTaskIds names only the unmerged-closed ro
     "", // blank line — skipped, never thrown
     "not-a-run-branch\ttrue", // no task id parses out — skipped
   ].join("\n");
-  const ids = closedUnmergedRunBranchTaskIds(raw);
-  assert.deepEqual([...ids], ["A"]);
+  const refs = closedUnmergedRunBranchRefs(raw);
+  assert.deepEqual([...refs], ["run-A-1786886488695"]);
 });
 
-test("W1-T1207: closedUnmergedRunBranchTaskIds degrades a malformed row to 'not observed', never a crash", () => {
-  assert.equal(closedUnmergedRunBranchTaskIds("").size, 0);
-  assert.equal(closedUnmergedRunBranchTaskIds("garbage\n\nrefs/heads/run-A-1\tmaybe").size, 0, "'maybe' is not the literal 'true' the merged_at==null discriminator requires");
+test("W1-T1207: closedUnmergedRunBranchRefs degrades a malformed row to 'not observed', never a crash", () => {
+  assert.equal(closedUnmergedRunBranchRefs("").size, 0);
+  assert.equal(closedUnmergedRunBranchRefs("garbage\n\nrefs/heads/run-A-1\tmaybe").size, 0, "'maybe' is not the literal 'true' the merged_at==null discriminator requires");
 });
 
 // ── ACCEPTANCE 1: a closed-and-unmerged PR's branch no longer blocks dispatch ───────────────────
 
 test("W1-T1207: nextRunnable admits a task whose pushed branch's PR is CLOSED AND UNMERGED", () => {
-  const sweep = runBranchTaskIds(lsRemoteRunBranches("A"));
-  const closedUnmerged = closedUnmergedRunBranchTaskIds(closedPrRows({ ref: "run-A-1786886488690", merged: false }));
+  const raw = lsRemoteRunBranches("A");
+  const sweep = runBranchTaskIds(raw);
+  const closedUnmerged = closedUnmergedRunBranchRefs(closedPrRows({ ref: "run-A-1786886488690", merged: false }));
   const next = nextRunnable(plan(), NONE_MERGED, {
-    // The exact composition `hasPushedRunBranch`'s own doc prescribes: pushed AND NOT closed-unmerged.
-    hasPushedRunBranch: (id) => sweep.has(id) && !closedUnmerged.has(id),
+    hasPushedRunBranch: (id) => stillBlockedByPushedRunBranch(id, sweep, closedUnmerged, parsePushedRunRefs(raw), []),
   });
   assert.equal(next?.id, "A", "A's branch is a leftover from an abandoned attempt, not evidence of work in flight");
 });
@@ -96,13 +98,14 @@ test("W1-T1207: nextRunnable admits a task whose pushed branch's PR is CLOSED AN
 // ── ACCEPTANCE 2: an open or draft PR's branch keeps blocking ───────────────────────────────────
 
 test("W1-T1207: nextRunnable still refuses a task whose pushed branch's PR is OPEN (or DRAFT) — absent from the closed-PR sweep entirely", () => {
-  const sweep = runBranchTaskIds(lsRemoteRunBranches("A"));
+  const raw = lsRemoteRunBranches("A");
+  const sweep = runBranchTaskIds(raw);
   // An OPEN or DRAFT pull request never appears on a `state=closed` page at all — GitHub's `state`
   // filter excludes it outright — so the closed-unmerged set built from that sweep is empty here,
   // by construction, exactly as it would be against the real API.
-  const closedUnmerged = closedUnmergedRunBranchTaskIds("");
+  const closedUnmerged = closedUnmergedRunBranchRefs("");
   const next = nextRunnable(plan(), NONE_MERGED, {
-    hasPushedRunBranch: (id) => sweep.has(id) && !closedUnmerged.has(id),
+    hasPushedRunBranch: (id) => stillBlockedByPushedRunBranch(id, sweep, closedUnmerged, parsePushedRunRefs(raw), []),
   });
   assert.equal(next?.id, "B", "A stays blocked — an OPEN/DRAFT PR means the work is still in flight");
 });
@@ -110,13 +113,14 @@ test("W1-T1207: nextRunnable still refuses a task whose pushed branch's PR is OP
 // ── ACCEPTANCE 3: no PR at all keeps blocking — the exact blind spot W1-T534 was built to close ──
 
 test("W1-T1207: nextRunnable still refuses a task whose branch has NO pull request at all", () => {
-  const sweep = runBranchTaskIds(lsRemoteRunBranches("A"));
+  const raw = lsRemoteRunBranches("A");
+  const sweep = runBranchTaskIds(raw);
   // No PR ⇒ no row anywhere, open or closed ⇒ the closed-unmerged set is empty, same as the OPEN
   // case above — this is deliberate (design (ii)): treating a PR-less branch as dispatchable would
   // reintroduce exactly the collision W1-T534 exists to prevent.
-  const closedUnmerged = closedUnmergedRunBranchTaskIds("");
+  const closedUnmerged = closedUnmergedRunBranchRefs("");
   const next = nextRunnable(plan(), NONE_MERGED, {
-    hasPushedRunBranch: (id) => sweep.has(id) && !closedUnmerged.has(id),
+    hasPushedRunBranch: (id) => stillBlockedByPushedRunBranch(id, sweep, closedUnmerged, parsePushedRunRefs(raw), []),
   });
   assert.equal(next?.id, "B", "a branch merely pushed ahead of its PR is the blind spot itself — it must keep blocking");
 });
@@ -124,8 +128,7 @@ test("W1-T1207: nextRunnable still refuses a task whose branch has NO pull reque
 test("W1-T1207: hasPushedRunBranch omitted (or readClosedRunBranchPrs omitted) behaves EXACTLY as before this task existed", () => {
   const sweep = runBranchTaskIds(lsRemoteRunBranches("A"));
   // No `readClosedRunBranchPrs` supplied in production shape ⇒ `closedUnmergedRunBranches` stays
-  // `undefined` ⇒ `!closedUnmergedRunBranches?.has(id)` is `!undefined` ⇒ always `true` ⇒ blocks on
-  // ANY pushed branch, byte-identical to W1-T916's own behaviour.
+  // `undefined` supplies no closed-ref exception, preserving W1-T916's pushed-branch guard.
   const next = nextRunnable(plan(), NONE_MERGED, { hasPushedRunBranch: (id) => sweep.has(id) });
   assert.equal(next?.id, "B", "with no PR-state read at all, a pushed branch blocks unconditionally, unchanged");
 });
@@ -246,7 +249,7 @@ test("W1-T1207: readRunBranchClosedPrsOutput fails TOWARD still-blocking (empty 
   });
   assert.equal(thrown, "", "a throw yields empty output");
   assert.equal(
-    closedUnmergedRunBranchTaskIds(thrown).size,
+    closedUnmergedRunBranchRefs(thrown).size,
     0,
     "which parses to an EMPTY exclusion set — every pushed branch keeps blocking, never wrongly unblocked",
   );

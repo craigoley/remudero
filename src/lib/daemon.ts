@@ -121,7 +121,7 @@ import {
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { resolveReleasedIds, closedUnmergedRunBranchTaskIds } from "./drain.js";
+import { resolveReleasedIds, closedUnmergedRunBranchRefs } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, type DispatchValueContext } from "./dispatch-value.js";
@@ -1336,7 +1336,7 @@ export interface DaemonDeps {
   /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** Same contract as `DrainDeps.readClosedRunBranchPrs` (W1-T1207): raw `<head-ref>\t<unmerged>` rows, parsed by
-   *  `closedUnmergedRunBranchTaskIds`. W1-T9482: the daemon arm reads it too, lazily, only for a task holding a pushed
+   *  `closedUnmergedRunBranchRefs`. W1-T9482: the daemon arm reads it too, lazily, only for a task holding a pushed
    *  ref. Absent or throwing keeps every ref blocking. */
   readClosedRunBranchPrs?: () => string;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
@@ -1856,7 +1856,7 @@ export function lazyClosedUnmerged(read: (() => string) | undefined): (() => Rea
   return () => {
     if (set === undefined) {
       try {
-        set = closedUnmergedRunBranchTaskIds(read());
+        set = closedUnmergedRunBranchRefs(read());
       } catch (error) {
         void error; // unreadable closed-PR sweep: exclude nothing
         set = new Set();
