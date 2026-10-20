@@ -1,0 +1,69 @@
+id: console-gardener-outcome-refresh-evidence-20261020
+ts: 2026-10-20T20:43:17.298Z
+raw: >-
+  Approved console follow-up: make gardener effectiveness evidence explain its
+  own reconciliation lifecycle without increasing autonomous work. Submitted by
+  Codex for the operator, not as a risk ruling or model verdict. Grounded source
+  facts on current main: W1-T4950/opportunity-outcomes.ts already joins source,
+  task, credited merged PR, deployment and equal-window denominated
+  measurements; gardener-opportunity-evidence.ts and the Console already expose
+  eight reported classifications and real source ages. Do not build duplicate
+  counters or describe reported classifications as freshly verified benefit. A
+  read-only live check found a saved outcome registry substantially older than
+  the currently observed intake cadence. This does not establish the prior
+  failure cause. Source daemon.ts runs outcome reconciliation on admitted
+  codeqlQuality intake; openOpportunityOutcomePorts delegates to
+  openOpportunityIntakePorts, which records the cadence fire before workspace
+  acquisition. A cadence marker therefore cannot certify outcome success, and a
+  skipped daily intake is not proof that reconciliation is healthy. Preserve
+  that distinction instead of changing the interval or pretending the registry
+  was refreshed.
+
+
+  Investigate current main, every open head, existing tasks and active ownership
+  before atomically filing a separately bounded task, or report positive
+  duplicate ownership. Add local bounded attempt/outcome evidence only to the
+  existing admitted reconciliation: attempted/finished phase, allowlisted
+  success/failure/skip reason, and last successful registry reconciliation
+  identity/time, with exact repository scope. Failure acquiring a workspace,
+  reading sources or persisting outcomes must not restamp the old registry as
+  current or erase its last success. A later-starting pass must not have its
+  status overwritten by an older completion. Unknown legacy attempt metadata
+  stays explicitly unknown. Preserve atomic writes, stable bounded reads and
+  existing private-store conventions; do not expose raw errors, source
+  candidates, prompts, outputs, credentials or host topology. Keep reported
+  outcome classification counts separate from refresh health, deployment
+  verification and measured causal benefit. Extend the typed read contract and
+  Console only as needed to explain the actual stale/unavailable reason and what
+  is awaiting the existing cadence, without new polling, history scans, timers
+  or unbounded payloads. Reconcile with owners before touching shared
+  daemon/analytics/read-model paths; CI infrastructure and Azure memory are
+  assigned to other chats.
+
+
+  Change no cadence, worker admission, hold, retry, model/provider,
+  spending/billing/budget, permission, authentication, service setting, gardener
+  mode, action authority or CI gate. Add no GitHub query or model call beyond
+  the existing pass; record evidence around work already happening. Do not run a
+  default reconciliation or synthetic paid pass as a diagnostic. The current old
+  registry is not permission to enable or accelerate a gardener. Existing
+  pipeline failures remain failures; absent monetary prices remain unknown. Test
+  the real private-store/default composition with source/provider work faked,
+  including workspace/source/save failures, unknown legacy metadata, foreign
+  repository, malformed/oversized/torn reads, overlapping completions, and
+  successful reconciliation. Use distinct literal behavioral test-title proofs
+  per criterion and a genuine source-removal/restoration falsifier, not four
+  copies of a whole-file proof. Keep task filing and implementation separate
+  through normal reservation, risk, scope, author, stored acceptance, review and
+  hosted CI gates. This is durable work intake only, not an operator decision on
+  a legacy ask, a task implementation credit or deployment approval. Field
+  Trials remains out of scope.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:90f3d8b4-4274-49df-a072-c69955ede915
+thread_id: null
