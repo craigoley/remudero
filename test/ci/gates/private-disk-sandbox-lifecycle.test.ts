@@ -3,20 +3,31 @@ import childProcess, { execFileSync } from "node:child_process";
 import fs, { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { after, afterEach, test } from "node:test";
 import * as review from "#src/lib/review.js";
 import { preopenGateSandboxArgv } from "#src/lib/preopen-gate.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
-// The pre-migration reviewer gives this test RAM /tmp AND an already writable, private disk HOME.
-// Use only that existing throwaway bind for nested fixtures; never grant or borrow another host root.
-const inheritedHome = process.env.HOME, priorTmpdir = process.env.TMPDIR;
-if (process.platform === "linux" && inheritedHome && /^rmd-proof-home-/.test(basename(inheritedHome)) && [0x01021994n, 0x858458f6n].includes(fs.statfsSync(tmpdir(), { bigint: true }).type)) {
-  const home = fs.lstatSync(inheritedHome);
-  if (home.isDirectory() && home.uid === process.geteuid?.() && (home.mode & 0o777) === 0o700 && ![0x01021994n, 0x858458f6n].includes(fs.statfsSync(inheritedHome, { bigint: true }).type)) {
-    process.env.TMPDIR = inheritedHome;
+// The pre-migration reviewer gives this test RAM /tmp AND an already writable, disk-backed HOME. By the time this file
+// runs, test/setup/tmp-hygiene.ts has already REPLACED process.env.HOME with a RAM-backed test home, so the sandbox's
+// own HOME survives only as the parent of RMD_TEST_LIVE_DENY_ROOT (`<HOME>/Remudero`, set from the inherited HOME).
+// Use only an existing writable bind for nested fixtures — that HOME, else this checkout — and only if it is a real,
+// disk-backed directory owned by this uid; never grant or borrow another host root.
+const RAM_FS = [0x01021994n, 0x858458f6n], priorTmpdir = process.env.TMPDIR;
+const onDisk = (path: string): boolean => {
+  try {
+    const st = fs.lstatSync(path);
+    return st.isDirectory() && st.uid === process.geteuid?.() && !RAM_FS.includes(fs.statfsSync(path, { bigint: true }).type);
+  } catch { return false; }
+};
+if (process.platform === "linux" && RAM_FS.includes(fs.statfsSync(tmpdir(), { bigint: true }).type)) {
+  const liveRoot = process.env.RMD_TEST_LIVE_DENY_ROOT;
+  const candidates = [liveRoot === undefined ? undefined : dirname(liveRoot), process.cwd()];
+  const disk = candidates.find((path): path is string => path !== undefined && onDisk(path));
+  if (disk !== undefined) {
+    process.env.TMPDIR = disk;
     after(() => { if (priorTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = priorTmpdir; });
   }
 }
