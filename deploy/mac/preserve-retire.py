@@ -16,7 +16,7 @@ Invariants (JANITOR.md "Preserve-then-retire"):
   complete census found no kept borrower of their objects.
 Usage: preserve-retire.py --home DIR [--apply] [--config PATH]
 """
-import argparse, json, os, re, shutil, stat, subprocess, sys, tarfile, tempfile, time
+import argparse, json, os, re, shlex, shutil, stat, subprocess, sys, tarfile, tempfile, time
 
 CONFIG_REL = ".local/state/remudero/preserve-retire.json"
 STAMP_REL = ".local/state/remudero/preserve-retire.last"
@@ -386,6 +386,15 @@ def preserve(repo, published, cfg, home, now):
     work = tempfile.mkdtemp(prefix=".incoming-", dir=cfg["preserve_root"])
     summary = {"path": repo.path, "kind": repo.kind, "preserved_at": now}
     try:
+        remotes = repo.git("remote")
+        if remotes.returncode != 0:
+            raise Hold("remotes-unreadable")
+        summary["remotes"] = {}
+        for name in remotes.stdout.decode().splitlines():
+            url = repo.git("remote", "get-url", name)
+            if url.returncode != 0:
+                raise Hold("remote-url-unreadable")
+            summary["remotes"][name] = url.stdout.decode().strip()
         if repo.kind != "bare":
             if repo.git("cat-file", "-e", "HEAD^{tree}").returncode != 0:
                 raise Hold("history-unrecoverable (HEAD unreadable)")
@@ -448,14 +457,17 @@ def preserve(repo, published, cfg, home, now):
 
 
 def restore_text(s, final):
+    remotes = s.get("remotes", {})
+    upstream = remotes.get("origin") or next(iter(remotes.values()), "<upstream URL>")
     return f"""Preserved by the janitor's preserve-then-retire phase (deploy/mac/JANITOR.md).
 path:   {s['path']}
 kind:   {s['kind']}
 head:   {s.get('head', '-')}  branch: {s.get('branch', '-')}
+remotes: {json.dumps(remotes)}
 commits not in published main: {s['unpublished_commits']}
 
 Restore:
-  git clone https://github.com/craigoley/remudero.git <dir> && cd <dir>   # or the repo named in refs.txt
+  git clone {shlex.quote(upstream)} <dir> && cd <dir>
   git bundle unbundle {final}/unpublished.bundle   # if present; restores every commit, detached HEAD included
   # refs.txt lists every original ref: git update-ref <ref> <sha> recreates the ones you want
   git checkout {s.get('head', '<sha from refs.txt>')}

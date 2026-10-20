@@ -123,6 +123,19 @@ test("preserve-then-retire saves unpublished commits, uncommitted edits and untr
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
+test("preserved restore instructions name the actual upstream repository", () => {
+  const fx = setup();
+  try {
+    clone(fx, "Remudero/a-different-project");
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const copy = preserved(fx, "Remudero/a-different-project");
+    const manifest = JSON.parse(readFileSync(join(copy, "manifest.json"), "utf8"));
+    assert.equal(manifest.remotes.origin, fx.origin);
+    assert.ok(readFileSync(join(copy, "MANIFEST.txt"), "utf8").includes(`git clone ${fx.origin} <dir>`));
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
 test("a checkout changed within the idle window, named by a live command, or held open is kept", () => {
   const fx = setup();
   try {
