@@ -148,7 +148,7 @@ function commitHistory(dir: string, when: string, message: string): void {
   for (const args of [["add", "-A"], ["commit", "--quiet", "--allow-empty", "-m", message]]) gitHistory(dir, when, args);
 }
 
-test("W1-T10210: exact record history survives embedded moves and renames", t => {
+test("W1-T10210: exact record history survives embedded moves and renames", async t => {
   const repo = gitRepo({ kind: "exact-filing-history", seedCommit: false });
   t.after(() => repo.cleanup());
   const dir = repo.dir, id = "W1-T9003";
@@ -162,19 +162,19 @@ test("W1-T10210: exact record history survives embedded moves and renames", t =>
   commitHistory(dir, "2020-01-11T12:00:00Z", "introduce the exact embedded record");
   const now = Date.parse("2020-02-10T12:00:00Z");
   assert.equal(parkedById(dir, now).get("W1-T9001")?.ageDays, 40, "readable-history positive control");
-  assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "date the record, not the earlier plan file or near-id");
+  await t.test("embedded introduction", () => assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "date the record, not the earlier plan file or near-id"));
   commitHistory(dir, "2020-01-30T12:00:00Z", "unrelated later timestamp");
   writeFileSync(join(dir, "plan", "tasks.yaml"), unrelated);
   const oldPath = join(dir, "plan", "tasks.d", "odd-name.yaml");
   writeFileSync(oldPath, ruling(id));
   commitHistory(dir, "2020-01-15T12:00:00Z", "move the exact record into a shard");
-  assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a move preserves introduction");
+  await t.test("embedded-to-shard move", () => assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a move preserves introduction"));
   renameSync(oldPath, join(dir, "plan", "tasks.d", "not-the-id.yml"));
   commitHistory(dir, "2020-01-05T12:00:00Z", "rename with an older numeric timestamp");
-  assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "neither rename date nor oldest numeric timestamp is birth");
+  await t.test("rename and non-monotone timestamp", () => assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "neither rename date nor oldest numeric timestamp is birth"));
   writeFileSync(join(dir, "plan", "tasks.d", `${id}-misleading.yaml`), ruling("W1-T9999"));
   commitHistory(dir, "2020-02-07T12:00:00Z", "a matching filename holds a different identity");
-  assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a wrong-id filename cannot replace exact record provenance");
+  await t.test("wrong-id filename", () => assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a wrong-id filename cannot replace exact record provenance"));
 });
 
 function historyCase(): { repo: ReturnType<typeof gitRepo>; plan: Plan; readAge: () => ShardUnderJudgement | undefined } {
@@ -258,8 +258,10 @@ test("W1-T10210: callers share one aggregate filing-history budget", async t => 
   const { dir, addedAtMs } = seededRepo(); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const plan = loadPlan(join(dir, "plan", "tasks.yaml"));
   commitHistory(dir, "2020-01-01T12:00:00Z", "a second commit consumes the same invocation allowance");
-  const positive = parkedVerifyHumanShards(plan, dir, clockAt(addedAtMs + 3 * DAY_MS));
-  assert.deepEqual(positive.map(s => s.ageDays), [3, 3], "both exact identities qualify without exhaustion");
+  await t.test("qualified-history positive control", () => {
+    const positive = parkedVerifyHumanShards(plan, dir, clockAt(addedAtMs + 3 * DAY_MS));
+    assert.deepEqual(positive.map(s => s.ageDays), [3, 3], "both exact identities qualify without exhaustion");
+  });
   for (const resource of ["commitVisits", "blobReads", "decodedBytes", "metadataBytes", "stateEntries"] as const) {
     await t.test(resource, () => {
       const calls: string[][] = [];
@@ -311,13 +313,14 @@ test("W1-T10210: merges retain a common introduction and reject independent birt
   if (commonResult.state === "qualified") assert.equal(commonResult.commit, first, "inspect all original parents without dating the merge or move");
 
   const independent = gitRepo({ kind: "independent-filing-births", seedCommit: false }); t.after(() => independent.cleanup());
-  mkdirSync(join(independent.dir, "plan"));
-  writeFileSync(join(independent.dir, "plan", "tasks.yaml"), ruling("W1-T9001"));
+  mkdirSync(join(independent.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(independent.dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(independent.dir, "plan", "tasks.d", "W1-T9001-control.yaml"), ruling("W1-T9001"));
   commitHistory(independent.dir, "2020-01-01T12:00:00Z", "before either introduction");
   independent.git("branch", "other");
   for (const [branch, day] of [["main", "11"], ["other", "12"]]) {
     independent.git("checkout", "--quiet", branch!);
-    writeFileSync(join(independent.dir, "plan", "tasks.yaml"), ruling("W1-T9001") + ruling("W1-T9003"));
+    writeFileSync(join(independent.dir, "plan", "tasks.yaml"), ruling("W1-T9003"));
     commitHistory(independent.dir, `2020-01-${day}T12:00:00Z`, `independent introduction on ${branch}`);
   }
   independent.git("checkout", "--quiet", "main");
