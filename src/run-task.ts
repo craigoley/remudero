@@ -11838,6 +11838,7 @@ export async function runFixRung(opts: {
       settingsFile: opts.settingsFile,
     });
   let review = opts.initialReview;
+  let reconstructedReviewChecked = false;
   const proofDiscriminationStillNeedsRepair = () =>
     opts.proofDiscrimination !== undefined &&
     review.capped === true &&
@@ -12274,6 +12275,40 @@ export async function runFixRung(opts: {
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
+    }
+
+    // W1-T10029: revalidate concrete reconstructed failed proofs before the first dispatch on
+    // this head. A missing proof cannot be re-executed, and an earlier dispatch owns the
+    // progress decision for its head; neither is a fresh no-op prevention opportunity.
+    if (!reconstructedReviewChecked && currentMergeConflict === undefined && !noReviewYet &&
+      review.reviewerOutcome === "sweep-reconstructed" &&
+      review.criteria.some((criterion) => !criterion.met && criterion.proof_exec === "executed_fail" && criterion.proof.trim() !== "") &&
+      !(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))().some((row) =>
+        row.step === "fix.dispatch" && row.task_id === opts.taskId && row.head_sha === review.headSha)) {
+      reconstructedReviewChecked = true;
+      try {
+        const body = await (deps.fetchPrBody ?? fetchPrBodyViaGh)(opts.prUrl);
+        const fresh = await deps.runReview({
+          ...opts.reviewBase, prUrl: opts.prUrl, task: opts.task, report: body,
+          reportIsSubstitute: false, reviewInputBody: body, settingsFile: opts.settingsFile,
+          config: opts.config, budgetUsd: opts.budgetUsd, log: deps.log, say: deps.say,
+          account: deps.account, reviewerClockBoundMs: opts.reviewerClockBoundMs,
+          workerTelemetry: opts.workerTelemetry, reviewerCodeFreshness: opts.reviewerCodeFreshness,
+          ledgerPath: deps.ledgerPath, runId: opts.runId, openTaskIds: opts.openTaskIds,
+        });
+        deps.log("fix.pre_dispatch_review", { head_sha: fresh.headSha, prior_head_sha: review.headSha,
+          state: fresh.state, verdict_withheld: fresh.verdictWithheld });
+        if (fresh.verdictWithheld || fresh.headSha !== review.headSha) {
+          const reason = fresh.verdictWithheld ?? "PR head moved during pre-dispatch review";
+          deps.log("fix.stood_down", { site: "rung.pre_dispatch_review", reason, head_sha: fresh.headSha });
+          return { outcome: "stood_down", review: fresh, strikes, retriggers, reason, standDownReason: reason };
+        }
+        review = fresh;
+        progressReviewInputDigest = reviewInputDigest(fresh.headSha, body);
+        if (fresh.state === "success") continue;
+      } catch (error) {
+        deps.log("fix.pre_dispatch_review_error", { head_sha: review.headSha, error: String(error) });
+      }
     }
 
     // W1-T2671 SITE — BASE-GAP REFRESH, BEFORE `strikes++` and before every deterministic/worker
