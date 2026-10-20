@@ -1,0 +1,107 @@
+- id: W1-T10210
+  title: "A task retains its qualified filing date across embedded records and shard moves"
+  repo: remudero
+  depends_on: [W1-T3188, W1-T8827, W1-T5339]
+  plan_refs: [W1-T3188, W1-T8827, W1-T5339]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  priority: 3
+  status: queued
+  attempts: 0
+  author_class: operator
+  origin: "operator continuation 2026-10-19: remaining issue7911 exact-record filing-history follow-up"
+  files: [src/lib/task-filing-history.ts, src/run-task.ts, test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts, test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts]
+  rationale: |
+    At main 7733faf8163295b9ad9ae1e9156f683b6e362c5b, shardAgeDays dates only a matching shard
+    filename add-commit. A readable embedded task remains unknown and a later shard move can date
+    an old task as newly filed. Filename creation is not exact structured-record introduction.
+    The whole tracked-tree subject sweep covered all twelve open heads with a real shardAgeDays
+    positive control and no subject additions. The sole declared-path overlap is PR12894 in
+    src/run-task.ts; it repairs dependency merge-credit admission, not age history. Its fix owner
+    remains authoritative. Recheck that owner and private/shared work before implementation;
+    neither this dated sweep nor an unreadable private checkout proves a free source lane.
+    API merge credit confirms W1-T3188/#4749, W1-T8827/#12700 and W1-T5339/#8844 shipped.
+    The unknown-versus-zero repair #11325 also shipped and explicitly excluded first-add recovery.
+    Preserve those implementations and credit. This task is only the remaining history adapter;
+    it does not repair unrelated instance routing or prove runtime acceptance for issue7911.
+  design: |
+    Add a record-aware read-only resolver at one explicit immutable repository revision through
+    the existing hardened Git-read seam. Accept exact structured task identity in the recognized
+    plan/tasks.yaml and plan/tasks.d YAML containers, including historical embedded records.
+    A filename, near-id, dependency reference, prose mention or string occurrence is no record.
+    Prove introduction from child/parent record states and complete relevant lineage, retaining
+    the original introduction across embedded-to-shard moves and renames. Return qualified
+    commit/path/source/completeness provenance or explicit unknown. Missing/unreadable objects,
+    shallow or incomplete ancestry, unsupported shape, duplicate identity, deletion/reintroduction
+    and incomparable lineage must remain unknown unless a unique valid lineage is proven.
+    Never substitute plan-file creation, mtime, oldest numeric timestamp or rename heuristics.
+
+    Make one finite aggregate work budget for each actual caller invocation, shared across all
+    candidate tasks and history reads in parkedVerifyHumanShards and routeAdaptiveLifetimePressure.
+    Budget commit visits, blob reads and decoded bytes before consuming each resource. Select and
+    document finite defaults from measured production-shaped and adversarial fixtures; exhaustion
+    returns unknown and stops history work. Do not give every task a fresh allowance or allocate
+    fresh budget in shardAgeDays. Do not use unbounded output/walk fallbacks, a periodic sampler,
+    persistent cache writer or a new wall-clock child timeout. Immutable in-invocation reuse may
+    avoid rereading the same tree without extending the shared budget or asserting completeness.
+    If normal engineering evidence requires an extra path, obtain a normal scope amendment first.
+
+    Export resolveTaskFilingHistory from the new module and call it from the existing
+    src/run-task.ts age adapter with the invocation's pinned revision and shared budget.
+    Adapt shardAgeDays only at the age boundary while preserving its number-or-null and reason
+    contract and the existing floor/clamp day calculation. Pin history once per caller invocation.
+    Parked verification uses qualified Git history only. lifetimeShardAge still prefers that
+    qualified date and otherwise uses the earliest valid matching ledger row with either task_id
+    or task aliases, preserving row selection, calculation and unknown when neither source qualifies.
+    First-seen ledger evidence remains distinct from a proven filing date. Keep resolver provenance
+    private to the adapter rather than silently changing persisted/public proposal schemas.
+    Preserve observedStateKey exactly: age and readability remain excluded. Preserve observationKey,
+    why-me source qualification, source-bound persisted judgments, proposal identity, route wording,
+    current age bands and W1-T216/W1-T4242 protections. Do not force rejudgment or rewrite proposals
+    solely because history becomes readable. Change no age/judge/cadence/capacity policy or hold.
+
+    Extend the two behavioral fixtures declared above. Replace the blanket committed-embedded unknown
+    fixture with separate known-history positives and genuinely unavailable/uncommitted/shallow
+    controls. Correct the lifetime Git-positive fixture's mismatched id:x record to its actual task
+    identity while preserving all attempt/outcome/fallback/wording/id assertions and other controls.
+    Use real private Git repositories with explicit fixture identity and commit times. Cover embedded
+    introduction after plan-file creation, moves/renames, same-day zero, near-ids/references/wrong-id
+    filenames, missing parents, ambiguity and each aggregate resource limit across multiple tasks.
+    Drive both production consumers and preserve age-excluded cache/provenance policy controls.
+    In the four declared exact Git/spawn census fixtures, remove only obsolete shardAgeDays
+    baseline rows when its bare Git call is replaced, and lower src/run-task.ts's global raw-Git
+    exception by that one removed site. The censuses reject stale entries as well as increases.
+    Add no allowance, ignore, new baseline site or higher ceiling.
+
+    Use the normal fleet owner and file-overlap controls; coordinate PR12894 before editing
+    src/run-task.ts and never hand-push its branch or start a competing writer. Recheck main, all open
+    heads, claims, run refs, private work and exact API merge credit before a build/publication.
+    Validate the committed tree through ordinary capacity/author admission and the actual caller,
+    source-reader and census floor. Unknown membership stays named. Require same-tree coverage with
+    actual SF records for every changed source file, GitHub-stored executable canonical proofs,
+    full hosted CI/security, native fleet review and API-confirmed merge. Static reports,
+    OVER-CAPACITY and NOT_RUN are not a full pass. No approval reuse, scanner ignore, baseline raise,
+    gate waiver, manual merge/arming, deployment/restart or live product write is authorized.
+    Source merge and independent final natural adoption/benefit acceptance remain separate.
+  acceptance:
+    - claim: "The existing production age adapter calls the new record-history resolver with its invocation context"
+      proof: "grep: resolveTaskFilingHistory( in src/run-task.ts"
+    - claim: "Exact embedded task introduction survives shard moves and renames without treating a filename or reference as identity"
+      proof: "unit test: W1-T10210: exact record history survives embedded moves and renames"
+    - claim: "Incomplete, ambiguous or unreadable history remains unknown and a real same-day introduction remains zero"
+      proof: "unit test: W1-T10210: unknown history is distinct from a measured same-day zero"
+    - claim: "The actual multi-task callers share finite history work and stop with unknown on aggregate exhaustion"
+      proof: "unit test: W1-T10210: callers share one aggregate filing-history budget"
+    - claim: "Both age consumers preserve lifetime fallback and source-bound age-excluded judgment and proposal identity"
+      proof: "unit test: W1-T10210: age consumers preserve fallback and judgment identity"
+  falsifier: |
+    In a private committed variant, remove only the production record-history resolution while
+    leaving every fixture/assertion, old unknown-versus-zero adapter, lifetime fallback and policy
+    code intact. The embedded/move/rename regressions must fail for their intended assertions;
+    unknown/zero/fallback/provenance/age-band controls must still execute and pass. Restore the fix
+    and require actual physical paths/titles and TAP tests/fail summaries on the exact tree.
+    Setup/import errors, a missing-path wrapper, no summary, capacity refusal or static reports
+    cannot satisfy either the positive evidence or the negative.

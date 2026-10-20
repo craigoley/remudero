@@ -1,8 +1,42 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { unwrapLowPriority } from "../../src/lib/test-slot.js";
+import type { TestSlotLease } from "../../src/lib/test-slot.js";
 import type { PreflightSpawn } from "../../src/lib/commit-message.js";
+import type { CoverageResourcePort } from "../../src/lib/ci-parity.js";
+import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
 import { finishJudgedRun } from "./judged-pool-run.js";
+
+export interface CoverageResourceFixture {
+  root: string;
+  scratchDir: string;
+  lcovPath: string;
+  events: string[];
+  resources: CoverageResourcePort;
+  cleanup(): void;
+}
+
+/** Real owned directories for fake children; neither host capacity nor a real slot is certified. */
+export function coverageResourceFixture(): CoverageResourceFixture {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}parity-argv-`));
+  const scratchDir = join(root, "scratch"), lcovPath = join(root, "artifacts", "lcov.info");
+  const events: string[] = [];
+  const cleanup = () => rmSync(root, { recursive: true, force: true });
+  const resources: CoverageResourcePort = (repoRoot) => {
+    events.push(`acquire:${repoRoot}`);
+    mkdirSync(scratchDir, { recursive: true });
+    mkdirSync(join(root, "artifacts"), { recursive: true });
+    const slot: TestSlotLease = { outcome: "acquired", executionAllowed: true, concurrency: 1, waitedMs: 0,
+      note: "fake child slot; NOT measured host capacity",
+      refresh: () => { events.push("refresh"); }, release: () => { events.push("slot-release"); } };
+    return { ok: true, lease: {
+      scratchDir, lcovPath, slot, note: "explicit argv fixture resources; NOT real coverage admission",
+      release: () => { events.push("release"); slot.release(); cleanup(); },
+    } };
+  };
+  return { root, scratchDir, lcovPath, events, resources, cleanup };
+}
 
 /** Materialize the artifacts a parity fixture's fake spawn claims its coverage child produced. */
 export function coverageParitySpawnResult(

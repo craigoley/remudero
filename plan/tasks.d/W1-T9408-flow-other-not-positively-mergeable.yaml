@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.29
   status: queued
@@ -28,10 +28,13 @@
     - PR #11504: 0.22 PR-hours — not positively mergeable — checks none, review none — escalating
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.88
+    verdict: "low"
+    action: proceed
+    confidence: 0.6
     reasons:
-      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The record requires automatic clearance of “not positively mergeable” in src/lib/sweep.ts but specifies no bounded remedy or cause diagnosis; the five cited PRs establish blocker recurrence and cost only.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration, which cannot verify automatic clearance or preservation of merge and review policy. The gates explicitly require HIGH when the finding cannot be verified from what is shown."
-    judged_at: "2026-10-14T08:52:57.243Z"
-    pin: "2660296050b5a356a383a4217c582d00d649b94e2b4894182c07745b4b6f81e1"
+      - "The declared files are src/lib/sweep.ts and a new test file. Neither is a secrets, auth, deploy, or review-policy path by name, and the description shows no deletion or irreversible action."
+      - "The acceptance is a single grep-verifiable test, and the evidence cites 5 distinct PRs with hour figures, so the finding can be verified from what is shown."
+      - "The family record is 6 merged and 2 declined (Beta mean 0.70), which is not a concerning track record. The gates state shows filingTime true and a machine author, with nothing flagged."
+      - "The remedy involves how \"not positively mergeable\" PRs are cleared. If that meant changing merge policy it would be a concern, but the description only says \"cleared by its owner\" and does not show such a change. The normal CI and review pass still applies."
+    judged_at: "2026-10-20T00:47:10.793Z"
+    pin: "fb040ecbc40b2ac8e739838b4b2644bf97abc47df226631fc79671c3ee2e026e"
