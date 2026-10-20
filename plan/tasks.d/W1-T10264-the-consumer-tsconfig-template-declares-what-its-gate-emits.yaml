@@ -1,0 +1,61 @@
+- id: W1-T10264
+  title: "THE CONSUMER TSCONFIG TEMPLATE STILL TURNS DECLARATION ON FOR A GATE THAT NEVER EMITS — src/lib/project-init.ts `tsStrictConfigContent` writes `\"declaration\": true` into every new consumer repo, whose generated gate runs `npx tsc -p tsconfig.json --noEmit`; under TS 7 that still computes declaration diagnostics for every file (35% of allocation, about 2 GB of the cold peak on this repo), which PR #13113 removed here; whether the template changes is an OPERATOR DECISION, and a consumer that publishes .d.ts output must keep it on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human  # an operator decision about what every new consumer repo inherits
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern, one compiler option in the consumer tsconfig template; the gate command and every other option are unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020 item 8 (2026-10-20); follow-up to PR #13113 (operator ruling 2026-10-20 for this repo's own tsconfig) and logs-8864/tscmem-summary.txt"
+  plan_refs: [W1-T27]
+  files:
+    - src/lib/project-init.ts
+    - test/deploy/the-consumer-tsconfig-template-declares-what-its-gate-emits.test.ts
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    OBSERVED for THIS repo (logs-8864/tscmem-summary.txt, tscmem-trace-summary.txt and PR #13113's body; method: tsgo
+    7.0.2 runs under heavy-run.sh scopes with /usr/bin/time -v and pprof, 2026-10-20):
+    - With `--noEmit`, TS 7 still computes declaration diagnostics for all ~5,045 files (`GetDiagnosticsOfAnyProgram`):
+      about 35% of allocation, about 2 GB of the cold peak and about half the wall time.
+    - tsc alone, cold: the repo's config took 21-31 s (`def`, n=3, demand 6.2-6.8 GB cg+swap); with declaration off,
+      9-10 s (`nodecl`, n=2, 3.4-3.6 GB).
+    - PR #13113 (open at filing) turns `declaration` off in this repo's tsconfig.json on an operator ruling. It does not
+      touch the consumer template.
+    READ at origin/main e18320e75 (symbols, not lines):
+    - src/lib/project-init.ts `tsStrictConfigContent(web)` writes compilerOptions including `declaration: true` and
+      `outDir: "dist"` into the consumer's tsconfig.json (`strictConfigFile: "tsconfig.json"`).
+    - The generated gate workflow for those profiles runs `npx tsc -p tsconfig.json --noEmit`; nothing the template
+      generates consumes .d.ts output.
+    - test/project-init.test.ts does not assert the `declaration` value (grep finds none).
+    INFERRED, not measured: a consumer's cost scales with its own file count; a small consumer pays proportionally less,
+    so the saving per consumer is unknown until one is measured.
+    CAVEAT the decision must weigh: a consumer that publishes a library (its own `tsc` build emits .d.ts) needs
+    declarations on; turning them off in the template would drop its type output and its declaration-only diagnostics
+    (TS2742, TS4xxx).
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and the plan trees of the open PR heads (2026-10-20) for
+    project-init together with declaration; no shard sets the template's option. PR #13113 is this repo's own config.
+  design: |
+    OPERATOR DECISION first (the task is `verify: human` so it is not dispatched until released). Options:
+    (a) template writes `declaration: false` (matches the `--noEmit` gate; a library consumer turns it on);
+    (b) template keeps `declaration: true` only for a profile that builds a package, false otherwise;
+    (c) leave as is.
+    For (a) or (b): `tsStrictConfigContent` takes the choice from the profile, the generated JSON carries a `"//"` note
+    saying why (as #13113 does for this repo), and existing consumer repos are not rewritten. TESTS in
+    test/deploy/the-consumer-tsconfig-template-declares-what-its-gate-emits.test.ts (folder from `rmd test-place` on a
+    stub importing project-init.ts; re-run on the real file), `test(` titles verbatim as in the proofs.
+  acceptance:
+    - claim: "a profile whose gate runs tsc --noEmit gets a tsconfig with declaration off"
+      proof: "unit test: W1-T10264: a noEmit-gated consumer tsconfig turns declaration off"
+    - claim: "the generated tsconfig says why declaration is off and when to turn it on"
+      proof: "unit test: W1-T10264: the consumer tsconfig names when declaration must stay on"
+  falsifier: |
+    At origin/main `tsStrictConfigContent` writes `declaration: true` for every profile and no note, so both tests fail.
+    Restore `declaration: true` and they fail again. (If the operator rules (c), retire this task instead.)
+  note: |
+    OPERATOR DECISION: whether new consumer repos inherit declaration off. Consumers that publish .d.ts output need
+    declarations kept on. EFFECT after merge: a new consumer's first gate run's tsc peak and wall time, compared with one
+    generated before (measured on that consumer, not this repo).
