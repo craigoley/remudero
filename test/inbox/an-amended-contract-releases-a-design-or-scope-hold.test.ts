@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { taskContractRevision } from "#src/lib/escalate.js";
-import { CONTRACT_AMENDED_REFRESH_STEP, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { CONTRACT_AMENDED_REFRESH_STEP, runSweep, type OpenPrView, type SweepDeps, type UpdateBranchOutcome } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
@@ -37,7 +37,7 @@ function fixture(rows: Record<string, unknown>[]) {
     readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); },
     fixProgressJudge: async () => ({ verdict: "continue", reason: "the red names one failing test" }),
     readTaskContractRevision: (taskId) => (taskId === TASK ? state.revision : undefined),
-    updateBranch: async () => { state.refreshed++; return "updated"; },
+    updateBranch: async (): Promise<UpdateBranchOutcome> => { state.refreshed++; return "updated"; },
     arm: () => {}, close: () => {},
     escalate: () => { state.escalated++; },
     dispatchFix: () => { state.dispatched++; },
