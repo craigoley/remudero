@@ -1,0 +1,95 @@
+- id: W1-T10347
+  title: "A failed Inbox interpretation stays read-only instead of requesting a redraft"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  principles: {tdd: strict}
+  origin: "operator:console-inbox-readonly-fallback-20261021"
+  files:
+    - src/lib/inbox-responder.ts
+    - test/an-inbox-item-is-a-conversation.test.ts
+    - test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts
+  rationale: |
+    Rule 19 / #588: drive answerThread through realThreadDecider and the existing non-dispatch
+    receipt wrapper, retaining a joined failed worker attempt while proving no business action.
+    An isolated controlled-worker fixture on 2026-10-21 found that "What happens next?" reaches
+    reframe when its interpreter returns an empty failed result or throws after assignment.
+    This is not evidence a live redraft occurred. The path is decideFor falling back to an empty
+    keyword question, then answerThread converting empty questions into edit under W1-T9252.
+    The operator chose "Read-only fallback; explicit commands unchanged". W1-T10272 owns model
+    evidence audit/regression, not this behavior change. W1-T10283 owns reply-to-work causality;
+    preserve its contracts and coordinate before publication, without competing pushes.
+    OWASP LLM06 Excessive Agency recommends limiting autonomous effects and retaining approvals
+    for high-impact actions. Interpreter failure is not evidence of user intent to modify work.
+    The operator subsequently required unmistakable commands after failed interpretation and
+    approved the existing W1-T9252 caller fixture as a test-only scope companion. A real
+    four-suite caller run reported 39 tests, 38 passing and one failure: the old direction
+    fixture supplies an invalid empty question and expects edit. Preserve that failure;
+    correct its input to a valid explicit edit, retaining every reframe and receipt assertion.
+  design: |
+    Distinguish a failed/unusable configured interpreter from a successfully validated decision
+    and from the existing no-interpreter keyword mode. When a configured interpreter throws,
+    returns null, invalid JSON or an invalid decision, keep a plain unclassified question
+    read-only. Explain that interpretation was unavailable, that nothing was changed, and how
+    the operator can retry or use the existing buttons. Do not infer redraft from missing intent.
+    After interpreter failure, require a complete unmistakable command using an anchored
+    positive grammar, not a keyword appearing anywhere in prose. Admit the existing direct
+    decline/restore/edit commands and approval suggestions, with bounded whitespace/case,
+    optional please and terminal period/exclamation normalization. A direct edit may carry
+    its direction after with/to; classify its command verb, not action words inside that payload.
+    Incidental, quoted, negated or conditional action mentions and question-marked prose stay
+    read-only; a model failure cannot resolve uncertain intent. Do not add semantic question
+    regexes, new action tiers or retries. State guards and approval-as-suggestion remain intact.
+    Successful validated model decisions and button actions remain unchanged.
+    The existing no-interpreter keyword/direction mode also remains unchanged.
+    Preserve the existing question bound, idempotent thread processing and plain-language output.
+    Exhausted clarification must remain read-only, never turn back into edit. No read-only fallback may
+    write a proposal mutation or claim work was filed; normal answer/attempt receipts still record
+    what happened. Any retry is initiated by the operator, not automatically scheduled here.
+    Keep one assignment and one attempt per real interpreter invocation, including throws after
+    selection. Use the real benchmarkNonDispatchSpawn wrapper with a controlled raw worker and
+    a private ledger sink; no model/provider calls in tests, no automatic retry or new provider.
+    Extend the existing production conversation integration suite, without a new test file.
+    The third declared path is the explicitly approved existing W1-T9252 caller companion.
+    Update the integration assertion that expects an invalid empty model answer to
+    request a redraft; add the failed-result, invalid-response and thrown-worker regression cases.
+    Retain positive explicit-command, valid-model and no-interpreter direction controls.
+    In the admitted W1-T9252 caller fixture, use a nonempty valid explicit edit decision for
+    direction-to-redraft and retain all existing action/receipt assertions and the later valid
+    clarifying question. Do not weaken the new empty/invalid-interpreter failure controls.
+    No new action tier, API, retry endpoint, permission, billing, budget, service or deployment
+    setting is included. This task does not repair stale conversation-list reads or claim the
+    whole Inbox is healthy. Record the actual operator approval through native release before
+    publication; do not relabel a machine-authored task or invent a model verdict.
+  acceptance:
+    - claim: "Failed empty or unparseable interpretation of a plain question yields a read-only answer and never a redraft"
+      proof: "unit test: W1-T10347: unusable interpretation of a plain question never requests a redraft"
+    - claim: "Thrown interpretation preserves one failed attempt, a read-only answer, and idempotence without automatic retry"
+      proof: "unit test: W1-T10347: a thrown interpreter stays read-only with one joined attempt and no retry"
+    - claim: "Failed interpretation never treats an action keyword inside a question or incidental prose as a command"
+      proof: "unit test: W1-T10347: failed interpretation requires an unmistakable command before any proposal change"
+  falsifier: |
+    First run the new physical tests against unchanged production and retain complete TAP with
+    failed plain-question cases. Implement only the approved boundary distinction, then rerun.
+    In a disposable clone remove only the boundary repair, keeping identical test bytes: the
+    plain-question regression must fail again. Exact restoration must pass with no skipped or
+    cancelled cases. Count reframe callbacks, proposal-mutation ledger rows, thread answers and
+    worker assignment/attempts; zero effects needs working explicit-command positive controls.
+    Separately remove only the strict fallback-command boundary, keeping the read-only failure
+    reply and unchanged tests. The incidental-action regression must fail while explicit-command
+    controls still pass; exact restoration must pass. No skipped or cancelled cases are evidence.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The operator explicitly required unmistakable commands after failed Inbox interpretation and approved the existing W1-T9252 caller-test companion. Pin this three-file amended specification to those actual decisions. Only failure fallback changes: successful validated model decisions, button actions, no-interpreter direction mode, state guards and approval-as-suggestion stay unchanged. Correct the caller fixture to a valid explicit edit without removing any action/receipt assertion. Preserve strict-command, failed-interpretation and no-interpreter controls, original red receipts, all tests, review and CI. No model/provider calls, retries, permissions, budgets, service change or deployment are authorized. Historical native release remains unchanged; this is a new operator ruling, not a model verdict or duplicate release."
+    judged_at: "2026-10-21T15:43:39.422Z"
+    pin: "67461a0761d5981a2bc8a32bab603432d848538c753d7dac9e41bbb58ae3292e"

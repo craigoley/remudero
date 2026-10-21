@@ -321,16 +321,16 @@ test("W1-T9252: a thread reply reaches the daemon as reframe direction", async (
     ledgerPath: fx.ledgerPath,
     readItems: () => registryThreadItems(fx.stateDir, fx.ledgerPath),
     reframe: (id, feedback) => void reframed.push([id, feedback]),
-    decide: async () => ({ action: "question", reply: "" }),
+    decide: async () => ({ action: "edit", reply: "I asked for the item to be redrafted." }),
   };
   appendThreadReplyOnce(inboxThreadIdentity("ruling:P4"), "Make the first option the cheap one.", "reply-direction-1", store);
-  assert.equal(await answerThread(inboxThreadId("ruling:P4"), deps), "edit", "a reply it cannot place as decline or restore is direction");
+  assert.equal(await answerThread(inboxThreadId("ruling:P4"), deps), "edit", "a valid explicit edit decision carries the operator's direction");
   assert.deepEqual(reframed, [["ruling:P4", "Make the first option the cheap one."]]);
   assert.ok(rowsWritten(fx).some((row) => row.step === "panel.proposal_reframe_requested" && row.feedback === "Make the first option the cheap one."));
   const stored = readThread(inboxThreadId("ruling:P4"), store);
   assert.equal(stored.status === "ok" ? stored.messages.at(-1)?.extra?.did?.action : undefined, "edit");
 
-  // A model that asks a real question still asks it: only an empty question is no question.
+  // A valid clarifying question remains a question, not an implicit edit decision.
   appendThreadReplyOnce(inboxThreadIdentity("ruling:P4"), "Hmm, which one?", "reply-direction-2", store);
   assert.equal(await answerThread(inboxThreadId("ruling:P4"), { ...deps, decide: async () => ({ action: "question", reply: "Do you want the cheap one first?" }) }), "question");
   assert.equal(reframed.length, 1);
