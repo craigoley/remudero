@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: span
   priority: 2.5
@@ -72,3 +72,11 @@
     and lost-owner controls remain green. Restore only the repair and require complete passing
     TAP with no skipped/cancelled cases. Observe actual IPC holder state and SQLite outcomes;
     a mock throw, zero-test summary or elapsed-time assertion alone is not discriminating proof.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The operator explicitly approved the counter-only fail-fast policy. Writable shadow-counter connections alone may refuse busy contention immediately, including first open; ordinary core and read-only timeouts, home lease fence before file changes, WAL/FULL durability, exact evidence and failed-save readiness withholding remain unchanged. A later normal comparison reconciles missed keys/reset; no automatic retry, new calls, provider, permissions, budgets, service settings, CI infrastructure, Azure memory change or deployment. Scope is read-model-db and the existing incremental persistence suite. Preserve actual failure receipts, source-only falsifiers, all review and CI gates. Native approve W1-T10357 records operator authority, not a model verdict."
+    judged_at: "2026-10-21T17:16:38.888Z"
+    pin: "b9cdda9c49f1380140ac756c3b9fde008ca7549aad24e450ce34385d9cbe6d1e"
