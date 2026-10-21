@@ -281,7 +281,7 @@ test("W1-T948: removing the assignment fails the positive test", skipInMutationS
 test("W1-T948: the specialist router is reached from a production call path", () => {
   // run-task.ts must call routeSpecialists through taskMetadataFromPrinciples
   // — the SAME builder tested above — not through a hand-built test literal.
-  const runTaskSrc = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const runTaskSrc = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
   assert.match(
     runTaskSrc,
     /routeSpecialists\(\s*\{\s*diff:\s*\{\s*files:\s*\[\]\s*\},\s*task:\s*taskMetadataFromPrinciples\(task\.principles\)/,

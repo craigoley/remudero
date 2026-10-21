@@ -67,7 +67,7 @@
     "src/run-task.ts:DOWN_SAFE_BOUNDARY_DELAY_MS",
     "src/run-task.ts:NPM_CI_TIMEOUT_MS",
     "src/run-task.ts:PLAN_MAX_NEW_TASKS",
-    "src/run-task.ts:RECON_MAX_TURNS",
+    "src/cli/commands/run-task-verb.ts:RECON_MAX_TURNS",
     "src/run-task.ts:TRIAGE_MAX_NEW_TASKS",
     "src/run-task.ts:WORKER_STALL_TAIL_ATTACH_MAX_BYTES",
     "src/run-task.ts:WORKER_STALL_TAIL_ATTACH_MAX_LINES",

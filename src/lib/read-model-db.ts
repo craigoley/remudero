@@ -673,12 +673,13 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
  * reads every page, 105 s for the 498 MB core file on the loaded host, so the open trusts SQLite's
  * own WAL recovery and the caller checks in the background after an unclean shutdown.
  */
-function connect(path: string, readOnly: boolean): DatabaseSync {
+function connect(path: string, readOnly: boolean, shadowCounterWriter = false): DatabaseSync {
   const { DatabaseSync: Database } = require("node:sqlite") as typeof import("node:sqlite");
   const connection = randomUUID();
   let raw: DatabaseSync | undefined;
   try {
-    raw = new Database(path, { readOnly, timeout: READ_MODEL_BUSY_TIMEOUT_MS });
+    // An auxiliary writer opens under the projector fence: it must not wait while holding it.
+    raw = new Database(path, { readOnly, timeout: shadowCounterWriter ? 0 : READ_MODEL_BUSY_TIMEOUT_MS });
     if (!readOnly) raw.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;
       PRAGMA journal_size_limit=${READ_MODEL_JOURNAL_SIZE_LIMIT_BYTES};`);
     return raw;
@@ -698,7 +699,7 @@ export function openScratchReadModel(): ReadModelDb {
 /** Persistent shadow evidence is not a rebuildable scratch projection. Never redirect or recover it. */
 export function openShadowCounterDb(path: string, readOnly = false): ReadModelDb {
   if (!readOnly) mkdirSync(dirname(path), { recursive: true });
-  const raw = connect(path, readOnly);
+  const raw = connect(path, readOnly, !readOnly);
   const db = wrap(raw, path, 1, readOnly);
   try {
     const tables = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all();

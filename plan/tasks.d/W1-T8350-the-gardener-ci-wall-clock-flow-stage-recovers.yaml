@@ -6,8 +6,11 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T8350 — The operator already declined machine-
+  # judge:W1-T8350 on 10-13 as transient, and gardener ci_wall_clock is not regressed now (p50 9.8 against 7.1,
+  # regressed=false). Only the plan retirement is missing.
   attempts: 0
   author_class: machine
   origin: "flow-regression:gardener:ci_wall_clock:all"

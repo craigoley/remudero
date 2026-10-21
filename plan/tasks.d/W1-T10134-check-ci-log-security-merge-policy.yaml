@@ -5,8 +5,13 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.27
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10134 — Live (10 security-merge-policy rounds in 3 d,
+  # last 10-21 13:42), but the remedy edits src/lib/code-scanning-merge-adapter.mjs, the security merge gate.
+  # 'Never spend a fix round on it' risks weakening a security gate. NOTE: the verify-human cadence already
+  # MACHINE-RELEASED it on 10-19 while the risk judge says high/escalate; consider retiring it so it does not
+  # build.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:security-merge-policy"

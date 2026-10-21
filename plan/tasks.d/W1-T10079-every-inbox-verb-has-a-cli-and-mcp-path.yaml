@@ -15,6 +15,7 @@
     - src/lib/operator-mcp.ts
     - src/lib/panel-graph.ts
     - src/run-task.ts
+    - docs/operator-guide.md
     - test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts
   status: queued
   priority: 1  # operator 2026-10-17: an agent recording the operator's decisions has no sanctioned way to act

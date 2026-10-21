@@ -37,7 +37,7 @@ import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/work
 // against a real local bare repo. It mirrors auto-triage.ts's triage claim structurally.
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const RUN_TASK_SRC = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+const RUN_TASK_SRC = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 
 function git(dir: string, ...args: string[]): string {

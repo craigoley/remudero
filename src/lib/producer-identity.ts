@@ -98,6 +98,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   "BENCHMARK-AA": producer("benchmark-aa", "Benchmark A/A"),
   "ESCALATION-ANSWERS": producer("escalation-answers", "Escalation Answers"),
   INCIDENT: producer("incident", "Incident Ingest"),
+  "REVIEWER-HEALTH": producer("reviewer-health", "Reviewer Health"),
   inbox: producer("inbox", "Inbox"),
   "inbox-bakeoff": producer("inbox-bakeoff", "Inbox Bake-off"),
   _ledger: producer("_ledger", "Ledger Internals"),

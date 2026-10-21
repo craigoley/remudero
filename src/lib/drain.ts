@@ -12,7 +12,7 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
-import { releasedTaskIds, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
+import { RELEASE_LEDGER_STEP, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
   partitionByFileOverlap,
@@ -21,7 +21,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { taskIdFromRunBranch } from "./status.js";
-import { isRecordTask } from "./task-linter.js";
+import { isRecordTask, taskRulingPin } from "./task-linter.js";
 import type { OpenSiblingBuild, StatusProjection } from "./status.js";
 import { measuredDispatchValue, redealFanoutOver, stridePassInputs, type DispatchValueContext } from "./dispatch-value.js";
 
@@ -1486,6 +1486,9 @@ export interface DrainDeps extends TaskPreconditionOptions {
    *  wires the real reader). ABSENT = today's behaviour exactly, an empty released set — a door
    *  that is never opened, never a wall that comes down. */
   readLedgerLines?: () => readonly string[];
+  /** W1-T10348 — the operator releases kept in state/operator-releases.json, where rotation cannot shed
+   *  them. A seam like `readLedgerLines`; absent, only the ledger's rows release. */
+  readDurableReleases?: () => ReadonlySet<string>;
   /** The in-flight guard (W1-T80): the OPEN PR number for a task, re-derived from the SAME
    *  projection `refreshMerged` just built, never a second GitHub read path. Optional. */
   isOpenPr?: OpenPrCheck;
@@ -1624,10 +1627,87 @@ export interface DrainDeps extends TaskPreconditionOptions {
  * NO READER WIRED MEANS AN EMPTY SET, never a throw and never an open door: a caller that has not
  * opted in behaves exactly as it did before this task.
  */
-export function resolveReleasedIds(deps: Pick<DrainDeps, "readLedgerLines">): ReadonlySet<string> {
-  const read = deps.readLedgerLines;
-  if (!read) return new Set<string>();
-  return releasedTaskIds(read());
+export function resolveReleasedIds(deps: ReleaseReaders, plan?: Plan): ReadonlySet<string> {
+  return resolveReleases(deps, plan).ids;
+}
+
+/** W1-T10348: the two release records every admission site reads, as seams (this module keeps no `fs`). */
+export type ReleaseReaders = Pick<DrainDeps, "readLedgerLines" | "readDurableReleases">;
+
+export type ReleaseAuthor = "operator" | "machine";
+
+/** W1-T10348: what one pass's release read resolved, honoured and set aside alike, so a filter can name either. */
+export interface ReleaseResolution {
+  /** The releases dispatch honours. */
+  ids: ReadonlySet<string>;
+  /** Who released each id read, honoured or set aside. */
+  authors: ReadonlyMap<string, ReleaseAuthor>;
+  /** Machine releases set aside because the record carries a current-pin `escalate` ruling. */
+  setAside: ReadonlySet<string>;
+  /** Why operator-releases.json could not be read; the ledger's releases still stand. */
+  durableUnreadable?: string;
+  /** Why the ledger could not be read; the durable releases still stand. */
+  ledgerUnreadable?: string;
+}
+
+/**
+ * W1-T10348 — THE ONE RELEASE RESOLVER every admission site shares (daemon tick, lane refill, console
+ * kick, `rmd drain`, the run child). It unions the ledger's `ratify.approved` rows with the durable
+ * operator-releases.json, so a release that ledger rotation shed is still honoured.
+ *
+ * WHICH RELEASES COUNT. An operator release (a row without `author_class: machine`, or an id in the
+ * durable file) is honoured as written. A machine release is honoured unless the record carries a
+ * current-pin risk ruling of `action: escalate`: that escalation went to a person (operator ruling
+ * 2026-09-29), and a second machine judge may not overrule it. Such an id lands in `setAside`. With no
+ * plan to read the ruling from, a machine release cannot be checked, so it is set aside too.
+ */
+export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResolution {
+  const authors = new Map<string, ReleaseAuthor>();
+  let ledgerUnreadable: string | undefined;
+  try {
+    for (const [id, author] of releaseAuthorsFromLedger(deps.readLedgerLines?.() ?? [])) authors.set(id, author);
+  } catch (e) {
+    // the ledger unreadable: it releases nothing (the safe direction), and the tick names the reason.
+    ledgerUnreadable = String((e as Error)?.message ?? e);
+  }
+  let durableUnreadable: string | undefined;
+  try {
+    for (const id of deps.readDurableReleases?.() ?? []) authors.set(id, "operator");
+  } catch (e) {
+    // operator-releases.json unreadable: it releases nothing (the safe direction), and the tick names the reason.
+    durableUnreadable = String((e as Error)?.message ?? e);
+  }
+  const ids = new Set<string>();
+  const setAside = new Set<string>();
+  for (const [id, author] of authors) {
+    const t = plan?.byId.get(id);
+    const escalated = plan === undefined || (t?.risk_ruling?.action === "escalate" && t.risk_ruling.pin === taskRulingPin(t));
+    if (author === "machine" && escalated) setAside.add(id);
+    else ids.add(id);
+  }
+  return {
+    ids, authors, setAside,
+    ...(durableUnreadable !== undefined ? { durableUnreadable } : {}),
+    ...(ledgerUnreadable !== undefined ? { ledgerUnreadable } : {}),
+  };
+}
+
+/** Each released id's author from its `ratify.approved` rows: an operator row outranks a machine one for the same task. */
+export function releaseAuthorsFromLedger(lines: readonly string[]): Map<string, ReleaseAuthor> {
+  const out = new Map<string, ReleaseAuthor>();
+  for (const line of lines) {
+    if (!line.includes(RELEASE_LEDGER_STEP)) continue; // cheap reject before the parse
+    let row: { step?: unknown; task_id?: unknown; author_class?: unknown };
+    try {
+      row = JSON.parse(line) as typeof row;
+    } catch {
+      continue; // an unparseable line releases nothing — the safe direction
+    }
+    if (row.step !== RELEASE_LEDGER_STEP || typeof row.task_id !== "string" || !row.task_id) continue;
+    if (row.author_class !== "machine") out.set(row.task_id, "operator");
+    else if (!out.has(row.task_id)) out.set(row.task_id, "machine");
+  }
+  return out;
 }
 
 /**
@@ -1669,7 +1749,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const max = opts.max ?? DEFAULT_MAX;
   const log = deps.log ?? (() => {});
   // W1-T3216: ONCE, here at the pass boundary — see resolveReleasedIds' doc for why not per task.
-  const releasedIds = resolveReleasedIds(deps);
+  const releasedIds = resolveReleasedIds(deps, plan);
   const attempted: string[] = [];
   const merged: string[] = [];
   /** Non-merged, non-halting outcomes (NON_HALTING_VERDICTS) — recorded, never credited. */
@@ -2180,7 +2260,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // W1-T3216: the lane pass has its OWN boundary — resolved here, exactly once, for the same
   // reason runDrain does it: deps.readLedgerLines is real I/O and must not enter the per-task
   // filter. Both passes must answer the same task the same way, so neither may skip this.
-  const releasedIds = resolveReleasedIds(deps);
+  const releasedIds = resolveReleasedIds(deps, plan);
   const laneCount = Math.max(1, opts.laneCount ?? 1);
   const max = opts.max ?? DEFAULT_MAX;
   const log = deps.log ?? (() => {});

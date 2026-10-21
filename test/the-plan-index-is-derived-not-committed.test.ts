@@ -60,7 +60,7 @@ test("W1-T4432: readers derive and cache the plan index from MASTER-PLAN.md with
     assert.equal(updated?.entries[0]?.heading, "5C. Updated section");
     assert.equal(existsSync(artifact), false, "reading does not materialize the generated artifact");
 
-    const runTask = readFileSync(join(ROOT, "src", "run-task.ts"), "utf8");
+    const runTask = readFileSync(join(ROOT, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
     const panelGraph = readFileSync(join(ROOT, "src", "lib", "panel-graph.ts"), "utf8");
     assert.match(runTask, /loadPlanIndex\(join\(dirname\(planPath\), "\.\.", "MASTER-PLAN\.md"\)\)/);
     assert.match(panelGraph, /loadPlanIndex\(resolveRepoLayout\(deps\.root\)\.masterPlan\)/);
@@ -89,7 +89,7 @@ test("W1-T4432: plan commit flows and capability snapshot do not write a committ
     assert.equal(capability.status, 0, capability.stdout + capability.stderr);
     assert.equal(existsSync(join(capabilityRoot, PLAN_INDEX_PATH)), false, "capability snapshot writes only MASTER-PLAN.md");
 
-    for (const path of ["src/run-task.ts", "src/lib/plan-architect.ts", "src/lib/plan-pr-emitter.ts"]) {
+    for (const path of ["src/run-task.ts", "src/cli/commands/run-task-verb.ts", "src/lib/plan-architect.ts", "src/lib/plan-pr-emitter.ts"]) {
       assert.doesNotMatch(readFileSync(join(ROOT, path), "utf8"), /regeneratePlanIndex(?:File|AndCommit)/, `${path} has no retired writer call`);
     }
   } finally {

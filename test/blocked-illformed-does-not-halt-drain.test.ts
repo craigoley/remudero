@@ -190,7 +190,7 @@ test("runTask returns blocked_illformed with costUsd 0, before any lock or spawn
   // happen AFTER a worktree or a spawn, "nothing was spent" would silently stop being true and this
   // verdict would no longer deserve its exemption. Read from source, since no unit test drives the
   // real refusal path.
-  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const src = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
   assert.match(
     src,
     /costUsd: 0, verdict: "blocked_illformed"/,

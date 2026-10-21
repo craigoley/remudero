@@ -9,7 +9,7 @@
   risk: medium  # Rule 19: one concern, which words the hook's gh rules read; the rules' verdicts, the floor, the broker and invokes_gh are unchanged
   band_meaning: span
   priority: 1  # operator-2026-10-21: a worker can still slip the merge refusal with a quoted verb or an inline -XPUT; #13263 closed the wrapper half
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-20: the porcelain-write grep reads `gh 'pr' 'comment' 1 -b x` as a read"
   plan_refs: [W1-T3275, W1-T10279, W1-T203, W1-T9643, W1-T5670, W1-T9281, W1-T1066]

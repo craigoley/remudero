@@ -5,8 +5,11 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.4
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10248 — 1 commit touching src/lib/code-scanning-merge-
+  # policy.mjs in 3 d; the hand-fix target is the security merge policy, a security gate surface. Small cost (13
+  # PR-min). NOTE: machine-released on 10-20.
   attempts: 0
   author_class: machine
   origin: "ci-friction:hand_fix:src/lib/code-scanning-merge-policy.mjs"

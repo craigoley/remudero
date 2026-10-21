@@ -1,0 +1,109 @@
+- id: W1-T10354
+  title: "THE NIGHTLY MUTATION IMPORTER MAP SEES TESTS THAT IMPORT THROUGH #src — scripts/mutation-ratchet.mjs reads only relative `from \"./…\"` specifiers, so 171 test files that import source through the package.json `#src/*` alias contribute no test↔module pair, and every new or moved test is written that way"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # one script's importer derivation plus one new test; the nightly is not a required check
+  origin: 'W1-T9873 build agent finding, 2026-10-21, at origin/main 6637c3cc4 (after #13360); re-measured by the filing agent'
+  plan_refs: [W1-T133, W1-T9873, W1-T9864, W1-T10064, W1-T2531]
+  files:
+    - scripts/mutation-ratchet.mjs
+    - test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    All numbers measured at origin/main 6637c3cc4 (2026-10-21), using the script's own exported
+    deriveDirectImporters/resolveMutateScope over the nightly's own test list
+    (`find test -type f -name '*.test.ts' -not -path 'test/fixtures/*'`, 3907 files, 71 nested).
+    - scripts/mutation-ratchet.mjs:294 is `RELATIVE_IMPORT_RE = /from\s+["'](\.[^"']*)["']/g`. Only a
+      relative specifier after `from` becomes an edge. package.json "imports" maps `#src/*`,
+      `#scripts/*` and `#test/*`, and none of them is read.
+    - 171 test files import source through `#src/` (114 at the top level, 57 nested), with 596 real
+      `#src` import specifiers. None of these specifiers produce a pair. Literal dynamic `import("../src/…")` is
+      missed too (377 real dynamic imports of src).
+    - The map today: 586 of 634 mutable modules have importers, with 11,323 pairs. With real
+      imports read through the alias and dynamic literals, it is 618 modules and 12,049 pairs:
+      32 modules newly reached, 175 modules with a longer importer list, and 179 test files that
+      add their first src edge. W1-T9873's recursive listing added exactly 1 pair (11,322 →
+      11,323) and no module, because the nested tests use `#src`.
+    - 15 of today's pairs are FALSE edges: the text regex matches `from "../src/…"` inside
+      fixture template strings. Another 52 src-shaped specifiers in fixture text resolve to no file.
+      A text-level fail-loud check would fire on those, so the extraction has to see real import
+      syntax only.
+    - THE GAP GROWS ON ITS OWN. W1-T9864 (#12542) asks every new test to import through
+      `#src/*`, W1-T10064 rewrites worker-added tests to it, and the test/ restructure moves
+      tests into folders with alias imports. Every new or moved test leaves the nightly's map, so the
+      nightly measures fewer test↔module pairs each week while still reporting a score: a check
+      that passes while comparing less.
+    WHAT CONSUMES THE OUTPUT: .github/workflows/mutation-nightly.yml only. It is not a required
+    check, not in ci-gate.yml's needs, and gates no merge. A red night opens a needs-human issue
+    (scripts/needs-human-issue.mjs --source mutation-nightly), and the report artifact
+    mutation-nightly-report feeds a human ratchet-up of scripts/mutation-baseline.json's
+    "nightly" section. src/lib/mutation-verdict-pull.ts reads the PR gate's
+    mutation-verdict-ledger artifact, not this one. The PR-time mutation-ratchet job uses
+    stryker.conf.json's own commandRunner, not this map. Hence priority 2.
+    RUN TIME: the last 12 scheduled nightlies (10-10..10-21) took 21-210 min when green
+    (median 73), one was cancelled at the 240-min timeout (10-17), and two failed. 10-21's run
+    planned in 43 s, included 8 of 14 sampled files (6 excluded: 4 over the 8000 ms command budget,
+    2 source readers), and ran Stryker for 20 min. 32 newly reached modules are 5% of 634,
+    so about 0.8 more sampled files per night become candidates before the budget check. 175
+    modules gain importers, which lengthens their commands and can push some over
+    commandBudgetMs into a named exclusion. The build measures both effects (design 5).
+  design: |
+    1. Importer edges come from REAL import syntax in each test file: static `import … from`
+       (type imports included, as today), bare `import "…"`, `export … from`, and `import()` whose
+       argument is a string or substitution-free template literal. A specifier inside a string or
+       template literal that is NOT in an import position (fixture text) produces no edge. Use a
+       parser that is already installed by the nightly's `npm ci` (for example @swc/core's
+       parseSync, a devDependency; it parsed all 3907 tests in ~6 s, against a 43 s plan step) or an
+       equivalent string- and template-aware scan. The typescript package is v7 (native) and has no
+       JS compiler API.
+    2. Specifiers resolve through package.json "imports", READ AT RUN TIME (pattern keys with
+       one `*`), plus relative paths. The `.js`→`.ts` rewrite and an explicit `.ts` stay. A target
+       that exists under src/ but is outside the mutate scope (today four src/lib/*.mjs files) is a
+       known non-mutable target, not an error.
+    3. FAIL LOUD. --nightly-plan exits non-zero BEFORE writing any config, and names each test
+       file and specifier, when a literal import specifier (a) maps under src/ but resolves to no
+       file, or (b) starts with `#` and matches no package.json "imports" key. A non-literal
+       `import(expr)` cannot be resolved. It is counted and named in the plan log, never silently
+       dropped. Today 230 test files have one, mostly `pathToFileURL(SCRIPT)` loads of scripts/.
+    4. COVERAGE LINE, NOT A THRESHOLD: the plan log prints the number of test files with ≥1 src
+       edge, modules with importers, pairs, and how many edges came through each alias key. The
+       plan asserts that every test file with a resolved import of a mutable module appears in that
+       module's importer list. A miss is a named failure.
+    5. The PR body reports, measured on the head tree: modules newly reached and modules with
+       longer importer lists. For the next three night indexes, it reports included/excluded
+       counts and planned command ms before vs after, run with --nightly-plan locally or by script.
+       No commandBudgetMs or fileCap change belongs in this task. If the measurement argues for one,
+       file it separately.
+    6. Out of scope: transitive reach through #test/ helpers (the map is DIRECT by design,
+       mutation-ratchet.mjs:285-292), and dropping type-only imports from the edge set.
+    7. test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts (folder from
+       `rmd test-place`, high confidence via ci-parity) drives deriveDirectImporters on
+       synthetic trees, plus one assertion over the real repo: at least one real test imports src
+       through `#src/`, and every such test is in the map. That assertion fails if the alias
+       stops being read.
+  acceptance:
+    - claim: 'a test that imports a module through #src is one of its direct importers'
+      proof: 'grep: test("W1-T10354: a test that imports a module through #src is one of its direct importers" in test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts'
+    - claim: 'the alias targets come from package.json imports, so a new alias key resolves without a code change'
+      proof: 'grep: test("W1-T10354: the alias targets come from package\.json imports" in test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts'
+    - claim: 'a literal dynamic import of a src module is an importer edge'
+      proof: 'grep: test("W1-T10354: a literal dynamic import of a src module is an importer edge" in test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts'
+    - claim: 'an import specifier inside fixture text is not an importer edge and is not a failure'
+      proof: 'grep: test("W1-T10354: an import specifier inside fixture text is not an importer edge" in test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts'
+    - claim: 'the nightly plan fails loudly, naming the test, on a src or alias import it cannot resolve'
+      proof: 'grep: test("W1-T10354: the nightly plan fails loudly on a src or alias import it cannot resolve" in test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts'
+    - claim: 'on the real tree every test that imports src through #src is in the importer map'
+      proof: 'grep: test("W1-T10354: on the real tree every test that imports src through #src is in the importer map" in test/ci/gates/the-mutation-importer-map-sees-package-import-aliases.test.ts'
+  falsifier: |
+    At origin/main, deriveDirectImporters reads only RELATIVE_IMPORT_RE, so a `#src/lib/a.js`
+    import yields no edge, a literal `import("../src/lib/a.js")` yields no edge, and fixture text
+    `from "../src/lib/a.js"` inside a template string DOES yield one. --nightly-plan exits 0 on an
+    unresolvable `#src/lib/missing.js`. Every new test fails at base. The real-tree test is
+    load-bearing only if the code that reads package.json "imports" is deleted and it goes red,
+    not just if its population is non-empty. It asserts that population is non-zero before it compares.

@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts
-  status: queued
+  status: merged
   priority: 1  # every hand PR; each miss costs a red required check, and on an unfiled PR a human escalation (#13218)
   attempts: 0
   rationale: |

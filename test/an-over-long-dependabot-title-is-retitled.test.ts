@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { checkCommitMessage, CONVENTIONAL_LIMITS } from "../src/lib/commit-message.js";
 import {
-  fitDependabotTitle, GROUP_BUMP_RE, overallSemverLevel, parseDependabotBumpFacts, reconcileDependabotTitle, SINGLE_BUMP_RE, TITLE_CLAUSE_RE,
+  fitDependabotTitle, GROUP_BUMP_RE, isActionShaPinOnlyProposal, overallSemverLevel, parseDependabotBumpFacts, reconcileDependabotTitle, SINGLE_BUMP_RE, TITLE_CLAUSE_RE,
 } from "../src/lib/dep-review.js";
 
 // #11968's title as Dependabot wrote it (and restored it on 2026-10-16T16:44:30Z), 162 characters.
@@ -21,6 +21,35 @@ const PR11968_BODY = [
 ].join("\n");
 const LONG_NAME = `@scope/${"a".repeat(80)}`;
 const UNFITTABLE_TITLE = `chore(deps): bump ${LONG_NAME} from 1.2.3 to 1.2.4 in /`;
+
+test("a full-SHA Dependabot title is fitted only while its body retains exact pin evidence", async (t) => {
+  const from = "8ac9e5ce44cc7178e0e04229a91bdcc003166e57";
+  const to = "9a96bc4d2b09685b6142bcfe25a3dc17cb2d7347";
+  for (const action of ["google/osv-scanner-action/osv-scanner-action", "google/osv-scanner-action/osv-reporter-action"]) {
+    const title = `chore(deps): bump ${action} from ${from} to ${to}`;
+    const body = `Bumps [${action}](https://github.com/google/osv-scanner-action) from ${from} to ${to}.`;
+    const diff = `diff --git a/.github/workflows/scan.yml b/.github/workflows/scan.yml\n--- a/.github/workflows/scan.yml\n+++ b/.github/workflows/scan.yml\n@@ -1 +1 @@\n-        uses: ${action}@${from} # v2.0.0\n+        uses: ${action}@${to} # v2.0.0\n`;
+    const fit = fitDependabotTitle(title, body);
+    assert.equal(fit.kind, "fitted");
+    if (fit.kind !== "fitted") throw new Error("expected fitted title");
+    assert.deepEqual(checkCommitMessage(fit.title), []);
+    assert.equal(fit.title, `chore(deps): bump ${action} to ${to.slice(0, 12)}`);
+    assert.equal(isActionShaPinOnlyProposal(title, body, diff), true);
+    assert.equal(isActionShaPinOnlyProposal(fit.title, body, diff), true, "the exact diff still requires the full body pins");
+    assert.equal(isActionShaPinOnlyProposal(fit.title, body.replace(to, "f".repeat(40)), diff), false);
+    for (const missing of ["", body.replace(from, "f".repeat(40)), body.replace(to, "f".repeat(40)), body.replace(action, "other/action")]) {
+      assert.equal(fitDependabotTitle(title, missing).kind, "unfittable");
+    }
+    const f = lane(t, title, body);
+    assert.equal(await f.run(), "retitled");
+    assert.deepEqual(f.writes, [fit.title]);
+    assert.equal(await f.run(), "fits");
+    assert.equal(f.writes.length, 1);
+  }
+  const action = "owner/" + "long-action/".repeat(10) + "scanner";
+  assert.equal(fitDependabotTitle(`chore(deps): bump ${action} from ${from} to ${to}`,
+    `Bumps ${action} from ${from} to ${to}`).kind, "unfittable");
+});
 
 test("W1-T9828: an over-long Dependabot title is fitted keeping its dependency and versions", () => {
   assert.ok(PR11968_TITLE.length > CONVENTIONAL_LIMITS.headerMaxLength, "the recorded fixture is the real over-long title");

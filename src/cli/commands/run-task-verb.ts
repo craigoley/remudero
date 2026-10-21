@@ -1,5 +1,5 @@
 // W1-T9332: shared entrypoint collaborators arrive through the host; libraries import directly.
-// A per-call closure binds helpers to the same host, while the probe cache stays process-wide.
+// Top-level helpers take narrow host ports; the factory snapshots ports once and binds public facades.
 import type { PlanLintOutcome } from "../../lib/review.js";
 import type { QuarantinedTask } from "../../lib/plan.js";
 import { type FixProgressJudge, type FixProgressVerdict } from "../../lib/fix-progress-judge.js";
@@ -61,6 +61,7 @@ import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
 import { systemClock, type Clock } from "../../lib/clock.js";
+import { resolveReleasedIds, type ReleaseReaders } from "../../lib/drain.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "../../lib/cash-trial.js";
 import { benchmarkNonDispatchSpawn, callerOwnsBenchmarkReceipt, type BenchmarkStackEvidence, dispatchTaskShape, fixLaneBenchmarkWork, type BenchmarkWorkInput } from "../../lib/benchmark-run.js";
 import { type RepairReceiptContext } from "../../lib/repair-cost-evidence.js";
@@ -604,6 +605,7 @@ export interface RunTaskCommandHost {
   readonly execFilePromise: (file: string, args: readonly string[], options: import('node:child_process').ExecFileOptionsWithStringEncoding) => Promise<{ stdout: string; stderr: string }>;
   readonly AWAITING_EXTERNAL_LEDGER_STEP: string;
   readonly readLedgerRawLines: (path: string) => readonly string[];
+  readonly releaseReadersFor: (path: string) => ReleaseReaders;
 }
 
 export interface WorkerStateSensor {
@@ -1286,127 +1288,129 @@ const PROBE_KEY_FIELDS = ["imageBuildSha", "harnessRevision", "workerSettings", 
 
 const PROCESS_PROBE_VERDICTS = createProbeVerdictCache();
 
-export function runTaskCommandHelpers(host: RunTaskCommandHost) {
-  const {
-    BRANCH_NAME_CONTRACT_PART,
-    syncPlanOrRefuse,
-    lintPlanForReview,
-    proofRepairRoundRefusalInWorktree,
-    startShellLessMergeConflictMerge,
-    terminalVerdictFields,
-    renderReconClaimLines,
-    CENSUS_BASELINE_FILES,
-    workerBoundaryStack,
-    buildBaseReproductionProbe,
-    writeSyncLine,
-    WORKER_STATE_LEDGER_STEP,
-    capWorkerTailLines,
-    writeWorkerTailBestEffort,
-    attributeWorkerStreamEvent,
-    quietBoundHistory,
-    readWorktreeHeadReflog,
-    workerCreatedCurrentHead,
-    syncPlanOrRefuseAsync,
-    isTerminalRed,
-    ghPrCreateFillCommand,
-    withDiagnostics,
-    draftPrCreate,
-    prCreateArgv,
-    runGhPrCreate,
-    lastCommitSubject,
-    appendTaskTrailerToCommit,
-    fetchPrBodyViaGh,
-    fetchPrDiffFilesViaGh,
-    changeView,
-    rewriteAcceptanceBlockFromPlan,
-    execGrepProofInWorktree,
-    ensureTaskTrailer,
-    ghPrHeadGateway,
-    checkPrOwnership,
-    scrubGitCredentialText,
-    openTaskIdsFromPlan,
-    yieldingSleep,
-    restRollupFor,
-    pollRestTarget,
-    ciGateState,
-    STALL_WINDOW,
-    checkWaitStalled,
-    waitForCiGreen,
-    runReview,
-    ghLiveState,
-    ghLiveHead,
-    captureWorktreeSnapshotViaGit,
-    ghUpdateBranch,
-    redBaseRefreshFactsFromRest,
-    fixRebaseMergeFactsFromRest,
-    reclaimAbandonedWorker,
-    fixWorkerRunId,
-    fixWorkerReceipt,
-    spawnFixWorkerBounded,
-    readFixRoundCommitsViaGit,
-    runNpmScriptViaSpawn,
-    commitGeneratorOutputViaGit,
-    readPackageScriptsFor,
-    runFixRung,
-    buildProofAmendmentGitOps,
-    buildProofAmendmentWritePorts,
-    prNumberFromRef,
-    workerSignal,
-    harvestFollowupsFromReport,
-    commitsAhead,
-    sha256Hex,
-    readRuleSourceFileOrUndefined,
-    DEFAULT_BUDGET_USD,
-    archiveWorkerTranscript,
-    withPredecessorTranscriptCopies,
-    benchmarkRunLedgerLogger,
-    recordBenchmarkWorkerAttempt,
-    dispatchFallbackObserver,
-    withGitCredentialSocket,
-    runErrorCause,
-    censusPushRefusal,
-    CENSUS_PUSH_CHECK,
-    CENSUS_SNAPSHOT_ENV,
-    COVERAGE_PUSH_CHECK,
-    CENSUS_PUSH_NEVER_BYPASS,
-    fixCensusAppliesToRepo,
-    writeFixCensusSnapshot,
-    writeFixCensusSnapshotAsync,
-    checkFixCensusSnapshotAsync,
-    FixRoundPushError,
-    pushFixRound,
-    coveragePrecheck,
-    coveragePushRefusal,
-    pushFixRoundPrechecked,
-    repairRetroAcceptanceBlock,
-    defaultRetroFetchBody,
-    defaultRetroEditBody,
-    prUrlTarget,
-    readHeadShaRest,
-    resolveFixRungTaskContractAtHeadAsync,
-    MERGE_BASE_DIFF_ARGS,
-    hostWorktreeGitResult,
-    dispatchClaimReserverAsyncFor,
-    WORKTREE_REAP_BOOT_CONTRACT_VERSION,
-    logCloneReapSurvey,
-    cloneReapPlan,
-    logCloneReapRow,
-    DISK_RECLAIM_DEFAULT_SWEEPS,
-    createDaemonGatewayFactory,
-    readRegistrationChanges,
-    commitWorkerEdits,
-    fixRoundGitOwnership,
-    MISSING_COMMIT_MESSAGE_REASON,
-    harnessCommitForShellLessWorker,
-    worktreeHasUncommittedChanges,
-    COMMIT_LINE_RESUME_PROMPT,
-    writerCannotResume,
-    missingCommitLinePrompt,
-    pathIsUnderDeclaredSurface,
-    execFilePromise,
-    AWAITING_EXTERNAL_LEDGER_STEP,
-    readLedgerRawLines,
-  } = host;
+type RunTaskHelperHost = Pick<RunTaskCommandHost,
+  "BRANCH_NAME_CONTRACT_PART" |
+  "syncPlanOrRefuse" |
+  "lintPlanForReview" |
+  "proofRepairRoundRefusalInWorktree" |
+  "startShellLessMergeConflictMerge" |
+  "terminalVerdictFields" |
+  "renderReconClaimLines" |
+  "CENSUS_BASELINE_FILES" |
+  "workerBoundaryStack" |
+  "buildBaseReproductionProbe" |
+  "writeSyncLine" |
+  "WORKER_STATE_LEDGER_STEP" |
+  "capWorkerTailLines" |
+  "writeWorkerTailBestEffort" |
+  "attributeWorkerStreamEvent" |
+  "quietBoundHistory" |
+  "readWorktreeHeadReflog" |
+  "workerCreatedCurrentHead" |
+  "syncPlanOrRefuseAsync" |
+  "isTerminalRed" |
+  "ghPrCreateFillCommand" |
+  "withDiagnostics" |
+  "draftPrCreate" |
+  "prCreateArgv" |
+  "runGhPrCreate" |
+  "lastCommitSubject" |
+  "appendTaskTrailerToCommit" |
+  "fetchPrBodyViaGh" |
+  "fetchPrDiffFilesViaGh" |
+  "changeView" |
+  "rewriteAcceptanceBlockFromPlan" |
+  "execGrepProofInWorktree" |
+  "ensureTaskTrailer" |
+  "ghPrHeadGateway" |
+  "checkPrOwnership" |
+  "scrubGitCredentialText" |
+  "openTaskIdsFromPlan" |
+  "yieldingSleep" |
+  "restRollupFor" |
+  "pollRestTarget" |
+  "ciGateState" |
+  "STALL_WINDOW" |
+  "checkWaitStalled" |
+  "waitForCiGreen" |
+  "runReview" |
+  "ghLiveState" |
+  "ghLiveHead" |
+  "captureWorktreeSnapshotViaGit" |
+  "ghUpdateBranch" |
+  "redBaseRefreshFactsFromRest" |
+  "fixRebaseMergeFactsFromRest" |
+  "reclaimAbandonedWorker" |
+  "fixWorkerRunId" |
+  "fixWorkerReceipt" |
+  "spawnFixWorkerBounded" |
+  "readFixRoundCommitsViaGit" |
+  "runNpmScriptViaSpawn" |
+  "commitGeneratorOutputViaGit" |
+  "readPackageScriptsFor" |
+  "runFixRung" |
+  "buildProofAmendmentGitOps" |
+  "buildProofAmendmentWritePorts" |
+  "prNumberFromRef" |
+  "workerSignal" |
+  "harvestFollowupsFromReport" |
+  "commitsAhead" |
+  "sha256Hex" |
+  "readRuleSourceFileOrUndefined" |
+  "DEFAULT_BUDGET_USD" |
+  "archiveWorkerTranscript" |
+  "withPredecessorTranscriptCopies" |
+  "benchmarkRunLedgerLogger" |
+  "recordBenchmarkWorkerAttempt" |
+  "dispatchFallbackObserver" |
+  "withGitCredentialSocket" |
+  "runErrorCause" |
+  "censusPushRefusal" |
+  "CENSUS_PUSH_CHECK" |
+  "CENSUS_SNAPSHOT_ENV" |
+  "COVERAGE_PUSH_CHECK" |
+  "CENSUS_PUSH_NEVER_BYPASS" |
+  "fixCensusAppliesToRepo" |
+  "writeFixCensusSnapshot" |
+  "writeFixCensusSnapshotAsync" |
+  "checkFixCensusSnapshotAsync" |
+  "FixRoundPushError" |
+  "pushFixRound" |
+  "coveragePrecheck" |
+  "coveragePushRefusal" |
+  "pushFixRoundPrechecked" |
+  "repairRetroAcceptanceBlock" |
+  "defaultRetroFetchBody" |
+  "defaultRetroEditBody" |
+  "prUrlTarget" |
+  "readHeadShaRest" |
+  "resolveFixRungTaskContractAtHeadAsync" |
+  "MERGE_BASE_DIFF_ARGS" |
+  "hostWorktreeGitResult" |
+  "dispatchClaimReserverAsyncFor" |
+  "WORKTREE_REAP_BOOT_CONTRACT_VERSION" |
+  "logCloneReapSurvey" |
+  "cloneReapPlan" |
+  "logCloneReapRow" |
+  "DISK_RECLAIM_DEFAULT_SWEEPS" |
+  "createDaemonGatewayFactory" |
+  "readRegistrationChanges" |
+  "commitWorkerEdits" |
+  "fixRoundGitOwnership" |
+  "MISSING_COMMIT_MESSAGE_REASON" |
+  "harnessCommitForShellLessWorker" |
+  "worktreeHasUncommittedChanges" |
+  "COMMIT_LINE_RESUME_PROMPT" |
+  "writerCannotResume" |
+  "missingCommitLinePrompt" |
+  "pathIsUnderDeclaredSurface" |
+  "execFilePromise" |
+  "AWAITING_EXTERNAL_LEDGER_STEP" |
+  "readLedgerRawLines"
+>;
+
+type BoundRunTaskHelper<F> = F extends (helperHost: never, ...args: infer A) => infer R ? (...args: A) => R : never;
+
 
 function defaultBinaryPinDeps(claudeBin: string): Parameters<typeof readBinaryPin>[0] {
   return {
@@ -1427,10 +1431,11 @@ function deriveRunawayTurnBound(
 }
 
 function dispatchStreamObserver(
-  base: WorkerStreamObserver,
+  helperHost: Pick<RunTaskHelperHost, "attributeWorkerStreamEvent">, base: WorkerStreamObserver,
   spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider"> & { cwd?: string },
   assignment: () => Pick<WorkerSelectionAssignment, "id" | "requested" | "selected"> | undefined,
 ): WorkerStreamObserver {
+  const { attributeWorkerStreamEvent } = helperHost;
   return (event) => {
     const current = assignment();
     const located = spawn.cwd && !event.cwd ? { ...event, cwd: spawn.cwd } : event;
@@ -1439,7 +1444,7 @@ function dispatchStreamObserver(
 }
 
 function watchDispatchSpawn(
-  rawSpawn: typeof spawnWorker,
+  helperHost: Pick<RunTaskHelperHost, "quietBoundHistory" | "commitWorkerEdits" | "worktreeHasUncommittedChanges">, rawSpawn: typeof spawnWorker,
   watch: {
     enabled: boolean;
     taskId: string;
@@ -1459,12 +1464,13 @@ function watchDispatchSpawn(
     history?: QuietBoundHistory;
     judge?: QuietWorkerJudge;
     deliver?: typeof deliverOperatorAnswerToRunningWorker;
-    hasUncommittedChanges?: typeof worktreeHasUncommittedChanges;
-    commit?: typeof commitWorkerEdits;
+    hasUncommittedChanges?: RunTaskCommandHost["worktreeHasUncommittedChanges"];
+    commit?: RunTaskCommandHost["commitWorkerEdits"];
     push?: typeof gitPushRunBranchAsync;
     headSha?: (cwd: string) => string;
   } = {},
 ): typeof spawnWorker {
+  const { quietBoundHistory, commitWorkerEdits, worktreeHasUncommittedChanges } = helperHost;
   if (!watch.enabled) return rawSpawn;
   const { taskId, spawnArgs, task, log } = watch;
   const state: { rootPid?: number; ended?: QuietRoundEndedError } = {};
@@ -1527,12 +1533,13 @@ function checkpointUndeclaredFields(undeclared: readonly string[]): { undeclared
 }
 
 async function commitAndPushRestartCheckpoint(
-  worktreePath: string,
+  helperHost: Pick<RunTaskHelperHost, "commitWorkerEdits" | "worktreeHasUncommittedChanges">, worktreePath: string,
   task: { files?: readonly string[]; acceptance?: readonly AcceptanceCriterion[] },
   taskId: string,
   waitingOn: string,
-  seams: { push?: typeof gitPushRunBranchAsync; hasUncommittedChanges?: typeof worktreeHasUncommittedChanges } = {},
+  seams: { push?: typeof gitPushRunBranchAsync; hasUncommittedChanges?: RunTaskCommandHost["worktreeHasUncommittedChanges"] } = {},
 ): Promise<{ undeclared: readonly string[] }> {
+  const { commitWorkerEdits, worktreeHasUncommittedChanges } = helperHost;
   let undeclared: readonly string[] = [];
   if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(worktreePath)) {
     const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
@@ -1585,7 +1592,7 @@ function boundedWorkerTelemetryText(value: string | undefined): string | undefin
     : `${normalized.slice(0, WORKER_TELEMETRY_TEXT_MAX_CHARS)}…`;
 }
 
-function buildWorkerStateSensor(args: {
+function buildWorkerStateSensor(helperHost: Pick<RunTaskHelperHost, "WORKER_STATE_LEDGER_STEP" | "capWorkerTailLines" | "writeWorkerTailBestEffort">, args: {
   ledgerPath: string;
   runId: string;
   taskId: string;
@@ -1594,6 +1601,7 @@ function buildWorkerStateSensor(args: {
   now?: () => number;
   pollMs?: number;
 }): WorkerStateSensor {
+  const { WORKER_STATE_LEDGER_STEP, capWorkerTailLines, writeWorkerTailBestEffort } = helperHost;
   const now = args.now ?? Date.now;
   const tracker = new WorkerStateTracker(args.quietFloorMs ?? DEFAULT_WORKER_QUIET_FLOOR_MS);
   const tailPath = join(args.root, "state", "runs", `${args.runId}.tail`);
@@ -1752,7 +1760,7 @@ function resolveShadowInstanceArmPermission(shadowInstance: boolean): { armed: b
 }
 
 async function ghPrCreateFillCommandAsync(
-  worktreePath: string,
+  helperHost: Pick<RunTaskHelperHost, "withDiagnostics" | "draftPrCreate" | "prCreateArgv">, worktreePath: string,
   owner: string,
   repo: string,
   branch: string,
@@ -1762,6 +1770,7 @@ async function ghPrCreateFillCommandAsync(
   openOnFailingProof = false,
   childStore: ChildEntryStoreOptions = {},
 ): Promise<PrCreateCommand> {
+  const { withDiagnostics, draftPrCreate, prCreateArgv } = helperHost;
   const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
   let checkedBody: string;
   try {
@@ -1801,7 +1810,8 @@ function worktreeDiffStat(worktreePath: string): string {
   }
 }
 
-function branchPrTitle(worktreePath: string, task?: { id: string; title?: string }): string | undefined {
+function branchPrTitle(helperHost: Pick<RunTaskHelperHost, "lastCommitSubject">, worktreePath: string, task?: { id: string; title?: string }): string | undefined {
+  const { lastCommitSubject } = helperHost;
   try {
     const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", ...(task ? ["--no-merges"] : []), "origin/main..HEAD"]).split("\n");
     return (task && prTitleForTask(subjects, task)) || (prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath));
@@ -1930,7 +1940,8 @@ function armRunIdFromLedger(
   return runId;
 }
 
-function mergeShaNow(prUrl: string, fetch: GhApiFetcher = ghJson): string | undefined {
+function mergeShaNow(helperHost: Pick<RunTaskHelperHost, "prUrlTarget">, prUrl: string, fetch: GhApiFetcher = ghJson): string | undefined {
+  const { prUrlTarget } = helperHost;
   const target = prUrlTarget(prUrl);
   if (!target) return undefined;
   try {
@@ -1995,15 +2006,15 @@ function lostRaceEscalation(input: {
 }
 
 async function riskJudgeDisarm(
-  ctx: Parameters<typeof disposeDisarm>[1],
+  helperHost: Pick<RunTaskHelperHost, "prUrlTarget">, ctx: Parameters<BoundRunTaskHelper<typeof disposeDisarm>>[1],
   disarm: typeof disarmAutoMergeAsync = disarmAutoMergeAsync,
-  disposition: Parameters<typeof disposeDisarm>[2] = {},
-): Promise<ReturnType<typeof disposeDisarm>> {
-  return disposeDisarm(await disarm(ctx.prUrl), ctx, disposition);
+  disposition: Parameters<BoundRunTaskHelper<typeof disposeDisarm>>[2] = {},
+): Promise<ReturnType<BoundRunTaskHelper<typeof disposeDisarm>>> {
+  return disposeDisarm(helperHost, await disarm(ctx.prUrl), ctx, disposition);
 }
 
 function disposeDisarm(
-  outcome: DisarmOutcome | void,
+  helperHost: Pick<RunTaskHelperHost, "prUrlTarget">, outcome: DisarmOutcome | void,
   ctx: {
     prUrl: string;
     taskId: string;
@@ -2034,7 +2045,7 @@ function disposeDisarm(
       taskId: ctx.taskId,
       runId: ctx.runId,
       refusal: ctx.refusal,
-      mergeSha: (deps.mergeSha ?? mergeShaNow)(ctx.prUrl),
+      mergeSha: (deps.mergeSha ?? mergeShaNow.bind(undefined, helperHost))(ctx.prUrl),
       confidence: ctx.confidence,
       reasons: ctx.reasons,
       armRunId: armRunIdFromLedger((deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(), ctx.prUrl),
@@ -2042,16 +2053,18 @@ function disposeDisarm(
   };
 }
 
-function fallbackPushEvidence(text: string): string {
+function fallbackPushEvidence(helperHost: Pick<RunTaskHelperHost, "scrubGitCredentialText">, text: string): string {
+  const { scrubGitCredentialText } = helperHost;
   const trimmed = text.trim();
   if (trimmed === "") return FALLBACK_PUSH_EVIDENCE_ABSENT;
   return capStderrExcerpt(scrubGitCredentialText(trimmed), STDERR_EXCERPT_CAP);
 }
 
 function fallbackPushCause(
-  probe: RemotePresenceProbeFailure | undefined,
+  helperHost: Pick<RunTaskHelperHost, "scrubGitCredentialText">, probe: RemotePresenceProbeFailure | undefined,
   workerEvidence: string,
 ): FallbackPushCause {
+  const { scrubGitCredentialText } = helperHost;
   if (!probe || probe.status !== 2) {
     const reason = classifyGhFailure(probe?.status ?? null, probe?.stderr ?? "");
     // `detail` is scrubbed too (not only the new `evidence` field below): it already interpolated
@@ -2065,7 +2078,7 @@ function fallbackPushCause(
       detail:
         `git ls-remote could not confirm the branch is absent (status ${probe?.status ?? "none"}, ` +
         `classified ${reason})${scrubbedStderr ? `: ${scrubbedStderr}` : ""}`,
-      evidence: fallbackPushEvidence(probe?.stderr ?? ""),
+      evidence: fallbackPushEvidence(helperHost, probe?.stderr ?? ""),
     };
   }
   if (classifyGhFailure(null, workerEvidence) === "auth") {
@@ -2075,14 +2088,14 @@ function fallbackPushCause(
       // THE FIX: `credential_expired`'s `detail` above stayed a fixed sentence on all 15 incidents
       // to date — this is the text the classifier just read to reach that verdict, carried instead
       // of discarded (W1-T2522).
-      evidence: fallbackPushEvidence(workerEvidence),
+      evidence: fallbackPushEvidence(helperHost, workerEvidence),
     };
   }
   if (!/\bgit\s+push\b/i.test(workerEvidence)) {
     return {
       cause: "push_not_attempted",
       detail: "no \"git push\" invocation appears anywhere in the worker's own transcript",
-      evidence: fallbackPushEvidence(workerEvidence),
+      evidence: fallbackPushEvidence(helperHost, workerEvidence),
     };
   }
   return {
@@ -2090,7 +2103,7 @@ function fallbackPushCause(
     detail:
       "the branch is confirmed absent from origin but neither a credential failure nor a missing " +
       "push attempt is evident in the worker's own transcript",
-    evidence: fallbackPushEvidence(workerEvidence),
+    evidence: fallbackPushEvidence(helperHost, workerEvidence),
   };
 }
 
@@ -2109,11 +2122,12 @@ function prOpenHandoffDecline(run: { irreversible: boolean; noMerge: boolean; sh
 }
 
 async function pollToGate(
-  prUrl: string,
+  helperHost: Pick<RunTaskHelperHost, "isTerminalRed" | "yieldingSleep" | "restRollupFor" | "pollRestTarget" | "STALL_WINDOW" | "checkWaitStalled" | "AWAITING_EXTERNAL_LEDGER_STEP">, prUrl: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   everySec = 6,
   deps: PollDeps = {},
 ): Promise<GateOutcome> {
+  const { isTerminalRed, yieldingSleep, restRollupFor, pollRestTarget, STALL_WINDOW, checkWaitStalled, AWAITING_EXTERNAL_LEDGER_STEP } = helperHost;
   const read = deps.readJson ?? ghJsonAsync;
   const sleep = deps.sleep ?? yieldingSleep;
   // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
@@ -2180,7 +2194,8 @@ async function pollToGate(
   }
 }
 
-function ciGateBlockReason(r: CiGateOutcome | "green" | "red" | "timeout"): string {
+function ciGateBlockReason(helperHost: Pick<RunTaskHelperHost, "ciGateState">, r: CiGateOutcome | "green" | "red" | "timeout"): string {
+  const { ciGateState } = helperHost;
   const state = ciGateState(r);
   if (state === "freshness_handoff") {
     return "daemon code became stale while CI was pending; yielded at the recorded external-wait boundary";
@@ -2315,10 +2330,11 @@ function parseAlreadySatisfied(text: string): AlreadySatisfiedClaim | undefined 
 }
 
 function resolveAlreadySatisfied(
-  claim: AlreadySatisfiedClaim,
+  helperHost: Pick<RunTaskHelperHost, "prNumberFromRef">, claim: AlreadySatisfiedClaim,
   github: GitHub,
   taskId: string,
 ): AlreadySatisfiedResolution {
+  const { prNumberFromRef } = helperHost;
   const claimedNumber = prNumberFromRef(claim.ref);
   if (claimedNumber === undefined) return { outcome: "refuted", reason: "unparsable_ref" };
   // W1-T441: ask for EVERY merged PR carrying the trailer, not just the newest. Membership needs
@@ -2348,14 +2364,14 @@ function resolveAlreadySatisfied(
 }
 
 function resolveAlreadySatisfiedWithRetry(
-  claim: AlreadySatisfiedClaim,
+  helperHost: Pick<RunTaskHelperHost, "prNumberFromRef">, claim: AlreadySatisfiedClaim,
   github: GitHub,
   taskId: string,
   resolve: (
     c: AlreadySatisfiedClaim,
     g: GitHub,
     t: string,
-  ) => AlreadySatisfiedResolution = resolveAlreadySatisfied,
+  ) => AlreadySatisfiedResolution = resolveAlreadySatisfied.bind(undefined, helperHost),
   attempts: number = ALREADY_SATISFIED_VERIFY_ATTEMPTS,
 ): { resolution: AlreadySatisfiedResolution; attempts: number } {
   // A bound below one would ask nothing and return no resolution at all, so the first read always
@@ -2398,7 +2414,8 @@ function alreadySatisfiedVerdict(
   };
 }
 
-function implementAttemptOutcome(r: WorkerResult): AttemptOutcome {
+function implementAttemptOutcome(helperHost: Pick<RunTaskHelperHost, "workerSignal">, r: WorkerResult): AttemptOutcome {
+  const { workerSignal } = helperHost;
   if (r.apiError) return { success: false, evidence: workerSignal(r) };
   if (r.isError && r.subtype === "error_max_budget_usd") throw new ImplementBudgetBreach();
   if (r.isError && r.subtype === "success") return { success: true };
@@ -2407,11 +2424,12 @@ function implementAttemptOutcome(r: WorkerResult): AttemptOutcome {
 }
 
 function finishTransientRetry(
-  driverResult: DiagnoseThenRetryResult,
+  helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields">, driverResult: DiagnoseThenRetryResult,
   context: { taskId: string; runId: string; repoDir: string; worktreePath: string; costUsd: number;
     worker: WorkerResult; log: RunTaskContext["log"]; say: RunTaskContext["say"] },
   removeWorktree: typeof worktreeRemove = worktreeRemove,
 ): RunResult | undefined {
+  const { terminalVerdictFields } = helperHost;
   if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
   const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
   if (driverResult.cashAllowanceExhausted) {
@@ -2479,7 +2497,8 @@ function nonEmptyLines(s: string): string[] {
     .filter((l) => l.length > 0);
 }
 
-function reconObservedToContext(recon: WorkerResult, taskId: string, recordPath?: string): string {
+function reconObservedToContext(helperHost: Pick<RunTaskHelperHost, "renderReconClaimLines">, recon: WorkerResult, taskId: string, recordPath?: string): string {
+  const { renderReconClaimLines } = helperHost;
   const parsed = parseReconReport(workerTranscript(recon));
   const lines = nonEmptyLines(parsed?.observed ?? "");
   const gaps = nonEmptyLines(parsed?.couldntVerify ?? "");
@@ -2538,7 +2557,8 @@ function reconMaskedContextNote(
   return lines.join("\n");
 }
 
-function fileDigestOrAbsent(p: string): string {
+function fileDigestOrAbsent(helperHost: Pick<RunTaskHelperHost, "sha256Hex">, p: string): string {
+  const { sha256Hex } = helperHost;
   try {
     return sha256Hex(readFileSync(p, "utf8"));
   } catch {
@@ -2546,13 +2566,15 @@ function fileDigestOrAbsent(p: string): string {
   }
 }
 
-function filesDigest(worktreePath: string, files: ReadonlyArray<string>): string {
+function filesDigest(helperHost: Pick<RunTaskHelperHost, "sha256Hex">, worktreePath: string, files: ReadonlyArray<string>): string {
+  const { sha256Hex } = helperHost;
   const sorted = [...files].sort();
-  const combined = sorted.map((f) => `${f}:${fileDigestOrAbsent(join(worktreePath, f))}`).join("\n");
+  const combined = sorted.map((f) => `${f}:${fileDigestOrAbsent(helperHost, join(worktreePath, f))}`).join("\n");
   return sha256Hex(combined);
 }
 
-function taskRecordSha(planPath: string, taskId: string): string {
+function taskRecordSha(helperHost: Pick<RunTaskHelperHost, "sha256Hex">, planPath: string, taskId: string): string {
+  const { sha256Hex } = helperHost;
   const recordPath = taskRecordPath(planPath, taskId);
   if (!recordPath) return PLAN_RECORD_ABSENT;
   try {
@@ -2608,7 +2630,8 @@ function writeReconArtifact(root: string, artifact: ReconArtifact): void {
   writeFileSync(p, JSON.stringify(artifact, null, 2));
 }
 
-function reconArtifactToContext(artifact: ReconArtifact, taskId: string, recordPath?: string): string {
+function reconArtifactToContext(helperHost: Pick<RunTaskHelperHost, "renderReconClaimLines">, artifact: ReconArtifact, taskId: string, recordPath?: string): string {
+  const { renderReconClaimLines } = helperHost;
   const lines = nonEmptyLines(artifact.observed);
   const gaps = nonEmptyLines(artifact.couldnt_verify);
   const header =
@@ -2621,9 +2644,9 @@ function reconArtifactToContext(artifact: ReconArtifact, taskId: string, recordP
 }
 
 function buildRuleHeadlinesPart(
-  enabled: boolean,
+  helperHost: Pick<RunTaskHelperHost, "readRuleSourceFileOrUndefined">, enabled: boolean,
   sourcePath: string,
-  readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
+  readFile: (path: string) => string | undefined = helperHost.readRuleSourceFileOrUndefined,
   displayPath: string = sourcePath,
 ): string {
   if (!enabled) return "";
@@ -2831,12 +2854,13 @@ function isManagedCheckoutLockBusy(error: unknown): boolean {
 }
 
 function refreshManagedCheckout(
-  repoDir: string,
+  helperHost: Pick<RunTaskHelperHost, "execFilePromise">, repoDir: string,
   lockPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   install?: (repoDir: string) => void | Promise<void>,
   escalate?: (failure: StagedInstallFailure) => void,
 ): Promise<ManagedCheckoutRefresh> {
+  const { execFilePromise } = helperHost;
   if (!existsSync(join(repoDir, "node_modules"))) return Promise.resolve({ kind: "unborrowed", release: () => {} });
   // W1-T4933: staged and swapped, never the in-place clear-then-fill of ensureInstallFresh, which empties a tree others are linked to.
   const runInstall = install ?? ((dir: string) => void stagedInstall(dir, { log, escalate }));
@@ -3081,15 +3105,16 @@ async function withInflightRunLock<T>(
 }
 
 function endThrownRun(
-  log: RunTaskContext["log"],
+  helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields" | "scrubGitCredentialText" | "runErrorCause">, log: RunTaskContext["log"],
   alreadyEnded: boolean,
   stage: ThrownRunVerdictStage,
   err: unknown,
   costUsd: number,
 ): void {
-  endRunOnce(log, alreadyEnded, () => ({
+  const { runErrorCause } = helperHost;
+  endRunOnce(helperHost, log, alreadyEnded, () => ({
     verdict: "failed",
-    reason: boundedVerdictReason(String((err as Error)?.message ?? err)),
+    reason: boundedVerdictReason(helperHost, String((err as Error)?.message ?? err)),
     stage,
     cause: runErrorCause(err),
     cost_usd: costUsd,
@@ -3097,14 +3122,15 @@ function endThrownRun(
 }
 
 async function deferOpenToSiblingPr(
-  ctx: RunTaskContext,
+  helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields" | "scrubGitCredentialText">, ctx: RunTaskContext,
   run: { impl: WorkerResult; branch: string; worktreePath: string; repoDir: string; costUsd: number },
 ): Promise<RunResult | undefined> {
+  const { terminalVerdictFields } = helperHost;
   const { log, say, opts, owner, task, taskId, runId } = ctx;
   const { impl, branch, worktreePath, repoDir, costUsd } = run;
   const sibling = await readOtherOpenPrForTask(owner, task.repo, taskId, branch, opts.otherOpenPrReader ?? ((args) => ghJsonAsync(args)));
   if (sibling.state === "unreadable") {
-    log("pr.open_existing_check_unreadable", { branch, error: boundedVerdictReason(sibling.error) });
+    log("pr.open_existing_check_unreadable", { branch, error: boundedVerdictReason(helperHost, sibling.error) });
     return undefined;
   }
   if (sibling.state === "none") return undefined;
@@ -3150,19 +3176,23 @@ function reclaimRunWorktree(
 }
 
 function endRefusedRun(
-  log: RunTaskContext["log"],
+  helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields" | "scrubGitCredentialText">, log: RunTaskContext["log"],
   alreadyEnded: boolean,
   stage: RefusedRunVerdictStage,
   result: RunResult,
   reason: string,
 ): RunResult {
-  endRunOnce(log, alreadyEnded, () => ({ verdict: result.verdict, reason: boundedVerdictReason(reason), stage, cost_usd: result.costUsd }));
+  endRunOnce(helperHost, log, alreadyEnded, () => ({ verdict: result.verdict, reason: boundedVerdictReason(helperHost, reason), stage, cost_usd: result.costUsd }));
   return result;
 }
 
-const boundedVerdictReason = (text: string): string => capStderrExcerpt(scrubGitCredentialText(text), STDERR_EXCERPT_CAP);
+function boundedVerdictReason(helperHost: Pick<RunTaskHelperHost, "scrubGitCredentialText">, text: string): string {
+  const { scrubGitCredentialText } = helperHost;
+  return capStderrExcerpt(scrubGitCredentialText(text), STDERR_EXCERPT_CAP);
+}
 
-function endRunOnce(log: RunTaskContext["log"], alreadyEnded: boolean, row: () => Record<string, unknown>): void {
+function endRunOnce(helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields">, log: RunTaskContext["log"], alreadyEnded: boolean, row: () => Record<string, unknown>): void {
+  const { terminalVerdictFields } = helperHost;
   if (alreadyEnded) return;
   try {
     log("verdict", { ...row(), ...terminalVerdictFields(null) });
@@ -3172,7 +3202,7 @@ function endRunOnce(log: RunTaskContext["log"], alreadyEnded: boolean, row: () =
   }
 }
 
-async function repairCensusRefusedPush(input: {
+async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENSUS_BASELINE_FILES" | "reclaimAbandonedWorker" | "fixWorkerRunId" | "fixWorkerReceipt" | "spawnFixWorkerBounded" | "commitsAhead" | "censusPushRefusal" | "CENSUS_PUSH_CHECK" | "CENSUS_SNAPSHOT_ENV" | "COVERAGE_PUSH_CHECK" | "CENSUS_PUSH_NEVER_BYPASS" | "fixCensusAppliesToRepo" | "writeFixCensusSnapshotAsync" | "checkFixCensusSnapshotAsync" | "fixRoundGitOwnership" | "harnessCommitForShellLessWorker">, input: {
   refusal: CensusPushRefusal;
   task: Task;
   runId: string;
@@ -3197,6 +3227,7 @@ async function repairCensusRefusedPush(input: {
   /** Only the implement fallback offers closure catalog edits; the fix lane never does. */
   catalogFiles?: (refusal: CensusPushRefusal) => readonly string[];
 }): Promise<CensusPushRungOutcome> {
+  const { CENSUS_BASELINE_FILES, reclaimAbandonedWorker, fixWorkerRunId, fixWorkerReceipt, spawnFixWorkerBounded, commitsAhead, censusPushRefusal, CENSUS_PUSH_CHECK, CENSUS_SNAPSHOT_ENV, COVERAGE_PUSH_CHECK, CENSUS_PUSH_NEVER_BYPASS, fixCensusAppliesToRepo, writeFixCensusSnapshotAsync, checkFixCensusSnapshotAsync, fixRoundGitOwnership, harnessCommitForShellLessWorker } = helperHost;
   const { task, worktreePath: cwd, log } = input;
   const head = () => hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
   const startHead = head();
@@ -3314,14 +3345,15 @@ async function repairCensusRefusedPush(input: {
 }
 
 function normalizeRunPrAcceptanceFromPlan(
-  prUrl: string,
+  helperHost: Pick<RunTaskHelperHost, "rewriteAcceptanceBlockFromPlan" | "defaultRetroFetchBody" | "defaultRetroEditBody">, prUrl: string,
   taskId: string,
   planCriteria: readonly AcceptanceCriterion[],
   log: (step: string, extra?: Record<string, unknown>) => void,
   // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
   // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
-  deps: Omit<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "diff"> = {},
+  deps: Omit<NonNullable<Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[2]>, "diff"> = {},
 ): "rewritten" | "healthy" | "no-block" | "error" {
+  const { rewriteAcceptanceBlockFromPlan, defaultRetroFetchBody, defaultRetroEditBody } = helperHost;
   if (planCriteria.length === 0) return "no-block";
   const { fetchBody, editBody } = { fetchBody: defaultRetroFetchBody, editBody: defaultRetroEditBody, ...deps };
   try {
@@ -3339,11 +3371,12 @@ function normalizeRunPrAcceptanceFromPlan(
 }
 
 function recordBakedClosureCatalog(
-  prUrl: string,
+  helperHost: Pick<RunTaskHelperHost, "defaultRetroFetchBody" | "defaultRetroEditBody">, prUrl: string,
   files: readonly string[],
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: Pick<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "fetchBody" | "editBody"> = {},
+  deps: Pick<NonNullable<Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[2]>, "fetchBody" | "editBody"> = {},
 ): void {
+  const { defaultRetroFetchBody, defaultRetroEditBody } = helperHost;
   if (files.length === 0) return;
   try {
     const body = (deps.fetchBody ?? defaultRetroFetchBody)(prUrl);
@@ -3358,7 +3391,8 @@ function recordBakedClosureCatalog(
   }
 }
 
-function refusedBranchChangedFiles(worktreePath: string): string[] | undefined {
+function refusedBranchChangedFiles(helperHost: Pick<RunTaskHelperHost, "hostWorktreeGitResult">, worktreePath: string): string[] | undefined {
+  const { hostWorktreeGitResult } = helperHost;
   const base = hostWorktreeGitResult(worktreePath, ["merge-base", "origin/main", "HEAD"]);
   if (base.status !== 0 || base.stdout.trim() === "") return undefined;
   const diff = hostWorktreeGitResult(worktreePath, ["diff", "--name-only", base.stdout.trim(), "HEAD"]);
@@ -3367,10 +3401,11 @@ function refusedBranchChangedFiles(worktreePath: string): string[] | undefined {
 }
 
 async function logCloneReapSurveyAsync(
-  config: Config,
+  helperHost: Pick<RunTaskHelperHost, "cloneReapPlan" | "logCloneReapRow">, config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
-  deps: Omit<NonNullable<Parameters<typeof logCloneReapSurvey>[2]>, "reap"> & { reap?: typeof reapStaleClonesAsync } = {},
+  deps: Omit<NonNullable<Parameters<RunTaskCommandHost["logCloneReapSurvey"]>[2]>, "reap"> & { reap?: typeof reapStaleClonesAsync } = {},
 ): Promise<CloneReapSummary | null> {
+  const { cloneReapPlan, logCloneReapRow } = helperHost;
   try {
     const plan = cloneReapPlan(config, log, deps);
     const summary = await (deps.reap ?? reapStaleClonesAsync)(plan.roots, plan.opts);
@@ -3381,7 +3416,7 @@ async function logCloneReapSurveyAsync(
 }
 
 function logWorktreeReapBootSurvey(
-  config: Config,
+  helperHost: Pick<RunTaskHelperHost, "WORKTREE_REAP_BOOT_CONTRACT_VERSION">, config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
   deps: {
     root?: () => string;
@@ -3392,6 +3427,7 @@ function logWorktreeReapBootSurvey(
     ratifications?: Ratifications;
   } = {},
 ): WorktreeReapSummary | null {
+  const { WORKTREE_REAP_BOOT_CONTRACT_VERSION } = helperHost;
   try {
     const readPolicy =
       deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.worktreeReapBoot);
@@ -3429,14 +3465,14 @@ function logWorktreeReapBootSurvey(
 }
 
 async function logDiskReclaimRung(
-  config: Config,
+  helperHost: Pick<RunTaskHelperHost, "DISK_RECLAIM_DEFAULT_SWEEPS">, config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
   deps: {
     sweepTempDirs?: (opts?: TempSweepOpts) => TempSweepSummary | Promise<TempSweepSummary>;
     reapClonesSurvey?: (
-      ...a: Parameters<typeof logCloneReapSurveyAsync>
+      ...a: Parameters<BoundRunTaskHelper<typeof logCloneReapSurveyAsync>>
     ) => CloneReapSummary | null | Promise<CloneReapSummary | null>;
-    cloneReapDeps?: Parameters<typeof logCloneReapSurveyAsync>[2];
+    cloneReapDeps?: Parameters<BoundRunTaskHelper<typeof logCloneReapSurveyAsync>>[2];
     sweepWorkerHomes?: (
       ...a: Parameters<typeof sweepStaleWorkerHomes>
     ) => ReturnType<typeof sweepStaleWorkerHomes> | Promise<ReturnType<typeof sweepStaleWorkerHomes>>;
@@ -3467,6 +3503,7 @@ async function logDiskReclaimRung(
   objectsPruned: number;
   objectsWouldPrune: number;
 }> {
+  const { DISK_RECLAIM_DEFAULT_SWEEPS } = helperHost;
   // AWAITED (2026-10-06): every sweep's default is the off-loop twin of the sync sweep it replaced.
   const sweepTempDirs = deps.sweepTempDirs ?? DISK_RECLAIM_DEFAULT_SWEEPS.sweepTempDirs;
   const reapClonesSurvey = deps.reapClonesSurvey ?? DISK_RECLAIM_DEFAULT_SWEEPS.reapClonesSurvey;
@@ -3546,7 +3583,8 @@ function logSkillsUsed(
   if (usagePath) recordSkillUsage(usagePath, row);
 }
 
-function fixRungCiFailures(owner: string, repo: string): (prUrl: string, sha?: string) => Promise<CiFailure[]> {
+function fixRungCiFailures(helperHost: Pick<RunTaskHelperHost, "restRollupFor">, owner: string, repo: string): (prUrl: string, sha?: string) => Promise<CiFailure[]> {
+  const { restRollupFor } = helperHost;
   return async (prUrl, sha) => {
     if (sha) return fetchCiFailuresAsync(owner, repo, await restRollupFor(owner, repo, sha, ghJsonAsync));
     const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"]) as { statusCheckRollup?: RollupCheck[] };
@@ -3555,9 +3593,10 @@ function fixRungCiFailures(owner: string, repo: string): (prUrl: string, sha?: s
 }
 
 function cashContainedRunRefusal(
-  config: Config,
+  helperHost: Pick<RunTaskHelperHost, "fixRoundGitOwnership">, config: Config,
   implementCashTools: readonly string[] | undefined,
 ): string | undefined {
+  const { fixRoundGitOwnership } = helperHost;
   const required: Array<{ lane: string; tools: readonly string[] | undefined }> = [
     { lane: "recon", tools: cashDivertSpawnFields("recon").cashTools },
     { lane: "implement", tools: implementCashTools },
@@ -3603,7 +3642,7 @@ function createHarnessCommitRefusalRecorder(state: { reason?: string }): (reason
 }
 
 async function resumeForMissingCommitLine(
-  input: {
+  helperHost: Pick<RunTaskHelperHost, "MISSING_COMMIT_MESSAGE_REASON" | "harnessCommitForShellLessWorker" | "worktreeHasUncommittedChanges">, input: {
     commitCount: number;
     refusalReason: string | undefined;
     report: string;
@@ -3615,7 +3654,7 @@ async function resumeForMissingCommitLine(
     assignmentId?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
-    onCommit?: Parameters<typeof harnessCommitForShellLessWorker>[0]["onCommit"];
+    onCommit?: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[0]["onCommit"];
     /** Resume the worker's OWN session once with the ask-for-the-line prompt. A required
      *  collaborator the implement lane wires, like `log`/`say` — not an optional seam. */
     resume: () => Promise<{
@@ -3628,8 +3667,9 @@ async function resumeForMissingCommitLine(
   },
   // The SAME seam `harnessCommitForShellLessWorker` takes, forwarded to it unchanged: the retried
   // commit is that helper's, so its `commit`/`ahead` fakes are the only seams this recovery needs.
-  deps: Parameters<typeof harnessCommitForShellLessWorker>[1] = {},
+  deps: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[1] = {},
 ): Promise<{ commitCount: number; refusalReason: string | undefined; report: string; resumed: boolean }> {
+  const { MISSING_COMMIT_MESSAGE_REASON, harnessCommitForShellLessWorker, worktreeHasUncommittedChanges } = helperHost;
   const noop = {
     commitCount: input.commitCount,
     refusalReason: input.refusalReason,
@@ -3754,11 +3794,12 @@ function derivedImplementCommit(task: Pick<Task, "id" | "title" | "type">, paths
 }
 
 function commitLineResume(
-  spawn: typeof spawnWorker,
+  helperHost: Pick<RunTaskHelperHost, "COMMIT_LINE_RESUME_PROMPT" | "missingCommitLinePrompt">, spawn: typeof spawnWorker,
   account: (r: WorkerResult) => WorkerResult,
   spawnArgs: Omit<SpawnWorkerArgs, "prompt">,
   context?: { provider?: WorkerResult["provider"]; title: string; report: string; declaredPaths?: readonly string[] },
 ): () => Promise<{ text: string; costUsd: number; sessionId: string; numTurns: number; subtype: string }> {
+  const { COMMIT_LINE_RESUME_PROMPT, missingCommitLinePrompt } = helperHost;
   return async () => {
     const prompt = context ? missingCommitLinePrompt({ ...context, tools: spawnArgs.tools, worktreePath: spawnArgs.cwd }) : COMMIT_LINE_RESUME_PROMPT;
     const resumed = account(await spawn({ ...spawnArgs, prompt }));
@@ -3772,104 +3813,225 @@ function commitLineResume(
   };
 }
 
+export function runTaskCommandHelpers(host: RunTaskCommandHost) {
+  const helperHost: RunTaskHelperHost = {
+    BRANCH_NAME_CONTRACT_PART: host.BRANCH_NAME_CONTRACT_PART,
+    syncPlanOrRefuse: host.syncPlanOrRefuse,
+    lintPlanForReview: host.lintPlanForReview,
+    proofRepairRoundRefusalInWorktree: host.proofRepairRoundRefusalInWorktree,
+    startShellLessMergeConflictMerge: host.startShellLessMergeConflictMerge,
+    terminalVerdictFields: host.terminalVerdictFields,
+    renderReconClaimLines: host.renderReconClaimLines,
+    CENSUS_BASELINE_FILES: host.CENSUS_BASELINE_FILES,
+    workerBoundaryStack: host.workerBoundaryStack,
+    buildBaseReproductionProbe: host.buildBaseReproductionProbe,
+    writeSyncLine: host.writeSyncLine,
+    WORKER_STATE_LEDGER_STEP: host.WORKER_STATE_LEDGER_STEP,
+    capWorkerTailLines: host.capWorkerTailLines,
+    writeWorkerTailBestEffort: host.writeWorkerTailBestEffort,
+    attributeWorkerStreamEvent: host.attributeWorkerStreamEvent,
+    quietBoundHistory: host.quietBoundHistory,
+    readWorktreeHeadReflog: host.readWorktreeHeadReflog,
+    workerCreatedCurrentHead: host.workerCreatedCurrentHead,
+    syncPlanOrRefuseAsync: host.syncPlanOrRefuseAsync,
+    isTerminalRed: host.isTerminalRed,
+    ghPrCreateFillCommand: host.ghPrCreateFillCommand,
+    withDiagnostics: host.withDiagnostics,
+    draftPrCreate: host.draftPrCreate,
+    prCreateArgv: host.prCreateArgv,
+    runGhPrCreate: host.runGhPrCreate,
+    lastCommitSubject: host.lastCommitSubject,
+    appendTaskTrailerToCommit: host.appendTaskTrailerToCommit,
+    fetchPrBodyViaGh: host.fetchPrBodyViaGh,
+    fetchPrDiffFilesViaGh: host.fetchPrDiffFilesViaGh,
+    changeView: host.changeView,
+    rewriteAcceptanceBlockFromPlan: host.rewriteAcceptanceBlockFromPlan,
+    execGrepProofInWorktree: host.execGrepProofInWorktree,
+    ensureTaskTrailer: host.ensureTaskTrailer,
+    ghPrHeadGateway: host.ghPrHeadGateway,
+    checkPrOwnership: host.checkPrOwnership,
+    scrubGitCredentialText: host.scrubGitCredentialText,
+    openTaskIdsFromPlan: host.openTaskIdsFromPlan,
+    yieldingSleep: host.yieldingSleep,
+    restRollupFor: host.restRollupFor,
+    pollRestTarget: host.pollRestTarget,
+    ciGateState: host.ciGateState,
+    STALL_WINDOW: host.STALL_WINDOW,
+    checkWaitStalled: host.checkWaitStalled,
+    waitForCiGreen: host.waitForCiGreen,
+    runReview: host.runReview,
+    ghLiveState: host.ghLiveState,
+    ghLiveHead: host.ghLiveHead,
+    captureWorktreeSnapshotViaGit: host.captureWorktreeSnapshotViaGit,
+    ghUpdateBranch: host.ghUpdateBranch,
+    redBaseRefreshFactsFromRest: host.redBaseRefreshFactsFromRest,
+    fixRebaseMergeFactsFromRest: host.fixRebaseMergeFactsFromRest,
+    reclaimAbandonedWorker: host.reclaimAbandonedWorker,
+    fixWorkerRunId: host.fixWorkerRunId,
+    fixWorkerReceipt: host.fixWorkerReceipt,
+    spawnFixWorkerBounded: host.spawnFixWorkerBounded,
+    readFixRoundCommitsViaGit: host.readFixRoundCommitsViaGit,
+    runNpmScriptViaSpawn: host.runNpmScriptViaSpawn,
+    commitGeneratorOutputViaGit: host.commitGeneratorOutputViaGit,
+    readPackageScriptsFor: host.readPackageScriptsFor,
+    runFixRung: host.runFixRung,
+    buildProofAmendmentGitOps: host.buildProofAmendmentGitOps,
+    buildProofAmendmentWritePorts: host.buildProofAmendmentWritePorts,
+    prNumberFromRef: host.prNumberFromRef,
+    workerSignal: host.workerSignal,
+    harvestFollowupsFromReport: host.harvestFollowupsFromReport,
+    commitsAhead: host.commitsAhead,
+    sha256Hex: host.sha256Hex,
+    readRuleSourceFileOrUndefined: host.readRuleSourceFileOrUndefined,
+    DEFAULT_BUDGET_USD: host.DEFAULT_BUDGET_USD,
+    archiveWorkerTranscript: host.archiveWorkerTranscript,
+    withPredecessorTranscriptCopies: host.withPredecessorTranscriptCopies,
+    benchmarkRunLedgerLogger: host.benchmarkRunLedgerLogger,
+    recordBenchmarkWorkerAttempt: host.recordBenchmarkWorkerAttempt,
+    dispatchFallbackObserver: host.dispatchFallbackObserver,
+    withGitCredentialSocket: host.withGitCredentialSocket,
+    runErrorCause: host.runErrorCause,
+    censusPushRefusal: host.censusPushRefusal,
+    CENSUS_PUSH_CHECK: host.CENSUS_PUSH_CHECK,
+    CENSUS_SNAPSHOT_ENV: host.CENSUS_SNAPSHOT_ENV,
+    COVERAGE_PUSH_CHECK: host.COVERAGE_PUSH_CHECK,
+    CENSUS_PUSH_NEVER_BYPASS: host.CENSUS_PUSH_NEVER_BYPASS,
+    fixCensusAppliesToRepo: host.fixCensusAppliesToRepo,
+    writeFixCensusSnapshot: host.writeFixCensusSnapshot,
+    writeFixCensusSnapshotAsync: host.writeFixCensusSnapshotAsync,
+    checkFixCensusSnapshotAsync: host.checkFixCensusSnapshotAsync,
+    FixRoundPushError: host.FixRoundPushError,
+    pushFixRound: host.pushFixRound,
+    coveragePrecheck: host.coveragePrecheck,
+    coveragePushRefusal: host.coveragePushRefusal,
+    pushFixRoundPrechecked: host.pushFixRoundPrechecked,
+    repairRetroAcceptanceBlock: host.repairRetroAcceptanceBlock,
+    defaultRetroFetchBody: host.defaultRetroFetchBody,
+    defaultRetroEditBody: host.defaultRetroEditBody,
+    prUrlTarget: host.prUrlTarget,
+    readHeadShaRest: host.readHeadShaRest,
+    resolveFixRungTaskContractAtHeadAsync: host.resolveFixRungTaskContractAtHeadAsync,
+    MERGE_BASE_DIFF_ARGS: host.MERGE_BASE_DIFF_ARGS,
+    hostWorktreeGitResult: host.hostWorktreeGitResult,
+    dispatchClaimReserverAsyncFor: host.dispatchClaimReserverAsyncFor,
+    WORKTREE_REAP_BOOT_CONTRACT_VERSION: host.WORKTREE_REAP_BOOT_CONTRACT_VERSION,
+    logCloneReapSurvey: host.logCloneReapSurvey,
+    cloneReapPlan: host.cloneReapPlan,
+    logCloneReapRow: host.logCloneReapRow,
+    DISK_RECLAIM_DEFAULT_SWEEPS: host.DISK_RECLAIM_DEFAULT_SWEEPS,
+    createDaemonGatewayFactory: host.createDaemonGatewayFactory,
+    readRegistrationChanges: host.readRegistrationChanges,
+    commitWorkerEdits: host.commitWorkerEdits,
+    fixRoundGitOwnership: host.fixRoundGitOwnership,
+    MISSING_COMMIT_MESSAGE_REASON: host.MISSING_COMMIT_MESSAGE_REASON,
+    harnessCommitForShellLessWorker: host.harnessCommitForShellLessWorker,
+    worktreeHasUncommittedChanges: host.worktreeHasUncommittedChanges,
+    COMMIT_LINE_RESUME_PROMPT: host.COMMIT_LINE_RESUME_PROMPT,
+    writerCannotResume: host.writerCannotResume,
+    missingCommitLinePrompt: host.missingCommitLinePrompt,
+    pathIsUnderDeclaredSurface: host.pathIsUnderDeclaredSurface,
+    execFilePromise: host.execFilePromise,
+    AWAITING_EXTERNAL_LEDGER_STEP: host.AWAITING_EXTERNAL_LEDGER_STEP,
+    readLedgerRawLines: host.readLedgerRawLines,
+  };
   return {
-    defaultBinaryPinDeps,
-    deriveRunawayTurnBound,
-    dispatchStreamObserver,
-    watchDispatchSpawn,
-    checkpointUndeclaredFields,
-    commitAndPushRestartCheckpoint,
-    pushRestartCheckpoint,
-    freshnessYieldRows,
-    roundEndedHandoffRows,
-    boundedWorkerTelemetryText,
-    buildWorkerStateSensor,
-    resolveOwner,
-    shadowLiveWouldHaveDone,
-    resolveShadowInstanceArmPermission,
-    ghPrCreateFillCommandAsync,
-    worktreeHeadOrUndefined,
-    worktreeDiffStat,
-    branchPrTitle,
-    restoreBoundaryCheckpoint,
-    diffFileChangesFromPatch,
-    diffIsClassifiedIrreversible,
-    irreversibleSignalForWorktree,
-    armRunIdFromLedger,
-    mergeShaNow,
-    lostRaceEscalation,
-    riskJudgeDisarm,
-    disposeDisarm,
-    fallbackPushEvidence,
-    fallbackPushCause,
-    rollupCheckSummary,
-    prOpenHandoffDecline,
-    pollToGate,
-    ciGateBlockReason,
-    fixRungTerminationVerdict,
-    workerErrorVerdict,
-    noPrVerdict,
-    parseAlreadySatisfied,
-    resolveAlreadySatisfied,
-    resolveAlreadySatisfiedWithRetry,
-    alreadySatisfiedVerdict,
-    implementAttemptOutcome,
-    finishTransientRetry,
-    workerVisibleRecordPath,
-    taskRecordContextLine,
-    nonEmptyLines,
-    reconObservedToContext,
-    reconDegradedContextNote,
-    reconMaskedContextNote,
-    fileDigestOrAbsent,
-    filesDigest,
-    taskRecordSha,
-    decideReconArtifactReuse,
-    reconArtifactPath,
-    loadReconArtifact,
-    writeReconArtifact,
-    reconArtifactToContext,
-    buildRuleHeadlinesPart,
-    softBudgetWarning,
-    resolveRunMounts,
-    probeVerdictKey,
-    hookFilesUnder,
-    readProbeKeyInputs,
-    reportWorkerSourceSizeFollowup,
-    isManagedCheckoutLockBusy,
-    refreshManagedCheckout,
-    refreshHeldManagedCheckout,
-    sourceSizeGateFollowupConsumer,
-    buildSourceSizeGatePostureRuntime,
-    sourceSizeFollowupDebtResult,
-    reportWorkerSourceSizeFollowupWithGatePosture,
-    withInflightRunLock,
-    endThrownRun,
-    deferOpenToSiblingPr,
-    reclaimRunWorktree,
-    endRefusedRun,
-    endRunOnce,
-    boundedVerdictReason,
-    repairCensusRefusedPush,
-    normalizeRunPrAcceptanceFromPlan,
-    recordBakedClosureCatalog,
-    refusedBranchChangedFiles,
-    logCloneReapSurveyAsync,
-    logWorktreeReapBootSurvey,
-    logDiskReclaimRung,
-    logLearningsUsed,
-    logSkillsUsed,
-    fixRungCiFailures,
-    cashContainedRunRefusal,
-    forceCashContainedRunSpawn,
-    headProvenanceFields,
-    createHarnessCommitRefusalRecorder,
-    resumeForMissingCommitLine,
-    requiredCompanions,
-    readBuildScopeAmendmentState,
-    askScopeForLeftOutImports,
-    derivedImplementCommit,
-    commitLineResume,
+    defaultBinaryPinDeps: defaultBinaryPinDeps.bind(undefined),
+    deriveRunawayTurnBound: deriveRunawayTurnBound.bind(undefined),
+    dispatchStreamObserver: dispatchStreamObserver.bind(undefined, helperHost),
+    watchDispatchSpawn: watchDispatchSpawn.bind(undefined, helperHost),
+    checkpointUndeclaredFields: checkpointUndeclaredFields.bind(undefined),
+    commitAndPushRestartCheckpoint: commitAndPushRestartCheckpoint.bind(undefined, helperHost),
+    pushRestartCheckpoint: pushRestartCheckpoint.bind(undefined),
+    freshnessYieldRows: freshnessYieldRows.bind(undefined),
+    roundEndedHandoffRows: roundEndedHandoffRows.bind(undefined),
+    boundedWorkerTelemetryText: boundedWorkerTelemetryText.bind(undefined),
+    buildWorkerStateSensor: buildWorkerStateSensor.bind(undefined, helperHost),
+    resolveOwner: resolveOwner.bind(undefined),
+    shadowLiveWouldHaveDone: shadowLiveWouldHaveDone.bind(undefined),
+    resolveShadowInstanceArmPermission: resolveShadowInstanceArmPermission.bind(undefined),
+    ghPrCreateFillCommandAsync: ghPrCreateFillCommandAsync.bind(undefined, helperHost),
+    worktreeHeadOrUndefined: worktreeHeadOrUndefined.bind(undefined),
+    worktreeDiffStat: worktreeDiffStat.bind(undefined),
+    branchPrTitle: branchPrTitle.bind(undefined, helperHost),
+    restoreBoundaryCheckpoint: restoreBoundaryCheckpoint.bind(undefined),
+    diffFileChangesFromPatch: diffFileChangesFromPatch.bind(undefined),
+    diffIsClassifiedIrreversible: diffIsClassifiedIrreversible.bind(undefined),
+    irreversibleSignalForWorktree: irreversibleSignalForWorktree.bind(undefined),
+    armRunIdFromLedger: armRunIdFromLedger.bind(undefined),
+    mergeShaNow: mergeShaNow.bind(undefined, helperHost),
+    lostRaceEscalation: lostRaceEscalation.bind(undefined),
+    riskJudgeDisarm: riskJudgeDisarm.bind(undefined, helperHost),
+    disposeDisarm: disposeDisarm.bind(undefined, helperHost),
+    fallbackPushEvidence: fallbackPushEvidence.bind(undefined, helperHost),
+    fallbackPushCause: fallbackPushCause.bind(undefined, helperHost),
+    rollupCheckSummary: rollupCheckSummary.bind(undefined),
+    prOpenHandoffDecline: prOpenHandoffDecline.bind(undefined),
+    pollToGate: pollToGate.bind(undefined, helperHost),
+    ciGateBlockReason: ciGateBlockReason.bind(undefined, helperHost),
+    fixRungTerminationVerdict: fixRungTerminationVerdict.bind(undefined),
+    workerErrorVerdict: workerErrorVerdict.bind(undefined),
+    noPrVerdict: noPrVerdict.bind(undefined),
+    parseAlreadySatisfied: parseAlreadySatisfied.bind(undefined),
+    resolveAlreadySatisfied: resolveAlreadySatisfied.bind(undefined, helperHost),
+    resolveAlreadySatisfiedWithRetry: resolveAlreadySatisfiedWithRetry.bind(undefined, helperHost),
+    alreadySatisfiedVerdict: alreadySatisfiedVerdict.bind(undefined),
+    implementAttemptOutcome: implementAttemptOutcome.bind(undefined, helperHost),
+    finishTransientRetry: finishTransientRetry.bind(undefined, helperHost),
+    workerVisibleRecordPath: workerVisibleRecordPath.bind(undefined),
+    taskRecordContextLine: taskRecordContextLine.bind(undefined),
+    nonEmptyLines: nonEmptyLines.bind(undefined),
+    reconObservedToContext: reconObservedToContext.bind(undefined, helperHost),
+    reconDegradedContextNote: reconDegradedContextNote.bind(undefined),
+    reconMaskedContextNote: reconMaskedContextNote.bind(undefined),
+    fileDigestOrAbsent: fileDigestOrAbsent.bind(undefined, helperHost),
+    filesDigest: filesDigest.bind(undefined, helperHost),
+    taskRecordSha: taskRecordSha.bind(undefined, helperHost),
+    decideReconArtifactReuse: decideReconArtifactReuse.bind(undefined),
+    reconArtifactPath: reconArtifactPath.bind(undefined),
+    loadReconArtifact: loadReconArtifact.bind(undefined),
+    writeReconArtifact: writeReconArtifact.bind(undefined),
+    reconArtifactToContext: reconArtifactToContext.bind(undefined, helperHost),
+    buildRuleHeadlinesPart: buildRuleHeadlinesPart.bind(undefined, helperHost),
+    softBudgetWarning: softBudgetWarning.bind(undefined),
+    resolveRunMounts: resolveRunMounts.bind(undefined),
+    probeVerdictKey: probeVerdictKey.bind(undefined),
+    hookFilesUnder: hookFilesUnder.bind(undefined),
+    readProbeKeyInputs: readProbeKeyInputs.bind(undefined),
+    reportWorkerSourceSizeFollowup: reportWorkerSourceSizeFollowup.bind(undefined),
+    isManagedCheckoutLockBusy: isManagedCheckoutLockBusy.bind(undefined),
+    refreshManagedCheckout: refreshManagedCheckout.bind(undefined, helperHost),
+    refreshHeldManagedCheckout: refreshHeldManagedCheckout.bind(undefined),
+    sourceSizeGateFollowupConsumer: sourceSizeGateFollowupConsumer.bind(undefined),
+    buildSourceSizeGatePostureRuntime: buildSourceSizeGatePostureRuntime.bind(undefined),
+    sourceSizeFollowupDebtResult: sourceSizeFollowupDebtResult.bind(undefined),
+    reportWorkerSourceSizeFollowupWithGatePosture: reportWorkerSourceSizeFollowupWithGatePosture.bind(undefined),
+    withInflightRunLock: withInflightRunLock.bind(undefined),
+    endThrownRun: endThrownRun.bind(undefined, helperHost),
+    deferOpenToSiblingPr: deferOpenToSiblingPr.bind(undefined, helperHost),
+    reclaimRunWorktree: reclaimRunWorktree.bind(undefined),
+    endRefusedRun: endRefusedRun.bind(undefined, helperHost),
+    endRunOnce: endRunOnce.bind(undefined, helperHost),
+    boundedVerdictReason: boundedVerdictReason.bind(undefined, helperHost),
+    repairCensusRefusedPush: repairCensusRefusedPush.bind(undefined, helperHost),
+    normalizeRunPrAcceptanceFromPlan: normalizeRunPrAcceptanceFromPlan.bind(undefined, helperHost),
+    recordBakedClosureCatalog: recordBakedClosureCatalog.bind(undefined, helperHost),
+    refusedBranchChangedFiles: refusedBranchChangedFiles.bind(undefined, helperHost),
+    logCloneReapSurveyAsync: logCloneReapSurveyAsync.bind(undefined, helperHost),
+    logWorktreeReapBootSurvey: logWorktreeReapBootSurvey.bind(undefined, helperHost),
+    logDiskReclaimRung: logDiskReclaimRung.bind(undefined, helperHost),
+    logLearningsUsed: logLearningsUsed.bind(undefined),
+    logSkillsUsed: logSkillsUsed.bind(undefined),
+    fixRungCiFailures: fixRungCiFailures.bind(undefined, helperHost),
+    cashContainedRunRefusal: cashContainedRunRefusal.bind(undefined, helperHost),
+    forceCashContainedRunSpawn: forceCashContainedRunSpawn.bind(undefined),
+    headProvenanceFields: headProvenanceFields.bind(undefined),
+    createHarnessCommitRefusalRecorder: createHarnessCommitRefusalRecorder.bind(undefined),
+    resumeForMissingCommitLine: resumeForMissingCommitLine.bind(undefined, helperHost),
+    requiredCompanions: requiredCompanions.bind(undefined),
+    readBuildScopeAmendmentState: readBuildScopeAmendmentState.bind(undefined),
+    askScopeForLeftOutImports: askScopeForLeftOutImports.bind(undefined),
+    derivedImplementCommit: derivedImplementCommit.bind(undefined),
+    commitLineResume: commitLineResume.bind(undefined, helperHost),
   };
 }
 
@@ -4220,6 +4382,7 @@ export async function runTask(
     execFilePromise,
     AWAITING_EXTERNAL_LEDGER_STEP,
     readLedgerRawLines,
+    releaseReadersFor,
   } = host;
   const {
     defaultBinaryPinDeps,
@@ -4559,7 +4722,8 @@ export async function runTask(
 
   // W1-T3216: the released set is passed so an operator-ratified verify:human task runs here too.
   // Read once, at this single-task entry point — there is no pass to amortise it over.
-  assertRunnable(plan, task, isMerged, releasedTaskIds(readLedgerRawLines(ledgerPath)));
+  // W1-T10348: preserve the shared resolver across the extraction.
+  assertRunnable(plan, task, isMerged, resolveReleasedIds(releaseReadersFor(ledgerPath), plan));
 
   // ── §5C LAYER A: deterministic task linter, FAIL-CLOSED pre-dispatch guard
   // (MASTER-PLAN §5C). Four malformed tasks (W1-T6, W1-T9, W1-T12) reached a
@@ -6903,48 +7067,28 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail, evidence: pushCause.evidence });
       say(`fallback push firing for ${branch} — cause: ${pushCause.cause} (${pushCause.detail})`);
       // W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG — the ONE orchestrator-initiated push in this
-      // file (the worker itself normally pushes from inside its own sandbox; this fallback runs on
-      // whatever the worktree holds, which is exactly the shape a refreshed/collapsed/squashed
-      // branch would have). Computed FRESH from this worktree, never a cached list, and BEFORE the
-      // push, so the ledger line is written against the diff that is about to reach origin.
-      //
-      // THE ANSWER TO AN OVERRUN IS NO LONGER A REFUSAL (W1-T434). It used to return verdict
-      // "failed" with no push, and that answer DESTROYED ITS OWN EVIDENCE: the branch never
-      // reached origin and died with the reaped worktree, so nobody could afterwards tell a
-      // phantom revert from an under-declared `files:` — the two shapes produce an identical file
-      // list, and the refusal deleted the only artifact that separates them. Four refusals in one
-      // week cost roughly $29 of already-completed work each time it fired (operator report,
-      // UNMEASURED here), while the very class it exists to contain merged anyway through the
-      // worker's own sandbox push (W1-T393's implementation, #1521, touching src/lib/ledger.ts
-      // beyond its declared files) — because this guard reaches ONE of gitPushRunBranch's nine
-      // call sites and only when the branch is ABSENT from origin. It could punish the fallback
-      // path after the money was spent; it could never contain a worker.
-      //
-      // WHAT IS GIVEN UP, STATED RATHER THAN GLOSSED. The DETECTION is unchanged — the detector
-      // below is untouched and still names exactly the same paths — but the BLOCK becomes a FLAG,
-      // and `unwiredAdvisories` folds into neither `state` nor `floorState` (lib/review.ts), while
-      // `armAutoMergeAtOpen` arms the instant the PR exists. So on this one path a phantom revert
-      // that passes CI and the review floor can now merge carrying the revert, where before it
-      // could not reach origin at all. That is accepted because real containment is the merge gate
-      // (Standing rule 3B), because the branch surviving is what lets a human adjudicate at all,
-      // and because a guard covering one push site was never the containment it read as.
-      //
-      // AND ONE CASE GOES QUIET RATHER THAN SOFT: `scopeGuardOutOfScopeFiles` treats an
-      // absent/empty declared scope as "everything is out of scope", but review-side
-      // `scopeViolationFiles` deliberately does the opposite and never fires on an empty scope. A
-      // task declaring no `files:` therefore still ledgers `scope_guard.overrun` here — the
-      // detector is untouched — but earns NO PR advisory. The ledger keeps it; the comment does not.
-      //
-      // THREE-DOT, AND THIS WAS A REAL DEFECT RATHER THAN A STYLE PREFERENCE. Two-dot
-      // `origin/main..HEAD` diffs the two TIPS, so every file merged to main AFTER this worktree
-      // was cut reads as something this branch changed. MEASURED: a drain booted at 3147755
-      // dispatched W1-T395, #1533 merged mid-run, and the guard refused the push naming
-      // `src/run-task.ts` and `test/drain-gateway-batched.test.ts` — #1533's files, which the
-      // worker never opened. A merge to main must not break a running drain.
-      //
-      // `origin/main...HEAD` diffs against the MERGE BASE — what THIS BRANCH changed relative to
-      // where it started — which is the question the guard is actually asking, and is already the
-      // convention `lib/ci-parity.ts` uses at both of its own diff sites.
+      // file; workers normally push in their sandbox. This fallback pushes whatever a refreshed,
+      // collapsed or squashed worktree holds, only when the branch is ABSENT from origin.
+      // Compute the diff FRESH from this worktree BEFORE pushing; ledger the diff about to publish.
+      // W1-T434 changed overrun REFUSAL to PUSH-AND-FLAG: refusing with verdict "failed" destroyed
+      // the reaped branch, the only evidence separating phantom reverts from under-declared files.
+      // Four refusals in one week reportedly lost ~$29 each (operator report, UNMEASURED here).
+      // Worker pushes bypassed it: W1-T393/#1521 changed undeclared src/lib/ledger.ts anyway.
+      // This guard reaches only ONE of gitPushRunBranch's nine sites, after the work was paid for.
+      // DETECTION is unchanged and names the same paths; BLOCK becomes FLAG. `unwiredAdvisories`
+      // affects neither `state` nor `floorState` (lib/review.ts). W1-T434's then-at-open
+      // `armAutoMergeAtOpen` meant a phantom revert passing CI and the review floor could merge,
+      // whereas refusal had kept it off origin. This accepted tradeoff leaves containment to the
+      // merge gate (Standing rule 3B), preserves human adjudication, and admits the guard's limits.
+      // EMPTY SCOPE remains asymmetric: scopeGuardOutOfScopeFiles treats absent/empty files as
+      // everything out of scope; review-side scopeViolationFiles deliberately never fires then.
+      // Thus a no-files task still ledgers scope_guard.overrun but gets NO PR advisory.
+      // THREE-DOT is required: origin/main..HEAD compares TIPS and falsely includes files merged
+      // to main after this worktree was cut. At drain boot3147755, W1-T395 was wrongly refused
+      // after #1533 merged, naming src/run-task.ts and test/drain-gateway-batched.test.ts that its
+      // worker never opened. Main advancing must not break a running drain.
+      // origin/main...HEAD compares the MERGE BASE: only THIS BRANCH's changes since its start,
+      // the same question and convention used at both lib/ci-parity.ts diff sites.
       let diffFiles: string[] | undefined;
       try {
         diffFiles = hostWorktreeGit(worktreePath, MERGE_BASE_DIFF_ARGS)
@@ -7002,7 +7146,19 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       dropTierRowsBeforePush(worktreePath, log);
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
-      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
+      const precheck = await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo });
+      const coverageRefusal = coveragePushRefusal(precheck, log, "fallback_push");
+      // W1-T5309: an `uncovered-narrow` gap refuses nothing. The worker gets ONE pre-PR repair with the narrow pass's
+      // lines, then the push below proceeds whatever that attempt did; CI's coverage-ratchet stays the authority.
+      if (precheck.outcome === "uncovered-narrow") {
+        const advisory = await repairCensusRefusedPush({
+          refusal: { text: `${COVERAGE_PUSH_CHECK}: the diff's own and direct-importer suites leave these added lines uncovered (advisory; the push proceeds after this one attempt) —\n${precheck.text}`, censuses: ["diff-coverage"], offeredBaselines: [] },
+          task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, resumeSessionProvider: impl.provider, mount: fixMount,
+          settingsFile, config: { ...config, fixStrikeCap: 1 }, budgetUsd, ledgerPath, spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
+          spawn: trackRepairLadder(spawn, { config, log }), account, log, say, recheck: async () => undefined,
+        }).catch((error: unknown) => ({ outcome: "error", reason: String((error as Error)?.message ?? error) }));
+        say(`coverage: one advisory repair for an uncovered-narrow head ended ${advisory.outcome}; pushing as before`);
+      }
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         await (opts.implementPush ?? gitPushRunBranchAsync)(worktreePath);
@@ -7515,34 +7671,24 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     // ── W1-T185 (Gap 1, criteria 2-3), raised by W1-T229: THE AUTO-MERGE
     // ARMING PATH refuses ANY CAPPED verdict, unattended — the #411 shape
-    // (0/5 proofs executed, posted as an uncapped PASS, merged with no human
-    // reading the diff). W1-T229 removed the tdd:strict exemption this used
-    // to carry: a capped, non-tdd:strict PR previously armed exactly as if it
-    // were an ordinary PASS, which made prose the DEFAULT merge floor (since
-    // `{tdd: strict}` is opt-in, not the default). No autonomous run carries
-    // an operator override of its own: an override is a HUMAN decision,
-    // granted out of band via `rmd review <pr> --override-capped-by/
-    // --override-capped-reason` and recovered here from the SAME ledger every
-    // other precedence check in this file reads (readLedgerLines). A verdict
-    // that isn't capped arms exactly as before — decideAutoMergeArm only ever
-    // REFUSES the one shape rule 22's fixture (iii) named.
-    //
-    // KNOWN RESIDUAL GAP (explicitly out of this task's stated file scope,
-    // `plan/tasks.yaml` W1-T185 `files:`): `sweep.ts`'s independent
-    // "checks green + review success -> mergeable" reconciliation does not
-    // yet consult `capped`/an override — a PR this refuses stays OPEN and
-    // UNARMED, but a later sweep poll could still arm it via that separate
-    // path. Left for a follow-up task rather than widened here unreviewed.
-    //
-    // A SECOND, SAME-SHAPED RESIDUAL GAP (W1-T947, explicitly out of THIS task's stated file
-    // scope — `plan/tasks.d/W1-T947-*.yaml` `files:` names only review.ts, run-task.ts and this
-    // test file): `decideArmFromLedgerVerdict`/`armAutoMerge` (lib/review.ts, lib/run-task.ts) —
-    // the SWEEP's and `rmd review`'s independent re-arm path, reached via
-    // `withdrawArmIfVerdictRefuses`/`armIfVerdictPermits` — call the SAME `decideAutoMergeArm`
-    // this task raised, but neither passes it an `irreversible` signal (no live worktree diff
-    // is available at ledger-recovery time the way it is here). A PR this run's two gates
-    // correctly refuse could still be armed later by a sweep pass or a manual `rmd review`.
-    // Named here, not silently absorbed, per this task's own design clause (v).
+    // (0/5 proofs executed, posted as uncapped PASS, merged without a human reading the diff).
+    // W1-T229 removed the tdd:strict exemption: capped non-strict PRs had armed like ordinary
+    // PASS, making prose the DEFAULT floor because {tdd: strict} is opt-in.
+    // No autonomous run grants itself an override: a HUMAN grants it out of band through
+    // `rmd review <pr> --override-capped-by/--override-capped-reason`; recover it from the SAME
+    // readLedgerLines ledger as every other precedence check. Uncapped verdicts arm unchanged:
+    // decideAutoMergeArm REFUSES only the shape named by rule22 fixture(iii).
+    // KNOWN RESIDUAL GAP, outside W1-T185's plan/tasks.yaml files scope: sweep.ts's independent
+    // "checks green + review success -> mergeable" reconciliation does not consult capped or an
+    // override. A refused PR stays OPEN and UNARMED here but a later sweep could still arm it.
+    // Leave that gap to its follow-up rather than silently widening this task.
+    // A SECOND, SAME-SHAPED RESIDUAL GAP (W1-T947): its plan/tasks.d/W1-T947-*.yaml files name
+    // only review.ts, run-task.ts and its test. decideArmFromLedgerVerdict/armAutoMerge
+    // (lib/review.ts, lib/run-task.ts), reached through withdrawArmIfVerdictRefuses/
+    // armIfVerdictPermits, use the SAME decideAutoMergeArm but pass no irreversible signal:
+    // ledger recovery has no live worktree diff. Thus a PR these two run gates correctly refuse
+    // could still be armed by a later sweep or manual `rmd review`. Keep this out-of-scope gap
+    // explicit, per the task's own design clause(v).
     const tddStrict = isTddStrict(task.principles);
     // W1-T948: the specialist panel's testing trigger (specialist-panel.ts)
     // reads the SAME `principles` this line just did, through the panel's one
@@ -7813,34 +7959,21 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     }
 
     // ── ARM (W1-T125, DEFERRED BY W1-T975): register GitHub auto-merge only NOW —
-    // the FIRST point this run has a verdict it is willing to stand behind: ci
-    // went green, the review passed (or the fix rung earned a pass), the
-    // capped-verdict gate above did not refuse, and the risk judge above did not
-    // escalate. Every earlier exit (ci-not-green before review, fix-rung
-    // exhausted, stood down, a capped refusal, a risk-judge escalation) RETURNS
-    // before this line, so it leaves the PR with NO standing arm.
-    //
-    // WHY THIS MOVED (W1-T975): an already-armed PR short-circuits the sweep's
-    // own arming decision (`alreadyDone = pr.autoMergeArmed === true`,
-    // lib/sweep.ts) — the ONE place a durable risk-judge refusal (W1-T970) can
-    // ever be consulted. Arming at PR-open (the old W1-T125 site) left every
-    // early exit above with a standing arm that routed a would-be merge AROUND
-    // that predicate, permanently, not merely early — and a disarm on those
-    // exits would not have closed the gap: the sweep RE-ARMS on
-    // checks-green + review-success (lib/sweep.ts), which nullified five of
-    // five measured disarm races. Deferring the arm to here means an abandoned
-    // PR's only remaining route to a merge is the sweep's `mergeable` decision,
-    // so a durable refusal installed there is never bypassed.
-    //
-    // The LATE blocked_ci exit below (after pollToGate) still keeps its arm —
-    // by the time this line runs the review HAS been posted and the risk judge
-    // HAS passed, so that exit is unaffected: it polls an already-armed PR,
-    // exactly as before this task.
-    // W1-T1256: the no-merge boundary. `opts.noMerge` is set ONLY by `wipeTestCommand`, for
-    // BOTH arms of a wipe-test pair — the policy decision itself is pure and lives in
-    // wipe-test.ts (`resolveWipeTestArmPermission`); this call site only consults it and skips
-    // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
-    // never merge out from under the pair it belongs to.
+    // the FIRST point this run stands behind a verdict: CI green, review passed (or fixed),
+    // capped gate did not refuse and risk judge did not escalate. Earlier ci-not-green,
+    // fix-exhausted, stood-down, capped-refusal and risk-escalation exits RETURN before this
+    // line, leaving NO standing arm.
+    // W1-T975: alreadyDone = pr.autoMergeArmed === true short-circuits the sweep's own arming
+    // decision, the ONE place it can consult a durable W1-T970 risk refusal (lib/sweep.ts).
+    // Old at-open arming bypassed that predicate permanently on every early exit. Disarming
+    // those exits would not fix it: checks-green + review-success re-armed the PR in five of
+    // five measured races. Deferral leaves an abandoned PR only the sweep's mergeable route,
+    // where the durable refusal cannot be bypassed.
+    // The LATE blocked_ci exit AFTER pollToGate still keeps its arm: review was posted and
+    // risk passed before arming, so polling the already-armed PR is unchanged.
+    // W1-T1256 no-merge boundary: ONLY wipeTestCommand sets opts.noMerge, for BOTH arms of a
+    // wipe-test pair. Pure resolveWipeTestArmPermission in wipe-test.ts decides; this call site
+    // skips armAutoMergeAtOpen outright on refusal, so the pair's PR cannot arm or merge away.
     // Check shadow before wipe-test; the counterfactual uses this same live arm decision.
     if (shadowInstance) {
       const shadowVerdict = shadowLiveWouldHaveDone(true);

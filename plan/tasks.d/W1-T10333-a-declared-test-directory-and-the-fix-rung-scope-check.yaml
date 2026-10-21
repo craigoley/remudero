@@ -1,0 +1,58 @@
+- id: W1-T10333
+  title: "DOES THE FIX RUNG'S SCOPE CHECK REFUSE A FILE UNDER A DECLARED DIRECTORY? — at 14:48:54Z on 2026-10-20 it stood #13121 (W1-T10070) down and opened BLOCKED issue #13143 because a fix worker added test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts, \"outside the declared scope\", while the declared list it printed ended in `test/`; confirm or refute the defect before any fix"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: low  # an investigation record; no scope check, stand-down or escalation behaviour changes in this task
+  priority: 2
+  origin: "coordinator brief f1021b item 2 (2026-10-21), from the #13121 builder's report (logs-8864/s13121-*); the operator ruled on 10-21 that #13143 be closed as stale"
+  plan_refs: [W1-T76, W1-T1227, W1-T2653, W1-T5118, W1-T3849, W1-T4450, W1-T10070]
+  files:
+    - docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger on host remudero (rmd-state2, read-only, rotations from 2026-10-18 plus the live file):
+    - 2026-10-20T14:48:54.897Z `fix.stood_down` site `rung.scope`, strike 2, task W1-T10070, scope_kind `files`,
+      out_of_scope_paths [test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts], reason "a fix worker added
+      path(s) outside the declared scope: test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts — declared
+      files: src/lib/proof-amendment.ts, src/run-task.ts, test/a-build-that-needs-scope-before-its-pr-gets-it.test.ts,
+      test/". The same second, `escalation.issue_opened` #13143 (BLOCKED, head 18df476fa, recommendation `revert`).
+    - W1-T10070's shard on origin/main declares only the first three paths. Where the fourth entry, `test/`, came from
+      (a scope amendment, a reachable-remedy widening, or another source) is not yet known.
+    READ at origin/main 16f4c28fc (symbols, not lines):
+    - `fixRungScopeStandDownReason` (src/run-task.ts) compares through `outOfDeclaredScopeFiles` →
+      `scopeGuardOutOfScopeFiles` (src/lib/prompt-render.ts), which is EXACT set membership (`declared.has(f)`), so a
+      directory entry such as `test/` can never admit a file under it.
+    - Other scope predicates in the repo read a trailing-slash entry as a directory prefix:
+      `pathIsUnderDeclaredSurface` (src/run-task.ts, W1-T3849/W1-T4450) and `inScope` (src/lib/flight-signals.ts).
+    So two readings of one declared list disagree. Whether the fix rung SHOULD admit a directory entry, and whether
+    `test/` was a legitimate entry at all, are the open questions; widening the predicate without knowing would let a
+    fix round write anywhere under a directory a task never declared.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and every open PR head's plan tree for
+    scopeGuardOutOfScopeFiles, outOfDeclaredScopeFiles and pathIsUnderDeclaredSurface; the hits are merged tasks that
+    built those predicates. No queued shard asks this.
+  design: |
+    Write docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md with these sections (headings
+    verbatim):
+    1. "## Where the entry came from" — trace the declared list the rung printed at 14:48:54Z back to its source, by
+       symbol and ledger row: which code appended `test/` to W1-T10070's declared files, and when. State the window, the
+       corpus's newest ts, and a positive control (the 14:48:54Z row must be found).
+    2. "## Which reading is right" — every scope predicate that reads a task's declared files (at least the two above),
+       quoted by symbol, with how each treats a trailing-slash entry. Then CONFIRM or REFUTE: does the fix rung refuse a
+       file that the rest of the system treats as in scope? Count since 2026-10-14 the `fix.stood_down` site `rung.scope`
+       rows whose printed declared list holds a directory entry that prefixes an out-of-scope path.
+    3. "## Remedy proposal" — if confirmed, the smallest change (one shared predicate, or refusing the directory entry
+       where it is minted), filed as its own implement task with a falsifier built from the 14:48:54Z row; if refuted,
+       the reason the refusal was right. No scope behaviour changes in this task.
+  acceptance:
+    - claim: "the record traces where the declared `test/` entry came from, with a positive control"
+      proof: "grep: ## Where the entry came from in docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md"
+    - claim: "the record compares every declared-scope predicate and confirms or refutes the defect with a count"
+      proof: "grep: ## Which reading is right in docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md"
+    - claim: "the record proposes a remedy or says why the refusal was right"
+      proof: "grep: ## Remedy proposal in docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md"
+  falsifier: |
+    At origin/main docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md does not exist, so all three
+    grep proofs read 0.

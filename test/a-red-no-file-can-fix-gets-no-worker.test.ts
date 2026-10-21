@@ -187,6 +187,8 @@ test("a refused report requesting an out-of-scope file routes to a scope amendme
   const h = harness();
   h.rows.push(
     { task_id: "W1-T4459", step: "sweep.disposed", pr_number: 4459, head_sha: "head-a", disposition: "blocked-fixable", acted: true, red_checks: ["ci"] },
+    { task_id: "W1-T4459", step: "fix.scope_amendment", pr_number: 4459, head_sha: "head-a",
+      outcome: "created", amendmentNumber: 4460, paths: ["src/lib/needed.ts"] },
     { task_id: "W1-T4459", step: "fix.commit_refused", head_sha: "head-a", reason: "scope refused", scope_amendment_detail: "src/lib/needed.ts is needed" },
   );
   await runSweep([subject(["ci"])], h.deps, DEFAULT_SWEEP_POLICY);

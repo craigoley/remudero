@@ -6134,6 +6134,13 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
   renderer and disposition state. The original daemon console was retired; this reservation
   carries the research forward without assuming the replacement console has the same defect.
 - ratification-candidate: W1-T5071 — proof-debt:W1-T5071, 2026-10-14 proposal (W1-T9485); matching candidate recorded in plan/tasks.yaml.
+- ratification-audit: W1-T9485 — follow-on guard for the W1-T5071 candidate.
+  After operator approval, record the operator-provided candidate-to-task mapping here and beside
+  the matching candidate in `plan/tasks.yaml`. Verify that each mapped W1-T ID has a real `- id:`
+  task record in `plan/tasks.yaml` or `plan/tasks.d/*.yaml`, and that both candidate entries name
+  the same IDs. Record the approval reference and checked task-record paths with the mapping.
+  Until approval and these checks are complete, keep the candidate pending; missing, ambiguous,
+  or placeholder IDs must not be treated as a completed mapping or dispatched as follow-on tasks.
 - Grill-me protocol as in-harness interactive intake (`rmd chat`) — post-WS-4.
 - Agent Teams as an optional worker sub-mode for parallel exploration inside one task.
 - **Beads import/export adapter** — tasks.yaml stays the schema-tight native substrate; Beads (23k★,

@@ -63,6 +63,7 @@ import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
 // spawning the real CLI — matches the pattern test/isolation-wiring.test.ts
 // and test/mounts-wiring.test.ts already use for this exact file.
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskVerbSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 // ── Recorded fixtures (acceptance #2, the FALSIFIER) ────────────────────────
 // The verdict LOGIC is a PURE function so the falsifier is a unit fixture: a
@@ -2263,7 +2264,7 @@ test("W1-T229: an operator override arms a capped, NON-tdd:strict verdict too (t
 // explicit carve-out (W1-T205) trips this test instead of silently stalling every retro/
 // triage/plan/approve PR.
 test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/triage/plan/approve/dep-review) arm auto-merge directly, never through the raised decideAutoMergeArm/resolveAutoMergeArm floor — so the plan lane does not stall", () => {
-  const resolveCallCount = (runTaskSrc.match(/resolveAutoMergeArm\(/g) ?? []).length;
+  const resolveCallCount = [runTaskSrc, runTaskVerbSrc].reduce((count, source) => count + (source.match(/resolveAutoMergeArm\(/g) ?? []).length, 0);
   // Exactly one production call site: runTask's own "implement" flow, right before its
   // own direct armAutoMerge(...) call. Every OTHER armAutoMerge(...) call in the file
   // (retro/triage/plan/approve/dep-review/sweep) must NOT be preceded by a

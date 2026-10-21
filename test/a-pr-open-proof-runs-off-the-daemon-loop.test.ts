@@ -17,6 +17,7 @@ const defaultProofRunnerAsync: typeof prOpen.defaultProofRunnerAsync = (...args)
 const prerunPullRequestProofs: typeof prOpen.prerunPullRequestProofs = (...args) => prOpen.prerunPullRequestProofs(...args);
 import { gitRepo } from "./helpers/git-repo.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { parseAcceptanceBlock } from "../src/lib/review.js";
 
 /** A fake `rmd`: echoes its argv, writes to stderr, sleeps `RMD_FAKE_SLEEP_MS`, and exits 3 when
  *  the proof names FAIL. With RMD_FAKE_IGNORE_TERM it survives SIGTERM, so only SIGKILL ends it. */
@@ -51,7 +52,7 @@ function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise
 }
 
 /** A checkout with a filed plan and an origin/main a commit behind HEAD. */
-function filedPlanFixture(proofs: string[]): { dir: string; base: string } {
+function filedPlanFixture(proofs: (string | { claim: string; proof?: string; satisfied_by?: string })[]): { dir: string; base: string } {
   const repo = gitRepo({ kind: "proof-off-loop" });
   mkdirSync(join(repo.dir, "plan"));
   const plan = [
@@ -60,7 +61,7 @@ function filedPlanFixture(proofs: string[]): { dir: string; base: string } {
     "  repo: remudero",
     "  type: implement",
     "  acceptance:",
-    ...proofs.flatMap((proof, i) => [`    - claim: claim ${i}`, `      proof: ${JSON.stringify(proof)}`]),
+    ...proofs.map((proof, i) => `    - ${JSON.stringify(typeof proof === "string" ? { claim: `claim ${i}`, proof } : proof)}`),
   ].join("\n");
   writeFileSync(join(repo.dir, "plan", "tasks.yaml"), `${plan}\n`);
   repo.git("add", "-A");
@@ -72,6 +73,92 @@ function filedPlanFixture(proofs: string[]): { dir: string; base: string } {
   repo.git("commit", "-q", "-m", "feat: change");
   return { dir: repo.dir, base };
 }
+
+test("async PR opening checks every remaining proof beside prior credit", async () => {
+  const first = { claim: "the new marker is present", proof: "grep: ^change in note.md" };
+  for (const lastProof of ["grep: change$ in note.md", "grep: ABSENT in note.md", "not an executable proof"]) {
+    const last = { claim: "the independent remaining claim", proof: lastProof };
+    const { dir, base } = filedPlanFixture([
+      { claim: "the plan already shipped", proof: "grep: acceptance in plan/tasks.yaml", satisfied_by: "#11180" },
+      first,
+      { claim: "proofless prior credit", satisfied_by: "#12258" },
+      last,
+      "grep: ^change$ in note.md",
+    ]);
+    try {
+      // The final proof is reached only when both earlier executable proofs pass.
+      const ran: string[] = [];
+      const recorder: AsyncOpenPullRequestProofRunner = async (proof, mergeBase, root, target) => {
+        assert.equal(mergeBase, base);
+        ran.push(proof);
+        return defaultProofRunnerAsync(proof, mergeBase, root, target);
+      };
+      for (const open of [
+        () => prOpen.openPullRequestCheckedAsync("", "run-W1-T9-1", dir, "origin/main", recorder),
+        async () => {
+          const runner = await prerunPullRequestProofs("run-W1-T9-1", dir, "origin/main", undefined, recorder);
+          return openPullRequestChecked("", "run-W1-T9-1", dir, "origin/main", runner);
+        },
+      ]) {
+        ran.length = 0;
+        if (lastProof === "grep: change$ in note.md") {
+          const body = await open();
+          assert.deepEqual(parseAcceptanceBlock(body).map((criterion) => criterion.proof), [first.proof, lastProof, "grep: ^change$ in note.md"]);
+          assert.match(body, /#11180/);
+          assert.match(body, /proofless prior credit/);
+          assert.match(body, /#12258/);
+          assert.deepEqual(ran, [first.proof, lastProof, "grep: ^change$ in note.md"]);
+          continue;
+        }
+        await assert.rejects(open, (err: unknown) => {
+          assert.ok(err instanceof PrOpenRefusedError);
+          assert.equal(err.refusalClass, "branch-gap");
+          if (lastProof.startsWith("not")) {
+            assert.match(err.message, /cannot execute: not an executable proof/);
+            assert.equal(err.failingProof, undefined);
+          } else {
+            assert.equal(err.failingProof?.proof, lastProof);
+            const body = err.failingProof!.checkedBody;
+            assert.deepEqual(parseAcceptanceBlock(body).map((criterion) => criterion.claim), [first.claim, last.claim, "claim 4"]);
+            assert.match(body, /proofless prior credit/);
+            assert.match(body, /#11180/);
+            assert.match(body, /#12258/);
+          }
+          return true;
+        });
+        assert.deepEqual(ran, lastProof.startsWith("not") ? [first.proof] : [first.proof, lastProof]);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("an all-credited filed task has no invented executable proof", async () => {
+  for (const proof of ["grep: acceptance in plan/tasks.yaml", undefined]) {
+    const { dir } = filedPlanFixture([{ claim: "already delivered", proof, satisfied_by: "#11180" }]);
+    try {
+      let calls = 0;
+      const runner = () => { calls++; return { status: 0 }; };
+      const refused = (err: unknown): boolean => {
+        assert.ok(err instanceof PrOpenRefusedError);
+        assert.equal(err.refusalClass, "all-credited");
+        assert.equal(err.details?.refusalClass, "all-credited");
+        assert.equal(err.failingProof, undefined);
+        assert.match(err.message, /no executable acceptance criteria/);
+        return true;
+      };
+      assert.throws(() => openPullRequestChecked("", "run-W1-T9-1", dir, "origin/main", runner), refused);
+      const asyncRunner = async () => runner();
+      const preRun = await prerunPullRequestProofs("run-W1-T9-1", dir, "origin/main", undefined, asyncRunner);
+      assert.throws(() => openPullRequestChecked("", "run-W1-T9-1", dir, "origin/main", preRun), refused);
+      await assert.rejects(prOpen.openPullRequestCheckedAsync("", "run-W1-T9-1", dir, "origin/main", asyncRunner), refused);
+      assert.equal(calls, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
 
 test("an awaited proof run leaves the event loop free to service a timer while it is pending", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-proof-async-"));

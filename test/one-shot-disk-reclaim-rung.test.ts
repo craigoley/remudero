@@ -41,7 +41,7 @@ import type { CloneReapSummary } from "../src/lib/clone-reaper.js";
 import type { TempSweepSummary } from "../src/lib/tmp.js";
 import type { WorkerHomeSweepSummary } from "../src/lib/worker-home.js";
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 const CONFIG = { root: "/nonexistent-repo-root-for-disk-reclaim-test" } as unknown as Config;
 
 function tempSummary(over: Partial<TempSweepSummary> = {}): TempSweepSummary {
@@ -75,8 +75,8 @@ test("runTaskBody calls logDiskReclaimRung — AFTER logWorktreeReapBootSurvey, 
 
 describe("no new predicate — every decision stays inside the sweep that already owns it", () => {
   it("the function body introduces no age arithmetic or liveness probe of its own", () => {
-    const defMarker = "export async function logDiskReclaimRung(";
-    const endMarker = "\n/**\n * impl-FZ — build the daemon's plan re-reader";
+    const defMarker = "async function logDiskReclaimRung(";
+    const endMarker = "\n}\n";
     const start = runTaskSrc.indexOf(defMarker);
     const end = runTaskSrc.indexOf(endMarker, start);
     assert.ok(start >= 0 && end > start, "must locate logDiskReclaimRung's full body in source");
