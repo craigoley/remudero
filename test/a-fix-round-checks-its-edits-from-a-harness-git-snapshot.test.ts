@@ -279,3 +279,39 @@ test("PR-13121: a merge-conflict round's census check re-snapshots after the mer
   assert.equal(await harness.censusSnapshotForCheck("/wt", "before-merge.json", true, async () => undefined, log), "before-merge.json");
   assert.deepEqual(written, ["/wt"]);
 });
+
+test("a pending main merge gives the census its prospective merged base without hiding branch edits", async t => {
+  const harness = await import("#src/run-task.js");
+  const repo = gitRepo({ kind: "pending-main-census", scope: t });
+  mkdirSync(join(repo.dir, "src"), { recursive: true });
+  writeFileSync(join(repo.dir, "src/branch.ts"), "export const own = 0;\n");
+  repo.git("add", "src"); repo.git("commit", "-m", "fixture: shared census base");
+  const base = repo.git("rev-parse", "HEAD");
+  repo.git("checkout", "-b", "repair");
+  writeFileSync(join(repo.dir, "src/branch.ts"), "export const own = Date.now();\n");
+  repo.git("add", "src"); repo.git("commit", "-m", "fixture: branch-owned change");
+  const head = repo.git("rev-parse", "HEAD");
+  repo.git("checkout", "main");
+  mkdirSync(join(repo.dir, "test"), { recursive: true });
+  const inherited = "test/main-added.test.ts";
+  writeFileSync(join(repo.dir, inherited), 'export const inherited = "unchanged main bytes";\n');
+  repo.git("add", "test"); repo.git("commit", "-m", "fixture: main adds census member");
+  const main = repo.git("rev-parse", "HEAD");
+  repo.git("update-ref", "refs/remotes/origin/main", main);
+  repo.git("checkout", "repair");
+  const beforePath = await harness.writeFixCensusSnapshotAsync(repo.dir, () => {});
+  assert.ok(beforePath);
+  assert.equal(readCensusSnapshot(beforePath).mergeBase, base, "control: an unmerged branch retains the ordinary merge base");
+  repo.git("merge", "--no-commit", "--no-ff", "main");
+  assert.equal(repo.git("rev-parse", "HEAD"), head, "the harness has not committed its prepared merge");
+  const path = await harness.writeFixCensusSnapshotAsync(repo.dir, () => {});
+  assert.ok(path);
+  const snapshot = readCensusSnapshot(path);
+  assert.equal(snapshot.mergeBase, main, "a normal pending main merge has main as its prospective merge base");
+  assert.equal(snapshot.baseBlobs[inherited], readFileSync(join(repo.dir, inherited), "utf8"));
+  assert.equal(snapshot.baseBlobs["src/branch.ts"], "export const own = 0;\n");
+  assert.equal(snapshot.headSha, head, "the branch's committed census inputs remain selected as head");
+  assert.ok(snapshot.headPaths.includes("src/branch.ts"));
+  assert.equal(repo.git("diff", "--name-only", snapshot.mergeBase, "--", "src/branch.ts"), "src/branch.ts",
+    "the branch's own newly unsafe census input remains different from the measured base");
+});

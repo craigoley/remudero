@@ -13,9 +13,9 @@ test("Haiku 5.5 image pins the CLI declared by its actual locked SDK", () => {
   const lock = json("package-lock.json");
   const image = json("deploy/package.json");
   const imageLock = json("deploy/package-lock.json");
-  assert.equal(lock.packages["node_modules/@anthropic-ai/claude-agent-sdk"].version, "0.3.296");
-  assert.equal(sdk.version, "0.3.296", "the actual installed SDK must match the committed lock");
-  assert.equal(sdk.claudeCodeVersion, "2.1.296", "read CLI identity from SDK metadata, never infer it");
+  assert.equal(lock.packages["node_modules/@anthropic-ai/claude-agent-sdk"].version, "0.3.302");
+  assert.equal(sdk.version, "0.3.302", "the actual installed SDK must match the committed lock");
+  assert.equal(sdk.claudeCodeVersion, "2.1.302", "read CLI identity from SDK metadata, never infer it");
   assert.equal(image.dependencies["@anthropic-ai/claude-code"], sdk.claudeCodeVersion);
   assert.equal(imageLock.packages["node_modules/@anthropic-ai/claude-code"].version, sdk.claudeCodeVersion);
   assert.equal(imageLock.packages[""].dependencies["@anthropic-ai/claude-code"], sdk.claudeCodeVersion);

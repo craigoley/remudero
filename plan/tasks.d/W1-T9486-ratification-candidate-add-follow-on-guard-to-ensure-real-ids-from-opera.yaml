@@ -12,7 +12,7 @@
   
     Cross-file invariant depends on both plan/tasks.yaml and MASTER-PLAN.md being consistent
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=6389c9ab3e9c8cc5
   attempts: 0
   files:

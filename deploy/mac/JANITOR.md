@@ -296,9 +296,11 @@ bare origins, and every janitor pass reported `removed=0`.
 `preserve-retire.py` runs as the last phase of every pass. It does nothing until the
 account writes an owner-private (0600) `~/.local/state/remudero/preserve-retire.json`
 below private parents, for example `{"enabled": true, "idle_hours": 24, "retain_days": 7}`.
-It scans `~/Remudero`, `~/rmd-work`, `~/.codex/work-artifacts` and
-`~/Developer/remudero-operator-worktrees` (never other `Developer` clones or protected
-roots), at most once every `interval_hours` (default 6).
+It scans `~/Remudero`, `~/rmd-work`, `~/.codex/work-artifacts`,
+`~/Developer/remudero-operator-worktrees`, every `~/Developer/remudero-operator-recovered-worktrees-*`
+and every `~/Downloads/remudero-*` folder (never other `Developer` or `Downloads` content or
+protected roots), at most once every `interval_hours` (default 6). A `roots` entry with `*`
+names every folder it matches.
 
 A checkout, standalone clone or bare repository is a candidate when nothing in it
 (dependencies included, its own Git metadata excluded) changed in `idle_hours` by
@@ -322,6 +324,24 @@ for activity just before removal. Worktrees go through `git worktree remove --fo
 then `git worktree prune`. Copies older than `retain_days` are expired; folders the
 phase did not stamp are never touched. After expiry, unpublished work exists nowhere
 else, so set `retain_days` to how long you might want it back.
+
+The same pass then does housekeeping that changes no history. On 2026-10-21 one
+clone held 8.6 GiB in 1,640 packs (repeated fetches with automatic gc off) that repacked
+to 111 MiB, and agents had left 16 GB of JSON and log dumps beside their checkouts:
+
+- A repository under the roots with `repack_min_packs` (default 50) or more packs is
+  repacked with `git repack -a -d -l --keep-unreachable`, kept or active ones included:
+  no object is dropped, and borrowed objects stay with their lender.
+- Outside any repository, a `.json`, `.jsonl`, `.ndjson`, `.log`, `.lcov` or `.info`
+  file of at least `dump_min_mb` (default 5) idle for `idle_hours` and not open is
+  gzipped beside itself after a full read-back; its modification time is kept. A dump in
+  either form unchanged for `dump_retain_days` (default 14) is deleted.
+- Outside any repository, an idle, unopened `node_modules` is removed, and so are
+  `coverage`, `.turbo` and `.next` beside a `package.json`; elsewhere those names may be
+  fixture data. Symlinked folders are never followed.
+
+The janitor also runs `~/.local/bin/remudero-dependencies sweep --apply` on every apply
+pass when that tool is installed (see `deploy/DEPENDENCY-SEEDS.md`).
 
 The janitor's human log now rotates at 16 MiB, keeping one previous generation.
 
