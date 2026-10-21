@@ -668,6 +668,12 @@
       "grepHint": "Staged private ownership / peer capacity protocol"
     },
     {
+      "path": "docs/forensics/the-retro-backoff-has-no-ceiling.md",
+      "title": "The retro backoff has no ceiling",
+      "summary": "The time arm grows without a ceiling; a cap's effect on actual attempts remains unmeasured without the attempt and tick history.",
+      "grepHint": "The retro backoff has no ceiling"
+    },
+    {
       "path": "docs/forensics/tick-read-worker.md",
       "title": "Forensics: src/lib/tick-read-worker.ts",
       "summary": "Every measured fact, incident and design argument the longest comment blocks in `src/lib/tick-read-worker.ts`",
