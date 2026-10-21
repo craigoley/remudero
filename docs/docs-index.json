@@ -410,6 +410,12 @@
       "grepHint": "fleet-heartbeat-watch.yml forensics"
     },
     {
+      "path": "docs/forensics/followup-w1-t7898-pr-repairs.md",
+      "title": "W1-T7898 follow-up: actual repairs for PRs 10578, 10628 and 10671",
+      "summary": "The three PRs had different repairs; the inspected `Analyze (actions)` reds were cancelled jobs,",
+      "grepHint": "W1-T7898 follow-up: actual repairs for PRs 10578, 10628 and 10671"
+    },
+    {
       "path": "docs/forensics/fs-race-safe.md",
       "title": "fs-race-safe.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
