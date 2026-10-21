@@ -624,3 +624,58 @@ test("W1-T10347: fallback safety preserves valid decisions and bounded conversat
     assert.equal(fallbackRows(f).filter(row => row.step === "panel.proposal_reframe_requested").length, before, "exhausted fallback never becomes an edit");
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
+
+test("W1-T10347: failed interpretation requires an unmistakable command before any proposal change", async () => {
+  const messages = [
+    "When should I decline this?",
+    "Please explain why I should reject this.",
+    "I do not want to decline this.",
+    "Don't edit this.",
+    "If this fails, close it.",
+    'The review says "decline this".',
+    '"decline this"',
+    "`decline this`",
+    "decline this?",
+    "decline this, or keep it?",
+    "When should I restore this?",
+    "How would I redraft it with a smaller scope?",
+    "We can change it later.",
+    "Do not go ahead.",
+    "looks good, but don't approve",
+    "please decline this and restore that",
+    "undo this only if safe",
+    "decline this\nthen bring it back",
+    "please edit it?",
+  ];
+  for (const text of messages) {
+    const f = fixture();
+    try {
+      const reader = failedInterpretation(f, { text: "", isError: true });
+      appendThreadMessage(inboxThreadIdentity(RULING), "reply", text, { threadStorePath: inboxThreadStorePath(f.root) });
+      assert.equal(await answerThread(inboxThreadId(RULING), reader.deps), "question", text);
+      assertReadOnlyFallback(f);
+      assert.equal(reader.calls(), 1, "uncertain intent cannot retry the model");
+      assert.equal(fallbackRows(f).filter(row => row.step === "worker.attempt").length, 1);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T10347: an explicit edit command keeps action words in its payload as feedback", async () => {
+  const f = fixture(), store = { threadStorePath: inboxThreadStorePath(f.root) };
+  try {
+    const unavailable = f.responder(async () => null);
+    const direction = "Please redraft it with a note to restore the archived material.";
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", direction, store);
+    assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "edit");
+    assert.deepEqual(f.reframed, [[RULING, direction]], "preserve the original feedback, not an embedded restore command");
+    assert.equal(fallbackRows(f).filter(row => row.step === "panel.proposal_restored").length, 0);
+    assert.equal(fallbackRows(f).filter(row => row.step === "panel.proposal_declined").length, 0);
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "  PLEASE decline this!  ", store);
+    assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "decline");
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Restore this proposal.", store);
+    assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "restore");
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Please go ahead!", store);
+    assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "approve");
+    assert.deepEqual(f.approved, [], "approval remains a button suggestion, never execution");
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
