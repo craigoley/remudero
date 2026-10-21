@@ -15,7 +15,7 @@
     - deploy/mac/tmp-reclaim.sh
     - deploy/mac/JANITOR.md
     - test/the-mac-janitor-reclaims-what-it-skipped.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-20: the Mac sits under 4 GB free and every author preflight returns NOT_RUN
   attempts: 0
   rationale: |

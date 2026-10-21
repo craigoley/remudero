@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 10.00
   priority: 1  # requested by the operator session 2026-10-21: operator releases are silently dead in production
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-21: W1-T6372, W1-T7271 and W1-T7736, released by rmd approve on 2026-10-13, have no dispatch row in 8 days"
   plan_refs: [W1-T147, W1-T3206, W1-T3216, W1-T5351, W1-T6358, W1-T8771, W1-T9045, W1-T3271, W1-T5359, W1-T5406]
