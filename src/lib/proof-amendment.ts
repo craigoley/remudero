@@ -26,7 +26,7 @@ import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
+import { execWhitelistedProof, INSTRUMENT_SURFACE, matchedLinesAreAllComments, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
@@ -143,6 +143,14 @@ function targetsPlanShard(whitelisted: WhitelistedProof, planShardPaths: Readonl
   return typeof target === "string" && planShardPaths.has(target);
 }
 
+/** The reviewer's comment-only downgrade reads the grep pattern against the target file's text (review.ts
+ *  `matchedLineCommentContext`); the same context here keeps a validated replacement from being capped again. */
+function grepCommentContext(parsed: WhitelistedProof, cwd: string): { pattern: string; fileText: string } | undefined {
+  const dialect = parsed.authorSelectedArgv !== true && parsed.args.length === 4 && parsed.args[0] === "-arn" && parsed.args[1] === "--";
+  const path = dialect ? join(cwd, parsed.args[3]!) : undefined;
+  return path !== undefined && existsSync(path) ? { pattern: parsed.args[2]!, fileText: readFileSync(path, "utf8") } : undefined;
+}
+
 export interface ProofAmendmentValidationInput {
   readonly headCwd: string;
   readonly baseCwd: string | undefined;
@@ -225,6 +233,12 @@ export function validateProofAmendmentProposal(
       return {
         ok: false,
         refusal: { reason: "not-discriminating", detail: `replacement does not pass at the implementation head: ${entry.newProof}` },
+      };
+    }
+    if (parsed.kind === "grep" && matchedLinesAreAllComments(parsed.matchedLines ?? [], grepCommentContext(parsed, input.headCwd))) {
+      return {
+        ok: false,
+        refusal: { reason: "not-discriminating", detail: `replacement matches only comment lines, which the reviewer caps: ${entry.newProof}` },
       };
     }
     if (input.baseCwd === undefined) {
