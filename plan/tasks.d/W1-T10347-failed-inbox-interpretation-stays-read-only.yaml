@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: span
   priority: 2.5
@@ -64,3 +64,11 @@
     plain-question regression must fail again. Exact restoration must pass with no skipped or
     cancelled cases. Count reframe callbacks, proposal-mutation ledger rows, thread answers and
     worker assignment/attempts; zero effects needs working explicit-command positive controls.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The operator explicitly chose read-only fallback for failed Inbox interpretation with explicit commands unchanged, and authorized filing and implementation. Native rmd approve W1-T10347 recorded that decision. Narrow scope: inbox-responder and its existing conversation integration suite. Preserve successful validated decisions, no-interpreter direction behavior, action tiers, one-attempt telemetry and all review/CI gates; no automatic retry, new provider, permissions, budgets, service change or deployment."
+    judged_at: "2026-10-21T14:05:50.401Z"
+    pin: "8759c4d0df60bf4059f448c53f5d3c0ecd8dc33ca8352b634ddfd2efbc77e2db"
