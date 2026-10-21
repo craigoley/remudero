@@ -575,7 +575,7 @@ import {
   type OpenPrRest,
   fetchSinglePrRest,
   codeqlCheckFailed,
-  hydrateCodeqlHeadAlerts,
+  hydrateCodeqlHeadAlertsSteps,
   CODEQL_CHECK_NAME,
   fetchSinglePrRestAsync,
   hydrateMergeStates,
@@ -45483,8 +45483,9 @@ export async function fixCommand(
     row.pr_number === raw.number && row.head_sha === raw.headRefOid);
   const failedCodeql = codeqlCheckFailed(raw.statusCheckRollup);
   const codeqlHeadAlerts = failedCodeql && !falsePositive
-    ? hydrateCodeqlHeadAlerts(owner, repo, [{ number: raw.number, headSha: raw.headRefOid }], deps.fetch ?? ghJson,
-      undefined, (pr_number, reason) => log("fix.codeql_alerts_unreadable", { pr_number, head_sha: raw.headRefOid, reason })).get(raw.number)
+    ? (await runStepsAsync(hydrateCodeqlHeadAlertsSteps(owner, repo, [{ number: raw.number, headSha: raw.headRefOid }],
+      deps.fetch ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit)),
+      undefined, (pr_number, reason) => log("fix.codeql_alerts_unreadable", { pr_number, head_sha: raw.headRefOid, reason })))).get(raw.number)
     : undefined;
   const pr: OpenPrView = {
     prNumber: raw.number,
