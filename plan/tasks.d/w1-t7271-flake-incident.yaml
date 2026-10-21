@@ -5,8 +5,11 @@
   type: implement
   verify: human
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21: retire W1-T7271 — 'real spawn' (test/fast-gate-admits-the-census-class.test.ts) shows 0 flake
+  # rounds and 0 flake retries in the 3 days to 2026-10-21T13:52Z; its 10-13 release would otherwise dispatch now that
+  # W1-T10348 (#13387) honours releases, building a fix for a cause that no longer occurs.
   attempts: 0
   author_class: machine
   origin: "ci-friction:flake-incident:test/fast-gate-admits-the-census-class.test.ts#real spawn"

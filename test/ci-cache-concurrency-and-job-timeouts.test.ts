@@ -63,7 +63,7 @@ function assertSetupCache(file: string, jobId: string, steps: WorkflowStep[], in
     assert.equal(checkout?.with?.["fetch-depth"], 2);
     assert.equal(checkout?.with?.["sparse-checkout-cone-mode"], false);
     assert.deepEqual(String(checkout?.with?.["sparse-checkout"]).split(/\s+/).filter(Boolean),
-      [".nvmrc", "scripts/", "src/lib/plan-scope.ts"],
+      [".nvmrc", "scripts/", "src/lib/plan-scope.ts", "src/lib/rule-suites.ts"],
       `${context} must not acquire a package-lock or a dependency checkout`);
     assert.match(setup?.uses ?? "", /^actions\/setup-node@[a-f0-9]{40}$/i);
     assert.equal(setup?.with?.cache, undefined, `${context} must remain uncached without a lockfile`);
@@ -341,4 +341,24 @@ test("coverage-shard has headroom beyond the measured 39m ceiling but remains be
     `coverage-shard must exceed its former 39m ceiling after run 37694060425 hit that bound; got ${coverageTimeout}`);
   assert.ok(Number.isFinite(waitCapSeconds) && coverageTimeout * 60 < waitCapSeconds,
     `coverage-shard timeout (${coverageTimeout}m) must stay strictly below ci-gate WAIT_CAP_SECONDS (${waitCapSeconds}s)`);
+});
+
+
+test("ledger bootstrap admits only its two classifier leaves without admitting dependencies", async () => {
+  const doc = (await loadWorkflowFiles()).find(entry => entry.file === "ci.yml")!.doc;
+  const steps = doc.jobs["coverage-ledger"]!.steps!;
+  const index = steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
+  assertSetupCache("ci.yml", "coverage-ledger", steps, index);
+  const declared = String(steps[0]!.with!["sparse-checkout"]);
+  for (const replacement of [
+    declared.replace("src/lib/rule-suites.ts", ""),
+    declared.replace("src/lib/plan-scope.ts", ""),
+    declared.replace("src/lib/rule-suites.ts", "src/lib/"),
+    declared + "package-lock.json\n", declared + "node_modules/\n", declared + "src/lib/unrelated.ts\n",
+  ]) {
+    const changed = structuredClone(steps);
+    changed[0]!.with!["sparse-checkout"] = replacement;
+    assert.throws(() => assertSetupCache("ci.yml", "coverage-ledger", changed, index),
+      /must not acquire a package-lock or a dependency checkout/);
+  }
 });
