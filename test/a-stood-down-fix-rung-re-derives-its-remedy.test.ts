@@ -167,3 +167,52 @@ test("a later unfinished round stays live and a completed round cannot silently 
   f.rows.push({ ...f.rows[2], ts: new Date(f.now + 1).toISOString(), round_id: "later-round", fix_outcome: "FIXED" });
   assert.equal(terminalFixDesignHandoff(f.pr, f.rows).kind, "handoff", "the rung's protective first handoff still needs a person at this head");
 });
+
+for (const mode of ["conflict", "ci"] as const) {
+  test(`operator-amended terminal design handoff adopts main before admission (${mode})`, async t => {
+    const f = designFixture(t, mode); f.rows[1]!.contract_revision = "contract-A"; f.write();
+    let revision = "contract-A", refreshed = 0;
+    f.deps.readTaskContractRevision = () => revision;
+    f.deps.updateBranch = async () => { refreshed++; return "updated"; };
+    await runSweep([f.pr], f.deps);
+    assert.equal(f.effects.escalations.length, 1); assert.equal(refreshed, 0);
+    revision = "contract-B";
+    await runSweep([f.pr], f.deps);
+    assert.equal(refreshed, 1, "a protected-main operator amendment must reach the existing ordinary base-adoption path");
+    assert.equal(f.effects.admissions, 0, "base adoption cannot consume a new code-fix admission");
+    assert.equal(f.effects.fixes, 0); assert.equal(f.effects.escalations.length, 1);
+    await runSweep([f.pr], f.deps);
+    assert.equal(refreshed, 1, "an unchanged head and amendment is taken only once");
+  });
+}
+
+test("a design amendment defers without branch-update capability and remains pending for the full pass", async t => {
+  const f = designFixture(t, "ci"); f.rows[1]!.contract_revision = "contract-A"; f.write();
+  let refreshed = 0;
+  f.deps.readTaskContractRevision = () => "contract-B";
+  const light = await runSweep([f.pr], f.deps);
+  assert.match(light.actions[0]!.reason, /deferred to full sweep/);
+  f.deps.updateBranch = async () => { refreshed++; return "updated"; };
+  await runSweep([f.pr], f.deps);
+  assert.equal(refreshed, 1); assert.equal(f.effects.admissions, 0); assert.equal(f.effects.fixes, 0);
+});
+
+test("an unreadable design contract stays unavailable before an admission or write", async t => {
+  const f = designFixture(t, "ci"); f.rows[1]!.contract_revision = "contract-A"; f.write();
+  f.deps.readTaskContractRevision = () => { throw new Error("plan source unavailable"); };
+  f.deps.updateBranch = async () => assert.fail("unknown contract cannot authorize a refresh");
+  const result = await runSweep([f.pr], f.deps);
+  assert.equal(result.actions[0]!.disposition, "wait");
+  assert.match(result.actions[0]!.reason, /contract revision unavailable/);
+  assert.deepEqual(f.effects, { admissions: 0, fixes: 0, escalations: [] });
+});
+
+test("a design amendment that changes during observation never admits the old head", async t => {
+  const f = designFixture(t, "ci"); f.rows[1]!.contract_revision = "contract-A"; f.write();
+  let read = 0, refreshed = 0;
+  f.deps.readTaskContractRevision = () => ++read === 1 ? "contract-B" : "contract-A";
+  f.deps.updateBranch = async () => { refreshed++; return "updated"; };
+  const result = await runSweep([f.pr], f.deps);
+  assert.equal(refreshed, 0); assert.equal(f.effects.admissions, 0); assert.equal(f.effects.fixes, 0);
+  assert.match(result.actions[0]!.reason, /changed during/);
+});
