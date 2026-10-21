@@ -32422,6 +32422,7 @@ export async function autoTriageCheck(
   }
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
+  const feedbackRoot = opts.feedbackRoot ?? repoRoot;
   const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
@@ -32441,10 +32442,10 @@ export async function autoTriageCheck(
     marker: readAutoTriageMarker(autoTriageMarkerPath(config.root)),
     now,
     // repoRoot, NOT config.root — see this block's doc comment.
-    candidates: newFeedbackIdsOldestFirst(opts.feedbackRoot ?? repoRoot),
+    candidates: newFeedbackIdsOldestFirst(feedbackRoot),
     // SAME repoRoot, SAME reasoning, read through the SAME underlying walk (W1-T2289) — see
     // `oldestFeedbackAgeMs`'s own doc for why this must never drift onto `config.root`.
-    oldestCandidateAgeMs: oldestFeedbackAgeMs(opts.feedbackRoot ?? repoRoot, now),
+    oldestCandidateAgeMs: oldestFeedbackAgeMs(feedbackRoot, now),
   };
   // W1-T4769: decide FIRST without any claim knowledge — every refusal that does not depend on which
   // entry is claimed returns here with no git or ledger I/O. Only a would-be fire pays for the sweep.
