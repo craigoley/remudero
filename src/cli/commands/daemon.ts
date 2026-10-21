@@ -69,6 +69,7 @@ import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import { dispatchClaimRef, findClaimMintRow, releaseReplacedContainerClaims, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
 import { buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence } from "../../lib/sweep.js";
+import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
 import { terminalUnionScans } from "../../lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint } from "../../lib/daemon-footprint.js";
@@ -502,10 +503,14 @@ export async function daemonCommand(
 
   const runId = `DAEMON-${Date.now()}`;
   let lastReadPlaneStep: string | undefined;
+  let onMainEntryStep: ((step: string) => void) | undefined;
   const log = (step: string, extra: Record<string, unknown> = {}) => {
     lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
+    onMainEntryStep?.(step);
   };
+  // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
+  onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
   const fleetRatify = fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath);
   const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);

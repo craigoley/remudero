@@ -24,6 +24,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
 import type { Route } from "./service.js";
 import { observeSelectedRegistry, observeSelectedRegistrySync, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { sendJson } from "./panel-actions.js";
@@ -658,7 +659,7 @@ function startRepoTelemetryWorker(workerUrl: URL): (req: RepoTelemetryRequest) =
 
 /** Runs {@link computeRepoTelemetrySync} on the persistent worker for `workerUrl` (default: this module). */
 export function computeRepoTelemetryOffThread(req: RepoTelemetryRequest, workerUrl?: URL): Promise<RepoTelemetryOutcome> {
-  const url = workerUrl ?? new URL(import.meta.url);
+  const url = workerUrl ?? bundledWorkerUrl(import.meta.url);
   let run = telemetryWorkers.get(url.href);
   if (!run) telemetryWorkers.set(url.href, (run = startRepoTelemetryWorker(url)));
   return run(req);

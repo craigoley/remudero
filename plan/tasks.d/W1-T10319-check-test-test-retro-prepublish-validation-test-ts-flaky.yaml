@@ -1,0 +1,36 @@
+- id: W1-T10319
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/retro-prepublish-validation.test.ts:flaky cost 12 PR minute(s) across 4 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.44
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/retro-prepublish-validation.test.ts:flaky"
+  files:
+    - src/lib/retro-preflight.ts
+    - test/learning/check-test-test-retro-prepublish-validation-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/retro-prepublish-validation.test.ts:flaky"
+      proof: "grep: test(\"W1-T10319: check:test:test/retro-prepublish-validation.test.ts:flaky is prevented, not retried\" in test/learning/check-test-test-retro-prepublish-validation-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/retro-prepublish-validation.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/retro-prepublish-validation.test.ts:flaky cost 12 PR minute(s) (seven-day half-life) across 4 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/retro-preflight.ts: test/retro-prepublish-validation.test.ts imports it
+    - test/retro-prepublish-validation.test.ts: named by the failing check
+    - the rounds name a failing test: test/retro-prepublish-validation.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13170 at 2026-10-20T18:25:29Z: hand fix PR #13170: src/lib/retro-preflight.ts; minutes are the pass median proxy (5.946438888888888), not measured repair time
+    - PR #13112 at 2026-10-20T14:37:48Z: hand fix PR #13112: src/lib/retro-preflight.ts; minutes are the pass median proxy (5.946438888888888), not measured repair time
+    - PR #10780 (https://github.com/craigoley/remudero/pull/10780) at 2026-10-11T05:07:20.305Z: ci-log round — coverage-shard (6/8): test/retro-prepublish-validation.test.ts
+        failing tests: retro prepublish runs the dynamically enumerated plan-reading suites through test-with-retry
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

@@ -9,7 +9,7 @@ import { scoutGardenSpec, scoutShard } from "#src/lib/scout-gardener.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
-const symptom = { step: "inbox.draft_escalated", older: 2, newer: 3, total: 5, files: [] };
+const symptom = { step: "inbox.draft_error", older: 2, newer: 3, total: 5, files: [] };
 
 test("W1-T10261: a recon scout draft declares the file that writes its step", (t) => {
   const repo = gitRepo({ scope: t, kind: "scout-writer" });
@@ -17,12 +17,12 @@ test("W1-T10261: a recon scout draft declares the file that writes its step", (t
     mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
     writeFileSync(join(repo.dir, path), text);
   };
-  put("src/lib/inbox.ts", 'log("inbox.draft_escalated"); log(\'inbox.draft_escalated\');');
-  put("scripts/inbox.ts", 'log(`inbox.draft_escalated`);');
-  put("src/comment.ts", '// "inbox.draft_escalated"\nlog("prefix inbox.draft_escalated");');
-  put("test/example.ts", 'log("inbox.draft_escalated");');
+  put("src/lib/inbox.ts", 'log("inbox.draft_error"); log(\'inbox.draft_error\');');
+  put("scripts/inbox.ts", 'log(`inbox.draft_error`);');
+  put("src/comment.ts", '// "inbox.draft_error"\nlog("prefix inbox.draft_error");');
+  put("test/example.ts", 'log("inbox.draft_error");');
   repo.git("add", ".");
-  put("src/untracked.ts", 'log("inbox.draft_escalated");');
+  put("src/untracked.ts", 'log("inbox.draft_error");');
   const draft = scoutShard(symptom, "W1-T99001", [5], repo.dir);
   assert.equal(draft.refused, undefined);
   const task = loadPlanFromYaml(draft.text, "draft.yaml").tasks[0]!;
@@ -57,7 +57,7 @@ test("W1-T10261: queued test-only scout drafts gain their writer and return to t
   const repo = gitRepo({ scope: t, kind: "scout-rederive" });
   repo.addRemote("origin", "https://github.com/fixture/scout.git");
   mkdirSync(join(repo.dir, "src/lib"), { recursive: true });
-  writeFileSync(join(repo.dir, "src/lib/inbox.ts"), 'log("inbox.draft_escalated");');
+  writeFileSync(join(repo.dir, "src/lib/inbox.ts"), 'log("inbox.draft_error");');
   repo.git("add", "src");
   mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
   const texts = new Map<string, string>();
@@ -72,7 +72,7 @@ test("W1-T10261: queued test-only scout drafts gain their writer and return to t
     writeFileSync(join(repo.dir, path), text);
     const task = loadPlanFromYaml(text, path).tasks[0]!;
     if (n === 5) task.files!.unshift("src/already.ts");
-    if (n === 6) task.origin = "other:inbox.draft_escalated";
+    if (n === 6) task.origin = "other:inbox.draft_error";
     return task;
   });
   const deps: GardenerDeps = {
