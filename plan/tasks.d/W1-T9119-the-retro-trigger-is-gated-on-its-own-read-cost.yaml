@@ -1,11 +1,11 @@
 - id: W1-T9119
   title: "THE RETRO TRIGGER IS GATED ON WHAT ITS OWN LEDGER READ WOULD COST, NOT ON A FIXED ARCHIVE COUNT, AND A DEFERRAL THAT OUTLASTS THE RETRO'S OWN CADENCE SAYS SO — every tick since 2026-10-06T18Z deferred the retro with \"over bound — N archive(s) > 400\" (111 rows over 10-10..13, zero retro_triggered), because the check borrows the compaction rung's fixed maxArchives as its pressure signal and the archive count has only grown"
   repo: remudero
-  depends_on: [W1-T9113]
+  depends_on: [W1-T9113, W1-T10046]  # W1-T10046 added 2026-10-20 by the amendment below
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 11.50
   risk: high  # Rule 19: one concern — the retro check's own read cost decides whether it runs, and a persistent deferral is named; it spans the tick gate (daemon.ts), the check's ledger read and wiring (run-task.ts) and the new test
   band_meaning: span
   origin: "found 2026-10-13 by an operator session (the retro trigger never ran on 10-10..13); operator standing direction: fix at the root, no hard fixed thresholds, automated flow"
@@ -69,6 +69,24 @@
     11 shards for retro_trigger. One head read more: plan-file-1791897336437 (#11353, since merged), whose W1-T9113 cites the same
     111 deferrals as evidence that the retro check is dormant and fixes the closed-PR read, not the gate. W1-T5790
     (queued) moves when the check is awaited, not whether it is gated. W1-T6312 (merged) refuses no-reduction passes.
+  amendment: |
+    2026-10-20 (coordinator brief file1020 item 7; W1-T10046's own shard says "W1-T9119 should depend on this one or
+    drop its step 1 (coordinator's call)"). W1-T9119 is unshipped: no `Remudero-Task: W1-T9119` trailer on main, no
+    run-W1-T9119-* head, and its only run (W1-T9119-1792408080502, dispatched 2026-10-19T11:09Z) settled `rejected`
+    at 16:12Z after a container stop (core ledger, read-only); refs/rmd-dispatch/W1-T9119 is still on origin.
+    W1-T10046 is in PR #13016 (open at this amendment). Per that PR's body (logs-8864/10046-pr-body.md):
+    `readRetroTriggerRunsAsync` replaces `readRetroTriggerLedgerAsync` with a per-process slice reader
+    (`createEscalationTriageHistoryReader`, slice `RETRO_TRIGGER_RUN_SLICE`, holder `run-task.retro-trigger-runs`)
+    whose durable per-rotation digests cut a restarted process's read from 332.6 MB / 12.4 s to 20.5 MB / 0.90 s
+    (OBSERVED offline by that builder on a 369-rotation copy of the core state); it already ledgers
+    `retro_trigger.ledger_read` {rows, ms, rotations, unread, loaded_rotations, digest_hits, digest_misses,
+    seeded_rotations, loop_read_bytes, parsed_lines}, and the slice reader gains `lastLoad()`.
+    So, after W1-T10046 merges: design 1's "reads the whole union once" and its incremental repeat read ARE that
+    reader; reuse it and build no second reader beside it (keep the `since` window only if it measurably saves digest
+    loads). Design 2's row is W1-T10046's row: add only the fields this task needs (since, projected bytes, heap
+    headroom) to the same step, never a second schema under one step name. Design 3 projects cost from the rotations
+    with no digest (`digest_misses`, their on-disk bytes times the observed expansion), since a digest hit decompresses
+    nothing. The acceptance proofs are unchanged; "reads only its window" asserts against the reader's `lastLoad()`.
   design: |
     No fixed count, no fixed byte bound and no timer.
     1. THE CHECK READS ONLY WHAT IT USES. `readRetroTriggerLedgerAsync` reads the union from a window derived from its

@@ -15,7 +15,7 @@
     - src/lib/read-plane.ts
     - src/lib/raw-call-sites.ts
     - test/memory/a-worker-spawn-names-its-site-without-source-maps.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

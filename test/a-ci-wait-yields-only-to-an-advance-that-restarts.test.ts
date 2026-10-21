@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { DaemonFreshness } from "../src/lib/daemon.js";
+import { DEPLOY_RESTART_SCORE_THRESHOLD } from "../src/lib/deploy-judge.js";
 import { ciWaitFreshness, waitForCiGreen, type PollDeps } from "../src/run-task.js";
 
 // W1-T5037 — MEASURED 2026-09-28..30: ~31 of 113 build verdicts were freshness_yield handoffs of a CI wait.
@@ -55,10 +56,26 @@ test("W1-T5037: a low-weight advance does not end the CI wait of a build run", a
   assert.ok(polls.count >= 3, "the wait polled past the advance instead of yielding at the first boundary");
 });
 
-test("W1-T5037: an advance to the daemon loop still hands the CI wait off", async () => {
+test("W1-T9089: an advance to the daemon loop alone is the source floor and does not end the CI wait", async () => {
   const outcome = await waitForCiGreen(PR_URL, () => {}, 0, {
     ...pollDeps({ count: 0 }),
     externalWaitFreshness: ciWaitFreshness(() => stale(["src/lib/daemon.ts"])),
+  });
+  assert.equal(outcome.state, "green");
+});
+
+test("W1-T5037: an advance that alone carries the restart threshold's worth of commits still hands the CI wait off", async () => {
+  const heavy = (): Extract<DaemonFreshness, { stale: true }> => ({
+    stale: true,
+    oldSha: OLD_SHA,
+    newSha: NEW_SHA,
+    changes: Array.from({ length: DEPLOY_RESTART_SCORE_THRESHOLD.value }, (_, index) => ({
+      sha: index === 0 ? NEW_SHA : String(index).padStart(40, "d"), subject: "advance", files: ["src/lib/daemon.ts"],
+    })),
+  });
+  const outcome = await waitForCiGreen(PR_URL, () => {}, 0, {
+    ...pollDeps({ count: 0 }),
+    externalWaitFreshness: ciWaitFreshness(heavy),
   });
   assert.equal(outcome.state, "freshness_handoff");
 });

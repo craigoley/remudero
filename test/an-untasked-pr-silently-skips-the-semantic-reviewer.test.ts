@@ -8,6 +8,8 @@ import test from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { reviewCommand, UNTASKED_REVIEW_BUDGET_USD } from "../src/run-task.js";
 import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "../src/lib/required-semantic-review.js";
+import { loadPlanAtRef } from "../src/lib/plan.js";
+import { usesUntaskedReviewMetadata } from "../src/lib/tick-read-worker.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
@@ -68,7 +70,54 @@ test("a derived task id whose shard is missing refuses semantic review before an
   assert.deepEqual(skips.map((r) => r.reason), ["head-task-metadata-unavailable"]);
 });
 
+test("a resolved shard without budget_usd runs the semantic reviewer under the default review cap, visibly", async () => {
+  // Budget is optional in a shard (builds default it); 182 of 523 queued shards had none on 2026-10-20, and each
+  // review of such a PR was refused after #12954 instead of reviewed. Pick one at HEAD rather than pin an id.
+  const shard = [...loadPlanAtRef(REPO_ROOT, "plan/tasks.yaml", HEAD).byId.values()]
+    .find((t) => t.budget_usd === undefined && (t.acceptance?.length ?? 0) > 0);
+  assert.ok(shard, "the plan at HEAD must hold a shard with acceptance and no budget_usd for this case to measure anything");
+  const { args, ledger, code } = await review(`Remudero-Task: ${shard.id}`);
+
+  assert.equal(code, 0, "a shard that resolved must be reviewed, not refused");
+  assert.equal(args.task.id, shard.id);
+  assert.equal(args.spawnReviewer, true);
+  assert.equal(args.requireSemanticReview, true, "the defaults change the cap, never the required-semantic policy");
+  assert.equal(args.budgetUsd, UNTASKED_REVIEW_BUDGET_USD);
+  assert.equal(args.task.risk, shard.risk);
+  assert.ok(args.reviewerMount);
+  const defaults = ledger.filter((r) => r.step === "review.reviewer.metadata_defaults");
+  assert.deepEqual(defaults.map((r) => [r.task, r.missing, r.task_risk, r.hard_cap_usd]),
+    [[shard.id, ["budget_usd"], shard.risk, UNTASKED_REVIEW_BUDGET_USD]]);
+  assert.ok(!ledger.some((r) => r.step === "review.reviewer.skipped" || r.step === "review.semantic_setup_refused"));
+});
+
 const unfiledHead = "run-unfiled-1791211800000";
+
+test("generated triage and main-repair ids receive required semantic review without fictional plan shards", async () => {
+  for (const id of ["TRIAGE-evidence-coverage-inbox-response-served-model", "main-repair-ratchet-105b1219ee15"]) {
+    const { args, ledger, code } = await review(`## Acceptance\n- x | grep: review in src/lib/review.ts\n\nRemudero-Task: ${id}`, `run-${id}-1791211800000`);
+    assert.equal(code, 0, id);
+    assert.equal(args.task.id, id, "retain the generated identity for attribution");
+    assert.equal(args.spawnReviewer, true);
+    assert.equal(args.requireSemanticReview, true);
+    assert.equal(args.task.risk, "medium");
+    assert.equal(args.budgetUsd, UNTASKED_REVIEW_BUDGET_USD);
+    assert.ok(args.reviewerMount);
+    assert.equal(ledger.filter(row => row.step === "review.reviewer.untasked_defaults").length, 1);
+    assert.ok(!ledger.some(row => row.step === "review.semantic_setup_refused"));
+  }
+});
+
+test("generated review defaults require the exact generated branch and never cover missing filed task records", () => {
+  for (const id of ["RETRO", "RETRO-1", "TRIAGE-feedback", "PLAN-repair", "APPROVE-feedback", "main-repair-105b1219ee15", "main-repair-revert-105b1219ee15"]) {
+    assert.equal(usesUntaskedReviewMetadata(id, `run-${id}-1791211800000`), true, id);
+    assert.equal(usesUntaskedReviewMetadata(id, "codex/foreign"), false, id);
+    assert.equal(usesUntaskedReviewMetadata(id, `run-${id}-other-1791211800000`), false, id);
+  }
+  for (const id of ["W1-T999999", "main-repair-ratchet-not-a-sha", "unknown-lane"]) {
+    assert.equal(usesUntaskedReviewMetadata(id, `run-${id}-1791211800000`), false, id);
+  }
+});
 
 test("a canonical unfiled run receives bounded semantic review under its own PR identity", async () => {
   const { args, ledger } = await review("## Acceptance\n- x | grep: review in src/lib/review.ts\n", unfiledHead);

@@ -83,7 +83,7 @@ test("acceptance 3 — a reviewer line with no trailing clause leaves the parse 
 
 test("acceptance 4 — an affirmative reviewer line gains no clause and still defers to the deterministic floor", () => {
   const transcript = "REVIEW_VERDICT 1: PASS (proof is responsive and substantiated)";
-  assert.deepEqual(parseReviewerVerdicts(transcript, 1), [undefined], "PASS defers to the floor, never records a value");
+  assert.deepEqual(parseReviewerVerdicts(transcript, 1), [true], "an observed PASS is complete evidence, not permission to override the floor");
   const clauses = parseReviewerVerdictClauses(transcript, 1);
   assert.equal(clauses[0], undefined, "a PASS line's trailing parenthetical is never captured as a clause");
 

@@ -1,18 +1,21 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 
 import { backlogCitedSteps } from "./backlog-gardener.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { CI_FRICTION_LEDGER_STEPS } from "./ci-friction-gardener.js";
 import { slug } from "./feedback-docket.js";
-import { newTestPath } from "./plan.js";
+import { loadPlanFromYaml, newTestPath, type Task } from "./plan.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
 import { readMainHistory } from "./hot-file-gardener.js";
+import { ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard, withoutRulingBlock } from "./machine-filing.js";
 import { planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
+import { parseOwnerRepoFromRemoteUrl } from "./onboard/inventory.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 
 /**
  * lib/scout-gardener.ts (W1-T5454) — the fleet looks for work nobody has asked for.
@@ -77,9 +80,11 @@ export interface ScoutSymptom {
 export interface ScoutAction extends GardenAction<ScoutClass> {
   symptom: ScoutSymptom;
   origin: string;
+  draft?: { id: string; path: string; files: string[] };
 }
 
 export interface ScoutInventory {
+  rederive: ScoutAction[];
   symptoms: ScoutSymptom[];
   covered: string[];
   uncovered: ScoutSymptom[];
@@ -108,6 +113,61 @@ export interface ScoutSources {
   fileExists: (path: string) => boolean;
   /** THE RESERVATION PATH (`ciLearningTaskIdMinter`, run-task.ts), never `max(id)+1`. */
   mintTaskId: GardenTaskIdMinter;
+  /** Open run PRs, read completely; a failed read must stop draft rewrites. */
+  openRunTasks?: () => ReadonlySet<string>;
+}
+
+/** Rank only tracked source string literals, never paths guessed from the step name. */
+function scoutSourceTexts(repoRoot: string): Array<{ path: string; text: string }> {
+  const paths = hostWorktreeGit(repoRoot, ["ls-files", "-z", "--", "src/", "scripts/"]).split("\0").filter(Boolean);
+  return paths.map((path) => ({ path, text: readFileSync(join(repoRoot, path), "utf8") }));
+}
+
+function scoutWriters(repoRoot: string, step: string, corpus = scoutSourceTexts(repoRoot)): string[] {
+  return corpus.map(({ path, text }) => {
+    const scanner = createScanner(true, undefined, text);
+    let count = 0;
+    for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
+      if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) && scanner.getTokenValue() === step) count++;
+    }
+    return { path, count };
+  }).filter((f) => f.count > 0).sort((a, b) => b.count - a.count || a.path.localeCompare(b.path)).slice(0, 3).map((f) => f.path);
+}
+
+async function openScoutRuns(repoRoot: string): Promise<ReadonlySet<string>> {
+  const remote = await hostWorktreeGitAsync(repoRoot, ["remote", "get-url", "origin"]);
+  const repo = parseOwnerRepoFromRemoteUrl(remote.trim());
+  if (!repo) throw new Error("scout gardener: origin does not identify a GitHub repository");
+  const heads = await ghTextAsync(["api", "--paginate", `repos/${repo.owner}/${repo.repo}/pulls?state=open&per_page=100`, "--jq", ".[].head.ref"]);
+  return new Set(heads.split("\n").flatMap((head) => /^run-(W\d+-T\d+)-\d+$/.exec(head.trim())?.[1] ?? []));
+}
+
+function requireScoutRuns(sources: ScoutSources): ReadonlySet<string> {
+  if (!sources.openRunTasks) throw new Error("scout gardener: draft re-derivation requires an awaited open-run listing");
+  return sources.openRunTasks();
+}
+
+function isTestOnlyScout(t: Task): boolean {
+  return t.status === "queued" && t.attempts === 0 && !t.retirement &&
+    t.author_class === "machine" && t.origin?.startsWith("scout:") === true && t.files?.length === 1 &&
+    /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/.test(t.files[0]!);
+}
+
+function scoutRederivations(sources: ScoutSources, plan: PlanInventory): ScoutAction[] {
+  const drafts = plan.open.filter((t) => isTestOnlyScout(t) && plan.shards.has(t.id));
+  if (drafts.length === 0) return [];
+  const active = requireScoutRuns(sources);
+  let corpus: ReturnType<typeof scoutSourceTexts> | undefined;
+  return drafts.flatMap((task): ScoutAction[] => {
+    if (active.has(task.id)) return [];
+    const step = task.origin!.slice("scout:".length);
+    const files = scoutWriters(sources.repoRoot, step, corpus ??= scoutSourceTexts(sources.repoRoot));
+    if (files.length === 0) return [];
+    return [{ class: "file-uncovered-symptom", target: step, origin: task.origin!,
+      reason: `${task.id} declares only its test; return its writer scope to the machine-filing judge.`,
+      symptom: { step, older: 0, newer: 0, total: 0, files },
+      draft: { id: task.id, path: plan.shards.get(task.id)!, files: [...files, task.files![0]!] } }];
+  });
 }
 
 const iso = (ms: number): string => clockFromMillisFn(() => ms).iso();
@@ -201,21 +261,22 @@ export function scoutInventory(sources: ScoutSources): ScoutInventory {
   const scoutSteps = [...new Set(plan.all.flatMap((t) => (typeof t.origin === "string" && t.origin.startsWith("scout:") ? [t.origin.slice("scout:".length)] : [])))];
   const survivalRows = scoutSteps.length === 0 ? [] : sources.ledger(iso(nowMs - 4 * SCOUT_SURVIVAL_WINDOW_MS - SCOUT_SURVIVAL_WINDOW_MS), scoutSteps);
   const { outcome, tracked } = scoutSurvival(plan, merged, survivalRows, nowMs);
-  return { symptoms, covered: symptoms.filter((s) => covered.has(s.step)).map((s) => s.step), uncovered, selected, budget, openQueue: plan.open.length, unprioritizedShare, blocked, survival: outcome, tracked };
+  return { rederive: scoutRederivations(sources, plan), symptoms, covered: symptoms.filter((s) => covered.has(s.step)).map((s) => s.step), uncovered, selected, budget, openQueue: plan.open.length, unprioritizedShare, blocked, survival: outcome, tracked };
 }
 
 /** The test a filed record's acceptance proof names, one per symptom. */
 const scoutTestPath = (step: string, files: readonly string[]): string => newTestPath(`scout-${slug(step, 60).replace(/-+$/, "")}`, files, "scout-gardener");
 
 /** Render ONE uncovered symptom as a single-record shard; `refused` names the lint checks that blocked it. */
-export function scoutShard(symptom: ScoutSymptom, taskId: string, population: readonly number[]): { text: string; refused?: string } {
-  const testPath = scoutTestPath(symptom.step, symptom.files);
+export function scoutShard(symptom: ScoutSymptom, taskId: string, population: readonly number[], repoRoot?: string): { text: string; refused?: string } {
+  const files = symptom.files.length > 0 || repoRoot === undefined ? symptom.files : scoutWriters(repoRoot, symptom.step);
+  const testPath = scoutTestPath(symptom.step, files);
   const recon = symptom.files.length === 0;
   return renderMachineShard({
     taskId,
     title: `THE SCOUT'S UNCOVERED RECURRING SYMPTOM — ${symptom.step} landed ${symptom.total} ledger rows across the trailing window and no task cites it`,
     origin: scoutOrigin(symptom.step),
-    files: [...symptom.files, testPath],
+    files: [...files, testPath],
     cost: symptom.total,
     costPopulation: population,
     acceptance: [{
@@ -227,21 +288,24 @@ export function scoutShard(symptom: ScoutSymptom, taskId: string, population: re
       `The ledger step ${symptom.step} carries a failure shape and landed rows in both halves of the trailing ${SCOUT_WINDOW_MS / 86_400_000} days: ${symptom.older} in the older half, ${symptom.newer} in the newer.`,
       "No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.",
       recon
-        ? "The rows name no file of their own: locate the code that writes this step first, then fix its cause."
+        ? files.length > 0 ? `The rows name no file; tracked source literals locate this step in: ${files.join(", ")}. Start there.`
+          : "The rows name no file of their own: locate the code that writes this step first, then fix its cause."
         : `The rows themselves name these files: ${symptom.files.join(", ")}. Start there.`,
     ],
   });
 }
 
 /** The records one pass would file, as the pure core: ids are minted by the caller, one per symptom. */
-export function scoutFilings(selected: readonly ScoutSymptom[], mint: () => string): Array<{ symptom: ScoutSymptom; taskId: string; text: string; refused?: string }> {
+export function scoutFilings(selected: readonly ScoutSymptom[], mint: () => string, repoRoot?: string): Array<{ symptom: ScoutSymptom; taskId: string; text: string; refused?: string }> {
   const population = selected.map((s) => s.total);
   const minted = new Set<string>();
   return selected.map((symptom) => {
     const taskId = mint();
     if (minted.has(taskId)) throw new Error(`scout gardener: the id minter returned ${taskId} twice in one pass`);
     minted.add(taskId);
-    return { symptom, taskId, ...scoutShard(symptom, taskId, population) };
+    const initial = scoutShard(symptom, taskId, population);
+    if (initial.refused !== undefined) return { symptom, taskId, ...initial };
+    return { symptom, taskId, ...scoutShard(symptom, taskId, population, repoRoot) };
   });
 }
 
@@ -297,33 +361,68 @@ export function scoutGardenSpec(
     fileExists: (path) => existsSync(join(deps.repoRoot, path)),
     ...sources,
   };
+  let preparedRuns: ReadonlySet<string> | undefined;
   return {
     name: "scout",
     landingRefusal: machineShardLandingGuard(deps),
     classes: SCOUT_CLASSES,
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(clock)}`,
     inventory: () => scoutInventory(full),
-    fingerprint: (i) => `${i.selected.map((s) => `${s.step}:${s.total}`).join("|")}:${i.budget}:${i.blocked}`,
-    unfinished: (i) => i.selected.length > 0,
+    inventoryAsync: async () => {
+      const plan = full.plan();
+      const active = plan.open.some(isTestOnlyScout)
+        ? full.openRunTasks ? full.openRunTasks() : await openScoutRuns(full.repoRoot) : new Set<string>();
+      return scoutInventory({ ...full, plan: () => plan, openRunTasks: () => active });
+    },
+    fingerprint: (i) => `${i.selected.map((s) => `${s.step}:${s.total}`).join("|")}:${JSON.stringify(i.rederive)}:${i.budget}:${i.blocked}`,
+    unfinished: (i) => i.selected.length > 0 || i.rederive.length > 0,
     metric: (i) => i.survival,
-    candidates: (i) => i.selected.map((symptom) => ({
+    candidates: (i) => [...i.rederive, ...i.selected.map((symptom) => ({
       class: "file-uncovered-symptom" as const, target: symptom.step, origin: scoutOrigin(symptom.step), symptom,
       reason: `${symptom.step} landed ${symptom.total} ledger rows (${symptom.older} then ${symptom.newer}) and no task or scorecard covers it.`,
-    })),
+    }))],
     scorecard: (i) => ({
       symptoms: i.symptoms.length, covered: i.covered.length, uncovered: i.uncovered.length, proposed: i.selected.length,
       merge_budget: i.budget, open: i.openQueue, unprioritized_share: Math.round(i.unprioritizedShare * 1000) / 1000, blocked: i.blocked,
       survival: i.tracked,
     }),
-    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions.length, full.mintTaskId, async),
+    prepare: (ws, plan, async) => {
+      const count = plan.actions.filter((a) => !a.draft).length;
+      preparedRuns = undefined;
+      if (plan.actions.some((a) => a.draft) && !full.openRunTasks) {
+        if (!async) requireScoutRuns(full);
+        return (async () => {
+          preparedRuns = await openScoutRuns(full.repoRoot);
+          return prepareGardenTaskIds(ws, count, full.mintTaskId, true);
+        })();
+      }
+      return prepareGardenTaskIds(ws, count, full.mintTaskId, async);
+    },
     apply: (ws, plan, _scorecard, heldIds) => {
       if (plan.actions.length === 0) return undefined;
       if (!ws.branch) throw new Error("scout gardener: filing workspace has no branch for task-id reservation");
-      const ids = heldIds ?? prepareGardenTaskIds(ws, plan.actions.length, full.mintTaskId) as string[];
+      const fresh = plan.actions.filter((a) => !a.draft);
+      const ids = heldIds ?? prepareGardenTaskIds(ws, fresh.length, full.mintTaskId) as string[];
       let index = 0;
-      const filings = scoutFilings(plan.actions.map((a) => a.symptom), () => ids[index++]!);
+      const filings = scoutFilings(fresh.map((a) => a.symptom), () => ids[index++]!, ws.root);
       const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const written: Array<{ rel: string; step: string; origin: string }> = [];
+      const drafts = plan.actions.flatMap((a) => a.draft ? [{ ...a.draft, step: a.symptom.step, origin: a.origin }] : []);
+      const active = drafts.length === 0 ? new Set<string>() : preparedRuns ?? requireScoutRuns(full);
+      preparedRuns = undefined;
+      for (const draft of drafts) {
+        if (active.has(draft.id)) continue;
+        const path = join(ws.root, draft.path);
+        const original = readFileSync(path, "utf8");
+        const tasks = loadPlanFromYaml(original, draft.path).tasks;
+        if (tasks.length !== 1 || tasks[0]!.id !== draft.id || !isTestOnlyScout(tasks[0]!) ||
+            tasks[0]!.origin !== draft.origin || tasks[0]!.files![0] !== draft.files.at(-1)) continue;
+        const text = withoutRulingBlock(original.trimEnd().split("\n")).join("\n")
+          .replace(/^  verify:.*$/m, "  verify: human")
+          .replace(/^  files:\s*\n(?:    -[^\n]*\n?)*/m, `  files:\n${draft.files.map((f) => `    - ${f}`).join("\n")}\n`);
+        writeFileSync(path, text + "\n");
+        written.push({ rel: draft.path, step: draft.step, origin: draft.origin });
+      }
       for (const f of filings) {
         if (f.refused !== undefined) {
           deps.log("scout.record_refused", { step: f.symptom.step, task_id: f.taskId, reason: f.refused });
@@ -337,7 +436,7 @@ export function scoutGardenSpec(
       if (written.length === 0) return undefined;
       return {
         paths: written.map((w) => w.rel),
-        title: `chore(plan): the scout gardener files ${written.length} uncovered recurring symptom(s)`,
+        title: `chore(plan): the scout gardener scopes ${written.length} recurring symptom(s)`,
         body: [
           "The scout gardener (W1-T5454) files recurring failure-shaped ledger steps that no task or scorecard covers. Close this PR to decline them.",
           "",

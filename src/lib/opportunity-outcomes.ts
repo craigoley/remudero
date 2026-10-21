@@ -65,6 +65,7 @@ function outcomeOf(source: OpportunitySource, evidence: OpportunityEvidence, clo
   result.task = task;
   if (!pr) return finish("filed", "task awaits a credited merged PR");
   if (pr.repo !== candidate.repo || pr.taskId !== task.id || !pr.headSha || !pr.mergeSha || !Number.isFinite(Date.parse(pr.mergedAt))) return finish("unavailable", "credited PR source or head unavailable");
+  if (Date.parse(pr.mergedAt) > clock.now()) return finish("unavailable", "credited merge is later than the observed clock");
   result.pr = pr;
   if (!deployment) return finish("merged", "merged PR awaits deployment receipt; unmeasured");
   // expiring-fixture: exempt -- injected clock checks future receipts; ageing cannot stale a deployment.

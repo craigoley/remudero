@@ -53,7 +53,7 @@ const SCRIPT = join(REPO_ROOT, "scripts", "head-identity-gate.mjs");
 // instead, the same reason test/credit-surface-gate.test.ts reaches its own sibling script.
 const GATE_URL = pathToFileURL(SCRIPT).href;
 const mod = (await import(GATE_URL)) as {
-  evaluateHeadIdentityGate: (input: { headCommitMessage: string; headRef: string | undefined }) => {
+  evaluateHeadIdentityGate: (input: { headCommitMessage: string; headRef: string | undefined; changedPaths?: readonly string[] }) => {
     ok: boolean;
     defect?: string;
     message: string;
@@ -147,6 +147,7 @@ test("W1-T3388: a filing is never refused for carrying neither surface", () => {
   const result = evaluateHeadIdentityGate({
     headCommitMessage: "chore(plan): file W1-T3388 — the branch-name contract has no unfiled form\n",
     headRef: "triage/hand-pushed-filing",
+    changedPaths: ["plan/tasks.d/W1-T3388-the-branch-name-contract.yaml"],
   });
   assert.equal(result.ok, true);
   assert.match(result.message, /filing/);

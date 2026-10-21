@@ -22,10 +22,10 @@
 //   node scripts/workflow-guard-mutation-ratchet.mjs --list     # enumerate the guards and exit
 //   node scripts/workflow-guard-mutation-ratchet.mjs --seed     # record every currently-UNCOVERED guard
 //   node scripts/workflow-guard-mutation-ratchet.mjs --base <ref>  # judge inherited-vs-caused against <ref> (default origin/main)
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // W1-T3703: reuses comment-load-ratchet's own caused-vs-inherited rule (see
@@ -271,17 +271,99 @@ export function suiteVerdictFrom(out) {
   return Number(summary[1]) > 0;
 }
 
+const SUITE_ARGV = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts"];
+
 // diff-cov: process-boundary — running a suite in a child node cannot carry a DA hit without
 // forking; everything this decides lives in suiteVerdictFrom above, unit-tested against the
 // truncated, green and failing shapes, and every caller takes it as an injectable `runSuite`.
 function suiteFails(suite, root = REPO_ROOT) {
-  const res = spawnSync(
-    process.execPath,
-    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", suite],
-    { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const res = spawnSync(process.execPath, [...SUITE_ARGV, suite], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
   return { failed: suiteVerdictFrom(out), out };
+}
+
+/**
+ * Run `suites` from `root`, `width` children at a time (one per suite, as `node --test` runs files),
+ * each judged by {@link suiteVerdictFrom}; a child that cannot start answers `undefined`, never green.
+ * A pool, not lock-step batches: one 60 s suite must not hold three idle slots (MEASURED below).
+ *
+ * Once a suite FAILS, no later suite can be the first catcher in order, so none is started and any
+ * still running is stopped: each reads `null`, not run. Every suite before the first failure, and
+ * that failure, always carries a verdict — exactly what classifyGuard's in-order loop asks for.
+ */
+export function suiteVerdicts(suites, root = process.cwd(), width = suites.length) {
+  const verdicts = suites.map(() => null);
+  const running = new Map();
+  let firstFailure = Infinity;
+  let next = 0;
+  return new Promise((resolve) => {
+    const launch = () => {
+      while (running.size < Math.max(1, width) && next < Math.min(suites.length, firstFailure)) start(next++);
+      if (running.size === 0) resolve(verdicts);
+    };
+    const start = (index) => {
+      let out = "";
+      const child = spawn(process.execPath, [...SUITE_ARGV, suites[index]], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+      running.set(index, child);
+      child.stdout.on("data", (chunk) => { out += chunk; });
+      child.stderr.on("data", (chunk) => { out += chunk; });
+      const settle = (failed) => {
+        if (!running.delete(index)) return;
+        if (index < firstFailure) verdicts[index] = { failed };
+        if (failed === true && index < firstFailure) {
+          firstFailure = index;
+          for (const [later, stopped] of running) if (later > index) stopped.kill();
+        }
+        launch();
+      };
+      child.on("error", () => settle(undefined));
+      child.on("close", () => settle(suiteVerdictFrom(out)));
+    };
+    launch();
+  });
+}
+
+/** {@link suiteVerdicts} for a synchronous caller: one child node runs the pool and prints the
+ *  verdicts. Output that is not that verdict list is a run that proves nothing — `undefined` each. */
+export function suitesFailTogether(suites, root = REPO_ROOT, width = availableParallelism()) {
+  const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--suite-verdicts", String(width), ...suites], {
+    cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024,
+  });
+  try {
+    const verdicts = JSON.parse(res.stdout);
+    if (Array.isArray(verdicts) && verdicts.length === suites.length) return verdicts;
+  } catch {
+    // Not the verdict list: the batch is unmeasured, which the length check below also answers.
+  }
+  return suites.map(() => ({ failed: undefined }));
+}
+
+/**
+ * W1-T3220's wall clock: a full pass ran every suite ONE AT A TIME, ~5 min for the corpus control
+ * and up to ~4.5 min per guard whose catcher sorts late — 34 min and still unfinished when
+ * ci-shard 1's 35-min ceiling cancelled #12981 (2026-10-19, 46 guards over 118 suites). MEASURED
+ * locally on that corpus, 4 cores beside a running preflight: one at a time 331 s, lock-step
+ * batches of 3 257 s, a pool of 3 161 s.
+ *
+ * This keeps classifyGuard and redCorpus exactly as they are — they still ask for one suite at a
+ * time, in order, and stop at the first catcher — but answers each ask from one pooled run of the
+ * suites still unmeasured under the SAME tree. A verdict is valid only for the tree it ran against:
+ * `reset` before every mutant (and after it), so no verdict crosses from one mutant to the next.
+ */
+export function prefetchingRunner(runBatch, width) {
+  const verdicts = new Map();
+  return {
+    reset: () => verdicts.clear(),
+    run(suite, suites, root) {
+      if (!verdicts.has(suite)) {
+        const batch = [suite, ...suites.slice(suites.indexOf(suite) + 1).filter((s) => !verdicts.has(s) && s !== suite)];
+        runBatch(batch, root, Math.max(1, width)).forEach((verdict, i) => {
+          if (verdict) verdicts.set(batch[i], verdict);
+        });
+      }
+      return verdicts.get(suite) ?? { failed: undefined };
+    },
+  };
 }
 
 /** An unreadable or unparseable baseline is an EMPTY one, never a crash: a ratchet that dies on
@@ -422,12 +504,24 @@ function measure(argv, io, getScratch) {
   const readCi = io.readCi ?? (() => readFileSync(join(root, ".github/workflows/ci.yml"), "utf8"));
   const baselineOf = io.readBaseline ?? (() => readBaseline(join(root, "scripts/workflow-guard-mutation-baseline.json")));
   const suitesOf = io.suites ?? (() => ciReadingSuites(root));
-  const runSuite = (suite, suites) => (io.runSuite ?? suiteFails)(suite, getScratch(suites));
-  const classify = io.classify ?? ((guard, original, suites) => classifyGuard(
+  // An injected runSuite is asked one suite at a time, as before; the real one runs a batch at once.
+  const batches = io.runSuite === undefined
+    ? prefetchingRunner(io.runBatch ?? suitesFailTogether, io.width ?? availableParallelism())
+    : undefined;
+  const runSuite = (suite, suites) => (batches ? batches.run(suite, suites, getScratch(suites)) : io.runSuite(suite, getScratch(suites)));
+  const freshTree = (measureTree) => {
+    batches?.reset();
+    try {
+      return measureTree();
+    } finally {
+      batches?.reset();
+    }
+  };
+  const classify = io.classify ?? ((guard, original, suites) => freshTree(() => classifyGuard(
     guard, original, suites, (suite) => runSuite(suite, suites),
     (g, text, fn) => withMutant(g, text, fn, { path: join(getScratch(suites), ".github/workflows/ci.yml"), write: writeFileSync }),
-  ));
-  const corpusCheck = io.redCorpus ?? ((suites) => redCorpus(suites, (suite) => runSuite(suite, suites)));
+  )));
+  const corpusCheck = io.redCorpus ?? ((suites) => freshTree(() => redCorpus(suites, (suite) => runSuite(suite, suites))));
   const writeBaseline = io.writeBaseline ?? ((text) => writeFileSync(join(root, "scripts/workflow-guard-mutation-baseline.json"), text));
   // W1-T3703: the merge-base a "caused vs inherited" split is judged against, resolved fresh each
   // run (never a stored number) — same shape as comment-load-ratchet's own readBaseDiff.
@@ -563,5 +657,7 @@ function measure(argv, io, getScratch) {
 // refusal, the uncovered block, the baselined skip, --list, --all and --seed — are unit-tested
 // through its `io` seam in test/a-ci-skip-guard-can-fire-unconditionally.test.ts.
 if (process.argv[1] && process.argv[1].endsWith("workflow-guard-mutation-ratchet.mjs")) {
-  process.exit(main(process.argv.slice(2)));
+  if (process.argv[2] === "--suite-verdicts") {
+    suiteVerdicts(process.argv.slice(4), process.cwd(), Number(process.argv[3])).then((verdicts) => process.stdout.write(JSON.stringify(verdicts)));
+  } else process.exit(main(process.argv.slice(2)));
 }

@@ -6836,7 +6836,7 @@ components:
 
     GardenerRuntimeEntry:
       type: object
-      required: [name, enabled, scope, cadenceMs, phase, observedAt, passId, nextDueAt, queueMs, executionMs, exit, reason, attempts, completions, failures, lastCompletedAt, lastSuccessAt, lastFailureAt]
+      required: [name, enabled, scope, cadenceMs, phase, observedAt, passId, nextDueAt, queueMs, executionMs, exit, reason, attempts, completions, failures, lastCompletedAt, lastSuccessAt, lastFailureAt, dueIntervalMedianMs, dueIntervalSamples]
       properties:
         name:
           type: string
@@ -6889,6 +6889,13 @@ components:
         lastFailureAt:
           type: [string, "null"]
           format: date-time
+        dueIntervalMedianMs:
+          type: [number, "null"]
+          minimum: 0
+          description: The median time from a completed pass to the first ask of the next one, carried across restarts.
+        dueIntervalSamples:
+          type: integer
+          minimum: 0
 
     GardenersResult:
       type: object

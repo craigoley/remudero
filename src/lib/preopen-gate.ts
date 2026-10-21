@@ -35,8 +35,68 @@ import { PROOF_ENV_ALLOWLIST, PROOF_SANDBOX_BINARY, proofChildEnv, proofLinkedMo
 import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { parseGateSandboxMeasurement, type GateSandboxMeasurement } from "./gate-sandbox-metrics.js";
+import { spoolEscalation, withdrawSpooledEscalation } from "./host-escalation-spool.js";
 
 export const PREOPEN_GATE_STEP = "implement.preopen_gate";
+export const PREOPEN_UNMEASURED_ALERT_AT = 3;
+
+/** Fleet-wide consecutive gate observations, in ledger order; other steps do not interrupt it. */
+export function detectUnmeasuredPreopenStreak(rows: readonly Record<string, unknown>[], threshold = PREOPEN_UNMEASURED_ALERT_AT) {
+  let consecutive = 0;
+  let firstTs: unknown;
+  let firstRunId: unknown;
+  let newestTs: unknown;
+  let reason: unknown;
+  for (const row of rows) {
+    if (row.step !== PREOPEN_GATE_STEP) continue;
+    if (row.result === "pass" || row.result === "fail") {
+      consecutive = 0;
+      firstTs = firstRunId = newestTs = reason = undefined;
+    } else if (row.result === "unmeasured") {
+      if (consecutive === 0) { firstTs = row.ts; firstRunId = row.run_id; }
+      consecutive++;
+      newestTs = row.ts;
+      reason = row.reason;
+    }
+  }
+  return { alert: consecutive >= threshold, consecutive, firstTs, firstRunId, newestTs, reason };
+}
+
+/** Called after the gate row is durable. Alert transport failure must never stop a build. */
+export function updatePreopenGateAlert(opts: {
+  stateDir: string;
+  readRows: () => readonly Record<string, unknown>[];
+  log: GateLog;
+  clock?: Clock;
+  host?: string;
+}): void {
+  try {
+    const rows = opts.readRows();
+    const streak = detectUnmeasuredPreopenStreak(rows);
+    const prior = rows.findLast(row => row.step === `${PREOPEN_GATE_STEP}.alert` && (row.action === "raised" || row.action === "cleared"));
+    const identity = { taskId: "HARNESS", summary: "fleet pre-open gates are unmeasured" };
+    const meta = { source: PREOPEN_GATE_STEP, host: opts.host ?? "fleet", clock: opts.clock ?? systemClock };
+    if (streak.alert && (prior?.action !== "raised" || prior.streak_first_ts !== streak.firstTs)) {
+      spoolEscalation(opts.stateDir, {
+        ...identity, class: "BLOCKED", runId: String(streak.firstRunId), headDedup: "independent",
+        detail: `${streak.consecutive} consecutive pre-open gates were unmeasured across the fleet. ` +
+          `First: ${streak.firstTs} (run ${streak.firstRunId}); newest: ${streak.newestTs}. Reason: ${streak.reason}`,
+        options: [
+          { label: "repair gate execution", detail: "inspect the named containment or backstop failure on the host and restore measured gates" },
+          { label: "wait for recovery", detail: "builds continue; the next measured pass or fail clears this alert" },
+        ],
+        recommendation: "repair gate execution",
+        consequence: "build pull requests continue opening without a measured local fast gate",
+      }, meta);
+      opts.log(`${PREOPEN_GATE_STEP}.alert`, { consecutive: streak.consecutive, streak_first_ts: streak.firstTs, action: "raised" });
+    } else if (streak.consecutive === 0 && prior?.action === "raised") {
+      withdrawSpooledEscalation(opts.stateDir, identity, "A pre-open gate was measured again (pass or fail); the unmeasured streak has ended.", meta);
+      opts.log(`${PREOPEN_GATE_STEP}.alert`, { consecutive: 0, streak_first_ts: prior.streak_first_ts, action: "cleared" });
+    }
+  } catch (error) {
+    opts.log(`${PREOPEN_GATE_STEP}.alert`, { action: "failed", reason: `could not update pre-open gate alert: ${String(error)}` });
+  }
+}
 
 /** BACKSTOP only: a gate that has not answered by then is reported unmeasured, never a pass. */
 export const PREOPEN_GATE_BACKSTOP_MS = 15 * 60_000;

@@ -1,0 +1,70 @@
+- id: W1-T10255
+  title: "A CLEARED MEMORY-ADMISSION STARVATION HOLD CLOSES ITS OWN HOST ALERT — PR #13060 raises one host alert per starvation streak through the escalation spool and ends the streak when a start is admitted on any other tier, but nothing withdraws or closes the alert, so the issue stays open after the hold clears; follow escalateStarvationCleared's close-with-comment pattern through the spool's existing withdrawSpooledEscalation"
+  repo: remudero
+  depends_on: []  # needs PR #13060 (a hand fix with no task id) merged first; see the note
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern, the starvation alert's clear path; when the alert is raised and what admission decides are unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020 item 6 (2026-10-20); follow-up to the memory-gate hand fix PR #13060 (operator ruling 2026-10-19 item 3)"
+  plan_refs: [W1-T10042, W1-T9625, W1-T10208]
+  files:
+    - src/lib/host-memory-admission.ts
+    - src/lib/host-escalation-spool.ts
+    - src/run-task.ts
+    - test/memory/a-cleared-starvation-hold-closes-its-host-alert.test.ts
+  status: queued
+  dispatch_hold: true  # hold until PR #13060 merges; a person removes this line then (see note)
+  priority: 2
+  attempts: 0
+  rationale: |
+    DEPENDS ON PR #13060 MERGING (open at filing, head efad75538, "fix(memory-budget): judge swap-in by its complement
+    and admit a class starved an hour"); it carries no task id, so `depends_on` cannot name it. Do not build before it
+    merges.
+    READ at PR #13060 head efad75538 (symbols, not lines):
+    - src/lib/host-memory-admission.ts: on a `starvation` admit, if the class is not yet alerted, `ports.alert(root,
+      starvationEscalation({ workerClass, ... }))` raises the alert and `starvationAlerted` / the held record's
+      `alerted: true` remember it. When a start is admitted on any other tier (`ended`), the class's held record is
+      deleted and `starvationAlerted.delete(classKey)` runs; no clear sink is called.
+    - src/lib/host-escalation-spool.ts `spoolingStarvationAlert` is the raise sink run-task installs (spooled for the
+      daemon's drain). The same module already has `withdrawSpooledEscalation(stateDir, e, comment, meta)`: it drops a
+      still-spooled escalation and spools a close with a comment for one the daemon already opened.
+    READ at origin/main a16d6d95f: src/lib/escalation-catalogue.ts `escalateStarvationCleared` is the dispatch-starvation
+    precedent: it finds the referent from the episode's own escalated row, closes it with a comment naming why the
+    episode ended, and never re-derives an older referent past a prior clear. src/lib/launcher-host-alerts.ts
+    `clearLauncherAlert` uses `withdrawSpooledEscalation` the same way for a host alert.
+    INFERRED: without a clear, an alert raised for one streak stays open through recovery, and the next streak's raise
+    lands on the same title as a comment on a stale issue.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and the plan trees of every open PR head (2026-10-20 11:40Z) for
+    starvation_admit, spoolingStarvationAlert and starvation alert; the only hit is PR #13060's code itself.
+  design: |
+    1. The admission ports gain a clear sink beside `alert`. When a class with `alerted: true` (record or this
+       process's `starvationAlerted`) ends its streak (a start admitted on a non-starvation tier), call it once with the
+       same escalation identity the raise used (`starvationEscalation`'s taskId and summary, so the spool key matches)
+       and a comment naming how the hold ended: the tier that admitted, the class, held_since and held_ms.
+    2. run-task installs it as `withdrawSpooledEscalation` under the state root's own state directory, exactly as
+       `spoolingStarvationAlert` installs the raise; the admission module keeps not importing the escalation modules
+       (PR #13060's import-cycle reason).
+    3. A failed clear is recorded on the evaluation (`alert: "clear-failed: <reason>"`) and never changes admission;
+       the record keeps `alerted` until a clear returns, so a restart retries it.
+    4. TESTS in test/memory/a-cleared-starvation-hold-closes-its-host-alert.test.ts (`rmd test-place` on a stub
+       importing host-memory-admission.ts and host-escalation-spool.ts printed test/inbox/ at low confidence, runner-up
+       memory; re-run it on the real file and use what it prints), `test(` titles verbatim as in the proofs.
+  acceptance:
+    - claim: "a starvation streak that ends on another tier calls the clear sink once with the raise's identity"
+      proof: "unit test: W1-T10255: a cleared starvation hold withdraws its alert once"
+    - claim: "the installed sink withdraws a still-spooled alert and spools a close with a comment for a delivered one"
+      proof: "unit test: W1-T10255: the starvation clear sink closes a delivered alert with a comment"
+    - claim: "a failed clear leaves admission unchanged and is retried after a restart"
+      proof: "unit test: W1-T10255: a failed starvation clear is retried and never changes admission"
+  falsifier: |
+    At PR #13060's head the `ended` branch only deletes the record and the in-process mark, so no clear sink is ever
+    called and the first two tests fail. Delete the clear call and they fail again; clear on every evaluation instead of
+    once and the first test's call count fails.
+  note: |
+    ORDER: build only after PR #13060 merges (it creates the raise path this task closes); `dispatch_hold` keeps the
+    fleet off it until then, and whoever sees #13060 merge removes that line in a plan-only PR. EFFECT, measured after merge:
+    every `host_escalation` raise for a memory-budget starvation streak is followed by a `host_escalation.withdrawn` row
+    or a spooled close when the hold clears.

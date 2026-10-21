@@ -1,0 +1,71 @@
+- id: W1-T10291
+  title: "SERVE'S PER-PASS CHILDREN FORK THROUGH W1-T9754'S LONG-LIVED SPAWN HELPER, NOT FROM SERVE — PR #13207 forks one read-model oracle child per consistency slice from serve's read-model worker thread, and a fork's synchronous part copies the whole parent's page tables: `spawn_sync_ms` 84-196 ms offline from a 1.5 GB parent, INFERRED 250-500 ms at serve's 3.3-4.4 GB, about 22 times an hour, each on the thread that runs the projector's ticks"
+  repo: remudero
+  depends_on: [W1-T9754]  # the helper itself; PR #13207 (the per-slice child) is merged at origin/main faefe0655
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which process forks serve's per-pass children; what each child runs and answers is unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020c item 2 (2026-10-20); the expected-cost paragraph of PR #13207's body (logs-8864/c5-pr-body.md)"
+  plan_refs: [W1-T9754, W1-T10290, W1-T10294, W1-T9638]
+  files:
+    - src/lib/spawn-helper.ts
+    - src/lib/child-entry-argv.ts
+    - src/lib/read-model-worker.ts
+    - test/worker/serve-per-pass-children-fork-through-the-spawn-helper.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main faefe0655 (symbols, not lines):
+    - src/lib/read-model-worker.ts `childOracle` calls `forkWorkerEntry` (src/lib/child-entry-argv.ts) once per slice,
+      with `serialization: "advanced"` and an IPC channel; `forkWorkerEntry` returns `spawnSyncMs`, the time the fork
+      held the calling thread, and the `read_model.oracle_child_exited` row records it as `spawn_sync_ms`.
+    - The caller is the read-model worker thread, the thread that runs the projector's ticks, so the stall lands there,
+      not on serve's HTTP loop.
+    OBSERVED offline (PR #13207 bench, logs-8864/c5-bench/, processes the builder started): from a 1.5 GB parent under
+    serve's malloc tuning, `spawn_sync_ms` 84-196 per child, one outlier at 1,325 under host load. 150
+    `read_model.consistency` slices 2026-10-20 08:32-15:23Z had a gap p50 of 117 s, so about 22 forks an hour.
+    INFERRED (PR #13207's scaling, ~0.1 ms per MB of parent RSS): 250-500 ms per fork at serve's 3.3-4.4 GB. No
+    production `read_model.oracle_child_exited` row existed when this was filed (#13207 merged at 21:18:55Z on 10-20).
+    WHY NOT AN AMENDMENT TO W1-T9754: its helper runs commands for the core daemon (`startSpawnHelper(` in
+    src/lib/daemon.ts) and returns exit code, stdout and stderr. A per-pass child needs a live IPC channel with advanced
+    serialization, and it runs in serve, a different process with its own helper. Folding both into W1-T9754 would
+    widen a queued, unclaimed task (no refs/rmd-dispatch/W1-T9754, no run-W1-T9754-* head at 21:37Z) past its files.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and all 15 open PR heads' plan trees (21:19Z) for spawn
+    helper, spawnSyncMs, spawn_sync_ms and forkWorkerEntry: only W1-T9754 names the helper.
+  design: |
+    1. AFTER W1-T9754. Reuse its helper module and its `startSpawnHelper`. Serve starts one helper per generation (the
+       read-model worker calls `startSpawnHelper(` and owns it), small and long-lived, so a fork copies the helper's page
+       tables, not serve's.
+    2. FORK WITH A CHANNEL. The helper gains a fork verb: start a worker entry (the same bundle-or-tsx decision
+       `forkWorkerEntry` makes) with an IPC channel, and relay its messages to and from the caller. Measure the relay
+       against the alternative of handing the caller a direct channel; pick the cheaper one and record both numbers in
+       the PR. `child_max_rss_bytes` must stay the child's own VmHWM, never the helper's.
+    3. ANY DOUBT FORKS DIRECTLY. A helper that is not healthy, or a fork verb that fails, falls back to today's direct
+       `forkWorkerEntry` for that slice and names the reason. A slice never waits on a dead helper.
+    4. THE ROW SAYS WHICH. `read_model.oracle_child_exited` gains `via: helper | direct` (and the fallback reason).
+       `spawn_sync_ms` keeps its meaning, the time the calling thread was held.
+    5. Whether the helper route is on by default is an OPERATOR DECISION, made from the rows; name the switch and its
+       default in the PR, do not choose it.
+    6. TESTS in test/worker/serve-per-pass-children-fork-through-the-spawn-helper.test.ts (computed by
+       `computedTestFolder`; re-run `rmd test-place` on the real file), `test(` titles verbatim as in the proofs. One test
+       forks a real child through a real helper from a parent holding ballast.
+  acceptance:
+    - claim: "an oracle slice forked through the helper answers as a direct fork does, and the row says via helper"
+      proof: "unit test: W1-T10291: a slice forked through the spawn helper is answered like a direct fork"
+    - claim: "a dead helper falls back to a direct fork for that slice and names why"
+      proof: "unit test: W1-T10291: a dead spawn helper falls back to a direct fork and names the reason"
+    - claim: "with ballast in the parent, a fork through the helper holds the calling thread for less time than a direct fork"
+      proof: "unit test: W1-T10291: a large parent forks through the helper for less synchronous time"
+    - claim: "serve's read-model worker starts its own spawn helper"
+      proof: "grep: startSpawnHelper( in src/lib/read-model-worker.ts"
+  falsifier: |
+    At origin/main every oracle child is forked directly, so no row says `via: helper` and the first test fails. Start
+    the helper per slice instead of once per generation: its own fork costs the parent the same page-table copy, and
+    the third test's comparison fails.
+  note: |
+    EFFECT, measured after merge: `read_model.oracle_child_exited` `spawn_sync_ms` p50/p90 by `via`, per serve
+    generation, against the same generation's RSS on `serve.memory`.

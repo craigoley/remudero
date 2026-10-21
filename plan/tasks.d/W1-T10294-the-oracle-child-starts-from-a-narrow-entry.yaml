@@ -1,0 +1,70 @@
+- id: W1-T10294
+  title: "THE READ-MODEL ORACLE CHILD STARTS FROM A NARROW ENTRY OF ITS OWN — PR #13207's per-slice child loads the whole read-model worker bundle (2,431,937 bytes: projector, views, slow-lane wiring) to run one consistency slice, spending ~0.5-1 s loading (`ready_ms` 433-963 offline) and peaking at 194-222 MB; an entry that imports only the slice body cuts both on every one of ~22 children an hour"
+  repo: remudero
+  depends_on: []  # needs the bundled-daemon-mains PR #13218 (no plan task id) merged first: both change WORKER_ENTRIES; see dispatch_hold
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which module the oracle child loads; the slice body, its answer and its row are unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020c item 5 (2026-10-20); PR #13207 bench (logs-8864/c5-bench/c5-oracle-bench.ndjson)"
+  plan_refs: [W1-T8777, W1-T10290, W1-T10291, W1-T9117]
+  files:
+    - src/lib/read-model-oracle-entry.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/child-entry-argv.ts
+    - scripts/build-child-entries.mjs
+    - test/console-api/read-model/the-oracle-child-starts-from-a-narrow-entry.test.ts
+  status: queued
+  dispatch_hold: true  # hold until the bundled-daemon-mains PR #13218 merges; a person removes this line then (see note)
+  priority: 2
+  attempts: 0
+  rationale: |
+    DEPENDS ON THE BUNDLED-DAEMON-MAINS PR MERGING: PR #13218 ("the daemon main starts from its prebuilt bundle", open
+    at filing, carries `Remudero-Task: PR-13218`, not a plan task id) adds six modules to `WORKER_ENTRIES` and bumps
+    `RECIPE_VERSION` in scripts/build-child-entries.mjs. This task adds an entry to the same list, so `depends_on`
+    cannot name the dependency and `dispatch_hold` carries it. Build after the bundled-daemon-mains PR merges.
+    READ at origin/main faefe0655 (symbols, not lines):
+    - src/lib/read-model-worker.ts `childOracle` forks `forkWorkerEntry(import.meta.url, [READ_MODEL_ORACLE_CHILD_ARG,
+      ...])`, so the child is the read-model worker module's own bundle, `worker-lib-read-model-worker.mjs`, and runs
+      `runReadModelOracleChild` -> `runReadModelOracleWorker` -> `checkOracleSlice` -> `runConsistencyCheck`.
+    - scripts/build-child-entries.mjs `WORKER_ENTRIES` lists src/lib/read-model-worker.ts; a module not listed has no
+      bundle, and `bundledWorkerUrl` refuses it.
+    OBSERVED offline (PR #13207 bench, 8 real slices of 7.9k-15k rows from a 1.5 GB parent, worker bundle):
+    `ready_ms` 433-963 (one at 1,739), `child_max_rss_bytes` 194-222 MB. The bundle built at wt-c5 16:19Z was
+    2,431,937 bytes (logs-8864/c5-build-entries.log).
+    INFERRED, not measured: most of the load and much of the peak is module code the slice never runs. The task measures
+    it before and after on the same slices.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and all 15 open PR heads' plan trees (21:19Z) for
+    oracle child, READ_MODEL_ORACLE, spawnOracle and WORKER_ENTRIES: no shard narrows the oracle's entry (W1-T9091 narrows
+    the daemon's own entry; W1-T9555 is a fixture).
+  design: |
+    1. A NARROW ENTRY. src/lib/read-model-oracle-entry.ts imports only what `runReadModelOracleChild` needs (the slice
+       body, the store open, the escalation deps) and is its own worker bundle in `WORKER_ENTRIES`. If the body's
+       imports reach the projector or views modules, move the body out of read-model-worker.ts so they do not; never
+       copy it.
+    2. `childOracle` forks the narrow entry, whose module exports `readModelOracleEntryUrl()` for it to call. Its
+       bundle-or-tsx decision and its demotion are `forkWorkerEntry`'s,
+       unchanged; a narrow bundle that is not current falls back the way any worker bundle does.
+    3. MEASURED IN THE PR, same slices, same host: `ready_ms`, `child_max_rss_bytes` and bundle bytes, wide entry against
+       narrow, n of at least 3 each. The row needs no new field: `entry` already says bundle or tsx.
+    4. TESTS in test/console-api/read-model/the-oracle-child-starts-from-a-narrow-entry.test.ts (computed by
+       `computedTestFolder`; re-run `rmd test-place` on the real file), `test(` titles verbatim as in the proofs. One test
+       reads the narrow entry's static import graph and fails on a projector or views module in it.
+  acceptance:
+    - claim: "the oracle child forks the narrow entry and answers its slice"
+      proof: "unit test: W1-T10294: the oracle child starts from its narrow entry and answers a slice"
+    - claim: "the narrow entry's import graph holds no projector or views module"
+      proof: "unit test: W1-T10294: the narrow oracle entry imports no projector or views module"
+    - claim: "the narrow entry is a declared worker bundle"
+      proof: "grep: src/lib/read-model-oracle-entry\\.ts in scripts/build-child-entries.mjs"
+    - claim: "the oracle runner forks the narrow entry's URL"
+      proof: "grep: readModelOracleEntryUrl( in src/lib/read-model-worker.ts"
+  falsifier: |
+    At origin/main the child forks src/lib/read-model-worker.ts and no narrow entry exists, so all three proofs fail.
+    Point the narrow entry at a module that re-exports from read-model-worker.ts and the import-graph test fails.
+  note: |
+    ORDER: after the bundled-daemon-mains PR (#13218) merges; whoever sees it merge removes `dispatch_hold` in a
+    plan-only PR. EFFECT after merge: `read_model.oracle_child_exited` `ready_ms` and `child_max_rss_bytes` p50/p90,
+    an equal window before and after.

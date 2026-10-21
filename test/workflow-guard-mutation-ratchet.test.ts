@@ -29,13 +29,30 @@ interface GuardResult {
   by: string | undefined;
 }
 
+interface Verdict {
+  failed: boolean | undefined;
+}
+
 const {
   main,
   splitCoverageViolations,
   pruneStaleBaselineGuards,
   inheritedGuardReason,
+  classifyGuard,
+  prefetchingRunner,
 } = workflowGuard as {
   main(argv: string[], io: Record<string, unknown>): number;
+  classifyGuard(
+    guard: SkipGuard,
+    original: string,
+    suites: string[],
+    runSuite: (suite: string) => Verdict,
+    apply: (guard: SkipGuard, original: string, fn: (root: string) => GuardResult) => GuardResult,
+  ): GuardResult;
+  prefetchingRunner(
+    runBatch: (batch: string[], root: string, width: number) => Array<Verdict | null>,
+    width: number,
+  ): { reset(): void; run(suite: string, suites: string[], root: string): Verdict };
   splitCoverageViolations(
     uncovered: SkipGuard[],
     baseGuardsByKey: Map<string, SkipGuard>,
@@ -301,4 +318,33 @@ test("a ci.yml the base never had at all yields no inherited guards — everythi
   );
   assert.deepEqual(out.caused, [GUARD_A, GUARD_B]);
   assert.deepEqual(out.inherited, []);
+});
+
+// ── a full pass runs its suites side by side, and still reads them one at a time ───────────────
+
+test("a guard mutation batch runs side by side yet names the FIRST catcher in suite order", () => {
+  const suites = ["a", "b", "c", "d", "e"].map((name) => `test/${name}.test.ts`);
+  const calls: Array<{ batch: string[]; width: number }> = [];
+  // The pool stops at the first failure: c fails, so d and e are never run and read null.
+  const runner = prefetchingRunner((batch, _root, width) => {
+    calls.push({ batch, width });
+    const stop = batch.indexOf("test/c.test.ts");
+    return batch.map((suite, i) => (stop >= 0 && i > stop ? null : { failed: suite === "test/c.test.ts" }));
+  }, 3);
+  const out = classifyGuard(GUARD_A, "unused", suites, (suite) => runner.run(suite, suites, "/scratch"), (_g, _t, fn) => fn("/scratch"));
+  assert.deepEqual(out, { covered: true, by: "test/c.test.ts" }, "the same answer the one-at-a-time loop gives");
+  assert.deepEqual(calls, [{ batch: suites, width: 3 }], "one pooled run of every unmeasured suite, at the pool's width");
+  assert.deepEqual(runner.run("test/b.test.ts", suites, "/scratch"), { failed: false }, "a measured suite is answered from that run");
+  runner.run("test/d.test.ts", suites, "/scratch");
+  assert.deepEqual(calls.at(-1)?.batch, ["test/d.test.ts", "test/e.test.ts"], "a suite the pool never ran is run when asked, never assumed");
+  runner.reset();
+  runner.run("test/b.test.ts", suites, "/scratch");
+  assert.deepEqual(calls.at(-1)?.batch, suites.slice(1), "after a reset nothing is reused, and a run starts at the suite asked for");
+});
+
+test("a guard mutation batch member with no verdict is unmeasured, never green", () => {
+  assert.deepEqual(prefetchingRunner(() => [], 3).run("test/a.test.ts", ["test/a.test.ts", "test/b.test.ts"], "/scratch"), { failed: undefined });
+  const widths: number[] = [];
+  prefetchingRunner((batch, _root, width) => (widths.push(width), batch.map(() => ({ failed: false }))), 0).run("test/a.test.ts", ["test/a.test.ts"], "/scratch");
+  assert.deepEqual(widths, [1], "a width below one still runs one suite at a time");
 });

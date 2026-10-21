@@ -24,7 +24,7 @@ fi
 # Validate the complete source set before replacing any installed file.
 for file in "$src/../workspace-retirement-guard.sh" "$src/../dependency-seed-guard.sh" \
   "$src/tmp-reclaim.sh" "$src/remudero-janitor.sh" "$src/remudero-mac-janitor.sh" \
-  "$src/cache-reclaim.py" "$src/retire-legacy-sweeper.py"; do
+  "$src/cache-reclaim.py" "$src/retire-legacy-sweeper.py" "$src/preserve-retire.py"; do
   [ -r "$file" ] || { printf 'missing maintained source: %s\n' "$file" >&2; exit 2; }
 done
 mkdir -p "$dest"
@@ -36,7 +36,7 @@ done
 # retirement; keep its delegated cache-only helper on the same installed source.
 install -m 0755 "$src/tmp-reclaim.sh" "$dest/tmp-reclaim.sh.tmp.$$"
 mv -f "$dest/tmp-reclaim.sh.tmp.$$" "$dest/tmp-reclaim.sh"
-for name in cache-reclaim.py retire-legacy-sweeper.py; do
+for name in cache-reclaim.py retire-legacy-sweeper.py preserve-retire.py; do
   install -m 0755 "$src/$name" "$dest/$name.tmp.$$"
   mv -f "$dest/$name.tmp.$$" "$dest/$name"
 done

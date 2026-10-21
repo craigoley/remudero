@@ -31,3 +31,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The declared remedy targets src/lib/code-scanning-merge-policy.mjs, placing it within the operator escalation rule's merge-policy scope.; on the change's description/files alone, no diff was read — The supplied evidence lists recurring hand fixes but gives no per-PR failure diagnosis or concrete prevention mechanism; it does not establish that these rounds share a cause.; on the change's description/files alone, no diff was read — The acceptance proof checks for a test declaration using grep; it does not demonstrate preserved merge-policy behavior or prevention of fix rounds."
+    judged_at: "2026-10-20T16:28:14.954Z"
+    pin: "cbefc6f01cc2437a201ea9b946f4e089886439febf7e75e29ed5df1f37d783a7"

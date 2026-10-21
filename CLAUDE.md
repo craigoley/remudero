@@ -85,8 +85,8 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 
 ## CI and merging
 
-- **Space `gh` reads 180 s apart, never poll — `deny-floor.sh` refuses a closer read; GitHub's
-  SECONDARY limit 403s on RATE while `rate_limit` reads full; `gh pr create` may die, git push won't.** → doctrine/ci-and-merging/gh-read-cadence.md
+- **Read GitHub through `rmd gh -- <gh args>` while a broker is live (the hook says so), never poll;
+  the 180 s floor applies only with no live broker; `gh pr create` may die, git push won't.** → doctrine/ci-and-merging/gh-read-cadence.md
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** → doctrine/ci-and-merging/conflicting-pr-zero-checks.md
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close

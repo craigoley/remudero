@@ -155,6 +155,18 @@ export function spoolEscalation(stateDir: string, e: Escalation, meta: SpoolMeta
 }
 
 /**
+ * The memory budget's starvation alert (host-memory-admission.ts, OPERATOR RULING 2026-10-19 (3)) as a sink run-task
+ * installs: spooled for the daemon's drain under the state root's own state directory, which it never creates.
+ */
+export function spoolingStarvationAlert(meta: Omit<SpoolMeta, "directError">): (root: string, e: Escalation) => void {
+  return (root, e) => {
+    const stateDir = join(root, "state");
+    if (!existsSync(stateDir)) throw Object.assign(new Error(`ENOENT: ${stateDir}`), { code: "ENOENT" });
+    spoolEscalation(stateDir, e, meta);
+  };
+}
+
+/**
  * W1-T9625 -- the HOST posted this escalation itself (`rmd host-alert`, while the daemon that drains
  * the spool was down). Recorded exactly as the drain records its own delivery: the delivered record
  * the daemon's drain and spoolEscalation read, so neither posts it again, and the pending entry is
