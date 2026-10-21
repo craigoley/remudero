@@ -7,7 +7,6 @@ import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
 import { TICK_READ_MAX_AGE_MS } from "./read-plane.js";
-import type { OpenPrView } from "./sweep.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
@@ -1648,7 +1647,13 @@ export interface DepReviewRepairSnapshot {
   owner: string;
   repo: string;
   asOfMs: number;
-  prs: readonly Pick<OpenPrView, "prNumber" | "headSha" | "headRefName" | "createdAt" | "checksState">[];
+  prs: readonly {
+    prNumber: number;
+    headSha?: string;
+    headRefName?: string;
+    createdAt?: string;
+    checksState: "green" | "red" | "pending" | "none";
+  }[];
 }
 
 /** PRIMARY CONTROL: the operator's stuck-PR horizon; it changes ordering, never admission or spend. */
