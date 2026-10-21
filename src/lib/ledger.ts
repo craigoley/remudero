@@ -816,7 +816,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
   // idempotence AND the staleness clock; dropping it makes a review stalled for hours read as fresh.
   "review.pending_posted",
-  // The stalled-stage backstop (sweep.ts) reads it: a review refusing at a head is no live owner.
+  // PR-13355: the stalled-stage backstop (sweep.ts) reads it; a review refusing at a head is no live owner.
   "review.semantic_setup_refused",
   // W1-T1017: W1-T322's ships-unwired advisory floor line. The deciding reader is not code — it is
   // the operator adjudicating W1-T323's advisory-versus-blocking flip against this exact corpus.
