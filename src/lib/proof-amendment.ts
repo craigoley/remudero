@@ -15,7 +15,7 @@
 //
 // OUT OF SCOPE: deciding when a capped review is fix-rung-actionable (sweep.ts, unchanged), the
 // lower-privilege human-flagging rung (`insertPlanRepairFlag`/`dispatchPlanOnlyRepair`, W1-T3390,
-// left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
+// left untouched), and a taskless PR, refused shard-not-found here (its body repair is W1-T10339).
 
 import { createHash, randomUUID } from "node:crypto";
 import {
