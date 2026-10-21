@@ -52,3 +52,4 @@ door is not.
 | [0005](0005-apache-2.0-never-relicense.md) | Apache-2.0, and the core is never relicensed |
 | [0006](0006-precompiled-daemon-child-entries.md) | Run daemon children from a precompiled, source-keyed bundle, not tsx |
 | [0007](0007-build-runs-outlive-the-daemon.md) | Run each build in a child process that outlives the daemon; restart the daemon only for its own code |
+| [0008](0008-the-daemon-main-runs-from-the-bundle.md) | Start the daemon's own main from the precompiled bundle, keeping source maps on through a linked map |

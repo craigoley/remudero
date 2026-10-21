@@ -150,6 +150,11 @@ export function materializeFromStore(treeRoot: string, storeRoot: string): Store
       for (const file of [...bundleNames(script, stored), script.MANIFEST_NAME]) {
         copyFileSync(join(stored, file), join(stage, file), MATERIALIZE_COPY_MODE);
       }
+      // bundlemain: each bundle's linked map travels with it (a recipe-5 build writes one), so a main started from a
+      // materialized bundle keeps its source maps. A build without maps has none to copy.
+      for (const map of bundleNames(script, stored).map((bundle) => `${bundle}.map`).filter((file) => existsSync(join(stored, file)))) {
+        copyFileSync(join(stored, map), join(stage, map), MATERIALIZE_COPY_MODE);
+      }
       const stagedRefusal = storedBuildRefusal(script, stage, treeRoot, hash);
       if (stagedRefusal) return { outcome: "miss", reason: `staged-${stagedRefusal}`, hash };
       publishDir(stage, target, `${stage}-old`);
