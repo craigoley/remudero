@@ -475,7 +475,7 @@ import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type Daemo
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_ENV, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, findOffendingMerge, gitIn, readReviewerHealthRows, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerRegressionEvidenceText, reviewerShadowStep, type HealedTreeGit, type ReviewerHealthStore, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -2055,18 +2055,36 @@ export function buildReviewerCodeFreshnessGate(
   };
 }
 
-/** W1-T10269 — what a caller of {@link buildReviewerHealthRoute} may replace; each defaults to production. */
-export interface ReviewerHealthRouteOverrides {
-  health?: Partial<Omit<ReviewerHealthStore, "effects">> & { effects?: Partial<ReviewerHealthStore["effects"]> };
-  tree?: Partial<HealedTreeGit>;
-  /** The healed child: `rmd review` run from the healed tree with the incident id in its env. */
-  spawnHealed?: (tree: string, args: string[], onFailure: (failure: string) => void, env: NodeJS.ProcessEnv) => Promise<number>;
-  /** The shadow: today's reviewer from a fresh origin/main tree, publishing nothing. */
-  shadow?: (prArg: string, args: string[], originMainSha: string) => Promise<number | undefined>;
-  withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
-  self?: () => { owner: string; repo: string };
-  /** The revert PR opener; production is the main-repair lane's. */
-  openRevert?: (owner: string, repo: string, config: Config, request: MainRepairRevertRequest, ledgerPath: string, runId: string) => Promise<MainRepairRevertOutcome>;
+/** W1-T10269 — the escalation's issue gateway, assigning each issue it files to the repo owner
+ *  (escalation by assignment: Remudero Issues are the alert channel). */
+export function assigningIssueGateway(owner: string, repo: string, log: (step: string, extra?: Record<string, unknown>) => void,
+  gateway: AsyncIssueGateway = ghIssueGatewayAsync(owner, repo)): AsyncIssueGateway {
+  return {
+    ...gateway,
+    create: async (title, body, labels) => {
+      const url = await gateway.create(title, body, labels);
+      await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", owner]).catch((error: unknown) =>
+        log("reviewer.regression_assign_failed", { issue_url: url, error: String((error as Error)?.message ?? error) }));
+      return url;
+    },
+  };
+}
+
+/** W1-T10269 — the red-main repair lane for a reviewer regression's revert PR, with the PR read and
+ *  close over REST that the main-health rung uses when its lane names none. */
+export function reviewerRevertLane(owner: string, repo: string, config: Config, ledgerPath: string, runId: string): MainRepairLane {
+  const pull = (url: string) => /\/pull\/(\d+)$/.exec(url)?.[1] ?? "";
+  return {
+    ...mainRepairLaneFor(owner, repo, config, ledgerPath, runId),
+    readPr: async (url) => {
+      const pr = (await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${pull(url)}`])) as { state?: unknown; merged?: unknown };
+      return { state: pr?.merged === true ? "merged" : pr?.state === "open" ? "open" : "closed" };
+    },
+    closePr: async (url, comment) => {
+      await ghJsonAsync(["api", "--method", "POST", `repos/${owner}/${repo}/issues/${pull(url)}/comments`, "-f", `body=${comment}`]);
+      await ghJsonAsync(["api", "--method", "PATCH", `repos/${owner}/${repo}/pulls/${pull(url)}`, "-f", "state=closed"]);
+    },
+  };
 }
 
 /**
@@ -2076,86 +2094,51 @@ export interface ReviewerHealthRouteOverrides {
  * origin/main moves, so W1-T228 reads it fresh — never from an old head or an engine tree; while
  * today's reviewer has no judgment yet it also runs in shadow, publishing nothing. A healed tree that
  * cannot be built escalates and the review falls back to today's path, unchanged.
+ * Injection reuses the review path's own {@link FreshTreeReviewSeams} (the same object the stale-code
+ * fresh-tree runner takes), the escalation's issue gateway and the red-main repair lane.
  */
 export function buildReviewerHealthRoute(
   repoDir: string,
   config: Config,
   ledgerPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  seams: ReviewerHealthRouteOverrides = {},
+  tree: FreshTreeReviewSeams,
+  issues?: AsyncIssueGateway,
+  lane?: MainRepairLane,
 ): (prArg: string, rest: string[], reviewDeps: ReviewCommandDeps, normal: () => Promise<number>) => Promise<number> {
-  const git = seams.tree?.git ?? gitIn(repoDir);
-  const self = seams.self ?? (() => resolveOwnerRepo());
+  const git = gitIn(repoDir);
   const runId = `reviewer-health-${systemClock.now()}`;
-  const pullOf = (url: string) => /\/pull\/(\d+)$/.exec(url)?.[1] ?? "";
-  const effects: ReviewerHealthStore["effects"] = {
-    findOffendingMerge: (healthy, regressed) => findOffendingMerge(git, healthy, regressed),
-    isAncestor: (ancestor, descendant) => git(["merge-base", "--is-ancestor", ancestor, descendant]).then(() => true,
-      () => false), // not an ancestor, or unknown here: either way not the healthy side
-    escalate: async (incident, conflict) => {
-      const { owner, repo } = self();
-      const url = await tryEscalateAsync(reviewerRegressionEscalation(incident, conflict), { issues: ghIssueGatewayAsync(owner, repo), ledgerPath, runId });
-      if (url) await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", owner]).catch((error: unknown) =>
-        log("reviewer.regression_assign_failed", { issue_url: url, error: String((error as Error)?.message ?? error) }));
-      return url;
-    },
-    openRevertPr: async (incident) => {
-      const { owner, repo } = self();
-      return (seams.openRevert ?? openMainRepairRevertPr)(owner, repo, config, {
-        branch: "main", headSha: incident.regressedSha, offendingSha: incident.offending.sha,
-        ...(incident.offending.pr === null ? {} : { offendingPr: incident.offending.pr }),
-        failingChecks: [], whyFixInsufficient: "no fix had returned the reviewer to its baseline",
-        reason: { kind: "reviewer-regression", incidentId: incident.id, evidence: reviewerRegressionEvidenceText(incident) },
-      }, ledgerPath, runId);
-    },
-    closeIssue: async (url, comment) => {
-      const { owner, repo } = self();
-      await ghIssueGatewayAsync(owner, repo).closeWithComment?.(url, comment);
-    },
-    readPr: async (url) => {
-      const { owner, repo } = self();
-      const pr = (await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${pullOf(url)}`])) as { state?: unknown; merged?: unknown };
-      return pr?.merged === true ? "merged" : pr?.state === "open" ? "open" : "closed";
-    },
-    closePr: async (url, comment) => {
-      const { owner, repo } = self();
-      await ghJsonAsync(["api", "--method", "POST", `repos/${owner}/${repo}/issues/${pullOf(url)}/comments`, "-f", `body=${comment}`]);
-      await ghJsonAsync(["api", "--method", "PATCH", `repos/${owner}/${repo}/pulls/${pullOf(url)}`, "-f", "state=closed"]);
-    },
-    ...seams.health?.effects,
+  const self = (): { owner: string; repo: string } => resolveOwnerRepo();
+  const escalation = { issues: issues ?? assigningIssueGateway(self().owner, self().repo, log), ledgerPath, runId };
+  const repairLane = lane ?? reviewerRevertLane(self().owner, self().repo, config, ledgerPath, runId);
+  const statePath = reviewerHealthStatePath(dirname(ledgerPath));
+  const readRows = (cursor: Parameters<typeof readReviewerHealthRows>[1]) => readReviewerHealthRows(dirname(ledgerPath), cursor);
+  const healthLog = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra });
+  // A tree left at a healed path by an earlier process (its memo gone) is removed, then cut again.
+  const cut = (prefix: string, sha: string): string => {
+    try {
+      return prepareFreshOriginMainTree(repoDir, tree, prefix, sha);
+    } catch (error) {
+      try {
+        worktreeRemove(repoDir, `${tree.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`);
+      } catch {
+        throw error; // deliberate: nothing was there to remove, so the cut's own refusal stands
+      }
+      return prepareFreshOriginMainTree(repoDir, tree, prefix, sha);
+    }
   };
-  const health: ReviewerHealthStore = {
-    statePath: reviewerHealthStatePath(dirname(ledgerPath)),
-    readRows: (cursor) => readReviewerHealthRows(dirname(ledgerPath), cursor),
-    log: (step, extra = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra }),
-    now: () => systemClock.iso(),
-    ...seams.health,
-    effects,
-  };
-  const worktreeRoot = join(repoDir, "..", "worktrees");
-  // The fresh-tree helper inspects with a synchronous git; it goes through the hardened leaf, as fleetRatifyGateway's does.
-  const treeTools = (): FreshTreeTools => ({ git: (args) => hostWorktreeGit(args[1] ?? repoDir, args.slice(2)),
-    addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot });
-  const tree: HealedTreeGit = {
-    git,
-    treeGit: (dir, args) => hostWorktreeGitAsync(dir, args),
-    cut: (prefix, sha) => prepareFreshOriginMainTree(repoDir, treeTools(), prefix, sha),
-    remove: (dir) => worktreeRemove(repoDir, dir),
-    ...seams.tree,
-  };
-  const shadowRun = seams.shadow ?? ((prArg: string, args: string[], originMainSha: string) =>
-    buildFreshTreeReviewRunner(repoDir, { ...treeTools(), spawnReview: spawnRmdReviewForFreshTree })(prArg, args, { originMainSha }));
-  const spawnHealed = seams.spawnHealed ?? spawnRmdReviewForFreshTree;
+  const remove = (dir: string): void => worktreeRemove(repoDir, dir);
   const escalatedConflicts = new Set<string>();
   return async (prArg, rest, reviewDeps, normal) => {
     // An unreadable origin/main still ingests; no current reviewer is judged this call.
     const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
-    const decision = await evaluateReviewerHealth(health, { originMainSha });
+    const decision = await evaluateReviewerHealth({ originMainSha }, statePath, readRows, git, escalation, repairLane, healthLog, systemClock);
     if (decision.route === "normal") return normal();
     const incident: ReviewerIncident = decision.incident;
     // A healed tree built from a PR's head never reviews that same PR: the revert-built tree judges it.
     const withPr = decision.withPr !== null && String(decision.withPr) !== prArg ? decision.withPr : undefined;
-    const healed = await buildHealedReviewerTree(tree, incident.offending!.sha, withPr === undefined ? {} : { withPr });
+    const healed = await buildHealedReviewerTree(repoDir, incident.offending!.sha, cut, remove, withPr === undefined ? {} : { withPr });
     if (healed.state === "empty") {
       log("reviewer.healed_patch_empty", { incident_id: incident.id, origin_main_sha: healed.originMainSha, pr: prArg });
       return normal();
@@ -2166,24 +2149,25 @@ export function buildReviewerHealthRoute(
       const key = `${incident.id}:${healed.originMainSha}`;
       if (healed.state === "conflict" && !escalatedConflicts.has(key)) {
         escalatedConflicts.add(key);
-        await effects.escalate(incident, healed).catch((error: unknown) =>
-          log("reviewer.regression_escalation_failed", { incident_id: incident.id, error: String((error as Error)?.message ?? error) }));
+        // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
+        await tryEscalateAsync(reviewerRegressionEscalation(incident, healed), escalation);
       }
       return normal();
     }
     const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
     if (decision.shadow && originMainSha !== null) {
-      const code = await shadowRun(prArg, [...childArgs, REVIEWER_SHADOW_FLAG], originMainSha).catch((error: unknown) => {
-        log("reviewer.shadow_failed", { incident_id: incident.id, pr: prArg, error: String((error as Error)?.message ?? error) });
-        return undefined;
-      });
-      log("reviewer.shadow_ran", { incident_id: incident.id, pr: prArg, origin_main_sha: originMainSha, exit_code: code ?? null });
+      // Today's reviewer, from the review path's own fresh origin/main tree, publishing nothing. The
+      // runner never rejects: a failure reads undefined, its reason on the line below.
+      let why: string | undefined;
+      const code = await buildFreshTreeReviewRunner(repoDir, tree)(prArg, [...childArgs, REVIEWER_SHADOW_FLAG], { originMainSha }, (failure) => { why = failure; });
+      log("reviewer.shadow_ran", { incident_id: incident.id, pr: prArg, origin_main_sha: originMainSha, exit_code: code ?? null,
+        ...(why === undefined ? {} : { failure: why }) });
     }
     let failure: string | undefined;
     let code: number;
     try {
-      code = await (seams.withWorktreeLease ?? withReviewerWorktreeLease)(healed.path, () =>
-        spawnHealed(healed.path, [prArg, ...childArgs], (why) => { failure = why; }, { ...process.env, [REVIEWER_INCIDENT_ENV]: incident.id }));
+      code = await (tree.withWorktreeLease ?? withReviewerWorktreeLease)(healed.path, () =>
+        tree.spawnReview(healed.path, [prArg, ...childArgs, REVIEWER_INCIDENT_FLAG, incident.id], (why) => { failure = why; }));
     } catch (error) {
       // COULD NOT RUN: today's path reviews, as it would with no incident; never an older reviewer.
       log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, error: String((error as Error)?.message ?? error) });
@@ -2500,22 +2484,23 @@ export function buildSweepEffects(
   // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
+  const freshTreeSeams: FreshTreeReviewSeams = {
+    git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString(),
+    // THE REVIEW PATH'S OWN HELPER, not a fifth raw site. worktree-sites.ts pins exactly four
+    // and refuses another; this needs the same throwaway detached tree, at the base revision.
+    addWorktree: realDeps().reviewWorktree.addWorktree,
+    worktreeRoot: join(repoRoot, "..", "worktrees"),
+    spawnReview: spawnRmdReviewForFreshTree,
+  };
   const reviewerCodeGate = buildReviewerCodeFreshnessGate(
     reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env)),
     deps.log,
     reviewCommand,
-    buildFreshTreeReviewRunner(repoRoot, {
-      git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString(),
-      // THE REVIEW PATH'S OWN HELPER, not a fifth raw site. worktree-sites.ts pins exactly four
-      // and refuses another; this needs the same throwaway detached tree, at the base revision.
-      addWorktree: realDeps().reviewWorktree.addWorktree,
-      worktreeRoot: join(repoRoot, "..", "worktrees"),
-      spawnReview: spawnRmdReviewForFreshTree,
-    }),
+    buildFreshTreeReviewRunner(repoRoot, freshTreeSeams),
   );
   // W1-T10269: every review asks reviewer health first; with no open incident it is the gate above, unchanged.
   const reviewerHealthRoute = reviewerHealthRouteImpl ??
-    (deriveLedgerActor() === "test" ? undefined : buildReviewerHealthRoute(repoRoot, deps.config, deps.ledgerPath, deps.log));
+    (deriveLedgerActor() === "test" ? undefined : buildReviewerHealthRoute(repoRoot, deps.config, deps.ledgerPath, deps.log, freshTreeSeams));
   const reviewGateCall = (prArg: string, rest: string[], opts: ReviewCommandDeps): Promise<number> =>
     reviewerHealthRoute ? reviewerHealthRoute(prArg, rest, opts, () => reviewerCodeGate.call(prArg, rest, opts)) : reviewerCodeGate.call(prArg, rest, opts);
   const reviewFallbackRunner =
@@ -23639,7 +23624,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step: reviewerShadowStep(step, shadow), lane: "review",
       ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }), ...extra,
-      ...reviewerHealthRowFields(step) });
+      ...reviewerHealthRowFields(step, flagValue(rest, REVIEWER_INCIDENT_FLAG)) });
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
   if (!shadow) {
     await observeAdmissionDisposition(config.contributorAdmission,
