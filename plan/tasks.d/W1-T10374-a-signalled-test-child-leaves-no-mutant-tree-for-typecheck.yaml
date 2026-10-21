@@ -1,4 +1,4 @@
-- id: W1-T10364
+- id: W1-T10374
   title: "A TEST CHILD KILLED AT ITS BOUND LEAVES NO `test/mutants-*` TREE BEHIND FOR THE TYPECHECK — `writeMutantModule` (test/helpers/mutant-module.ts) removes its `test/mutants-<rand>/` copies only in a `process.on(\"exit\")` handler, which a SIGTERM from a census-precheck child's 60 s bound never runs, and tsconfig.json's `include` (`test/**/*.ts`) has the next typecheck in the same preflight read the stray copies"
   repo: remudero
   depends_on: []
@@ -46,7 +46,7 @@
     - claim: "the new test file passes"
       proof: "unit test: test/ci/a-signalled-test-child-leaves-no-mutant-tree-for-typecheck.test.ts"
     - claim: "a child that wrote a mutant and is sent SIGTERM leaves no test/mutants directory and still exits by that signal"
-      proof: "grep: W1-T10364: a mutant writer sent SIGTERM removes its copies and exits by the signal in test/ci/a-signalled-test-child-leaves-no-mutant-tree-for-typecheck.test.ts"
+      proof: "grep: W1-T10374: a mutant writer sent SIGTERM removes its copies and exits by the signal in test/ci/a-signalled-test-child-leaves-no-mutant-tree-for-typecheck.test.ts"
     - claim: "the typecheck configuration excludes the mutant copies"
       proof: "grep: test/mutants- in tsconfig.json"
   falsifier: |

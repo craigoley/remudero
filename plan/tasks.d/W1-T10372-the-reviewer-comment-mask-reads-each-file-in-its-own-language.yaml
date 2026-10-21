@@ -1,4 +1,4 @@
-- id: W1-T10362
+- id: W1-T10372
   title: "THE REVIEWER'S COMMENT MASK READS EACH FILE IN ITS OWN LANGUAGE — `commentMaskByLine` (src/lib/review.ts) applies JavaScript comment rules to every file, so plan/policy.yaml's header line 8 (`src/lib/*.ts`) opens a `/*` block that never closes, every later policy line reads as a comment, and a true `grep:` proof there is capped `executed_stale` (comment-only): `grep: mode: act in plan/policy.yaml` matched the real value line `  mode: act` on #13282 and was still capped"
   repo: remudero
   depends_on: []
@@ -51,9 +51,9 @@
     - claim: "the new test file passes"
       proof: "unit test: test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts"
     - claim: "a grep proof matching a YAML value line after a stray `/*` in a YAML comment is graded on the line, not capped (the policy.yaml shape)"
-      proof: "grep: W1-T10362: a YAML value line after a stray slash-star is not a comment in test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts"
+      proof: "grep: W1-T10372: a YAML value line after a stray slash-star is not a comment in test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts"
     - claim: "a YAML `#` comment line and a TS block comment are still read as comments"
-      proof: "grep: W1-T10362: a YAML hash comment and a TS block comment are still comments in test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts"
+      proof: "grep: W1-T10372: a YAML hash comment and a TS block comment are still comments in test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts"
   falsifier: |
     Keep the JS-only mask and the policy.yaml-shaped fixture (header line holding `src/lib/*.ts`, a later `  mode: act`)
     grades `grep: mode: act` comment-only again. Mask nothing for YAML and the `#`-comment test reds.

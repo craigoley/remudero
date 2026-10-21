@@ -115,7 +115,7 @@
         `proof_amendment.requested` refusal row before the round returns. The `priorDesign` reuse and the stand-down
         hold below will see that row.
       - The body route must validate through `validateProofAmendmentProposal` itself, so it inherits the comment-only
-        refusal (and the language-aware comment mask, W1-T10362, when that lands) instead of a parallel copy of the
+        refusal (and the language-aware comment mask, W1-T10372, when that lands) instead of a parallel copy of the
         checks.
   design: |
     No fixed bounds. A repair is re-dispatched when, and only when, something it read has changed.

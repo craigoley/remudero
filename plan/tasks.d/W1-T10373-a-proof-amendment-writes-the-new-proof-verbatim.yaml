@@ -1,4 +1,4 @@
-- id: W1-T10363
+- id: W1-T10373
   title: "A PROOF AMENDMENT WRITES THE NEW PROOF VERBATIM — `replaceProofScalar` (src/lib/proof-amendment.ts) calls `String.prototype.replace` with a STRING replacement, so a new proof containing `$&`, `$'`, `` $` `` or `$$` is expanded by JavaScript's replacement patterns and the shard receives a proof nobody proposed"
   repo: remudero
   depends_on: []
@@ -36,7 +36,7 @@
     - claim: "the new test file passes"
       proof: "unit test: test/fix-lane/a-proof-amendment-writes-the-new-proof-verbatim.test.ts"
     - claim: "a new proof containing dollar-ampersand, dollar-quote and double-dollar sequences is written into the shard byte for byte"
-      proof: "grep: W1-T10363: a new proof with dollar sequences is written verbatim in test/fix-lane/a-proof-amendment-writes-the-new-proof-verbatim.test.ts"
+      proof: "grep: W1-T10373: a new proof with dollar sequences is written verbatim in test/fix-lane/a-proof-amendment-writes-the-new-proof-verbatim.test.ts"
   falsifier: |
     Restore the string replacement and the fixture proof holding `$&` and `$'` is written with the old proof and the
     line's tail spliced in.
