@@ -121,25 +121,64 @@ test("the narrow observation protocol reads real fixtures and refuses invalid re
   const request = { output, base: base.dir, head: fixture.dir };
   const valid = runNarrow(checkProofObservationChildArgv(), fixture.dir, childEnv(), JSON.stringify(request));
   assert.equal(valid.status, 0, valid.stderr);
-  assert.match(JSON.parse(valid.stdout), /base lacks export\(s\) added/);
-  for (const input of ["{", "null", JSON.stringify({ ...request, base: "relative" }), " ".repeat(4 * 1024 ** 2 + 1)]) {
+  assert.equal(JSON.parse(valid.stdout).state, "attributed");
+  assert.match(JSON.parse(valid.stdout).note, /base lacks export\(s\) added/);
+  const unproven = runNarrow(checkProofObservationChildArgv(), fixture.dir, childEnv(),
+    JSON.stringify({ ...request, output: "unrelated load failure" }));
+  assert.deepEqual(JSON.parse(unproven.stdout), { state: "unproven" });
+  for (const input of ["{", "null", JSON.stringify({ ...request, base: "relative" }),
+    JSON.stringify({ ...request, output: 3 }), JSON.stringify({ ...request, head: null }),
+    " ".repeat(4 * 1024 ** 2 + 1)]) {
     const out = runNarrow(checkProofObservationChildArgv(), fixture.dir, childEnv(), input);
     assert.equal(out.status, 0, out.stderr);
-    assert.equal(JSON.parse(out.stdout), null);
+    assert.deepEqual(JSON.parse(out.stdout), { state: "unavailable", reason: "invalid-request" });
   }
   const extra = runNarrow([...checkProofObservationChildArgv(), "extra"], fixture.dir, childEnv(), JSON.stringify(request));
   assert.equal(extra.status, 0, extra.stderr);
-  assert.equal(JSON.parse(extra.stdout), null);
+  assert.deepEqual(JSON.parse(extra.stdout), { state: "unavailable", reason: "invalid-request" });
 });
 
 test("an unavailable CLI export observation never produces an attribution", async () => {
-  const { cliMissingExportNote } = await import("../src/lib/check-proof.js");
+  const { observeCliMissingExports } = await import("../src/lib/check-proof.js");
   const unavailable = (() => { throw new Error("controlled observer unavailable"); }) as typeof spawnSync;
-  assert.equal(cliMissingExportNote("controlled load error", root, root, unavailable), undefined);
-  for (const script of ["process.stdout.write('{')", "process.exitCode=1"]) {
+  assert.deepEqual(observeCliMissingExports("controlled load error", root, root, unavailable),
+    { state: "unavailable", reason: "observer-error" });
+  for (const [script, expected] of [
+    ["process.stdout.write('{')", { state: "unavailable", reason: "observer-error" }],
+    ["process.exitCode=1", { state: "unavailable", reason: "child-failed" }],
+    ["process.kill(process.pid, 'SIGTERM')", { state: "unavailable", reason: "child-failed" }],
+    ["process.stdout.write('null')", { state: "unavailable", reason: "invalid-response" }],
+    ["process.stdout.write(JSON.stringify({state:'attributed',note:''}))", { state: "unavailable", reason: "invalid-response" }],
+    ["process.stdout.write(JSON.stringify({state:'unavailable',reason:'invalid-request'}))", { state: "unavailable", reason: "invalid-request" }],
+    ["process.stdout.write(JSON.stringify({state:'unavailable',reason:'observer-error'}))", { state: "unavailable", reason: "observer-error" }],
+  ] as const) {
     const child = ((_file: string, _args: string[], options: Parameters<typeof spawnSync>[2]) =>
       spawnSync(process.execPath, ["-e", script], options)) as typeof spawnSync;
-    assert.equal(cliMissingExportNote("controlled load error", root, root, child), undefined);
+    assert.deepEqual(observeCliMissingExports("controlled load error", root, root, child), expected);
   }
-  assert.equal(cliMissingExportNote(" ".repeat(4 * 1024 ** 2), root, root, unavailable), undefined);
+  const missingPath = resolve(root, "coverage/nonexistent-observer-executable");
+  assert.equal(existsSync(missingPath), false);
+  const missingExecutable = ((_file: string, _args: string[], options: Parameters<typeof spawnSync>[2]) =>
+    spawnSync(missingPath, [], options)) as typeof spawnSync;
+  assert.deepEqual(observeCliMissingExports("controlled load error", root, root, missingExecutable),
+    { state: "unavailable", reason: "child-failed" });
+  assert.deepEqual(observeCliMissingExports(" ".repeat(4 * 1024 ** 2), root, root, unavailable),
+    { state: "unavailable", reason: "request-too-large" });
+});
+
+test("the CLI reports an unavailable export observer while retaining unknown", async t => {
+  const fixture = exportFixture(t, "export const kept = 1;\n");
+  const { checkProofCommand } = await import("../src/lib/check-proof.js");
+  const lines: string[] = [], previous = process.cwd();
+  t.mock.method(console, "log", (...args: unknown[]) => { lines.push(args.join(" ")); });
+  process.chdir(fixture.dir);
+  try {
+    const result = checkProofCommand(["unit test: test/probe.test.ts", "--base", "HEAD~1"], {
+      observeMissingExports: () => ({ state: "unavailable", reason: "child-failed" }),
+    });
+    assert.equal(result, 0);
+    assert.match(lines.join("\n"), /export observation unavailable \(child-failed\) — no attribution made/);
+    assert.match(lines.join("\n"), /discrimination: unknown/);
+    assert.doesNotMatch(lines.join("\n"), /COULD NOT LINK/);
+  } finally { process.chdir(previous); }
 });

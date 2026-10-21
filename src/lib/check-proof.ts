@@ -64,18 +64,30 @@ export function checkProofObservationChildArgv(): string[] {
   return [...proofChildEntryArgv(), MISSING_EXPORT_OBSERVATION_FLAG];
 }
 
+export type MissingExportObservation =
+  | { state: "attributed"; note: string }
+  | { state: "unproven" }
+  | { state: "unavailable"; reason: "request-too-large" | "child-failed" | "invalid-response" | "invalid-request" | "observer-error" };
+
 /** The synchronous CLI retains its reservation while a narrow child awaits confined reads. */
-export function cliMissingExportNote(output: string, base: string, head: string, run = spawnSync): string | undefined {
+export function observeCliMissingExports(output: string, base: string, head: string, run = spawnSync): MissingExportObservation {
   try {
     const input = JSON.stringify({ output, base, head });
-    if (Buffer.byteLength(input) > PROOF_FILE_READ_BYTES) return undefined;
+    if (Buffer.byteLength(input) > PROOF_FILE_READ_BYTES) return { state: "unavailable", reason: "request-too-large" };
     const args = checkProofObservationChildArgv();
     const child = run(process.execPath, args, { input, encoding: "utf8",
       env: { ...process.env, NODE_V8_COVERAGE: "" }, timeout: checkProofTimeoutMs(), maxBuffer: PROOF_FILE_READ_BYTES });
-    if (child.error || child.signal || child.status !== 0) return undefined;
-    const note: unknown = JSON.parse(child.stdout);
-    return typeof note === "string" ? note : undefined;
-  } catch { return undefined; }
+    if (child.error || child.signal || child.status !== 0) return { state: "unavailable", reason: "child-failed" };
+    const response: unknown = JSON.parse(child.stdout);
+    if (typeof response !== "object" || response === null) return { state: "unavailable", reason: "invalid-response" };
+    const observed = response as Record<string, unknown>;
+    if (observed.state === "attributed" && typeof observed.note === "string" && observed.note.length > 0)
+      return { state: "attributed", note: observed.note };
+    if (observed.state === "unproven") return { state: "unproven" };
+    if (observed.state === "unavailable" && (observed.reason === "invalid-request" || observed.reason === "observer-error"))
+      return { state: "unavailable", reason: observed.reason };
+    return { state: "unavailable", reason: "invalid-response" };
+  } catch { return { state: "unavailable", reason: "observer-error" }; }
 }
 
 /**
@@ -329,6 +341,7 @@ export function checkProofCommand(
   rest: string[],
   deps: {
     pathStatus?: (cwd: string, path: string) => string;
+    observeMissingExports?: typeof observeCliMissingExports;
     /** W1-T912: injectable ONLY for tests. Real callers (the CLI dispatch below) omit this and
      *  get {@link buildBaseProofDir}'s own default `git show` — see its doc for why that is the
      *  right default. Overriding `showBlob` here is what makes a `--base` comparison decidable
@@ -758,10 +771,12 @@ export function checkProofCommand(
       printFailureOutput("base", baseDiag, baseDiag === undefined && typeof loadOutput === "string" ? proofFailureTail(loadOutput) : undefined);
       const missingExport =
         baseW.kind === "test" && typeof loadOutput === "string"
-          ? cliMissingExportNote(loadOutput, baseCheckoutDir, process.cwd())
+          ? (deps.observeMissingExports ?? observeCliMissingExports)(loadOutput, baseCheckoutDir, process.cwd())
           : undefined;
-      if (missingExport !== undefined) {
-        console.log(`base:       COULD NOT LINK — ${missingExport}`);
+      if (missingExport?.state === "unavailable")
+        console.log(`base:       export observation unavailable (${missingExport.reason}) — no attribution made`);
+      if (missingExport?.state === "attributed") {
+        console.log(`base:       COULD NOT LINK — ${missingExport.note}`);
         console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
         return headExit;
       }

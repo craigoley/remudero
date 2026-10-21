@@ -5,6 +5,7 @@ import { isAbsolute } from "node:path";
 import { PROOF_FILE_READ_BYTES } from "./lib/proof-file-reader-child.js";
 
 if (process.argv[2] === MISSING_EXPORT_OBSERVATION_FLAG) {
+  let reason: "invalid-request" | "observer-error" = "invalid-request";
   try {
     if (process.argv.length !== 3) throw Error("unexpected observation arguments");
     const parts: Buffer[] = []; let used = 0;
@@ -21,9 +22,11 @@ if (process.argv[2] === MISSING_EXPORT_OBSERVATION_FLAG) {
     const { output, base, head } = request as Record<string, unknown>;
     if (typeof output !== "string" || typeof base !== "string" || typeof head !== "string" ||
         !isAbsolute(base) || !isAbsolute(head)) throw Error("invalid observation context");
+    reason = "observer-error";
     const { baseLacksPrAddedExports } = await import("./lib/proof-missing-export.js");
-    console.log(JSON.stringify(await baseLacksPrAddedExports(output, base, head) ?? null));
-  } catch { console.log("null"); }
+    const note = await baseLacksPrAddedExports(output, base, head);
+    console.log(JSON.stringify(note === undefined ? { state: "unproven" } : { state: "attributed", note }));
+  } catch { console.log(JSON.stringify({ state: "unavailable", reason })); }
 } else {
   process.exitCode = withSyncChildReservation("check-proof", () => checkProofCommand(process.argv.slice(2)), { bindSelf: true });
 }
