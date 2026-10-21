@@ -340,6 +340,18 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "rmd drain (feedback-landing sweep rung)",
     note: "Scoped to a branch the fleet alone owns (comment: force-push is safe here); no ledger step name confirmed by grep, reported as unmapped.",
   },
+  // ── src/cli/commands/run-task-verb.ts ────────────────────────────────────────────────────
+  {
+    id: "restore-boundary-checkpoint-branch",
+    action: "recreate an absent task checkpoint branch from its verified commit",
+    module: "src/cli/commands/run-task-verb.ts",
+    symbol: "restoreBoundaryCheckpoint",
+    boundary: "git-push",
+    gate: "always",
+    ledgerSteps: ["implement.checkpoint_branch_recreated"],
+    verb: "rmd run-task / rmd drain",
+    note: "Runs only after the remote branch is confirmed absent and the fetched object matches the checkpoint head; force-with-lease requires absence.",
+  },
   // ── src/lib/git-push.ts ──────────────────────────────────────────────────────────────────
   {
     id: "push-run-branch",

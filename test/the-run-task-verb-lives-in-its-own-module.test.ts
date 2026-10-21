@@ -40,3 +40,20 @@ test("W1-T9332: the run-task module imports nothing from src/run-task.ts", () =>
   assert.ok(imports.length > 10, "the module imports its library collaborators directly");
   assert.deepEqual(imports.filter((path) => /(^|\/)run-task(?:\.[jt]s)?$/.test(path)), []);
 });
+
+test("wiring: the recon worker's spawn prompt is built via renderReconPrompt(planIndexBlock, ...), not a hardcoded literal", () => {
+  const module = source("src/cli/commands/run-task-verb.ts");
+  const reconIdx = module.indexOf('"recon worker"');
+  const promptCallIdx = module.indexOf("prompt: renderReconPrompt(planIndexBlock,");
+  assert.ok(reconIdx >= 0, "the recon worker section must exist");
+  assert.ok(promptCallIdx > reconIdx, "the recon spawn must build its prompt after announcing recon");
+});
+
+test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's blocked_review branch, one from the W1-T77 sweep real-wiring; no duplicated fix-dispatch logic", () => {
+  const entry = source("src/run-task.ts");
+  const module = source("src/cli/commands/run-task-verb.ts");
+  assert.equal((entry.match(/await runFixRung\(/g) ?? []).length, 1, "the sweep has one dispatch site");
+  assert.equal((module.match(/await runFixRung\(/g) ?? []).length, 1, "runTask has one dispatch site");
+  assert.equal((entry.match(/^async function runTask\(/gm) ?? []).length, 1, "the entrypoint has one runTask delegate");
+  assert.equal((module.match(/^export async function runTask\(/gm) ?? []).length, 1, "the module has one implementation");
+});

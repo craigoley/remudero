@@ -3490,7 +3490,11 @@ export function buildWorkerStateSensor(args: {
   now?: () => number;
   pollMs?: number;
 }): WorkerStateSensor {
-  return runTaskCommandHelpers(runTaskCommandHost()).buildWorkerStateSensor(args);
+  const { now, ...rest } = args;
+  return runTaskCommandHelpers(runTaskCommandHost()).buildWorkerStateSensor({
+    ...rest,
+    clock: now === undefined ? undefined : clockFromMillisFn(now),
+  });
 }
 
 /** Retention window {@link sweepStaleWorkerTails} ages a `.tail` file out on — generously above
@@ -49006,6 +49010,8 @@ function runTaskCommandHost(): RunTaskCommandHost {
     missingCommitLinePrompt,
     pathIsUnderDeclaredSurface,
     execFilePromise,
+    managedCheckoutGit: async (repoDir, args) =>
+      (await execFilePromise("git", ["-C", repoDir, ...args], { encoding: "utf8" })).stdout.trim(),
     AWAITING_EXTERNAL_LEDGER_STEP,
     readLedgerRawLines,
   };

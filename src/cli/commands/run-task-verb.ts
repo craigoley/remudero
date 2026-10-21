@@ -60,7 +60,8 @@ import { bodyWithFailingProofAtOpen, defaultProofRunnerAsync, openPullRequestChe
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
-import { systemClock, type Clock } from "../../lib/clock.js";
+import { fixedClock, systemClock, type Clock } from "../../lib/clock.js";
+import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "../../lib/cash-trial.js";
 import { benchmarkNonDispatchSpawn, callerOwnsBenchmarkReceipt, type BenchmarkStackEvidence, dispatchTaskShape, fixLaneBenchmarkWork, type BenchmarkWorkInput } from "../../lib/benchmark-run.js";
 import { type RepairReceiptContext } from "../../lib/repair-cost-evidence.js";
@@ -129,6 +130,152 @@ import { chainAbortSignal } from "../../lib/run-child.js";
 import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../lib/tick-read-worker.js";
 
 export type GitRunner = (args: string[], stdin?: string) => string;
+
+type ReclaimAbandonedWorkerPorts = {
+    listCandidates?: typeof defaultListCandidates;
+    readMarkers?: typeof defaultReadMarkers;
+    kill?: typeof killProcessGroup;
+    
+    log?: (step: string, extra?: Record<string, unknown>) => void;
+  };
+
+type SpawnFixWorkerBoundedPorts = {
+    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    spawnWallClockBoundMs?: number;
+    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+  };
+
+type RunFixRungPorts = {
+    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    fixProgressJudge?: FixProgressJudge;
+    
+    harnessCommitForShellLessWorker?: RunTaskCommandHost["harnessCommitForShellLessWorker"];
+    writeFixCensusSnapshot?: (...args: Parameters<RunTaskCommandHost["writeFixCensusSnapshot"]>) => string | undefined | Promise<string | undefined>;
+    readMainTip?: () => string | Promise<string>;
+    reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
+    requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
+    
+    proofRepairRoundRefusal?: RunTaskCommandHost["proofRepairRoundRefusalInWorktree"];
+    scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
+    scopeAmendmentPortsIo?: Parameters<RunTaskCommandHost["buildProofAmendmentWritePorts"]>[1];
+    scopeAmendmentGit?: typeof hostWorktreeGitAsync;
+    
+    worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
+    
+    startShellLessMergeConflictMerge?: RunTaskCommandHost["startShellLessMergeConflictMerge"];
+    
+    commitsAhead?: (worktreePath: string, base: string) => number;
+    readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; 
+    
+    waitForCiGreen: (
+      prUrl: string,
+      log: (step: string, extra?: Record<string, unknown>) => void,
+    ) => Promise<CiGateOutcome | "green" | "red" | "timeout">;
+    
+    readLiveState?: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>;
+    
+    readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
+    
+    fetchCiFailures?: (prUrl: string, sha?: string) => Promise<CiFailure[]>;
+    
+    readCiRollup?: (prUrl: string) => RollupCheckEntry[] | Promise<RollupCheckEntry[]>;
+    
+    fetchPrBody?: (prUrl: string) => Promise<string>;
+    
+    fetchPrDiffFiles?: (prUrl: string) => Promise<string[]>;
+    
+    updatePrBody?: (prUrl: string, body: string) => Promise<void>;
+    
+    addedTestsAtHead?: (headSha: string) => AddedTestsAtHead;
+    
+    diffAtHead?: (headSha: string) => string | undefined;
+    
+    execAcceptanceGateRepairProof?: (proof: string) => { hits: number } | undefined;
+    
+    resolveTaskContractAtHead?: (
+      prUrl: string,
+      taskId: string,
+    ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
+    runReview: (args: Parameters<RunTaskCommandHost["runReview"]>[0]) => ReturnType<RunTaskCommandHost["runReview"]>;
+    
+    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown;
+    
+    readHeadShaForProvenance?: (prUrl: string) => string;
+    issues: IssueGateway;
+    escalationIssues?: AsyncIssueGateway;
+    ledgerPath: string;
+    
+    readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>>;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+    account: (r: WorkerResult) => WorkerResult;
+    
+    spawnWallClockBoundMs?: number;
+    
+    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
+    
+    readPrerequisiteState?: (prNumber: number) => LiveStateResult | Promise<LiveStateResult>;
+    
+    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
+    
+    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+    
+    readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
+    
+    reproduceFailingTestsOnMerge?: NonNullable<SweepDeps["reproduceFailingTestsOnMerge"]>;
+    
+    ledgerLines?: () => Array<Record<string, unknown>>;
+    
+    captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>; readRegisteredWorktrees?: () => readonly RegisteredWorktree[] | Promise<readonly RegisteredWorktree[]>;
+    
+    readRoundCommits?: ReadFixRoundCommits;
+    
+    runGeneratorScript?: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
+    
+    commitGeneratorOutput?: (opts: { cwd: string; message: string }) => { sha: string; changed: boolean } | Promise<{ sha: string; changed: boolean }>;
+    
+    packageScripts?: Readonly<Record<string, string>>;
+    
+    branchClaim?: FixRoundBranchClaim;
+    
+    approvedSkillsDir?: string;
+  };
+
+type RepairRetroAcceptancePorts = {
+    fetchBody?: (url: string) => string;
+    editBody?: (url: string, body: string) => void;
+    
+    diff?: string;
+    
+    diffText?: (url: string) => string;
+  };
+
+type CloneReapSurveyPorts = {
+    roots?: () => string[];
+    reap?: typeof reapStaleClones;
+    policy?: () => { enabled: boolean; maxAgeHours: number };
+    
+    ratifications?: Ratifications;
+  };
+
+type CommitWorkerEditsPorts = { commit?: RunTaskCommandHost["commitWorkerEdits"]; ahead?: (worktreePath: string, base: string) => number };
+
+type DisposeDisarmPorts = {
+    mergeSha?: (prUrl: string) => string | undefined;
+    ledgerLines?: () => Array<Record<string, unknown>>;
+  };
+
+type WorktreeReapBootPorts = {
+    root?: () => string;
+    reap?: typeof reapStaleWorktrees;
+    policy?: () => { enabled: boolean };
+    isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
+    /** W1-T2694: injected ratification pins — same seam shape as `policy` above. */
+    ratifications?: Ratifications;
+  };
 
 export interface RunTaskCommandHost {
   readonly syncPlanOrRefuse: (planPath: string, opts: { allowStale: boolean; log: (step: string, extra?: Record<string, unknown>) => void; say: (msg: string) => void; planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan; quarantine?: (quarantined: QuarantinedTask[]) => void }) => SyncedPlan | { error: string };
@@ -269,26 +416,14 @@ export interface RunTaskCommandHost {
   readonly ghUpdateBranch: (owner: string, repo: string, prNumber: number, exec?: typeof execFileSync, via?: string, record?: BranchUpdateRecorder) => { ok: boolean; error?: string };
   readonly redBaseRefreshFactsFromRest: (owner: string, repo: string, prNumber: number, fetch?: GhApiFetcher) => RedBaseRefreshFacts;
   readonly fixRebaseMergeFactsFromRest: (owner: string, repo: string, prNumber: number, fetch?: GhApiFetcher) => FixRebaseMergeFacts;
-  readonly reclaimAbandonedWorker: (info: { runId: string; taskId: string; elapsedMs: number }, deps?: {
-    listCandidates?: typeof defaultListCandidates;
-    readMarkers?: typeof defaultReadMarkers;
-    kill?: typeof killProcessGroup;
-    
-    log?: (step: string, extra?: Record<string, unknown>) => void;
-  }) => void;
+  readonly reclaimAbandonedWorker: (info: { runId: string; taskId: string; elapsedMs: number }, deps?: ReclaimAbandonedWorkerPorts) => void;
   readonly fixWorkerRunId: (callerRunId: string, label: string, startedAtMs: number) => string;
   readonly fixWorkerReceipt: (spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>, log: (step: string, extra?: Record<string, unknown>) => void, workerRunId: string, work?: BenchmarkWorkInput, repair?: RepairReceiptContext, tail?: { root: string }, remedyExecution?: CiRemedyExecution) => {
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   joinFields: () => Record<string, unknown>;
   ledgerFields: (result: WorkerResult) => Record<string, unknown>;
 };
-  readonly spawnFixWorkerBounded: (deps: {
-    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
-    spawnWallClockBoundMs?: number;
-    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
-    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-  }, args: SpawnWorkerArgs, ctx: { runId: string; taskId: string; snapshot?: FixDispatchSnapshot }) => Promise<
+  readonly spawnFixWorkerBounded: (deps: SpawnFixWorkerBoundedPorts, args: SpawnWorkerArgs, ctx: { runId: string; taskId: string; snapshot?: FixDispatchSnapshot }) => Promise<
   | { kind: "spawned"; result: WorkerResult; elapsedMs: number }
   | { kind: "abandoned"; elapsedMs: number }
   | { kind: "superseded"; elapsedMs: number; superseded: FixSuperseded }
@@ -354,102 +489,7 @@ export interface RunTaskCommandHost {
   proofDiscrimination?: ProofDiscriminationEvidence;
   
   priorPartialWork?: PriorPartialWork;
-  deps: {
-    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
-    fixProgressJudge?: FixProgressJudge;
-    
-    harnessCommitForShellLessWorker?: RunTaskCommandHost["harnessCommitForShellLessWorker"];
-    writeFixCensusSnapshot?: (...args: Parameters<RunTaskCommandHost["writeFixCensusSnapshot"]>) => string | undefined | Promise<string | undefined>;
-    readMainTip?: () => string | Promise<string>;
-    reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
-    requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
-    
-    proofRepairRoundRefusal?: RunTaskCommandHost["proofRepairRoundRefusalInWorktree"];
-    scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
-    scopeAmendmentPortsIo?: Parameters<RunTaskCommandHost["buildProofAmendmentWritePorts"]>[1];
-    scopeAmendmentGit?: typeof hostWorktreeGitAsync;
-    
-    worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
-    
-    startShellLessMergeConflictMerge?: RunTaskCommandHost["startShellLessMergeConflictMerge"];
-    
-    commitsAhead?: (worktreePath: string, base: string) => number;
-    readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; 
-    
-    waitForCiGreen: (
-      prUrl: string,
-      log: (step: string, extra?: Record<string, unknown>) => void,
-    ) => Promise<CiGateOutcome | "green" | "red" | "timeout">;
-    
-    readLiveState?: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>;
-    
-    readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
-    
-    fetchCiFailures?: (prUrl: string, sha?: string) => Promise<CiFailure[]>;
-    
-    readCiRollup?: (prUrl: string) => RollupCheckEntry[] | Promise<RollupCheckEntry[]>;
-    
-    fetchPrBody?: (prUrl: string) => Promise<string>;
-    
-    fetchPrDiffFiles?: (prUrl: string) => Promise<string[]>;
-    
-    updatePrBody?: (prUrl: string, body: string) => Promise<void>;
-    
-    addedTestsAtHead?: (headSha: string) => AddedTestsAtHead;
-    
-    diffAtHead?: (headSha: string) => string | undefined;
-    
-    execAcceptanceGateRepairProof?: (proof: string) => { hits: number } | undefined;
-    
-    resolveTaskContractAtHead?: (
-      prUrl: string,
-      taskId: string,
-    ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
-    runReview: (args: Parameters<RunTaskCommandHost["runReview"]>[0]) => ReturnType<RunTaskCommandHost["runReview"]>;
-    
-    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown;
-    
-    readHeadShaForProvenance?: (prUrl: string) => string;
-    issues: IssueGateway;
-    escalationIssues?: AsyncIssueGateway;
-    ledgerPath: string;
-    
-    readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>>;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-    say: (msg: string) => void;
-    account: (r: WorkerResult) => WorkerResult;
-    
-    spawnWallClockBoundMs?: number;
-    
-    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
-    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
-    
-    readPrerequisiteState?: (prNumber: number) => LiveStateResult | Promise<LiveStateResult>;
-    
-    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
-    
-    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
-    
-    readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
-    
-    reproduceFailingTestsOnMerge?: NonNullable<SweepDeps["reproduceFailingTestsOnMerge"]>;
-    
-    ledgerLines?: () => Array<Record<string, unknown>>;
-    
-    captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>; readRegisteredWorktrees?: () => readonly RegisteredWorktree[] | Promise<readonly RegisteredWorktree[]>;
-    
-    readRoundCommits?: ReadFixRoundCommits;
-    
-    runGeneratorScript?: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
-    
-    commitGeneratorOutput?: (opts: { cwd: string; message: string }) => { sha: string; changed: boolean } | Promise<{ sha: string; changed: boolean }>;
-    
-    packageScripts?: Readonly<Record<string, string>>;
-    
-    branchClaim?: FixRoundBranchClaim;
-    
-    approvedSkillsDir?: string;
-  };
+  deps: RunFixRungPorts;
 }) => Promise<FixRungOutcome>;
   readonly buildProofAmendmentGitOps: (git?: (worktreePath: string, args: string[]) => string) => {
   gitAdd: (worktreePath: string, relPath: string) => void;
@@ -527,14 +567,7 @@ export interface RunTaskCommandHost {
   readonly coveragePrecheck: (wt: string, ports?: CoveragePrecheckPorts) => Promise<CoveragePrecheck>;
   readonly coveragePushRefusal: (result: CoveragePrecheck, log: (step: string, extra?: Record<string, unknown>) => void, site: string) => CensusPushRefusal | undefined;
   readonly pushFixRoundPrechecked: (log: (step: string, extra?: Record<string, unknown>) => void, wt: string, branch: string, expectedHeadSha?: string, ports?: CoveragePrecheckPorts, push?: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown, priorHeadSha?: string, reapply?: { ports?: FixRoundReapplyPorts; attempted?: boolean }) => Promise<unknown>;
-  readonly repairRetroAcceptanceBlock: (prUrl: string, log: (step: string, extra?: Record<string, unknown>) => void, deps?: {
-    fetchBody?: (url: string) => string;
-    editBody?: (url: string, body: string) => void;
-    
-    diff?: string;
-    
-    diffText?: (url: string) => string;
-  }) => "repaired" | "healthy" | "unrepresentable" | "error";
+  readonly repairRetroAcceptanceBlock: (prUrl: string, log: (step: string, extra?: Record<string, unknown>) => void, deps?: RepairRetroAcceptancePorts) => "repaired" | "healthy" | "unrepresentable" | "error";
   readonly defaultRetroFetchBody: (url: string) => string;
   readonly defaultRetroEditBody: (url: string, body: string) => void;
   readonly prUrlTarget: (prUrl: string) => { owner: string; repo: string; number: number } | undefined;
@@ -544,13 +577,7 @@ export interface RunTaskCommandHost {
   readonly hostWorktreeGitResult: (worktreePath: string, args: string[]) => { status: number | null; stdout: string; stderr: string };
   readonly dispatchClaimReserverAsyncFor: (repoDir: string) => DispatchClaimReserverAsync;
   readonly WORKTREE_REAP_BOOT_CONTRACT_VERSION: string;
-  readonly logCloneReapSurvey: (config: Config, log: (step: string, fields: Record<string, unknown>) => void, deps?: {
-    roots?: () => string[];
-    reap?: typeof reapStaleClones;
-    policy?: () => { enabled: boolean; maxAgeHours: number };
-    
-    ratifications?: Ratifications;
-  }) => CloneReapSummary | null;
+  readonly logCloneReapSurvey: (config: Config, log: (step: string, fields: Record<string, unknown>) => void, deps?: CloneReapSurveyPorts) => CloneReapSummary | null;
   readonly cloneReapPlan: (config: Config, log: (step: string, fields: Record<string, unknown>) => void, deps: Omit<NonNullable<Parameters<RunTaskCommandHost["logCloneReapSurvey"]>[2]>, "reap">) => { roots: string[]; opts: { dryRun: boolean; maxAgeMs: number } };
   readonly logCloneReapRow: (log: (step: string, fields: Record<string, unknown>) => void, summary: CloneReapSummary, rootsSurveyed: number) => CloneReapSummary;
   readonly DISK_RECLAIM_DEFAULT_SWEEPS: { readonly sweepTempDirs: typeof sweepStaleTempDirsAsync; readonly reapClonesSurvey: RunTaskCommandHelpers["logCloneReapSurveyAsync"]; readonly sweepWorkerHomes: typeof sweepStaleWorkerHomesAsync };
@@ -588,7 +615,7 @@ export interface RunTaskCommandHost {
     onRefusal?: (reason: string, undeclared?: readonly string[], conflictMarkerFiles?: readonly string[]) => void;
     
     onCommit?: (sha: string, undeclared?: readonly string[]) => void;
-  }, deps?: { commit?: RunTaskCommandHost["commitWorkerEdits"]; ahead?: (worktreePath: string, base: string) => number }) => number;
+  }, deps?: CommitWorkerEditsPorts) => number;
   readonly worktreeHasUncommittedChanges: (worktreePath: string) => boolean;
   readonly COMMIT_LINE_RESUME_PROMPT: string;
   readonly writerCannotResume: (provider: WorkerResult["provider"], tools?: readonly string[]) => boolean;
@@ -602,6 +629,7 @@ export interface RunTaskCommandHost {
 }) => string;
   readonly pathIsUnderDeclaredSurface: (path: string, declaredPaths: readonly string[]) => boolean;
   readonly execFilePromise: (file: string, args: readonly string[], options: import('node:child_process').ExecFileOptionsWithStringEncoding) => Promise<{ stdout: string; stderr: string }>;
+  readonly managedCheckoutGit: (repoDir: string, args: string[]) => Promise<string>;
   readonly AWAITING_EXTERNAL_LEDGER_STEP: string;
   readonly readLedgerRawLines: (path: string) => readonly string[];
 }
@@ -1278,6 +1306,7 @@ export const ALREADY_SATISFIED_VERIFY_ATTEMPTS = 3;
 
 export const PLAN_RECORD_ABSENT = "absent";
 
+/** PRIMARY CONTROL: this turn limit keeps the read-only recon preamble cheap on every dispatch. */
 export const RECON_MAX_TURNS = 40;
 
 const RULE_HEADLINES_SRC = "plan#W1-T2508";
@@ -1404,6 +1433,7 @@ export function runTaskCommandHelpers(host: RunTaskCommandHost) {
     missingCommitLinePrompt,
     pathIsUnderDeclaredSurface,
     execFilePromise,
+    managedCheckoutGit,
     AWAITING_EXTERNAL_LEDGER_STEP,
     readLedgerRawLines,
   } = host;
@@ -1591,10 +1621,10 @@ function buildWorkerStateSensor(args: {
   taskId: string;
   root: string;
   quietFloorMs?: number;
-  now?: () => number;
+  clock?: Clock;
   pollMs?: number;
 }): WorkerStateSensor {
-  const now = args.now ?? Date.now;
+  const clock = args.clock ?? systemClock;
   const tracker = new WorkerStateTracker(args.quietFloorMs ?? DEFAULT_WORKER_QUIET_FLOOR_MS);
   const tailPath = join(args.root, "state", "runs", `${args.runId}.tail`);
   let tailLines: string[] = [];
@@ -1654,7 +1684,7 @@ function buildWorkerStateSensor(args: {
       writeWorkerTailBestEffort(tailPath, tailLines);
     }
     const toolEnded = activeTool !== undefined && event.kind !== "tool-executing";
-    const eventAt = new Date(event.tsMs).toISOString();
+    const eventAt = fixedClock(event.tsMs).iso();
     const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
     const toolCallIndex = event.kind === "tool-executing" ? nextToolCallIndex++ : undefined;
     try {
@@ -1721,7 +1751,7 @@ function buildWorkerStateSensor(args: {
 
   const startPolling = (): (() => void) => {
     const timer = setInterval(() => {
-      const next = tracker.check(now());
+      const next = tracker.check(clock.now());
       if (next) recordTransition(next);
     }, args.pollMs ?? WORKER_STATE_POLL_MS);
     timer.unref?.();
@@ -1912,7 +1942,9 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
   try {
     const patch = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD"], { maxBuffer: 64 * 1024 * 1024 });
     return diffIsClassifiedIrreversible(patch);
-  } catch {
+  } catch (error) {
+    // An unreadable diff cannot establish an irreversible change; the caller keeps its prior signal.
+    void error;
     return false;
   }
 }
@@ -1940,7 +1972,9 @@ function mergeShaNow(prUrl: string, fetch: GhApiFetcher = ghJson): string | unde
     return typeof row?.merge_commit_sha === "string" && row.merge_commit_sha.length > 0
       ? row.merge_commit_sha
       : undefined;
-  } catch {
+  } catch (error) {
+    // A failed PR read leaves the merge SHA unverified, the same state as an absent SHA.
+    void error;
     return undefined;
   }
 }
@@ -2014,10 +2048,7 @@ function disposeDisarm(
     confidence?: number;
     reasons?: readonly string[];
   },
-  deps: {
-    mergeSha?: (prUrl: string) => string | undefined;
-    ledgerLines?: () => Array<Record<string, unknown>>;
-  } = {},
+  deps: DisposeDisarmPorts = {},
 ): {
   step: "automerge.disarmed" | "automerge.disarm_skipped";
   row: Record<string, unknown>;
@@ -2541,7 +2572,9 @@ function reconMaskedContextNote(
 function fileDigestOrAbsent(p: string): string {
   try {
     return sha256Hex(readFileSync(p, "utf8"));
-  } catch {
+  } catch (error) {
+    // A missing or unreadable source file has no digest; the sentinel invalidates artifact reuse.
+    void error;
     return "absent";
   }
 }
@@ -2597,7 +2630,9 @@ function loadReconArtifact(root: string, taskId: string): ReconArtifact | undefi
       return parsed as ReconArtifact;
     }
     return undefined;
-  } catch {
+  } catch (error) {
+    // A malformed or unreadable artifact cannot be reused; recon runs again.
+    void error;
     return undefined;
   }
 }
@@ -2721,8 +2756,8 @@ function resolveRunMounts(
   // The fresh advisory reviewer is its OWN mount-governed phase (task_type="reviewer",
   // W1-T63/P10); the blocked_review fix rung rides its own "fix" row (W1-T76) —
   // both resolved here alongside the task's own mount, never an undeclared literal.
-  // impl-BP — RESOLVE THE RECON ROW, the one `routes:` entry nothing read. `.remudero/
-  // mounts.yaml` has carried a fully-specified `recon:` block (haiku for low-risk/docs/plan-lint,
+  // impl-BP — RESOLVE THE RECON ROW, the one `routes:` entry nothing read. The project-local
+  // mounts file has carried a fully-specified `recon:` block (haiku for low-risk/docs/plan-lint,
   // sonnet for medium/high src) since the class axis landed, and the recon spawn passed neither
   // `model` nor `effort` — so every recon in this repo's history ran on the SDK default. Measured
   // over the ledger unioned across all 661 rotations: 413 `recon.done` rows, model label
@@ -2849,7 +2884,7 @@ function refreshManagedCheckout(
     throw new ManagedCheckoutRefreshRefusedError(`another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})`);
   }
   // Async, so a fetch over a slow origin never holds the daemon loop (2026-10-08 profile: 20.1 s and 29.5 s blocks).
-  const git = async (...args: string[]) => (await execFilePromise("git", ["-C", repoDir, ...args], { encoding: "utf8" })).stdout.trim();
+  const git = (...args: string[]) => managedCheckoutGit(repoDir, args);
   return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
 }
 
@@ -3383,14 +3418,7 @@ async function logCloneReapSurveyAsync(
 function logWorktreeReapBootSurvey(
   config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
-  deps: {
-    root?: () => string;
-    reap?: typeof reapStaleWorktrees;
-    policy?: () => { enabled: boolean };
-    isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
-    /** W1-T2694: injected ratification pins — same seam shape as `policy` above. */
-    ratifications?: Ratifications;
-  } = {},
+  deps: WorktreeReapBootPorts = {},
 ): WorktreeReapSummary | null {
   try {
     const readPolicy =
@@ -3428,10 +3456,7 @@ function logWorktreeReapBootSurvey(
   }
 }
 
-async function logDiskReclaimRung(
-  config: Config,
-  log: (step: string, fields: Record<string, unknown>) => void,
-  deps: {
+type DiskReclaimRungPorts = {
     sweepTempDirs?: (opts?: TempSweepOpts) => TempSweepSummary | Promise<TempSweepSummary>;
     reapClonesSurvey?: (
       ...a: Parameters<typeof logCloneReapSurveyAsync>
@@ -3458,7 +3483,12 @@ async function logDiskReclaimRung(
     objectOwnInflightLock?: string;
     /** 2026-10-06: the daemon's own checkout, reaped as a second repo with its own streak. */
     objectDaemonCheckoutDir?: () => string;
-  } = {},
+  };
+
+async function logDiskReclaimRung(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: DiskReclaimRungPorts = {},
 ): Promise<{
   tempDirsRemoved: number;
   clonesReaped: number;
@@ -4338,7 +4368,7 @@ export async function runTask(
 
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
-  const runId = `${taskId}-${Date.now()}`;
+  const runId = `${taskId}-${systemClock.now()}`;
   const log = benchmarkRunLedgerLogger((step, fields) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }),
     opts.benchmarkStackEvidence ?? workerBoundaryStack);
@@ -5521,7 +5551,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           return {
             localHost: hostname(),
             namespaceBootMs,
-            namespaceBootIso: new Date(namespaceBootMs).toISOString(),
+            namespaceBootIso: fixedClock(namespaceBootMs).iso(),
             pidPresent: pidIsPresent(anchor.pid),
           };
         },
@@ -5636,7 +5666,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // reapStaleWorktrees' widowed-lock pass deletes a `.lock` whose directory does not exist yet.
     // W1-T4356: written BEFORE the checkout lock is released, so a peer's refresh sees this borrower.
     mkdirSync(worktreePath, { recursive: true });
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
     // W1-T2621: `log` goes last so a test's `worktreeBaseDeps` can never swallow this run's ledger.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
     await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
@@ -5769,9 +5799,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
-    // carries a content-hash-cached PLAN INDEX derived from MASTER-PLAN.md, not the plan body.
+    // carries a content-hash-cached PLAN INDEX derived from the plan monolith, not the plan body.
     // `loadPlanIndex` is non-fatal when the source is missing and never writes a generated file.
-    const planIndex = loadPlanIndex(join(dirname(planPath), "..", "MASTER-PLAN.md"));
+    const planIndex = loadPlanIndex(resolveRepoLayout(dirname(dirname(planPath))).masterPlan);
     const planIndexBlock = planIndex ? renderPlanIndex(planIndex) : "";
     // W1-T164: task-scoped operator guidance notes — read from the durable console-editable
     // store (`repoRoot`, the SAME root worker.ts's question store reads/writes), scoped strictly
@@ -5973,7 +6003,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
               observed: parsedForArtifact.observed,
               inferred: parsedForArtifact.inferred,
               couldnt_verify: parsedForArtifact.couldntVerify,
-              written_at: new Date().toISOString(),
+              written_at: systemClock.iso(),
               run_id: runId,
             });
           }
@@ -5994,7 +6024,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // LAYERED — project + user-overall + global, P32/W1-T145): inject the
     // distrust rule, the autonomy clause, and the task-matched LEARNINGS
     // facts. `loadLayeredLearningsForTaskFiles` reads the PROJECT layer via
-    // the index-based LOOKUP (W1-T33's `learnings/index.json`, not a scan —
+    // the index-based LOOKUP (W1-T33's learning index, not a scan —
     // it parses only the corpus shards task.files could match), then merges
     // in the USER-OVERALL layer (a fleet-readable home outside this repo)
     // and the RMD-GLOBAL layer (a hash-pinned artifact — a tampered/missing
@@ -6413,10 +6443,14 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     if (implFail) return implFail;
 
     const fullText = (r: WorkerResult) => workerTranscript(r);
+    const hasWorkerPrUrl = (r: WorkerResult): boolean => {
+      const prUrl = parseReport(fullText(r))?.prUrl;
+      return typeof prUrl === "string" && prUrl.length > 0;
+    };
 
     // ── DECISION_REQUEST → auto-choose RECOMMENDED → resume (§4).
     const decision = parseDecisionRequest(fullText(impl));
-    if (decision && !parseReport(fullText(impl))?.prUrl) {
+    if (decision && !hasWorkerPrUrl(impl)) {
       const chosen = decision.recommended ?? decision.options[0] ?? "(first option)";
       // W1-T32: decision-record hygiene. Every DECISION_REQUEST is auto-chosen and
       // ledgered — that never changes — but only decisions worth a human's
@@ -6577,7 +6611,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
     const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
-    if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
+    if (preopenGate !== undefined && !hasWorkerPrUrl(impl)) {
       const workerYield = await yieldAtWorkerBoundary("worker", "preopen_gate");
       if (workerYield) return workerYield;
       const gate = await preopenGate(worktreePath);
@@ -6614,7 +6648,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       }
     }
 
-    if (!parseReport(fullText(impl))?.prUrl) {
+    if (!hasWorkerPrUrl(impl)) {
       const workerYield = await yieldAtWorkerBoundary("worker", "pushing");
       if (workerYield) return workerYield;
     }
@@ -6623,7 +6657,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const question = parseQuestion(fullText(impl));
     if (question) {
       const logged = appendQuestion(repoRoot, {
-        ts: new Date().toISOString(),
+        ts: systemClock.iso(),
         task: taskId,
         question: question.question,
         current_assumption: question.currentAssumption,
@@ -6919,6 +6953,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // beyond its declared files) — because this guard reaches ONE of gitPushRunBranch's nine
       // call sites and only when the branch is ABSENT from origin. It could punish the fallback
       // path after the money was spent; it could never contain a worker.
+
       //
       // WHAT IS GIVEN UP, STATED RATHER THAN GLOSSED. The DETECTION is unchanged — the detector
       // below is untouched and still names exactly the same paths — but the BLOCK becomes a FLAG,
@@ -6928,6 +6963,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // could not reach origin at all. That is accepted because real containment is the merge gate
       // (Standing rule 3B), because the branch surviving is what lets a human adjudicate at all,
       // and because a guard covering one push site was never the containment it read as.
+
       //
       // AND ONE CASE GOES QUIET RATHER THAN SOFT: `scopeGuardOutOfScopeFiles` treats an
       // absent/empty declared scope as "everything is out of scope", but review-side
@@ -7526,6 +7562,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // other precedence check in this file reads (readLedgerLines). A verdict
     // that isn't capped arms exactly as before — decideAutoMergeArm only ever
     // REFUSES the one shape rule 22's fixture (iii) named.
+
     //
     // KNOWN RESIDUAL GAP (explicitly out of this task's stated file scope,
     // `plan/tasks.yaml` W1-T185 `files:`): `sweep.ts`'s independent
@@ -7533,9 +7570,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // yet consult `capped`/an override — a PR this refuses stays OPEN and
     // UNARMED, but a later sweep poll could still arm it via that separate
     // path. Left for a follow-up task rather than widened here unreviewed.
+
     //
     // A SECOND, SAME-SHAPED RESIDUAL GAP (W1-T947, explicitly out of THIS task's stated file
-    // scope — `plan/tasks.d/W1-T947-*.yaml` `files:` names only review.ts, run-task.ts and this
+    // scope — W1-T947's task shard `files:` names only review.ts, run-task.ts and this
     // test file): `decideArmFromLedgerVerdict`/`armAutoMerge` (lib/review.ts, lib/run-task.ts) —
     // the SWEEP's and `rmd review`'s independent re-arm path, reached via
     // `withdrawArmIfVerdictRefuses`/`armIfVerdictPermits` — call the SAME `decideAutoMergeArm`
@@ -7819,6 +7857,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // escalate. Every earlier exit (ci-not-green before review, fix-rung
     // exhausted, stood down, a capped refusal, a risk-judge escalation) RETURNS
     // before this line, so it leaves the PR with NO standing arm.
+
     //
     // WHY THIS MOVED (W1-T975): an already-armed PR short-circuits the sweep's
     // own arming decision (`alreadyDone = pr.autoMergeArmed === true`,

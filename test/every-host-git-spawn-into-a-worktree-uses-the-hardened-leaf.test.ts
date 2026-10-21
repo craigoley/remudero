@@ -45,7 +45,7 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
   ["src/lib/git-push.ts", "worktreePushExecAsync"],
   ["src/run-task.ts", "commitWorkerEdits"],
   ["src/run-task.ts", "appendTaskTrailerToCommit"],
-  ["src/run-task.ts", "irreversibleSignalForWorktree"],
+  ["src/cli/commands/run-task-verb.ts", "irreversibleSignalForWorktree"],
   ["src/run-task.ts", "pushFixRound"],
   ["src/lib/worker.ts", "stampRunWorktreeAssignment"],
   // W1-T6122: the WORKER/REVIEWER sites outside run-task.ts.

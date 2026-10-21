@@ -759,13 +759,6 @@ test("renderReconPrompt: a read-time plan index renders a prompt orders of magni
   assert.doesNotMatch(prompt, /Hooks <1s\. Craig overlay/);
 });
 
-test("wiring: the recon worker's spawn prompt is built via renderReconPrompt(planIndexBlock, ...), not a hardcoded literal", () => {
-  const reconIdx = runTaskSrc.indexOf('"recon worker"');
-  const promptCallIdx = runTaskSrc.indexOf("prompt: renderReconPrompt(planIndexBlock,");
-  assert.ok(reconIdx >= 0, "the recon worker section must exist");
-  assert.ok(promptCallIdx > reconIdx, "the recon spawn must build its prompt via renderReconPrompt, after the recon worker say()");
-});
-
 test("workerErrorVerdict: a non-error result maps to null (caller proceeds)", () => {
   assert.equal(workerErrorVerdict(result({ isError: false, subtype: "success" }), 1.2, "implement"), null);
 });
@@ -4950,21 +4943,6 @@ test("dispatchFixPreflightStandDown: a live OPEN read does NOT stand down and lo
 
 // ── Wiring: ONE call site, both entry points (drain + manual `rmd run-task`
 // both call the SAME `runTask`, so there is exactly one place to gate) ──────
-
-test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's blocked_review branch, one from the W1-T77 sweep real-wiring; no duplicated fix-dispatch logic", () => {
-  const dispatchSites = runTaskSrc.match(/await runFixRung\(/g) ?? [];
-  // Two CALL sites, ONE implementation: (1) runTask's blocked_review branch (the
-  // live-run path — drain + manual `rmd run-task` both reach it via the SAME
-  // runTask), and (2) the W1-T77 level-triggered sweep's real wiring, which
-  // reconciles a PR discovered COLD by REUSING runFixRung (the sanctioned design:
-  // "only CALL it, NOT reimplement"). Neither duplicates the rung's logic.
-  assert.equal(dispatchSites.length, 2, "runFixRung must be REUSED (called), never reimplemented");
-  // runTask itself is defined exactly once — the drain path (runOne) and the
-  // manual CLI path both call this SAME function, so the one dispatch site
-  // above already covers both entry points; grep confirms no second runTask.
-  const runTaskDefs = runTaskSrc.match(/^async function runTask\(/gm) ?? [];
-  assert.equal(runTaskDefs.length, 1, "there must be exactly one runTask implementation for both callers to share");
-});
 
 // ── W1-T192: the draft rung runs DAEMON-SIDE, not CLI-pull ─────────────────────────────────
 //
