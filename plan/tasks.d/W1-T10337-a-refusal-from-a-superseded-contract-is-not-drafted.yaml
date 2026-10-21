@@ -1,0 +1,64 @@
+- id: W1-T10337
+  title: "A WORKER REFUSAL MADE AGAINST A SUPERSEDED TASK CONTRACT IS NEVER DRAFTED AS AN AMENDMENT — #13235 (merged 2026-10-20T23:09Z) stamped W1-T9265's 20:30Z fix-round refusal onto a shard the operator's #13214 had already corrected at 20:59Z, and held the task again, because `noPrVerdictRowsFromLedger` reads no contract revision off a `fix.needs_design` row and `draftRefusalAmendments` never compares one with the live task"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern, whether a refusal from an older contract revision may still become an amendment; a refusal on the live contract drafts exactly as today
+  band_meaning: blast-radius
+  origin: "coordinator brief f1021b item 6 (2026-10-21), from the #13039 builder's root-cause work (logs-8864/s13039-*, RESUME-1019 10-21 ~05:45Z); builds on PR #13318 (merged 08:34Z, commit 8b83ad0dc), which records `contract_revision` on `fix.needs_design`"
+  plan_refs: [W1-T4838, W1-T5531, W1-T9792, W1-T3579, W1-T9265]
+  files:
+    - src/lib/refusal-amendment.ts
+    - src/lib/sweep.ts
+    - test/fix-lane/a-refusal-from-a-superseded-contract-is-not-drafted.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger on host remudero (rmd-state2, read-only) and origin/main history:
+    - 2026-10-20T20:30:46Z `fix.needs_design`, task W1-T9265, run DAEMON-1792526038631, head 0dad88f06: the fix worker
+      refused criterion 1 [needs-operator-input] ("Acceptance requires fixing recurrence without hiding rows, but the
+      test requires excluding the event from scout classification"). The row carries no contract revision.
+    - 20:59:42Z the operator's #13214 ("fix(plan): distinguish expected Inbox recovery from scout failures") rewrote
+      plan/tasks.d/W1-T9265-scout-inbox-draft-escalated.yaml, answering that question.
+    - 22:42:27Z `refusal_amendment.drafted` source DAEMON-1792526038631@0dad88f06…, PR #13235; merged 23:09:34Z
+      (commit 26ad035e5). It added "the worker refused criterion 1 … this task is held from dispatch until its record
+      changes" to the already-corrected shard.
+    - The earlier refusal (18:33:30Z, drafted as #13182, merged 19:13Z) came before #13214 and was legitimate.
+    READ at origin/main 16f4c28fc (symbols, not lines):
+    - `noPrVerdictRowsFromLedger` (src/lib/refusal-amendment.ts) nominates the newest `fix.needs_design` row per task,
+      taking `contractRevision` only from `pre_dispatch_contract_revision`, a field a fix round never writes.
+    - PR #13318 (merged 08:34Z on 10-21) makes the fix round write `contract_revision: taskContractRevision(task)` on
+      `fix.needs_design`, so a new row now carries the revision it worked on. Nothing reads it here yet.
+    - The production `draftRefusalAmendments` (src/lib/sweep.ts) reloads the plan and skips only a task that is closed
+      (`taskAwaitsAmendment`); it never compares the candidate's revision with the live task's, so a refusal whose
+      question main already answered becomes a hold on the answer.
+    NOT COVERED ELSEWHERE: W1-T9792 (merged) built the fix-round nomination; W1-T5531 (merged) re-offers a main-red
+    refusal once main moves; #13318 releases the needs-design HOLD on a new revision but does not stop the amendment
+    draft. Swept origin/main plan/tasks.d and every open PR head's plan tree for noPrVerdictRowsFromLedger,
+    draftRefusalAmendments and refusal_amendment: no shard covers it.
+  design: |
+    1. `noPrVerdictRowsFromLedger` carries a `fix.needs_design` row's `contract_revision` as the candidate's revision,
+       tagged with its kind, beside the verdict path's `pre_dispatch_contract_revision`, so each candidate is compared
+       with the same revision function that wrote it (`taskContractRevision` for a fix round, `preDispatchContractRevision`
+       for a build verdict).
+    2. `draftRefusalAmendments` skips a candidate whose recorded revision differs from the live task's, with outcome
+       `superseded_contract` (a new `RefusalAmendmentOutcome` value, ledgered on the existing amendment row), and writes
+       no hold for it.
+    3. A candidate with no recorded revision (a row older than #13318) keeps today's behaviour.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/fix-lane/a-refusal-from-a-superseded-contract-is-not-drafted.test.ts"
+    - claim: "a fix-round refusal recorded against an older contract revision is skipped as superseded and holds nothing (the #13235 shape)"
+      proof: "grep: W1-T10337: a refusal from a superseded contract is skipped and holds nothing in test/fix-lane/a-refusal-from-a-superseded-contract-is-not-drafted.test.ts"
+    - claim: "a refusal recorded against the live contract revision is still drafted"
+      proof: "grep: W1-T10337: a refusal on the live contract is still drafted in test/fix-lane/a-refusal-from-a-superseded-contract-is-not-drafted.test.ts"
+  falsifier: |
+    Drop the revision comparison and the #13235-shaped fixture (a `fix.needs_design` row at revision A, the live task at
+    revision B) drafts an amendment and writes a hold again. Skip every candidate and the live-contract test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger: `refusal_amendment.drafted` rows whose source row's revision
+    differs from the task's revision at draft time. Healthy shape: none; they appear as `superseded_contract`.
