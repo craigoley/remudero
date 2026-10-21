@@ -55,17 +55,18 @@ function hookVerdict(args: readonly string[], cacheHome: string): string {
   return `hook exit ${r.status}: ${r.stderr.trim()}`;
 }
 
-/** `rmd gh`'s routing with a live broker: a write must reach runDirect, a read the broker, never both. */
+/** `rmd gh`'s routing with a live broker: a read reaches the broker; a write is refused (exit 2) and
+ *  reaches neither runDirect nor the broker, since `rmd gh` is a read client. */
 async function ghCommandVerdict(args: readonly string[], cacheHome: string): Promise<string> {
   const direct: string[][] = [];
   const brokered: string[][] = [];
-  await ghCommand(["--class", "agent", "--", ...args], { RMD_GH_CACHE_HOME: cacheHome },
+  const code = await ghCommand(["--class", "agent", "--", ...args], { RMD_GH_CACHE_HOME: cacheHome },
     (a) => { direct.push(a); return 0; },
     async (_socket, a) => { brokered.push([...a]); return { stdout: "", stderr: "", exitCode: 0, outcome: "upstream-200" }; },
     () => {});
-  if (direct.length === 1 && brokered.length === 0) return "write";
-  if (direct.length === 0 && brokered.length === 1) return "read";
-  return `direct=${direct.length} brokered=${brokered.length}`;
+  if (code === 2 && direct.length === 0 && brokered.length === 0) return "write";
+  if (code === 0 && direct.length === 0 && brokered.length === 1) return "read";
+  return `code=${code} direct=${direct.length} brokered=${brokered.length}`;
 }
 
 function table(dir: string): Array<[string[], Verdict]> {
@@ -153,7 +154,7 @@ test("one write rule: a gh api call with fields and no method is a write that ru
     ["api", "repos/o/r/issues/1/comments", "-f", "body=hi"],
     ["api", "graphql", "-f", "query=mutation { addStar(input: {starrableId: \"x\"}) { clientMutationId } }"],
   ]) {
-    assert.equal(await ghCommandVerdict(args, cache), "write", `rmd gh must run it with gh: ${args.join(" ")}`);
+    assert.equal(await ghCommandVerdict(args, cache), "write", `rmd gh must refuse it, never broker it: ${args.join(" ")}`);
     assert.equal(hookVerdict(args, cache), "write", `the hook must let the raw write run: ${args.join(" ")}`);
   }
 });

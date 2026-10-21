@@ -60,6 +60,10 @@ invokes_gh() {
     | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
 
+# `rmd gh [--class c] [--fresh] -- <args>` runs `gh <args>`, so rules 2, 4, 5 and 10 all judge this text.
+# Only rule 10 used to, and `rmd gh -- pr merge 1` passed rule 5 in a worker. rmd gh also refuses writes.
+gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
+
 # 1) a push whose DESTINATION is a default branch (main/master), judged per command SEGMENT (W1-T4588)
 #    by its PARSED refspecs (W1-T5352), never by substrings. Two loose greps -- a force flag anywhere
 #    in the segment AND `main` anywhere in it -- refused a forced push of `run-fix-main-gate-1` and let
@@ -191,7 +195,7 @@ case "$cmd" in
 esac
 
 # 2) gh auth mutation (login/logout/refresh/token/setup-git).
-if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git)'; then
+if printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git)'; then
   deny "gh auth mutation"
 fi
 
@@ -200,24 +204,7 @@ if printf '%s' "$haystack" | grep -Eq '(^|[^A-Za-z0-9_])FORBIDDEN_PROBE'; then
   deny "FORBIDDEN_PROBE path"
 fi
 
-# 4) POST a commit status via `gh api` (W1-T203 — THE FORGE ATTACK). `gh` runs
-#    outside the OS sandbox with the operator's own ambient credential, so any
-#    worker (implementer, reviewer, anything spawned) that can reach this floor
-#    could otherwise post its own remudero-review=success and satisfy its own
-#    merge gate. The ORCHESTRATOR's own poster (postReviewStatus, src/lib/
-#    review.ts) calls `gh` via execFileSync directly from the `rmd run-task`
-#    process — never through a Claude Code Bash tool call — so it never
-#    reaches this hook at all; only a spawned worker's Bash call does. Matches
-#    regardless of flag order (`-X POST` vs `--method POST` vs the args before
-#    or after the endpoint) and regardless of context (not just
-#    remudero-review — any commit status is the same forge surface).
-if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api\b'; then
-  if printf '%s' "$cmd" | grep -Eq '(-X|--method)[[:space:]]+POST'; then
-    if printf '%s' "$cmd" | grep -Eq 'repos/[^[:space:]]*/statuses(/|[[:space:]]|$)'; then
-      deny "gh api POST to a commit-status endpoint (remudero-review provenance, W1-T203)"
-    fi
-  fi
-fi
+# 4) a commit-status POST (W1-T203) is judged below, after rule 10's gh_api_is_write, which it uses.
 
 # 5) merge or arm a pull request from inside a worker. The worker authors and repairs a PR; the
 #    orchestrator alone owns the merge decision after CI and semantic review. Before this rule,
@@ -227,15 +214,15 @@ fi
 #    a tripwire, not a credential boundary: an indirectly assembled request can evade command-text
 #    matching, exactly as the file header documents. W1-T9643: the worker lane only; an operator session's
 #    merge always passes (operator ruling 2026-10-15: never block merges).
-if [ "$worker_lane" -eq 1 ] && printf '%s' "$cmd" | grep -Eq 'gh([[:space:]]+(-R|--repo)(=|[[:space:]])[^[:space:]]+)*[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+if [ "$worker_lane" -eq 1 ] && printf '%s' "$gh_norm" | grep -Eq 'gh([[:space:]]+(-R|--repo)(=|[[:space:]])[^[:space:]]+)*[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
   deny "a worker may author or repair a PR, but only the orchestrator may merge or arm it"
 fi
-if [ "$worker_lane" -eq 1 ] && printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api([[:space:]]|$)'; then
-  if printf '%s' "$cmd" | grep -Eq '(-X|--method)(=|[[:space:]])PUT([[:space:]]|$)' &&
-     printf '%s' "$cmd" | grep -Eq 'repos/[^[:space:]]+/pulls/[0-9]+/merge([?[:space:]]|$)'; then
+if [ "$worker_lane" -eq 1 ] && printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+api([[:space:]]|$)'; then
+  if printf '%s' "$gh_norm" | grep -Eq '(-X|--method)(=|[[:space:]])PUT([[:space:]]|$)' &&
+     printf '%s' "$gh_norm" | grep -Eq 'repos/[^[:space:]]+/pulls/[0-9]+/merge([?[:space:]]|$)'; then
     deny "gh api PUT to a pull-request merge endpoint"
   fi
-  if printf '%s' "$cmd" | grep -Eq '(mergePullRequest|enablePullRequestAutoMerge)[[:space:]]*\('; then
+  if printf '%s' "$gh_norm" | grep -Eq '(mergePullRequest|enablePullRequestAutoMerge)[[:space:]]*\('; then
     deny "gh api GraphQL mutation that merges or arms a pull request"
   fi
 fi
@@ -1302,7 +1289,7 @@ case "$hr_tool" in
 esac
 
 # 10) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
-#    Rule 6 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget
+#    Rule 7 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget
 #    gets burned. MEASURED 2026-09-09: a session tripped the secondary limit TWICE with no loop
 #    anywhere, just separate status reads seconds apart, each legal alone. At the 403,
 #    `gh api rate_limit` read core 5000/5000 — the ceiling was the SECONDARY limit, which counts
@@ -1422,9 +1409,36 @@ gh_segment_api_is_write() {  # $1 = one hr_tokens line; true when it runs a `gh 
   done
   return 1
 }
+
+# 4) POST a commit status via `gh api` (W1-T203 — THE FORGE ATTACK). `gh` runs
+#    outside the OS sandbox with the operator's own ambient credential, so any
+#    worker (implementer, reviewer, anything spawned) that can reach this floor
+#    could otherwise post its own remudero-review=success and satisfy its own
+#    merge gate. The ORCHESTRATOR's own poster (postReviewStatus, src/lib/
+#    review.ts) calls `gh` via execFileSync directly from the `rmd run-task`
+#    process — never through a Claude Code Bash tool call — so it never
+#    reaches this hook at all; only a spawned worker's Bash call does. Matches
+#    regardless of flag order and regardless of context (not just
+#    remudero-review — any commit status is the same forge surface).
+#    The method is gh_api_is_write's, per command: gh POSTs `-f state=success` with no -X, and
+#    `-XPOST` or a quoted 'POST' is the same call. The explicit-POST text test stays as the
+#    backstop for a gh call inside a quoted string (`bash -c "…"`), which the tokens cannot open.
+gh_status_forge() {  # $1 = one hr_tokens line; true when it is a `gh api` write to a commit-status endpoint
+  gh_segment_api_is_write "$1" && printf '%s' "$1" | tr '\037' ' ' | grep -Eq 'repos/[^[:space:]]*/statuses(/|[[:space:]]|$)'
+}
+if printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+api\b'; then
+  if printf '%s' "$gh_norm" | grep -Eq '(-X|--method)[[:space:]]+POST' &&
+     printf '%s' "$gh_norm" | grep -Eq 'repos/[^[:space:]]*/statuses(/|[[:space:]]|$)'; then
+    deny "gh api POST to a commit-status endpoint (remudero-review provenance, W1-T203)"
+  fi
+  while IFS= read -r gh_seg; do
+    if gh_status_forge "$gh_seg"; then
+      deny "gh api POST to a commit-status endpoint (remudero-review provenance, W1-T203)"
+    fi
+  done < <(printf '%s\n' "$gh_norm" | hr_tokens)
+fi
+
 if [ -n "$cmd" ] && invokes_gh "$cmd"; then
-  # `rmd gh [--class c] [--fresh] -- <args>` reads as `gh <args>` to every classifier below.
-  gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
   gh_is_write=0
   while IFS= read -r gh_seg; do
     if gh_segment_api_is_write "$gh_seg"; then gh_is_write=1; fi
