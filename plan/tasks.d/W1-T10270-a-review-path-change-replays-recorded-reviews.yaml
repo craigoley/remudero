@@ -9,6 +9,11 @@
   band_meaning: span
   budget_usd: 25.00
   priority: 1
+  # refusal-amendment (W1-T10270, run DAEMON-1792613880153@72d261d4ef3c112a7efe528d1a0b740e767df809, 2026-10-21T22:13:33.527Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The required authentic sample cannot be generated without retained production ledger evidence.
+  # refusal-amendment (W1-T10270, run DAEMON-1792613880153@72d261d4ef3c112a7efe528d1a0b740e767df809, 2026-10-21T22:13:33.527Z): the worker refused criterion 2 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Recorded real-review replay cannot be verified while that sample is absent.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   origin: "operator session 2026-10-20: reviewer outage after #12954 — 'let's solve root causes, not work around them'"
@@ -19,10 +24,19 @@
     - src/lib/required-semantic-review.ts
     - src/lib/review.ts
     - src/lib/garden-registry.ts
+    - src/lib/config-gardener.ts
     - src/lib/affected-suites.ts
     - src/run-task.ts
     - test/fixtures/review-replay/sample.ndjson
     - test/review/a-review-path-change-replays-recorded-reviews.test.ts
+  amendment: |
+    W1-T10270 companion reconciliation (2026-10-21 stuck-PR recovery): include
+    src/lib/config-gardener.ts only to register review.replay_input in the existing
+    CONFIG_GARDEN_LEDGER_STEPS filtered-read vocabulary. The new replay receipt already carries
+    pr_url; the unchanged priced-step census requires that consumer to retain the row.
+    This adds no pricing, spend, budget, governor, trust or write authority. Preserve the
+    census and every existing acceptance criterion and falsifier; do not add an exemption.
+    Prove the real union reader retains this row and still filters unrelated telemetry.
   rationale: |
     READ on origin/main 04ed915a7 (2026-10-20).
 
