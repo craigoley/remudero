@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
@@ -166,9 +166,10 @@ export function ghRunForBroker(args: string[], opts: { cwd?: string; maxBuffer: 
   });
 }
 
-/** The broker socket for this read, or `undefined` for today's direct, floored path. */
-function ghBrokerSocketFor(args: readonly string[], env: NodeJS.ProcessEnv | undefined): string | undefined {
-  if (ghArgvIsWrite(args) || ghArgvIsCadenceExempt(args)) return undefined;
+/** The broker socket for this read, or `undefined` for today's direct, floored path. A write by
+ *  {@link ghArgvIsWrite}, judged in the directory the call runs in (`cwd`), is never brokered. */
+function ghBrokerSocketFor(args: readonly string[], env: NodeJS.ProcessEnv | undefined, cwd?: string): string | undefined {
+  if (ghArgvIsWrite(args, { cwd }) || ghArgvIsCadenceExempt(args)) return undefined;
   return ghBrokerRouteFor(env ?? process.env);
 }
 
@@ -207,7 +208,7 @@ export function ghExec(args: string[], opts: ExecFileSyncOptionsWithStringEncodi
 export function ghExec(args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
   // W1-T10279: with a live broker the same one spawn runs the broker client in place of `gh`, unfloored.
-  const socket = ghBrokerSocketFor(args, opts.env);
+  const socket = ghBrokerSocketFor(args, opts.env, typeof opts.cwd === "string" ? opts.cwd : undefined);
   // W1-T3297: otherwise this overload spawns the real `gh`, so the cadence floor applies.
   if (socket === undefined) applyGhReadCadence(args);
   const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args, ghBrokerClassOf(opts.env));
@@ -863,11 +864,113 @@ export function ghSecondaryLimitRefusal(operation: string, bucket: string = GH_R
   };
 }
 
-/** WRITE-SHAPED argv, mirroring `hooks/deny-floor.sh` rule 9's own classifier. A write is what the
- *  fleet does when it has something to say and is self-limiting; pacing one stalls a dispatch. */
-export function ghArgvIsWrite(args: readonly string[]): boolean {
+/** The `gh api` flags that take a value, as gh's own `api` command defines them. */
+const GH_API_FLAGS_WITH_VALUE = new Set(["-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field", "--input",
+  "-q", "--jq", "-t", "--template", "-p", "--preview", "--hostname", "--cache"]);
+const GH_API_SHORT_FLAGS_WITH_VALUE = new Set(["-X", "-H", "-f", "-F", "-q", "-t", "-p"]);
+
+/** One `-f`/`--raw-field` (`typed: false`) or `-F`/`--field` (`typed: true`) as `key=value`. */
+export interface GhApiField {
+  typed: boolean;
+  key: string;
+  value: string;
+}
+
+/** A `gh api` argv, parsed the way gh's own flag parser reads it. */
+export interface GhApiArgv {
+  endpoint: string | undefined;
+  /** The explicit -X/--method, upper-cased; `undefined` when none was given. */
+  explicitMethod: string | undefined;
+  /** The method gh sends: the explicit one, else POST when any field or --input is given, else GET. */
+  method: string;
+  fields: GhApiField[];
+  /** The --input file (`-` is stdin). */
+  input: string | undefined;
+  /** --jq, --template, --cache, --paginate or --slurp: the output is not one HTTP response body. */
+  opaqueOutput: boolean;
+}
+
+/** PURE: `args` (starting with `api`) as gh parses them, including `--name=value`, `-XPOST` and `-fkey=v`. */
+export function parseGhApiArgv(args: readonly string[]): GhApiArgv {
+  let endpoint: string | undefined;
+  let explicitMethod: string | undefined;
+  let input: string | undefined;
+  let opaqueOutput = false;
+  const fields: GhApiField[] = [];
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i];
+    let name = arg;
+    let value: string | undefined;
+    if (arg.startsWith("--") && arg.includes("=")) {
+      name = arg.slice(0, arg.indexOf("="));
+      value = arg.slice(arg.indexOf("=") + 1);
+    } else if (!arg.startsWith("--") && arg.length > 2 && GH_API_SHORT_FLAGS_WITH_VALUE.has(arg.slice(0, 2))) {
+      name = arg.slice(0, 2);
+      value = arg.slice(2).replace(/^=/, "");
+    }
+    if (GH_API_FLAGS_WITH_VALUE.has(name)) {
+      if (value === undefined) {
+        value = args[i + 1] ?? "";
+        i += 1;
+      }
+      if (name === "-X" || name === "--method") explicitMethod = value.toUpperCase();
+      else if (name === "-f" || name === "--raw-field" || name === "-F" || name === "--field") {
+        const eq = value.indexOf("=");
+        fields.push({ typed: name === "-F" || name === "--field", key: eq < 0 ? value : value.slice(0, eq), value: eq < 0 ? "" : value.slice(eq + 1) });
+      } else if (name === "--input") input = value;
+      else if (name === "-q" || name === "--jq" || name === "-t" || name === "--template" || name === "--cache") opaqueOutput = true;
+    } else if (arg === "--paginate" || arg === "--slurp") opaqueOutput = true;
+    else if (!arg.startsWith("-") && endpoint === undefined) endpoint = arg;
+  }
+  const method = explicitMethod ?? (fields.length > 0 || input !== undefined ? "POST" : "GET");
+  return { endpoint, explicitMethod, method, fields, input, opaqueOutput };
+}
+
+/** A local file's text, or `undefined` when it is stdin (`-`) or cannot be read. No network. */
+function readGhLocalFile(path: string, cwd: string | undefined): string | undefined {
+  if (path === "-" || path === "") return undefined;
+  try {
+    return readFileSync(isAbsolute(path) || cwd === undefined ? path : join(cwd, path), "utf8");
+  } catch {
+    // Unreadable is not "no mutation": the caller counts an unknown query as a write, the safe direction.
+    return undefined;
+  }
+}
+
+/** Could this GraphQL query text be a mutation? Unknown (unreadable) or empty text counts as one. */
+function ghGraphqlTextMayMutate(text: string | undefined): boolean {
+  return text === undefined || text.trim() === "" || /\bmutation\b/.test(text);
+}
+
+/**
+ * THE ONE WRITE RULE for a `gh` call, mirroring gh's own method rule. Every path that decides "write or
+ * read" derives from this: the transport's floor and broker routing, `rmd gh` (ghCommand), the broker's
+ * own refusal (classifyGhBrokerRead), and `hooks/deny-floor.sh` rule 10, which mirrors it in shell.
+ *
+ *   * `gh api`: the method is the explicit -X/--method, else POST when any -f/--raw-field/-F/--field/
+ *     --input is present, else GET. A non-GET/HEAD call is a write.
+ *   * `gh api graphql` is always POSTed, so it is a READ only when its query provably is not a mutation.
+ *     A query named as a local file (`-F query=@file`, or `--input file` with no query field) is read here
+ *     to decide, with no network; an unreadable, stdin or empty query is a WRITE: the safe direction, sent
+ *     straight to gh, never brokered or cached. An explicit non-GET/HEAD method is a write regardless.
+ *   * Porcelain: the verbs that change something.
+ *
+ * After W1-T10279 (#13204) the transport saw a write only with an explicit method, so a `-f body=x` POST
+ * and a `-f query='mutation …'` went to the read broker, which refused them, and the write failed.
+ * `cwd` resolves a relative query file where gh runs it; it defaults to this process's own.
+ */
+export function ghArgvIsWrite(args: readonly string[], opts: { cwd?: string } = {}): boolean {
+  if (args[0] === "api") {
+    const api = parseGhApiArgv(args);
+    if (api.explicitMethod !== undefined && api.explicitMethod !== "GET" && api.explicitMethod !== "HEAD") return true;
+    if (api.endpoint === "graphql") {
+      const queries = api.fields.filter((f) => f.key === "query");
+      if (queries.length === 0) return ghGraphqlTextMayMutate(api.input === undefined ? undefined : readGhLocalFile(api.input, opts.cwd));
+      return queries.some((q) => ghGraphqlTextMayMutate(q.typed && q.value.startsWith("@") ? readGhLocalFile(q.value.slice(1), opts.cwd) : q.value));
+    }
+    return api.method !== "GET" && api.method !== "HEAD";
+  }
   const joined = args.join(" ");
-  if (/(?:^|\s)(?:-X|--method)\s+(?:POST|PATCH|PUT|DELETE)\b/i.test(joined)) return true;
   if (/^(?:pr|issue)\s+(?:create|merge|edit|close|reopen|comment|review|ready|lock|unlock)\b/.test(joined)) return true;
   return /^(?:run\s+(?:rerun|cancel|delete)|workflow\s+(?:run|enable|disable)|release\s+(?:create|edit|delete)|label\s+(?:create|edit|delete)|secret\s+set)\b/.test(
     joined,
