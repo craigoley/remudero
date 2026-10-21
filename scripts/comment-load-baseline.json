@@ -75,7 +75,6 @@
   "scripts/plan-state-claims.mjs": 60,
   "scripts/recovery-drill.mjs": 148,
   "scripts/satisfied-task-census.mjs": 14,
-  "scripts/shell-screenshot.mjs": 16,
   "scripts/source-size-baseline.json": 0,
   "scripts/source-text-assertion-baseline.json": 0,
   "scripts/state-citation-baseline.json": 0,
