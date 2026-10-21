@@ -16,8 +16,11 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { fixedClock, type Clock } from "#src/lib/clock.js";
-import { releasedFilteredLogger, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
-import { resolveReleasedIds, resolveReleases, runDrain, type DispatchFilterReason } from "#src/lib/drain.js";
+// Namespace imports, so the file still loads at a base without this task's exports and each test fails on its own.
+import * as daemonLib from "#src/lib/daemon.js";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import * as drainLib from "#src/lib/drain.js";
+import { runDrain, type DispatchFilterReason } from "#src/lib/drain.js";
 import type { GardenCheckout } from "#src/lib/gardener.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
@@ -26,7 +29,7 @@ import { loadPlan, RELEASE_LEDGER_STEP, type Plan, type Task } from "#src/lib/pl
 import type { RiskJudgeVerdict } from "#src/lib/risk-judge.js";
 import { taskRulingPin } from "#src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { releaseReadersFor } from "#src/run-task.js";
+import * as runTask from "#src/run-task.js";
 
 type Row = { step: string; extra: Record<string, unknown> };
 
@@ -105,7 +108,7 @@ test("W1-T10348: the daemon dispatches an operator-released verify:human task", 
   assert.deepEqual(unreleased.named, [], "and it is not a released task, so no released_filtered row names it");
   const unwired = await drive(plan(), {});
   assert.deepEqual(unwired.spawned, [], "no reader wired yields an empty set");
-  assert.equal(resolveReleasedIds({}, plan()).size, 0);
+  assert.equal(drainLib.resolveReleasedIds({}, plan()).size, 0);
 });
 
 test("W1-T10348: a machine release with no escalate ruling dispatches; one over a current-pin escalation does not", async (t) => {
@@ -159,9 +162,9 @@ test("W1-T10348: a release that rotation shed is still honoured from operator-re
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = ledgerPathFor({ root } as never);
   writeFileSync(ledgerPath, JSON.stringify({ step: "sweep.disposed", task_id: "W1-T9" }) + "\n");
-  assert.equal(resolveReleasedIds(releaseReadersFor(ledgerPath), plan()).has("W1-T6"), false, "positive control: nothing released yet");
+  assert.equal(drainLib.resolveReleasedIds(runTask.releaseReadersFor(ledgerPath), plan()).has("W1-T6"), false, "positive control: nothing released yet");
   recordOperatorRelease(join(root, "state"), "W1-T6", "2026-10-13T00:00:00.000Z");
-  const resolved = resolveReleases(releaseReadersFor(ledgerPath), plan());
+  const resolved = drainLib.resolveReleases(runTask.releaseReadersFor(ledgerPath), plan());
   assert.ok(resolved.ids.has("W1-T6"), "the run child's admission reads operator-releases.json");
   assert.equal(resolved.authors.get("W1-T6"), "operator");
 
@@ -172,7 +175,7 @@ test("W1-T10348: a release that rotation shed is still honoured from operator-re
       dispatched.push(id);
       return { taskId: id, runId: `R-${id}`, merged: true, verdict: "merged", costUsd: 0 };
     },
-    ...releaseReadersFor(ledgerPath),
+    ...runTask.releaseReadersFor(ledgerPath),
     log: () => {},
   } as never, { max: 1 });
   assert.deepEqual(dispatched, ["W1-T6"], "`rmd drain` honours the durable release too");
@@ -180,7 +183,7 @@ test("W1-T10348: a release that rotation shed is still honoured from operator-re
   // An unreadable durable file releases nothing more and is named; the ledger's releases still stand.
   writeFileSync(join(root, "state", "operator-releases.json"), "{ not json");
   const broken = await drive(planOf(t, record("W1-T6"), record("W1-T7")), {
-    ...releaseReadersFor(ledgerPath),
+    ...runTask.releaseReadersFor(ledgerPath),
     readLedgerLines: () => [release("W1-T7")],
   });
   assert.deepEqual(broken.spawned, ["W1-T7"]);
@@ -221,8 +224,8 @@ test("W1-T10348: a released task dispatch filters out is named with its reason",
   const rows: Record<string, unknown>[] = [];
   const tallied: string[] = [];
   const named2 = new Set<string>();
-  const resolved = resolveReleases({ readLedgerLines: () => [release("W1-T20")] }, plan);
-  const onFiltered = releasedFilteredLogger(resolved, named2, (task) => tallied.push(task.id), (step, extra) => rows.push({ step, ...extra }));
+  const resolved = drainLib.resolveReleases({ readLedgerLines: () => [release("W1-T20")] }, plan);
+  const onFiltered = daemonLib.releasedFilteredLogger(resolved, named2, (task) => tallied.push(task.id), (step, extra) => rows.push({ step, ...extra }));
   const task = plan.byId.get("W1-T20")!;
   for (const reason of ["blocked", "blocked", "run-branch-already-pushed", "blocked"] as DispatchFilterReason[]) onFiltered(task, reason);
   assert.deepEqual(rows.map((r) => r.reason), ["blocked", "run-branch-already-pushed"]);
