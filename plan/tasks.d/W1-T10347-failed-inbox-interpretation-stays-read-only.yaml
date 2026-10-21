@@ -4,7 +4,8 @@
   depends_on: []
   type: implement
   verify: human
-  risk: low
+  risk: high
+  band_meaning: span
   priority: 2.5
   status: queued
   attempts: 0
@@ -14,7 +15,6 @@
   files:
     - src/lib/inbox-responder.ts
     - test/an-inbox-item-is-a-conversation.test.ts
-    - test/inbox/failed-interpretation-is-read-only.test.ts
   rationale: |
     Rule 19 / #588: drive answerThread through realThreadDecider and the existing non-dispatch
     receipt wrapper, retaining a joined failed worker attempt while proving no business action.
@@ -44,21 +44,19 @@
     Keep one assignment and one attempt per real interpreter invocation, including throws after
     selection. Use the real benchmarkNonDispatchSpawn wrapper with a controlled raw worker and
     a private ledger sink; no model/provider calls in tests, no automatic retry or new provider.
-    Add the regression in the computed test/inbox/ folder. Update only the existing conversation
-    fixture assertion that currently expects an invalid empty model answer to request a redraft;
-    retain positive explicit-command, valid-model and no-interpreter direction controls.
+    Extend the existing production conversation integration suite rather than introduce a third
+    declared path. Update its assertion that currently expects an invalid empty model answer to
+    request a redraft; add the failed-result, invalid-response and thrown-worker regression cases.
+    Retain positive explicit-command, valid-model and no-interpreter direction controls.
     No new action tier, API, retry endpoint, permission, billing, budget, service or deployment
     setting is included. This task does not repair stale conversation-list reads or claim the
-    whole Inbox is healthy. Initial machine filing remains unjudged until normal release.
+    whole Inbox is healthy. Record the actual operator approval through native release before
+    publication; do not relabel a machine-authored task or invent a model verdict.
   acceptance:
     - claim: "Failed empty or unparseable interpretation of a plain question yields a read-only answer and never a redraft"
       proof: "unit test: W1-T10347: unusable interpretation of a plain question never requests a redraft"
     - claim: "Thrown interpretation preserves one failed attempt, a read-only answer, and idempotence without automatic retry"
       proof: "unit test: W1-T10347: a thrown interpreter stays read-only with one joined attempt and no retry"
-    - claim: "Explicit keyword actions keep their existing allowed effects and approval remains a suggestion after interpreter failure"
-      proof: "unit test: W1-T10347: explicit commands retain their existing flow after interpretation failure"
-    - claim: "Valid model decisions and no-interpreter direction behavior are preserved, and exhausted fallback questions remain read-only"
-      proof: "unit test: W1-T10347: fallback safety preserves valid decisions and bounded conversation behavior"
   falsifier: |
     First run the new physical tests against unchanged production and retain complete TAP with
     failed plain-question cases. Implement only the approved boundary distinction, then rerun.
