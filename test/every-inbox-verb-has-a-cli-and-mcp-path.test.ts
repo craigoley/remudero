@@ -12,7 +12,8 @@ import { inboxThreadId, readThread } from "#src/lib/inbox-thread.js";
 import { INBOX_VERBS, inboxVerbCommand } from "#src/lib/inbox-verdict-command.js";
 import { optionAction } from "#src/lib/inbox-plain.js";
 import { createOperatorMcpServer, operatorMcpCommand, type OperatorMcpConfig } from "#src/lib/operator-mcp.js";
-import { buildInboxVerbActions, buildPanelWriteRoutes, inboxThreadStorePath, inboxTriagePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { buildApproveProposalRoute, buildArchiveProposalRoute, buildInboxVerbActions, buildPanelWriteRoutes, buildReframeProposalRoute, buildSnoozeProposalRoute,
+  inboxThreadStorePath, inboxTriagePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createService } from "#src/lib/service.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { COMMANDS, HANDLERS, inboxActionCliCommand } from "#src/run-task.js";
@@ -199,4 +200,14 @@ test("rmd keep records a reversible observation with its reason", async t => {
   assert.ok(JSON.parse(readFileSync(inboxTriagePath(join(deps.inboxRoot, "state")), "utf8"))[ID].keptState);
   assert.equal(await inboxVerbCommand("keep", [ID, "--unkeep"], actions), 0);
   assert.deepEqual(JSON.parse(readFileSync(inboxTriagePath(join(deps.inboxRoot, "state")), "utf8")), {});
+});
+
+test("W1-T10079: each named inbox route builder serves its own verb's table row", t => {
+  const deps = world(t);
+  for (const [name, build] of [["approve", buildApproveProposalRoute], ["reframe", buildReframeProposalRoute],
+    ["archive", buildArchiveProposalRoute], ["snooze", buildSnoozeProposalRoute]] as const) {
+    const spec = INBOX_VERBS.find(verb => verb.name === name)!;
+    const route = build(deps);
+    assert.deepEqual([route.method, route.path, route.tier], ["POST", spec.path, spec.tier], name);
+  }
 });

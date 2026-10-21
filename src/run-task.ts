@@ -726,7 +726,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { INBOX_VERBS, inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -54594,15 +54594,36 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["plan", async (rest) => await planCommand(rest)],
   ["inbox", async (rest) => await inboxCommand(rest)],
   ["inbox-bakeoff", async (rest) => await inboxBakeoffCommand(rest)],
+  [
+    "approve",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await approveCommandMirrored(rest);
+    },
+  ],
+  ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
+  ["restore", (rest) => proposalVerdictCliCommand("restore", rest)],
   ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
   ["rule", async (rest) => await ruleCommand(rest)],
-  ...INBOX_VERBS.map(verb => [verb.name, (rest: string[]) => {
-    if ((verb.name === "approve" || verb.name === "reframe") && !rest[0]) { console.error(USAGE); return 2; }
-    if (verb.name === "approve") return approveCommandMirrored(rest);
-    if (verb.name === "reframe") return reframeCommand(rest);
-    if (verb.name === "decline" || verb.name === "restore") return proposalVerdictCliCommand(verb.name, rest);
-    return inboxActionCliCommand(verb.name, rest);
-  }] as [string, CommandHandler]),
+  [
+    "reframe",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await reframeCommand(rest);
+    },
+  ],
+  ["reply", (rest) => inboxActionCliCommand("reply", rest)],
+  ["archive", (rest) => inboxActionCliCommand("archive", rest)],
+  ["snooze", (rest) => inboxActionCliCommand("snooze", rest)],
+  ["keep", (rest) => inboxActionCliCommand("keep", rest)],
 ]);
 
 /**
