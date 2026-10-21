@@ -43,14 +43,15 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { syncBuiltinESMExports } from "node:module";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { buildBaseProofDir, type BaseProofDir } from "../src/run-task.js";
-import { execWhitelistedProof, judgeCriterion, parseWhitelistedProof } from "../src/lib/review.js";
+import { execWhitelistedProof, execWhitelistedProofAsync, judgeCriterion, judgeReviewAsync, parseWhitelistedProof } from "../src/lib/review.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -288,7 +289,7 @@ function addedExportScenario(headA: string): { head: string } {
 
 const LINKS_ADDED_PROOF = "unit test: test/links-added.test.ts";
 
-test("a base that cannot link a named export the PR adds grades the proof discriminating and names the export", () => {
+test("a base that cannot link a named export the PR adds grades the proof discriminating and names the export", async () => {
   const { head } = addedExportScenario("export const widget = 1;\nexport const added = 3;\n");
   let built: BaseProofDir | undefined;
   try {
@@ -297,7 +298,12 @@ test("a base that cannot link a named export the PR adds grades the proof discri
     const wp = parseWhitelistedProof(LINKS_ADDED_PROOF)!;
     assert.throws(() => execWhitelistedProof(wp, built!.baseCheckoutDir!), "precondition: the base run cannot load");
 
-    const v = judgeWithRealExecutor(head, built, LINKS_ADDED_PROOF);
+    const verdict = await judgeReviewAsync([{ claim: "the widget is frobnicated", proof: LINKS_ADDED_PROOF }], {
+      diff: "", report: "", headCheckoutDir: head, baseCheckoutDir: built.baseCheckoutDir,
+      baseIsCheckout: built.baseIsCheckout, baseUnreadablePaths: built.baseUnreadablePaths,
+      asyncExecProof: execWhitelistedProofAsync,
+    });
+    const v = verdict.criteria[0]!;
     assert.equal(v.proof_exec, "executed_pass", v.reason);
     assert.equal(v.met, true);
     assert.match(v.reason, /base lacks export\(s\) added \(src\/a\.ts\) that the PR adds/, v.reason);
@@ -321,7 +327,7 @@ test("a named import missing at both the base and the head never earns a missing
     const output =
       `# ${join(head, "test", "links-added.test.ts")}:3\n` +
       "# SyntaxError: The requested module '../src/a.js' does not provide an export named 'added'\n";
-    assert.equal(missingExport.baseLacksPrAddedExports(output, head, head), undefined, "the head must export it");
+    assert.equal(await missingExport.baseLacksPrAddedExports(output, head, head), undefined, "the head must export it");
   } finally {
     teardown(head, built);
   }
@@ -339,15 +345,36 @@ test("an unrelated load failure or a wildcard re-export at the base keeps the ba
     const missing = "# SyntaxError: The requested module '../src/a.js' does not provide an export named 'added'\n";
 
     writeFileSync(join(base, "src", "a.ts"), "export const widget = 1;\n");
-    assert.match(String(missingExport.baseLacksPrAddedExports(importer + missing, base, headDir)), /added \(src\/a\.ts\)/);
+    assert.match(String(await missingExport.baseLacksPrAddedExports(importer + missing, base, headDir)), /added \(src\/a\.ts\)/);
     const unrelated = importer + "# SyntaxError: Unexpected token '}'\n";
-    assert.equal(missingExport.baseLacksPrAddedExports(unrelated, base, headDir), undefined, "a syntax error is not a missing export");
+    assert.equal(await missingExport.baseLacksPrAddedExports(unrelated, base, headDir), undefined, "a syntax error is not a missing export");
     const mixed = importer + missing + "# Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/x/b.js'\n";
-    assert.equal(missingExport.baseLacksPrAddedExports(mixed, base, headDir), undefined, "any other load error disqualifies");
+    assert.equal(await missingExport.baseLacksPrAddedExports(mixed, base, headDir), undefined, "any other load error disqualifies");
 
     writeFileSync(join(base, "src", "a.ts"), 'export * from "./b.js";\n');
-    assert.equal(missingExport.baseLacksPrAddedExports(importer + missing, base, headDir), undefined, "a wildcard could supply it");
+    assert.equal(await missingExport.baseLacksPrAddedExports(importer + missing, base, headDir), undefined, "a wildcard could supply it");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("a synchronous review fold never reads missing-export source files", t => {
+  const { head } = addedExportScenario("export const widget = 1;\nexport const added = 3;\n");
+  let built: BaseProofDir | undefined;
+  const read = fs.readFileSync; let sourceReads = 0;
+  try {
+    built = buildBaseProofDir([{ proof: LINKS_ADDED_PROOF }], head);
+    assert.equal(built.baseIsCheckout, true, JSON.stringify(built));
+    const paths = new Set([join(head, "src/a.ts"), join(built.baseCheckoutDir!, "src/a.ts")]);
+    t.mock.method(fs, "readFileSync", (...args: Parameters<typeof read>) => {
+      if (paths.has(String(args[0]))) sourceReads++;
+      return read(...args);
+    }); syncBuiltinESMExports();
+    const verdict = judgeWithRealExecutor(head, built, LINKS_ADDED_PROOF);
+    assert.equal(sourceReads, 0, "only the awaited observation path may read missing-export evidence");
+    assert.equal(verdict.proof_exec, "executed_pass", "the genuine head pass keeps its existing outcome");
+    assert.match(verdict.reason, /base_unknown/);
+    assert.doesNotMatch(verdict.reason, /base lacks export/, "the fold cannot invent a missing-export observation");
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); teardown(head, built); }
 });
