@@ -1,0 +1,626 @@
+name: Hosted credited PR opener author pilot
+on:
+  push:
+    branches:
+      - run-unfiled-1792583887933
+    paths:
+      - .github/workflows/hosted-author-12667.yml
+permissions:
+  contents: read
+concurrency:
+  group: hosted-author-12667-exact-head
+  cancel-in-progress: false
+jobs:
+  author:
+    name: hosted-W10087-exact-head
+    runs-on: ubuntu-24.04
+    timeout-minutes: 205
+    env:
+      SOURCE_HEAD: e769a3a6c3a94940faf9445f33408493178ed54c
+      CAPTURED_BASE: 03cf4288f470fbcfcc9fd669cef5f20349d9610e
+      SOURCE_BUNDLE_SHA256: 12216e43f48cb268341cf71d9783541b910fccde798dce9371613e0bbb148a65
+      PUBLICATION_BRANCH: run-W1-T10087-1792551565938
+      PILOT_CONCERN: credited-pr-opener
+    steps:
+      - name: Fix one total deadline including setup and calibration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime, os
+          deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=195)
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('PILOT_DEADLINE=' + deadline.isoformat() + '\n')
+              f.write('PLAYWRIGHT_BROWSERS_PATH=' + os.path.join(os.environ['RUNNER_TEMP'], 'pilot-browsers') + '\n')
+          PY
+
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const tmp=process.env.RUNNER_TEMP;
+          const bundleChunks=Number(process.env.PILOT_BUNDLE_CHUNK_COUNT);if(!Number.isInteger(bundleChunks)||bundleChunks<1||bundleChunks>32)throw Error("Invalid immutable bundle transport count");const pilotBundleBase64=Array.from({length:bundleChunks},(_,i)=>{const p=process.env["PILOT_SOURCE_BUNDLE_B64_"+String(i).padStart(2,"0")];if(typeof p!=="string"||p.length<1||p.length>24000)throw Error("Missing immutable bundle transport part");return p;}).join("");
+
+          const dir=path.join(tmp,'pilot-bootstrap-evidence');fs.mkdirSync(dir,{mode:0o700});fs.writeFileSync(path.join(dir,'input.json'),JSON.stringify({at:new Date().toISOString(),sourceHead:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,controllerHead:process.env.GITHUB_SHA,bundleSha256:process.env.SOURCE_BUNDLE_SHA256,author:'NOT_RUN',exception:'Explicit operator-approved execution-location deferral for both unchanged pre-push hooks; no check waived'}),{flag:'wx',mode:0o600});
+          fs.writeFileSync(path.join(tmp,'hosted-author-12667.mjs'),process.env.PILOT_CONTROLLER_JS,{flag:'wx',mode:0o600});
+          fs.writeFileSync(path.join(tmp,'pilot-source-input.json'),JSON.stringify({format:'rmd-hosted-author-input-v1',head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,bundleSha256:process.env.SOURCE_BUNDLE_SHA256,bundleBytes:Buffer.from(pilotBundleBase64,'base64').length,requiredPublicPrerequisite:process.env.CAPTURED_BASE,bundleBase64:pilotBundleBase64}),{flag:'wx',mode:0o600});
+          JS
+
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';import path from 'node:path';
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'pilot-passive.mjs'),process.env.PILOT_PASSIVE_JS,{flag:'wx',mode:0o600});
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'pilot-seal.mjs'),process.env.PILOT_SEAL_JS,{flag:'wx',mode:0o600});
+          JS
+          nohup env -i PATH="$PATH" node "$RUNNER_TEMP/pilot-passive.mjs" "$RUNNER_TEMP" "$(sed -n 's/^PILOT_DEADLINE=//p' "$GITHUB_ENV")" > "$RUNNER_TEMP/pilot-passive.stdout.log" 2> "$RUNNER_TEMP/pilot-passive.stderr.log" < /dev/null &
+        env:
+          PILOT_CONTROLLER_JS: |
+            import fs from 'node:fs';
+            import cp from 'node:child_process';
+            import os from 'node:os';
+            import path from 'node:path';
+            import crypto from 'node:crypto';
+            import assert from 'node:assert/strict';
+            import net from 'node:net';
+            import {pathToFileURL} from 'node:url';
+            const [mode,configPath]=process.argv.slice(2);
+            const config=JSON.parse(fs.readFileSync(configPath,'utf8'));
+            const {source,head,base,publicationBranch,deadline,output,privateHome,privateTmp,browsers}=config;
+            const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+            const git=args=>cp.execFileSync('git',['-C',source,...args],{encoding:'utf8',timeout:60000,maxBuffer:8*1024*1024}).trim();
+            const save=(name,value)=>fs.writeFileSync(path.join(output,name),JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});
+            const sample=()=>{
+             const mem=Object.fromEntries(fs.readFileSync('/proc/meminfo','utf8').split('\n').filter(l=>/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/.test(l)).map(l=>[l.split(':')[0],Number(l.trim().split(/\s+/)[1])*1024]));
+             const vm=Object.fromEntries(fs.readFileSync('/proc/vmstat','utf8').trim().split('\n').map(l=>l.split(/\s+/)));
+             const psi=Object.fromEntries(fs.readFileSync('/proc/pressure/memory','utf8').split('\n').find(l=>l.startsWith('full ')).split(' ').slice(1).map(x=>x.split('=')));
+             return{at:new Date().toISOString(),memory:mem,swapInPages:Number(vm.pswpin),fullAvg60:Number(psi.avg60),workspaceFree:Number(fs.statfsSync(source).bavail)*Number(fs.statfsSync(source).bsize),tempFree:Number(fs.statfsSync(privateTmp).bavail)*Number(fs.statfsSync(privateTmp).bsize)};
+            };
+            function mirrorIdentity(){
+             const roots=[source,config.controller],moduleUrl=pathToFileURL(path.join(source,'src/lib/owner-repo.ts')).href;
+             const probe='import {resolveOwnerRepoAt} from '+JSON.stringify(moduleUrl)+';console.log(JSON.stringify('+JSON.stringify(roots)+'.map(root=>({root,...resolveOwnerRepoAt(root)}))));';
+             const identities=JSON.parse(cp.execFileSync(process.execPath,['--import',path.join(source,'node_modules/tsx/dist/loader.mjs'),'--input-type=module','-e',probe],{cwd:source,env:{PATH:process.env.PATH,HOME:privateHome,TMPDIR:privateTmp,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_TERMINAL_PROMPT:'0'},encoding:'utf8',timeout:15000,maxBuffer:1024*1024}));
+             assert.equal(identities.length,2);for(const [i,row]of identities.entries()){assert.equal(row.root,roots[i]);assert.equal(row.owner,'craigoley');assert.equal(row.repo,'remudero');}
+             return{at:new Date().toISOString(),identities,reader:'actual unchanged resolveOwnerRepoAt',limits:'File-only mirrors retain canonical repository identity. No resolver fake, network, credential or product-source change.'};
+            }
+            if(mode==='prepare'){
+             assert(/^[a-f0-9]{40}$/.test(head)&&/^[a-f0-9]{40}$/.test(base));
+             assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['rev-parse','--is-shallow-repository']),'false');assert.equal(git(['status','--porcelain']),'');
+             assert.equal(fs.readFileSync(path.join(source,'.nvmrc'),'utf8').trim().replace(/^v/,''),process.versions.node);
+             assert(Date.parse(deadline)>Date.now(),'Fixed pilot deadline already elapsed');
+             for(const dir of[output,privateHome,privateTmp])fs.mkdirSync(dir,{recursive:false,mode:0o700});
+             assert(!fs.existsSync(path.join(source,'.git','objects','info','alternates')),'Borrowed Git objects are not admitted');
+             git(['checkout','-b',publicationBranch,head]);git(['config','core.hooksPath','hooks']);
+             const mirror=path.join(path.dirname(output),'source-mirror','craigoley','remudero.git');assert(!fs.existsSync(mirror));fs.mkdirSync(path.dirname(mirror),{recursive:true,mode:0o700});cp.execFileSync('git',['clone','--mirror','--no-local','--no-hardlinks',source,mirror],{encoding:'utf8',timeout:120000});
+             cp.execFileSync('git',['-C',mirror,'update-ref','refs/heads/main',base],{encoding:'utf8',timeout:10000});
+             git(['remote','set-url','origin','file://'+mirror]);git(['update-ref','refs/remotes/origin/main',base]);assert.equal(git(['rev-parse','origin/main']),base);
+             assert.equal(config.controllerBranch,"run-unfiled-1792583887933");
+             assert.equal(config.controllerPriorHead,"03cf4288f470fbcfcc9fd669cef5f20349d9610e");assert.equal(config.controllerPushPreviousHead,'0000000000000000000000000000000000000000');
+             const controlGit=args=>cp.execFileSync('git',['-C',config.controller,...args],{encoding:'utf8',timeout:60000}).trim();
+             assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');
+             assert.equal(controlGit(['rev-parse','--is-shallow-repository']),'false');assert(!fs.existsSync(path.join(config.controller,'.git/objects/info/alternates')));
+             controlGit(['cat-file','-e',config.controllerPriorHead+'^{commit}']);
+             const recipes=['package.json','package-lock.json',...fs.readdirSync(path.join(source,'packages')).flatMap(n=>fs.existsSync(path.join(source,'packages',n,'package.json'))?['packages/'+n+'/package.json']:[])];
+             for(const file of recipes)assert.equal(hash(path.join(source,file)),hash(path.join(config.controller,file)),'Controller/source dependency recipe differs: '+file);
+             assert(!fs.existsSync(path.join(config.controller,'node_modules')));fs.symlinkSync(path.join(source,'node_modules'),path.join(config.controller,'node_modules'),'dir');
+             const controlMirror=path.join(path.dirname(output),'controller-mirror','craigoley','remudero.git');assert(!fs.existsSync(controlMirror));fs.mkdirSync(path.dirname(controlMirror),{recursive:true,mode:0o700});
+             cp.execFileSync('git',['clone','--mirror','--no-local','--no-hardlinks',config.controller,controlMirror],{encoding:'utf8',timeout:120000});
+             cp.execFileSync('git',['-C',controlMirror,'update-ref','refs/heads/main',base],{encoding:'utf8',timeout:10000});
+             controlGit(['remote','set-url','origin','file://'+controlMirror]);controlGit(['update-ref','refs/remotes/origin/main',base]);controlGit(['config','core.hooksPath','hooks']);
+             save('mirror-identity-prepared.json',mirrorIdentity());
+             save('controller-prepared.json',{head:config.controllerHead,base,tree:controlGit(['rev-parse','HEAD^{tree}']),branch:config.controllerBranch,priorHead:config.controllerPriorHead,hookSha256:hash(path.join(config.controller,'hooks/pre-push')),sourceHookSha256:hash(path.join(source,'hooks/pre-push')),mirror:controlMirror,recipesVerified:recipes,limits:'Actual controller tree, separate from author source; unchanged hook must execute on this exact tree after bootstrap.'});
+             const out={pilot:12667,stage:'prepared',at:new Date().toISOString(),head,base,tree:git(['rev-parse','HEAD^{tree}']),publicationBranch,deadline,node:process.version,platform:process.platform,arch:process.arch,kernel:os.release(),cpus:os.availableParallelism(),source,mirror,locks:{package:hash(path.join(source,'package-lock.json')),manifest:hash(path.join(source,'scripts/test-tier-manifest.json'))},limits:'Fresh public source and lockfile-installed dependencies only; source gate will fetch captured public main from a complete file-only mirror. No production state, credentials or test result reuse.'};save('prepared.json',out);console.log(JSON.stringify(out));
+            }else if(mode==='phase'){
+             const rootOutput=output,phase=process.argv[4],phases=['admission','typecheck','fixture','registry','controller-hook','source-hook','selection','calibration','author'],index=phases.indexOf(phase);assert(index>=0);assert(Date.now()<Date.parse(deadline),'One fixed deadline elapsed');
+             const phasePath=path.join(rootOutput,'phases',String(index+1).padStart(2,'0')+'-'+phase);fs.mkdirSync(path.dirname(phasePath),{recursive:true,mode:0o700});fs.mkdirSync(phasePath,{mode:0o700});
+             const savePhase=(name,value)=>fs.writeFileSync(path.join(phasePath,name),JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});
+             let prior=null;if(index){const previous=path.join(rootOutput,'phases',String(index).padStart(2,'0')+'-'+phases[index-1],'phase-result.json');prior=JSON.parse(fs.readFileSync(previous));assert(prior.passed&&prior.head===head&&prior.base===base&&prior.deadline===deadline&&prior.phase===phases[index-1]);}
+             assert.equal(process.getuid(),config.uid);assert.equal(process.env.HOME,privateHome);assert.equal(process.env.TMPDIR,privateTmp);assert.notEqual(fs.readlinkSync('/proc/self/ns/net'),config.hostNetNamespace);
+             const server=net.createServer(socket=>socket.end('loopback-control'));await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});const port=server.address().port;const loopback=await new Promise((resolve,reject)=>{let text='';const socket=net.connect(port,'127.0.0.1');socket.on('data',b=>text+=b);socket.once('error',reject);socket.once('end',()=>resolve(text));});await new Promise(r=>server.close(r));assert.equal(loopback,'loopback-control');
+             savePhase('network-control.json',{phase,at:new Date().toISOString(),isolatedNamespace:fs.readlinkSync('/proc/self/ns/net'),hostNamespace:config.hostNetNamespace,loopback:'passed',routeTable:fs.readFileSync('/proc/net/route','utf8')});
+             assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['status','--porcelain']),'');assert.equal(process.versions.node,fs.readFileSync(path.join(source,'.nvmrc'),'utf8').trim());savePhase('mirror-identity-isolated.json',mirrorIdentity());
+             const controlGit=args=>cp.execFileSync('git',['-C',config.controller,...args],{encoding:'utf8',timeout:60000}).trim();assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');
+             const command=async(name,args,program=process.execPath,options={})=>{
+              assert(Date.now()<Date.parse(deadline),'Fixed deadline elapsed');
+              const paths={stdout:path.join(phasePath,name+'.stdout.log'),stderr:path.join(phasePath,name+'.stderr.log')};
+              const out=fs.openSync(paths.stdout,'wx',0o600),err=fs.openSync(paths.stderr,'wx',0o600),started=Date.now();
+              let reason=null,error=null,escalation;const child=cp.spawn(program,args,{cwd:options.cwd??source,env:{...process.env,...options.env},stdio:['ignore',out,err],detached:true});
+              const alive=()=>{if(!child.pid)return false;try{process.kill(-child.pid,0);return true;}catch(e){if(e.code==='ESRCH')return false;throw e;}};
+              const stop=why=>{if(reason)return;reason=why;if(alive())process.kill(-child.pid,'SIGTERM');escalation=setTimeout(()=>{if(alive())process.kill(-child.pid,'SIGKILL');},15000);escalation.unref();};
+              const timer=setTimeout(()=>stop('fixed-deadline'),Math.max(1,Date.parse(deadline)-Date.now()));timer.unref();
+              const leaseTimer=options.ownsSlot?setInterval(()=>{if(!options.ownsSlot())stop('test-slot-lost-or-unknown');},1000):null;leaseTimer?.unref();
+              const exit=await new Promise(resolve=>{child.once('error',e=>{error={code:e.code,message:e.message};});child.once('close',(status,signal)=>resolve({status,signal}));});
+              clearTimeout(timer);if(leaseTimer)clearInterval(leaseTimer);
+              for(let i=0;i<20&&alive();i++)await new Promise(r=>setTimeout(r,50));
+              if(alive()){stop('descendants-after-parent-close');for(let i=0;i<320&&alive();i++)await new Promise(r=>setTimeout(r,50));}
+              if(escalation)clearTimeout(escalation);const groupClosed=!alive();fs.closeSync(out);fs.closeSync(err);
+              const result={...exit,error,reason,outputComplete:groupClosed&&!reason&&!error&&!exit.signal,startedAt:new Date(started).toISOString(),finishedAt:new Date().toISOString(),durationMs:Date.now()-started,ownedGroup:child.pid,groupClosed,stdout:fs.readFileSync(paths.stdout,'utf8'),stderr:fs.readFileSync(paths.stderr,'utf8')};
+              savePhase(name+'.native.json',{...result,stdout:undefined,stderr:undefined,stdoutBytes:Buffer.byteLength(result.stdout),stderrBytes:Buffer.byteLength(result.stderr),resources:sample()});
+              console.log(JSON.stringify({stage:name,status:result.status,durationMs:result.durationMs,outputComplete:result.outputComplete,reason:result.reason}));
+              return result;
+             };
+             let detail=null,passed=false,error=null;const startedAt=new Date().toISOString();
+             try{
+              if(phase==='admission'){
+               const first=sample();await new Promise(r=>setTimeout(r,30000));const last=sample(),checks={memory:min(first.memory.MemAvailable,last.memory.MemAvailable)>=7*1024**3,disk:min(first.workspaceFree,last.workspaceFree,first.tempFree,last.tempFree)>=20*1024**3,noSwapIn:first.swapInPages===last.swapInPages,pressure:Math.max(first.fullAvg60,last.fullAvg60)<0.5};detail={first,last,checks,admitted:Object.values(checks).every(Boolean)};savePhase('admission.json',{head,deadline,...detail});assert(detail.admitted,'Hosted admission refused; no gate started');
+              }else if(phase==='typecheck'){
+               const result=await command('source-typecheck',['--import','tsx','scripts/typecheck.mjs']);assert(result.status===0&&result.outputComplete&&!result.error&&!result.signal,'Early maintained source typecheck failed');
+              }else if(phase==='fixture'){
+               detail=await openerControls(command,{...config,output:phasePath});
+              }else if(phase==='registry'){
+               detail=await companionControls(command,{...config,source:config.controller,head:config.controllerHead,output:phasePath});
+              }else if(phase==='controller-hook'||phase==='source-hook'){
+               const controller=phase==='controller-hook',branch=controller?config.controllerBranch:publicationBranch,sha=controller?config.controllerHead:head,previous=controller?config.controllerPushPreviousHead:'0'.repeat(40),ref='refs/heads/'+branch+' '+sha+' refs/heads/'+branch+' '+previous;
+               const result=await command(controller?'controller-pre-push':'source-pre-push',['--noprofile','--norc','-c','set -euo pipefail; printf "%s\\n" "$1" | /bin/sh hooks/pre-push origin "$2"','pilot-prepush',ref,controller?controlGit(['remote','get-url','origin']):git(['remote','get-url','origin'])],'/bin/bash',controller?{cwd:config.controller}:{});
+               assert(result.status===0&&!result.error&&!result.signal&&result.outputComplete,'Unchanged actual hook did not pass');assert(!(result.stdout+'\n'+result.stderr).split('\n').some(l=>l.startsWith('census-precheck: census suites NOT MEASURED')||l.startsWith('pre-push: census-precheck could not measure')),'Unmeasured hook checks cannot qualify');
+              }else if(phase==='selection'){
+               const result=await command('selection',['--import','tsx','scripts/preflight-author.mjs','--dry-run','--head-ref',publicationBranch,'--head-sha',head]);assert(result.status===0&&!result.error&&!result.signal&&result.outputComplete);fs.copyFileSync(path.join(source,'coverage/preflight-author.json'),path.join(phasePath,'selection.json'),fs.constants.COPYFILE_EXCL);const selected=JSON.parse(fs.readFileSync(path.join(phasePath,'selection.json')));assert.equal(selected.headSha,head);assert.equal(selected.baseSha,base);assert(selected.suites.length>0);for(const file of selected.suites)assert(fs.lstatSync(path.join(source,file)).isFile(),file);detail={physicalFiles:selected.suites.length};
+              }else if(phase==='calibration'){
+               const result=await command('calibration',['--import','tsx','scripts/calibrate-author-runtime.mjs']);assert(result.status===0&&!result.error&&!result.signal&&result.outputComplete);const rows=result.stdout.trim().split('\n').flatMap(s=>{try{return[JSON.parse(s)];}catch{return[];}}),profile=rows.findLast(r=>r.head===head&&r.samples===32&&r.path);assert(profile,'No new source-bound32-file maintained profile');detail=profile;
+              }else if(phase==='author'){
+               const selected=JSON.parse(fs.readFileSync(path.join(rootOutput,'phases','07-selection','selection.json'))),calibration=JSON.parse(fs.readFileSync(path.join(rootOutput,'phases','08-calibration','phase-result.json'))),profile=calibration.detail;assert(profile?.head===head&&profile.samples===32&&fs.lstatSync(profile.path).isFile());
+               const result=await command('author',['--import','tsx','scripts/preflight-author.mjs','--head-ref',publicationBranch,'--head-sha',head,'--deadline',deadline,'--runtime-profile',profile.path]),receipt=JSON.parse(fs.readFileSync(path.join(source,'coverage/preflight-author.json')));fs.copyFileSync(path.join(source,'coverage/preflight-author.json'),path.join(phasePath,'author-receipt.json'),fs.constants.COPYFILE_EXCL);
+               assert.deepEqual(receipt.suites,selected.suites);for(const file of receipt.suites)assert(fs.lstatSync(path.join(source,file)).isFile(),file);const tests=receipt.steps.find(s=>s.name==='affected-tests'),summary=tests?.testSummary;
+               const qualified=result.status===0&&!result.error&&!result.signal&&result.outputComplete&&receipt.verdict==='passed'&&receipt.headSha===head&&receipt.baseSha===base&&receipt.steps.every(s=>s.ok===true)&&!receipt.tiered&&tests?.judge?.complete===true&&summary?.tests>0&&summary.fail===0&&summary.cancelled===0&&summary.todo===0&&summary.pass+summary.skipped===summary.tests;
+               const final={pilot:12667,at:new Date().toISOString(),head,base,tree:git(['rev-parse','HEAD^{tree}']),deadline,passed:qualified,status:result.status,selectedPhysicalFiles:receipt.suites.length,summary,conditionalSkips:summary?.skipped??null,openerControls:JSON.parse(fs.readFileSync(path.join(rootOutput,'phases','03-fixture','opener-controls.json'))),controllerRegistryControls:JSON.parse(fs.readFileSync(path.join(rootOutput,'phases','04-registry','companion-controls.json'))),judge:tests?.judge,slot:receipt.testSlot,executionWorkers:receipt.executionWorkers,runtimeAdmission:receipt.runtimeAdmission,capacity:receipt.capacity,finalResources:sample(),phaseAccounting:receipt.phaseAccounting??null,limits:'Exact-head full author gate only; all nine phases required. No skipped required check or manually omitted selected suite. Existing conditional skips disclosed. Hosted CI/review/merge/adoption and live benefit remain separate.'};savePhase('final.json',final);detail=final;assert(qualified,'Actual maintained author gate did not qualify this head');
+              }
+              assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['status','--porcelain']),'');assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');assert(Date.now()<Date.parse(deadline),'Fixed total deadline elapsed');passed=true;
+             }catch(e){error={message:e.message};throw e;}
+             finally{
+              const coverage=path.join(source,'coverage');if(fs.existsSync(coverage)&&['selection','calibration','author'].includes(phase))for(const name of fs.readdirSync(coverage).filter(n=>n.startsWith('rmd-author-')||n.startsWith('rmd-native-runtime-')||n==='preflight-author-static.json'))fs.cpSync(path.join(coverage,name),path.join(phasePath,name),{recursive:true,errorOnExist:true,force:false});
+              savePhase('phase-result.json',{pilot:12667,phase,index,head,base,controllerHead:config.controllerHead,deadline,startedAt,finishedAt:new Date().toISOString(),passed,error,detail,previousPhase:index?phases[index-1]:null,limits:'One closed phase of one attempt, never a source PASS on its own. Unchanged deadline and actual executors; passive observer does not control resources or execution.'});
+             }
+            }else throw Error('Unknown pilot mode');
+            function min(...values){return Math.min(...values);}
+
+            async function companionControls(command,config){
+             const {source,base,head,output,privateTmp,deadline}=config;
+             const {acquireTestSlot,testSlotExecutionAllowed,lowPriorityCommand,testRunArgv,startTestSlotHeartbeat}=await import(pathToFileURL(path.join(source,'src/lib/test-slot.ts')).href);
+             const file='test/instrument-surface-completeness.test.ts',sourceText=fs.readFileSync(path.join(source,'src/lib/review.ts'),'utf8'),testText=fs.readFileSync(path.join(source,file),'utf8');
+             const titles=['hosted author and calibration tools are exact protected instruments, never data exclusions','the generated document index is data while its freshness and path checks remain wired','hosted tooling registration still refuses a newly unregistered executable in a workflow'];
+             assert(fs.lstatSync(path.join(source,file)).isFile());for(const title of titles)assert(testText.includes(title));
+             const budget=Date.parse(deadline)-Date.now();assert(budget>60000,'No fixed-deadline room for real companion controls');
+             const slot=acquireTestSlot('hosted-instrument-companion:controls',{waitBoundMs:Math.min(10*60*1000,budget-60000)});
+             assert.equal(slot.outcome,'acquired');assert(testSlotExecutionAllowed(slot)&&slot.childEnvironment,'No real inherited test-slot capacity for controls');
+             const root=fs.mkdtempSync(path.join(privateTmp,'companion-falsifiers-')),cases=[];let slotLost=false;
+             let heartbeat;
+             const summary=text=>Object.fromEntries(['tests','pass','fail','cancelled','skipped','todo'].map(k=>[k,Number([...text.matchAll(new RegExp('^# '+k+' ([0-9]+)$','gm'))].at(-1)?.[1]??NaN)]));
+             const run=async(label,repo,expectedFailure)=>{
+              assert(!slotLost);slot.refresh();
+              assert(fs.lstatSync(path.join(repo,file)).isFile(),'Verified physical fixture test required');
+              const argv=testRunArgv(['--test','--test-reporter=tap','--import','tsx','--import','./test/setup/tmp-hygiene.ts',file],Math.min(1,slot.concurrency)),low=lowPriorityCommand(process.execPath,argv);
+              const result=await command(label,low.args,low.file,{cwd:repo,env:slot.childEnvironment,ownsSlot:()=>!slotLost}),tap=summary(result.stdout+'\n'+result.stderr);
+              assert(!result.error&&!result.signal&&result.outputComplete===true,'Fixture output incomplete: '+label);assert(tap.tests>0&&tap.cancelled===0&&tap.todo===0&&tap.skipped===0);
+              const failedTitles=result.stdout.split('\n').filter(l=>l.trim().startsWith('not ok '));
+              if(expectedFailure){assert.equal(result.status,1);assert(tap.fail>0&&failedTitles.some(l=>l.includes(expectedFailure)),'Expected intended companion failure: '+expectedFailure);}
+              else{assert.equal(result.status,0);assert.equal(tap.fail,0);assert.equal(tap.pass,tap.tests);}
+              cases.push({label,base:label==='control-base'?base:head,physicalFiles:[file],tap,expectedFailure:expectedFailure??null,failedTitles});
+             };
+             const fixture=(label,ref,mutate)=>{
+              const repo=path.join(root,label);cp.execFileSync('git',['clone','--quiet','--no-local','--no-hardlinks','--no-checkout',source,repo],{encoding:'utf8',timeout:120000});
+              cp.execFileSync('git',['-C',repo,'checkout','--detach',ref],{encoding:'utf8',timeout:20000});assert(!fs.existsSync(path.join(repo,'.git/objects/info/alternates')));
+              for(const p of ['package.json','package-lock.json',...fs.readdirSync(path.join(source,'packages')).flatMap(n=>fs.existsSync(path.join(source,'packages',n,'package.json'))?['packages/'+n+'/package.json']:[])])assert.equal(hash(path.join(repo,p)),hash(path.join(source,p)),'Fixture recipe differs');
+              fs.symlinkSync(path.join(source,'node_modules'),path.join(repo,'node_modules'),'dir');fs.writeFileSync(path.join(repo,file),testText);
+              const target=path.join(repo,'src/lib/review.ts');if(mutate)fs.writeFileSync(target,mutate(sourceText));
+              const diff=cp.execFileSync('git',['-C',repo,'diff','--','src/lib/review.ts',file],{encoding:'utf8',timeout:20000,maxBuffer:2*1024*1024});
+              fs.writeFileSync(path.join(output,label+'.fixture.diff'),diff,{flag:'wx',mode:0o600});return repo;
+             };
+             try{
+              heartbeat=slot.heartbeat?startTestSlotHeartbeat(slot.heartbeat,row=>{fs.appendFileSync(path.join(output,'controls-heartbeats.ndjson'),JSON.stringify(row)+'\n',{mode:0o600});if(['test_slot.heartbeat_lost','test_slot.heartbeat_failed'].includes(row.step))slotLost=true;}):null;
+              await run('control-head',source);
+              await run('control-base',fixture('base',base));
+              for(const [i,p]of ['scripts/preflight-author.mjs','scripts/calibrate-author-runtime.mjs','scripts/lib/author-step-capture.mjs'].entries()){
+               const repo=fixture('remove-tool-'+i,head,text=>{const lines=text.split('\n'),needle=JSON.stringify('^'+p.replaceAll('.','\\.')+'$')+',';assert.equal(lines.filter(l=>l.trim()===needle).length,1);return lines.filter(l=>l.trim()!==needle).join('\n');});
+               await run('control-remove-tool-'+i,repo,titles[0]);
+              }
+              const noData=fixture('remove-data',head,text=>{const lines=text.split('\n'),start=lines.findIndex(l=>l.trim()==='"docs/docs-index.json":'),end=lines.findIndex((l,i)=>i>start&&l.trim().endsWith('",'));assert(start>0&&end>start&&end-start<8);lines.splice(start,end-start+1);return lines.join('\n');});
+              await run('control-remove-data',noData,titles[1]);
+              const waived=fixture('bad-executable-exclusion',head,text=>{const anchor='export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {';assert(text.includes(anchor));return text.replace(anchor,anchor+'\n  "scripts/unregistered-hosted-control.mjs": "Deliberately wrong disposable fixture, never source policy.",');});
+              await run('control-bad-executable-exclusion',waived,titles[2]);
+              await run('control-restored-head',source);
+              assert(!slotLost,'Test-slot uncertainty cannot qualify companion controls');
+             }finally{heartbeat?.stop(true);slot.release();assert.equal(cp.execFileSync('git',['-C',source,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),head);assert.equal(cp.execFileSync('git',['-C',source,'status','--porcelain'],{encoding:'utf8'}).trim(),'');assert(root.startsWith(privateTmp+'/companion-falsifiers-')&&root!==source);fs.rmSync(root,{recursive:true});}
+             const out={head,base,slot:{outcome:slot.outcome,concurrency:slot.concurrency,waitedMs:slot.waitedMs},cases,sourceRestoredClean:true,limits:'Real full physical-file controls plus base and five deliberately wrong disposable fixtures. Expected red controls are not author PASS; the unchanged full author selection still follows.'};
+             fs.writeFileSync(path.join(output,'companion-controls.json'),JSON.stringify(out,null,2)+'\n',{flag:'wx',mode:0o600});return out;
+            }
+
+            async function openerControls(command,config){
+             const {source,head,base,output,privateTmp,deadline}=config;
+             const module='src/lib/pr-open.ts',files=['test/a-pr-opens-with-a-judgeable-body.test.ts','test/a-pr-open-proof-runs-off-the-daemon-loop.test.ts'];
+             const original=fs.readFileSync(path.join(source,module),'utf8');
+             for(const file of files)assert(fs.lstatSync(path.join(source,file)).isFile());
+             const {acquireTestSlot,testSlotExecutionAllowed,lowPriorityCommand,testRunArgv,startTestSlotHeartbeat}=await import(pathToFileURL(path.join(source,'src/lib/test-slot.ts')).href);
+             const remaining=Date.parse(deadline)-Date.now();assert(remaining>60000);
+             const slot=acquireTestSlot('hosted-W10087:controls',{waitBoundMs:Math.min(10*60000,remaining-60000)});
+             assert.equal(slot.outcome,'acquired');assert(testSlotExecutionAllowed(slot)&&slot.childEnvironment);
+             const root=fs.mkdtempSync(path.join(privateTmp,'W10087-controls-')),cases=[];let lost=false;
+             const heartbeat=slot.heartbeat?startTestSlotHeartbeat(slot.heartbeat,row=>{fs.appendFileSync(path.join(output,'opener-slot-heartbeats.ndjson'),JSON.stringify(row)+'\n',{mode:0o600});if(['test_slot.heartbeat_lost','test_slot.heartbeat_failed'].includes(row.step))lost=true;}):null;
+             const expected=['async PR opening checks every remaining proof beside prior credit','the shared PR opener does not execute a satisfied_by criterion','an all-credited filed task has no invented executable proof'];
+             const fixture=(name,ref,mutate)=>{
+              const repo=path.join(root,name);cp.execFileSync('git',['clone','--quiet','--no-local','--no-hardlinks','--no-checkout',source,repo],{encoding:'utf8',timeout:120000});
+              cp.execFileSync('git',['-C',repo,'checkout','--detach',ref],{encoding:'utf8',timeout:30000});assert(!fs.existsSync(path.join(repo,'.git/objects/info/alternates')));
+              for(const p of ['package.json','package-lock.json',...fs.readdirSync(path.join(source,'packages')).flatMap(n=>fs.existsSync(path.join(source,'packages',n,'package.json'))?['packages/'+n+'/package.json']:[])])assert.equal(hash(path.join(repo,p)),hash(path.join(source,p)));
+              fs.symlinkSync(path.join(source,'node_modules'),path.join(repo,'node_modules'),'dir');
+              for(const file of files)fs.copyFileSync(path.join(source,file),path.join(repo,file));
+              if(mutate)fs.writeFileSync(path.join(repo,module),mutate(original));
+              fs.writeFileSync(path.join(output,name+'.fixture.diff'),cp.execFileSync('git',['-C',repo,'diff','--',module,...files],{encoding:'utf8',timeout:30000,maxBuffer:2*1024**2}),{flag:'wx',mode:0o600});return repo;
+             };
+             const run=async(name,repo,red=false)=>{
+              assert(!lost);slot.refresh();for(const file of files)assert(fs.lstatSync(path.join(repo,file)).isFile());
+              const argv=testRunArgv(['--test','--test-reporter=tap','--import','tsx','--import','./test/setup/tmp-hygiene.ts',...files],Math.min(1,slot.concurrency)),low=lowPriorityCommand(process.execPath,argv);
+              const result=await command(name,low.args,low.file,{cwd:repo,env:slot.childEnvironment,ownsSlot:()=>!lost});
+              assert(result.outputComplete&&!result.error&&!result.signal);const tap=Object.fromEntries(['tests','pass','fail','cancelled','skipped','todo'].map(k=>{const rows=[...result.stdout.matchAll(new RegExp('^# '+k+' ([0-9]+)$','gm'))];assert.equal(rows.length,1);return[k,Number(rows[0][1])];}));
+              assert.equal(tap.tests,26);assert.equal(tap.cancelled,0);assert.equal(tap.skipped,0);assert.equal(tap.todo,0);
+              const failures=result.stdout.split('\n').filter(l=>l.trim().startsWith('not ok '));
+              if(red){assert.equal(result.status,1);assert.equal(tap.fail,3);for(const title of expected)assert(failures.some(l=>l.includes(title)));}
+              else{assert.equal(result.status,0);assert.equal(tap.pass,26);assert.equal(tap.fail,0);}
+              cases.push({name,files,tap,expectedFailures:red?expected:[],failures});
+             };
+             try{
+              await run('opener-head',source);
+              await run('opener-base',fixture('base',base),true);
+              await run('opener-delete-filter',fixture('delete-filter',head,text=>{const anchor='const executable = criteria.filter((criterion) => !criterion.satisfied_by);';assert.equal(text.split(anchor).length,2);return text.replace(anchor,'const executable = criteria;');}),true);
+              await run('opener-restored',source);assert(!lost);
+             }finally{
+              heartbeat?.stop(true);slot.release();assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['status','--porcelain']),'');
+              assert(root.startsWith(privateTmp+'/W10087-controls-')&&root!==source);fs.rmSync(root,{recursive:true});
+             }
+             const out={head,base,cases,sourceRestoredClean:true,slot:{outcome:slot.outcome,concurrency:slot.concurrency,waitedMs:slot.waitedMs},authorPassed:false};
+             fs.writeFileSync(path.join(output,'opener-controls.json'),JSON.stringify(out,null,2)+'\n',{flag:'wx',mode:0o600});return out;
+            }
+          PILOT_PASSIVE_JS: |
+            import fs from 'node:fs';import path from 'node:path';import os from 'node:os';
+            const [root,deadline]=process.argv.slice(2),dir=path.join(root,'pilot-passive-observer');fs.mkdirSync(dir,{mode:0o700});
+            const file=path.join(dir,'samples.ndjson'),fd=fs.openSync(file,'wx',0o600);let rows=0,bytes=0;
+            function record(){
+             const mem=Object.fromEntries(fs.readFileSync('/proc/meminfo','utf8').split('\n').filter(l=>/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/.test(l)).map(l=>[l.split(':')[0],Number(l.trim().split(/\s+/)[1])*1024]));
+             const vm=Object.fromEntries(fs.readFileSync('/proc/vmstat','utf8').trim().split('\n').map(l=>l.split(/\s+/))),stat=fs.statfsSync(root),pressure=fs.readFileSync('/proc/pressure/memory','utf8').trim(),cpu=fs.readFileSync('/proc/stat','utf8').split('\n')[0].trim().split(/\s+/).slice(1).map(Number);
+             const row=JSON.stringify({at:new Date().toISOString(),memory:mem,swapInPages:Number(vm.pswpin),swapOutPages:Number(vm.pswpout),memoryPressure:pressure,cpuTicks:cpu,diskAvailableBytes:Number(stat.bavail)*Number(stat.bsize),load:os.loadavg()})+'\n';
+             if(rows>=2400||bytes+Buffer.byteLength(row)>4*1024**2)return false;fs.writeSync(fd,row);rows++;bytes+=Buffer.byteLength(row);return true;
+            }
+            fs.writeFileSync(path.join(dir,'identity.json'),JSON.stringify({pid:process.pid,at:new Date().toISOString(),node:process.version,deadline,mode:'passive',noProcessSignals:true,noResourceChanges:true,noArgvEnvOrPayloadReads:true}),{flag:'wx',mode:0o600});
+            let capped=false;while(Date.now()<Date.parse(deadline)&&!fs.existsSync(path.join(dir,'stop'))){try{if(!record()){capped=true;break;}}catch(e){fs.writeFileSync(path.join(dir,'error.json'),JSON.stringify({at:new Date().toISOString(),message:e.message}),{flag:'wx',mode:0o600});break;}await new Promise(r=>setTimeout(r,5000));}
+            fs.fsyncSync(fd);fs.closeSync(fd);fs.writeFileSync(path.join(dir,'final.json'),JSON.stringify({at:new Date().toISOString(),rows,bytes,capped,passive:true}),{flag:'wx',mode:0o600});
+          PILOT_SEAL_JS: |
+            import fs from 'node:fs';import path from 'node:path';import crypto from 'node:crypto';import assert from 'node:assert/strict';
+            const [root,phase]=process.argv.slice(2),phases=['bootstrap','admission','typecheck','fixture','registry','controller-hook','source-hook','selection','calibration','author','teardown'],i=phases.indexOf(phase);assert(i>=0);const evidence=path.join(root,'pilot-evidence'),dir=phase==='bootstrap'?path.join(root,'pilot-bootstrap-evidence'):phase==='teardown'?path.join(root,'pilot-teardown-evidence'):path.join(evidence,'phases',String(i).padStart(2,'0')+'-'+phase);fs.mkdirSync(dir,{recursive:true,mode:0o700});
+            const hash=b=>crypto.createHash('sha256').update(b).digest('hex'),observer=path.join(root,'pilot-passive-observer'),monitor=path.join(observer,'samples.ndjson'),offsetFile=path.join(root,'pilot-passive-snapshot-offset.json');let previous=0;if(fs.existsSync(offsetFile))previous=JSON.parse(fs.readFileSync(offsetFile)).offset;
+            if(fs.existsSync(monitor)){const st=fs.lstatSync(monitor);assert(st.isFile()&&!st.isSymbolicLink()&&st.size<=4*1024**2);const data=fs.readFileSync(monitor),end=data.lastIndexOf(10)+1;assert(previous<=end);const part=data.subarray(previous,end);fs.writeFileSync(path.join(dir,'passive-resources.ndjson'),part,{flag:'wx',mode:0o600});fs.writeFileSync(path.join(dir,'passive-resources-range.json'),JSON.stringify({phase,previous,end,bytes:part.length,sha256:hash(part),tailBytes:data.length-end,passive:true}),{flag:'wx',mode:0o600});const tmp=offsetFile+'.tmp';fs.writeFileSync(tmp,JSON.stringify({phase,offset:end}),{flag:'wx',mode:0o600});fs.renameSync(tmp,offsetFile);for(const name of ['identity.json','error.json','final.json'])if(fs.existsSync(path.join(observer,name)))fs.copyFileSync(path.join(observer,name),path.join(dir,'passive-'+name),fs.constants.COPYFILE_EXCL);}
+            // Prepared source/config evidence contains public source identities only, never HOME/env.
+            if(phase==='bootstrap'&&fs.existsSync(evidence))for(const name of fs.readdirSync(evidence).filter(n=>n.endsWith('.json'))){const p=path.join(evidence,name),st=fs.lstatSync(p);assert(st.isFile()&&!st.isSymbolicLink());fs.copyFileSync(p,path.join(dir,name),fs.constants.COPYFILE_EXCL);}
+            const files=[];let bytes=0;function walk(p,rel=''){for(const name of fs.readdirSync(p)){assert(/^[A-Za-z0-9_.-]+$/.test(name));const full=path.join(p,name),r=path.join(rel,name),st=fs.lstatSync(full);assert(!st.isSymbolicLink());if(st.isDirectory())walk(full,r);else{assert(st.isFile());bytes+=st.size;assert(bytes<=128*1024**2,'Closed phase evidence bound exceeded; do not claim qualification');files.push({path:r,bytes:st.size,sha256:hash(fs.readFileSync(full))});}}}walk(dir);fs.writeFileSync(path.join(dir,'closed-evidence-manifest.json'),JSON.stringify({at:new Date().toISOString(),phase,bytes,files,limits:'Complete bounded closed-phase files; numeric passive monitoring only. This manifest is not a gate verdict.'},null,2)+'\n',{flag:'wx',mode:0o600});console.log(JSON.stringify({phase,files:files.length,bytes}));
+          PILOT_BUNDLE_CHUNK_COUNT: "1"
+          PILOT_SOURCE_BUNDLE_B64_00: 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
+      - name: Checkout the reviewed pilot controller without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: pilot-control
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and reconstruct the exact source from its checksummed Git input
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import cp from 'node:child_process';
+          import crypto from 'node:crypto';
+          import assert from 'node:assert/strict';
+          const root=process.env.GITHUB_WORKSPACE,control=path.join(root,'pilot-control'),source=path.join(root,'source');
+          const input=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'pilot-source-input.json'),'utf8'));
+          assert.equal(input.format,'rmd-hosted-author-input-v1');assert.equal(input.head,process.env.SOURCE_HEAD);assert.equal(input.base,process.env.CAPTURED_BASE);assert.equal(input.bundleSha256,process.env.SOURCE_BUNDLE_SHA256);
+          const bytes=Buffer.from(input.bundleBase64,'base64');assert.equal(bytes.length,input.bundleBytes);assert(bytes.length<10*1024*1024);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),input.bundleSha256);
+          const bundle=path.join(process.env.RUNNER_TEMP,'pilot-source-input.bundle');fs.writeFileSync(bundle,bytes,{flag:'wx',mode:0o600});
+          const git=(dir,args)=>cp.execFileSync('git',['-C',dir,...args],{encoding:'utf8',timeout:120000}).trim();
+          git(control,['cat-file','-e',input.base+'^{commit}']);
+          cp.execFileSync('git',['clone','--no-local','--no-hardlinks','--no-checkout',control,source],{encoding:'utf8',timeout:120000});
+          git(source,['fetch',control,'refs/remotes/origin/main:refs/remotes/origin/main']);git(source,['cat-file','-e',input.base+'^{commit}']);
+          git(source,['bundle','verify',bundle]);assert.equal(git(source,['bundle','list-heads',bundle]),input.head+' HEAD');
+          git(source,['fetch',bundle,'HEAD:refs/heads/pilot-input']);git(source,['checkout','--detach',input.head]);assert.equal(git(source,['rev-parse','HEAD']),input.head);assert.equal(git(source,['status','--porcelain']),'');
+          console.log(JSON.stringify({stage:'source-reconstructed',head:input.head,base:input.base,bundleSha256:input.bundleSha256,bundleBytes:bytes.length,author:'NOT_RUN'}));
+          JS
+      - name: Use the source tree's pinned runtime and npm download cache
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: source/.nvmrc
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - name: Install exact locked dependencies
+        working-directory: source
+        run: npm ci
+      - name: Install the browser required by normal repository tests
+        working-directory: source
+        run: npx --no-install playwright install chromium
+      - name: Prepare complete local source inputs without production state
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const tmp=process.env.RUNNER_TEMP,workspace=process.env.GITHUB_WORKSPACE;
+          const config={concern:process.env.PILOT_CONCERN,controller:path.join(workspace,"pilot-control"),controllerHead:process.env.GITHUB_SHA,controllerBranch:"run-unfiled-1792583887933",controllerPriorHead:"03cf4288f470fbcfcc9fd669cef5f20349d9610e",controllerPushPreviousHead:"0000000000000000000000000000000000000000",source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
+          fs.writeFileSync(path.join(tmp,'pilot-config.json'),JSON.stringify(config),{flag:'wx',mode:0o600});
+          JS
+          node "$RUNNER_TEMP/hosted-author-12667.mjs" prepare "$RUNNER_TEMP/pilot-config.json"
+      - name: Seal bootstrap evidence
+        id: seal_bootstrap
+        if: always()
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" bootstrap
+      - name: Upload closed bootstrap evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-bootstrap
+          path: ${{ runner.temp }}/pilot-bootstrap-evidence/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase admission
+        id: phase_admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" admission
+      - name: Seal closed admission evidence
+        if: always() && steps.phase_admission.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" admission
+      - name: Upload closed admission evidence
+        if: always() && steps.phase_admission.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-admission
+          path: ${{ runner.temp }}/pilot-evidence/phases/01-admission/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase typecheck
+        id: phase_typecheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" typecheck
+      - name: Seal closed typecheck evidence
+        if: always() && steps.phase_typecheck.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" typecheck
+      - name: Upload closed typecheck evidence
+        if: always() && steps.phase_typecheck.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-typecheck
+          path: ${{ runner.temp }}/pilot-evidence/phases/02-typecheck/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase fixture
+        id: phase_fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" fixture
+      - name: Seal closed fixture evidence
+        if: always() && steps.phase_fixture.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" fixture
+      - name: Upload closed fixture evidence
+        if: always() && steps.phase_fixture.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-fixture
+          path: ${{ runner.temp }}/pilot-evidence/phases/03-fixture/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase registry
+        id: phase_registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" registry
+      - name: Seal closed registry evidence
+        if: always() && steps.phase_registry.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" registry
+      - name: Upload closed registry evidence
+        if: always() && steps.phase_registry.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-registry
+          path: ${{ runner.temp }}/pilot-evidence/phases/04-registry/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase controller-hook
+        id: phase_controller_hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" controller-hook
+      - name: Seal closed controller-hook evidence
+        if: always() && steps.phase_controller_hook.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" controller-hook
+      - name: Upload closed controller-hook evidence
+        if: always() && steps.phase_controller_hook.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-controller-hook
+          path: ${{ runner.temp }}/pilot-evidence/phases/05-controller-hook/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase source-hook
+        id: phase_source_hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" source-hook
+      - name: Seal closed source-hook evidence
+        if: always() && steps.phase_source_hook.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" source-hook
+      - name: Upload closed source-hook evidence
+        if: always() && steps.phase_source_hook.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-source-hook
+          path: ${{ runner.temp }}/pilot-evidence/phases/06-source-hook/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase selection
+        id: phase_selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" selection
+      - name: Seal closed selection evidence
+        if: always() && steps.phase_selection.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" selection
+      - name: Upload closed selection evidence
+        if: always() && steps.phase_selection.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-selection
+          path: ${{ runner.temp }}/pilot-evidence/phases/07-selection/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase calibration
+        id: phase_calibration
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" calibration
+      - name: Seal closed calibration evidence
+        if: always() && steps.phase_calibration.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" calibration
+      - name: Upload closed calibration evidence
+        if: always() && steps.phase_calibration.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-calibration
+          path: ${{ runner.temp }}/pilot-evidence/phases/08-calibration/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Run required phase author
+        id: phase_author
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))')"
+          test "$REMAINING" -gt 0
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" --import "$GITHUB_WORKSPACE/source/node_modules/tsx/dist/loader.mjs" "$RUNNER_TEMP/hosted-author-12667.mjs" phase "$RUNNER_TEMP/pilot-config.json" author
+      - name: Seal closed author evidence
+        if: always() && steps.phase_author.outcome != 'skipped'
+        shell: bash
+        run: node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" author
+      - name: Upload closed author evidence
+        if: always() && steps.phase_author.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-author
+          path: ${{ runner.temp }}/pilot-evidence/phases/09-author/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Close passive observer and seal teardown evidence
+        if: always()
+        shell: bash
+        run: |-
+          set -euo pipefail
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';import path from 'node:path';
+          const dir=path.join(process.env.RUNNER_TEMP,'pilot-passive-observer');if(fs.existsSync(dir)){fs.writeFileSync(path.join(dir,'stop'),'teardown\n',{flag:'wx',mode:0o600});for(let n=0;n<12&&!fs.existsSync(path.join(dir,'final.json'));n++)await new Promise(r=>setTimeout(r,500));}
+          JS
+          node "$RUNNER_TEMP/pilot-seal.mjs" "$RUNNER_TEMP" teardown
+      - name: Upload closed teardown evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: W10087-phased-${{ github.run_id }}-teardown
+          path: ${{ runner.temp }}/pilot-teardown-evidence/
+          retention-days: 1
+          if-no-files-found: error
