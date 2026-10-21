@@ -582,6 +582,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
+  // The sweep reads these exact-head security decisions from the live ledger after async judgment.
+  // Archiving them re-judges settled alerts or forgets an already admitted repair.
+  "code_scanning.judged_fix",
+  "code_scanning.judged_false_positive",
+  "code_scanning.fix_dispatch",
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
