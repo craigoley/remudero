@@ -584,6 +584,12 @@
       "grepHint": "self-sync.ts forensics"
     },
     {
+      "path": "docs/forensics/serve-non-heap-rss-growth.md",
+      "title": "Serve non-heap RSS growth attribution",
+      "summary": "Offline measurements and the evidence still needed to attribute live growth for W1-T10293.",
+      "grepHint": "Serve non-heap RSS growth attribution"
+    },
+    {
       "path": "docs/forensics/serve.md",
       "title": "serve.ts comment forensics",
       "summary": "The measured forensics and design arguments behind `src/lib/serve.ts`, kept out of the source so",
