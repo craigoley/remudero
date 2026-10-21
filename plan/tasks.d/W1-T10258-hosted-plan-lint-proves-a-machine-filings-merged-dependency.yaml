@@ -16,7 +16,7 @@
     - .github/workflows/ci.yml
     - scripts/lib/ci-dependency-evidence.mjs
     - scripts/lib/ci-dependency-evidence.d.mts
-    - test/ci/a-hosted-plan-lint-credits-a-merged-dependency.test.ts
+    - test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts
   rationale: |
     OBSERVED 2026-10-20. #12894 (merged 00:26Z) made filing lint admit a machine-authored
     task's depends_on only on verified merge credit (plan.ts machineFilingAdmissionViolations).
@@ -51,9 +51,9 @@
     operator's release (verify: human).
   acceptance:
     - claim: "a machine filing whose dependency merged passes hosted lint with producer evidence"
-      proof: 'grep: test("W1-T10258: hosted plan lint credits a merged dependency from same-run producer evidence" in test/ci/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
+      proof: 'grep: test("W1-T10258: hosted plan lint credits a merged dependency from same-run producer evidence" in test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
     - claim: "absent, foreign or tampered producer evidence stays UNKNOWN and red"
-      proof: 'grep: test("W1-T10258: hosted plan lint keeps a dependency UNKNOWN without valid producer evidence" in test/ci/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
+      proof: 'grep: test("W1-T10258: hosted plan lint keeps a dependency UNKNOWN without valid producer evidence" in test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
   falsifier: |
     Remove the producer step. The first test must report "dependency credit unavailable
     (UNKNOWN)" for W1-T9658-shaped evidence.
@@ -62,6 +62,6 @@
     action: proceed
     confidence: 1
     reasons:
-      - "released by the operator with rmd approve"
-    judged_at: "2026-10-20T18:45:34.674Z"
-    pin: "35dcee8c005074b65501b3d101af3c6e82661597645ca8d7a154c9e242d22c2e"
+      - "Operator explicitly approved the bounded CI qualification package and this exact test-folder relocation pin in the session on 2026-10-21; all ordinary gates retained."
+    judged_at: "2026-10-21T01:14:25.248Z"
+    pin: "a34aad7235038e34d87acc8ec46d7d4fc8d64e6b9ca9fa1769e919886360e94b"
