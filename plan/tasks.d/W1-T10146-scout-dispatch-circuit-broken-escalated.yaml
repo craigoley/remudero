@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 2.65
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10146 — 0 dispatch.circuit_broken.escalated rows in 3
+  # d (it had 3 in the 7 d before filing); the symptom has stopped.
   attempts: 0
   author_class: machine
   origin: "scout:dispatch.circuit_broken.escalated"

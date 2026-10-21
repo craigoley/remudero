@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -17,9 +17,10 @@ import * as health from "#src/lib/reviewer-health.js";
 import { postReviewStatusGuarded } from "#src/lib/review.js";
 import { checkReviewerCodeFreshness, type ReviewerCodeFreshness } from "#src/lib/self-sync.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import type { MainRepairRevertRequest } from "#src/lib/main-health-rung.js";
+import type { MainRepairLane, MainRepairRevertRequest } from "#src/lib/main-health-rung.js";
+import type { AsyncIssueGateway } from "#src/lib/escalate.js";
 import { reviewerRegressionRevertText } from "#src/lib/main-health-rung.js";
-import { buildReviewerHealthRoute, mainRepairRevertBody, reviewCommand, runReview } from "#src/run-task.js";
+import { assigningIssueGateway, buildReviewerHealthRoute, mainRepairRevertBody, reviewCommand, reviewerRevertLane, runReview, type FreshTreeReviewSeams } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -88,11 +89,9 @@ const pushMain = (f: TenTwenty, files: Record<string, string>, subject: string):
   return sha;
 };
 
-/** Healed-tree seams over the daemon clone: a detached worktree per cut, as the fresh-tree helper does. */
-function treeSeams(f: TenTwenty): health.HealedTreeGit {
+/** The healed builder's cut and remove over the daemon clone: a detached worktree per cut. */
+function cutter(f: TenTwenty): { cut: (prefix: string, sha: string) => string; remove: (dir: string) => void } {
   return {
-    git: async (args) => f.daemon.git(...args),
-    treeGit: async (dir, args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }),
     cut: (prefix, sha) => {
       const path = join(f.root, `${prefix}-${sha.slice(0, 12)}-${Math.random().toString(36).slice(2, 8)}`);
       f.daemon.git("worktree", "add", "-q", "--detach", path, sha);
@@ -102,41 +101,57 @@ function treeSeams(f: TenTwenty): health.HealedTreeGit {
   };
 }
 
-interface Calls {
-  escalate: Array<{ incident: health.ReviewerIncident; conflict?: { reason: string; paths: readonly string[] } }>;
-  revert: health.ReviewerIncident[];
-  closeIssue: string[];
-  closePr: Array<{ url: string; comment: string }>;
+/** The review path's own FreshTreeReviewSeams over the daemon clone, as buildSweepEffects builds them. */
+function freshTree(f: TenTwenty, spawnReview: FreshTreeReviewSeams["spawnReview"], extra: Partial<FreshTreeReviewSeams> = {}): FreshTreeReviewSeams {
+  return {
+    git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }),
+    addWorktree: (repoDir, path, revision) => { execFileSync("git", ["-C", repoDir, "worktree", "add", "-q", "--detach", path, revision], { stdio: "pipe" }); },
+    worktreeRoot: join(f.root, "worktrees"),
+    spawnReview,
+    prepareWorktree: () => true,
+    withWorktreeLease: (_tree, action) => action(),
+    ...extra,
+  };
 }
 
-function harness(t: TestContext, git: health.GitText, overrides: Partial<health.ReviewerHealthEffects> = {}) {
-  const statePath = join(scratch(t, "state"), "reviewer-health.json");
+interface Calls {
+  issues: Array<{ title: string; body: string }>;
+  closedIssues: string[];
+  reverts: MainRepairRevertRequest[];
+  closedPrs: Array<{ url: string; comment: string }>;
+}
+
+/** Reviewer health's inputs: a queue standing in for the ledger, the escalation's issue gateway and
+ *  the red-main repair lane as recording fakes, and the real fixture git. */
+function harness(t: TestContext, git: health.GitText, over: Partial<AsyncIssueGateway & MainRepairLane> = {}) {
+  const dir = scratch(t, "state");
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const statePath = join(dir, "reviewer-health.json");
   const queue: Row[] = [];
   const logs: Array<{ step: string; extra: Row }> = [];
-  const calls: Calls = { escalate: [], revert: [], closeIssue: [], closePr: [] };
-  const deps: health.ReviewerHealthStore = {
-    statePath,
-    readRows: async () => ({ rows: queue.splice(0), cursor: { liveOffset: 0 } }),
-    effects: {
-      findOffendingMerge: (healthy, regressed) => health.findOffendingMerge(git, healthy, regressed),
-      isAncestor: (a, b) => git(["merge-base", "--is-ancestor", a, b]).then(() => true, () => false),
-      escalate: async (incident, conflict) => {
-        calls.escalate.push({ incident, ...(conflict ? { conflict } : {}) });
-        return "https://github.com/acme/remudero/issues/1";
-      },
-      openRevertPr: async (incident) => {
-        calls.revert.push(incident);
-        return { prUrl: `${REPO_URL}/900` };
-      },
-      closeIssue: async (url) => { calls.closeIssue.push(url); },
-      readPr: async () => "open",
-      closePr: async (url, comment) => { calls.closePr.push({ url, comment }); },
-      ...overrides,
-    },
-    log: (step, extra = {}) => { logs.push({ step, extra }); },
-    now: () => new Date(clock).toISOString(),
+  const calls: Calls = { issues: [], closedIssues: [], reverts: [], closedPrs: [] };
+  const issues: AsyncIssueGateway = {
+    create: over.create ?? (async (title, body) => { calls.issues.push({ title, body }); return `https://github.com/acme/remudero/issues/${calls.issues.length}`; }),
+    listOpen: async () => [],
+    ensureLabel: async () => true,
+    comment: async (_url, body) => { calls.issues.push({ title: "(comment)", body }); },
+    closeWithComment: over.closeWithComment ?? (async (url) => { calls.closedIssues.push(url); }),
   };
-  return { deps, queue, logs, calls, statePath, steps: (step: string) => logs.filter((l) => l.step === step) };
+  const lane: MainRepairLane = {
+    openFixPr: async () => { throw new Error("a reviewer regression opens no fix PR"); },
+    openRevertPr: over.openRevertPr ?? (async (request) => { calls.reverts.push(request); return { prUrl: `${REPO_URL}/900` }; }),
+    readPr: over.readPr ?? (async () => ({ state: "open" as const })),
+    closePr: over.closePr ?? (async (url, comment) => { calls.closedPrs.push({ url, comment }); }),
+  };
+  const escalation = { issues, ledgerPath, runId: "reviewer-health-test" };
+  const log = (step: string, extra: Row = {}) => { logs.push({ step, extra }); };
+  const clockPort = { iso: () => new Date(clock).toISOString() };
+  const readRows = async () => ({ rows: queue.splice(0), cursor: { liveOffset: 0 } });
+  const evaluate = (originMainSha: string | null) =>
+    health.evaluateReviewerHealthNow({ originMainSha }, statePath, readRows, git, escalation, lane, log, clockPort);
+  const write = (...rows: Row[]) => appendFileSync(ledgerPath, rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
+  return { queue, logs, calls, statePath, ledgerPath, issues, lane, escalation, log, clockPort, readRows, evaluate, write,
+    steps: (step: string) => logs.filter((l) => l.step === step) };
 }
 
 /** The 10-20 baseline: twenty reviewer code shas and then C0, five posted code reviews each, none withheld. */
@@ -153,14 +168,14 @@ function baseline(f: TenTwenty): Row[] {
 const onset = (f: TenTwenty): Row[] => [withheld(f.m2, 201), withheld(f.m2, 202), withheld(f.m2, 203), withheld(f.m2, 204),
   refused(f.m2, 205), refused(f.m2, 206)];
 
-async function openTenTwenty(t: TestContext, overrides: Partial<health.ReviewerHealthEffects> = {}) {
+async function openTenTwenty(t: TestContext, over: Partial<AsyncIssueGateway & MainRepairLane> = {}) {
   const f = tenTwenty(t);
-  const h = harness(t, async (args) => f.daemon.git(...args), overrides);
+  const h = harness(t, async (args) => f.daemon.git(...args), over);
   h.queue.push(...baseline(f));
-  const seeded = await health.evaluateReviewerHealthNow(h.deps, { originMainSha: f.c0 });
+  const seeded = await h.evaluate(f.c0);
   assert.equal(seeded.route, "normal");
   h.queue.push(...onset(f));
-  const decision = await health.evaluateReviewerHealthNow(h.deps, { originMainSha: f.m2 });
+  const decision = await h.evaluate(f.m2);
   return { f, h, decision };
 }
 
@@ -182,8 +197,8 @@ test("W1-T10269: the 10-20 outcome shape opens a reviewer-regression incident na
   assert.equal(incident.evidence.n, 6);
   assert.equal(incident.evidence.baseline.k, 0);
   assert.equal(incident.evidence.baseline.n, 105);
-  assert.equal(h.calls.escalate.length, 1, "raised as an issue");
-  assert.equal(h.calls.revert.length, 1);
+  assert.equal(h.calls.issues.length, 1, "raised as an issue");
+  assert.equal(h.calls.reverts.length, 1);
   assert.equal(decision.route, "healed");
   assert.equal(decision.route === "healed" && decision.shadow, false, "today's reviewer IS the regressed sha: judged, so no shadow");
   assert.equal(opened[0]!.extra.boot_head_sha, f.c0);
@@ -198,10 +213,10 @@ test("W1-T10269: an outcome mix inside the baseline opens no incident", async (t
     const sha = fake(`noisy-${i}`);
     for (let j = 0; j < 10; j++) h.queue.push(i % 3 === 0 && j < 2 ? withheld(sha, pr++) : posted(sha, pr++));
   }
-  await health.evaluateReviewerHealthNow(h.deps, { originMainSha: null });
+  await h.evaluate(null);
   const current = fake("noisy-current");
   h.queue.push(withheld(current, 9001), ...Array.from({ length: 9 }, (_, j) => posted(current, 9002 + j)));
-  const decision = await health.evaluateReviewerHealthNow(h.deps, { originMainSha: current });
+  const decision = await h.evaluate(current);
   const state = health.loadReviewerHealthState(h.statePath);
   const judged = health.judgeReviewerSha(state, current);
   assert.ok(judged.k / judged.n > judged.baseline.k / judged.baseline.n,
@@ -209,12 +224,12 @@ test("W1-T10269: an outcome mix inside the baseline opens no incident", async (t
   assert.equal(judged.state, "healthy", "but its interval sits inside the baseline's");
   assert.equal(state.incident, null);
   assert.equal(h.steps("reviewer.regression_opened").length, 0);
-  assert.equal(h.calls.escalate.length, 0);
+  assert.equal(h.calls.issues.length, 0);
   assert.equal(decision.route, "normal");
   // A thin sample: one posted review at a new sha could not have shown a regression.
   const thin = fake("noisy-thin");
   h.queue.push(posted(thin, 9100));
-  await health.evaluateReviewerHealthNow(h.deps, { originMainSha: thin });
+  await h.evaluate(thin);
   const thinJudged = health.judgeReviewerSha(health.loadReviewerHealthState(h.statePath), thin);
   assert.equal(thinJudged.state, "insufficient", "a thin sample reads insufficient, never healthy");
   assert.equal(thinJudged.reason, "thin-sample");
@@ -224,8 +239,8 @@ test("W1-T10269: an outcome mix inside the baseline opens no incident", async (t
 test("W1-T10269: the healed reviewer is origin/main plus the revert and W1-T228 reads it fresh", async (t) => {
   health.resetHealedReviewerTrees();
   const { f, h } = await openTenTwenty(t);
-  const seams = treeSeams(f);
-  const healed = await health.buildHealedReviewerTree(seams, f.m2);
+  const { cut, remove } = cutter(f);
+  const healed = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove);
   assert.equal(healed.state, "ready");
   if (healed.state !== "ready") return;
   const at = (args: string[]) => execFileSync("git", ["-C", healed.path, ...args], { encoding: "utf8" }).trim();
@@ -239,11 +254,11 @@ test("W1-T10269: the healed reviewer is origin/main plus the revert and W1-T228 
   const childEnv = { RMD_SELF_SYNC_DONE: "1" };
   const fresh = checkReviewerCodeFreshness(healed.path, childEnv);
   assert.equal(fresh.status, "fresh", JSON.stringify(fresh));
-  const ledgerPath = join(scratch(t, "publish"), "state", "ledger.ndjson");
+  const publishLedger = join(scratch(t, "publish"), "state", "ledger.ndjson");
   const posts: string[] = [];
   const publish = (freshness: ReviewerCodeFreshness, sha: string) => postReviewStatusGuarded({
     owner: "acme", repo: "remudero", sha, state: "success", description: "PASS", taskId: "PR-205", evidence: "executed",
-    ledgerPath, runId: `publish-${sha.slice(0, 7)}`, prUrl: `${REPO_URL}/205`, reviewerCodeFreshness: freshness,
+    ledgerPath: publishLedger, runId: `publish-${sha.slice(0, 7)}`, prUrl: `${REPO_URL}/205`, reviewerCodeFreshness: freshness,
     fetchLifecycle: () => ({ merged: false, closed: false }), post: ({ state }: { state: string }) => { posts.push(state); },
   } as never);
   const published = await publish(fresh, fake("head-205"));
@@ -258,60 +273,61 @@ test("W1-T10269: the healed reviewer is origin/main plus the revert and W1-T228 
   assert.match(withheldPost.reason ?? "", /materially behind origin\/main/);
   assert.deepEqual(posts, ["success"]);
   // Through the daemon's route: the reviewer it spawns is that healed tree, never the old head or an engine tree.
-  const spawned: Array<{ tree: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+  const spawned: Array<{ tree: string; args: string[] }> = [];
   let normal = 0;
-  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, ledgerPath, () => {}, {
-    health: { ...h.deps }, tree: seams, self: () => ({ owner: "acme", repo: "remudero" }),
-    withWorktreeLease: (_tree, action) => action(),
-    spawnHealed: async (tree, args, _onFailure, env) => { spawned.push({ tree, args, env }); return 0; },
-    shadow: async () => { throw new Error("today's reviewer is judged regressed: no shadow"); },
-  });
+  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath, () => {},
+    freshTree(f, async (tree, args) => { spawned.push({ tree, args }); return 0; }), h.issues, h.lane);
   assert.equal(await route("207", ["--repo", "acme/remudero"], { executionMode: "semantic" }, async () => ++normal), 0);
   assert.equal(normal, 0, "the healed tree reviewed, not today's path");
-  assert.equal(spawned.length, 1);
+  assert.equal(spawned.length, 1, "today's reviewer is judged regressed: no shadow, one healed review");
   const tree = spawned[0]!.tree;
   const parent = execFileSync("git", ["-C", tree, "rev-parse", "HEAD^1"], { encoding: "utf8" }).trim();
   const head = execFileSync("git", ["-C", tree, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   assert.equal(parent, f.m2);
   assert.ok(![f.c0, f.m1, f.m2].includes(head), "the reviewer is no old head, and not origin/main unhealed");
-  assert.equal(spawned[0]!.env[health.REVIEWER_INCIDENT_ENV], "reviewer-regression-" + f.m2.slice(0, 12));
-  assert.ok(spawned[0]!.args.includes("--judge-at-own-start"));
-  assert.ok(spawned[0]!.args.includes("--execution-mode"));
+  const args = spawned[0]!.args;
+  assert.equal(args[0], "207");
+  assert.equal(args[args.indexOf(health.REVIEWER_INCIDENT_FLAG) + 1], "reviewer-regression-" + f.m2.slice(0, 12));
+  assert.ok(args.includes("--judge-at-own-start") && args.includes("--execution-mode"));
+  assert.ok(!args.includes(health.REVIEWER_SHADOW_FLAG));
 });
 
 test("W1-T10269: the healed reviewer follows origin/main and escalates a conflicting revert", async (t) => {
   health.resetHealedReviewerTrees();
   const { f, h } = await openTenTwenty(t);
-  const seams = treeSeams(f);
-  const first = await health.buildHealedReviewerTree(seams, f.m2);
+  const { cut, remove } = cutter(f);
+  const first = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove);
   assert.equal(first.state, "ready");
-  const again = await health.buildHealedReviewerTree(seams, f.m2);
+  const again = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove);
   assert.deepEqual(again, first, "the same origin/main reuses its healed tree");
   const m3 = pushMain(f, { "docs/other.md": "other\n" }, "docs: another page (#103)");
-  const moved = await health.buildHealedReviewerTree(seams, f.m2);
+  const moved = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove);
   assert.equal(moved.state, "ready");
   if (moved.state !== "ready" || first.state !== "ready") return;
   assert.equal(moved.originMainSha, m3, "rebuilt when origin/main moves");
   assert.notEqual(moved.path, first.path);
   assert.equal(execFileSync("git", ["-C", moved.path, "rev-parse", "HEAD^1"], { encoding: "utf8" }).trim(), m3);
-  // Today's code (m3) has no judgment yet: the route shadows it; a healed child that cannot run falls back to today's path.
-  const shadowLogs: string[] = [];
-  const shadowed: string[][] = [];
+  // Today's code (m3) has no judgment yet: the route shadows it from a fresh origin/main tree; a healed
+  // child that cannot run falls back to today's path.
+  const shadowLogs: Array<{ step: string; extra: Row }> = [];
+  const calls: Array<{ tree: string; args: string[] }> = [];
   let fellBack = 0;
-  const shadowRoute = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, join(f.root, "ledger.ndjson"), (step) => shadowLogs.push(step), {
-    health: { ...h.deps }, tree: seams, self: () => ({ owner: "acme", repo: "remudero" }), withWorktreeLease: (_tree, action) => action(),
-    shadow: async (_pr, args, originMain) => { shadowed.push([...args, originMain]); throw new Error("shadow child died"); },
-    spawnHealed: async () => { throw new Error("spawn ENOENT"); },
-  });
+  const shadowRoute = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath,
+    (step, extra = {}) => shadowLogs.push({ step, extra }), freshTree(f, async (tree, args, onFailure) => {
+      calls.push({ tree, args });
+      if (args.includes(health.REVIEWER_SHADOW_FLAG)) { onFailure?.("shadow child died"); return 1; }
+      throw new Error("spawn ENOENT");
+    }), h.issues, h.lane);
   assert.equal(await shadowRoute("216", [], {}, async () => { fellBack++; return 7; }), 7);
-  assert.equal(shadowed.length, 1);
-  assert.ok(shadowed[0]!.includes(health.REVIEWER_SHADOW_FLAG) && shadowed[0]!.includes(m3), "today's reviewer, at origin/main, in shadow");
-  assert.deepEqual(shadowLogs, ["reviewer.shadow_failed", "reviewer.shadow_ran", "reviewer.healed_review_failed"]);
+  const shadow = calls.find((c) => c.args.includes(health.REVIEWER_SHADOW_FLAG))!;
+  assert.equal(execFileSync("git", ["-C", shadow.tree, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), m3, "today's reviewer, at origin/main, in shadow");
+  assert.deepEqual(shadowLogs.map((l) => l.step), ["reviewer.shadow_ran", "reviewer.healed_review_failed"]);
+  assert.equal(shadowLogs[0]!.extra.failure, "shadow child died");
   assert.equal(fellBack, 1);
   assert.equal((await health.gitIn(f.daemon.dir)(["rev-parse", "origin/main"])).trim(), m3, "the default git is the hardened leaf");
   // A later merge rewrites the offending lines: the revert no longer applies.
   const m4 = pushMain(f, { "src/lib/required-semantic-review.ts": 'export const refusal = () => "something else";\n' }, "fix(review): reword (#104)");
-  const conflict = await health.buildHealedReviewerTree(seams, f.m2);
+  const conflict = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove);
   assert.equal(conflict.state, "conflict");
   if (conflict.state !== "conflict") return;
   assert.equal(conflict.originMainSha, m4);
@@ -319,26 +335,22 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   // Through the route: it escalates the conflict once and reviews on today's path — never an old head.
   const logs: string[] = [];
   let normal = 0;
-  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, join(f.root, "ledger.ndjson"), (step) => logs.push(step), {
-    health: { ...h.deps }, tree: seams, self: () => ({ owner: "acme", repo: "remudero" }),
-    spawnHealed: async () => { throw new Error("no healed tree exists to spawn"); },
-    shadow: async () => undefined,
-  });
+  const before = h.calls.issues.length;
+  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath, (step) => logs.push(step),
+    freshTree(f, async () => { throw new Error("no healed tree exists to spawn"); }), h.issues, h.lane);
   assert.equal(await route("207", [], {}, async () => { normal++; return 0; }), 0);
   assert.equal(await route("208", [], {}, async () => { normal++; return 0; }), 0);
   assert.equal(normal, 2);
-  const conflicts = h.calls.escalate.filter((c) => c.conflict);
-  assert.equal(conflicts.length, 1, "escalated once per incident and origin/main");
-  assert.deepEqual(conflicts[0]!.conflict!.paths, ["src/lib/required-semantic-review.ts"]);
+  const filed = h.calls.issues.slice(before);
+  assert.equal(filed.length, 1, "escalated once per incident and origin/main");
+  assert.match(filed[0]!.body, /does not apply/);
+  assert.match(filed[0]!.body, /src\/lib\/required-semantic-review\.ts/);
   assert.ok(logs.includes("reviewer.healed_tree_unavailable"));
-  const escalation = health.reviewerRegressionEscalation(conflicts[0]!.incident, conflicts[0]!.conflict);
-  assert.match(escalation.detail, /does not apply/);
-  assert.equal(escalation.recommendation, "Heal with a fix PR");
   // When main itself reverts the offending merge, the healed patch is empty: the healed tree IS origin/main.
   f.work.git("revert", "--no-edit", m4);
   f.work.git("revert", "--no-edit", f.m2);
   f.work.git("push", "-q", "origin", "main");
-  assert.equal((await health.buildHealedReviewerTree(seams, f.m2)).state, "empty");
+  assert.equal((await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove)).state, "empty");
   assert.equal(await route("209", [], {}, async () => { normal++; return 0; }), 0);
   assert.ok(logs.includes("reviewer.healed_patch_empty"));
 });
@@ -348,28 +360,18 @@ test("W1-T10269: the incident opens one revert PR of the offending merge", async
   const f = tenTwenty(t);
   const h = harness(t, async (args) => f.daemon.git(...args));
   h.queue.push(...baseline(f));
-  await health.evaluateReviewerHealthNow(h.deps, { originMainSha: f.c0 });
-  const requests: MainRepairRevertRequest[] = [];
-  const { openRevertPr: _unused, ...effects } = h.deps.effects;
-  void _unused;
-  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, join(f.root, "ledger.ndjson"), () => {}, {
-    health: { ...h.deps, effects }, tree: treeSeams(f), self: () => ({ owner: "acme", repo: "remudero" }),
-    withWorktreeLease: (_tree, action) => action(),
-    openRevert: async (owner, repo, _config, request) => {
-      assert.deepEqual([owner, repo], ["acme", "remudero"]);
-      requests.push(request);
-      return { prUrl: `${REPO_URL}/900` };
-    },
-    spawnHealed: async () => 0, shadow: async () => 0,
-  });
-  h.queue.push(...onset(f));
+  await h.evaluate(f.c0);
+  // The route reads the ledger itself: its rows go to the ledger file.
+  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath, () => {},
+    freshTree(f, async () => 0), h.issues, h.lane);
+  h.write(...onset(f));
   await route("210", [], {}, async () => 0);
   // More regressed rows, at the same sha and a later one, never open a second revert.
   const m2b = fake("m2b");
-  h.queue.push(withheld(f.m2, 211), withheld(m2b, 212), withheld(m2b, 213), refused(m2b, 214));
+  h.write(withheld(f.m2, 211), withheld(m2b, 212), withheld(m2b, 213), refused(m2b, 214));
   await route("215", [], {}, async () => 0);
-  assert.equal(requests.length, 1, "one revert PR");
-  const request = requests[0]!;
+  assert.equal(h.calls.reverts.length, 1, "one revert PR, through the red-main repair lane");
+  const request = h.calls.reverts[0]!;
   assert.equal(request.offendingSha, f.m2);
   assert.equal(request.offendingPr, 102);
   assert.equal(request.reason?.kind, "reviewer-regression");
@@ -384,7 +386,9 @@ test("W1-T10269: the incident opens one revert PR of the offending merge", async
   const state = health.loadReviewerHealthState(h.statePath);
   assert.equal(state.incident?.revertPrUrl, `${REPO_URL}/900`);
   assert.ok(state.incident!.signature.includes("head-task-metadata-unavailable"));
-  assert.ok(h.steps("reviewer.regression_extended").length >= 1, "the later regressed sha joins the open incident");
+  const rows = readFileSync(h.ledgerPath, "utf8");
+  assert.match(rows, /"step":"reviewer\.regression_extended"/, "the later regressed sha joins the open incident");
+  assert.match(rows, /"task_id":"REVIEWER-HEALTH"/);
 });
 
 test("W1-T10269: the incident closes when the current reviewer returns to baseline", async (t) => {
@@ -392,28 +396,28 @@ test("W1-T10269: the incident closes when the current reviewer returns to baseli
   const fixed = fake("fixed-main");
   // A few clean reviews at today's code are not yet evidence enough: the shadow keeps measuring.
   h.queue.push(posted(fixed, 300), posted(fixed, 301), posted(fixed, 302));
-  const early = await health.evaluateReviewerHealthNow(h.deps, { originMainSha: fixed });
+  const early = await h.evaluate(fixed);
   assert.equal(early.route, "healed");
   assert.equal(early.route === "healed" && early.shadow, true, "today's reviewer has no judgment yet: it runs in shadow");
   assert.equal(h.steps("reviewer.regression_closed").length, 0);
   // Shadow reviews at today's code count as its outcomes.
   for (let i = 0; i < 30; i++) h.queue.push({ ...posted(fixed, 303 + i), step: "shadow.review.shadow_verdict" });
-  const decision = await health.evaluateReviewerHealthNow(h.deps, { originMainSha: fixed });
+  const decision = await h.evaluate(fixed);
   const closed = h.steps("reviewer.regression_closed");
   assert.equal(closed.length, 1);
   assert.equal(closed[0]!.extra.current_reviewer_code_sha, fixed);
   assert.equal(closed[0]!.extra.revert_pr_state, "open");
   assert.equal(decision.route, "normal", "routing returns to the normal path");
-  assert.deepEqual(h.calls.closeIssue, ["https://github.com/acme/remudero/issues/1"]);
-  assert.equal(h.calls.closePr.length, 1, "the revert PR a fix made unnecessary is closed");
-  assert.match(h.calls.closePr[0]!.comment, /A fix made this revert unnecessary/);
+  assert.deepEqual(h.calls.closedIssues, ["https://github.com/acme/remudero/issues/1"]);
+  assert.equal(h.calls.closedPrs.length, 1, "the revert PR a fix made unnecessary is closed");
+  assert.match(h.calls.closedPrs[0]!.comment, /A fix made this revert unnecessary/);
   const state = health.loadReviewerHealthState(h.statePath);
   assert.equal(state.incident, null);
   assert.equal(state.closed.length, 1);
   // The same failure mode recurring reopens THAT incident, with its blame, instead of blaming a later merge.
   const later = fake("later-main");
   h.queue.push(refused(later, 400), refused(later, 401));
-  await health.evaluateReviewerHealthNow(h.deps, { originMainSha: later });
+  await h.evaluate(later);
   const reopened = health.loadReviewerHealthState(h.statePath).incident!;
   assert.equal(reopened.reopenedFrom, "reviewer-regression-" + f.m2.slice(0, 12));
   assert.equal(reopened.offending?.sha, f.m2);
@@ -471,18 +475,18 @@ test("W1-T10269: the seed replays history with effects off and raises only a reg
   const f = tenTwenty(t);
   const carried = harness(t, async (args) => f.daemon.git(...args));
   carried.queue.push(...baseline(f), ...onset(f));
-  const decision = await health.evaluateReviewerHealthNow(carried.deps, { originMainSha: fake("today") });
+  const decision = await carried.evaluate(fake("today"));
   assert.equal(decision.route, "normal");
-  assert.equal(carried.calls.escalate.length, 0, "history's incident raises nothing today");
+  assert.equal(carried.calls.issues.length, 0, "history's incident raises nothing today");
   assert.equal(carried.steps("reviewer.regression_carried").length, 1);
   const state = health.loadReviewerHealthState(carried.statePath);
   assert.equal(state.closed.length, 1, "carried as closed, for a recurrence to reopen");
   assert.equal(state.closed[0]!.offending?.sha, f.m2);
   const raised = harness(t, async (args) => f.daemon.git(...args));
   raised.queue.push(...baseline(f), ...onset(f));
-  const live = await health.evaluateReviewerHealthNow(raised.deps, { originMainSha: f.m2 });
+  const live = await raised.evaluate(f.m2);
   assert.equal(live.route, "healed");
-  assert.equal(raised.calls.escalate.length, 1, "today's reviewer is the regressed one: raised once");
+  assert.equal(raised.calls.issues.length, 1, "today's reviewer is the regressed one: raised once");
   assert.equal(raised.steps("reviewer.regression_opened")[0]!.extra.from_seed, true);
   assert.equal(raised.steps("reviewer.health_seeded").length, 1);
 });
@@ -492,36 +496,42 @@ test("W1-T10269: an incident without a healthy ancestor or a review-material mer
   // No healthy sha precedes the regression in git: the baseline shas are not on main.
   const lone = harness(t, async (args) => f.daemon.git(...args));
   lone.queue.push(...Array.from({ length: 200 }, (_, i) => posted(fake(`lone-${i % 40}`), i + 1)));
-  await health.evaluateReviewerHealthNow(lone.deps, { originMainSha: null });
+  await lone.evaluate(null);
   lone.queue.push(...onset(f));
-  const decision = await health.evaluateReviewerHealthNow(lone.deps, { originMainSha: f.m2 });
+  const decision = await lone.evaluate(f.m2);
   assert.equal(decision.route, "normal");
   assert.match(decision.reason, /names no offending merge/);
   assert.match(health.loadReviewerHealthState(lone.statePath).incident!.offendingUnavailable!, /no healthy reviewer code sha/);
-  assert.equal(lone.calls.revert.length, 0);
+  assert.equal(lone.calls.reverts.length, 0);
+  assert.equal(lone.calls.issues.length, 1, "still raised as an issue");
   // Merge history unreadable.
-  const blind = harness(t, async (args) => f.daemon.git(...args), { findOffendingMerge: async () => { throw new Error("git gone"); } });
+  const blind = harness(t, async (args) => {
+    if (args[0] === "rev-list") throw new Error("git gone");
+    return f.daemon.git(...args);
+  });
   blind.queue.push(...baseline(f));
-  await health.evaluateReviewerHealthNow(blind.deps, { originMainSha: null });
+  await blind.evaluate(null);
   blind.queue.push(...onset(f));
-  await health.evaluateReviewerHealthNow(blind.deps, { originMainSha: f.m2 });
+  await blind.evaluate(f.m2);
   assert.match(health.loadReviewerHealthState(blind.statePath).incident!.offendingUnavailable!, /merge history unreadable: git gone/);
-  // Nothing review-material in range: only the docs merge.
+  // Nothing review-material in range.
   assert.equal(await health.findOffendingMerge(async (args) => f.daemon.git(...args), f.c0, f.m1), undefined);
-  const none = harness(t, async (args) => f.daemon.git(...args), { findOffendingMerge: async () => undefined });
+  const none = harness(t, async (args) => (args[0] === "rev-list" ? "" : f.daemon.git(...args)));
   none.queue.push(...baseline(f));
-  await health.evaluateReviewerHealthNow(none.deps, { originMainSha: null });
+  await none.evaluate(null);
   none.queue.push(...onset(f));
-  await health.evaluateReviewerHealthNow(none.deps, { originMainSha: f.m2 });
+  await none.evaluate(f.m2);
   assert.match(health.loadReviewerHealthState(none.statePath).incident!.offendingUnavailable!, /no review-material merge/);
 });
 
 test("W1-T10269: a failing effect is ledgered and never blocks the incident", async (t) => {
   const refusedRevert = await openTenTwenty(t, {
-    escalate: async () => { throw new Error("issues down"); },
+    create: async () => { throw new Error("issues down"); },
     openRevertPr: async () => ({ refused: "git revert did not apply", conflictPaths: ["src/lib/review.ts"] }),
   });
-  assert.equal(refusedRevert.h.steps("reviewer.regression_escalation_failed").length, 1);
+  const escalationRows = readFileSync(refusedRevert.h.ledgerPath, "utf8");
+  assert.match(escalationRows, /"step":"escalation\.failed"/, "the escalation's own failure row");
+  assert.equal(health.loadReviewerHealthState(refusedRevert.h.statePath).incident?.issueUrl, null);
   const refusal = refusedRevert.h.steps("main-repair.revert_refused");
   assert.equal(refusal.length, 1);
   assert.deepEqual(refusal[0]!.extra.conflict_paths, ["src/lib/review.ts"]);
@@ -530,20 +540,26 @@ test("W1-T10269: a failing effect is ledgered and never blocks the incident", as
   const state = health.loadReviewerHealthState(thrown.h.statePath);
   assert.equal(state.incident?.revertRefused?.reason, "push refused");
   // Close-side failures: an unreadable revert PR is left open; failed closes are ledgered.
+  const fixed = fake("fixed-close");
   const closing = await openTenTwenty(t, {
     readPr: async () => { throw new Error("unreadable"); },
-    closeIssue: async () => { throw new Error("close failed"); },
+    closeWithComment: async () => { throw new Error("close failed"); },
   });
-  const fixed = fake("fixed-close");
   closing.h.queue.push(...Array.from({ length: 40 }, (_, i) => posted(fixed, 700 + i)));
-  await health.evaluateReviewerHealthNow(closing.h.deps, { originMainSha: fixed });
+  await closing.h.evaluate(fixed);
   assert.equal(closing.h.steps("reviewer.regression_closed")[0]!.extra.revert_pr_state, "unread");
-  assert.equal(closing.h.calls.closePr.length, 0, "never closed blind");
+  assert.equal(closing.h.calls.closedPrs.length, 0, "never closed blind");
   assert.equal(closing.h.steps("reviewer.regression_issue_close_failed").length, 1);
   const prFails = await openTenTwenty(t, { closePr: async () => { throw new Error("pr close failed"); } });
   prFails.h.queue.push(...Array.from({ length: 40 }, (_, i) => posted(fixed, 800 + i)));
-  await health.evaluateReviewerHealthNow(prFails.h.deps, { originMainSha: fixed });
+  await prFails.h.evaluate(fixed);
   assert.equal(prFails.h.steps("reviewer.regression_revert_close_failed").length, 1);
+  // A lane that cannot read or close a PR leaves the revert PR to its reviewers.
+  const blindLane = await openTenTwenty(t);
+  delete (blindLane.h.lane as { readPr?: unknown }).readPr;
+  blindLane.h.queue.push(...Array.from({ length: 40 }, (_, i) => posted(fixed, 900 + i)));
+  await blindLane.h.evaluate(fixed);
+  assert.equal(blindLane.h.steps("reviewer.regression_closed")[0]!.extra.revert_pr_state, "unread");
 });
 
 test("W1-T10269: the ledger reader streams the union once, then only what is new", async (t) => {
@@ -571,48 +587,45 @@ test("W1-T10269: the ledger reader streams the union once, then only what is new
 });
 
 test("W1-T10269: evaluation seeds in the background, serializes, and degrades to the normal route", async (t) => {
-  const stateDir = scratch(t, "serial");
-  const statePath = join(stateDir, "reviewer-health.json");
+  const h = harness(t, async () => "");
   const logs: string[] = [];
   let reads = 0;
-  const deps: health.ReviewerHealthStore = {
-    statePath,
-    readRows: async () => { reads++; return { rows: [posted(fake("serial"), reads)], cursor: { liveOffset: reads } }; },
-    effects: {} as health.ReviewerHealthEffects,
-    log: (step) => logs.push(step),
-    now: () => "2026-10-21T00:00:00.000Z",
-  };
-  const first = await health.evaluateReviewerHealth(deps, { originMainSha: null });
+  const readRows = async () => { reads++; return { rows: [posted(fake("serial"), reads)], cursor: { liveOffset: reads } }; };
+  const log = (step: string) => { logs.push(step); };
+  const run = (statePath: string, read: typeof readRows) =>
+    health.evaluateReviewerHealth({ originMainSha: null }, statePath, read, async () => "", h.escalation, h.lane, log, h.clockPort);
+  const first = await run(h.statePath, readRows);
   assert.match(first.route === "normal" ? first.reason : "", /seeding/);
-  const during = await health.evaluateReviewerHealth(deps, { originMainSha: null });
+  const during = await run(h.statePath, readRows);
   assert.match(during.route === "normal" ? during.reason : "", /seeding/);
-  await health.settleReviewerHealthSeed(statePath);
+  await health.settleReviewerHealthSeed(h.statePath);
   assert.ok(logs.includes("reviewer.health_seeded"));
-  const both = await Promise.all([health.evaluateReviewerHealth(deps, { originMainSha: null }), health.evaluateReviewerHealth(deps, { originMainSha: null })]);
+  const both = await Promise.all([run(h.statePath, readRows), run(h.statePath, readRows)]);
   assert.deepEqual(both.map((d) => d.route), ["normal", "normal"]);
   assert.equal(reads, 3);
-  assert.equal(health.loadReviewerHealthState(statePath).cursor?.liveOffset, 3);
-  const broken = { ...deps, readRows: async () => { throw new Error("ledger unreadable"); } };
-  const degraded = await health.evaluateReviewerHealth(broken, { originMainSha: null });
+  assert.equal(health.loadReviewerHealthState(h.statePath).cursor?.liveOffset, 3);
+  const broken = async (): Promise<never> => { throw new Error("ledger unreadable"); };
+  const degraded = await run(h.statePath, broken);
   assert.match(degraded.route === "normal" ? degraded.reason : "", /reviewer health unavailable: ledger unreadable/);
-  const brokenSeed = { ...broken, statePath: join(stateDir, "other.json") };
-  await health.evaluateReviewerHealth(brokenSeed, { originMainSha: null });
-  await health.settleReviewerHealthSeed(brokenSeed.statePath);
+  const otherPath = join(scratch(t, "serial-other"), "reviewer-health.json");
+  await run(otherPath, broken);
+  await health.settleReviewerHealthSeed(otherPath);
   assert.equal(logs.filter((step) => step === "reviewer.health_unavailable").length, 2);
   // A torn or older state file re-seeds rather than judging on counts it cannot trust.
-  writeFileSync(statePath, "{torn");
-  assert.equal(health.loadReviewerHealthState(statePath).cursor, null);
-  writeFileSync(statePath, JSON.stringify({ version: "reviewer-health-v0" }));
-  assert.equal(health.loadReviewerHealthState(statePath).seq, 0);
+  writeFileSync(h.statePath, "{torn");
+  assert.equal(health.loadReviewerHealthState(h.statePath).cursor, null);
+  writeFileSync(h.statePath, JSON.stringify({ version: "reviewer-health-v0" }));
+  assert.equal(health.loadReviewerHealthState(h.statePath).seq, 0);
 });
 
 test("W1-T10269: the operator's fix-PR choice is recorded, and the healed tree merges it", async (t) => {
   health.resetHealedReviewerTrees();
   const { f, h } = await openTenTwenty(t);
   const out: string[] = [];
-  const io = { statePath: h.statePath, clock: { iso: () => "2026-10-21T00:00:00.000Z" }, out: (l: string) => out.push(l), err: (l: string) => out.push(l) };
-  assert.equal(health.reviewerHealCommand(["--with-pr"], io), 2);
-  assert.equal(health.reviewerHealCommand(["--with-pr", "77"], io), 0);
+  const at = { iso: () => "2026-10-21T00:00:00.000Z" };
+  const heal = (rest: string[]) => health.reviewerHealCommand(rest, h.statePath, at, (l) => out.push(l), (l) => out.push(l));
+  assert.equal(heal(["--with-pr"]), 2);
+  assert.equal(heal(["--with-pr", "77"]), 0);
   assert.deepEqual(health.loadReviewerHealthState(h.statePath).operatorHeal, { withPr: 77, at: "2026-10-21T00:00:00.000Z" });
   assert.match(out.at(-1)!, /merges PR #77 on origin\/main for reviewer-regression-/);
   // PR 77's head: a fix on top of main.
@@ -620,18 +633,16 @@ test("W1-T10269: the operator's fix-PR choice is recorded, and the healed tree m
   const fix = commitFile(f.work, { "src/lib/required-semantic-review.ts": "export const refusal = () => undefined; // fixed\n" }, "fix: heal");
   f.work.git("push", "-q", "origin", `${fix}:refs/pull/77/head`);
   f.work.git("checkout", "-q", "main");
-  const seams = treeSeams(f);
-  const healed = await health.buildHealedReviewerTree(seams, f.m2, { withPr: 77 });
+  const { cut, remove } = cutter(f);
+  const healed = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove, { withPr: 77 });
   assert.equal(healed.state, "ready");
   if (healed.state !== "ready") return;
   assert.equal(healed.patch, "with-pr");
   assert.equal(execFileSync("git", ["-C", healed.path, "rev-parse", "HEAD^1"], { encoding: "utf8" }).trim(), f.m2);
   // The route never lets PR 77's own tree review PR 77.
   const spawned: string[] = [];
-  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, join(f.root, "ledger.ndjson"), () => {}, {
-    health: { ...h.deps }, tree: seams, self: () => ({ owner: "acme", repo: "remudero" }),
-    withWorktreeLease: (_tree, action) => action(), spawnHealed: async (tree) => { spawned.push(tree); return 0; },
-  });
+  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath, () => {},
+    freshTree(f, async (tree) => { spawned.push(tree); return 0; }), h.issues, h.lane);
   await route("77", [], {}, async () => 1);
   await route("78", [], {}, async () => 1);
   const parents = spawned.map((tree) => execFileSync("git", ["-C", tree, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim());
@@ -642,23 +653,17 @@ test("W1-T10269: the operator's fix-PR choice is recorded, and the healed tree m
   f.work.git("push", "-q", "origin", `${clash}:refs/pull/79/head`);
   f.work.git("reset", "-q", "--hard", "HEAD^");
   pushMain(f, { "src/lib/required-semantic-review.ts": "main moved\n" }, "main moves (#105)");
-  assert.equal((await health.buildHealedReviewerTree(seams, f.m2, { withPr: 79 })).state, "conflict");
-  assert.equal(health.reviewerHealCommand(["--clear"], io), 0);
+  assert.equal((await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove, { withPr: 79 })).state, "conflict");
+  assert.equal(heal(["--clear"]), 0);
   assert.equal(health.loadReviewerHealthState(h.statePath).operatorHeal, null);
 });
 
-test("W1-T10269: the route's default effects raise, read and close through gh", async (t) => {
-  health.resetHealedReviewerTrees();
-  const f = tenTwenty(t);
-  const h = harness(t, async (args) => f.daemon.git(...args));
-  h.queue.push(...baseline(f));
-  await health.evaluateReviewerHealthNow(h.deps, { originMainSha: f.c0 });
-  const m3 = pushMain(f, { "docs/other.md": "other\n" }, "docs: another page (#103)");
-  f.daemon.git("fetch", "-q", "origin", "main");
+test("W1-T10269: the route's default issue gateway assigns, and its default lane reads and closes over REST", async (t) => {
   const shim = ghShim([
     { when: "issue create", stdout: "https://github.com/acme/remudero/issues/41\n" },
-    { when: "/issues?", stdout: "[]" },
+    { when: "issues/42 --repo", stderr: "assign refused", exit: 1 },
     { when: "pulls/900", stdout: JSON.stringify({ state: "open", merged: false }) },
+    { when: "pulls/901", stdout: JSON.stringify({ state: "closed", merged: true }) },
     { when: "api ", stdout: "{}" },
   ], { kind: "reviewer-heal-effects" });
   const saved = { PATH: process.env.PATH, allow: process.env.RMD_ALLOW_LIVE_WRITES };
@@ -669,54 +674,85 @@ test("W1-T10269: the route's default effects raise, read and close through gh", 
     if (saved.allow === undefined) delete process.env.RMD_ALLOW_LIVE_WRITES; else process.env.RMD_ALLOW_LIVE_WRITES = saved.allow;
     execFileSync("rm", ["-rf", shim.dir]);
   });
-  const ledgerPath = join(f.root, "route-ledger.ndjson");
-  const { deps } = h;
-  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, ledgerPath, () => {}, {
-    health: { statePath: deps.statePath, readRows: deps.readRows, log: deps.log, now: deps.now },
-    tree: treeSeams(f), self: () => ({ owner: "acme", repo: "remudero" }), withWorktreeLease: (_tree, action) => action(),
-    openRevert: async () => ({ prUrl: `${REPO_URL}/900` }), spawnHealed: async () => 0, shadow: async () => 0,
-  });
-  h.queue.push(...onset(f));
-  assert.equal(await route("220", [], {}, async () => 1), 0);
-  const opened = health.loadReviewerHealthState(deps.statePath).incident!;
-  assert.equal(opened.issueUrl, "https://github.com/acme/remudero/issues/41");
-  h.queue.push(...Array.from({ length: 40 }, (_, i) => posted(m3, 900 + i)));
-  assert.equal(await route("221", [], {}, async () => 5), 5, "closed: today's path again");
+  const logs: string[] = [];
+  const gateway = assigningIssueGateway("acme", "remudero", (step) => logs.push(step));
+  assert.equal(await gateway.create("t", "b", []), "https://github.com/acme/remudero/issues/41");
+  const failing = assigningIssueGateway("acme", "remudero", (step) => logs.push(step),
+    { create: async () => "https://github.com/acme/remudero/issues/42" });
+  assert.equal(await failing.create("t", "b", []), "https://github.com/acme/remudero/issues/42", "an unassigned issue still stands");
+  assert.deepEqual(logs, ["reviewer.regression_assign_failed"]);
+  const lane = reviewerRevertLane("acme", "remudero", { root: scratch(t, "lane") } as Config, join(scratch(t, "lane-ledger"), "ledger.ndjson"), "run");
+  assert.deepEqual(await lane.readPr!(`${REPO_URL}/900`), { state: "open" });
+  assert.deepEqual(await lane.readPr!(`${REPO_URL}/901`), { state: "merged" });
+  await lane.closePr!(`${REPO_URL}/900`, "a fix made this revert unnecessary");
   const calls = shim.calls().join("\n");
   assert.match(calls, /issue edit https:\/\/github.com\/acme\/remudero\/issues\/41 --repo acme\/remudero --add-assignee acme/, "assigned");
-  assert.match(calls, /pulls\/900 --method PATCH|--method PATCH repos\/acme\/remudero\/pulls\/900/, "the unnecessary revert PR is closed");
-  assert.match(calls, /issue close https:\/\/github.com\/acme\/remudero\/issues\/41/);
-  assert.equal(health.loadReviewerHealthState(deps.statePath).incident, null);
+  assert.match(calls, /--method POST repos\/acme\/remudero\/issues\/900\/comments/);
+  assert.match(calls, /--method PATCH repos\/acme\/remudero\/pulls\/900/);
+  // Built with no gateway or lane, the route takes those two defaults for this repo.
+  const f = tenTwenty(t);
+  assert.equal(typeof buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, join(f.root, "ledger.ndjson"), () => {},
+    freshTree(f, async () => 0)), "function");
 });
 
 test("W1-T10269: the healed tree builder refuses rather than falls back", async (t) => {
   health.resetHealedReviewerTrees();
   const f = tenTwenty(t);
-  const seams = treeSeams(f);
-  const noOrigin = await health.buildHealedReviewerTree({ ...seams, git: async () => { throw new Error("offline"); } }, f.m2);
-  assert.deepEqual(noOrigin, { state: "unavailable", originMainSha: null, reason: "origin/main unreadable: offline" });
-  const offMain = await health.buildHealedReviewerTree(seams, fake("not-on-main"));
+  const { cut, remove } = cutter(f);
+  const noOrigin = await health.buildHealedReviewerTree(scratch(t, "not-a-repo"), f.m2, cut, remove);
+  assert.equal(noOrigin.state, "unavailable");
+  assert.match(noOrigin.state === "unavailable" ? noOrigin.reason : "", /^origin\/main unreadable/);
+  const offMain = await health.buildHealedReviewerTree(f.daemon.dir, fake("not-on-main"), cut, remove);
   assert.equal(offMain.state, "unavailable");
-  const uncut = await health.buildHealedReviewerTree({ ...seams, cut: () => { throw new Error("no worktree"); } }, f.m2);
+  const uncut = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, () => { throw new Error("no worktree"); }, remove);
   assert.match(uncut.state === "unavailable" ? uncut.reason : "", /could not be cut: no worktree/);
-  // A cached tree someone dirtied is rebuilt, not reused.
-  const first = await health.buildHealedReviewerTree(seams, f.m2);
+  // A cached tree someone dirtied is removed and rebuilt, not reused.
+  const first = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove);
   assert.equal(first.state, "ready");
   if (first.state !== "ready") return;
   writeFileSync(join(first.path, "src/lib/review.ts"), "dirty\n");
-  const rebuilt = await health.buildHealedReviewerTree(seams, f.m2);
+  const rebuilt = await health.buildHealedReviewerTree(f.daemon.dir, f.m2, cut, remove);
   assert.ok(rebuilt.state === "ready" && rebuilt.path !== first.path);
-  // A merge commit reverts against its first parent.
-  f.work.git("checkout", "-q", "-b", "side");
-  commitFile(f.work, { "src/lib/review.ts": "side\n" }, "side change");
-  f.work.git("checkout", "-q", "main");
-  f.work.git("merge", "-q", "--no-ff", "-m", "Merge pull request #106 from acme/side", "side");
-  const merge = f.work.git("rev-parse", "HEAD");
-  f.work.git("push", "-q", "origin", "main");
-  f.daemon.git("fetch", "-q", "origin", "main");
+  assert.equal(existsSync(first.path), false, "the dirtied tree is gone");
+  // The route's cut: a tree an earlier process left at the healed path is removed and cut again; a
+  // tree that cannot be added at all is refused.
+  const { h } = await openTenTwenty(t);
+  void h;
+  const merge = await (async () => {
+    // A merge commit reverts against its first parent.
+    f.work.git("checkout", "-q", "-b", "side");
+    commitFile(f.work, { "src/lib/review.ts": "side\n" }, "side change");
+    f.work.git("checkout", "-q", "main");
+    f.work.git("merge", "-q", "--no-ff", "-m", "Merge pull request #106 from acme/side", "side");
+    f.work.git("push", "-q", "origin", "main");
+    f.daemon.git("fetch", "-q", "origin", "main");
+    return f.work.git("rev-parse", "HEAD");
+  })();
   assert.equal((await health.findOffendingMerge(async (args) => f.daemon.git(...args), f.m2, merge))?.pr, 106);
-  const healedMerge = await health.buildHealedReviewerTree(seams, merge);
+  const healedMerge = await health.buildHealedReviewerTree(f.daemon.dir, merge, cut, remove);
   assert.equal(healedMerge.state, "ready");
+});
+
+test("W1-T10269: the route's healed tree survives a restart and refuses a tree it cannot add", async (t) => {
+  health.resetHealedReviewerTrees();
+  const { f, h } = await openTenTwenty(t);
+  const spawned: string[] = [];
+  const tree = freshTree(f, async (path) => { spawned.push(path); return 0; });
+  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath, () => {}, tree, h.issues, h.lane);
+  await route("230", [], {}, async () => 1);
+  health.resetHealedReviewerTrees(); // a new process: the healed path is on disk, its memo is not
+  await route("231", [], {}, async () => 1);
+  assert.equal(spawned.length, 2);
+  assert.equal(spawned[0], spawned[1], "the same healed path, removed and cut again");
+  assert.equal(execFileSync("git", ["-C", spawned[1]!, "rev-parse", "HEAD^1"], { encoding: "utf8" }).trim(), f.m2);
+  health.resetHealedReviewerTrees();
+  const logs: Array<{ step: string; extra: Row }> = [];
+  let normal = 0;
+  const refusing = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath, (step, extra = {}) => logs.push({ step, extra }),
+    freshTree(f, async () => 0, { worktreeRoot: join(f.root, "fresh-root"), addWorktree: () => { throw new Error("worktree add refused"); } }), h.issues, h.lane);
+  assert.equal(await refusing("232", [], {}, async () => ++normal), 1);
+  assert.equal(logs[0]!.step, "reviewer.healed_tree_unavailable");
+  assert.match(String(logs[0]!.extra.reason), /worktree add refused/);
 });
 
 test("W1-T10269: blame reads run-task.ts's review path and the modules it imports", async (t) => {
@@ -756,10 +792,9 @@ test("W1-T10269: terminal rows carry the judging code's sha; a shadow review is 
   assert.equal(health.loadedReviewerCodeSha(() => "not-a-sha"), null);
   health.resetLoadedReviewerCodeSha();
   const sha = fake("loaded");
-  assert.deepEqual(health.reviewerHealthRowFields("review.posted", { [health.REVIEWER_INCIDENT_ENV]: "inc-1" }, () => sha),
-    { reviewer_code_sha: sha, incident_id: "inc-1" });
-  assert.deepEqual(health.reviewerHealthRowFields("review.semantic_setup_refused", {}, () => null), {});
-  assert.deepEqual(health.reviewerHealthRowFields("review.pending_posted", {}, () => sha), {});
+  assert.deepEqual(health.reviewerHealthRowFields("review.posted", "inc-1", () => sha), { reviewer_code_sha: sha, incident_id: "inc-1" });
+  assert.deepEqual(health.reviewerHealthRowFields("review.semantic_setup_refused", undefined, () => null), {});
+  assert.deepEqual(health.reviewerHealthRowFields("review.pending_posted", undefined, () => sha), {});
   assert.equal(health.reviewerShadowStep("review.posted", true), "shadow.review.posted");
   assert.equal(health.reviewerShadowStep("review.posted", false), "review.posted");
   // reviewCommand in shadow: no pending post, no admission, rows renamed with the code sha, exit at the verdict.

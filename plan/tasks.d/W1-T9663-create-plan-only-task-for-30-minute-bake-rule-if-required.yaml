@@ -7,6 +7,11 @@
   verify: auto
   risk: low
   priority: 4
+  # refusal-amendment (W1-T9663, run W1-T9663-1792605145320, 2026-10-21T19:30:21.614Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Filing remains conditional on the unresolved operator ruling.
+  # refusal-amendment (W1-T9663, run W1-T9663-1792605145320, 2026-10-21T19:30:21.614Z): the worker refused criterion 2 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Documenting a fresh task requires the same ruling.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   # backlog gardener: band=4 evidence=af5af096fca9ddfb
   attempts: 0

@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 1
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9517 — 1 machine_judge.refused row in 3 d against 577
+  # at filing: fixed at its cause by #11678 (see retired W1-T9264).
   attempts: 0
   author_class: machine
   origin: "scout:machine_judge.refused"

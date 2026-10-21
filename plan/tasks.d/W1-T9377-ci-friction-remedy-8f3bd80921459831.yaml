@@ -6,8 +6,12 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1.06
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9377 — Live (148 coverage-ratchet rounds/red heads in
+  # 3 d), but the signature is 'diff-coverage: BLOCKED -- this diff adds source line(s) with zero coverage': that
+  # is the coverage gate doing its job. Stopping these rounds via ci.yml would weaken a CI gate; the real remedy
+  # is builders adding tests before pushing, which is not this record's scope.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero"

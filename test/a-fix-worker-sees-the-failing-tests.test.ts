@@ -61,7 +61,9 @@ test("W1-T4461: an annotation with a real finding remains the prompt's source", 
     60,
     {
       fetchAnnotations: () => ["src/run-task.ts:1: lint finding"],
-      fetchJobLog: () => "not ok 1 - should not be read",
+      // W1-T9434: a readable `not ok` would win over annotations, so this log names no failing test; the step
+      // printed the finding itself, outside any subtest, so the annotation is a failure's, never a passing test's.
+      fetchJobLog: () => "lint step output that should not be read: it names no failing test\nsrc/run-task.ts:1: lint finding",
     },
   );
 
@@ -74,6 +76,7 @@ test("W1-T4461: an annotation with a real finding remains the prompt's source", 
   assert.match(prompt, /failure detail source: annotations/);
   assert.match(prompt, /src\/run-task\.ts:1: lint finding/);
   assert.doesNotMatch(prompt, /should not be read/);
+  assert.deepEqual(failure?.annotations, [{ message: "src/run-task.ts:1: lint finding", from_passing_test: false }]);
 });
 
 test("W1-T4461: TAP extraction is bounded and preserves retry evidence", () => {

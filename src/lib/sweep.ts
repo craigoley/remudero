@@ -5344,14 +5344,16 @@ export interface CiFailure {
    *  causes). Present ONLY when the tail is empty and a cause was observed, absent whenever a tail
    *  was captured — so `logUnavailable !== undefined` never fires on a real tail. */
   logUnavailable?: CiLogUnavailableCause;
-  /** WHICH source filled {@link logTail}. `"annotations"` is the fallback, reached only when the
-   *  log read came back empty or failed, so a readable log can never be displaced by it. Absent
+  /** WHICH source filled {@link logTail}. `"annotations"` is the fallback when the log is unreadable
+   *  or names no failing test or step. Annotations printed by passing tests are excluded. Absent
    *  exactly when {@link logUnavailable} is present — the two are complements. */
   tailSource?: CiTailSource;
-  /** WHAT the annotation fallback did, when reached; absent entirely when the log answered. Kept
+  /** WHAT the annotation read found, independently of which source supplies the excerpt. Kept
    *  separate from {@link logUnavailable} so a fallback can never take back the cause W1-T2291
    *  named. */
   annotationFallback?: CiAnnotationFallback;
+  /** Annotations observed in passing TAP output remain auditable but cannot supply failure evidence. */
+  annotations?: Array<{ message: string; from_passing_test: boolean }>;
 }
 
 export const ARTIFACT_FINALIZE_INTERMEDIARY_403 = "artifact-finalize-intermediary-403" as const;
@@ -14698,6 +14700,50 @@ function priorActionsFromLedger(
   };
 }
 
+export type TerminalFixDesignHandoff =
+  | { kind: "none" }
+  | { kind: "unavailable"; reason: string }
+  | { kind: "handoff"; reason: string; roundId: string };
+
+/** Bind the rung's first cached handoff to a completed round for this exact PR and head. */
+export function terminalFixDesignHandoff(
+  pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): TerminalFixDesignHandoff {
+  const key = fixLedgerTaskIdFor(pr);
+  const held = lines.find(row => row.step === "fix.needs_design" && row.task_id === key && row.head_sha === pr.headSha);
+  if (held === undefined) return { kind: "none" };
+  const unavailable = (): TerminalFixDesignHandoff => ({ kind: "unavailable",
+    reason: "terminal design handoff context unavailable — no fix admitted" });
+  const stamp = (row: Record<string, unknown>) => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  const at = stamp(held);
+  if (key === undefined || !/^[a-f0-9]{40}$/.test(pr.headSha) || !Number.isSafeInteger(pr.prNumber) || pr.prNumber < 1 ||
+      typeof held.reason !== "string" || !held.reason.trim() || !Number.isFinite(at) ||
+      typeof held.run_id !== "string" || !held.run_id || typeof held.host !== "string" || !held.host ||
+      typeof held.actor_pid !== "number" || !Number.isSafeInteger(held.actor_pid) || held.actor_pid < 1) return unavailable();
+  const ownPr = (row: Record<string, unknown>) =>
+    (row.pr_number === undefined || row.pr_number === pr.prNumber) &&
+    typeof row.repair_pr_url === "string" && prUrlKey(row.repair_pr_url) === prUrlKey(pr.prUrl);
+  if ((held.pr_number !== undefined && held.pr_number !== pr.prNumber) ||
+      (held.repair_pr_url !== undefined && !ownPr(held))) return unavailable();
+  const related = lines.filter(row => row.task_id === key && row.head_sha === pr.headSha &&
+    row.run_id === held.run_id && row.host === held.host && row.actor_pid === held.actor_pid);
+  const completed = related.filter(row => row.step === "fix.done" && row.fix_outcome === "NEEDS_DESIGN" &&
+    ownPr(row) && typeof row.round_id === "string" && row.round_id && Number.isFinite(stamp(row)) && stamp(row) >= at &&
+    related.some(start => start.step === "fix.dispatch" && start.round_id === row.round_id && ownPr(start) &&
+      Number.isFinite(stamp(start)) && stamp(start) <= at));
+  const rounds = new Set(completed.map(row => row.round_id));
+  if (rounds.size !== 1) return unavailable();
+  const terminal = completed[0]!;
+  // A later round which is still working keeps the existing dispatch/owner wait.
+  const newerLiveRound = lines.some(row => row.task_id === key && row.head_sha === pr.headSha &&
+    row.step === "fix.dispatch" && ownPr(row) && stamp(row) > stamp(terminal) &&
+    !lines.some(done => done.step === "fix.done" && done.task_id === key && done.head_sha === pr.headSha &&
+      done.run_id === row.run_id && done.round_id === row.round_id && ownPr(done) && stamp(done) >= stamp(row)));
+  if (newerLiveRound) return { kind: "none" };
+  return { kind: "handoff", reason: held.reason, roundId: terminal.round_id as string };
+}
+
 /** W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING A
  *  NEW HEAD? `prior.fixed` records only that a fix was DISPATCHED, never an outcome, and clears only
  *  on a new head — so a dispatch that ran and ENDED without pushing leaves the key set and every
@@ -18644,6 +18690,37 @@ export async function runSweep(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
+    let terminalDesignHold: { amended: boolean; revision?: string; observedRevision?: string; roundId: string } | undefined;
+    if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
+        !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
+        !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+      const handoff = terminalFixDesignHandoff(pr, ledgerLines);
+      if (handoff.kind === "handoff") {
+        const held = ledgerLines.find(row => row.step === "fix.needs_design" &&
+          row.task_id === fixLedgerTaskIdFor(pr) && row.head_sha === pr.headSha)!;
+        const recorded = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+          row.head_sha === pr.headSha && row.needs_design_hold === true && typeof row.progress_contract_revision === "string");
+        const standingOn = (recorded?.progress_contract_revision as string | undefined) ??
+          (typeof held.contract_revision === "string" ? held.contract_revision : undefined);
+        let current: string | undefined, unreadable: { reason: string } | undefined;
+        try { current = pr.taskId === undefined ? undefined : deps.readTaskContractRevision?.(pr.taskId); }
+        catch (error) { unreadable = { reason: String(error) }; }
+        if (unreadable) {
+          disposition = "wait";
+          reason = `terminal design handoff task contract revision unavailable — no fix admitted: ${unreadable.reason}`;
+        } else {
+          const amended = current !== undefined && standingOn !== undefined && current !== standingOn;
+          terminalDesignHold = { amended, revision: standingOn ?? current, observedRevision: current, roundId: handoff.roundId };
+          disposition = amended ? "blocked-fixable" : "refused-escalate";
+          reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+            : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
+          if (!amended) ruleBlockerByIndex.set(prIndex, "escalated");
+        }
+      } else if (handoff.kind === "unavailable") {
+        disposition = "wait";
+        reason = handoff.reason;
+      }
+    }
     byDisposition[disposition]++;
     const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue && !sloLadderDue;
     const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
@@ -18877,7 +18954,7 @@ export async function runSweep(
           !metadataRedRuledOut(ledgerLines, pr);
         // W1-T9999: the seed's own rung decides, never an earlier rung's; an earlier run's seed with no rung row is settled.
         const seedRead = dispatchedThisHead ? fixSeedRead(ledgerLines, pr, deps.runId) : undefined;
-        alreadyDone = metadataRed || emptyDiffReviewFailure(pr)
+        alreadyDone = terminalDesignHold?.amended === true || metadataRed || emptyDiffReviewFailure(pr)
           ? false
           : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
         if (seedRead?.kind === "orphaned" && !deps.dryRun) {
@@ -19025,6 +19102,48 @@ export async function runSweep(
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
     if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
+    if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true,
+      ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }) };
+    const refreshAmendedContract = async (
+      latched: readonly Record<string, unknown>[], inputKey?: string, observedRevision?: string,
+    ): Promise<string | undefined> => {
+      const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+      if (observedRevision !== undefined && current !== observedRevision) {
+        acted = false;
+        return "task contract changed during design-handoff observation — no fix admitted";
+      }
+      const standingOn = latched.findLast(row => typeof row.progress_contract_revision === "string")
+        ?.progress_contract_revision as string | undefined;
+      const record = (revision: string | undefined) => {
+        extraDisposedFields = { ...extraDisposedFields, ...(inputKey !== undefined ? { progress_escalated_key: inputKey } : {}),
+          ...(revision !== undefined ? { progress_contract_revision: revision } : {}) };
+      };
+      // First observation (or a latch predating the record): adopt the current contract, change nothing.
+      if (current === undefined || standingOn === undefined || standingOn === current) {
+        record(standingOn ?? current);
+        return undefined;
+      }
+      record(standingOn);
+      acted = false;
+      if (!deps.updateBranch) {
+        return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
+      }
+      let outcome: string;
+      recordForcedRefresh(deps, pr, "contract-amended"); // W1-T7735
+      try { outcome = await deps.updateBranch(pr); }
+      catch (error) { outcome = `error: ${String(error)}`; }
+      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+        step: CONTRACT_AMENDED_REFRESH_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+        escalated_under: standingOn, contract_revision: current, outcome });
+      record(current);
+      if (outcome === "updated" || outcome === "head-moved") {
+        acted = true;
+        return `task contract amended since this head was escalated — took main into the branch (${outcome}) ` +
+          "so the next round works on the amended contract";
+      }
+      return `task contract amended since this head was escalated — branch refresh ${outcome}; ` +
+        "awaiting new evidence or an operator answer";
+    };
     let contradictoryEscalated = false;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
@@ -19300,6 +19419,12 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
+              if (terminalDesignHold?.amended) {
+                const amended = await refreshAmendedContract([{ progress_contract_revision: terminalDesignHold.revision }], undefined, terminalDesignHold.observedRevision);
+                if (amended === undefined) acted = false;
+                standDownReason = amended ?? "task contract changed during design-handoff observation — no fix admitted";
+                break;
+              }
               const scopeHold = unfiledScopeStandDown(ledgerLines, pr);
               if (scopeHold) { acted = false; spent = false; standDownReason = scopeHold; break; }
               const preflightEscalation = preflightEscalations.get(pr.prNumber);
@@ -19325,42 +19450,6 @@ export async function runSweep(
               // head carries the amendment, and a new head releases every head-keyed hold with it.
               // PR-13039: the NEEDS_SCOPE and NEEDS_DESIGN holds below await a plan amendment too, so they
               // release the same way; they pass no input key.
-              const refreshAmendedContract = async (
-                latched: readonly Record<string, unknown>[], inputKey?: string,
-              ): Promise<string | undefined> => {
-                const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
-                const standingOn = latched.findLast(row => typeof row.progress_contract_revision === "string")
-                  ?.progress_contract_revision as string | undefined;
-                const record = (revision: string | undefined) => {
-                  extraDisposedFields = { ...extraDisposedFields, ...(inputKey !== undefined ? { progress_escalated_key: inputKey } : {}),
-                    ...(revision !== undefined ? { progress_contract_revision: revision } : {}) };
-                };
-                // First observation (or a latch predating the record): adopt the current contract, change nothing.
-                if (current === undefined || standingOn === undefined || standingOn === current) {
-                  record(standingOn ?? current);
-                  return undefined;
-                }
-                record(standingOn);
-                acted = false;
-                if (!deps.updateBranch) {
-                  return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
-                }
-                let outcome: string;
-                recordForcedRefresh(deps, pr, "contract-amended"); // W1-T7735
-                try { outcome = await deps.updateBranch(pr); }
-                catch (error) { outcome = `error: ${String(error)}`; }
-                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
-                  step: CONTRACT_AMENDED_REFRESH_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
-                  escalated_under: standingOn, contract_revision: current, outcome });
-                record(current);
-                if (outcome === "updated" || outcome === "head-moved") {
-                  acted = true;
-                  return `task contract amended since this head was escalated — took main into the branch (${outcome}) ` +
-                    "so the next round works on the amended contract";
-                }
-                return `task contract amended since this head was escalated — branch refresh ${outcome}; ` +
-                  "awaiting new evidence or an operator answer";
-              };
               const askProgress = async (): Promise<boolean> => {
                 progressDecision ??= progressParkedReason ? undefined : judgedContinue.get(pr.prNumber);
                 if (progressDecision) return true;
@@ -19622,18 +19711,21 @@ export async function runSweep(
                 }
               }
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
-              const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment");
-              const closedAmendment = scopeAmendment && ledgerLines.some(row => row.step === PR_TERMINAL_STEP &&
-                row.state === "closed" && Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
-              if (closedAmendment && deps.fixProgressJudge) {
+              const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment" &&
+                row.head_sha === pr.headSha && (row.pr_number === undefined || Number(row.pr_number) === pr.prNumber));
+              const amendmentTerminal = scopeAmendment && ledgerLines.findLast(row => row.step === PR_TERMINAL_STEP &&
+                Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
+              const closedAmendment = amendmentTerminal?.state === "closed";
+              if (scopeAmendment && closedAmendment && deps.fixProgressJudge) {
                 progressParkedReason = `amendment-closed: scope amendment ${scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number} closed without merging`;
                 const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                   row.head_sha === pr.headSha && row.stand_down_reason === progressParkedReason);
                 if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
                 if (!await askProgress()) break;
               }
-              if (refusedSameRed?.scopeAmendment && !closedAmendment) {
-                const reason = `fix report requests a scope amendment: ${refusedSameRed.scopeAmendment}`;
+              if (scopeAmendment && ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
+                  !["merged", "closed"].includes(String(amendmentTerminal?.state))) {
+                const reason = `fix report requests a scope amendment: ${refusedSameRed?.scopeAmendment ?? scopeAmendment.paths}`;
                 const alreadyEscalated = ledgerLines.some((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
                   line.head_sha === pr.headSha && JSON.stringify(line.scope_amendment_red_checks) === JSON.stringify(redCheckNames(pr)));
@@ -19645,6 +19737,16 @@ export async function runSweep(
                 standDownReason = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
                   line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.scope_amendment_red_checks !== undefined)) ?? reason;
                 break;
+              }
+              if (scopeAmendment?.outcome === "refused") {
+                progressParkedReason = `scope-amendment-refused: ${scopeAmendment.reason}: ${scopeAmendment.detail}`;
+              }
+              if (scopeAmendment?.outcome === "refused" && scopeAmendment.reason === "path-not-changed") {
+                const paths = Array.isArray(scopeAmendment.paths) ? scopeAmendment.paths.join(", ") : scopeAmendment.detail;
+                const constraint = `Scope amendment refused (path-not-changed): ${scopeAmendment.detail}; ` +
+                  `make the edit to ${paths} and leave it saved and uncommitted, then report NEEDS_SCOPE`;
+                pr.pendingAnswer = { ...pr.pendingAnswer,
+                  constraint: [pr.pendingAnswer?.constraint, constraint].filter(Boolean).join("\n\n") };
               }
               // PR-13039: the fix rung stands down at a head whose round handed off NEEDS_DESIGN; the hold starts on
               // the contract that round worked on, so an amendment that answers it takes main into the branch.
