@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: span
   priority: 2
@@ -76,3 +76,11 @@
     Native reservation refs/rmd-id/W1-T10365 belongs to this filing branch; never recycle it.
     The operator approved the product policy in this chat, not a model judgment or deployment.
     verify: human retains native release/ruling until that actual decision is recorded.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The operator selected fleet-owned information unless an explicit human decision is blocked and authorized follow-up filing and implementation. Native rmd approve W1-T10365 records the actual decision, not a model verdict. This task is only the narrow source-faithful wording/checker slice: open-PR age must not invent a waiting human review or review deadline; cached original history remains unchanged. Only inbox-plain and the existing factual-language test are in scope. Owner classification, historical-thread compatibility, explicit/unreadable escalations, action authority and every review/CI gate are preserved; no extra model calls, retries, global backfill, gardener activation, item closure, permissions, providers, spending, CI infrastructure, Azure memory, services or deployment."
+    judged_at: "2026-10-21T19:27:34.519Z"
+    pin: "1199ae56b43582d3db855e484b5c7097153614d938d6c2f254c0fd55a9ab2de8"
