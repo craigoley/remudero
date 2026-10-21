@@ -118,6 +118,37 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   automatically. Run `npm run --silent comment-load-signal` locally to check your own changes
   before pushing.
 
+### comment-load-ratchet recurrence since the ratchet repair wiring
+
+W1-T10240 observation, 2026-10-21: the post-wiring fix-round count is **unavailable**,
+not a measured zero. This worker has no permitted live ledger corpus; the checkout has no
+`state/` directory. The wiring's deployment time, observation-window bounds, newest ledger
+timestamp, positive controls and live policy enablement are therefore unverified. No conclusion
+about recurrence or its absence follows from this observation.
+
+At the inspected checkout, `src/lib/sweep.ts::recordableRatchetRepairFor` is called by the
+blocked-fixable disposition's reason builder. Execution separately uses
+`ratifiedBaselineRatchetRepairFor`: it requires `recordableRatchetRepairEnabled`, a
+`repairRecordableRatchet` executor and an entirely admitted red-check set. Success logs
+`sweep.ratchet_repaired`; a declined repair can fall through to an ordinary fix round.
+`src/lib/policy.ts` defaults the enablement flag to false when omitted. These source facts
+establish a conditional repair path, not that a deployed daemon took it.
+
+The originating [PR #12776](https://github.com/craigoley/remudero/pull/12776) is closed and
+unmerged according to the GitHub API. Its
+[closing discussion](https://github.com/craigoley/remudero/pull/12776#issuecomment-6256733167)
+attributes the old task's rounds to a sibling mutation failure's incorrect attribution and
+an instrument-scope gap. Those rounds do not establish post-wiring comment-load recurrence.
+
+Decision: retain this follow-up pending measurement; a further remedy is **undetermined**.
+Withdrawal requires a covered post-deployment window with a measured zero. The measurement
+must count distinct ordinary fix rounds actually attributed to comment-load-ratchet, retain
+each PR's other failing gates and disposition, and distinguish successful deterministic
+repairs from declined repairs and disabled policy. Read the retained ledger union, record
+its window and positive controls, and deduplicate rounds by their identifiers rather than
+counting repeated sweep observations. A nonzero count warrants examining those individual
+causes before proposing another remedy.
+
 - `ci-friction:check:ci-log:task-id-existence` — a pull request's diff cites a task id
   (e.g., `W1-T1234`) in source code, documentation, or plan files, but that id is not
   declared in any plan shard and has no reservation ref (`refs/rmd-id/W1-T<n>` on the
