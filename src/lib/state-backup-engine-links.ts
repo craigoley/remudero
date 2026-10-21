@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 
 export const ENGINE_LINK_MANIFEST = "state-backup-engine-links.json";
 const LINK_PATH = /^engines\/([0-9a-f]{64})\/node_modules$/;
 const REVISION = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PIN_FILES = ["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"];
-const CRITICAL_STATE = ["ledger.ndjson", "inbox-proposals.json"];
+const CRITICAL_STATE = [LEDGER_FILENAME, "inbox-proposals.json"];
 
 interface EngineDependencyLink {
   path: string;
