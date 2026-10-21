@@ -6,8 +6,10 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1.2
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9961 — 0 matching rounds in 3 d; a one-off TypeScript
+  # type error (1 round on 1 PR).
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:ci-shard:type-pass-is-not-assignable-to-type-failure-none-pending-suc"
