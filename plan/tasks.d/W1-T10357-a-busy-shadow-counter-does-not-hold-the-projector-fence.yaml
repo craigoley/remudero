@@ -63,7 +63,7 @@
     - claim: "A contended first shadow-writer open refuses while its holder stays active and releases the home fence without changing committed evidence"
       proof: "unit test: W1-T10357: a contended shadow-counter open releases the home fence without waiting for its holder"
     - claim: "Contention on a reused writer withholds readiness and a later normal comparison reconciles exact missed append and reset membership"
-      proof: "unit test: W1-T10357: a warmed shadow-counter write refuses contention and reconciles exact evidence on the next comparison"
+      proof: "unit test: W1-T10357: a warmed shadow-counter refusal reconciles missed keys and resets"
     - claim: "Counter-only fail-fast leaves the home lease fence, lost-owner refusal, durable commits, read-only waits and ordinary projector busy backstop intact"
       proof: "unit test: W1-T10357: counter-only refusal preserves lease fencing, durability and the projector busy backstop"
   falsifier: |
@@ -79,4 +79,4 @@
     reasons:
       - "The operator explicitly approved the counter-only fail-fast policy. Writable shadow-counter connections alone may refuse busy contention immediately, including first open; ordinary core and read-only timeouts, home lease fence before file changes, WAL/FULL durability, exact evidence and failed-save readiness withholding remain unchanged. A later normal comparison reconciles missed keys/reset; no automatic retry, new calls, provider, permissions, budgets, service settings, CI infrastructure, Azure memory change or deployment. Scope is read-model-db and the existing incremental persistence suite. Preserve actual failure receipts, source-only falsifiers, all review and CI gates. Native approve W1-T10357 records operator authority, not a model verdict."
     judged_at: "2026-10-21T17:16:38.888Z"
-    pin: "b9cdda9c49f1380140ac756c3b9fde008ca7549aad24e450ce34385d9cbe6d1e"
+    pin: "434ff736abc0bf90bc065bce177002c7b32baffad7b160aac68c83ca1e2eb7e2"
