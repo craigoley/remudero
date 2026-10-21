@@ -277,7 +277,7 @@ export interface TestSlotHolder {
   ownerUid?: number;
   /** Sticky once work uses a marker: withdrawing a cadence must not restore parent-pid-only recovery. */
   workIdentity?: "reservation-marker-v1";
-  /** Scope observed before publication; shared or unproven groups never establish terminal evidence. */
+  /** Scope observed before publication (dedicated: only our group and our own ancestors); shared or unproven never ends. */
   cgroupScope?: { path: string; dedicated: boolean; reason?: string };
 }
 
@@ -343,26 +343,41 @@ const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(St
 const dedicatedScopePath = (path: unknown): path is string => typeof path === "string" &&
   /^\/(?:[^/\0\n]+\/)*[^/\0\n]+\.scope$/.test(path) && !path.split("/").some(part => part === "." || part === "..");
 
-/** Record our cgroup v2 membership; a scope containing another process group is shared. */
+/**
+ * Record our cgroup v2 membership. A scope is dedicated when every member is in our process group or is one of our
+ * own ancestors: a builder's `systemd-run --scope timeout … job.sh` puts the wrapper `timeout`s (each takes a new
+ * group) and the job script in the scope with the owner (W1-T10251). Any other member makes the scope shared.
+ */
 export function readTestSlotCgroup(host: ReservedTreeProbeHost = {}): TestSlotHolder["cgroupScope"] {
   if ((host.platform ?? process.platform) !== "linux") return undefined;
   const read = host.read ?? ((path: string) => readFileSync(path, "utf8"));
   const readCgroup = host.readCgroup ?? read;
+  const statFields = (raw: string): string[] | undefined => raw.includes(") ") ? raw.slice(raw.lastIndexOf(") ") + 2).trim().split(/\s+/) : undefined;
   let path = "";
   try {
     path = /^0::([^\n]+)$/m.exec(read("/proc/self/cgroup"))?.[1] ?? "";
     if (!dedicatedScopePath(path)) return { path, dedicated: false, reason: "not a dedicated cgroup v2 scope" };
-    const raw = read("/proc/self/stat");
-    const group = raw.slice(raw.lastIndexOf(") ") + 2).trim().split(/\s+/)[2];
-    if (!raw.includes(") ") || !/^[1-9][0-9]*$/.test(group ?? "")) throw new Error("owner process group unproven");
+    const self = statFields(read("/proc/self/stat"));
+    const group = self?.[2];
+    if (!/^[1-9][0-9]*$/.test(group ?? "")) throw new Error("owner process group unproven");
     const members = readCgroup(`/sys/fs/cgroup${path}/cgroup.procs`).trim().split(/\s+/);
     if (!members.includes(String(process.pid))) throw new Error("scope does not contain this owner");
+    let ancestors: Set<string> | undefined;
+    const ancestorsOfOwner = (): Set<string> => {
+      const chain = new Set<string>();
+      // The parent chain ends at pid 0; an unreadable link throws below, which records the scope as unproven.
+      for (let parent = self?.[1]; parent !== undefined && /^[1-9][0-9]*$/.test(parent) && !chain.has(parent);) {
+        chain.add(parent);
+        parent = statFields(read(`/proc/${parent}/stat`))?.[1];
+      }
+      return chain;
+    };
     for (const pid of members) {
       if (!/^[1-9][0-9]*$/.test(pid)) throw new Error("invalid scope member");
-      const member = read(`/proc/${pid}/stat`);
-      if (!member.includes(") ") || member.slice(member.lastIndexOf(") ") + 2).trim().split(/\s+/)[2] !== group) {
-        return { path, dedicated: false, reason: "scope contains another process group" };
-      }
+      const member = statFields(read(`/proc/${pid}/stat`));
+      if (member?.[2] === group) continue;
+      if (member !== undefined && (ancestors ??= ancestorsOfOwner()).has(pid)) continue;
+      return { path, dedicated: false, reason: "scope contains another process group" };
     }
     return { path, dedicated: true };
   } catch (error) {

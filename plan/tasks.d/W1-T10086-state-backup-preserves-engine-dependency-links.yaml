@@ -13,6 +13,9 @@
     - src/lib/ledger.ts
     - src/lib/state-backup-engine-links.ts
     - test/state-backup.test.ts
+    - .github/workflows/acr-build.yml
+    - deploy/install-host-units.sh
+    - src/lib/baked-runtime-inputs.ts
   status: queued
   priority: 1
   attempts: 0
@@ -42,6 +45,14 @@
     directory walks loudly and without publishing a partial archive. Retain existing internal/external
     non-engine content coverage; no new exclusions, fallback success or archive deletion.
     Keep filesystem/JSON helpers separate from run-task/worker imports. Add tests to the existing suite.
+    W10086 catalog-only companion scope approved 2026-10-21 for escalation #13332:
+    The three additional catalog files may only declare src/lib/state-backup-engine-links.ts in the
+    existing ACR push-path/drift lists, launcher DEPLOY_LOGIC_PATHS and BAKED_RUNTIME_SOURCE_PATHS.
+    Preserve every existing catalog member. Do not alter workflow jobs, commands, permissions,
+    scanner coverage, checks, baselines, deploy behavior, runtime limits or production settings.
+    This scope amendment neither executes a deployment nor changes the fix lane's instrument policy.
+    Existing source owner PR #13317 retains the implementation and filesystem-race corrections;
+    original acceptance, failure guarantees and all required security/CI/review checks remain unchanged.
   acceptance:
     - claim: "the real state snapshot path consumes the engine-link preservation helper, not only its tests"
       proof: "grep: preserveEngineDependencyLinks( in src/lib/ledger.ts"

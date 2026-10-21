@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -245,8 +245,9 @@ test("the shared PR opener refuses a stale or plan-divergent acceptance block be
   assert.equal(proofCalls, 1, "the first stale proof stops the opener before REST creation");
 });
 
-function filedTaskFixture(proof = "grep: marker in README.md"): string {
+function filedTaskFixture(proof: string | { claim: string; proof?: string; satisfied_by?: string }[] = "grep: marker in README.md"): string {
   const dir = fixture();
+  const criteria = typeof proof === "string" ? [{ claim: "the marker is present", proof }] : proof;
   mkdirSync(join(dir, "plan"));
   writeFileSync(join(dir, "plan", "tasks.yaml"), [
     "- id: W1-T4420",
@@ -254,11 +255,58 @@ function filedTaskFixture(proof = "grep: marker in README.md"): string {
     "  repo: remudero",
     "  type: implement",
     "  acceptance:",
-    "    - claim: the marker is present",
-    `      proof: ${JSON.stringify(proof)}`,
+    ...criteria.map((criterion) => `    - ${JSON.stringify(criterion)}`),
   ].join("\n"));
   return dir;
 }
+
+test("the shared PR opener does not execute a satisfied_by criterion", () => {
+  for (const legacyProof of ["grep: seed in README.md", undefined]) {
+    const remaining = [
+      { claim: "the first addition is present", proof: "grep: FIRST in fresh.md" },
+      { claim: "the last addition is present", proof: "grep: LAST in fresh.md" },
+    ];
+    const dir = filedTaskFixture([
+      { claim: "the seed already shipped", proof: legacyProof, satisfied_by: "#11180" },
+      remaining[0],
+      { claim: "a proofless prior change", satisfied_by: "#12258" },
+      remaining[1],
+    ]);
+    try {
+      writeFileSync(join(dir, "fresh.md"), "FIRST\nLAST\n");
+      commit(dir, "feat: add markers");
+      assert.equal(defaultProofRunner("grep: seed in README.md", "origin/main", dir).status, 5,
+        "control: the credited legacy proof is stale at the merge base");
+      const ran: string[] = [];
+      const runner: typeof defaultProofRunner = (proof, base, root, target) => {
+        ran.push(proof);
+        return defaultProofRunner(proof, base, root, target);
+      };
+      const body = openPullRequestChecked("Built markers.", "run-W1-T4420-1", dir, "origin/main", runner);
+      assert.deepEqual(parseAcceptanceBlock(body), remaining);
+      assert.deepEqual(ran, remaining.map((criterion) => criterion.proof));
+      assert.match(body, /the seed already shipped/);
+      assert.match(body, /#11180/);
+      assert.match(body, /a proofless prior change/);
+      assert.match(body, /#12258/);
+      assert.doesNotMatch(body, /grep: seed/);
+      assert.ok(body.endsWith("Remudero-Task: W1-T4420"));
+      assert.equal(openPullRequestChecked(body, "run-W1-T4420-1", dir, "origin/main", runner), body,
+        "a healthy authored body and its prior-credit context survive a repeated open unchanged");
+      const authored = `${renderAcceptanceBlock(remaining)}\n\nRemudero-Task: W1-T4420`;
+      assert.deepEqual(parseAcceptanceBlock(openPullRequestChecked(authored, "run-W1-T4420-1", dir, "origin/main", runner)), remaining);
+      const beforeRefusals = ran.length;
+      for (const invalid of [
+        "Acceptance:\n- malformed claim",
+        renderAcceptanceBlock([remaining[0]]),
+        "Remudero-Task: W1-T9999",
+      ]) assert.throws(() => openPullRequestChecked(invalid, "run-W1-T4420-1", dir, "origin/main", runner));
+      assert.equal(ran.length, beforeRefusals, "body and trailer checks still refuse before execution");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
 
 test("a feature-branch PR proof runner reaches check-proof without self-sync refusing the branch", () => {
   const result = defaultProofRunner(
