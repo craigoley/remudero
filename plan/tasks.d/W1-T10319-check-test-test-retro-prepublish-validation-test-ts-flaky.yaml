@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.44
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10319 — 0 rounds and 0 flake retries in 3 d for retro-
+  # prepublish-validation.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/retro-prepublish-validation.test.ts:flaky"
