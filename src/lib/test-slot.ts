@@ -365,10 +365,10 @@ export function readTestSlotCgroup(host: ReservedTreeProbeHost = {}): TestSlotHo
     let ancestors: Set<string> | undefined;
     const ancestorsOfOwner = (): Set<string> => {
       const chain = new Set<string>();
-      // The parent chain ends at pid 0; an unreadable link ends it early, which only leaves the scope shared.
+      // The parent chain ends at pid 0; an unreadable link throws below, which records the scope as unproven.
       for (let parent = self?.[1]; parent !== undefined && /^[1-9][0-9]*$/.test(parent) && !chain.has(parent);) {
         chain.add(parent);
-        try { parent = statFields(read(`/proc/${parent}/stat`))?.[1]; } catch { break; }
+        parent = statFields(read(`/proc/${parent}/stat`))?.[1];
       }
       return chain;
     };

@@ -187,7 +187,7 @@ test("scope evidence requires owner death, matching identities and complete popu
 // The measured builder shape on the Azure host (2026-10-21, run-u1165.scope): systemd-run --scope starts
 // `timeout … job.sh`, the job wraps the preflight in a second `timeout`, and each `timeout` takes a new process
 // group. The owner's own wrappers are therefore in another group, yet the scope holds nothing but this run.
-function builderScope(extra: { pid: number; ppid: number; group: number }[] = []) {
+function builderScope(extra: { pid: number; ppid: number; group: number }[] = [], unreadable?: number) {
   const procs = [
     { pid: 900, ppid: 7, group: 900 },            // outer `timeout -k 60 7200 … job.sh`
     { pid: 901, ppid: 900, group: 900 },          // the job script
@@ -198,6 +198,7 @@ function builderScope(extra: { pid: number; ppid: number; group: number }[] = []
   const stats = new Map(procs.map(p => [p.pid, `${p.pid} (wrapper) S ${p.ppid} ${p.group} ${"0 ".repeat(15)}100 0`]));
   stats.set(7, `7 (systemd) S 1 7 ${"0 ".repeat(15)}1 0`);
   stats.set(1, `1 (systemd) S 0 1 ${"0 ".repeat(15)}1 0`);
+  if (unreadable !== undefined) stats.delete(unreadable);
   const read = (path: string): string => {
     if (path === "/proc/self/cgroup") return `0::${scopePath}\n`;
     const pid = path === "/proc/self/stat" ? process.pid : Number(path.split("/")[2]);
@@ -236,4 +237,8 @@ test("a builder scope that also holds a sibling or an unrelated group stays shar
     assert.equal(recorded.dedicated, false, JSON.stringify(extra));
     assert.equal(recorded.reason, "scope contains another process group");
   }
+  // An ancestor link that cannot be read leaves the ancestry unproven, never assumed.
+  const unproven = builderScope([], 7)!;
+  assert.equal(unproven.dedicated, false);
+  assert.match(unproven.reason ?? "", /^scope dedication unproven: /);
 });
