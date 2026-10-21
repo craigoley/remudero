@@ -294,6 +294,21 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   assert.equal(moved.originMainSha, m3, "rebuilt when origin/main moves");
   assert.notEqual(moved.path, first.path);
   assert.equal(execFileSync("git", ["-C", moved.path, "rev-parse", "HEAD^1"], { encoding: "utf8" }).trim(), m3);
+  // Today's code (m3) has no judgment yet: the route shadows it; a healed child that cannot run falls back to today's path.
+  const shadowLogs: string[] = [];
+  const shadowed: string[][] = [];
+  let fellBack = 0;
+  const shadowRoute = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, join(f.root, "ledger.ndjson"), (step) => shadowLogs.push(step), {
+    health: { ...h.deps }, tree: seams, self: () => ({ owner: "acme", repo: "remudero" }), withWorktreeLease: (_tree, action) => action(),
+    shadow: async (_pr, args, originMain) => { shadowed.push([...args, originMain]); throw new Error("shadow child died"); },
+    spawnHealed: async () => { throw new Error("spawn ENOENT"); },
+  });
+  assert.equal(await shadowRoute("216", [], {}, async () => { fellBack++; return 7; }), 7);
+  assert.equal(shadowed.length, 1);
+  assert.ok(shadowed[0]!.includes(health.REVIEWER_SHADOW_FLAG) && shadowed[0]!.includes(m3), "today's reviewer, at origin/main, in shadow");
+  assert.deepEqual(shadowLogs, ["reviewer.shadow_failed", "reviewer.shadow_ran", "reviewer.healed_review_failed"]);
+  assert.equal(fellBack, 1);
+  assert.equal((await health.gitIn(f.daemon.dir)(["rev-parse", "origin/main"])).trim(), m3, "the default git is the hardened leaf");
   // A later merge rewrites the offending lines: the revert no longer applies.
   const m4 = pushMain(f, { "src/lib/required-semantic-review.ts": 'export const refusal = () => "something else";\n' }, "fix(review): reword (#104)");
   const conflict = await health.buildHealedReviewerTree(seams, f.m2);
@@ -630,6 +645,48 @@ test("W1-T10269: the operator's fix-PR choice is recorded, and the healed tree m
   assert.equal((await health.buildHealedReviewerTree(seams, f.m2, { withPr: 79 })).state, "conflict");
   assert.equal(health.reviewerHealCommand(["--clear"], io), 0);
   assert.equal(health.loadReviewerHealthState(h.statePath).operatorHeal, null);
+});
+
+test("W1-T10269: the route's default effects raise, read and close through gh", async (t) => {
+  health.resetHealedReviewerTrees();
+  const f = tenTwenty(t);
+  const h = harness(t, async (args) => f.daemon.git(...args));
+  h.queue.push(...baseline(f));
+  await health.evaluateReviewerHealthNow(h.deps, { originMainSha: f.c0 });
+  const m3 = pushMain(f, { "docs/other.md": "other\n" }, "docs: another page (#103)");
+  f.daemon.git("fetch", "-q", "origin", "main");
+  const shim = ghShim([
+    { when: "issue create", stdout: "https://github.com/acme/remudero/issues/41\n" },
+    { when: "/issues?", stdout: "[]" },
+    { when: "pulls/900", stdout: JSON.stringify({ state: "open", merged: false }) },
+    { when: "api ", stdout: "{}" },
+  ], { kind: "reviewer-heal-effects" });
+  const saved = { PATH: process.env.PATH, allow: process.env.RMD_ALLOW_LIVE_WRITES };
+  process.env.PATH = `${shim.dir}:${saved.PATH}`;
+  process.env.RMD_ALLOW_LIVE_WRITES = "1"; // only the shim answers: no request leaves this machine
+  t.after(() => {
+    process.env.PATH = saved.PATH;
+    if (saved.allow === undefined) delete process.env.RMD_ALLOW_LIVE_WRITES; else process.env.RMD_ALLOW_LIVE_WRITES = saved.allow;
+    execFileSync("rm", ["-rf", shim.dir]);
+  });
+  const ledgerPath = join(f.root, "route-ledger.ndjson");
+  const { deps } = h;
+  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, ledgerPath, () => {}, {
+    health: { statePath: deps.statePath, readRows: deps.readRows, log: deps.log, now: deps.now },
+    tree: treeSeams(f), self: () => ({ owner: "acme", repo: "remudero" }), withWorktreeLease: (_tree, action) => action(),
+    openRevert: async () => ({ prUrl: `${REPO_URL}/900` }), spawnHealed: async () => 0, shadow: async () => 0,
+  });
+  h.queue.push(...onset(f));
+  assert.equal(await route("220", [], {}, async () => 1), 0);
+  const opened = health.loadReviewerHealthState(deps.statePath).incident!;
+  assert.equal(opened.issueUrl, "https://github.com/acme/remudero/issues/41");
+  h.queue.push(...Array.from({ length: 40 }, (_, i) => posted(m3, 900 + i)));
+  assert.equal(await route("221", [], {}, async () => 5), 5, "closed: today's path again");
+  const calls = shim.calls().join("\n");
+  assert.match(calls, /issue edit https:\/\/github.com\/acme\/remudero\/issues\/41 --repo acme\/remudero --add-assignee acme/, "assigned");
+  assert.match(calls, /pulls\/900 --method PATCH|--method PATCH repos\/acme\/remudero\/pulls\/900/, "the unnecessary revert PR is closed");
+  assert.match(calls, /issue close https:\/\/github.com\/acme\/remudero\/issues\/41/);
+  assert.equal(health.loadReviewerHealthState(deps.statePath).incident, null);
 });
 
 test("W1-T10269: the healed tree builder refuses rather than falls back", async (t) => {

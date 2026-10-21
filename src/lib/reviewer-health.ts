@@ -501,10 +501,12 @@ export async function buildHealedReviewerTree(
     }
     healedMemo.delete(key);
   }
+  // A merge commit reverts against its first parent, as findOffendingMerge diffed it; a squash merge has one parent.
+  let mainline: string[] = [];
   if (opts.withPr === undefined) {
     try {
-      // Already reverted (or otherwise undone) on main: the healed tree IS origin/main.
       await seams.git(["merge-base", "--is-ancestor", offendingSha, originMainSha]);
+      mainline = (await seams.git(["rev-list", "--parents", "-n", "1", offendingSha])).trim().split(/\s+/).length > 2 ? ["-m", "1"] : [];
     } catch {
       return { state: "unavailable", originMainSha, reason: `${offendingSha.slice(0, 12)} is not on origin/main ${originMainSha.slice(0, 12)}` };
     }
@@ -515,11 +517,10 @@ export async function buildHealedReviewerTree(
   } catch (error) {
     return { state: "unavailable", originMainSha, reason: `healed tree could not be cut: ${String((error as Error)?.message ?? error)}` };
   }
-  // A merge commit reverts against its first parent, as findOffendingMerge diffed it; a squash merge has one parent.
-  const mainline = await mainlineArgs(seams, offendingSha);
   try {
     if (opts.withPr === undefined) {
       await seams.treeGit(tree, [...HEAL_IDENTITY, "revert", "--no-commit", ...mainline, offendingSha]);
+      // Already undone on main (a revert PR merged): reverting again stages nothing, so the healed tree IS origin/main.
       const staged = (await seams.treeGit(tree, ["diff", "--cached", "--name-only"])).trim();
       if (staged === "") {
         await seams.treeGit(tree, ["revert", "--abort"]);
@@ -543,10 +544,6 @@ export async function buildHealedReviewerTree(
     } catch {
       // deliberate: the tree is removed next either way
     }
-    if (opts.withPr === undefined && (await offendingChangesAbsent(seams, tree, offendingSha, mainline))) {
-      await seams.remove(tree);
-      return { state: "empty", originMainSha };
-    }
     try {
       await seams.remove(tree);
     } catch {
@@ -559,32 +556,6 @@ export async function buildHealedReviewerTree(
   const sha = (await seams.treeGit(tree, ["rev-parse", "HEAD"])).trim();
   healedMemo.set(key, { path: tree, sha });
   return { state: "ready", path: tree, sha, originMainSha, patch, ...(opts.withPr === undefined ? {} : { withPr: opts.withPr }) };
-}
-
-/** A revert that does not apply may mean main already undid the merge (a revert PR merged): then
- *  re-applying the merge itself applies cleanly. That reads as an empty patch, never a conflict. */
-async function offendingChangesAbsent(seams: HealedTreeGit, tree: string, offendingSha: string, mainline: string[]): Promise<boolean> {
-  try {
-    await seams.treeGit(tree, [...HEAL_IDENTITY, "cherry-pick", "--no-commit", ...mainline, offendingSha]);
-    const staged = (await seams.treeGit(tree, ["diff", "--cached", "--name-only"])).trim();
-    return staged !== "";
-  } catch {
-    return false; // deliberate: neither direction applies, so it is a conflict
-  } finally {
-    try {
-      await seams.treeGit(tree, ["reset", "--hard", "--quiet", "HEAD"]);
-    } catch {
-      // deliberate: the tree is removed by the caller either way
-    }
-  }
-}
-
-async function mainlineArgs(seams: HealedTreeGit, sha: string): Promise<string[]> {
-  try {
-    return (await seams.git(["rev-list", "--parents", "-n", "1", sha])).trim().split(/\s+/).length > 2 ? ["-m", "1"] : [];
-  } catch {
-    return []; // deliberate: an unreadable parent list reverts as a single-parent commit, and a conflict says so
-  }
 }
 
 /** Test seam: forget every healed tree this process built. */
@@ -929,14 +900,14 @@ function completeLivePrefix(path: string, size: number): number {
   const chunk = Buffer.allocUnsafe(64 * 1024);
   try {
     let end = size;
-    while (end > 0) {
-      const start = Math.max(0, end - chunk.length);
-      const bytes = readSync(fd, chunk, 0, end - start, start);
-      const newline = chunk.subarray(0, bytes).lastIndexOf(0x0a);
-      if (newline >= 0) return start + newline + 1;
+    let newline = -1;
+    let start = 0;
+    while (end > 0 && newline < 0) {
+      start = Math.max(0, end - chunk.length);
+      newline = chunk.subarray(0, readSync(fd, chunk, 0, end - start, start)).lastIndexOf(0x0a);
       end = start;
     }
-    return 0;
+    return newline < 0 ? 0 : start + newline + 1;
   } finally {
     closeSync(fd);
   }
