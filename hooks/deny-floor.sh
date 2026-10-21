@@ -1426,6 +1426,7 @@ gh_av_write=0 gh_av_exempt=0 gh_av_inv_num="" gh_av_inv_repo=""
 gh_argv_classify() {  # $@ = the words gh receives; folds this argv's verdicts into the gh_av_* totals
   local w p1="" p2="" i1=0 at=0 np=0 endopts=0 skip=0 help=0 repo="" num="" redir=0
   local -a av
+  av=()  # set, not just declared: bash 4+ under `set -u` calls a declared-only array unbound at ${#av[@]}
   for w in "$@"; do
     if [ "$redir" -eq 1 ]; then redir=0; continue; fi
     case "$w" in
