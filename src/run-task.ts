@@ -14379,7 +14379,8 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
       }
       deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha,
-        reason: "non-test paths need scope", scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
+        reason: `non-test paths need scope (${amendment.reason}: ${amendment.detail})`,
+        scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
         fix_outcome: fixOutcome?.kind });
       if (harnessCommitCount > 0) {
         let landing: FixRoundLanding | undefined;
