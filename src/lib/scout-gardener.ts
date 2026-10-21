@@ -57,13 +57,16 @@ export const SCOUT_UNPRIORITIZED_SHARE_BOUND = 0.25;
 /** Step names that carry a failure shape. Only dotted names are considered: a cited step must be citable. */
 const FAILURE_SHAPE = /failed|refused|unavailable|escalated|unhealthy/;
 const DOTTED_STEP = /^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+$/;
+const EXPECTED_RECOVERY_STEP = "inbox.draft_escalated";
+const DRAFT_ERROR_STEPS = new Set(["inbox.draft_error", "inbox.draft_escalation_error"]);
 /** A raw-line prefilter for the ledger read, so only failure-shaped rows are ever parsed. */
-const FAILURE_ROW = /"step":"[^"]*(?:failed|refused|unavailable|escalated|unhealthy)[^"]*"/;
+const FAILURE_ROW = /"step":"(?:inbox\.draft_(?:escalation_)?error|[^"]*(?:failed|refused|unavailable|escalated|unhealthy)[^"]*)"/;
 
 export const scoutOrigin = (step: string): string => `scout:${step}`;
 
 export function isFailureShapedStep(step: string): boolean {
-  return DOTTED_STEP.test(step) && FAILURE_SHAPE.test(step);
+  return DOTTED_STEP.test(step) && step !== EXPECTED_RECOVERY_STEP &&
+    (DRAFT_ERROR_STEPS.has(step) || FAILURE_SHAPE.test(step));
 }
 
 export interface ScoutSymptom {

@@ -1,0 +1,60 @@
+- id: W1-T10086
+  title: "A state snapshot preserves reproducible engine dependency links without following a missing worktree install"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved follow-through 2026-10-17; backup incident #12064; explicit approval to preserve engine links and reconstruction metadata"
+  files:
+    - src/lib/ledger.ts
+    - src/lib/state-backup-engine-links.ts
+    - test/state-backup.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Actual core snapshot failures on October15,16,17 are ENOENT/stat at
+    state/engines/01c2f02f8902e69e1af53541fa848382a8eb5e1767b7fcae00da51251bcc614b/node_modules.
+    The entry is a symlink into a former worker worktree; the nightly container does not mount that target.
+    listStateFiles follows it before staging. Actual-module synthetic controls reproduce failure without
+    publishing an archive, and demonstrate that the existing walker follows available external directories.
+    Engine installs are reproducible links, not irreplaceable state. Craig explicitly approved preserving
+    this narrow link class verbatim with reconstruction metadata, not a broad node_modules exclusion.
+    Existing W5545/W5546 own live-safe copying and off-host transfer, not this link contract.
+  design: |
+    Preserve all existing ledger, proposals, permissions, live-rotation and loud-failure guarantees.
+    Classify only a symbolic-link entry at engines/<64-lowercase-hex-sourceHash>/node_modules as an engine
+    dependency reference. Preserve its original link text without dereferencing, traversing, installing,
+    chmodding or repairing the target. Real node_modules directories and all other state remain covered.
+    Store a versioned payload-free reconstruction manifest in the staged archive, never in live state:
+    relative link path, verbatim target, source hash, validated engine.json revision and available pinned
+    package/lock identities. Validate the required reconstruction evidence; absence/corruption is a named
+    failure, not a guessed pin. Describe restored links as requiring engine dependency reconstruction;
+    do not claim the restored engine is runnable or install anything automatically.
+    Verify staged link identity and reconstruction evidence before publishing, and validate the archive
+    before restore writes. Preserve link text on restore, including a dangling target. Neither backup nor
+    restore may follow that link, write its target, or treat a missing critical state file as reproducible.
+    Refuse corrupt manifests, traversal/identity mismatches, missing irreplaceable state and cyclic
+    directory walks loudly and without publishing a partial archive. Retain existing internal/external
+    non-engine content coverage; no new exclusions, fallback success or archive deletion.
+    Keep filesystem/JSON helpers separate from run-task/worker imports. Add tests to the existing suite.
+  acceptance:
+    - claim: "the real state snapshot path consumes the engine-link preservation helper, not only its tests"
+      proof: "grep: preserveEngineDependencyLinks( in src/lib/ledger.ts"
+    - claim: "real snapshot and restore preserve dangling engine dependency links and validated reconstruction evidence alongside ledger and proposals"
+      proof: "unit test: a state backup restores engine dependency links without following their targets"
+    - claim: "available external engine installs are not traversed or modified and critical non-engine missing state is still a failure"
+      proof: "unit test: engine dependency references do not excuse missing irreplaceable state"
+    - claim: "corrupt reconstruction evidence and link mismatches cannot publish or restore a success-shaped partial archive"
+      proof: "unit test: invalid engine dependency reconstruction evidence refuses before restore writes"
+    - claim: "a directory-link cycle is a bounded explicit backup failure rather than recursion or silent omission"
+      proof: "unit test: a state backup refuses a directory link cycle without publishing"
+  falsifier: |
+    Restore the current statSync-following walk: the dangling-link round trip fails ENOENT.
+    Follow an available engine link: the external sentinel is copied and the no-traversal assertion fails.
+    Ignore all node_modules entries: a real state directory or non-engine critical-file control fails.
+    Skip manifest validation: modified pins/link text reach restore and the before-write assertion fails.

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { aggregateCacheHitTotals, deriveKnowledgeBudgetCap, measureKnowledgeBudgetPressure, TRIVIAL_DROPPED_WEIGHT_CHARS, type CacheHitTokens, type KnowledgeBudgetDerivation } from "./digest.js";
@@ -375,7 +376,9 @@ export function measurementWorkerOptions(execArgv: readonly string[]): { resourc
 }
 
 /** A worker failure refuses this measurement; it never falls back to reading on the event loop. */
-export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = new URL(import.meta.url)): Promise<T> {
+/** bundlemain: a bundled daemon starts this worker from its own worker bundle (bundledWorkerUrl); a tsx parent from
+ *  this module's URL, as before. Its .ts source cannot load in a worker of a bundled main, which has no tsx loader. */
+export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = bundledWorkerUrl(import.meta.url)): Promise<T> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(workerUrl, { workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, ...measurementWorkerOptions(process.execArgv) });
     worker.once("message", (reply: MeasurementReply) => {

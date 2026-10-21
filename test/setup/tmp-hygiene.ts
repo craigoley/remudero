@@ -28,6 +28,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { beforeEach } from "node:test";
+import { fileURLToPath } from "node:url";
 import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
@@ -435,13 +436,56 @@ export function flattenChildCoverage(redirect: ChildCoverageRedirect, now: () =>
   return moved;
 }
 
+/**
+ * PR 13218 — A FIXTURE TREE'S SOURCE MAP NEVER COSTS THE SHARD ITS LCOV.
+ *
+ * A child that runs a bundle built in a fixture tree with a linked map (scripts/build-child-entries.mjs, recipe 5)
+ * leaves that map in its report's `source-map-cache`, naming .ts sources inside the tree. The tree is deleted before
+ * the runner reports, and Node then throws ERR_SOURCE_MAP_MISSING_SOURCE and writes NO lcov for the whole run
+ * (MEASURED on #13218: 12 of the 19 suites that build bundles, and 7 of 8 coverage shards). For an UNMAPPED script
+ * whose file was deleted, Node's own `getLines` leaves the file out of the report instead. This gives a mapped
+ * script the same treatment: an entry whose map names a source that cannot be read, with no `sourcesContent` for
+ * it, is removed, so the script reads as unmapped and Node leaves it out as before. A map whose sources all read
+ * is untouched, so a bundle built from real sources still maps onto its .ts lines. Returns the removed URLs.
+ */
+export function dropUnmappableSourceMaps(reportPath: string): string[] {
+  const text = fs.readFileSync(reportPath, "utf8");
+  if (!text.includes('"source-map-cache"')) return [];
+  const seen = new Map<unknown, boolean>();
+  const readable = (url: unknown) => {
+    if (!seen.has(url)) {
+      seen.set(url, typeof url === "string" && url.startsWith("file:") &&
+        fs.statSync(fileURLToPath(url), { throwIfNoEntry: false })?.isFile() === true);
+    }
+    return seen.get(url) === true;
+  };
+  // A first pass without a parse: a tsx child's report runs to megabytes, and its sources all read.
+  const named = [...text.matchAll(/"sources":\[([^\]]*)\]/g)]
+    .flatMap((m) => [...(m[1] ?? "").matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((s) => JSON.parse(`"${s[1]}"`) as string));
+  if (named.every(readable)) return [];
+  type Entry = { data?: { sources?: unknown; sourcesContent?: unknown } | null };
+  const report = JSON.parse(text) as { "source-map-cache"?: Record<string, Entry> };
+  const cache = report["source-map-cache"] ?? {};
+  const dropped = Object.keys(cache).filter((url) => {
+    const sources = cache[url]?.data?.sources;
+    const contents = cache[url]?.data?.sourcesContent;
+    return Array.isArray(sources) && sources.some((source, i) => (Array.isArray(contents) ? contents[i] : null) == null && !readable(source));
+  });
+  if (dropped.length === 0) return [];
+  for (const url of dropped) delete cache[url];
+  fs.writeFileSync(`${reportPath}.part`, JSON.stringify(report));
+  fs.renameSync(`${reportPath}.part`, reportPath);
+  return dropped;
+}
+
+let movedChildReports: string[] = [];
 const childCoverage = redirectChildCoverage();
 if (childCoverage !== undefined) {
   // A thread sharing this env writes its own report after every exit handler: back to the flat dir.
   process.on("exit", () => {
     process.env.NODE_V8_COVERAGE = childCoverage.coverageDir;
     try {
-      flattenChildCoverage(childCoverage);
+      movedChildReports = flattenChildCoverage(childCoverage);
     } catch (error) {
       console.error(`test setup: could not move this suite's child coverage reports into ${childCoverage.coverageDir}: ${(error as Error).message}`);
       process.exitCode = 1;
@@ -494,3 +538,17 @@ process.on("exit", () => {
     process.exitCode = 1;
   }
 });
+
+// PR 13218: AFTER the sweep above, so a fixture tree the sweep removed reads as gone (see dropUnmappableSourceMaps).
+if (childCoverage !== undefined) {
+  process.on("exit", () => {
+    for (const name of movedChildReports) {
+      try {
+        dropUnmappableSourceMaps(join(childCoverage.coverageDir, name));
+      } catch (error) {
+        console.error(`test setup: could not check ${name}'s source maps against their sources: ${(error as Error).message}`);
+        process.exitCode = 1;
+      }
+    }
+  });
+}

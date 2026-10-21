@@ -1046,6 +1046,9 @@ import {
   parseProofAmendmentProposal,
   requestProofAmendment,
   requestScopeAmendment,
+  readBuildScopeRecovery,
+  saveBuildScopeRecovery,
+  restoreBuildScopeRecovery,
   saveScopeAmendmentWork,
   restoreScopeAmendmentWork,
   type ScopeAmendmentOutcome,
@@ -17023,7 +17026,10 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   prCreateExec?: Parameters<typeof runGhPrCreate>[4];
   prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
   /** W1-T10026: test seam for a build's left-out-import scope request; production asks `requestScopeAmendment`. */
+  implementPush?: typeof gitPushRunBranchAsync;
   implementScopeAmendment?: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome;
+  implementScopeAmendmentPortsIo?: Parameters<typeof buildProofAmendmentWritePorts>[1];
+  implementScopeAmendmentState?: (url: string) => Promise<"open" | "merged" | "closed">;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -18053,6 +18059,10 @@ async function runTask(
     otherOpenPrReader?: OpenPrJsonReader;
     prCreateExec?: Parameters<typeof runGhPrCreate>[4];
     prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
+    implementPush?: RunTaskBodyOptions["implementPush"];
+    implementScopeAmendment?: RunTaskBodyOptions["implementScopeAmendment"];
+    implementScopeAmendmentPortsIo?: RunTaskBodyOptions["implementScopeAmendmentPortsIo"];
+    implementScopeAmendmentState?: RunTaskBodyOptions["implementScopeAmendmentState"];
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     selectedModeFileIO?: RegistryFileIO;
     pairedTrial?: Partial<PairedTrialInput>;
@@ -19379,7 +19389,23 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     task,
     log,
   );
+  const scopePointer = join(config.root, "state", "recovery", "build-scope", taskId, "latest.json");
+  let scopeRecovery: ReturnType<typeof readBuildScopeRecovery> | undefined;
+  let scopeWait: { amendmentUrl: string; paths: string[] } | undefined;
+  if (existsSync(scopePointer)) {
+    try {
+      const pointer = JSON.parse(readFileSync(scopePointer, "utf8"));
+      scopeRecovery = readBuildScopeRecovery(pointer.path, taskId);
+      if (pointer.amendmentUrl && Array.isArray(pointer.paths) && pointer.paths.some((path: string) => !pathIsUnderDeclaredSurface(path, task.files ?? []))) {
+        scopeWait = { amendmentUrl: pointer.amendmentUrl, paths: pointer.paths };
+      }
+    } catch (error) {
+      scopeRecovery = { status: "unverifiable", path: scopePointer, reason: String(error) };
+    }
+  }
   log("run.start", {
+    ...(scopeRecovery ? { scope_recovery: scopeRecovery.status, recovery_path: scopeRecovery.path,
+      ...(scopeRecovery.status !== "verified" ? { recovery_reason: scopeRecovery.reason } : {}) } : {}),
     repo: task.repo,
     type: task.type,
     risk: task.risk,
@@ -19396,6 +19422,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     soft_threshold_usd: softThresholdUsd,
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
+
+  if (scopeWait) {
+    let state: string;
+    try {
+      state = await (opts.implementScopeAmendmentState ?? readBuildScopeAmendmentState)(scopeWait.amendmentUrl);
+    } catch (error) {
+      state = "unreadable";
+      log("implement.scope_wait_unreadable", { amendment_url: scopeWait.amendmentUrl, reason: String(error) });
+    }
+    if (state !== "closed") {
+      log("verdict", { verdict: "blocked_inflight", reason: "scope_amendment_pending", amendment_url: scopeWait.amendmentUrl,
+        scopeAmendmentsPending: state === "open" ? 1 : 0, amendment_state: state, cost_usd: 0 });
+      return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_inflight" };
+    }
+  }
 
   // The decision and its failure-tolerant arms live in `exploreMount`, which never throws; only real data sources are wired here.
   // `runId` is clock-derived, so no harness can steer this call onto explore — the arms are seamed.
@@ -20069,6 +20110,22 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
       }
     }
+    let scopeRecoveryPrompt = "";
+    if (scopeRecovery?.status === "verified" && !scopeWait) {
+      try {
+        const paths = [...scopeRecovery.data.committedPaths, ...scopeRecovery.data.companions.map((c) => c.path)];
+        if (paths.some((path) => !pathIsUnderDeclaredSurface(path, task.files ?? []))) throw new Error("saved paths are outside the amended task scope");
+        await restoreBuildScopeRecovery(scopeRecovery.data, worktreePath, (args) => hostWorktreeGit(worktreePath, args));
+        log("implement.scope_restored", { recovery_path: scopeRecovery.path, source_head_sha: scopeRecovery.data.headSha, paths });
+        scopeRecoveryPrompt = `\nRecovered build work from ${scopeRecovery.data.branch} after scope amendment ${scopeRecovery.data.amendmentUrl}. ` +
+          "The saved harness changes and companions are present as uncommitted edits. Continue this work and include it in your report.\n";
+      } catch (error) {
+        log("implement.scope_recovery_fresh", { recovery_path: scopeRecovery.path, reason: String(error) });
+      }
+    } else if (scopeRecovery) {
+      log("implement.scope_recovery_fresh", { recovery_path: scopeRecovery.path,
+        reason: scopeRecovery.status === "verified" ? "amendment closed without granting scope" : scopeRecovery.reason });
+    }
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
@@ -20441,7 +20498,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const prompt = `${renderedImplementPrompt}${scopeRecoveryPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -21038,12 +21095,17 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       amend: opts.implementScopeAmendment ?? ((request) => requestScopeAmendment(request, buildProofAmendmentWritePorts({
         taskId, worktreePath: repoDir, config, owner, repo: task.repo, prNumber: request.prNumber, ledgerLinesNow: [], log,
         gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
-      }))),
+      }, opts.implementScopeAmendmentPortsIo))),
     });
     if (scopeNeeded) {
       harvestFollowupsFromReport(fullText(impl), { label: "implement", runId, log, say });
-      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log);
       const { amendment } = scopeNeeded;
+      const recoveryPath = await saveBuildScopeRecovery({ root: config.root, taskId, branch, worktreePath,
+        headSha: harnessCommitted!.sha, amendmentUrl: "amendmentUrl" in amendment ? amendment.amendmentUrl : "",
+        companions: scopeNeeded.companions.map((c) => c.path), git: (args) => hostWorktreeGit(worktreePath, args) });
+      log("implement.scope_needed", { recovery_path: recoveryPath, paths: scopeNeeded.companions.map((c) => c.path),
+        head_sha: harnessCommitted!.sha, amendment_url: "amendmentUrl" in amendment ? amendment.amendmentUrl : "" });
+      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log);
       log("verdict", {
         verdict: "no_pr",
         reason: "scope_needed",
@@ -21303,7 +21365,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
-        await gitPushRunBranchAsync(worktreePath);
+        await (opts.implementPush ?? gitPushRunBranchAsync)(worktreePath);
       } catch (err) {
         const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err) ?? prePushGateRefusal(err);
         if (!refusal) throw err;
@@ -21369,7 +21431,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // read that tip. `appendTaskTrailerToCommit` amends only when the trailer is missing, so
     // an already-trailered commit (a worker that wrote it itself) pays no second amend.
     if (appendTaskTrailerToCommit(worktreePath, taskId)) {
-      await gitPushRunBranchAsync(worktreePath, { force: true });
+      await (opts.implementPush ?? gitPushRunBranchAsync)(worktreePath, { force: true });
     }
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
@@ -42623,6 +42685,16 @@ export function requiredCompanions(
   return [...importers].sort(([a], [b]) => a.localeCompare(b)).map(([path, by]) => ({ path, importers: by.sort() }));
 }
 
+export async function readBuildScopeAmendmentState(
+  url: string, fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<"open" | "merged" | "closed"> {
+  const pr = await fetch(["pr", "view", url, "--json", "state,mergedAt"]) as { state?: string; mergedAt?: string };
+  if (pr.mergedAt || pr.state === "MERGED") return "merged";
+  if (pr.state === "OPEN") return "open";
+  if (pr.state === "CLOSED") return "closed";
+  throw new Error("scope amendment state is unreadable");
+}
+
 /**
  * W1-T10026: A BUILD WHOSE COMMITTED FILES IMPORT A LEFT-OUT FILE ASKS FOR SCOPE. #12575 opened with three committed
  * files importing a module the harness commit dropped, so every check died ERR_MODULE_NOT_FOUND. With no required
@@ -42646,8 +42718,8 @@ export async function askScopeForLeftOutImports(input: {
   input.log("implement.scope_needed", { task_id: input.taskId, paths, importers, head_sha: sha });
   let amendment: ScopeAmendmentOutcome;
   try {
-    amendment = await input.amend({ taskId: input.taskId, prNumber: 0, prUrl: "", headSha: sha, headRef: input.branch,
-      paths, changedPaths: [...undeclared] });
+    amendment = await input.amend({ taskId: input.taskId, kind: "build", importers: [...new Set(companions.flatMap((c) => c.importers))], prNumber: 0, prUrl: "", headSha: sha, headRef: input.branch,
+      paths, changedPaths: [...undeclared, ...companions.flatMap((c) => c.importers)] });
   } catch (error) {
     amendment = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
   }
@@ -53004,7 +53076,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "gh",
     syntax: "rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>",
     summary: "Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.",
-    detail: "W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Writes go straight to gh, unpaced. With no live broker it runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.",
+    detail: "W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Reads only: a write (the one write rule, ghArgvIsWrite) or any auth call is refused with exit 2 and never run; run it as a plain gh call, where hooks/deny-floor.sh judges it. With no live broker a read runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.",
   },
   {
     name: "gh-broker",
