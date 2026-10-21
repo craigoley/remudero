@@ -1663,17 +1663,18 @@ export interface ReleaseResolution {
  */
 export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResolution {
   const authors = new Map<string, ReleaseAuthor>();
-  // Either record unreadable releases nothing from it, never throws into selection, and is named to the caller.
   let ledgerUnreadable: string | undefined;
   try {
     for (const [id, author] of releaseAuthorsFromLedger(deps.readLedgerLines?.() ?? [])) authors.set(id, author);
   } catch (e) {
+    // the ledger unreadable: it releases nothing (the safe direction), and the tick names the reason.
     ledgerUnreadable = String((e as Error)?.message ?? e);
   }
   let durableUnreadable: string | undefined;
   try {
     for (const id of deps.readDurableReleases?.() ?? []) authors.set(id, "operator");
   } catch (e) {
+    // operator-releases.json unreadable: it releases nothing (the safe direction), and the tick names the reason.
     durableUnreadable = String((e as Error)?.message ?? e);
   }
   const ids = new Set<string>();
