@@ -14,6 +14,27 @@
   status: queued
   priority: 1
   attempts: 0
+  amendment: |
+    W1-T9332 amended 2026-10-20 by coordinator brief file1020c item 8: src/run-task.ts sits at its comment-load ceiling.
+    No acceptance, file or design change; this records a second reason the split is due, and one constraint on it.
+    OBSERVED at origin/main faefe0655: `countCommentLines` (scripts/comment-load-ratchet.mjs) read 16,500 comment lines
+    in src/run-task.ts against a recorded ceiling of 16,500 (scripts/comment-load-baseline.json), so any PR adding one
+    comment line there was refused. At c89ef695b (21:35Z) it reads 16,500 against 16,502: two lines of headroom. The same count over main's last 12 run-task.ts commits: 16,495-16,498 through
+    16:46Z on 10-20, 16,501 at fe5ad726b (#13138, 17:06Z), 16,502 at e94e06e1a and 62b891098, then 16,500 at 6ddbedcde
+    (#13212, 21:16Z). A builder's push of a main merge into PR #13060's branch was refused by the pre-push gate on it
+    ("src/run-task.ts has 16503 comment lines > ceiling 16500", logs-8864/memgate-push3.log line 105, ~20:44Z).
+    REJECTED ALTERNATIVE, AN OPERATOR DECISION NOT TAKEN HERE: raising the ceiling again. The fleet's main-repair PR
+    #13169 ("record the ceiling main crossed on comment-load-signal") recorded `"src/run-task.ts": 16502` and merged at
+    0c6a994a9 (21:28Z) while this amendment was open. Any further raise is the operator's call, not this task's.
+    THE REMEDY IS THIS SPLIT, NOT A NEW TASK: moving runTask and runTaskBody (about 3,600 lines) carries their comments
+    into src/cli/commands/run-task-verb.ts, and W1-T9337, W1-T9338 and W1-T9339 do the same for fix, sweep and review.
+    Those three each hold a refs/rmd-dispatch ref at 21:37Z with no run-* head; this one holds neither.
+    CONSTRAINT (READ, `evaluateCommentLoadRatchet`): a shrink lowers the recorded ceiling only by whole 250-line
+    buckets (`ceilingForComments`), so the headroom a split leaves is the gap between run-task.ts's new count and the
+    next multiple of 250 above it, anywhere from 0 to 249 lines. The PR states that headroom; a count landing exactly
+    on a multiple leaves none, and trimming a stale comment block in the moved region before recording fixes that.
+    A moved comment block over `MAX_ADDED_BLOCK_LINES` (25) counts as ADDED in the new module; keep the move verbatim and
+    let diff-coverage's relocation exemption and the ratchet's own report show it, never raise a limit.
   rationale: |
     MEASURED on origin/main bbab8894f, 2026-10-13. src/run-task.ts is 57,478 lines. Of 329 open tasks (no
     `Remudero-Task:` trailer on main, and a shard status that is not merged, retired, done or blocked), 105 declare it

@@ -1,0 +1,79 @@
+- id: W1-T10259
+  title: "A refused scope amendment never parks its PR, and a machine task's amendment re-parks it for judgment"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-20: red-PR stall triage (#13039)"
+  plan_refs: [W1-T1223, W1-T6465, W1-T7959, W1-T9807, W1-T4459, W1-T10043, W1-T10070, W1-T100, W1-T9748]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/proof-amendment.ts
+    - src/run-task.ts
+    - test/a-refused-scope-amendment-never-parks-its-pr.test.ts
+  rationale: |
+    OBSERVED on #13039 (W1-T9265), core ledger 2026-10-20. The 04:03Z fix round reported
+    NEEDS_SCOPE src/lib/scout-gardener.ts without leaving the edit saved. requestScopeAmendment
+    refused it as path-not-changed (proof-amendment.ts:602). run-task.ts's scope-needed branch
+    (around :14003) then logged fix.commit_refused with scope_amendment_detail. From then on,
+    every sweep pass hit sweep.ts:19486 (`refusedSameRed?.scopeAmendment && !closedAmendment`)
+    and stood down with "fix report requests a scope amendment". No amendment PR existed and no
+    later round ran, so the PR stayed parked at head 4d45d9e for more than 7 h. The only output
+    was escalation #13051. The gate tells a pending amendment from a refused one only when the
+    refusal is main-owned (W1-T9807).
+
+    Second hole, same path. Since 10-14 four automatic amendments were refused as
+    amended-shard-lint. Both distinct tasks among them, W1-T9000/#11702 and W1-T5334/#11904,
+    were refused on machine-author-verify: on a machine-authored task the appended path
+    changes taskRulingPin, so the lint check newAmendedBlockers (proof-amendment.ts:653)
+    refuses the edit as a stale ruling. Scout drafts
+    are also broken by the append itself. isScoutDraftShape (plan.ts:500) needs the scout test
+    LAST, and the writer appends after it. So a machine task never gets an automatic scope
+    amendment, even when the worker does leave its edit.
+
+    Tally of fix.scope_amendment rows from 10-10 to 10-20: 32 created, 8 path-not-changed,
+    4 amended-shard-lint, 13 instrument-path, 11 no-task-trailer, 7 main-owned.
+
+    Overlap. W1-T100 (the ci-log fix route) and W1-T9748 (tracing declared files to staging)
+    share sweep.ts and run-task.ts but not this gate. W1-T10043 admits an imported-but-missing
+    path, and W1-T10070 handles a build with no PR yet. This task owns the parking of an open
+    PR after a refused amendment, and the machine/scout shape of the amendment writer.
+  design: |
+    1. Park only on a pending amendment. The sweep's scope-amendment stand-down applies only
+       while this head's latest fix.scope_amendment row is created, resumed or
+       branch_update_requested. Any other refusal is not a pending amendment. The PR returns to
+       the normal fix-round path, and the progress judge decides that round with the refusal's
+       reason and detail. A refused round is still history the judge reads, so a worker that
+       repeats the same refused NEEDS_SCOPE escalates through the existing loop signals. It
+       never parks silently.
+    2. Path-not-changed is a contract miss that the next round can cure. Hand the refusal
+       to the next fix round as a constraint, using the existing pendingAnswer or
+       change-approach channel: "make the edit to <paths> and leave it saved and uncommitted,
+       then report NEEDS_SCOPE". Add no new prompt surface beyond that constraint.
+    3. The amendment writer keeps a machine task amendable. When the appended paths stale a
+       machine-authored task's ruling pin, write `verify: human` in the same commit. The
+       machine-filing judge then re-rules the record as it now stands. Never recompute or
+       carry a pin, and never fabricate a ruling. For a scout draft (origin scout:), insert
+       the paths before the trailing scout test, so the shape isScoutDraftShape reads survives.
+    Keep every other refusal unchanged: instrument, test, plan, invalid path, no-task-trailer
+    and main-owned. Add no thresholds and no new ledger step names.
+  acceptance:
+    - claim: "a head whose scope amendment was refused path-not-changed gets a fix round instead of a permanent stand-down"
+      proof: 'grep: test("W1-T10259: a refused scope amendment does not park the PR at its head" in test/a-refused-scope-amendment-never-parks-its-pr.test.ts'
+    - claim: "a pending amendment still holds the PR until it merges or closes"
+      proof: 'grep: test("W1-T10259: a created scope amendment still holds the fix lane" in test/a-refused-scope-amendment-never-parks-its-pr.test.ts'
+    - claim: "a machine task's automatic amendment parks it at verify human instead of refusing on a stale pin"
+      proof: 'grep: test("W1-T10259: a machine task scope amendment re-parks it for the judge" in test/a-refused-scope-amendment-never-parks-its-pr.test.ts'
+    - claim: "a scout draft's amendment keeps the scout test last"
+      proof: 'grep: test("W1-T10259: an amended scout draft keeps the scout test last" in test/a-refused-scope-amendment-never-parks-its-pr.test.ts'
+  falsifier: |
+    Restore sweep.ts's unconditional `refusedSameRed?.scopeAmendment` stand-down. The first
+    test must fail with "fix report requests a scope amendment". Drop the verify:human write.
+    The third test must fail with amended-shard-lint / machine-author-verify. Append after the
+    scout test. The fourth test must fail isScoutDraftShape.

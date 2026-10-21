@@ -13,10 +13,11 @@ raw: >-
   The host's heartbeat has gone silent while its samples were falling.
 attachments: []
 origin: incident#103a7086317469442f73a747dafdb83ccc83d66f1ff144493e6301cb3b2a6ec6
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

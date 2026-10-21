@@ -1,0 +1,380 @@
+/** Runs the real preserve-then-retire helper and janitor against private fixture homes. */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const HELPER = join(process.cwd(), "deploy/mac/preserve-retire.py");
+const JANITOR = join(process.cwd(), "deploy/mac/remudero-janitor.sh");
+const HOUR = 3600;
+// The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later.
+const NOW = Math.floor(Date.now() / 1000) + 48 * HOUR;
+const GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+  GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+};
+
+interface Fx { root: string; home: string; origin: string; bin: string; lsof: string }
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV }).trim();
+}
+
+function setup(config: Record<string, unknown> | null = {}): Fx {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-preserve-retire-")));
+  const home = join(root, "home");
+  mkdirSync(join(home, ".local/state/remudero"), { recursive: true, mode: 0o700 });
+  for (const dir of [home, join(home, ".local"), join(home, ".local/state"), join(home, ".local/state/remudero")]) chmodSync(dir, 0o700);
+  const origin = join(root, "origin.git");
+  git(root, "init", "--quiet", "--bare", "-b", "main", origin);
+  const seed = join(root, "seed");
+  git(root, "clone", "--quiet", origin, seed);
+  writeFileSync(join(seed, "README"), "published\n");
+  git(seed, "add", "README"); git(seed, "commit", "--quiet", "-m", "published base");
+  git(seed, "push", "--quiet", "origin", "HEAD:main");
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  const lsof = join(root, "open-paths");
+  writeFileSync(lsof, "");
+  writeFileSync(join(bin, "ps"), '#!/bin/bash\nprintf "%s\\n" "${LIVE_PATH:-/bin/sh}"\n', { mode: 0o755 });
+  writeFileSync(join(bin, "lsof"), `#!/bin/bash\nwhile IFS= read -r p; do [ -n "$p" ] && printf 'p1\\nn%s\\n' "$p"; done < '${lsof}'\nexit 0\n`, { mode: 0o755 });
+  if (config) writeConfig({ root, home, origin, bin, lsof }, config);
+  return { root, home, origin, bin, lsof };
+}
+
+function writeConfig(fx: Fx, extra: Record<string, unknown>, mode = 0o600) {
+  const path = join(fx.home, ".local/state/remudero/preserve-retire.json");
+  writeFileSync(path, JSON.stringify({ enabled: true, idle_hours: 24, retain_days: 7, interval_hours: 0,
+    published_remotes: [fx.origin], ...extra }));
+  chmodSync(path, mode);
+}
+
+function clone(fx: Fx, rel: string, ...extra: string[]): string {
+  const path = join(fx.home, rel);
+  mkdirSync(join(path, ".."), { recursive: true });
+  git(fx.root, "clone", "--quiet", ...extra, fx.origin, path);
+  return path;
+}
+
+function commit(repo: string, file: string, text: string, message: string) {
+  writeFileSync(join(repo, file), text);
+  git(repo, "add", file); git(repo, "commit", "--quiet", "-m", message);
+}
+
+function helper(fx: Fx, args: string[] = ["--apply"], env: Record<string, string> = {}, now = NOW) {
+  return spawnSync("python3", ["-I", HELPER, "--home", fx.home, "--now", String(now), ...args], {
+    encoding: "utf8", timeout: 120_000,
+    env: { ...GIT_ENV, PATH: `${fx.bin}:${process.env.PATH}`, ...env },
+  });
+}
+
+function janitor(fx: Fx, apply: boolean) {
+  return spawnSync("bash", [JANITOR, apply ? "--apply" : "--dry-run"], { encoding: "utf8", timeout: 120_000, env: {
+    ...GIT_ENV, HOME: fx.home, PATH: `${fx.bin}:${process.env.PATH}`, TMPDIR: fx.root,
+    REMUDERO_JANITOR_ACCOUNT_HOME: fx.home, REMUDERO_JANITOR_SCAN_ROOTS: fx.root,
+    REMUDERO_JANITOR_DIRECTORY_ROOTS: join(fx.home, "Remudero"),
+    REMUDERO_JANITOR_LOG: join(fx.root, "janitor.log"), REMUDERO_JANITOR_LOCK_DIR: join(fx.root, "janitor.lock"),
+    REMUDERO_JANITOR_DECISION_LOG: join(fx.root, "decisions.tsv"),
+  } });
+}
+
+function pythonProbe(fx: Fx, script: string) {
+  const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
+  writeFileSync(join(fx.bin, "python3"), `#!/bin/bash
+case " $* " in *"/preserve-retire.py "*) ${script} ;; esac
+exec '${native}' "$@"
+`, { mode: 0o755 });
+  return native;
+}
+
+function preserved(fx: Fx, rel: string): string {
+  const root = join(fx.home, "Remudero-preserved");
+  const name = readdirSync(root).find(n => n.startsWith(rel.replaceAll("/", "__") + "@"));
+  assert.ok(name, `no preserved copy for ${rel} in ${readdirSync(root).join(", ")}`);
+  return join(root, name);
+}
+
+/** Restore a preserved copy onto a fresh clone of the published origin, as MANIFEST.txt says. */
+function restore(fx: Fx, copy: string, into: string): string {
+  git(fx.root, "clone", "--quiet", fx.origin, into);
+  const manifest = JSON.parse(readFileSync(join(copy, "manifest.json"), "utf8"));
+  if (existsSync(join(copy, "unpublished.bundle"))) git(into, "bundle", "unbundle", join(copy, "unpublished.bundle"));
+  git(into, "checkout", "--quiet", manifest.head);
+  if (existsSync(join(copy, "uncommitted.patch"))) git(into, "apply", "--binary", join(copy, "uncommitted.patch"));
+  if (existsSync(join(copy, "untracked.tar.gz"))) execFileSync("tar", ["-xzf", join(copy, "untracked.tar.gz"), "-C", into]);
+  return into;
+}
+
+function touch(path: string, at: number) { utimesSync(path, at, at); }
+
+test("preserve-then-retire saves unpublished commits, uncommitted edits and untracked files before it retires an idle clone", () => {
+  const fx = setup();
+  try {
+    const repo = clone(fx, "Remudero/task-run/repo");
+    commit(repo, "work.ts", "export const work = 1;\n", "unpublished local work");
+    writeFileSync(join(repo, "README"), "published\nedited locally\n");
+    writeFileSync(join(repo, "notes.md"), "untracked report\n");
+    writeFileSync(join(repo, ".env"), "IGNORED=kept\n");
+    writeFileSync(join(repo, ".gitignore"), ".env\nnode_modules/\n");
+    mkdirSync(join(repo, "node_modules/pkg"), { recursive: true });
+    writeFileSync(join(repo, "node_modules/pkg/index.js"), "regenerable\n");
+    const head = git(repo, "rev-parse", "HEAD");
+
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /PRESERVED 1 commits/);
+    assert.match(r.stdout, /RETIRED clone .*task-run\/repo/);
+    assert.equal(existsSync(repo), false, r.stdout);
+
+    const copy = preserved(fx, "Remudero/task-run/repo");
+    assert.equal(existsSync(join(copy, "MANIFEST.txt")), true);
+    const back = restore(fx, copy, join(fx.root, "restored"));
+    assert.equal(git(back, "rev-parse", "HEAD"), head);
+    assert.equal(readFileSync(join(back, "work.ts"), "utf8"), "export const work = 1;\n");
+    assert.equal(readFileSync(join(back, "README"), "utf8"), "published\nedited locally\n");
+    assert.equal(readFileSync(join(back, "notes.md"), "utf8"), "untracked report\n");
+    assert.equal(readFileSync(join(back, ".env"), "utf8"), "IGNORED=kept\n");
+    assert.equal(existsSync(join(back, "node_modules")), false, "dependency trees are regenerated, not preserved");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("preserved restore instructions name the actual upstream repository", () => {
+  const fx = setup();
+  try {
+    clone(fx, "Remudero/a-different-project");
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const copy = preserved(fx, "Remudero/a-different-project");
+    const manifest = JSON.parse(readFileSync(join(copy, "manifest.json"), "utf8"));
+    assert.equal(manifest.remotes.origin, fx.origin);
+    assert.ok(readFileSync(join(copy, "MANIFEST.txt"), "utf8").includes(`git clone ${fx.origin} <dir>`));
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a checkout changed within the idle window, named by a live command, or held open is kept", () => {
+  const fx = setup();
+  try {
+    const recent = clone(fx, "Remudero/recent");
+    touch(join(recent, "README"), NOW - 2 * HOUR);
+    const live = clone(fx, "rmd-work/live");
+    const open = clone(fx, ".codex/work-artifacts/open");
+    writeFileSync(fx.lsof, join(open, "README") + "\n");
+    const r = helper(fx, ["--apply"], { LIVE_PATH: `node ${live}/run.js` });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    for (const path of [recent, live, open]) assert.equal(existsSync(path), true, path + r.stdout);
+    assert.match(r.stdout, /HOLD active <24h .*Remudero\/recent/);
+    assert.match(r.stdout, /HOLD live command names it .*rmd-work\/live/);
+    assert.match(r.stdout, /HOLD open file or cwd inside .*work-artifacts\/open/);
+    assert.match(r.stdout, /retired=0/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("an object lender stays while its borrower stays, and both are preserved before either is retired", () => {
+  const fx = setup();
+  try {
+    const lender = clone(fx, "Remudero/lender");
+    commit(lender, "lent.ts", "export const lent = true;\n", "commit stored only in the lender");
+    const lent = git(lender, "rev-parse", "HEAD");
+    const borrower = clone(fx, "Remudero/borrower", "--reference", lender);
+    // The fetch writes no objects: the borrower's new branch points into the lender's store.
+    git(borrower, "fetch", "--quiet", lender, `${lent}:refs/heads/borrowed`);
+    git(borrower, "checkout", "--quiet", "borrowed");
+    touch(join(borrower, "README"), NOW - HOUR);
+
+    const first = helper(fx);
+    assert.equal(first.status, 0, first.stderr + first.stdout);
+    assert.equal(existsSync(lender), true, first.stdout);
+    assert.match(first.stdout, /HOLD lends-objects-to-kept .*Remudero\/lender/);
+
+    // A day later both are idle: both are preserved first, then both retire.
+    const second = helper(fx, ["--apply"], {}, NOW + 24 * HOUR);
+    assert.equal(second.status, 0, second.stderr + second.stdout);
+    assert.equal(existsSync(lender), false, second.stdout);
+    assert.equal(existsSync(borrower), false, second.stdout);
+    const order = second.stdout.split("\n").map(l => l.split(" ")[1]).filter(a => a === "PRESERVED" || a === "RETIRED");
+    assert.deepEqual(order, ["PRESERVED", "PRESERVED", "RETIRED", "RETIRED"], second.stdout);
+    const back = restore(fx, preserved(fx, "Remudero/borrower"), join(fx.root, "restored"));
+    assert.equal(readFileSync(join(back, "lent.ts"), "utf8"), "export const lent = true;\n");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a worktree whose git dir is gone, a locked worktree, and an oversized untracked file are held for a person", () => {
+  const fx = setup({ max_untracked_mb: 1 });
+  try {
+    const main = clone(fx, "Remudero/main");
+    const orphan = join(fx.home, "Remudero/orphan");
+    git(main, "worktree", "add", "--quiet", "-b", "orphan", orphan);
+    rmSync(join(main, ".git/worktrees/orphan"), { recursive: true, force: true });
+    const locked = join(fx.home, "Remudero/locked");
+    git(main, "worktree", "add", "--quiet", "-b", "locked", locked);
+    git(main, "worktree", "lock", locked);
+    const big = clone(fx, "Remudero/big");
+    writeFileSync(join(big, "capture.bin"), Buffer.alloc(2 * 1024 * 1024));
+
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    for (const path of [orphan, locked, big, main]) assert.equal(existsSync(path), true, path + r.stdout);
+    assert.match(r.stdout, /HOLD history-unrecoverable \(worktree git dir missing\) .*Remudero\/orphan/);
+    assert.match(r.stdout, /HOLD worktree-locked .*Remudero\/locked/);
+    assert.match(r.stdout, /HOLD untracked-file-over-1MB \(capture.bin\) .*Remudero\/big/);
+    assert.match(r.stdout, /HOLD has-kept-worktree .*Remudero\/main/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a refused worktree removal keeps its parent repository and counts each held repository once", () => {
+  const fx = setup();
+  try {
+    const parent = clone(fx, "Remudero/parent");
+    const child = join(fx.home, "Remudero/child");
+    git(parent, "worktree", "add", "--quiet", "-b", "child", child);
+    const nativeGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(join(fx.bin, "git"), `#!/bin/bash
+case " $* " in *" worktree remove "*) echo "fixture removal refused" >&2; exit 1;; esac
+exec '${nativeGit}' "$@"
+`, { mode: 0o755 });
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(child), true, r.stdout);
+    assert.equal(existsSync(parent), true, r.stdout);
+    assert.match(r.stdout, /HOLD has-kept-worktree .*Remudero\/parent/);
+    assert.match(r.stdout, /summary candidates=2 retired=0 held=2 apply=1/, "the refused child and retained parent are each counted once");
+    assert.equal(git(child, "cat-file", "-t", "HEAD"), "commit");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a bare repository's unpublished refs are bundled before it is retired", () => {
+  const fx = setup();
+  try {
+    const bare = join(fx.home, "Remudero/offline-origin.git");
+    git(fx.root, "clone", "--quiet", "--bare", fx.origin, bare);
+    const work = join(fx.root, "pusher");
+    git(fx.root, "clone", "--quiet", bare, work);
+    commit(work, "only-here.ts", "export {};\n", "pushed only to the local bare origin");
+    git(work, "push", "--quiet", "origin", "HEAD:refs/heads/offline-only");
+    const tip = git(work, "rev-parse", "HEAD");
+    rmSync(work, { recursive: true, force: true });
+
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(bare), false, r.stdout);
+    const copy = preserved(fx, "Remudero/offline-origin.git");
+    assert.match(readFileSync(join(copy, "refs.txt"), "utf8"), new RegExp(`${tip} refs/heads/offline-only`));
+    const into = join(fx.root, "restored");
+    git(fx.root, "clone", "--quiet", fx.origin, into);
+    git(into, "bundle", "unbundle", join(copy, "unpublished.bundle"));
+    assert.equal(git(into, "cat-file", "-t", tip), "commit");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("without an owner-private config the phase changes nothing, and a dry run plans only", () => {
+  const fx = setup(null);
+  try {
+    const repo = clone(fx, "Remudero/idle");
+    const none = helper(fx);
+    assert.equal(none.status, 0);
+    assert.match(none.stdout, /disabled \(no config\)/);
+    writeConfig(fx, {}, 0o644);
+    const loose = helper(fx);
+    assert.equal(loose.status, 2);
+    assert.match(loose.stdout, /refused: config must be an owner-private 0600 file/);
+    writeConfig(fx, {});
+    chmodSync(join(fx.home, ".local/state"), 0o775);
+    const shared = helper(fx);
+    assert.equal(shared.status, 2, "a parent inside the home that others can write voids the config");
+    chmodSync(join(fx.home, ".local/state"), 0o700);
+    const dry = helper(fx, []);
+    assert.equal(dry.status, 0, dry.stderr + dry.stdout);
+    assert.match(dry.stdout, /WOULD-RETIRE clone .*Remudero\/idle/);
+    assert.equal(existsSync(repo), true);
+    assert.equal(existsSync(join(fx.home, "Remudero-preserved")) && readdirSync(join(fx.home, "Remudero-preserved")).length > 0, false);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("retention expires only stamped copies older than retain_days", () => {
+  const fx = setup();
+  try {
+    const root = join(fx.home, "Remudero-preserved");
+    const stamped = (name: string, at: number) => {
+      mkdirSync(join(root, name), { recursive: true });
+      writeFileSync(join(root, name, "manifest.json"), JSON.stringify({ preserved_at: at }));
+      return join(root, name);
+    };
+    const old = stamped("Remudero__old@20260101T000000Z", NOW - 8 * 24 * HOUR);
+    const fresh = stamped("Remudero__fresh@20260102T000000Z", NOW - 6 * 24 * HOUR);
+    const manual = stamped("manual-copy", NOW - 30 * 24 * HOUR);
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(old), false, r.stdout);
+    assert.equal(existsSync(fresh), true);
+    assert.equal(existsSync(manual), true, "copies the phase did not stamp are never expired");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the janitor runs the preserve-then-retire phase and rotates its human log", () => {
+  const fx = setup();
+  try {
+    const log = join(fx.root, "janitor.log");
+    writeFileSync(log, "x".repeat(16 * 1024 * 1024 + 1));
+    const r = spawnSync("bash", [JANITOR, "--dry-run"], { encoding: "utf8", timeout: 120_000, env: {
+      ...GIT_ENV, HOME: fx.home, PATH: `${fx.bin}:${process.env.PATH}`, TMPDIR: fx.root,
+      REMUDERO_JANITOR_ACCOUNT_HOME: fx.home, REMUDERO_JANITOR_SCAN_ROOTS: fx.root,
+      REMUDERO_JANITOR_DIRECTORY_ROOTS: join(fx.home, "Remudero"),
+      REMUDERO_JANITOR_LOG: log, REMUDERO_JANITOR_LOCK_DIR: join(fx.root, "janitor.lock"),
+      REMUDERO_JANITOR_DECISION_LOG: join(fx.root, "decisions.tsv"),
+    } });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /preserve-retire: summary candidates=\d+ retired=0 held=\d+ apply=0/);
+    assert.equal(existsSync(log + ".1"), true, "the oversized log was rotated");
+    assert.ok(readFileSync(log, "utf8").length < 1024 * 1024, "the live log restarted small");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the janitor summary counts an actual preserved retirement in its total", () => {
+  const fx = setup();
+  try {
+    const repo = clone(fx, "Remudero/unpublished");
+    commit(repo, "work.ts", "export const work = true;\n", "unpublished work");
+    const native = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).trim();
+    pythonProbe(fx, `exec '${native}' "$@" --now ${NOW}`);
+    const r = janitor(fx, true);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(repo), false, r.stdout);
+    const summary = r.stdout.split("\n").find(l => l.includes("=== done:"));
+    assert.ok(summary, r.stdout);
+    assert.match(summary, /removed=1 removed-complete=yes/);
+    assert.match(summary, /preservation-status=completed preservation-retired=1 preservation-held=0 preservation-planned=0/);
+    assert.match(summary, /reclaimed-scope=legacy/);
+    const restored = restore(fx, preserved(fx, "Remudero/unpublished"), join(fx.root, "restored"));
+    assert.equal(readFileSync(join(restored, "work.ts"), "utf8"), "export const work = true;\n");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the janitor summary distinguishes dry-run, disabled, throttled and unknown preservation outcomes", () => {
+  const fx = setup();
+  try {
+    const output = join(fx.root, "preservation-output");
+    const exit = join(fx.root, "preservation-exit");
+    pythonProbe(fx, `cat '${output}'; exit "$(cat '${exit}')"`);
+    const cases = [
+      { apply: false, output: "summary candidates=2 retired=0 held=3 apply=0", exit: 0, fields: "preservation-status=completed preservation-retired=0 preservation-held=3 preservation-planned=2", complete: "yes" },
+      { apply: true, output: "disabled (no config)", exit: 0, fields: "preservation-status=disabled preservation-retired=0 preservation-held=unknown preservation-planned=0", complete: "yes" },
+      { apply: true, output: "skip ran within 6h", exit: 0, fields: "preservation-status=throttled preservation-retired=0 preservation-held=unknown preservation-planned=0", complete: "yes" },
+      { apply: true, output: "summary candidates=2 retired=2 held=3 apply=1", exit: 17, fields: "preservation-status=failed preservation-retired=unknown", complete: "no" },
+      { apply: true, output: "summary candidates=2 retired=999 held=3 apply=1", exit: 0, fields: "preservation-status=unverified preservation-retired=unknown", complete: "no" },
+      { apply: true, output: "summary candidates=2 retired=0 held=3 apply=0", exit: 0, fields: "preservation-status=unverified preservation-retired=unknown", complete: "no" },
+    ];
+    for (const c of cases) {
+      writeFileSync(output, `preserve-retire: ${c.output}\n`); writeFileSync(exit, String(c.exit));
+      const r = janitor(fx, c.apply);
+      assert.equal(r.status, 0, r.stderr + r.stdout);
+      const summary = r.stdout.split("\n").find(l => l.includes("=== done:"));
+      assert.ok(summary, r.stdout);
+      assert.ok(summary.includes(c.fields), summary);
+      assert.ok(summary.includes(`removed=0 removed-complete=${c.complete}`), summary);
+    }
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});

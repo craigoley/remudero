@@ -17,10 +17,14 @@
 // lower-privilege human-flagging rung (`insertPlanRepairFlag`/`dispatchPlanOnlyRepair`, W1-T3390,
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+} from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { RmdError } from "./errors.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
@@ -519,7 +523,7 @@ export function newAmendedBlockers(baseText: string, amendedText: string, label:
  *  trailing comment replaced to name the subsystems and the amendment PR), and `band_meaning: span`
  *  is added only when the task declares none. Returns `undefined` when the task's mapping is not in
  *  an editable block shape. */
-function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prNumber: number): string | undefined {
+function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prNumber: number, build = false): string | undefined {
   let text = source;
   const find = () => {
     const doc = parseDocument(text);
@@ -529,7 +533,7 @@ function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prN
   };
   const lineEnd = (at: number) => { const i = text.indexOf("\n", at); return i < 0 ? text.length : i; };
   const lineStart = (at: number) => text.lastIndexOf("\n", at - 1) + 1;
-  const comment = `# Rule 19 span: widened to ${subsystems} by a scope amendment for #${prNumber}`;
+  const comment = `# Rule 19 span: widened to ${subsystems} by a scope amendment for ${build ? "its build" : `#${prNumber}`}`;
   let task = find();
   if (!task) return undefined;
   const risk = task.get("risk", true);
@@ -558,6 +562,8 @@ function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prN
 
 export interface ScopeAmendmentRequest {
   readonly taskId: string;
+  readonly kind?: "build";
+  readonly importers?: readonly string[];
   readonly prNumber: number;
   readonly prUrl: string;
   readonly headSha: string;
@@ -570,6 +576,7 @@ export interface ScopeAmendmentRequest {
 }
 
 export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "ineligible" } | { kind: "refused" }> |
+  { kind: "amendment_merged"; amendmentNumber: number } |
   { kind: "refused"; reason: string; detail: string };
 
 /** W1-T2891's two Stryker registration files. Review admits them beside the product change they register, because a
@@ -579,14 +586,25 @@ export const SCOPE_GRANTABLE_INSTRUMENTS: ReadonlySet<string> = new Set(["stryke
 
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
   const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
-  if (!Number.isSafeInteger(request.prNumber) || request.prNumber <= 0) return refuse("invalid-pr", "no implementation PR number");
+  const build = request.kind === "build";
+  if (build ? request.prNumber !== 0 || taskIdFromRunBranch(request.headRef) !== request.taskId
+    : !Number.isSafeInteger(request.prNumber) || request.prNumber <= 0) {
+    return refuse("invalid-pr", build ? "no matching build identity" : "no implementation PR number");
+  }
   // W1-T6465: identity is the trailer OR the run-<taskId>-<epochMs> head ref, as head-identity-gate
   // admits; every identity the PR does carry must name THIS task, so a conflicting one still refuses.
   const identities = [request.trailerTaskId, taskIdFromRunBranch(request.headRef)].filter((id) => id !== undefined && id !== "");
   if (identities.length === 0 || identities.some((id) => id !== request.taskId)) {
     return refuse("no-task-trailer", "the implementation PR must carry the matching task trailer or run-<taskId>-<epochMs> head");
   }
-  const paths = [...new Set(request.paths)].sort();
+  const buildShard = build ? deps.findShard(deps.repoDir, request.taskId) : undefined;
+  const buildDoc = buildShard ? parseDocument(buildShard.text) : undefined;
+  const buildTask = isSeq(buildDoc?.contents) ? buildDoc.contents.items.find((t) => isMap(t) && String(t.get("id")) === request.taskId) : undefined;
+  const buildFiles = isMap(buildTask) ? buildTask.get("files", true) : undefined;
+  const declared = isSeq(buildFiles) ? buildFiles.toJSON() as string[] : [];
+  const importers = build ? (request.importers ?? []).filter((path) => !declared.some((surface) =>
+    path === surface || path.startsWith(`${surface.replace(/\/$/, "")}/`))) : [];
+  const paths = [...new Set([...request.paths, ...importers])].sort();
   if (paths.length === 0) return refuse("no-paths", "the worker requested no paths");
   for (const path of paths) {
     if (/^(?:\/|[A-Za-z]:)/.test(path) || /[\\\x00-\x1f\x7f]/.test(path) ||
@@ -602,14 +620,13 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     if (!request.changedPaths.includes(path)) return refuse("path-not-changed", path);
   }
   const digest = createHash("sha256").update(paths.join("\0")).digest("hex").slice(0, 20);
-  const key = `scope:${request.taskId}:${request.prNumber}:${digest}`;
+  const key = build ? `scope:${request.taskId}:build:${request.headRef}:${digest}` : `scope:${request.taskId}:${request.prNumber}:${digest}`;
   const existing = deps.lookupIdentity(key);
-  if (existing?.merged) {
-    const result = deps.updateBranch(request.prUrl, request.headSha);
-    return { kind: "branch_update_requested", ...result };
+  if (existing?.merged && !build) {
+    return { kind: "amendment_merged", amendmentNumber: existing.amendmentNumber };
   }
   if (existing) return { kind: "resumed", amendmentUrl: existing.amendmentUrl, amendmentNumber: existing.amendmentNumber };
-  const branch = `scope-amendment/${request.taskId}-${request.prNumber}`;
+  const branch = build ? `scope-amendment/${request.taskId}-build-${digest}` : `scope-amendment/${request.taskId}-${request.prNumber}`;
   const probed = deps.probeExisting(branch);
   if (probed) {
     deps.recordIdentity(key, { amendmentUrl: probed.prUrl, amendmentNumber: probed.prNumber, merged: false });
@@ -655,7 +672,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     const sizing = verdict.blockers.filter((v) => v.check === "sizing" && verdict!.task !== undefined && verdict!.task.risk !== "high");
     if (sizing.length === verdict.blockers.length) {
       const subsystems = /\((.*?)\) at risk:/.exec(sizing[0]!.message)?.[1] ?? "more than one subsystem";
-      const raised = raiseRiskToHigh(text, request.taskId, subsystems, request.prNumber);
+      const raised = raiseRiskToHigh(text, request.taskId, subsystems, request.prNumber, build);
       if (raised !== undefined && parseDocument(raised).errors.length === 0) {
         text = raised;
         riskRaise = { subsystems };
@@ -666,7 +683,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   if (verdict && verdict.blockers.length > 0) {
     return refuse("amended-shard-lint", verdict.blockers.map((v) => `${v.check}: ${v.message}`).join("; "));
   }
-  const wp = deps.worktreePathFor(request.taskId, request.prNumber);
+  const wp = deps.worktreePathFor(build ? `${request.taskId}-build-${digest}` : request.taskId, request.prNumber);
   deps.worktreeAdd(deps.repoDir, wp, branch);
   try {
     const currentShard = deps.findShard(wp, request.taskId);
@@ -675,7 +692,8 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     }
     deps.writeFile(join(wp, shard.path), text);
     deps.gitAdd(wp, shard.path);
-    const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for #${request.prNumber}`;
+    const target = build ? "its build" : `#${request.prNumber}`;
+    const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for ${target}`;
     const sha = deps.gitCommit(wp, riskRaise
       ? `${title}\n\nAppend validated worker paths to files and raise risk to high: the task linter counted ` +
         `${riskRaise.subsystems} (Rule 19 sizing). band_meaning: span is added only when none was declared.`
@@ -683,9 +701,9 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     deps.gitPush(wp, branch, sha);
     const created = deps.createPr({ title, head: branch, base: "main",
       body: (riskRaise
-        ? `Scope amendment for #${request.prNumber}. ${shard.path}'s files list changes and its risk is raised to high ` +
+        ? `Scope amendment for ${target}. ${shard.path}'s files list changes and its risk is raised to high ` +
           `because the task linter counted ${riskRaise.subsystems} (Rule 19 sizing); band_meaning: span is added only when none was declared.\n\n`
-        : `Scope amendment for #${request.prNumber}. Only ${shard.path}'s files list changes.\n\n`) +
+        : `Scope amendment for ${target}. Only ${shard.path}'s files list changes.\n\n`) +
         renderAcceptanceBlock([...additions.map((path) => ({ claim: `files includes ${path}`,
           proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` })),
           ...(riskRaise ? [{ claim: `risk is raised to high for ${riskRaise.subsystems}`, proof: `grep: ^ *risk: high in ${shard.path}` }] : [])]) });
@@ -694,4 +712,346 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   } finally {
     deps.worktreeRemove(deps.repoDir, wp);
   }
+}
+
+export interface BuildScopeRecovery {
+  version: 1;
+  taskId: string;
+  branch: string;
+  amendmentUrl: string;
+  headSha: string;
+  patch: string;
+  committedPaths: string[];
+  companions: Array<{ path: string; bytes: string; mode: number }>;
+}
+
+export type BuildScopeRecoveryRead =
+  | { status: "verified"; path: string; data: BuildScopeRecovery }
+  | { status: "missing" | "unverifiable"; path: string; reason: string };
+
+function safeRecoveryPath(path: string): boolean {
+  return path.length > 0 && !/^(?:\/|[A-Za-z]:)/.test(path) && !/[\\\x00-\x1f\x7f]/.test(path) &&
+    path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+}
+
+const recoveryDigest = (data: unknown): string => createHash("sha256").update(JSON.stringify(data)).digest("hex");
+
+export function readBuildScopeRecovery(path: string, taskId: string): BuildScopeRecoveryRead {
+  try {
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    const data = saved.data as BuildScopeRecovery;
+    if (saved.digest !== recoveryDigest(data) || data.version !== 1 || data.taskId !== taskId ||
+        taskIdFromRunBranch(data.branch) !== taskId || !/^[a-f0-9]{40,64}$/.test(data.headSha) ||
+        typeof data.amendmentUrl !== "string" || typeof data.patch !== "string" || !data.patch ||
+        !Array.isArray(data.committedPaths) || !data.committedPaths.every((p) => typeof p === "string" && safeRecoveryPath(p)) ||
+        !Array.isArray(data.companions) || data.companions.length === 0 || !data.companions.every((c) =>
+          typeof c.path === "string" && safeRecoveryPath(c.path) && typeof c.bytes === "string" &&
+          Buffer.from(c.bytes, "base64").toString("base64") === c.bytes && (c.mode === 0o644 || c.mode === 0o755))) {
+      return { status: "unverifiable", path, reason: "recovery checksum or manifest does not verify" };
+    }
+    return { status: "verified", path, data };
+  } catch (error) {
+    return { status: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverifiable", path, reason: String(error) };
+  }
+}
+
+/** The commit is pinned independently of the disposable run ref. Read back the complete byte manifest before cleanup.
+ *  Companion bytes are read through {@link scopeWorkFiles}, descriptor-relative from the worktree root, so neither a
+ *  replaced leaf nor a replaced ancestor directory can point the read outside the worktree. */
+export async function saveBuildScopeRecovery(input: {
+  root: string; taskId: string; branch: string; amendmentUrl: string; worktreePath: string; headSha: string;
+  companions: readonly string[]; git: (args: string[]) => string; io?: ScopeWorkIo;
+}): Promise<string> {
+  const { taskId, branch, amendmentUrl, headSha, git } = input;
+  for (const path of input.companions) if (!safeRecoveryPath(path)) throw new Error(`unsafe recovery path: ${path}`);
+  const read = await scopeWorkFiles(input.worktreePath, input.companions.map((path) => ({ path, data: null, mode: 0 })), false,
+    input.io ?? scopeWorkIo);
+  const companions = read.map(({ path, data, mode }) => {
+    if (data === null) throw new Error(`companion is missing: ${path}`);
+    return { path, bytes: data, mode: mode & 0o111 ? 0o755 : 0o644 };
+  });
+  const data: BuildScopeRecovery = { version: 1, taskId, branch, amendmentUrl, headSha, companions,
+    patch: git(["diff", "--binary", `${headSha}^`, headSha]),
+    committedPaths: git(["diff", "--name-only", "-z", `${headSha}^`, headSha]).split("\0").filter(Boolean) };
+  const digest = recoveryDigest(data);
+  const directory = join(input.root, "state", "recovery", "build-scope", taskId);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, `${digest}.json`);
+  writeFileSync(path, JSON.stringify({ data, digest }), { mode: 0o600 });
+  const saved = readBuildScopeRecovery(path, taskId);
+  if (saved.status !== "verified" || recoveryDigest(saved.data) !== digest) throw new Error(`scope recovery did not verify: ${path}`);
+  const ref = `refs/rmd-recovery/build-scope/${taskId}/${digest}`;
+  git(["update-ref", ref, headSha]);
+  if (git(["rev-parse", ref]).trim() !== headSha) throw new Error(`scope recovery commit did not verify: ${ref}`);
+  const pointer = join(directory, "latest.json");
+  writeFileSync(`${pointer}.tmp`, JSON.stringify({ path, amendmentUrl, paths: [...data.committedPaths, ...companions.map((c) => c.path)] }), { mode: 0o600 });
+  renameSync(`${pointer}.tmp`, pointer);
+  return path;
+}
+
+/** Writes and cleans up companions through {@link scopeWorkFiles}, the same confined path the read took. */
+export async function restoreBuildScopeRecovery(
+  saved: BuildScopeRecovery, worktreePath: string, git: (args: string[]) => string, io: ScopeWorkIo = scopeWorkIo,
+): Promise<void> {
+  const entries = saved.companions.map((c) => ({ path: c.path, data: c.bytes, mode: c.mode }));
+  const absent = entries.map(({ path }) => ({ path, data: null, mode: 0 }));
+  const existing = (await scopeWorkFiles(worktreePath, absent, false, io)).find((entry) => entry.data !== null);
+  if (existing) throw new Error(`recovery companion already exists: ${existing.path}`);
+  const patchPath = join(worktreePath, ".rmd-build-scope.patch");
+  try {
+    writeFileSync(patchPath, saved.patch);
+    git(["apply", "--check", "--3way", patchPath]);
+    git(["apply", "--3way", patchPath]);
+    await scopeWorkFiles(worktreePath, entries, true, io);
+    git(["reset", "--mixed", "HEAD"]);
+  } catch (error) {
+    git(["reset", "--hard", "HEAD"]);
+    try {
+      await scopeWorkFiles(worktreePath, absent, true, io);
+    } catch (cleanup) {
+      throw new AggregateError([error, cleanup], `scope recovery restore failed and its companion cleanup did not finish: ${String(cleanup)}`);
+    }
+    throw error;
+  } finally {
+    rmSync(patchPath, { force: true });
+  }
+}
+
+export interface ScopeAmendmentWork {
+  root: string;
+  worktreePath: string;
+  taskId: string;
+  prNumber: number;
+  amendmentNumber: number;
+  paths: readonly string[];
+}
+
+function scopeWorkIdentity(input: ScopeAmendmentWork): string {
+  return JSON.stringify([input.taskId, input.prNumber, input.amendmentNumber, [...new Set(input.paths)].sort()]);
+}
+
+function scopeWorkRecoveryPath(input: ScopeAmendmentWork): string {
+  const key = createHash("sha256").update(scopeWorkIdentity(input)).digest("hex");
+  return join(input.root, "recovery", "scope-amendment", `${key}.json`);
+}
+
+// Recovery copies contain regular files or deletions only; neither a source nor a destination may
+// follow a worker-controlled symlink out of the worktree (including an ancestor directory).
+function scopeWorkParts(path: string): string[] {
+  if (!path || /[\\\x00-\x1f\x7f:]/.test(path) || path.split("/").some((p) => !p || p === "." || p === ".." || p === ".git")) {
+    throw new Error(`unsafe scope recovery path: ${path}`);
+  }
+  return path.split("/");
+}
+
+interface ScopeWorkEntry { path: string; data: string | null; mode: number }
+
+export interface ScopeWorkIo { run: (script: string, input: string) => string | Promise<string> }
+// BACKSTOP: bound the rare recovery subprocess and its private IPC, never truncate saved work.
+const SCOPE_WORK_IO_TIMEOUT_MS = 30_000;
+const SCOPE_WORK_IO_MAX_BYTES = 64 * 1024 * 1024;
+const scopeWorkIo: ScopeWorkIo = { async run(script, input) {
+  const command = execFileLoopBounded("python3", ["-I", "-c", script], {
+    encoding: "utf8", timeout: SCOPE_WORK_IO_TIMEOUT_MS, maxBuffer: SCOPE_WORK_IO_MAX_BYTES,
+    killSignal: "SIGKILL",
+  });
+  const fed = new Promise<void>((resolveInput, rejectInput) => {
+    const stdin = command.child.stdin!;
+    stdin.once("error", rejectInput);
+    stdin.end(input, (error?: Error | null) => error ? rejectInput(error) : resolveInput());
+  });
+  const [{ stdout }] = await Promise.all([command, fed]);
+  return stdout;
+} };
+
+// Python3 is already required by the deploy image. Its dir_fd operations expose openat/renameat
+// on both supported POSIX hosts; /dev/fd/<directory>/<child> is not portable to macOS.
+const SCOPE_WORK_FILES = String.raw`
+import base64, contextlib, errno, json, os, stat, sys, uuid
+
+def recover(request):
+    required = (os.open, os.mkdir, os.unlink, os.rename, os.stat)
+    if not all(fn in os.supports_dir_fd for fn in required) or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("descriptor-relative scope recovery is unavailable")
+    entries = request["entries"]
+    for entry in entries:
+        name = entry["path"]
+        if not name or any(ord(c) < 32 or ord(c) == 127 or c in "\\:" for c in name) or any(p in ("", ".", "..", ".git") for p in name.split("/")):
+            raise ValueError("unsafe scope recovery path")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with contextlib.ExitStack() as stack:
+        def held(fd):
+            stack.callback(os.close, fd)
+            return fd
+        root = held(os.open(request["root"], directory_flags))
+        def parent_for(name, create):
+            parent = root
+            for part in name.split("/")[:-1]:
+                try:
+                    child = os.open(part, directory_flags, dir_fd=parent)
+                except FileNotFoundError:
+                    if not create:
+                        return None
+                    try:
+                        os.mkdir(part, mode=0o755, dir_fd=parent)
+                        os.fsync(parent)
+                    except FileExistsError:
+                        pass
+                    child = os.open(part, directory_flags, dir_fd=parent)
+                parent = held(child)
+            return parent
+        plans = []
+        for entry in entries:
+            parent = parent_for(entry["path"], request["restore"] and entry["data"] is not None)
+            leaf = entry["path"].split("/")[-1]
+            if request["restore"] and parent is not None:
+                try:
+                    current = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    current = None
+                if current is not None and not stat.S_ISREG(current.st_mode):
+                    raise ValueError("scope recovery requires a regular path")
+            plans.append((entry, parent, leaf))
+        result = []
+        for entry, parent, leaf in plans:
+            if not request["restore"]:
+                try:
+                    if parent is None:
+                        raise FileNotFoundError()
+                    fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                except FileNotFoundError:
+                    result.append(dict(path=entry["path"], data=None, mode=0))
+                    continue
+                with os.fdopen(fd, "rb") as source:
+                    info = os.fstat(source.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError("scope recovery requires a regular path without hard links")
+                    result.append(dict(path=entry["path"], data=base64.b64encode(source.read()).decode("ascii"), mode=stat.S_IMODE(info.st_mode) & 0o777))
+            elif parent is not None:
+                if entry["data"] is None:
+                    try:
+                        os.unlink(leaf, dir_fd=parent)
+                        os.fsync(parent)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    data = base64.b64decode(entry["data"], validate=True)
+                    temporary = ".scope-restore-" + uuid.uuid4().hex
+                    fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                    published = False
+                    try:
+                        with os.fdopen(fd, "w+b") as target:
+                            target.write(data)
+                            target.flush()
+                            os.fchmod(target.fileno(), entry["mode"])
+                            os.fsync(target.fileno())
+                            target.seek(0)
+                            if target.read() != data:
+                                raise ValueError("restored scope recovery bytes did not verify")
+                        os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                        published = True
+                        os.fsync(parent)
+                    finally:
+                        if not published:
+                            os.unlink(temporary, dir_fd=parent)
+        return result
+
+try:
+    print(json.dumps(dict(ok=True, entries=recover(json.load(sys.stdin)))))
+except (OSError, ValueError) as error:
+    message = "scope recovery requires a regular path" if isinstance(error, OSError) and error.errno in (errno.ELOOP, errno.ENOTDIR) else str(error)
+    print(json.dumps(dict(ok=False, error=message)))
+`;
+
+async function scopeWorkFiles(worktreePath: string, entries: ScopeWorkEntry[], restore: boolean, io: ScopeWorkIo): Promise<ScopeWorkEntry[]> {
+  for (const entry of entries) scopeWorkParts(entry.path);
+  const result = JSON.parse(await io.run(SCOPE_WORK_FILES, JSON.stringify({ root: resolve(worktreePath), entries, restore })));
+  if (result.ok !== true) throw new ScopeRecoveryError(String(result.error ?? "scope recovery filesystem unavailable"));
+  if (!Array.isArray(result.entries)) throw new Error("scope recovery filesystem response did not verify");
+  return result.entries;
+}
+
+class ScopeRecoveryError extends RmdError {
+  constructor(message: string) {
+    super("scope_recovery", 1, message);
+    this.name = "ScopeRecoveryError";
+  }
+}
+
+class MissingScopeWorkError extends ScopeRecoveryError {
+  constructor() {
+    super("missing saved work from the round that asked for scope");
+    this.name = "MissingScopeWorkError";
+  }
+}
+
+function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
+  const file = scopeWorkRecoveryPath(input);
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new MissingScopeWorkError();
+  }
+  const saved = JSON.parse(text);
+  if (saved.identity !== scopeWorkIdentity(input) || typeof saved.payload !== "string" ||
+      saved.digest !== createHash("sha256").update(saved.payload).digest("hex")) {
+    throw new Error("scope recovery identity or digest did not verify");
+  }
+  const entries: ScopeWorkEntry[] = JSON.parse(saved.payload);
+  const paths = [...new Set(input.paths)].sort();
+  if (!Array.isArray(entries) || entries.length !== paths.length || entries.some((entry, i) =>
+    entry.path !== paths[i] || (entry.data !== null && typeof entry.data !== "string") ||
+    !Number.isInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o777)) {
+    throw new Error("scope recovery paths or file content did not verify");
+  }
+  return entries;
+}
+
+/** Shared by any lane that parks edits behind a scope amendment. A resume verifies its existing
+ *  immutable copy instead of replacing the asking round's work with an empty, later checkout. */
+export async function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string> {
+  const file = scopeWorkRecoveryPath(input);
+  try {
+    readScopeWork(input);
+    return file;
+  } catch (error) {
+    if (!(error instanceof MissingScopeWorkError)) throw error;
+  }
+  const entries = await scopeWorkFiles(input.worktreePath, [...new Set(input.paths)].sort().map((path) => ({ path, data: null, mode: 0 })), false, io);
+  const payload = JSON.stringify(entries);
+  const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
+    digest: createHash("sha256").update(payload).digest("hex") });
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(join(input.root, "recovery", ".rmd-scratch-keep"), "preserved scope-amendment work\n", { flush: true });
+  // Publish a complete file in one link; a losing writer can then verify the winner's bytes.
+  const staging = join(dirname(file), `.scope-work-${randomUUID()}.tmp`);
+  let created = false;
+  try {
+    writeFileSync(staging, text, { flag: "wx", mode: 0o600, flush: true });
+    try {
+      linkSync(staging, file);
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  } finally {
+    rmSync(staging, { force: true });
+  }
+  if (created) {
+    if (readFileSync(file, "utf8") !== text) throw new Error("saved scope recovery bytes did not verify");
+    for (const path of [dirname(file), dirname(dirname(file)), input.root]) {
+      const fd = openSync(path, "r");
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+    }
+  }
+  readScopeWork(input);
+  return file;
+}
+
+export async function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string[]> {
+  const entries = readScopeWork(input);
+  await scopeWorkFiles(input.worktreePath, entries, true, io);
+  return entries.map((entry) => entry.path);
 }

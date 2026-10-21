@@ -105,7 +105,6 @@ const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>>
   refCommitMatchesDirtyRecovery: { count: 6, reason: FIX_CLONE },
   preserveFixHead: { count: 6, reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 2, reason: FIX_CLONE },
-  shardAgeDays: { count: 2, reason: OWN },
   idCitedInSrc: { count: 2, reason: OWN },
   approveCommand: { count: 20, reason: `${APPROVE}, and the clone it ls-remotes` },
   approveBatchCommand: { count: 6, reason: APPROVE },

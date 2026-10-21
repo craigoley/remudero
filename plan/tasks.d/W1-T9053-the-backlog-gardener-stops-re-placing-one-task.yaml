@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-13: gardener loop audit (gardener PR churn)"
   plan_refs: [W1-T8350]
   files: [src/lib/backlog-gardener.ts, test/the-backlog-gardener-stops-re-placing-one-task.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

@@ -1,0 +1,196 @@
+- id: W1-T10283
+  title: "Bind Inbox answers and redrafts to the scoped feedback snapshot they actually consumed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: feedback#console-inbox-causal-response-20261020
+  plan_refs: ["§7B", "P25", "W1-T194", "W1-T4088", "W1-T9252"]
+  files:
+    - src/cli/commands/daemon.ts
+    - src/lib/inbox-thread.ts
+    - src/lib/inbox-thread-view.ts
+    - src/lib/inbox-view.ts
+    - src/lib/inbox-responder.ts
+    - src/lib/inbox.ts
+    - src/lib/panel-graph.ts
+    - src/lib/instance-inbox-proposal.ts
+    - src/lib/instance-inbox-contract.ts
+    - src/lib/ledger-path.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - docs/cli-reference.md
+    - src/run-task.ts
+    - test/inbox/inbox-feedback-response-causal-link.test.ts
+    - test/an-instance-reframes-only-its-current-proposal.test.ts
+    - test/inbox-thread-view.test.ts
+    - test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=feb9a487f7353c77
+  # backlog gardener: placed=2026-10-20T22:55:06.900Z
+  attempts: 0
+  rationale: |
+    Grounded against CLAUDE.md, MASTER-PLAN.md, both task surfaces, LEARNINGS.md and DECISIONS.md.
+    W1-T4088 establishes conversation delivery; W1-T9252 mirrors action/outcome events and backfills
+    them. Neither requires an immutable feedback-to-response join. W1-T194 preserves explicit
+    supersession; it must not become implicit acknowledgement by recency.
+    Current main 52c306aae3dda5bbfd6a189b1de3ce5db5d99e78 still has text-only ReframeRecord entries
+    and threadEventsForRow labels inbox.drafted using current reframeHistory.length. answerThread
+    captures a last reply before awaiting the decider, but writes its acknowledgement without that
+    input identity. ThreadMessageExtra.replyId deduplicates incoming delivery only. runDraftRung
+    emits completion without consumed feedback identity, and the default draft-rung completion
+    in run-task.ts merges caches after asynchronous work. These are separate causal boundaries.
+    GitHub API confirms PR #13175 merged at 2026-10-20T19:28:37Z; its recorded-action discriminator
+    prevents re-execution of mirrored actions, and explicitly excludes exact feedback correlation.
+    Open PR #13151 adds W1-T10272 for served-model evidence in inbox-responder/benchmark-run;
+    it is an overlapping file owner, not ownership of this causal join. Retain its telemetry work.
+    Rule 19 / #588: one integration test must drive real reply delivery, responder action, reframe
+    persistence, queued draft completion and thread projection through the same scoped identity;
+    separate helper tests cannot prove that the default composition forwards it end to end.
+  design: |
+    Establish explicit immutable identity for each newly captured conversational input and reframe,
+    scoped to repository, proposal and thread. Reuse an existing trustworthy input identifier where
+    available; assign a fresh identity at genuine new capture otherwise. Distinct identical-text
+    inputs remain distinct. Validate scope and uniqueness at every handoff; foreign, ambiguous or
+    missing references cannot acknowledge an input. A digest may verify a snapshot but is not an
+    input identity inferred from text. Preserve the verbatim feedback and explicit supersession.
+
+    Capture the consumed snapshot before any asynchronous decision or draft work: exact input ids,
+    their immutable feedback, scope, and explicit supersession state. Carry it through the real
+    responder/reframe callbacks, queued draft work, cache candidate, action receipt, ledger outcome
+    and appended completion. A completion may acknowledge only inputs in that snapshot. A later
+    reframe must remain pending when an older draft finishes; an older cache write must neither
+    replace its newer draft nor mark the newer generation attempted. Re-read current scoped state
+    before merging completion, preserving unrelated writers and existing retry/refusal semantics.
+
+    Keep three identities distinct: incoming delivery deduplication, mirrored-action event keys,
+    and response/action completion deduplication. Persist enough scoped execution outcome before
+    acknowledgement that duplicate or restarted callbacks do not repeat an executed action if
+    appending its answer fails. Resume the missing acknowledgement from the durable outcome;
+    an indeterminate action remains explicitly unknown and is not replayed speculatively. Preserve
+    the existing action-state checks, question bounds and approval confirmation tier at execution.
+
+    Derive pending direction and response claims from validated links, never from matching text,
+    clocks, append order or current history length. Presentation may retain chronological ordering,
+    but an old completion or historical backfill cannot consume a later reply or reframe. Two replies
+    arriving during a decider call both remain pending unless the captured snapshot actually includes
+    them; avoid a last-message-only queue that loses either one. Genuinely linked delivery advances
+    only its inputs. Keep approval/hold precedence and existing classification gates intact.
+
+    Legacy records without links remain explicitly unknown. Do not retrofit identity using text,
+    timestamps, history position or a current proposal; do not rewrite/delete legacy history, retire
+    proposals, or treat an unknown historical draft as written with later feedback. Make unknown
+    linkage distinguishable from a validated completion in the existing thread read composition.
+    Preserve PR #13175's recorded-event exclusion and W1-T194's explicit retraction semantics.
+
+    Use real private thread/registry/draft/ledger stores and the production default callback and
+    draft-completion composition. Fake only provider work; never substitute the causal handoffs
+    under test. Exercise source reply routes, direct CLI reframe and instance-local reframe capture
+    as applicable to their existing scopes. Confirm test/inbox/ placement with rmd test-place from
+    the final imports before adding the test. Run caller and census suites for the changed surfaces.
+    Do not add model calls, synthetic production inputs, automatic approvals or Inbox retirement.
+    Change no provider, model, retry, permission, billing/budget, service or CI-infrastructure setting.
+    Azure memory and Field Trials remain outside this task.
+  acceptance:
+    - claim: "Real default delivery and completion retain exact same-repository/proposal/thread input identity; distinct identical-text inputs stay distinct and foreign ambiguous missing and legacy identities remain unknown without history mutation"
+      proof: "unit test: inbox causal delivery preserves exact scope and treats legacy or ambiguous links as unknown"
+    - claim: "Equal timestamps historical backfill two replies during a decider call and a newer reframe during an older draft never falsely acknowledge or overwrite newer direction; genuine linked completion advances only consumed inputs"
+      proof: "unit test: inbox causal completion cannot consume or overwrite newer concurrent direction"
+    - claim: "Duplicate and restarted completion callbacks and action-success followed by answer-append-failure resume acknowledgement without repeating the action; incoming and mirrored-event deduplication remain separate"
+      proof: "unit test: inbox causal restart resumes a failed acknowledgement without repeating an executed action"
+    - claim: "The production composition preserves recorded-action exclusion explicit supersession approval and hold precedence and all existing action gates while exposing unknown versus linked completion"
+      proof: "unit test: inbox causal composition preserves approval hold supersession and recorded-event gates"
+  falsifier: |
+    Delete only the new source forwarding of consumed input identity through the default asynchronous
+    responder/draft completion path, leaving real stores and test inputs intact. Require real assertion
+    failures for falsely consumed newer direction or missing exact linkage, then restore source and
+    require zero failures. Separately remove completion deduplication: the restarted callback after
+    action-success/answer-append-failure must expose a repeated action. Retain removal/restoration
+    receipts and same-committed-tree instrumented diff coverage, naming the SHA; helper-only mocks,
+    test-title greps and a fabricated mutant result are not evidence.
+  note: |
+    Generated companion qualification adds only docs/cli-reference.md and
+    packages/api-client/src/schema.d.ts, regenerated from the already-qualified CLI and OpenAPI
+    sources. Retain the complete command reference and contract, including other owners' changes;
+    do not hand-edit generated artifacts or waive drift checks. The ordinary author gate on
+    private implementation 0319f285820dd6aa477637fa64a76cdf9f7f2c40 refused these missing outputs.
+    Include the existing action/outcome thread regression to preserve its action, filing, refusal,
+    ordering and replay assertions while using verified captured input and adopted-completion
+    evidence for its redraft positive control. Add an explicit legacy control: chronological
+    inbox.drafted alone must not claim that it consumed feedback. This is the existing acceptance
+    contract, not permission to delete a failing assertion or to retrofit historical identity.
+    Reservation, risk, behavioral proofs, runtime settings and every review/CI gate are unchanged.
+
+    Cached correspondence qualification adds only src/lib/inbox-thread-view.ts, the existing
+    src/lib/inbox-view.ts producer and test/inbox-thread-view.test.ts caller suite. The cached view currently rebuilds an item with
+    only proposal id, summary, plain text and lane, dropping the source scope and feedback history
+    required by this task's already-approved unknown-versus-linked read contract. Use the native
+    producer-owned persisted classification and its exact snapshot identity; never infer repository
+    authority from message labels, a selected account, text similarity or a timestamp join. Preserve
+    the actual producer inbox root in the private persisted snapshot scope while retaining its
+    existing instance and repository identity; copied or root-less evidence cannot grant authority.
+    Keep private roots out of browser payloads. Validate complete snapshot-bound page cursors using
+    the canonical producer codec, preserving legacy numeric pages and all missing, mixed, foreign,
+    duplicate, gap and inconsistent-count refusals rather than loosening source qualification.
+    Preserve source age and readonly readiness. Missing, foreign, ambiguous or mismatched source snapshots
+    must keep correspondence unknown, never manufacture zero pending inputs or acknowledgements.
+    Memoization must observe source-generation and explicit-retraction changes. Preserve every
+    existing incomplete-page, unavailable-store and source-provenance assertion; close the fixture's
+    own producer/database resources before deleting its private root, without retries or skips.
+    No live work, claims, source binding, permission, provider, budget, cadence, service setting,
+    risk ruling or validation/review/merge gate changes. Original reservation and high-risk span,
+    all behavioral acceptance requirements and single-writer coordination remain unchanged.
+
+    Caller qualification adds only src/lib/ledger-path.ts and the existing instance-reframe
+    regression fixture. The ledger helper needs a type-only Config-to-Pick<Config, "root">
+    narrowing so a verified forwarded input can use its declared source root without reading
+    the account's default configuration; the ledger path expression and runtime values stay
+    unchanged. Preserve every hold, supersession, replay and source-isolation assertion in
+    test/an-instance-reframes-only-its-current-proposal.test.ts while asserting the additional
+    immutable captured-input metadata. The observed old-shape mismatch is not permission to
+    weaken these assertions. No new authority, risk ruling, provider call or service change.
+
+    Scope correction: the production responder callback now lives in src/cli/commands/daemon.ts.
+    That callback forwards to fleetRatify.reframe and currently discards the returned handoff.
+    Add only this existing composition file so the already-required consumed input identity and
+    completion outcome can cross the real daemon callback, rather than a test-only replacement.
+    Retain the existing high-risk span, behavioral acceptance, action gates and single-writer
+    coordination with W1-T10272. This is not a risk ruling, release or runtime activation.
+
+    The instance-inbox-contract deliver boundary currently calls the source write handler with
+    the original context, unlike its scoped read path. Include that wrapper to forward only its
+    already-validated repository/instance binding to capture; never trust a client's repository
+    label or recover scope from the account's selected repository. Preserve all existing scope,
+    actor, receipt, snapshot and confirmation refusals. Include openapi/daemon.yaml to document
+    the optional structured input/completion metadata on the existing thread message contract;
+    this does not authorize a new endpoint, permission or operational action.
+
+    Recovery preserves the original completed native triage and its W1-T10283 reservation on
+    run-TRIAGE-console-inbox-causal-response-20261020-1792527686941. Its first push was refused
+    locally for four identical whole-file acceptance proofs; nothing was published. Replace
+    only those proofs with distinct literal behavioral test-title requirements. These are forward
+    implementation requirements, not tests already run or proof of a working causal join.
+    The native refusal and original commit remain retained; no second triage or ID mint is used.
+
+    Reserved id W1-T10283 supplied by this triage harness; no independent mint or reservation change.
+    This filing is a work proposal, not operator risk approval, a model verdict or deployment authority.
+    Normal risk/scope/review/CI gates apply. No depends_on W1-T10272 is invented while its plan exists
+    only on open PR #13151. Before editing inbox-responder.ts, reconcile with that task's owner and
+    current head; serialize overlapping work through normal ownership/scope gates, preserving both
+    purposes. Refresh main/open heads/active claims before implementation; do not claim live adoption.
+
+    Triage read the 12 open PRs captured on 2026-10-20 through GitHub's read API, inspected every
+    complete compare file list (1-28 changed files each), and examined added/changed task subjects.
+    No added task patch describes this join. Positive controls: #13151 adds W1-T10272 and #13008
+    adds W1-T10160; #13175's API merge state and main's source independently confirm the bounded
+    event fix and remaining join gap. The 45 advertised rmd-dispatch refs included neither W1-T10272
+    nor this reserved task. This API comparison is narrower than the standing remote head-tree
+    sweep and does not prove absence of unpublished work; that sweep remains required before build.
+    No git/gh command, live ledger read or claim mutation was used by this triage. External trace-link
+    and message-reference documents are design analogies only; no platform-facts gap required web
+    research and no instrumentation/framework migration is proposed.

@@ -118,6 +118,37 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   automatically. Run `npm run --silent comment-load-signal` locally to check your own changes
   before pushing.
 
+### comment-load-ratchet recurrence since the ratchet repair wiring
+
+W1-T10240 observation, 2026-10-21: the post-wiring fix-round count is **unavailable**,
+not a measured zero. This worker has no permitted live ledger corpus; the checkout has no
+`state/` directory. The wiring's deployment time, observation-window bounds, newest ledger
+timestamp, positive controls and live policy enablement are therefore unverified. No conclusion
+about recurrence or its absence follows from this observation.
+
+At the inspected checkout, `src/lib/sweep.ts::recordableRatchetRepairFor` is called by the
+blocked-fixable disposition's reason builder. Execution separately uses
+`ratifiedBaselineRatchetRepairFor`: it requires `recordableRatchetRepairEnabled`, a
+`repairRecordableRatchet` executor and an entirely admitted red-check set. Success logs
+`sweep.ratchet_repaired`; a declined repair can fall through to an ordinary fix round.
+`src/lib/policy.ts` defaults the enablement flag to false when omitted. These source facts
+establish a conditional repair path, not that a deployed daemon took it.
+
+The originating [PR #12776](https://github.com/craigoley/remudero/pull/12776) is closed and
+unmerged according to the GitHub API. Its
+[closing discussion](https://github.com/craigoley/remudero/pull/12776#issuecomment-6256733167)
+attributes the old task's rounds to a sibling mutation failure's incorrect attribution and
+an instrument-scope gap. Those rounds do not establish post-wiring comment-load recurrence.
+
+Decision: retain this follow-up pending measurement; a further remedy is **undetermined**.
+Withdrawal requires a covered post-deployment window with a measured zero. The measurement
+must count distinct ordinary fix rounds actually attributed to comment-load-ratchet, retain
+each PR's other failing gates and disposition, and distinguish successful deterministic
+repairs from declined repairs and disabled policy. Read the retained ledger union, record
+its window and positive controls, and deduplicate rounds by their identifiers rather than
+counting repeated sweep observations. A nonzero count warrants examining those individual
+causes before proposing another remedy.
+
 - `ci-friction:check:ci-log:task-id-existence` — a pull request's diff cites a task id
   (e.g., `W1-T1234`) in source code, documentation, or plan files, but that id is not
   declared in any plan shard and has no reservation ref (`refs/rmd-id/W1-T<n>` on the
@@ -199,3 +230,76 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   PR's CI if the aggregate is stale) to obtain a complete summary before deciding what is broken.
   Do not raise `timeout-minutes` on a shard without reading the W1-T1009 invariant that keeps it
   below `ci-gate.yml`'s `WAIT_CAP_SECONDS`.
+
+## W1-T5309 root mechanism
+
+The W1-T4810 remedy entry exists: the `ci-friction:check:ci-log:coverage-ratchet`
+bullet above advises adding tests and measuring the same committed tree. Its owning shard is
+`plan/tasks.d/W1-T4810-check-ci-log-coverage-ratchet.yaml`; that advice changed no execution
+path. W1-T5309's shard records 458 rounds on 292 PRs and a later scope refusal: its declared
+`src/lib/ci-parity.ts` and test file could not change the dispatch logic in `src/run-task.ts`.
+Those counts are historical class-level evidence, not 458 diagnoses of one defect.
+
+### Where the check and the rounds live
+
+In `src/lib/ci-parity.ts`, `CI_PARITY_TABLE`'s `coverage-ratchet` entry refreshes the base,
+runs `testWithCoverageLeaf` (or explicitly leased `testWithCoverageShards`), then executes
+`scripts/coverage-ratchet.mjs` and `scripts/diff-coverage.mjs` against the resulting lcov.
+`runPreflightCoverage` supplies the opt-in full coverage/diff-coverage path. These local
+engines do not decide whether the fix rung dispatches a worker.
+
+In `src/run-task.ts`, `coveragePrecheck` selects affected suites and delegates to
+`judgeCoverage` in `src/lib/coverage-narrow.ts`. It first tries the diff's own tests and
+direct importers, then the reach-based tiers, with
+`PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING = 40` and manifest-derived execution bounds.
+`coveragePushRefusal` refuses only `uncovered`: `unavailable` and `uncovered-narrow` are
+logged and allowed through. `pushFixRoundPrechecked` uses that decision for fix pushes;
+the implement lane's `fallback_push` uses it before initial publication and invokes
+`repairCensusRefusedPush` only on a confirmed refusal. That repair itself spends worker
+strikes; moving a refusal there alone does not eliminate paid repair work.
+
+The concrete escape is an unproven source head: a reach set above 40 suites, a full-run
+selection, timeout, spawn failure or missing instrumentation can leave no authoritative
+pre-push verdict. A narrow run with gaps becomes advisory when the reach cannot be run;
+`coverage-narrow.ts` documents the prior 2,503-suite reach for a `src/run-task.ts` change
+on PR #11677. CI can subsequently report uncovered added lines from a wider run.
+`runFixRung` constructs `ciFailures` evidence, derives the `ci-log` mode, spawns the repair
+worker and records `fix.dispatch` with `ci_failures`. Publishing before coverage is settled
+therefore permits the late-discovery/test-repair cycle the existing paragraph cannot prevent.
+
+### What the evidence excludes
+
+The hosted `coverage-ratchet` name also aggregates shard/test failures, missing artifacts
+and coverage checks; it is not synonymous with an uncovered-line diagnosis. The gardener's
+`ciLogCauses` in `src/lib/ci-friction-gardener.ts` drops that aggregator when a producer
+signature identifies the failure. W1-T5309's historical rows do not include enough per-PR
+diagnostics to establish which subtype dominates, or how often today's narrow pass escapes.
+The path above establishes a mechanism, not a measured current share of all rounds.
+
+The installed behavioral tests preserve this distinction:
+`test/the-coverage-precheck-asks-the-diffs-own-suites-first.test.ts` asserts that an
+over-ceiling narrow gap returns `uncovered-narrow`, while
+`test/a-worker-catches-its-own-diff-coverage-drop-before-pushing.test.ts` asserts that
+`coveragePushRefusal` permits `unavailable`. Raising the ceiling alone would restore the
+failure recorded in `test/a-coverage-precheck-too-large-to-be-quick-is-skipped.test.ts`:
+a 1,839-suite synchronous precheck held the daemon for 42 minutes and its push then failed
+on an expired token. The fallback must therefore run in an admitted child off the daemon loop.
+
+Retuning aggregate floors is unsupported: the installed `scripts/coverage-baseline.json`
+has neither `linesPct` nor `branchesPct`, and `classifyCoverageTier` in
+`scripts/coverage-ratchet.mjs` makes branch tiers nonblocking. Diff coverage remains a
+separate blocking check. Suppressing every round named coverage-ratchet would also suppress
+real test and artifact failures. Another advice paragraph or a change confined to the
+local parity table cannot close the publication gap in the orchestrator.
+
+W1-T5309 chosen structural fix: add an orchestrator-owned full coverage fallback before
+publishing a source head whose scoped precheck is `unavailable` or `uncovered-narrow`,
+reusing the existing coverage engine and diff gate in an admitted child off the daemon loop
+on that same committed head. Keep an
+unmeasured result explicit and defer publication; return confirmed uncovered-line evidence
+to the author before PR creation. This targets the demonstrated escape without changing
+coverage policy or treating unrelated aggregator failures as repairable coverage debt.
+The implementation needs `src/run-task.ts` in its declared scope; this section records
+the proposal only. Validate it with an over-ceiling fixture that cannot publish until an
+authoritative result exists, and compare later head-linked precheck/CI dispositions before
+claiming fewer fix rounds.

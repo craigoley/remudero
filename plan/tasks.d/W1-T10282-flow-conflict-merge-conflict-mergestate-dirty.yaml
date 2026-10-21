@@ -1,0 +1,36 @@
+- id: W1-T10282
+  title: A conflict repair measures its pending main merge and escalates an exact-head design handoff
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  priority: 1.33
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: flow-blocker:conflict:merge conflict (mergeState dirty)
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts
+    - test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts
+  acceptance:
+    - claim: a pending main merge is measured against the prospective merged base while branch-owned census growth remains visible
+      proof: "unit test: a pending main merge gives the census its prospective merged base without hiding branch edits"
+    - claim: an exact-head terminal design handoff escalates once before another fix admission while live workers and newer heads keep their ordinary route
+      proof: "unit test: the sweep escalates an exact-head design handoff before admitting another fix"
+  note: "Operator approved the measured specification and release on 2026-10-21, pin 43cabffc. Preserve the high-risk band and all ordinary author, hosted, security, native-review and merge gates; no host change, capacity override or queued-branch push."
+  rationale: "OBSERVED 2026-10-20/21. #13121 at 10b5d544 repeatedly reports conflict dispatch, then stands down at rung.needs_design on its 17:54Z same-head handoff. The original snapshot worktree is retired; its worker report alone was not treated as a proof. An owned real-Git replay on main 0c4dc060 independently reproduced the pending-main census baseline mismatch: one native regression failed at the prospective-base assertion, with no skipped/cancelled tests. The two-line prototype passes all 11 snapshot/async controls. Current writeFixCensusSnapshotSteps ignores MERGE_HEAD, and runFixRung reuses any same-task/head fix.needs_design before spawning. The sweep currently charges a repair admission for that terminal result. #13039 is a distinct capacity-wait control; #13173 is a completed normal-repair control. No shared fleet-wide cause is asserted. All six open head trees were read and their snapshot/design-cache code matched main. This replaces the old hours-based diagnosis with a bounded, measured repair; the prior high-risk escalation remains intact until this exact amendment is explicitly released."
+  band_meaning: span
+  budget_usd: 5
+  design: Reuse the existing host Git snapshot path and Git merge-base against the prospective parents of a prepared merge; preserve ordinary no-merge behavior and branch-owned changes. Do not commit the merge early, change a bound, replace a census, or exclude a path. Project a valid exact-task/PR/head terminal NEEDS_DESIGN handoff into the existing deduplicated escalation route before fix capacity is charged. Preserve live-claim/in-flight priority; other-head, other-task, malformed and unresolved evidence must not authorize a write or invent a successful repair. An escalation is an actionable human decision, never a green check. Keep the native rung stand-down and all CI, security, semantic review, cost, ownership and merge gates. Do not automatically reinterpret a worker design request as authority to change a specification. The existing manual takeover rule applies only after an observed exhausted/escalated disposition and no live owner.
+  falsifier: "Remove only the prospective-base calculation: the owned pending-main regression must fail while its ordinary unmerged and branch-growth controls remain. Remove only design-handoff projection: the real sweep regression must attempt fix admission instead of the expected exact-head escalation. Restore each fix and rerun. Include live-worker and newer-head controls."
+  risk_ruling:
+    verdict: "high"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Actual operator reply: Approve the measured specification and release. Authority is limited to measured specification pin 43cabffc42ec777ccb15b3d837c4279271567475e5886cf1ddb291423eb9acfa: prospective pending-merge census base and pre-admission exact-head terminal design escalation. High-risk $5 four-file scope, normal author/CI/security/native-review/merge gates retained. No host change, capacity override, manual merge or queued-branch push."
+    judged_at: "2026-10-21T02:41:27.205567+00:00"
+    pin: "43cabffc42ec777ccb15b3d837c4279271567475e5886cf1ddb291423eb9acfa"

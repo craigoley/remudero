@@ -1,0 +1,47 @@
+- id: W1-T10260
+  title: "A plan-only PR whose red is a cancelled required check re-runs it instead of dispatching a plan round"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  priority: 1
+  status: merged
+  attempts: 0
+  origin: "operator session 2026-10-20: red-PR stall triage (#13096)"
+  plan_refs: [W1-T1223, W1-T2431, W1-T3194, W1-T9932, W1-T5543]
+  files:
+    - src/lib/sweep.ts
+    - test/a-plan-only-pr-requeues-its-cancelled-check.test.ts
+  rationale: |
+    OBSERVED on #13096, the machine-filing judge's own plan PR, at head 2bc3952 on 2026-10-20.
+    ci-shard (8/8) concluded CANCELLED after 35 minutes, with the annotation "The job has
+    exceeded the maximum execution time of 35m0s" (10:01Z to 10:37Z, run 39404956467). The
+    other shards passed, and the ci aggregate failed because of the cancelled shard. The sweep classified the PR as plan-proof-unrunnable,
+    owner plan-repair, and dispatched two plan-gate rounds (10:45Z and 10:52Z). Both were
+    refused because "the worker changed nothing", which is correct, since the shard has no
+    defect. The PR then went blocked-ambiguous, with "no further round can add information".
+
+    Why: the plan-only infrastructure branch (sweep.ts:18245, W1-T9932) re-runs only failures
+    that classifyCiInfrastructureFailure recognises. That classifier returns undefined for
+    any conclusion other than FAILURE (sweep.ts:5374). The W1-T1223 cancelled-check requeue
+    (sweep.ts:19701) reads pr.cancelledRequiredChecks, but it lives only on the code-fix path,
+    which a plan filing never reaches. The judge's next filing waits behind this PR.
+  design: |
+    On the plan-only path, before the plan-scoped round, apply the SAME cancelled-check
+    handling the code path uses. Requeue each cancelled required check once per head using
+    cancelledCheckRequeueDecision and requeueCheckJob. Keep the run_attempt surface reading
+    (W1-T2431), the deterministic-timeout skip (W1-T8040) and the escalate-after-requeue
+    backstop. When every red check is either cancelled or a downstream aggregate that the
+    cancellation explains (ci, ci-gate), dispatch no plan round and record awaiting-ci rather
+    than plan-proof-unrunnable. Reuse the existing ledger steps. Never re-queue over a live
+    run for the head (W1-T4586).
+  acceptance:
+    - claim: "a plan-only PR red only on a cancelled shard and its aggregate re-runs the shard and dispatches no plan round"
+      proof: 'grep: test("W1-T10260: a plan-only PR re-runs its cancelled shard instead of a plan round" in test/a-plan-only-pr-requeues-its-cancelled-check.test.ts'
+    - claim: "a second cancellation at the same head escalates once instead of looping"
+      proof: 'grep: test("W1-T10260: a twice-cancelled check on a plan-only PR escalates rather than re-running" in test/a-plan-only-pr-requeues-its-cancelled-check.test.ts'
+  falsifier: |
+    Delete the plan-only cancelled-check branch. The first test must observe a
+    dispatchPlanGateRound call and no requeue.

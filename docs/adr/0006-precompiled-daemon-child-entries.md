@@ -1,6 +1,7 @@
 # 0006. Run daemon children from a precompiled, source-keyed bundle, not tsx
 
 Status: Proposed
+Superseded in part by [0008](0008-the-daemon-main-runs-from-the-bundle.md): decision 1's daemon carve-out (the daemon verb now starts from the bundle).
 Date: 2026-10-10
 
 ## Context

@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { DEPLOY_RESTART_SCORE_THRESHOLD } from "../src/lib/deploy-judge.js";
 import type { Escalation } from "../src/lib/escalate.js";
 import { runLiveEditLadder } from "../src/lib/live-edit-ladder.js";
 import { fixedClock } from "../src/lib/clock.js";
@@ -38,8 +39,12 @@ function behindByASourceChange(t: TestContext): Checkout {
   author.addRemote("origin", origin.dir);
   author.git("push", "--quiet", "origin", "main");
   const live = gitRepo({ cloneFrom: origin.dir, kind: "midmerge-live" });
-  writeFileSync(join(author.dir, "src", "lib", "sweep.ts"), "export const v = 2;\n");
-  author.git("commit", "--quiet", "-am", "fix(sweep): the triage evidence reads its slice off the loop");
+  // W1-T9089: every source commit weighs the floor of 1 (the daemon's own code no longer weighs 18), so the checkout is
+  // behind by the restart threshold's worth of source commits for its staleness to be at restart pressure at once.
+  for (let version = 2; version < 2 + DEPLOY_RESTART_SCORE_THRESHOLD.value; version++) {
+    writeFileSync(join(author.dir, "src", "lib", "sweep.ts"), `export const v = ${version};\n`);
+    author.git("commit", "--quiet", "-am", "fix(sweep): the triage evidence reads its slice off the loop");
+  }
   author.git("push", "--quiet", "origin", "main");
   live.git("fetch", "--quiet", "origin", "main");
   const state = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}midmerge-state-`));

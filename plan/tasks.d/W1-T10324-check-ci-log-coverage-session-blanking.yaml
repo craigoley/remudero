@@ -1,0 +1,62 @@
+- id: W1-T10324
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-session-blanking cost 11.9 PR minute(s) across 13 round(s) on 12 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.45
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-session-blanking"
+  files:
+    - .github/workflows/coverage-session-blanking.yml
+    - test/gardeners/check-ci-log-coverage-session-blanking.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-session-blanking"
+      proof: "grep: test(\"W1-T10324: check:ci-log:coverage-session-blanking is prevented, not retried\" in test/gardeners/check-ci-log-coverage-session-blanking.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-session-blanking's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-session-blanking cost 11.9 PR minute(s) (seven-day half-life) across 13 fix round(s) on 12 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/coverage-session-blanking.yml: declares job coverage-session-blanking for coverage-session-blanking
+
+    RECENT ROUNDS (newest first):
+    - PR #13173 (https://github.com/craigoley/remudero/pull/13173) at 2026-10-20T19:23:35.731Z: ci-log round — rule-checks: test/coverage-session-blanking.test.ts; CodeQL alert #487 (js/file-system-race): UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this h
+        failing tests: the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus); the CLI, run directly (no injected collaborators), exits 0 against the real repo now that W1-T2732 cleared it, and still prints blind spots; ["no tracked test file contains a delete-is-noop defect","the check exits 0 on the real, cleared repo tree","the CLI, run directly against the real repo, exits 0 and still prints the clean summary","both the clean run and a violation run still print the blind-spots statement","the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus)","the CLI, run directly (no injected collaborators), exits 0 against the real repo now that W1-T2732 cleared it, and still prints blind spots"]
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/coverage-session-blanking.test.ts:1:3070
+          | ✖ the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus) (1655.991044ms)
+          |   AssertionError [ERR_ASSERTION]: W1-T2732 converted every delete-is-noop site to real blanking
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   {
+          |   +     expr: 'env',
+          |   +     file: 'test/review/subpath-missing-export.test.ts',
+          |   +     line: 34
+          |   +   }
+    - PR #12882 (https://github.com/craigoley/remudero/pull/12882) at 2026-10-19T03:24:41.752Z: ci-log round — coverage-session-blanking
+        log excerpt:
+          | - an env object assembled at runtime, or spread out of a shared helper, with no literal at
+          |     the call site itself.
+          |   - a spawn routed through a wrapper, where the env is built one layer away from the call.
+          |   - anything outside test/.
+          | Not a finding, by design (W1-T6108): test/setup/tmp-hygiene.ts ASSIGNS the NODE_V8_COVERAGE a
+          |   test file's children inherit to a per-suite directory and moves their reports back at exit, so
+          |   an inherited child is credited to its suite. That redirect never un-blanks a child env: a
+          |   blanked child still collects nothing, and every rule above is unchanged by it.
+          | 
+    - PR #11398 (https://github.com/craigoley/remudero/pull/11398) at 2026-10-13T16:06:09.025Z: ci-log round — coverage-session-blanking
+        failing tests: W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row
+    - PR #10918 at 2026-10-11T17:19:14.354Z: ci-log round — coverage-session-blanking
+    - PR #10834 at 2026-10-11T10:51:38.709Z: ci-log round — rule-checks: test/pure-test-files-share-one-process.test.ts; ci-shard (2/8): WN-TN: hooks/pre-push refuses a ghost tier row locally and names the fix, WN-TN: hooks/pre-push ADMITS a new
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

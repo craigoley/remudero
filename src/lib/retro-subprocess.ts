@@ -3,6 +3,7 @@
  * only the daemon hook comes through this adapter.
  */
 import { fileURLToPath } from "node:url";
+import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import {
   spawnDetachedGroup,
   teardownProcessGroup,
@@ -147,6 +148,7 @@ export async function runAutomatedRetroSubprocess(
   };
   const entrypoint = deps.entrypoint ?? fileURLToPath(new URL("../run-task.ts", import.meta.url));
   const startedAt = now();
+  const nodeArgs = childHeapPolicyArgs();
   let stdout = "";
   let stderr = "";
   let spawnError: Error | undefined;
@@ -160,7 +162,7 @@ export async function runAutomatedRetroSubprocess(
     contained = spawn(
       {
         command: process.execPath,
-        args: [`--max-old-space-size=${AUTOMATED_RETRO_HEAP_LIMIT_MB}`, "--import", "tsx", entrypoint, "retro"],
+        args: [`--max-old-space-size=${AUTOMATED_RETRO_HEAP_LIMIT_MB}`, ...nodeArgs, "--import", "tsx", entrypoint, "retro"],
         env,
       },
       (chunk) => {
@@ -177,6 +179,7 @@ export async function runAutomatedRetroSubprocess(
     log("daemon.retro_subprocess.start", {
       child_pid: contained.pid,
       heap_limit_mb: AUTOMATED_RETRO_HEAP_LIMIT_MB,
+      node_args: nodeArgs,
     });
     const terminal = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       child.once("exit", (code, childSignal) => resolve({ code, signal: childSignal }));

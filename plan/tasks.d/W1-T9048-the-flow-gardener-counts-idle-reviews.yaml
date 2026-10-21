@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-13: gardener loop audit"
   plan_refs: [W1-T5904, W1-T7735, W1-T8167]
   files: [src/lib/flow-gardener.ts, test/the-flow-gardener-counts-idle-reviews.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

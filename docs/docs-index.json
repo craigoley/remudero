@@ -62,6 +62,12 @@
       "grepHint": "0007. Run each build in a child process that outlives the daemon, and restart the daemon only for its own code"
     },
     {
+      "path": "docs/adr/0008-the-daemon-main-runs-from-the-bundle.md",
+      "title": "0008. Start the daemon's own main from the precompiled bundle, keeping source maps on through a linked map",
+      "summary": "Status: Accepted",
+      "grepHint": "0008. Start the daemon's own main from the precompiled bundle, keeping source maps on through a linked map"
+    },
+    {
       "path": "docs/adr/README.md",
       "title": "Architecture Decision Records",
       "summary": "MASTER-PLAN §5 TIER 3: ADR discipline for IRREVERSIBLE calls. A short",
@@ -108,6 +114,12 @@
       "title": "Audit fixtures",
       "summary": "Golden inputs for the `rmd audit` rung (MASTER-PLAN §6 process proposals, P36).",
       "grepHint": "Audit fixtures"
+    },
+    {
+      "path": "docs/audits/head-identity-gate-open-plan-pr-exposure.md",
+      "title": "Open plan PR exposure to head-identity-gate (W1-T9376)",
+      "summary": "The October 20, 2026 snapshot contains one qualifying open PR, #13008. It is not exposed to the historical synthetic-merge checkout failure; its observed gate…",
+      "grepHint": "Open plan PR exposure to head-identity-gate (W1-T9376)"
     },
     {
       "path": "docs/audits/pr-4045-stale-head-fix-race-2026-09.md",
@@ -180,6 +192,12 @@
       "title": "Dependency-PR review lane (W1-T54 + W1-T54b)",
       "summary": "`remudero-review` is a REQUIRED status check on `main` (see",
       "grepHint": "Dependency-PR review lane (W1-T54 + W1-T54b)"
+    },
+    {
+      "path": "docs/dependency-reuse-observations.md",
+      "title": "Dependency reuse observations",
+      "summary": "Enabling an account's existing dependency-seed configuration already routes new",
+      "grepHint": "Dependency reuse observations"
     },
     {
       "path": "docs/deploy-image-forensics.md",
@@ -398,6 +416,12 @@
       "grepHint": "fleet-heartbeat-watch.yml forensics"
     },
     {
+      "path": "docs/forensics/followup-w1-t7898-pr-repairs.md",
+      "title": "W1-T7898 follow-up: actual repairs for PRs 10578, 10628 and 10671",
+      "summary": "The three PRs had different repairs; the inspected `Analyze (actions)` reds were cancelled jobs,",
+      "grepHint": "W1-T7898 follow-up: actual repairs for PRs 10578, 10628 and 10671"
+    },
+    {
       "path": "docs/forensics/fs-race-safe.md",
       "title": "fs-race-safe.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -456,6 +480,12 @@
       "title": "ledger.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
       "grepHint": "ledger.ts forensics"
+    },
+    {
+      "path": "docs/forensics/live-worktrees-pruned-by-a-run-start.md",
+      "title": "Live worktrees removed by a run's startup prune",
+      "summary": "W1-T10299: pruning safeguards differ; the October 20 incident's cause and live-worktree loss frequency remain unmeasured.",
+      "grepHint": "Live worktrees removed by a run's startup prune"
     },
     {
       "path": "docs/forensics/measurement-cadence.md",
@@ -566,6 +596,12 @@
       "grepHint": "self-sync.ts forensics"
     },
     {
+      "path": "docs/forensics/serve-non-heap-rss-growth.md",
+      "title": "Serve non-heap RSS growth attribution",
+      "summary": "Offline measurements and the evidence still needed to attribute live growth for W1-T10293.",
+      "grepHint": "Serve non-heap RSS growth attribution"
+    },
+    {
       "path": "docs/forensics/serve.md",
       "title": "serve.ts comment forensics",
       "summary": "The measured forensics and design arguments behind `src/lib/serve.ts`, kept out of the source so",
@@ -602,6 +638,12 @@
       "grepHint": "status.ts comment forensics"
     },
     {
+      "path": "docs/forensics/storage-permission-fixtures-on-the-azure-host.md",
+      "title": "Storage permission fixtures: paired controls and Azure evidence limits",
+      "summary": "Paired worker controls reproduce ten storage refusals from the reported eleven; the preflight failure remains unattributed.",
+      "grepHint": "Storage permission fixtures: paired controls and Azure evidence limits"
+    },
+    {
       "path": "docs/forensics/sweep-map.md",
       "title": "Removed block map — `src/lib/sweep.ts`",
       "summary": "Every comment block compacted out of `src/lib/sweep.ts`, mapped to the heading in",
@@ -636,6 +678,12 @@
       "title": "Staged private ownership / peer capacity protocol",
       "summary": "Source-only redesign for #11906. No live path, permission, flag, daemon, review,",
       "grepHint": "Staged private ownership / peer capacity protocol"
+    },
+    {
+      "path": "docs/forensics/the-retro-backoff-has-no-ceiling.md",
+      "title": "The retro backoff has no ceiling",
+      "summary": "The time arm grows without a ceiling; a cap's effect on actual attempts remains unmeasured without the attempt and tick history.",
+      "grepHint": "The retro backoff has no ceiling"
     },
     {
       "path": "docs/forensics/tick-read-worker.md",
@@ -846,6 +894,12 @@
       "title": "Native hash-locked Semgrep Community Edition",
       "summary": "Scan uses an independently audited source closure, isolated native engine and bounded disposable MCP controls.",
       "grepHint": "Native hash-locked Semgrep Community Edition"
+    },
+    {
+      "path": "docs/shared-git-storage.md",
+      "title": "Account-private shared Git workspaces",
+      "summary": "Stage new unfiled author work in linked worktrees sharing one existing account's",
+      "grepHint": "Account-private shared Git workspaces"
     },
     {
       "path": "docs/system-diagrams.md",

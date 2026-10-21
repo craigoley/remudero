@@ -1,0 +1,73 @@
+- id: W1-T10254
+  title: "THE MEMORY-ADMISSION PRESSURE STORE NAMES EVERY WRITER THAT SHRINKS ITS HISTORY — <state>/container-pressure.json lost its whole learned swap history six times between 2026-10-15 and 10-19, never at a boot, and no row or field says which process wrote the empty history; each write records its writer's identity and what it dropped, and a write that empties a non-empty history ledgers one row naming it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # Rule 19: one concern, provenance on the pressure store's writes; what any verdict decides from the store is unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020 item 5 (2026-10-20); finding of the memory-gate hand fix (PR #13060, logs-8864/memgate-pr-body.md and memgate-replay-20261019.txt), whose writer was not identified"
+  plan_refs: [W1-T10085, W1-T8472, W1-T10208]
+  files:
+    - src/lib/host-memory-shadow.ts
+    - test/memory/the-pressure-store-names-the-writer-that-emptied-it.test.ts
+  status: queued
+  priority: 2  # each wipe resets the learned swap-in relation and the PSI bound; PR 13060 already stops the errno-reader cause
+  attempts: 0
+  rationale: |
+    OBSERVED by the memory-gate builder (logs-8864/memgate-pr-body.md "Rule (2) finding"; method: the core ledger union's
+    memory_budget rows plus the live store, 2026-10-15..19):
+    - The swap history in <state>/container-pressure.json fell to zero six times, none at a boot: 10-15 06:34Z and
+      07:35Z, 10-16 07:35Z and 08:14Z, 10-19 05:42Z and 14:52:39Z.
+    - The 14:52:39Z drop came 67 s after a learned verdict (360 samples) of the same daemon (pid 131), on consecutive
+      attempts 34 and 35; the 12:49Z and 14:12Z boots both kept the learned basis.
+    - The store read at 14:52:39Z parsed cleanly. No ledger row names an unread store across the five days. "The
+      writer that emptied the store is NOT identified."
+    - PR #13060 (open at filing, head efad75538) makes a reader whose read failed with an errno only CREATE a missing
+      store, never replace one. That removes one candidate; it does not name the writer of the observed wipes.
+    OBSERVED 2026-10-20 11:44Z, read-only: the core store holds keys prior, swap, container, psi with 2539 entries each,
+    oldest swap entry 05:44:13Z (the six-hour window); nothing in it names a writer.
+    READ at origin/main a16d6d95f (symbols, not lines) in src/lib/host-memory-shadow.ts:
+    - Two writers rewrite the whole store: `readContainerPressure` (every verdict: read, append, filter by
+      `now - at <= SWAP_STALL_HISTORY_MS`, cap at `SWAP_HISTORY_CAP`, write) and `markPsiStart`.
+    - `readPressureStore` turns a failed read into an empty history with `unread` set, and the verdict path then writes.
+    - INFERRED second candidate, not proven: the window filter uses the WRITER's `now`. A process whose clock or injected
+      clock runs ahead of the stored stamps by more than the window drops every entry in one valid write; nothing would
+      record that either.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and the plan trees of every open PR head (2026-10-20 11:40Z) for
+    container-pressure, "pressure store" and CONTAINER_PRESSURE_FILE; W1-T10085 and W1-T8472 (merged) built the PSI and
+    container histories; none records who writes the store.
+  design: |
+    1. Every write of the store carries `writer`: pid, NSpid when readable, hostname, boot id, the kernel start of the
+       writing process, the caller (`readContainerPressure` or `markPsiStart`), the writer's `now`, and the counts it
+       read and wrote for swap, container and psi. The previous write's `writer` is kept as `previousWriter`, so one
+       read of the file shows the last two writers.
+    2. A write that turns a non-empty swap or psi history into an empty one (or drops more than it appends, whatever
+       the cause: unread store, window filter, cap) appends one ledger row in the existing memory_budget step family,
+       `memory_budget.pressure_store_shrunk`, with both writers, the counts before and after, the oldest and newest stamp
+       read, the writer's `now` and the reason the store was read as it was (`unread` value or "window"). One row per
+       such write; a write that only appends writes no row.
+    3. No decision changes: every verdict, bound and admission reads the store exactly as today. A writer field the
+       reader does not understand is ignored by older code (the store already drops unknown fields on rewrite).
+    4. If PR #13060 has merged when this is built, rebase onto it and keep its create-only rule for errno readers;
+       the provenance applies to its writes too.
+    5. TESTS in test/memory/the-pressure-store-names-the-writer-that-emptied-it.test.ts (folder from `rmd test-place` on
+       a stub importing host-memory-shadow.ts and host-memory-admission.ts; re-run on the real file), `test(` titles
+       verbatim as in the proofs; drive the writers through their `readFile`/`writeFile` ports with a fixed clock, and
+       one case whose clock runs ahead of the stored window.
+  acceptance:
+    - claim: "every store write records its writer's identity and the counts it read and wrote"
+      proof: "unit test: W1-T10254: every pressure store write records its writer"
+    - claim: "a write that empties a non-empty history ledgers one shrunk row naming both writers"
+      proof: "unit test: W1-T10254: a write that empties the history names its writer in one row"
+    - claim: "a writer whose clock runs past the window is named as the cause of the drop"
+      proof: "unit test: W1-T10254: a writer whose clock runs ahead names the window as the cause"
+  falsifier: |
+    At origin/main the store has no `writer` field and no shrunk row exists, so all three tests fail. Delete the
+    provenance and they fail again; a version that ledgers every write (not just shrinking ones) fails the
+    one-row assertion in the second.
+  note: |
+    EFFECT, measured after merge: the next wipe of the core store leaves a `memory_budget.pressure_store_shrunk` row and
+    a `previousWriter` naming the process, caller and clock that wrote it; that row decides the follow-up repair.

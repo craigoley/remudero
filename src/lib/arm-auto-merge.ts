@@ -53,6 +53,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
+import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
 import {
   closingReferenceGuardSteps,
   recordClosingReferenceToLedger,
@@ -589,6 +590,8 @@ export interface ArmDeps<A extends boolean = false> {
   /** W1-T9536 — OPTIONAL. The PR's own files and main's since the merge base, for a behind PR GitHub
    *  would merge as-is. Absent: only a plan merge-safety reading's lists are checked. */
   readOwnFiles?: (prUrl: string) => MaybeAsync<OwnFilesReadings, A>;
+  /** W1-T9962 — OPTIONAL. The ratchet verdict on the merge of this PR into main's tip. Absent: no count is taken. */
+  readMergedRatchets?: (prUrl: string) => MaybeAsync<MergedRatchetJudgement, A>;
   /** W1-T5615 — OPTIONAL. Set only by W1-T5492's armed-idle fallback: GitHub already holds an arm,
    *  so the plan-PR hold is skipped and the direct path (which updates a behind plan PR) runs. */
   armStanding?: true;
@@ -743,6 +746,7 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
     mergeQueue: (prUrl) => runStepsAsync(cachedMergeQueueSteps(prUrl, ghJsonAsync)),
     readPlanMergeSafety: (prUrl) => runStepsAsync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync)),
     readOwnFiles: (prUrl) => runStepsAsync(ownFilesSteps(prUrl, ghJsonAsync)),
+    readMergedRatchets: (prUrl) => readMergedRatchetsAsync(prUrl, loadConfigImpl),
     enqueue: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       const head = await securityMergeHeadAsync(prUrl);
@@ -800,6 +804,30 @@ function* planMergeSafetyInClone(
   }
   const clone = join(root, "repos", target.repo);
   return yield* readPlanMergeSafetySteps(target, rest, gitIn(clone), planRelPaths(clone));
+}
+
+/** W1-T9962 — the merged-tree ratchet verdict for the sweep's armed re-judge, on the daemon's async transport. */
+export function readMergedRatchetsAsync(prUrl: string, loadConfigImpl: typeof loadConfig = loadConfig): Promise<MergedRatchetJudgement> {
+  return runStepsAsync(mergedRatchetsInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync));
+}
+
+function* mergedRatchetsInClone(
+  prUrl: string,
+  loadConfigImpl: typeof loadConfig,
+  rest: RestReader,
+  gitIn: typeof planSafetyGitSync,
+): Steps<MergedRatchetJudgement> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return judgeMergedRatchets({ error: `cannot resolve owner/repo/number from ${prUrl}` });
+  let root: string;
+  try {
+    root = loadConfigImpl().root;
+  } catch (e) {
+    return judgeMergedRatchets({ error: `no clone to merge in: ${String((e as Error)?.message ?? e)}` });
+  }
+  const started = systemClock.now();
+  const judgement = judgeMergedRatchets(yield* readMergedRatchetInputsSteps(target, rest, gitIn(join(root, "repos", target.repo))));
+  return { ...judgement, elapsedMs: systemClock.now() - started };
 }
 
 function* ownFilesSteps(prUrl: string, rest: RestReader): Steps<OwnFilesReadings> {
@@ -980,6 +1008,8 @@ export interface ArmAttemptResult {
   rateLimit?: GhRateLimitRefusal;
   /** W1-T2855 — the fresh facts and remedy behind a direct-merge preflight outcome. */
   directMergePreflight?: DirectMergePreflightEvidence;
+  /** W1-T9962 — the merged-tree ratchet verdict an arm consulted. */
+  ratchetJudge?: MergedRatchetJudgement;
 }
 
 export interface DirectMergePreflightEvidence {
@@ -992,7 +1022,9 @@ export interface DirectMergePreflightEvidence {
   planTouch?: PlanTouch;
   /** W1-T5472 — why a PR GitHub would merge as-is was updated instead; W1-T5748 — or held, past
    *  the refresh bound. */
-  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files" | "plan_merge_unread";
+  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files" | "plan_merge_unread" | "ratchet_collision";
+  /** W1-T9962 — the merged-tree ratchet verdict this decision consulted. */
+  ratchetJudge?: MergedRatchetJudgement;
   /** W1-T9536 — why main's changes since the merge base refreshed a behind PR, and the files. */
   ownFilesCause?: "overlap" | "baseline" | "unread";
   mainChangedOwnFiles?: string[];
@@ -1109,7 +1141,7 @@ function* armDetailedSteps(
  * armAutoMergeAtOpen} share the EXACT same completion logic rather than duplicating it.
  */
 type DirectMergePreflightDeps = Pick<ArmDeps<true>, "say"> &
-  Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "sleep" | "sleepSync">>;
+  Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "sleep" | "sleepSync">>;
 
 type DirectMergePreflightDecision =
   | { proceed: true; evidence?: DirectMergePreflightEvidence }
@@ -1124,6 +1156,7 @@ function* directMergePreflightSteps(
   deps: DirectMergePreflightDeps,
   priorHeadSha?: string,
   context: Pick<ArmAttemptResult, "error" | "rateLimit"> = {},
+  judged?: MergedRatchetJudgement,
 ): Steps<DirectMergePreflightDecision> {
   if (!deps.readMergeFacts || !deps.updateBranch) return { proceed: true };
 
@@ -1211,9 +1244,11 @@ function* directMergePreflightSteps(
   if (!behindBlocksThisMerge && (planTouch === undefined || planTouch === "untouched")) {
     const own = deps.readOwnFiles ? mainChangedOwnFiles(yield* readOwnFilesOrError(prUrl, deps)) : undefined;
     if (own === undefined) {
+      const held = yield* ratchetCollisionSteps(prUrl, deps, observedHead, baseEvidence, context, judged);
+      if ("hold" in held) return { proceed: false, result: held.hold };
       return {
         proceed: true,
-        evidence: { ...baseEvidence, ...(planTouch !== undefined ? { planTouch } : {}), remedy: "direct-merge" },
+        evidence: { ...baseEvidence, ...(planTouch !== undefined ? { planTouch } : {}), remedy: "direct-merge", ...judgeEvidence(held.judge) },
       };
     }
     planEvidence = { ...(planTouch !== undefined ? { planTouch } : {}), ...ownFilesEvidence(own) };
@@ -1226,11 +1261,13 @@ function* directMergePreflightSteps(
       const ownReadings = readings?.ownFiles ?? (deps.readOwnFiles ? yield* readOwnFilesOrError(prUrl, deps) : undefined);
       const own = ownReadings === undefined ? undefined : mainChangedOwnFiles(ownReadings);
       if (own === undefined) {
+        const held = yield* ratchetCollisionSteps(prUrl, deps, observedHead, { ...baseEvidence, planTouch }, context, judged);
+        if ("hold" in held) return { proceed: false, result: held.hold };
         deps.say(
           `automerge.plan_pr_merge_safe (W1-T5748): basis=${safety.basis} behind_by=${facts.behindBy} plan_touch=${planTouch}` +
             ` — merging the behind plan PR as-is: ${prUrl}`,
         );
-        return { proceed: true, evidence: { ...baseEvidence, planTouch, planMergeSafe: safety.basis, remedy: "direct-merge" } };
+        return { proceed: true, evidence: { ...baseEvidence, planTouch, planMergeSafe: safety.basis, remedy: "direct-merge", ...judgeEvidence(held.judge) } };
       }
       planEvidence = { planTouch, ...ownFilesEvidence(own) };
     }
@@ -1329,6 +1366,59 @@ function* readOwnFilesOrError(prUrl: string, deps: DirectMergePreflightDeps): St
   }
 }
 
+function judgeEvidence(judge: MergedRatchetJudgement | undefined): Pick<DirectMergePreflightEvidence, "ratchetJudge"> {
+  return judge ? { ratchetJudge: judge } : {};
+}
+
+type RatchetCollision = { hold: ArmAttemptResult } | { judge?: MergedRatchetJudgement };
+
+/**
+ * W1-T9962 — before an arm or a merge-as-is: the ceilings counted on the merge into main's tip. A
+ * crossing or a stale lowering is neither armed nor merged; the branch is updated once per (PR, head)
+ * (W1-T5921), so its next CI run counts current main. Clean, unread or unwired: the caller proceeds.
+ */
+function* ratchetCollisionSteps(
+  prUrl: string,
+  deps: DirectMergePreflightDeps,
+  observedHead: string | undefined,
+  baseEvidence: Partial<DirectMergePreflightEvidence> = {},
+  context: Pick<ArmAttemptResult, "error" | "rateLimit"> = {},
+  prior?: MergedRatchetJudgement,
+): Steps<RatchetCollision> {
+  if (!deps.readMergedRatchets) return {};
+  let judge = prior;
+  if (judge === undefined) {
+    try {
+      judge = yield* step(() => deps.readMergedRatchets!(prUrl));
+    } catch (e) {
+      judge = judgeMergedRatchets({ error: String((e as Error)?.message ?? e) });
+    }
+  }
+  if (!ratchetVerdictHolds(judge)) return { judge };
+  const head = observedHead ?? judge.headSha;
+  const evidence = { ...baseEvidence, ...(head !== undefined ? { priorHeadSha: head } : {}), reason: "ratchet_collision" as const, ratchetJudge: judge };
+  if (head !== undefined && (deps.ledgerLines?.() ?? []).some((l) => l.step === "automerge.direct_merge_updated" &&
+      l.reason === "ratchet_collision" && l.pr_url === prUrl && l.prior_head_sha === head)) {
+    deps.say(`automerge.direct_merge_preflight_refused (W1-T9962): head ${head} was already refreshed for a ${judge.verdict} — awaiting its new head: ${prUrl}`);
+    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, remedy: "retry-later" } } };
+  }
+  let update: { ok: boolean; error?: string };
+  try {
+    update = deps.updateBranch ? yield* step(() => deps.updateBranch!(prUrl)) : { ok: false, error: "update-branch is not wired" };
+  } catch (e) {
+    update = { ok: false, error: String((e as Error)?.message ?? e) };
+  }
+  const directMergePreflight: DirectMergePreflightEvidence = { ...evidence, remedy: "update-branch", ...(update.error !== undefined ? { error: update.error } : {}) };
+  if (!update.ok) {
+    deps.say(`automerge.direct_merge_update_failed (W1-T9962): ${judge.verdict} on main ${judge.mainSha ?? "unknown"}: ` +
+      `${describeRatchetRows(judge)}; ${update.error ?? "update-branch returned ok=false"} — neither armed nor merged: ${prUrl}`);
+    return { hold: { outcome: "direct-merge-update-failed", ...context, directMergePreflight } };
+  }
+  deps.say(`automerge.direct_merge_updated (W1-T9962): prior_head=${head ?? "unknown"} reason=ratchet_collision ` +
+    `verdict=${judge.verdict} on main ${judge.mainSha ?? "unknown"}: ${describeRatchetRows(judge)} — updated once instead of arming or merging: ${prUrl}`);
+  return { hold: { outcome: "direct-merge-updated", ...context, directMergePreflight } };
+}
+
 function gitStderrEvidence(readings: PlanMergeSafetyReadings | undefined): Pick<DirectMergePreflightEvidence, "gitStderr"> {
   const gitStderr = mergedTreeGitStderr(readings);
   return gitStderr === undefined ? {} : { gitStderr };
@@ -1375,7 +1465,7 @@ export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -1392,7 +1482,7 @@ export function attemptArm(
 export function attemptArmAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1402,7 +1492,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1481,17 +1571,21 @@ function* attemptArmSteps(
   // An arm GitHub already holds drains under the old rule.
   const planTouch = deps.armStanding ? undefined : yield* readPlanTouchOrUnreadable(prUrl, deps, priorHeadSha);
   if (planTouch === "touched" || planTouch === "unreadable") return yield* attemptPlanPrMergeSteps(prUrl, deps, planTouch, priorHeadSha);
+  // W1-T9962: an armed PR merges whenever its checks pass, behind or not, so its ceilings are counted
+  // on the merge into main's tip before the arm.
+  const judged = yield* ratchetCollisionSteps(prUrl, deps, priorHeadSha);
+  if ("hold" in judged) return judged.hold;
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
     yield* step(() => deps.armAuto(prUrl));
-    return { outcome: "armed" };
+    return { outcome: "armed", ...(judged.judge ? { ratchetJudge: judged.judge } : {}) };
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     // GitHub REFUSES to enable auto-merge on an ALREADY-mergeable PR ("Pull request is in clean
     // status"): every SWEEP-armed PR can land in exactly that state, so the fallback below
     // completes the merge outright rather than treating the refusal as a no-op.
     if (armFailureAction(msg) === "direct-merge") {
-      const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha);
+      const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, {}, judged.judge);
       if (!preflight.proceed) return preflight.result;
       return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
     }
@@ -1505,7 +1599,7 @@ function* attemptArmSteps(
         `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
           `${quota.bucket}, resets: ${quota.resetsAt}) — ${msg} — ${prUrl}`,
       );
-      const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, { error: msg, rateLimit: quota });
+      const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, { error: msg, rateLimit: quota }, judged.judge);
       if (!preflight.proceed) return preflight.result;
       try {
         yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
@@ -1818,7 +1912,7 @@ function* attemptQueueArmSteps(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -1834,7 +1928,7 @@ export function armAutoMergeAtOpen(
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">> = realArmDepsAsync(),
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
 ): Promise<ArmOutcome> {
@@ -1845,7 +1939,7 @@ export async function armAutoMergeAtOpenAsync(
 function* armAtOpenSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   irreversible: boolean,
   isDraft: boolean,
 ): Steps<ArmOutcome> {
@@ -1956,8 +2050,14 @@ export function logArmAttribution(
   extra: Record<string, unknown> = {},
   rateLimit?: GhRateLimitRefusal,
   directMergePreflight?: DirectMergePreflightEvidence,
+  ratchetJudge?: MergedRatchetJudgement,
 ): void {
   const prNumber = prNumberFromRef(prUrl);
+  const judge = ratchetJudge ?? directMergePreflight?.ratchetJudge;
+  if (judge) {
+    const remedy = directMergePreflight?.reason === "ratchet_collision" ? directMergePreflight.remedy : "proceed";
+    log("sweep.ratchet_judge.decided", { task_id: taskId, pr_number: prNumber, lane, ...ratchetJudgeLedgerFields(judge), remedy, outcome });
+  }
   const ghFields = rateLimit
     ? { gh_bucket: rateLimit.bucket, gh_bucket_resets_at: rateLimit.resetsAt, gh_bucket_operation: rateLimit.operation }
     : {};
@@ -2096,6 +2196,7 @@ export function armIfVerdictPermits(
     },
     rateLimit,
     directMergePreflight,
+    typeof result === "string" ? undefined : result.ratchetJudge,
   );
   return outcome;
 }
