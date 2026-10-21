@@ -5064,10 +5064,7 @@ export function disposeDisarm(
     confidence?: number;
     reasons?: readonly string[];
   },
-  deps: {
-    mergeSha?: (prUrl: string) => string | undefined;
-    ledgerLines?: () => Array<Record<string, unknown>>;
-  } = {},
+  deps: Parameters<ReturnType<typeof runTaskCommandHelpers>["disposeDisarm"]>[2] = {},
 ): {
   step: "automerge.disarmed" | "automerge.disarm_skipped";
   row: Record<string, unknown>;
@@ -10171,17 +10168,7 @@ export function reclaimAbandonedWorker(
   // reachable from a test — the primitives it wraps enumerate and signal REAL processes, so
   // driving the defaults could neither exercise the match nor the failure without touching the
   // host's process table.
-  deps: {
-    listCandidates?: typeof defaultListCandidates;
-    readMarkers?: typeof defaultReadMarkers;
-    kill?: typeof killProcessGroup;
-    /** W1-T2261: optional ledger sink — omitted (every pre-existing test) ⇒ no log call, byte-
-     *  identical to before this task. Both real call sites (`runTaskBody` and `buildSweepEffects`'s
-     *  `reclaimWorkerImpl` default) now bind this to the SAME `log` the rung/sweep already writes
-     *  `fix.spawn_abandoned`/`fix.spawn_reclaim_failed` through, so the three lines land in one
-     *  ledger stream. */
-    log?: (step: string, extra?: Record<string, unknown>) => void;
-  } = {},
+  deps: Parameters<RunTaskCommandHost["reclaimAbandonedWorker"]>[1] = {},
 ): void {
   const listCandidates = deps.listCandidates ?? defaultListCandidates;
   const readMarkers = deps.readMarkers ?? defaultReadMarkers;
@@ -10325,13 +10312,7 @@ export function fixWorkerReceipt(
  * `fixSpawnWallClockBoundMs` has a real, uncensored sample to read.
  */
 async function spawnFixWorkerBounded(
-  deps: {
-    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
-    spawnWallClockBoundMs?: number;
-    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
-    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-  },
+  deps: Parameters<RunTaskCommandHost["spawnFixWorkerBounded"]>[0],
   args: SpawnWorkerArgs,
   ctx: { runId: string; taskId: string; snapshot?: FixDispatchSnapshot },
 ): Promise<
@@ -10649,404 +10630,7 @@ export function formerBoundStandIn(reached: () => boolean,
   };
 }
 
-export async function runFixRung(opts: {
-  /** W1-T4072: production pins harness commits and pushes to the dispatch head. */
-  guardRoundHead?: boolean;
-  taskId: string;
-  runId: string;
-  /** `files` (W1-T322) — see runReview's own `task` doc; every real caller already passes the
-   *  full plan `Task`, so this widens for free. */
-  task: { id: string; title: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
-  prUrl: string;
-  branch: string;
-  worktreePath: string;
-  /** The failing implement worker's session id — resumed on strike 1. */
-  initialSessionId: string;
-  initialSessionProvider?: WorkerResult["provider"];
-  mount: Mount;
-  /** The final fresh strike's mount (`step_up:`); absent keeps every strike on {@link mount}. */
-  stepUpMount?: Mount;
-  settingsFile: string;
-  config: Config;
-  budgetUsd: number;
-  strikeCap: number;
-  progressDecision?: FixProgressVerdict;
-  progressApproach?: string;
-  /** W1-T7096: ask the production LLM progress judge when `deps.fixProgressJudge` is unwired. */
-  useProductionProgressJudge?: boolean;
-  /**
-   * W1-T2403: the per-head bound on retrigger-shaped rounds (see {@link isRetriggerShapedCommit})
-   * this invocation spends before it stops retriggering and escalates naming the check(s) that
-   * stayed red. Optional — defaults to {@link DEFAULT_FIX_RETRIGGER_CAP}. NEVER `strikeCap`
-   * itself, which this task leaves unchanged in either direction.
-   */
-  retriggerCap?: number;
-  /** The blocked_review verdict that triggered this rung. */
-  initialReview: ReviewRunResult;
-  /** The sweep's independently read PR input; absent is not proof that the body stayed unchanged. */
-  progressReviewInputDigest?: string;
-  initialCriterionIndices?: readonly number[];
-  reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
-  /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
-   * reviewer does not reread policy from disk on every fix strike. */
-  reviewerClockBoundMs?: number;
-  /** Parent run sensor shared by implement, fix, and advisory review workers. */
-  workerTelemetry?: WorkerStateSensor;
-  /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
-   *  `openTaskIds` doc. Optional; absent behaves exactly as every pre-W1-T322 caller already does. */
-  openTaskIds?: ReadonlySet<string>;
-  /** Re-read immediately before each fix-rung terminal verdict; never reuse a boot-time code
-   * observation after the worker has spent time changing or waiting on the PR. */
-  reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
-  /**
-   * W1-T78: an operator's answer to a clarification question, if this is a
-   * RE-DISPATCH — carried verbatim on EVERY strike's prompt as an added
-   * constraint (never paraphrased). Absent for an ORIGINAL blocked_review
-   * dispatch (W1-T76, unchanged).
-   */
-  constraint?: string;
-  feedbackContributions?: readonly unknown[];
-  /**
-   * W1-T100 (the #170 fix): failing required-check name+log-tail evidence for
-   * a blocked_ci dispatch — this PR is checks-red with NO review verdict
-   * posted yet, so the failing signal IS the CI log, never a reviewer verdict.
-   * Present ONLY for a ci-log-mode dispatch; undefined for the ordinary
-   * blocked_review path (W1-T76, unchanged). Drives the ci-log MODE
-   * (deriveFixMode/renderFixPrompt, W1-T94) for every strike UNTIL a real
-   * review actually runs (only reached once CI goes green) — from then on
-   * every subsequent strike reverts to review-mode evidence, even if that
-   * review itself still fails (a real verdict is never re-treated as "no
-   * review yet").
-   */
-  ciFailures?: CiFailure[];
-  ciEvidenceDisagreement?: CiEvidenceDisagreementObservation;
-  /** W1-T3166: the residual escalation judge (W1-T349). Defaulted to the real spawn, so production
-   *  is wired by OMISSION — a mechanism behind a default-off flag is unwired wearing a switch. */
-  escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
-  /**
-   * W1-T106 (the #170 DIRTY strand): merge-conflict evidence for a
-   * `conflicted` dispatch — this PR's merge state is dirty, so no CI check
-   * even runs and no review can post until the conflict resolves. Present
-   * ONLY for a merge-conflict-mode dispatch; undefined for every other path
-   * (ci-log/reviewer-unmet/body-coverage, unchanged). Drives the
-   * merge-conflict MODE (deriveFixMode/renderFixPrompt, W1-T94) UNTIL a
-   * strike's push leaves CI able to run at all — from then on this PR is no
-   * longer dirty, so every subsequent strike reverts to whichever mode its
-   * (now-computable) review/checks state derives, exactly like ci-log's own
-   * `noReviewYet` reversion.
-   */
-  mergeConflict?: MergeConflictEvidence;
-  baseSha?: string;
-  /**
-   * W1-T2236: the SWEEP's already-computed structured gate-failure remedy (W1-T923,
-   * {@link OpenPrView.actionableGateFailures}) — seeds ROUND 1 ONLY of a review-mode dispatch
-   * whose `initialReview` is a lossy ledger reconstruction (`buildFixRungDispatchArgs`: no
-   * `testTheater`/`changesetContradictions`, so `reviewLedgerReasons` on it alone would read
-   * `[]` even for the exact shape this field exists to carry). From round 2 on, this rung
-   * derives the gate-failure evidence FRESH off that round's own live re-review instead (the
-   * SAME `reviewLedgerReasons`/`actionableGateFailuresFromReasons` pair the ledger's own
-   * `review.posted` line and `actionableGateFailuresFromLedger` use) — never this stale seed —
-   * exactly like `ciFailures`' own per-round refresh via `deps.fetchCiFailures`. Present ONLY
-   * for a review-mode dispatch whose `unmetCriteria` is empty; undefined otherwise.
-   */
-  actionableGateFailures?: ActionableGateFailure[];
-  /** W1-T3306: capped-green evidence that makes a same-head PR-body repair actionable. */
-  proofDiscrimination?: ProofDiscriminationEvidence;
-  /** W1-T6434: a dead fix owner's preserved patch at the dispatched head (see PriorPartialWork). Offered to
-   *  every strike that still targets that head; once a push moves the head it is no longer shown. */
-  priorPartialWork?: PriorPartialWork;
-  deps: {
-    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
-    fixProgressJudge?: FixProgressJudge;
-    /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
-    harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
-    writeFixCensusSnapshot?: (...args: Parameters<typeof writeFixCensusSnapshot>) => string | undefined | Promise<string | undefined>;
-    readMainTip?: () => string | Promise<string>;
-    reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
-    requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
-    /** W1-T5544: test seam for the proof-repair gate; production reads the round's git diff and runs `check-proof --base`. */
-    proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
-    scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
-    scopeAmendmentPortsIo?: Parameters<typeof buildProofAmendmentWritePorts>[1];
-    scopeAmendmentGit?: typeof hostWorktreeGitAsync;
-    /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
-    worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
-    /** W1-T4458 (i): test seam; production runs `git merge --no-commit --no-ff origin/main`. */
-    startShellLessMergeConflictMerge?: typeof startShellLessMergeConflictMerge;
-    /** W1-T4458 (ii): test seam; production reads `git rev-list --count <roundStart>..HEAD`. */
-    commitsAhead?: (worktreePath: string, base: string) => number;
-    readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; // W1-T9618: production runs `git ls-remote`
-    /**
-     * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
-     * for, or the bare verdict every pre-existing stub already returns. Read it through
-     * {@link ciGateState}/{@link ciGateSha}, never by comparing it to a string directly: a bare
-     * verdict pins nothing and each consumer falls back to its own read, exactly as before.
-     */
-    waitForCiGreen: (
-      prUrl: string,
-      log: (step: string, extra?: Record<string, unknown>) => void,
-    ) => Promise<CiGateOutcome | "green" | "red" | "timeout">;
-    /**
-     * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
-     * re-read of THIS PR's live GitHub state, consulted at the top of every
-     * round — BEFORE `strikes++`, the only point that stops a strike being
-     * spent on a PR that went terminal since the previous round — and again
-     * immediately before the exhaustion escalate() call, so a PR that went
-     * terminal mid-rung never files a BLOCKED "fix rung exhausted" issue.
-     * Never the sweep/drain snapshot the caller may itself hold — a fresh
-     * `gh` read every time. Omitted, or a failed/indeterminate read
-     * (`ok:false`), behaves EXACTLY as before this check existed: the rung
-     * proceeds. Standing down fires ONLY on a positive, freshly-observed
-     * terminal reading (see {@link terminalStateReason}).
-     */
-    readLiveState?: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>;
-    /**
-     * W1-T296: an OPTIONAL fresh read of a PR's live head sha + head commit author, consulted at the pre-strike
-     * gate (site `rung.strike`) only once this invocation has pushed a round (see {@link branchAuthorshipStandDownReason}'s
-     * "first round has no prior head" contract), and (W1-T5779) for an opened prerequisite's head ref. Never a
-     * cached snapshot, mirroring `readLiveState`. Omission refuses a prerequisite dispatch; indeterminate reads proceed.
-     */
-    readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
-    /**
-     * W1-T138 (the #303/#305/#292/#315 fix): fetch the CURRENTLY failing
-     * required check(s) + log tails for THIS pr, called whenever a strike's
-     * push leaves CI non-green — refreshes the NEXT strike's ci-log evidence
-     * so it targets what is ACTUALLY still broken right now, never a stale
-     * `opts.ciFailures` snapshot from before this push (or, for a dispatch
-     * that started in reviewer-unmet mode, the STALE review criteria from
-     * before a strike's own commit newly broke a required check like
-     * commitlint/CodeQL). Optional + best-effort: when omitted (or it throws),
-     * the rung degrades to keeping whatever ci-log evidence it already had —
-     * the MODE still corrects itself (see `noReviewYet` below), only the
-     * failing-check CONTENT stays stale.
-     *
-     * W1-T2804: `sha` is APPENDED LAST with a default, so no positional caller shifts. When the
-     * round's gate read reported a sha, the miner is PINNED to it and both readers answer about
-     * ONE commit; omitted, the miner resolves its own head exactly as it always did.
-     */
-    fetchCiFailures?: (prUrl: string, sha?: string) => Promise<CiFailure[]>;
-    /**
-     * W1-T1278 (condition A): a FRESH read of THIS PR's current status-check rollup — the raw,
-     * per-attempt entries `fetchCiFailures` above filters down to failing names only. Consulted
-     * ONLY at the pre-strike gate (site `rung.strike`), and ONLY when this round is dispatching
-     * in ci-log mode (`currentCiFailures` non-empty) — to answer "does the ONE (or more) required
-     * name I am about to spend a strike on still read red right now, or has a later attempt on
-     * this same head already superseded it" ({@link stillRedRequiredNames}). Never the caller's
-     * own `currentCiFailures` snapshot — a fresh `gh` read every round, mirroring `readLiveState`'s
-     * own discipline. Omitted, or a throwing read, skips this check entirely (fail open — the
-     * rung proceeds exactly as it did before this task).
-     */
-    readCiRollup?: (prUrl: string) => RollupCheckEntry[] | Promise<RollupCheckEntry[]>;
-    /**
-     * W1-T256: fetch THIS PR's current body. Used as the review report in `body-coverage`
-     * fix mode, where the fix worker was told (renderFixPrompt) that the review
-     * floor judges the PR BODY, and the authoritative `reviewCommand`/`post-review`
-     * path DOES judge the body (`report: body`). Without it, this re-review judges
-     * the fix worker's CHAT TEXT instead, so a correct body substantiation is
-     * invisible and the rung can never heal a keyword-floor block — it keeps
-     * posting a worker-text verdict that shadows the body. Tests may inject it; production call
-     * sites wire {@link fetchPrBodyViaGh} explicitly. Every fix mode also uses the fetched
-     * snapshot only as its retry/backoff identity, so a worker transcript never masquerades as PR
-     * input. Best-effort: a throwing fetcher falls back to the worker-text report for judgment
-     * and leaves the exact-input identity unset. Omission refuses a prerequisite dispatch (W1-T5810).
-     */
-    fetchPrBody?: (prUrl: string) => Promise<string>;
-    /**
-     * W1-T307: fetch THIS PR's CURRENT changeset (file paths) — consulted alongside
-     * `fetchPrBody` in `body-coverage` mode ONLY, to check whether this strike's own commit
-     * left the just-fetched body's file-count/enumeration claim stale (see
-     * {@link deriveChangesetClaimUpdate}). Injected only by tests; in production it DEFAULTS
-     * to {@link fetchPrDiffFilesViaGh}. Best-effort: a throwing fetcher skips the repair for
-     * this strike (the claim, if stale, is left exactly as `bodyContradictsDiff` would have
-     * found it — never a partial or guessed edit).
-     */
-    fetchPrDiffFiles?: (prUrl: string) => Promise<string[]>;
-    /**
-     * W1-T307: write a PR's body — how {@link deriveChangesetClaimUpdate}'s narrow,
-     * mechanical edit actually reaches GitHub before the review below re-runs. Injected only
-     * by tests; in production it DEFAULTS to {@link updatePrBodyViaGh}. Best-effort: a
-     * throwing writer leaves the live body stale (the review that follows judges the
-     * fetched-but-unwritten body text this round already computed, so the CORRECTED review
-     * report is still used for this round's verdict even if persisting it to GitHub failed).
-     */
-    updatePrBody?: (prUrl: string, body: string) => Promise<void>;
-    /** The test files the PR head adds: the proofs a body repair prefers. Default: the real diff in the worktree. */
-    addedTestsAtHead?: (headSha: string) => AddedTestsAtHead;
-    /** W1-T4263: the PR head's diff since its merge base, the anchor a body repair falls back to. Default: the worktree's. */
-    diffAtHead?: (headSha: string) => string | undefined;
-    /**
-     * W1-T3506: runs one `grep:` proof from a CANDIDATE acceptance-gate body repair, exactly at
-     * the moment `acceptanceGateBodyRepair` is about to be pushed via `updatePrBody` — the write
-     * boundary {@link repairedProofsAreSafeToPush} (W1-T3389, lib/body-repair.ts) exists to guard
-     * but that PR never wired in. `undefined` reports the SAME `exec_error` causes the reviewer's
-     * own `judgeCriterion` reports (a parse failure, a timeout, a spawn error, grep exit 2) — this
-     * gate refuses to push on any of them. OPTIONAL WITH NO INTERNAL DEFAULT (mirrors
-     * `readCiRollup`/`fetchPrDiffFiles` above, never `fetchPrBody`'s `?? fetchPrBodyViaGh` shape):
-     * omitted, `diagnoseUnrunnableProofs` (body-repair.ts) itself degrades to its pure parse-shape
-     * check only — never a false refusal from a caller that never wired a runner. The real
-     * production call site wires {@link execGrepProofInWorktree} bound to that round's own
-     * `worktreePath`, the SAME checkout every other strike in this rung already reads and writes,
-     * through {@link "./lib/review.js".execWhitelistedProof} — this repo's ONE proof executor,
-     * never a second hand-rolled one.
-     */
-    execAcceptanceGateRepairProof?: (proof: string) => { hits: number } | undefined;
-    /**
-     * W1-T3557: re-resolve THIS task's acceptance criteria + declared files from the plan AS IT
-     * STANDS AT THE CURRENT PR HEAD — the same head-bound resolver `rmd review` uses
-     * ({@link "./lib/review.js".resolvePlanCriteriaAtHead}) — rather than replaying `opts.task`,
-     * a snapshot captured once at sweep admission. A daemon run that begins before a legitimate
-     * plan split or scope amendment (the W1-T3545 shape this fixes) can otherwise judge a PR
-     * against a contract the plan has already superseded by the time this rung's re-review
-     * actually runs. `undefined` back means the current head's contract could not be read (an
-     * unresolvable git object, a duplicate id) — the call site below NEVER falls back to
-     * `opts.task` on that signal; it stands the rung down instead (see the call site's own
-     * comment). A LEGITIMATE empty/narrowed criteria set at a READABLE head (no divergence) is
-     * not this case — it is exactly the refreshed contract this task exists to pass through.
-     * OPTIONAL, purely for pre-existing fixtures: omitted preserves the exact pre-W1-T3557
-     * behavior of passing `opts.task` straight through, so every fixture that predates this task
-     * needs no update. Production wires {@link resolveFixRungTaskContractAtHead}, which always
-     * runs — an un-updated production call site is not a shape this deps object allows silently,
-     * only a test fixture that never touches this field is.
-     */
-    resolveTaskContractAtHead?: (
-      prUrl: string,
-      taskId: string,
-    ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
-    runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
-    /** Push whatever the fix worker committed. Best-effort — a worker that
-     * already pushed leaves nothing new, which is not an error.
-     * W1-T2610: `expectedHeadSha`, when this rung can name the sha it just committed, is
-     * threaded to the leaf's post-condition (`gitPushRunBranch`'s `expectedHeadSha`) so a ref
-     * rewound between the commit and this call raises `LanePushForeignHeadError` instead of
-     * silently no-op'ing. Optional and additive — every existing test double that ignores its
-     * third argument keeps working unchanged. */
-    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown;
-    /** Fresh REST head read used only after the push to bind this worker to its exact output. */
-    readHeadShaForProvenance?: (prUrl: string) => string;
-    issues: IssueGateway;
-    escalationIssues?: AsyncIssueGateway;
-    ledgerPath: string;
-    /** W1-T5535: the fix rows the routing learner folds. Defaults to the cached async ledger-union read. */
-    readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>>;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-    say: (msg: string) => void;
-    account: (r: WorkerResult) => WorkerResult;
-    /**
-     * W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND): the WALL-CLOCK BOUND (ms) on ONE
-     * `deps.spawn` call below — see this task's own rationale for the measured incident (a
-     * fix-rung worker's `until` shell loop with no exit condition ran 8,970s as a direct
-     * daemon child; neither `--max-turns` nor `--max-budget-usd` can fire on a shell command
-     * that never returns). Optional: omitted defaults to {@link DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS}
-     * (policy.ts) — POLICY DATA (see that constant's own doc), never a literal at this call
-     * site; the real call sites here thread `plan/policy.yaml`'s `fixSpawnWallClockBoundMs` row
-     * (W1-T1219 split this OFF `sweepWallClockBoundMs` — a sweep tick and this spawn are
-     * different populations, so one row could no longer bound both).
-     */
-    spawnWallClockBoundMs?: number;
-    /**
-     * W1-T1044: best-effort RECLAIM of a worker THIS bound abandoned — the daemon-side bound
-     * (daemon.ts's `deps.sweep` call site) frees the DAEMON but never touches what the sweep
-     * spawned; this is what stops an abandoned worker becoming an unreaped orphan (still
-     * holding its worktree, its lock and its live API session, still polling). Called AFTER
-     * the abandonment is ledgered (`fix.spawn_abandoned`), never before — see
-     * {@link spawnFixWorkerBounded}'s own doc for why recording precedes reclaiming. Optional:
-     * omitted, the worker is left running (exactly pre-W1-T1044 behavior) — reclaim is a
-     * best-effort improvement layered on top of the bound returning control, never a
-     * precondition for it.
-     */
-    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
-    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
-    /**
-     * W1-T1095 (capability 1's resume half): an OPTIONAL fresh live-state read of an
-     * ARBITRARY prerequisite PR number (never `opts.prUrl` itself) — consulted ONLY when
-     * {@link outOfDiffBlockerFor} finds a "blocked on #N" review, to decide whether N has
-     * merged yet. Mirrors `readLiveState`'s own contract exactly ({@link LiveStateResult});
-     * omitted, or a failed/indeterminate read, behaves as "not yet merged" — the SAME
-     * fail-safe direction every other live-state read in this rung already takes (see
-     * {@link prerequisiteMerged}'s own doc). The real call site (`buildSweepEffects`) wires
-     * this to the SAME `ghLiveState` reader every other spending site here already uses,
-     * against the prerequisite's own PR URL in this task's repo.
-     */
-    readPrerequisiteState?: (prNumber: number) => LiveStateResult | Promise<LiveStateResult>;
-    /**
-     * W1-T1095 (capability 3 — REBASE): the two REST observations {@link runFixRebase} needs
-     * once a prerequisite has merged — `mergeable` and `behind_by`. Optional: a call site that
-     * omits it leaves `mergeable` unreadable, which {@link decideFixRebase} REFUSES on, so an
-     * unwired reader can only ever decline to rebase, never rebase blindly.
-     */
-    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
-    /**
-     * W1-T1095 (capability 3): the update-branch WRITE — {@link ghUpdateBranchArgv} over `gh api`.
-     * Optional, and its absence is ledgered as a refusal rather than assumed: the rung must never
-     * report a rebase it did not perform.
-     */
-    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
-    /**
-     * W1-T2671: fresh REST evidence for the checks-red branch's own base gap. Consulted only for
-     * ci-log mode, before the first strike. Omitted or unreadable facts leave the existing fix
-     * path unchanged.
-     */
-    readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
-    /** W1-T8396: the trial-merge probe the exact-path refresh decides from. Unwired, the refresh is kept
-     *  as today and its `refresh.clearance` row says why. */
-    reproduceFailingTestsOnMerge?: NonNullable<SweepDeps["reproduceFailingTestsOnMerge"]>;
-    /**
-     * W1-T1095 (capability 3): the ledger rows the ONE-rebase-per-pull-request bound is folded
-     * from ({@link fixRebaseAlreadySpent}). Defaults to reading `deps.ledgerPath`, the same
-     * `ledgerLines?` seam `armAuto`/`disarmAuto` already take.
-     */
-    ledgerLines?: () => Array<Record<string, unknown>>;
-    /**
-     * W1-T1284: an OPTIONAL fresh capture of `opts.worktreePath`'s own local content —
-     * consulted ONLY at the pre-strike gate (site `rung.strike`), to detect a strike that
-     * pushed nothing changing nothing — see {@link unchangedTreeStandDownReason}'s own doc.
-     * Never the PR's remote head sha, and never anything about `origin/main`. Omitted, or a
-     * failed/throwing capture, behaves EXACTLY as before this check existed: the rung proceeds
-     * (fail open — a read failure can only ever cause a strike to spend). The real call sites
-     * wire {@link captureWorktreeSnapshotViaGit}.
-     */
-    captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>; readRegisteredWorktrees?: () => readonly RegisteredWorktree[] | Promise<readonly RegisteredWorktree[]>;
-    /**
-     * W1-T2403: read THIS round's own new commit(s) — `sinceSha..HEAD` in `opts.worktreePath` —
-     * consulted right after `deps.spawn` demonstrably returns and BEFORE `strikes` is committed,
-     * to decide whether the round is an ordinary repair or RETRIGGER-SHAPED (see
-     * {@link isRetriggerShapedCommit}). Optional and FAIL OPEN, exactly like every other reader
-     * here: omitted, or a throwing read, leaves this round's commit list empty, which classifies
-     * as an ORDINARY repair — an unreadable signal can only ever cause a strike to spend, never
-     * invent a retrigger. The real call sites wire {@link readFixRoundCommitsViaGit}.
-     */
-    readRoundCommits?: ReadFixRoundCommits;
-    /**
-     * W1-T2551: run ONE declared generator's npm script (`npm run <name>` semantics) against this
-     * rung's own worktree — the ONLY mechanism {@link generatorFixFor}'s class of ci-log failure
-     * is resolved by (never a hand-composed edit). Optional; when EITHER this or
-     * `commitGeneratorOutput` below is absent, the generator-fix short-circuit (site
-     * `rung.generator_fix`, before `strikes++`) never fires and every ci-log round goes straight
-     * to the ordinary fix-worker path exactly as it did before this task — fail OPEN, the same
-     * discipline every other optional dep here already uses.
-     */
-    runGeneratorScript?: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
-    /**
-     * W1-T2551: commit whatever the generator run above staged into the worktree's OWN working
-     * tree — `git add -A && git commit`, never a hand-composed diff (acceptance criterion 5).
-     * `changed: false` when nothing was staged (the fresh regeneration already matched what was
-     * committed).
-     */
-    commitGeneratorOutput?: (opts: { cwd: string; message: string }) => { sha: string; changed: boolean } | Promise<{ sha: string; changed: boolean }>;
-    /**
-     * W1-T2551: this repo's OWN package.json `scripts` map — the declared-pairing source
-     * (rationale (2), acceptance criterion 2): a `<name>:check` script is a generator's verify
-     * mode IFF the bare `<name>` is ALSO declared there. Optional; absent behaves as `{}`, under
-     * which {@link generatorFixFor} never matches anything — "unknown" reads as "no pairing", the
-     * one input this feature must fail CLOSED on rather than guess.
-     */
-    packageScripts?: Readonly<Record<string, string>>;
-    /** W1-T5955: the round's branch claim — released at its `fix.done`, re-taken before reuse. */
-    branchClaim?: FixRoundBranchClaim;
-    /** The approved skill tree the fix lane selects from; production reads the implement lane's. */
-    approvedSkillsDir?: string;
-  };
-}): Promise<FixRungOutcome> {
+export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0]): Promise<FixRungOutcome> {
   const roundRows: Record<string, unknown>[] = [];
   const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
     roundRows.push({ ...extra, task_id: opts.taskId, step });
@@ -17143,14 +16727,7 @@ export function bodyCarriesGenericAcceptanceFallback(body: string): boolean {
 export function repairRetroAcceptanceBlock(
   prUrl: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: {
-    fetchBody?: (url: string) => string;
-    editBody?: (url: string, body: string) => void;
-    /** The PR's diff, already read by the caller. When absent, `diffText` reads it. */
-    diff?: string;
-    /** W1-T4263: reads the PR's unified diff. Default: the PR's diff read through gh. */
-    diffText?: (url: string) => string;
-  } = {},
+  deps: Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[2] = {},
 ): "repaired" | "healthy" | "unrepresentable" | "error" {
   const { fetchBody, editBody, diffText } = {
     fetchBody: defaultRetroFetchBody,
@@ -31587,13 +31164,7 @@ export function headroomPolicyFromCurve(curve: PolicyHeadroomRung[]): HeadroomPo
 export function logCloneReapSurvey(
   config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
-  deps: {
-    roots?: () => string[];
-    reap?: typeof reapStaleClones;
-    policy?: () => { enabled: boolean; maxAgeHours: number };
-    /** W1-T2694: injected ratification pins — same seam shape as `policy` above. */
-    ratifications?: Ratifications;
-  } = {},
+  deps: Parameters<RunTaskCommandHost["logCloneReapSurvey"]>[2] = {},
 ): CloneReapSummary | null {
   try {
     const plan = cloneReapPlan(config, log, deps);
@@ -31685,14 +31256,7 @@ function logCloneReapRow(
 export function logWorktreeReapBootSurvey(
   config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
-  deps: {
-    root?: () => string;
-    reap?: typeof reapStaleWorktrees;
-    policy?: () => { enabled: boolean };
-    isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
-    /** W1-T2694: injected ratification pins — same seam shape as `policy` above. */
-    ratifications?: Ratifications;
-  } = {},
+  deps: Parameters<ReturnType<typeof runTaskCommandHelpers>["logWorktreeReapBootSurvey"]>[2] = {},
 ): WorktreeReapSummary | null {
   return runTaskCommandHelpers(runTaskCommandHost()).logWorktreeReapBootSurvey(config, log, deps);
 }
@@ -31785,34 +31349,7 @@ export async function runRepositoryMaintenanceRung(
 export async function logDiskReclaimRung(
   config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
-  deps: {
-    sweepTempDirs?: (opts?: TempSweepOpts) => TempSweepSummary | Promise<TempSweepSummary>;
-    reapClonesSurvey?: (
-      ...a: Parameters<typeof logCloneReapSurveyAsync>
-    ) => CloneReapSummary | null | Promise<CloneReapSummary | null>;
-    cloneReapDeps?: Parameters<typeof logCloneReapSurveyAsync>[2];
-    sweepWorkerHomes?: (
-      ...a: Parameters<typeof sweepStaleWorkerHomes>
-    ) => ReturnType<typeof sweepStaleWorkerHomes> | Promise<ReturnType<typeof sweepStaleWorkerHomes>>;
-    workerHomeRoot?: () => string;
-    /** W1-T3092: the object reaper. Seams mirror the three sweeps above — appended LAST so no
-     *  positional caller shifts. `policy` and `ratifications` follow logWorktreeReapBootSurvey. */
-    reapObjects?: (repoDir: string, inflightDir: string, deps: ObjectReapDeps) => ObjectReapResult | Promise<ObjectReapResult>;
-    objectRepoDir?: () => string;
-    objectInflightDir?: () => string;
-    objectPolicy?: () => { enabled: boolean };
-    ratifications?: Ratifications;
-    /** W1-T4022: the real `lsof`-backed probe (src/lib/clone-reaper.ts) — a test can still inject
-     *  its own; production leaves this unset and gets the AWAITED, bounded
-     *  {@link defaultOpenFileCountAsync}, never the fail-closed `() => 1` object-reaper.ts falls back
-     *  to when NOTHING supplies a counter. */
-    objectOpenFileCount?: (dir: string) => number;
-    /** W1-T4022: where the consecutive-refusal streak persists across daemon restarts. */
-    objectStreakPath?: () => string;
-    objectOwnInflightLock?: string;
-    /** 2026-10-06: the daemon's own checkout, reaped as a second repo with its own streak. */
-    objectDaemonCheckoutDir?: () => string;
-  } = {},
+  deps: Parameters<ReturnType<typeof runTaskCommandHelpers>["logDiskReclaimRung"]>[2] = {},
 ): Promise<{
   tempDirsRemoved: number;
   clonesReaped: number;
@@ -36713,7 +36250,7 @@ export function harnessCommitForShellLessWorker(
     /** W1-T10026: also receives the changed paths the commit left out. */
     onCommit?: (sha: string, undeclared?: readonly string[]) => void;
   },
-  deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
+  deps: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[1] = {},
 ): number {
   if (!input.harnessOwnsGit || input.commitCount !== 0) return input.commitCount;
   if (input.requireMergeHead && !mergeHeadPresent(worktreeGitRunner(input.worktreePath))) {

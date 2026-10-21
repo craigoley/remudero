@@ -60,7 +60,7 @@ import { bodyWithFailingProofAtOpen, defaultProofRunnerAsync, openPullRequestChe
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
-import { systemClock, type Clock } from "../../lib/clock.js";
+import { fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "../../lib/cash-trial.js";
 import { benchmarkNonDispatchSpawn, callerOwnsBenchmarkReceipt, type BenchmarkStackEvidence, dispatchTaskShape, fixLaneBenchmarkWork, type BenchmarkWorkInput } from "../../lib/benchmark-run.js";
 import { type RepairReceiptContext } from "../../lib/repair-cost-evidence.js";
@@ -1278,6 +1278,7 @@ export const ALREADY_SATISFIED_VERIFY_ATTEMPTS = 3;
 
 export const PLAN_RECORD_ABSENT = "absent";
 
+// BACKSTOP: bounds a failed recon attempt; a completed worker result normally ends it.
 export const RECON_MAX_TURNS = 40;
 
 const RULE_HEADLINES_SRC = "plan#W1-T2508";
@@ -1591,10 +1592,10 @@ function buildWorkerStateSensor(args: {
   taskId: string;
   root: string;
   quietFloorMs?: number;
-  now?: () => number;
+  now?: Clock["now"];
   pollMs?: number;
 }): WorkerStateSensor {
-  const now = args.now ?? Date.now;
+  const now = args.now ?? systemClock.now;
   const tracker = new WorkerStateTracker(args.quietFloorMs ?? DEFAULT_WORKER_QUIET_FLOOR_MS);
   const tailPath = join(args.root, "state", "runs", `${args.runId}.tail`);
   let tailLines: string[] = [];
@@ -1654,7 +1655,7 @@ function buildWorkerStateSensor(args: {
       writeWorkerTailBestEffort(tailPath, tailLines);
     }
     const toolEnded = activeTool !== undefined && event.kind !== "tool-executing";
-    const eventAt = new Date(event.tsMs).toISOString();
+    const eventAt = fixedClock(event.tsMs).iso();
     const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
     const toolCallIndex = event.kind === "tool-executing" ? nextToolCallIndex++ : undefined;
     try {
@@ -4338,7 +4339,7 @@ export async function runTask(
 
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
-  const runId = `${taskId}-${Date.now()}`;
+  const runId = `${taskId}-${systemClock.now()}`;
   const log = benchmarkRunLedgerLogger((step, fields) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }),
     opts.benchmarkStackEvidence ?? workerBoundaryStack);
@@ -5521,7 +5522,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           return {
             localHost: hostname(),
             namespaceBootMs,
-            namespaceBootIso: new Date(namespaceBootMs).toISOString(),
+            namespaceBootIso: fixedClock(namespaceBootMs).iso(),
             pidPresent: pidIsPresent(anchor.pid),
           };
         },
@@ -5636,7 +5637,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // reapStaleWorktrees' widowed-lock pass deletes a `.lock` whose directory does not exist yet.
     // W1-T4356: written BEFORE the checkout lock is released, so a peer's refresh sees this borrower.
     mkdirSync(worktreePath, { recursive: true });
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
     // W1-T2621: `log` goes last so a test's `worktreeBaseDeps` can never swallow this run's ledger.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
     await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
@@ -5973,7 +5974,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
               observed: parsedForArtifact.observed,
               inferred: parsedForArtifact.inferred,
               couldnt_verify: parsedForArtifact.couldntVerify,
-              written_at: new Date().toISOString(),
+              written_at: systemClock.iso(),
               run_id: runId,
             });
           }
@@ -6623,7 +6624,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const question = parseQuestion(fullText(impl));
     if (question) {
       const logged = appendQuestion(repoRoot, {
-        ts: new Date().toISOString(),
+        ts: systemClock.iso(),
         task: taskId,
         question: question.question,
         current_assumption: question.currentAssumption,
