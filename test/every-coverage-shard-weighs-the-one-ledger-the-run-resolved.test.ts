@@ -527,3 +527,46 @@ test("both emitted shells preserve non-source, push and merge-group no-collectio
     });
   }
 });
+
+
+test("the coverage ledger sparse checkout runs its real classifier before dependencies exist", () => {
+  const ledger = workflow().jobs["coverage-ledger"];
+  const checkout = ledger.steps.find((step: any) => step.uses?.startsWith("actions/checkout@"));
+  const paths = (checkout.with["sparse-checkout"] as string).split("\n").map(path => path.trim()).filter(Boolean);
+  const assignment = (ledger.steps.find((step: any) => step.id === "resolve").run as string)
+    .split("\n").find(line => line.startsWith('CLASS="'))!;
+  assert.ok(assignment, "exercise the workflow's actual fail-closed classifier assignment");
+  fixture(at => {
+    const archive = join(at, "sparse-inputs.tar");
+    const packed = spawnSync("git", ["archive", "--format=tar", `--output=${archive}`, "HEAD", ...paths],
+      { cwd: root, encoding: "utf8" });
+    assert.equal(packed.status, 0, packed.stderr);
+    const unpacked = spawnSync("tar", ["-xf", archive, "-C", at], { encoding: "utf8" });
+    assert.equal(unpacked.status, 0, unpacked.stderr);
+    assert.equal(existsSync(join(at, "node_modules")), false, "the sparse job classifies before npm install");
+    // A shell classifier must not borrow the parent's test loader through NODE_OPTIONS.
+    const env = { ...process.env, NODE_OPTIONS: "" };
+    const classify = (changed: string) => {
+      writeFileSync(join(at, "ledger-changed-files.txt"), `${changed}\n`);
+      return spawnSync(process.execPath, ["scripts/diff-class.mjs", "--coverage-class", "--changed-files", "ledger-changed-files.txt"],
+        { cwd: at, env, encoding: "utf8" });
+    };
+    for (const [changed, expected] of [
+      ["plan/tasks.d/example.yaml", "PLAN_ONLY"], ["docs/example.md", "DOCS_ONLY"],
+      ["test/example.test.ts", "TEST_ONLY"], ["src/lib/example.ts", "SOURCE"],
+      [".github/workflows/ci.yml", "SOURCE"],
+    ]) {
+      const result = classify(changed!);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout.trim(), expected, changed);
+    }
+    rmSync(join(at, "src/lib/rule-suites.ts"));
+    writeFileSync(join(at, "ledger-changed-files.txt"), "plan/tasks.d/example.yaml\n");
+    const refused = spawnSync("bash", ["-c", `${assignment}\nprintf '%s\\n' "$CLASS"`],
+      { cwd: at, env, encoding: "utf8" });
+    assert.equal(refused.status, 0, refused.stderr);
+    assert.equal(refused.stdout.trim(), "SOURCE", "an unavailable classifier still measures conservatively");
+    assert.match(refused.stderr, /ERR_MODULE_NOT_FOUND/);
+    assert.equal(existsSync(join(at, "node_modules")), false);
+  });
+});

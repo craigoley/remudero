@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 2.8
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9943 — 0 host_resource.file_failed rows in 3 d.
+  # Machine-released on 10-20 despite 8 release_escalated rows; retire.
   attempts: 0
   author_class: machine
   origin: "scout:host_resource.file_failed"

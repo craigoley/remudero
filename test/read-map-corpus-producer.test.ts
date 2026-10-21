@@ -278,7 +278,9 @@ test("corpus descriptor metadata must remain observable and device-bound", () =>
 
 test("corpus FIFO without writer refuses as nonregular within a hard child deadline", () => {
   const result = corpusProbe(`
-    const made=spawnSync("mkfifo",[path+".fifo"],{encoding:"utf8",timeout:500});assert.equal(made.status,0,made.stderr);
+    // Fixture creation shares the enclosing 1500ms deadline; a shorter setup bound can fail before the read is tested.
+    const made=spawnSync("mkfifo",[path+".fifo"],{encoding:"utf8",timeout:1500});
+    assert.equal(made.error,undefined,made.error?.message);assert.equal(made.signal,null);assert.equal(made.status,0,made.stderr);
     assert.equal(fs.lstatSync(path+".fifo").isFIFO(),true);
     let closed=0;fs.closeSync=fd=>{closed++;return real.closeSync(fd);};syncBuiltinESMExports();
     assert.throws(()=>readCorpusBytes(path+".fifo"),/bounded regular/);assert.equal(closed,1);

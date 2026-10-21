@@ -352,7 +352,8 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
   test("amendment-closed waits once then asks the judge for the same repair", async () => {
     const rows: Record<string, unknown>[] = [
       { task_id: "W1-T7243", step: "fix.dispatch", round_id: "scope", head_sha: "head" },
-      { task_id: "W1-T7243", step: "fix.scope_amendment", amendment_number: 100 },
+      { task_id: "W1-T7243", step: "fix.scope_amendment", pr_number: 7243, head_sha: "head",
+        outcome: "created", amendment_number: 100 },
       { task_id: "W1-T7243", step: "fix.done", round_id: "scope", head_sha: "head", subtype: "scope_amendment_pending" },
       { task_id: "other", step: "pr.terminal", pr_number: 100, state: "closed" },
       { step: "sweep.disposed", pr_number: 7243, head_sha: "head", disposition: "blocked-fixable", acted: true },

@@ -666,10 +666,17 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   const additions = paths.filter((path) => !files.toJSON().includes(path));
   if (additions.length === 0) return refuse("already-declared", "all requested paths are already in files");
   const [start, end] = files.range;
+  const last = files.items.at(-1);
+  const scoutTest = isMap(task) && String(task.get("origin")).startsWith("scout:") && isScalar(last) &&
+    /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/.test(String(last.value)) ? last : undefined;
   let insert: number;
   let extra: string;
-  if (files.flow) {
-    const last = files.items.at(-1);
+  if (scoutTest) {
+    insert = files.flow ? scoutTest.range![0] : shard.text.lastIndexOf("\n", scoutTest.range![0]) + 1;
+    const indent = shard.text.slice(insert, scoutTest.range![0] - 2);
+    extra = files.flow ? `${additions.map((path) => JSON.stringify(path)).join(", ")}, `
+      : additions.map((path) => `${indent}- ${JSON.stringify(path)}\n`).join("");
+  } else if (files.flow) {
     insert = isScalar(last) ? last.range![1] : start + 1;
     extra = `${files.items.length > 0 ? ", " : ""}${additions.map((path) => JSON.stringify(path)).join(", ")}`;
   } else {
@@ -680,6 +687,14 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   }
   let text = shard.text.slice(0, insert) + extra + shard.text.slice(insert);
   if (parseDocument(text).errors.length > 0) return refuse("shard-drifted", "appending paths would invalidate the files sequence");
+  const reparked = isMap(task) && String(task.get("author_class")) === "machine";
+  if (reparked) {
+    const amended = parseDocument(text);
+    const index = (isSeq(amended.contents) ? amended.contents.items : []).findIndex(item => isMap(item) && String(item.get("id")) === request.taskId);
+    amended.setIn([index, "verify"], "human");
+    amended.deleteIn([index, "risk_ruling"]);
+    text = amended.toString({ lineWidth: 0 });
+  }
   // W1-T7959: lint what this writer writes BEFORE any worktree exists. Widening files: is the edit that
   // adds a subsystem, so Rule 19 sizing is the violation it produces by construction, and the linter's
   // own remedy for it (raise to risk:high) is applied; anything else new that blocks is refused.
@@ -711,19 +726,22 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     deps.gitAdd(wp, shard.path);
     const target = build ? "its build" : `#${request.prNumber}`;
     const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for ${target}`;
-    const sha = deps.gitCommit(wp, riskRaise
+    const reparkNote = reparked ? "\n\nSet verify: human and remove the stale risk ruling so the amended machine task returns to the judge." : "";
+    const sha = deps.gitCommit(wp, (riskRaise
       ? `${title}\n\nAppend validated worker paths to files and raise risk to high: the task linter counted ` +
         `${riskRaise.subsystems} (Rule 19 sizing). band_meaning: span is added only when none was declared.`
-      : `${title}\n\nAppend validated worker paths to files only.`);
+      : `${title}\n\nAppend validated worker paths to files.`) + reparkNote);
     deps.gitPush(wp, branch, sha);
     const created = deps.createPr({ title, head: branch, base: "main",
       body: (riskRaise
         ? `Scope amendment for ${target}. ${shard.path}'s files list changes and its risk is raised to high ` +
           `because the task linter counted ${riskRaise.subsystems} (Rule 19 sizing); band_meaning: span is added only when none was declared.\n\n`
-        : `Scope amendment for ${target}. Only ${shard.path}'s files list changes.\n\n`) +
+        : `Scope amendment for ${target}. ${reparked ? shard.path + "'s files list changes" : "Only " + shard.path + "'s files list changes"}.\n\n`) +
+        (reparked ? "Set verify: human and remove the stale risk ruling so the amended machine task returns to the judge.\n\n" : "") +
         renderAcceptanceBlock([...additions.map((path) => ({ claim: `files includes ${path}`,
           proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` })),
-          ...(riskRaise ? [{ claim: `risk is raised to high for ${riskRaise.subsystems}`, proof: `grep: ^ *risk: high in ${shard.path}` }] : [])]) });
+          ...(riskRaise ? [{ claim: `risk is raised to high for ${riskRaise.subsystems}`, proof: `grep: ^ *risk: high in ${shard.path}` }] : []),
+          ...(reparked ? [{ claim: "the amended machine task returns to the judge", proof: `grep: ^ *verify: human in ${shard.path}` }] : [])]) });
     deps.recordIdentity(key, { amendmentUrl: created.prUrl, amendmentNumber: created.prNumber, merged: false });
     return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
   } finally {

@@ -6,8 +6,11 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1.04
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9023 — Live (24 ci-shard rounds in 3 d, last 10-21
+  # 10:30), but like W1-T9002 it is a coarse family owned only by ci.yml; the rounds are distinct failing tests. A
+  # workflow edit is the wrong remedy surface; prefer the per-test causes.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-shard"

@@ -26,9 +26,10 @@ import { closeSync, createReadStream, existsSync, fstatSync, openSync, readdirSy
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Clock } from "./clock.js";
-import type { Escalation } from "./escalate.js";
+import { tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
+import type { MainRepairLane, MainRepairRevertRequest } from "./main-health-rung.js";
 import { upperNormalQuantile, wilsonInterval } from "./model-drift.js";
 import { REVIEW_MATERIAL_ADVANCE_PATHS, reviewAdvanceIsMaterial, reviewPathSpans, runTaskAdvanceTouchesReviewPath } from "./self-sync.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -58,8 +59,8 @@ export const REVIEWER_SHADOW_STEP_PREFIX = "shadow.";
 /** The shadow review's would-be terminal: it reached publication and published nothing. */
 export const REVIEWER_SHADOW_VERDICT_STEP = "review.shadow_verdict";
 export const REVIEWER_SHADOW_FLAG = "--reviewer-shadow";
-/** Set by the daemon on a healed review child; every terminal row it writes carries it. */
-export const REVIEWER_INCIDENT_ENV = "RMD_REVIEWER_INCIDENT_ID";
+/** Passed by the daemon to a healed review child; every terminal row it writes carries the id. */
+export const REVIEWER_INCIDENT_FLAG = "--reviewer-incident";
 
 const ATTRIBUTION_STEPS = ["review.ran_from_fresh_tree", "daemon.boot"] as const;
 /** Every step the health reader streams: terminal rows, their shadow twins, and attribution rows. */
@@ -456,32 +457,27 @@ export type HealedTree =
   | { state: "conflict"; originMainSha: string; reason: string; paths: string[] }
   | { state: "unavailable"; originMainSha: string | null; reason: string };
 
-/** The git a healed tree is built with: the daemon checkout's, and a tree's own. */
-export interface HealedTreeGit {
-  /** git in `repoDir` (args only). */
-  git: GitText;
-  /** git inside a tree. */
-  treeGit: (tree: string, args: string[]) => Promise<string>;
-  /** Cuts (or proves) a clean detached tree at `sha` under `prefix`, runnable; the fresh-tree helper. */
-  cut: (prefix: string, sha: string) => string | Promise<string>;
-  /** Removes a tree this builder cut and could not finish. */
-  remove: (tree: string) => void | Promise<void>;
-}
-
 const HEAL_IDENTITY = ["-c", "user.name=remudero reviewer-heal", "-c", "user.email=reviewer-heal@remudero.invalid"];
 const healedMemo = new Map<string, { path: string; sha: string }>();
 
 /** Build (or reuse) the healed tree for `offendingSha` at origin/main. Never an old head, never an
  *  engine tree: every route here starts from origin/main. */
 export async function buildHealedReviewerTree(
-  seams: HealedTreeGit,
+  repoDir: string,
   offendingSha: string,
+  /** Cuts (or proves) a clean detached tree at `sha` under `prefix`: the fresh-tree helper. */
+  cut: (prefix: string, sha: string) => string | Promise<string>,
+  /** Removes a tree this builder cut and could not finish. */
+  remove: (tree: string) => void | Promise<void>,
   opts: { withPr?: number } = {},
 ): Promise<HealedTree> {
+  // Every git here is the hardened leaf, off the event loop: the daemon checkout's, and the tree's own.
+  const git = gitIn(repoDir);
+  const treeGit = (tree: string, args: string[]) => hostWorktreeGitAsync(tree, args);
   let originMainSha: string;
   try {
-    await seams.git(["fetch", "--quiet", "origin", "main"]);
-    originMainSha = (await seams.git(["rev-parse", "origin/main"])).trim();
+    await git(["fetch", "--quiet", "origin", "main"]);
+    originMainSha = (await git(["rev-parse", "origin/main"])).trim();
   } catch (error) {
     return { state: "unavailable", originMainSha: null, reason: `origin/main unreadable: ${String((error as Error)?.message ?? error)}` };
   }
@@ -490,9 +486,9 @@ export async function buildHealedReviewerTree(
   const known = healedMemo.get(key);
   if (known !== undefined) {
     try {
-      const head = (await seams.treeGit(known.path, ["rev-parse", "HEAD"])).trim();
-      const parent = (await seams.treeGit(known.path, ["rev-parse", "HEAD^1"])).trim();
-      const dirty = (await seams.treeGit(known.path, ["status", "--porcelain", "-uno"])).trim();
+      const head = (await treeGit(known.path, ["rev-parse", "HEAD"])).trim();
+      const parent = (await treeGit(known.path, ["rev-parse", "HEAD^1"])).trim();
+      const dirty = (await treeGit(known.path, ["status", "--porcelain", "-uno"])).trim();
       if (head === known.sha && parent === originMainSha && dirty === "") {
         return { state: "ready", path: known.path, sha: known.sha, originMainSha, patch, ...(opts.withPr === undefined ? {} : { withPr: opts.withPr }) };
       }
@@ -500,52 +496,53 @@ export async function buildHealedReviewerTree(
       // deliberate: an unreadable cached tree is rebuilt below
     }
     healedMemo.delete(key);
+    await Promise.resolve(remove(known.path)).catch(() => undefined /* deliberate: an unremoved tree is reaped with the reviewer's other trees */);
   }
   // A merge commit reverts against its first parent, as findOffendingMerge diffed it; a squash merge has one parent.
   let mainline: string[] = [];
   if (opts.withPr === undefined) {
     try {
-      await seams.git(["merge-base", "--is-ancestor", offendingSha, originMainSha]);
-      mainline = (await seams.git(["rev-list", "--parents", "-n", "1", offendingSha])).trim().split(/\s+/).length > 2 ? ["-m", "1"] : [];
+      await git(["merge-base", "--is-ancestor", offendingSha, originMainSha]);
+      mainline = (await git(["rev-list", "--parents", "-n", "1", offendingSha])).trim().split(/\s+/).length > 2 ? ["-m", "1"] : [];
     } catch {
       return { state: "unavailable", originMainSha, reason: `${offendingSha.slice(0, 12)} is not on origin/main ${originMainSha.slice(0, 12)}` };
     }
   }
   let tree: string;
   try {
-    tree = await seams.cut(`healed-${(opts.withPr === undefined ? offendingSha : `pr${opts.withPr}`).slice(0, 12)}`, originMainSha);
+    tree = await cut(`healed-${(opts.withPr === undefined ? offendingSha : `pr${opts.withPr}`).slice(0, 12)}`, originMainSha);
   } catch (error) {
     return { state: "unavailable", originMainSha, reason: `healed tree could not be cut: ${String((error as Error)?.message ?? error)}` };
   }
   try {
     if (opts.withPr === undefined) {
-      await seams.treeGit(tree, [...HEAL_IDENTITY, "revert", "--no-commit", ...mainline, offendingSha]);
+      await treeGit(tree, [...HEAL_IDENTITY, "revert", "--no-commit", ...mainline, offendingSha]);
       // Already undone on main (a revert PR merged): reverting again stages nothing, so the healed tree IS origin/main.
-      const staged = (await seams.treeGit(tree, ["diff", "--cached", "--name-only"])).trim();
+      const staged = (await treeGit(tree, ["diff", "--cached", "--name-only"])).trim();
       if (staged === "") {
-        await seams.treeGit(tree, ["revert", "--abort"]);
-        await seams.remove(tree);
+        await treeGit(tree, ["revert", "--abort"]);
+        await remove(tree);
         return { state: "empty", originMainSha };
       }
-      await seams.treeGit(tree, [...HEAL_IDENTITY, "commit", "--quiet", "--no-verify", "-m", `Revert ${offendingSha.slice(0, 12)} (reviewer-heal, W1-T10269)`]);
+      await treeGit(tree, [...HEAL_IDENTITY, "commit", "--quiet", "--no-verify", "-m", `Revert ${offendingSha.slice(0, 12)} (reviewer-heal, W1-T10269)`]);
     } else {
-      await seams.treeGit(tree, ["fetch", "--quiet", "origin", `refs/pull/${opts.withPr}/head`]);
-      await seams.treeGit(tree, [...HEAL_IDENTITY, "merge", "--no-ff", "--no-edit", "--no-verify", "FETCH_HEAD"]);
+      await treeGit(tree, ["fetch", "--quiet", "origin", `refs/pull/${opts.withPr}/head`]);
+      await treeGit(tree, [...HEAL_IDENTITY, "merge", "--no-ff", "--no-edit", "--no-verify", "FETCH_HEAD"]);
     }
   } catch (error) {
     let paths: string[] = [];
     try {
-      paths = (await seams.treeGit(tree, ["diff", "--name-only", "--diff-filter=U"])).split("\n").map((s) => s.trim()).filter(Boolean);
+      paths = (await treeGit(tree, ["diff", "--name-only", "--diff-filter=U"])).split("\n").map((s) => s.trim()).filter(Boolean);
     } catch {
       // deliberate: the conflict stands without its path list
     }
     try {
-      await seams.treeGit(tree, opts.withPr === undefined ? ["revert", "--abort"] : ["merge", "--abort"]);
+      await treeGit(tree, opts.withPr === undefined ? ["revert", "--abort"] : ["merge", "--abort"]);
     } catch {
       // deliberate: the tree is removed next either way
     }
     try {
-      await seams.remove(tree);
+      await remove(tree);
     } catch {
       // deliberate: an unremoved tree is reaped with the reviewer's other trees
     }
@@ -553,7 +550,7 @@ export async function buildHealedReviewerTree(
     return { state: "conflict", originMainSha, paths,
       reason: `${what} does not apply cleanly on origin/main ${originMainSha.slice(0, 12)}: ${String((error as Error)?.message ?? error).split("\n")[0]}` };
   }
-  const sha = (await seams.treeGit(tree, ["rev-parse", "HEAD"])).trim();
+  const sha = (await treeGit(tree, ["rev-parse", "HEAD"])).trim();
   healedMemo.set(key, { path: tree, sha });
   return { state: "ready", path: tree, sha, originMainSha, patch, ...(opts.withPr === undefined ? {} : { withPr: opts.withPr }) };
 }
@@ -610,31 +607,6 @@ export function reviewerRegressionEscalation(incident: ReviewerIncident, conflic
   };
 }
 
-export interface ReviewerHealthEffects {
-  findOffendingMerge(healthySha: string, regressedSha: string): Promise<OffendingMerge | undefined>;
-  /** True when `ancestor` is on `descendant`'s history: a last healthy sha must precede the regression in git. */
-  isAncestor(ancestor: string, descendant: string): Promise<boolean>;
-  /** Raise the incident as an assigned issue (with `conflict`: its healed tree cannot be built);
-   *  returns the issue url, or null when it could not be filed. */
-  escalate(incident: ReviewerIncident, conflict?: { reason: string; paths: readonly string[] }): Promise<string | null>;
-  openRevertPr(incident: ReviewerIncident & { offending: OffendingMerge }): Promise<{ prUrl: string } | { refused: string; conflictPaths?: readonly string[] }>;
-  closeIssue(url: string, comment: string): Promise<void>;
-  /** The revert PR's lifecycle, to close it only when a fix made it unnecessary. */
-  readPr(url: string): Promise<"open" | "closed" | "merged">;
-  closePr(url: string, comment: string): Promise<void>;
-}
-
-/** Where reviewer health keeps and reads its evidence, and what it may do: the state file, the ledger
- *  reader, its own log and clock, and the incident's effects. */
-export interface ReviewerHealthStore {
-  statePath: string;
-  /** New rows since the cursor (null: the first read, which seeds from the whole union). */
-  readRows(cursor: ReviewerHealthCursor | null): Promise<{ rows: Iterable<Record<string, unknown>>; cursor: ReviewerHealthCursor }>;
-  effects: ReviewerHealthEffects;
-  log(step: string, extra?: Record<string, unknown>): void;
-  now(): string;
-}
-
 export type ReviewerHealthDecision =
   | { route: "normal"; reason: string; current: ReviewerShaJudgment | null }
   | { route: "healed"; incident: ReviewerIncident; shadow: boolean; withPr: number | null; current: ReviewerShaJudgment | null };
@@ -662,194 +634,191 @@ function signatureOf(rec: ReviewerShaRecord): string[] {
   return Object.keys(rec.reasons).sort();
 }
 
-/** Effects off: the seed replays history to learn which incident (if any) is still open, and acts
- *  on that one only, once, after. */
-interface Act { live: boolean }
-
-async function newestHealthyAncestor(state: ReviewerHealthState, deps: ReviewerHealthStore, rec: ReviewerShaRecord): Promise<ReviewerShaRecord | undefined> {
-  const earlier = Object.values(state.shas)
-    .filter((other) => other.seq < rec.seq && !other.healed && other.regressedAt === undefined)
-    .sort((a, b) => b.seq - a.seq);
-  for (const other of earlier) {
-    if (judgeReviewerSha(state, other.sha).state !== "healthy") continue;
-    try {
-      if (await deps.effects.isAncestor(other.sha, rec.sha)) return other;
-    } catch {
-      // deliberate: an unknown sha (a PR head, a pruned tree) cannot be the healthy side of the range
-    }
-  }
-  return undefined;
-}
-
-async function openIncident(state: ReviewerHealthState, deps: ReviewerHealthStore, rec: ReviewerShaRecord, judgment: ReviewerShaJudgment, act: Act): Promise<void> {
-  const signature = signatureOf(rec);
-  const bootHeadSha = rec.firstFailHost === undefined ? null : state.bootHeads[rec.firstFailHost] ?? null;
-  const prior = [...state.closed].reverse().find((c) => c.signature.some((s) => signature.includes(s)));
-  let incident: ReviewerIncident;
-  if (prior !== undefined) {
-    // The same failure mode again after a close: the same cause, so the same blame and the same heal.
-    const { closedAt: _closedAt, revertPrUrl: _url, revertRefused: _refused, ...rest } = prior;
-    void [_closedAt, _url, _refused];
-    incident = { ...rest, signature: [...new Set([...rest.signature, ...signature])].sort(), evidence: judgment, reopenedFrom: prior.id };
-    state.closed = state.closed.filter((c) => c.id !== prior.id);
-  } else {
-    const lastHealthy = await newestHealthyAncestor(state, deps, rec);
-    let offending: OffendingMerge | undefined;
-    let offendingUnavailable: string | undefined;
-    if (lastHealthy === undefined) offendingUnavailable = "no healthy reviewer code sha precedes the regression";
-    else {
-      try {
-        offending = await deps.effects.findOffendingMerge(lastHealthy.sha, rec.sha);
-        if (offending === undefined) offendingUnavailable = `no review-material merge in ${lastHealthy.sha.slice(0, 12)}..${rec.sha.slice(0, 12)}`;
-      } catch (error) {
-        offendingUnavailable = `merge history unreadable: ${String((error as Error)?.message ?? error)}`;
-      }
-    }
-    incident = { id: `reviewer-regression-${rec.sha.slice(0, 12)}`, openedAt: deps.now(), regressedSha: rec.sha, regressedSeq: rec.seq,
-      bootHeadSha, lastHealthySha: lastHealthy?.sha ?? null, offending: offending ?? null,
-      ...(offendingUnavailable === undefined ? {} : { offendingUnavailable }), signature, evidence: judgment };
-  }
-  state.incident = incident;
-  if (!act.live) return;
-  deps.log("reviewer.regression_opened", {
-    incident_id: incident.id, regressed_reviewer_code_sha: rec.sha, boot_head_sha: bootHeadSha,
-    last_healthy_reviewer_code_sha: incident.lastHealthySha, offending_sha: incident.offending?.sha ?? null,
-    offending_pr: incident.offending?.pr ?? null, offending_reason: incident.offending?.reason ?? incident.offendingUnavailable ?? null,
-    signature: incident.signature, k: judgment.k, n: judgment.n, baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n,
-    interval: judgment.interval, baseline_interval: judgment.baselineInterval, z: judgment.z,
-    ...(incident.reopenedFrom ? { reopened_from: incident.reopenedFrom } : {}),
-  });
-}
-
-/** The incident's outward effects: the assigned issue, then one revert PR of the offending merge. */
-async function raiseIncident(deps: ReviewerHealthStore, incident: ReviewerIncident): Promise<void> {
-  try {
-    incident.issueUrl = await deps.effects.escalate(incident);
-  } catch (error) {
-    incident.issueUrl = null;
-    deps.log("reviewer.regression_escalation_failed", { incident_id: incident.id, error: String((error as Error)?.message ?? error) });
-  }
-  if (incident.offending === null || incident.revertPrUrl !== undefined) return;
-  try {
-    const outcome = await deps.effects.openRevertPr({ ...incident, offending: incident.offending });
-    if ("prUrl" in outcome) {
-      incident.revertPrUrl = outcome.prUrl;
-      return;
-    }
-    incident.revertRefused = { reason: outcome.refused, paths: [...(outcome.conflictPaths ?? [])] };
-  } catch (error) {
-    incident.revertRefused = { reason: String((error as Error)?.message ?? error), paths: [] };
-  }
-  // A conflicting revert is ledgered with its paths; the healed reviewer (or the escalation) still covers it.
-  deps.log("main-repair.revert_refused", { incident_id: incident.id, offending_sha: incident.offending.sha,
-    reason: incident.revertRefused.reason, conflict_paths: incident.revertRefused.paths });
-}
-
-async function closeIncident(state: ReviewerHealthState, deps: ReviewerHealthStore, judgment: ReviewerShaJudgment, act: Act): Promise<void> {
-  const incident = state.incident!;
-  state.closed = [...state.closed, { ...incident, closedAt: deps.now() }].slice(-MAX_CLOSED_REVIEWER_INCIDENTS);
-  state.incident = null;
-  if (!act.live) return;
-  let revertPr: "open" | "closed" | "merged" | "unread" | null = null;
-  if (incident.revertPrUrl !== undefined) {
-    try {
-      revertPr = await deps.effects.readPr(incident.revertPrUrl);
-    } catch {
-      revertPr = "unread"; // deliberate: an unread PR is left open, never closed blind
-    }
-  }
-  const comment = `Reviewer code ${judgment.sha.slice(0, 12)} (origin/main) is back inside its baseline: ${judgment.k} of ${judgment.n} ` +
-    `not posted against ${judgment.baseline.k} of ${judgment.baseline.n} before (W1-T10269).`;
-  if (incident.revertPrUrl !== undefined && revertPr === "open") {
-    try {
-      await deps.effects.closePr(incident.revertPrUrl, `${comment} A fix made this revert unnecessary.`);
-    } catch (error) {
-      deps.log("reviewer.regression_revert_close_failed", { incident_id: incident.id, revert_pr: incident.revertPrUrl, error: String((error as Error)?.message ?? error) });
-    }
-  }
-  if (incident.issueUrl) {
-    try {
-      await deps.effects.closeIssue(incident.issueUrl, comment);
-    } catch (error) {
-      deps.log("reviewer.regression_issue_close_failed", { incident_id: incident.id, issue_url: incident.issueUrl, error: String((error as Error)?.message ?? error) });
-    }
-  }
-  deps.log("reviewer.regression_closed", { incident_id: incident.id, current_reviewer_code_sha: judgment.sha, k: judgment.k, n: judgment.n,
-    baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n, revert_pr: incident.revertPrUrl ?? null, revert_pr_state: revertPr });
-}
-
-/** Ingest `rows`, judge the shas they touched (oldest first, so the onset departs first), then test
- *  the open incident's close against `current`. */
-async function stepReviewerHealth(state: ReviewerHealthState, deps: ReviewerHealthStore, rows: Iterable<Record<string, unknown>>,
-  current: string | null, act: Act): Promise<void> {
-  const touched = ingestReviewerHealthRows(state, rows);
-  const candidates = touched.map((sha) => state.shas[sha])
-    .filter((rec): rec is ReviewerShaRecord => rec !== undefined && !rec.healed && rec.regressedAt === undefined)
-    .sort((a, b) => a.seq - b.seq);
-  for (const rec of candidates) {
-    const judgment = judgeReviewerSha(state, rec.sha);
-    if (judgment.state !== "regressed") continue;
-    rec.regressedAt = deps.now();
-    if (state.incident === null) {
-      await openIncident(state, deps, rec, judgment, act);
-      if (act.live) await raiseIncident(deps, state.incident!);
-      continue;
-    }
-    // A later sha failing the same way joins the open incident: its reasons extend the signature a
-    // recurrence after a close is matched on, so the recurrence keeps the original blame.
-    state.incident.signature = [...new Set([...state.incident.signature, ...signatureOf(rec)])].sort();
-    if (act.live) deps.log("reviewer.regression_extended", { incident_id: state.incident.id, reviewer_code_sha: rec.sha,
-      k: judgment.k, n: judgment.n, signature: state.incident.signature });
-  }
-  if (state.incident !== null && current !== null) {
-    const back = returnedToBaseline(state, state.incident, current);
-    if (back.returned) await closeIncident(state, deps, back.judgment, act);
-  }
-}
-
-/** The newest non-healed sha the history names: the seed's stand-in for "origin/main then". */
-function newestReviewerSha(state: ReviewerHealthState): string | null {
-  const newest = Object.values(state.shas).filter((rec) => !rec.healed).sort((a, b) => b.seq - a.seq)[0];
-  return newest?.sha ?? null;
-}
-
 /**
  * Read the reviewer's new outcomes, judge them, open or close the incident, and say how THIS review
- * routes. `originMainSha` is the current reviewer: origin/main's code.
+ * routes. `originMainSha` is the current reviewer: origin/main's code. The incident's effects reuse
+ * the shapes their lanes already have — the escalation's {@link EscalateDeps} (its issue gateway also
+ * closes the issue), the red-main {@link MainRepairLane} (the revert PR, its read and its close), the
+ * {@link Clock} port — and git, the ledger reader and the log are plain functions.
  */
-export async function evaluateReviewerHealthNow(deps: ReviewerHealthStore, input: { originMainSha: string | null }): Promise<ReviewerHealthDecision> {
-  const state = loadReviewerHealthState(deps.statePath);
-  const read = await deps.readRows(state.cursor);
+export async function evaluateReviewerHealthNow(
+  input: { originMainSha: string | null },
+  statePath: string,
+  readRows: (cursor: ReviewerHealthCursor | null) => Promise<{ rows: Iterable<Record<string, unknown>>; cursor: ReviewerHealthCursor }>,
+  git: GitText,
+  escalation: EscalateDeps<AsyncIssueGateway>,
+  lane: MainRepairLane,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  clock: Pick<Clock, "iso">,
+): Promise<ReviewerHealthDecision> {
+  const state = loadReviewerHealthState(statePath);
+  const read = await readRows(state.cursor);
+
+  const isAncestor = (ancestor: string, descendant: string): Promise<boolean> =>
+    git(["merge-base", "--is-ancestor", ancestor, descendant]).then(() => true, () => false);
+
+  const newestHealthyAncestor = async (rec: ReviewerShaRecord): Promise<ReviewerShaRecord | undefined> => {
+    const earlier = Object.values(state.shas)
+      .filter((other) => other.seq < rec.seq && !other.healed && other.regressedAt === undefined)
+      .sort((a, b) => b.seq - a.seq);
+    for (const other of earlier) {
+      // An unknown sha (a PR head, a pruned tree) is never an ancestor, so never the healthy side.
+      if (judgeReviewerSha(state, other.sha).state === "healthy" && await isAncestor(other.sha, rec.sha)) return other;
+    }
+    return undefined;
+  };
+
+  const openIncident = async (rec: ReviewerShaRecord, judgment: ReviewerShaJudgment, live: boolean): Promise<void> => {
+    const signature = signatureOf(rec);
+    const bootHeadSha = rec.firstFailHost === undefined ? null : state.bootHeads[rec.firstFailHost] ?? null;
+    const prior = [...state.closed].reverse().find((c) => c.signature.some((s) => signature.includes(s)));
+    let incident: ReviewerIncident;
+    if (prior !== undefined) {
+      // The same failure mode again after a close: the same cause, so the same blame and the same heal.
+      const { closedAt: _closedAt, revertPrUrl: _url, revertRefused: _refused, ...rest } = prior;
+      void [_closedAt, _url, _refused];
+      incident = { ...rest, signature: [...new Set([...rest.signature, ...signature])].sort(), evidence: judgment, reopenedFrom: prior.id };
+      state.closed = state.closed.filter((c) => c.id !== prior.id);
+    } else {
+      const lastHealthy = await newestHealthyAncestor(rec);
+      let offending: OffendingMerge | undefined;
+      let offendingUnavailable: string | undefined;
+      if (lastHealthy === undefined) offendingUnavailable = "no healthy reviewer code sha precedes the regression";
+      else {
+        try {
+          offending = await findOffendingMerge(git, lastHealthy.sha, rec.sha);
+          if (offending === undefined) offendingUnavailable = `no review-material merge in ${lastHealthy.sha.slice(0, 12)}..${rec.sha.slice(0, 12)}`;
+        } catch (error) {
+          offendingUnavailable = `merge history unreadable: ${String((error as Error)?.message ?? error)}`;
+        }
+      }
+      incident = { id: `reviewer-regression-${rec.sha.slice(0, 12)}`, openedAt: clock.iso(), regressedSha: rec.sha, regressedSeq: rec.seq,
+        bootHeadSha, lastHealthySha: lastHealthy?.sha ?? null, offending: offending ?? null,
+        ...(offendingUnavailable === undefined ? {} : { offendingUnavailable }), signature, evidence: judgment };
+    }
+    state.incident = incident;
+    if (!live) return;
+    log("reviewer.regression_opened", {
+      incident_id: incident.id, regressed_reviewer_code_sha: rec.sha, boot_head_sha: bootHeadSha,
+      last_healthy_reviewer_code_sha: incident.lastHealthySha, offending_sha: incident.offending?.sha ?? null,
+      offending_pr: incident.offending?.pr ?? null, offending_reason: incident.offending?.reason ?? incident.offendingUnavailable ?? null,
+      signature: incident.signature, k: judgment.k, n: judgment.n, baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n,
+      interval: judgment.interval, baseline_interval: judgment.baselineInterval, z: judgment.z,
+      ...(incident.reopenedFrom ? { reopened_from: incident.reopenedFrom } : {}),
+    });
+  };
+
+  /** The incident's outward effects: the assigned issue, then one revert PR of the offending merge. */
+  const raiseIncident = async (incident: ReviewerIncident): Promise<void> => {
+    // tryEscalateAsync never rejects: a failed filing is ledgered as escalation.failed and reads null.
+    incident.issueUrl = await tryEscalateAsync(reviewerRegressionEscalation(incident), escalation);
+    if (incident.offending === null || incident.revertPrUrl !== undefined) return;
+    try {
+      const outcome = await lane.openRevertPr(reviewerRegressionRevertRequest(incident as ReviewerIncident & { offending: OffendingMerge }));
+      if ("prUrl" in outcome) {
+        incident.revertPrUrl = outcome.prUrl;
+        return;
+      }
+      incident.revertRefused = { reason: outcome.refused, paths: [...(outcome.conflictPaths ?? [])] };
+    } catch (error) {
+      incident.revertRefused = { reason: String((error as Error)?.message ?? error), paths: [] };
+    }
+    // A conflicting revert is ledgered with its paths; the healed reviewer (or the escalation) still covers it.
+    log("main-repair.revert_refused", { incident_id: incident.id, offending_sha: incident.offending.sha,
+      reason: incident.revertRefused.reason, conflict_paths: incident.revertRefused.paths });
+  };
+
+  const closeIncident = async (judgment: ReviewerShaJudgment, live: boolean): Promise<void> => {
+    const incident = state.incident!;
+    state.closed = [...state.closed, { ...incident, closedAt: clock.iso() }].slice(-MAX_CLOSED_REVIEWER_INCIDENTS);
+    state.incident = null;
+    if (!live) return;
+    let revertPr: "open" | "closed" | "merged" | "unread" | null = null;
+    if (incident.revertPrUrl !== undefined) {
+      try {
+        revertPr = lane.readPr ? (await lane.readPr(incident.revertPrUrl)).state : "unread";
+      } catch {
+        revertPr = "unread"; // deliberate: an unread PR is left open, never closed blind
+      }
+    }
+    const comment = `Reviewer code ${judgment.sha.slice(0, 12)} (origin/main) is back inside its baseline: ${judgment.k} of ${judgment.n} ` +
+      `not posted against ${judgment.baseline.k} of ${judgment.baseline.n} before (W1-T10269).`;
+    if (incident.revertPrUrl !== undefined && revertPr === "open" && lane.closePr) {
+      try {
+        await lane.closePr(incident.revertPrUrl, `${comment} A fix made this revert unnecessary.`);
+      } catch (error) {
+        log("reviewer.regression_revert_close_failed", { incident_id: incident.id, revert_pr: incident.revertPrUrl, error: String((error as Error)?.message ?? error) });
+      }
+    }
+    if (incident.issueUrl && escalation.issues.closeWithComment) {
+      try {
+        await escalation.issues.closeWithComment(incident.issueUrl, comment);
+      } catch (error) {
+        log("reviewer.regression_issue_close_failed", { incident_id: incident.id, issue_url: incident.issueUrl, error: String((error as Error)?.message ?? error) });
+      }
+    }
+    log("reviewer.regression_closed", { incident_id: incident.id, current_reviewer_code_sha: judgment.sha, k: judgment.k, n: judgment.n,
+      baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n, revert_pr: incident.revertPrUrl ?? null, revert_pr_state: revertPr });
+  };
+
+  /** Ingest `rows`, judge the shas they touched (oldest first, so the onset departs first), then test the
+   *  open incident's close against `current`. `live` false is the seed: history replayed, effects off. */
+  const step = async (rows: Iterable<Record<string, unknown>>, current: string | null, live: boolean): Promise<void> => {
+    const touched = ingestReviewerHealthRows(state, rows);
+    const candidates = touched.map((sha) => state.shas[sha])
+      .filter((rec): rec is ReviewerShaRecord => rec !== undefined && !rec.healed && rec.regressedAt === undefined)
+      .sort((a, b) => a.seq - b.seq);
+    for (const rec of candidates) {
+      const judgment = judgeReviewerSha(state, rec.sha);
+      if (judgment.state !== "regressed") continue;
+      rec.regressedAt = clock.iso();
+      if (state.incident === null) {
+        await openIncident(rec, judgment, live);
+        if (live) await raiseIncident(state.incident!);
+        continue;
+      }
+      // A later sha failing the same way joins the open incident: its reasons extend the signature a
+      // recurrence after a close is matched on, so the recurrence keeps the original blame.
+      state.incident.signature = [...new Set([...state.incident.signature, ...signatureOf(rec)])].sort();
+      if (live) log("reviewer.regression_extended", { incident_id: state.incident.id, reviewer_code_sha: rec.sha,
+        k: judgment.k, n: judgment.n, signature: state.incident.signature });
+    }
+    if (state.incident !== null && current !== null) {
+      const back = returnedToBaseline(state, state.incident, current);
+      if (back.returned) await closeIncident(back.judgment, live);
+    }
+  };
+
   if (state.cursor === null) {
     // THE SEED replays history row by row with effects off, so a deploy mid-outage inherits the
     // outage's incident (and its blame) rather than judging today against a poisoned baseline.
-    for (const row of read.rows) await stepReviewerHealth(state, deps, [row], newestReviewerSha(state), { live: false });
-    state.seededAt = deps.now();
-    deps.log("reviewer.health_seeded", { shas: Object.keys(state.shas).length, pooled_shas: state.pooled.shas,
+    for (const row of read.rows) await step([row], newestReviewerSha(state), false);
+    state.seededAt = clock.iso();
+    log("reviewer.health_seeded", { shas: Object.keys(state.shas).length, pooled_shas: state.pooled.shas,
       rows: state.coverage.rows, unattributed: state.coverage.unattributed, open_incident: state.incident?.id ?? null,
       closed_incidents: state.closed.map((c) => c.id) });
     // History's incident is raised only when today's reviewer is itself regressed; otherwise it is
     // carried as closed, so a recurrence of its failure signature reopens it with the original blame.
     if (state.incident !== null && (input.originMainSha === null || judgeReviewerSha(state, input.originMainSha).state !== "regressed")) {
-      deps.log("reviewer.regression_carried", { incident_id: state.incident.id, offending_sha: state.incident.offending?.sha ?? null,
+      log("reviewer.regression_carried", { incident_id: state.incident.id, offending_sha: state.incident.offending?.sha ?? null,
         signature: state.incident.signature, reason: "today's reviewer code is not judged regressed" });
-      await closeIncident(state, deps, judgeReviewerSha(state, input.originMainSha ?? state.incident.regressedSha), { live: false });
+      await closeIncident(judgeReviewerSha(state, input.originMainSha ?? state.incident.regressedSha), false);
     }
     if (state.incident !== null) {
       const incident = state.incident;
-      deps.log("reviewer.regression_opened", { incident_id: incident.id, regressed_reviewer_code_sha: incident.regressedSha,
+      log("reviewer.regression_opened", { incident_id: incident.id, regressed_reviewer_code_sha: incident.regressedSha,
         boot_head_sha: incident.bootHeadSha, last_healthy_reviewer_code_sha: incident.lastHealthySha,
         offending_sha: incident.offending?.sha ?? null, offending_pr: incident.offending?.pr ?? null,
         offending_reason: incident.offending?.reason ?? incident.offendingUnavailable ?? null, signature: incident.signature,
         k: incident.evidence.k, n: incident.evidence.n, baseline_k: incident.evidence.baseline.k, baseline_n: incident.evidence.baseline.n,
         from_seed: true });
-      await raiseIncident(deps, incident);
+      await raiseIncident(incident);
     }
   } else {
-    await stepReviewerHealth(state, deps, read.rows, input.originMainSha, { live: true });
+    await step(read.rows, input.originMainSha, true);
   }
   state.cursor = read.cursor;
-  saveReviewerHealthState(deps.statePath, state);
+  saveReviewerHealthState(statePath, state);
   const current = input.originMainSha === null ? null : judgeReviewerSha(state, input.originMainSha);
   const incident = state.incident;
   if (incident === null) return { route: "normal", reason: "no open reviewer-regression incident", current };
@@ -860,6 +829,22 @@ export async function evaluateReviewerHealthNow(deps: ReviewerHealthStore, input
     withPr: state.operatorHeal?.withPr ?? null, current };
 }
 
+/** The revert PR request for the main-repair lane: the outcome-mix evidence, not failing checks. */
+export function reviewerRegressionRevertRequest(incident: ReviewerIncident & { offending: OffendingMerge }): MainRepairRevertRequest {
+  return {
+    branch: "main", headSha: incident.regressedSha, offendingSha: incident.offending.sha,
+    ...(incident.offending.pr === null ? {} : { offendingPr: incident.offending.pr }),
+    failingChecks: [], whyFixInsufficient: "no fix had returned the reviewer to its baseline",
+    reason: { kind: "reviewer-regression", incidentId: incident.id, evidence: reviewerRegressionEvidenceText(incident) },
+  };
+}
+
+/** The newest non-healed sha the history names: the seed's stand-in for "origin/main then". */
+function newestReviewerSha(state: ReviewerHealthState): string | null {
+  const newest = Object.values(state.shas).filter((rec) => !rec.healed).sort((a, b) => b.seq - a.seq)[0];
+  return newest?.sha ?? null;
+}
+
 const chains = new Map<string, Promise<unknown>>();
 const seeding = new Map<string, Promise<unknown>>();
 
@@ -868,23 +853,26 @@ const seeding = new Map<string, Promise<unknown>>();
  * and the first boot's seed — a whole-union read — runs in the background while reviews route as
  * today. Any failure routes normally and is ledgered; it never blocks a review.
  */
-export async function evaluateReviewerHealth(deps: ReviewerHealthStore, input: { originMainSha: string | null }): Promise<ReviewerHealthDecision> {
-  if (seeding.has(deps.statePath)) return { route: "normal", reason: "reviewer health is seeding from the ledger union", current: null };
-  if (loadReviewerHealthState(deps.statePath).cursor === null) {
-    const seed = evaluateReviewerHealthNow(deps, input).catch((error: unknown) => {
-      deps.log("reviewer.health_unavailable", { phase: "seed", error: String((error as Error)?.message ?? error) });
-    }).finally(() => seeding.delete(deps.statePath));
-    seeding.set(deps.statePath, seed);
+export async function evaluateReviewerHealth(
+  ...args: Parameters<typeof evaluateReviewerHealthNow>
+): Promise<ReviewerHealthDecision> {
+  const [, statePath, , , , , log] = args;
+  if (seeding.has(statePath)) return { route: "normal", reason: "reviewer health is seeding from the ledger union", current: null };
+  if (loadReviewerHealthState(statePath).cursor === null) {
+    const seed = evaluateReviewerHealthNow(...args).catch((error: unknown) => {
+      log("reviewer.health_unavailable", { phase: "seed", error: String((error as Error)?.message ?? error) });
+    }).finally(() => seeding.delete(statePath));
+    seeding.set(statePath, seed);
     return { route: "normal", reason: "reviewer health is seeding from the ledger union", current: null };
   }
-  const prior = chains.get(deps.statePath) ?? Promise.resolve();
-  const run = prior.then(() => evaluateReviewerHealthNow(deps, input), () => evaluateReviewerHealthNow(deps, input));
+  const prior = chains.get(statePath) ?? Promise.resolve();
+  const run = prior.then(() => evaluateReviewerHealthNow(...args), () => evaluateReviewerHealthNow(...args));
   // The chain only orders the next evaluation; this caller awaits `run` below and ledgers its failure.
-  chains.set(deps.statePath, run.catch(() => undefined /* deliberate: ordered, not swallowed; see the await below */));
+  chains.set(statePath, run.catch(() => undefined /* deliberate: ordered, not swallowed; see the await below */));
   try {
     return await run;
   } catch (error) {
-    deps.log("reviewer.health_unavailable", { phase: "evaluate", error: String((error as Error)?.message ?? error) });
+    log("reviewer.health_unavailable", { phase: "evaluate", error: String((error as Error)?.message ?? error) });
     return { route: "normal", reason: `reviewer health unavailable: ${String((error as Error)?.message ?? error)}`, current: null };
   }
 }
@@ -961,23 +949,24 @@ export async function readReviewerHealthRows(stateDir: string, cursor: ReviewerH
 /** The operator's explicit choice of a fix PR the healed reviewer merges instead of the revert, when the
  *  revert no longer applies (`--with-pr <n>`, or `--clear`). Its `rmd reviewer-heal` verb is not registered
  *  yet: a new CLI-only verb needs a row in the console-parity baseline, the operator's call. */
-export function reviewerHealCommand(rest: readonly string[], io: { statePath: string; clock: Pick<Clock, "iso">; out: (line: string) => void; err: (line: string) => void }): number {
-  const state = loadReviewerHealthState(io.statePath);
+export function reviewerHealCommand(rest: readonly string[], statePath: string, clock: Pick<Clock, "iso">,
+  out: (line: string) => void, err: (line: string) => void): number {
+  const state = loadReviewerHealthState(statePath);
   if (rest.includes("--clear")) {
     state.operatorHeal = null;
-    saveReviewerHealthState(io.statePath, state);
-    io.out("reviewer-heal: cleared; the healed reviewer reverts the offending merge");
+    saveReviewerHealthState(statePath, state);
+    out("reviewer-heal: cleared; the healed reviewer reverts the offending merge");
     return 0;
   }
   const at = rest.indexOf("--with-pr");
   const value = at < 0 ? undefined : rest[at + 1];
   if (value === undefined || !/^[1-9][0-9]*$/.test(value)) {
-    io.err("usage: reviewer-heal --with-pr <n> | --clear");
+    err("usage: reviewer-heal --with-pr <n> | --clear");
     return 2;
   }
-  state.operatorHeal = { withPr: Number(value), at: io.clock.iso() };
-  saveReviewerHealthState(io.statePath, state);
-  io.out(`reviewer-heal: the healed reviewer merges PR #${value} on origin/main${state.incident ? ` for ${state.incident.id}` : " once an incident opens"}`);
+  state.operatorHeal = { withPr: Number(value), at: clock.iso() };
+  saveReviewerHealthState(statePath, state);
+  out(`reviewer-heal: the healed reviewer merges PR #${value} on origin/main${state.incident ? ` for ${state.incident.id}` : " once an incident opens"}`);
   return 0;
 }
 
@@ -1043,10 +1032,10 @@ export function resetLoadedReviewerCodeSha(): void {
 
 /** The fields a review row adds so its outcome is attributable: the judging code's sha on every
  *  terminal row, and a healed child's incident id. Nothing on any other step. */
-export function reviewerHealthRowFields(step: string, env: NodeJS.ProcessEnv = process.env, codeSha: () => string | null = loadedReviewerCodeSha): Record<string, unknown> {
+export function reviewerHealthRowFields(step: string, incidentId: string | undefined, codeSha: () => string | null = loadedReviewerCodeSha): Record<string, unknown> {
   if (!(REVIEWER_HEALTH_STEPS as readonly string[]).includes(step) && step !== REVIEWER_SHADOW_VERDICT_STEP) return {};
   const sha = codeSha();
-  const incident = str(env[REVIEWER_INCIDENT_ENV]);
+  const incident = str(incidentId);
   return { ...(sha === null ? {} : { reviewer_code_sha: sha }), ...(incident === undefined ? {} : { incident_id: incident }) };
 }
 

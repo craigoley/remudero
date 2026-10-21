@@ -5,8 +5,12 @@
   type: implement
   verify: human
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10016 — The lesson is derived from #12305, whose
+  # repair added the GHSA-84m7 OSV ignore (osv-scanner.toml) that the operator REVERTED in #12342 (no security-
+  # gate waivers). Teaching that repair as guidance would encode a waiver. Machine-released on 10-20; retire
+  # before it builds.
   attempts: 0
   author_class: machine
   origin: "ci-learning:12305:scan-pr / osv-scan"

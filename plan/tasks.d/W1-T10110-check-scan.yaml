@@ -6,8 +6,11 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1.07
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10110 — 0 'Scan' rounds or red heads in 3 d. It also
+  # declares .github/workflows/semgrep.yml, a security scanner. Operator ruling 2026-10-16: the fix lane never
+  # edits a scanner workflow, and a paths-ignore carve-out is a security weakening. Retire; do not approve.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:Scan"
