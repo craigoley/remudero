@@ -1,0 +1,82 @@
+- id: W1-T10357
+  title: "A busy shadow-counter writer refuses without waiting under the projector fence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  principles: {tdd: strict}
+  origin: "operator:console-inbox-shadow-counter-contention-20261021"
+  files:
+    - src/lib/read-model-db.ts
+    - test/view-shadow-persistence-is-incremental.test.ts
+  rationale: |
+    Rule 19 / #588: exercise the default fileShadowStore and real independent SQLite writers,
+    not a fake save error. Signed-in selected-repository Inbox refresh on October21 withheld
+    replies after a core projector BEGIN IMMEDIATE lock failure. Existing W1-T9501/#12817,
+    W1-T10175/#12852 and W1-T10207/#12938 already preserve transaction observations and must
+    retain their credit. Live sidecar samples recorded a current Object.save acquisition beside
+    a waiting ensureLease, but do not prove a continuous lock, exclusive blocker or every cause.
+    A private independent-process two-WAL-database reproduction over unchanged current source
+    passed three controls: an auxiliary lock alone leaves the projector writable; actual
+    fileShadowStore.save waiting on that lock holds the projector fence; releasing the auxiliary
+    writer restores progress and exact key persistence. Lost home lease refuses without changing
+    counters. This proves the structural mechanism, not a claim that all Azure pressure or every
+    historical Inbox failure has the same cause. Open-head subject sweeps found no competing
+    implementation. The operator explicitly approved the counter-only fail-fast policy.
+    SQLite documents busy waits as connection-specific and timeout zero as disabling that wait.
+    One auxiliary evidence write must not spend its busy wait holding the core write fence.
+  design: |
+    Writable shadow-counter connections alone must use no SQLite busy wait from connection
+    initialization onward, including WAL/schema opening and later writes on a reused connection.
+    Preserve the existing 5000ms busy backstop on every ordinary read-model connection and on
+    read-only shadow-counter queries. Do not expose a new setting or generic configurable timeout.
+    Retain the home withWriteTransaction lease fence before creating, migrating or writing any
+    auxiliary file. Never reverse cross-database lock acquisition or write after lease loss.
+    Preserve WAL and synchronous=FULL durability, counter/key atomic commits, future/foreign/
+    corrupt-store refusal, rollback/close cleanup and exact historical key membership.
+    A busy auxiliary database must throw the original refusal, not report a successful save.
+    Keep existing view.shadow_failed handling and persistenceFailed readiness withholding.
+    A later existing normal comparison must reconcile exact missed append or real-diff reset
+    before readiness resumes. No automatic retries, dropped keys, successful partial evidence,
+    threshold changes, new scheduler, sampler or relaxation of generation/parity requirements.
+    Extend only the existing incremental persistence suite. Use real private WAL databases and
+    an independent fixture process that explicitly owns the auxiliary BEGIN IMMEDIATE until
+    released by test IPC. Test both the first persistent writer open and an already warmed
+    connection. Prove refusal while the auxiliary holder is still active, unchanged committed
+    evidence and actual projector write progress. Reconcile append and reset on a later normal
+    comparison after releasing that fixture writer. Include ordinary fast-save, lost-lease,
+    no-file-creation, read-only/core timeout, FULL durability and corruption/schema controls.
+    Close fixture servers/processes/databases and flush transaction observers before removing
+    their private directories; never delete live or unknown diagnostic sidecars.
+    Record the actual operator decision through native release/ruling, not a model verdict.
+    Preserve normal committed-tree author validation, instrumented same-tree diff coverage,
+    literal stored-body proofs, native review and hosted/security checks. CI infrastructure and
+    Azure memory remain other chats' work. No model/provider call, permission, billing, budget,
+    service setting, live claim recovery, restart or deployment is included.
+  acceptance:
+    - claim: "A contended first shadow-writer open refuses while its holder stays active and releases the home fence without changing committed evidence"
+      proof: "unit test: W1-T10357: a contended shadow-counter open releases the home fence without waiting for its holder"
+    - claim: "Contention on a reused writer withholds readiness and a later normal comparison reconciles exact missed append and reset membership"
+      proof: "unit test: W1-T10357: a warmed shadow-counter refusal reconciles missed keys and resets"
+    - claim: "Counter-only fail-fast leaves the home lease fence, lost-owner refusal, durable commits, read-only waits and ordinary projector busy backstop intact"
+      proof: "unit test: W1-T10357: counter-only refusal preserves lease fencing, durability and the projector busy backstop"
+  falsifier: |
+    Keep identical real fixture/test bytes in a disposable clone and restore only the former
+    shadow-writer busy wait. The cold and warmed contention cases must fail while ordinary-save
+    and lost-owner controls remain green. Restore only the repair and require complete passing
+    TAP with no skipped/cancelled cases. Observe actual IPC holder state and SQLite outcomes;
+    a mock throw, zero-test summary or elapsed-time assertion alone is not discriminating proof.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The operator explicitly approved the counter-only fail-fast policy. Writable shadow-counter connections alone may refuse busy contention immediately, including first open; ordinary core and read-only timeouts, home lease fence before file changes, WAL/FULL durability, exact evidence and failed-save readiness withholding remain unchanged. A later normal comparison reconciles missed keys/reset; no automatic retry, new calls, provider, permissions, budgets, service settings, CI infrastructure, Azure memory change or deployment. Scope is read-model-db and the existing incremental persistence suite. Preserve actual failure receipts, source-only falsifiers, all review and CI gates. Native approve W1-T10357 records operator authority, not a model verdict."
+    judged_at: "2026-10-21T17:16:38.888Z"
+    pin: "434ff736abc0bf90bc065bce177002c7b32baffad7b160aac68c83ca1e2eb7e2"

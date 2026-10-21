@@ -191,9 +191,15 @@ test("idle_starved: an operator-released human task or failed board read keeps t
     const clock = fakeClock();
     let stopReads = 0;
     const lines: string[] = [];
+    const dispatched: string[] = [];
     const s = await runDaemon(fixturePlan(), {
       refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
-      runOne: async () => { throw new Error("unexpected dispatch"); },
+      // W1-T10348: the daemon's own tick now dispatches the released task, rather than only staying awake for it.
+      runOne: async (id) => {
+        if (mode !== "released" || id !== "H") throw new Error("unexpected dispatch");
+        dispatched.push(id);
+        return okResult(id);
+      },
       isCreditIndeterminate: () => false,
       readLedgerLines: () => mode === "released" ? [JSON.stringify({ step: "ratify.approved", task_id: "H" })] : [],
       confirmedOpenPrCount: () => {
@@ -201,12 +207,15 @@ test("idle_starved: an operator-released human task or failed board read keeps t
         return 0;
       },
       idleStarvedSupervised: true,
-      checkStop: () => ++stopReads > 1 ? "test stop" : undefined,
+      // The released mode stops after its dispatch, which a second stop read precedes.
+      checkStop: () => ++stopReads > (mode === "released" ? 2 : 1) ? "test stop" : undefined,
       sleep: clock.sleep,
       log: (step) => lines.push(step),
     });
     assert.equal(s.stopReason, "stopped", mode);
-    assert.ok(clock.calls.length > 0, mode);
+    assert.ok(!lines.includes("daemon.idle_starved.enter"), mode);
+    if (mode === "released") assert.deepEqual(dispatched, ["H"]);
+    else assert.ok(clock.calls.length > 0, mode);
     if (mode === "failed-board") assert.ok(lines.includes("daemon.idle_starved.unassessed"));
   }
 });
