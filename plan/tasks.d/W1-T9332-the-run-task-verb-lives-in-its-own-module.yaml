@@ -10,7 +10,58 @@
   band_meaning: span
   origin: "operator approval 2026-10-13: the run-task.ts serialization finding; one step of the split, in measured-churn order W1-T9332 (run-task), W1-T9333 (daemon), W1-T9337 (fix), W1-T9338 (sweep) and W1-T9339 (review)"
   plan_refs: [W1-T9331, W1-T2893, W1-T2883, W1-T2892, W1-T2894, W1-T2325, W1-T3138, W1-T8502]
-  files: [src/run-task.ts, src/cli/commands/run-task-verb.ts, test/the-run-task-verb-lives-in-its-own-module.test.ts]
+  # Operator approved this narrow source-reader/authority amendment in the 2026-10-21 stuck-PR recovery chat.
+  files:
+    - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/lib/authority.ts
+    - scripts/comment-load-baseline.json
+    - docs/base-ref-contract.md
+    - test/the-run-task-verb-lives-in-its-own-module.test.ts
+    - test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts
+    - test/a-stale-gate-cannot-publish-a-verdict.test.ts
+    - test/adhoc-lane-reap.test.ts
+    - test/arm-at-open.test.ts
+    - test/blocked-illformed-does-not-halt-drain.test.ts
+    - test/commit-trailer-survives-squash.test.ts
+    - test/config-reader-seams.test.ts
+    - test/containment-wiring.test.ts
+    - test/disarm-lost-race-hard-stop.test.ts
+    - test/dispatch-claim-evidence-reachability.test.ts
+    - test/dispatch-claim.test.ts
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+    - test/every-worker-call-carries-its-assignment.test.ts
+    - test/fix-spawn-bound-split.test.ts
+    - test/git-push-head-confirmation.test.ts
+    - test/impl-review-judges-body.test.ts
+    - test/isolation-wiring.test.ts
+    - test/mounts-wiring.test.ts
+    - test/one-shot-disk-reclaim-rung.test.ts
+    - test/pr-create-rest-transport.test.ts
+    - test/preflight-summary.test.ts
+    - test/recon-artifact-reuse.test.ts
+    - test/recon-degrade.test.ts
+    - test/recon-gaps-relayed.test.ts
+    - test/recon-mount-routing.test.ts
+    - test/review-evidence-provenance.test.ts
+    - test/review-provider-provenance.test.ts
+    - test/review.test.ts
+    - test/risk-judge-change-view.test.ts
+    - test/risk-judge-description-is-the-defect.test.ts
+    - test/risk-judge-wiring.test.ts
+    - test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts
+    - test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts
+    - test/run-task.test.ts
+    - test/specialist-panel.test.ts
+    - test/task-linter-wiring.test.ts
+    - test/the-plan-index-is-derived-not-committed.test.ts
+    - test/the-project-layer-follows-the-target-repo.test.ts
+    - test/the-run-preflight-comments-match-the-once-per-boot-ruling.test.ts
+    - test/three-lanes-start-within-one-window.test.ts
+    - test/verdict-calibration-join-fraction.test.ts
+    - test/worker-clock-bound.test.ts
+    - test/worker-preflight-visibility.test.ts
+    - test/worktree-reap-boot-rung.test.ts
   status: queued
   priority: 1
   attempts: 0
@@ -66,12 +117,27 @@
        function builds the host from run-task.ts's own symbols and delegates to the module. HANDLERS, every in-file
        caller, and every test that imports a root from src/run-task.ts stay unchanged.
     4. Unchanged: COMMANDS (scripts/rmd-help.mjs source-scans that array), and the verb's behaviour, ledger rows,
-       stdout and exit codes. No test file other than the new one is edited. If an existing test must change, the
-       move was not verbatim; fix the move, not the test.
+       stdout and exit codes. Existing behavioural assertions and their fixtures/falsifiers stay unchanged.
+       Only the explicitly declared source-reader companion suites may retarget the implementation's physical
+       location from src/run-task.ts to src/cli/commands/run-task-verb.ts, or distinguish the retained wrapper
+       from the moved body. Caller/source ownership inventories may rekey an existing site to its actual module;
+       they may not add a site, remove an assertion, weaken an ordering check, add an exclusion or increase an allowance.
+       No combined prose/source facsimile may stand in for the actual executable declaration under test.
+       Add exactly one truthful AUTHORITY_TABLE row for the moved restoreBoundaryCheckpoint branch-recreation
+       write, describing its real absence/exact-head/lease preconditions and existing ledger step. This is a report
+       entry for an existing write, not new write authority or a new assertion that a live-write guard exists.
+       docs/base-ref-contract.md may retarget only its irreversibleSignalForWorktree citation to the actual
+       implementation. scripts/comment-load-baseline.json may only record the extraction's normally generated
+       non-growth changes; no limit or measured count is raised to pass this task.
+       Every other gate keeps its original population and enforcement. In particular clock, catch-erasure, bound,
+       house-layout and sync-spawn checks must be satisfied by faithful implementation and existing semantics;
+       no threshold, baseline allowance, scanner setting or acceptance proof is relaxed by this amendment.
+       A gate requiring a separate relocation-only baseline ruling is escalated with exact per-site evidence.
     5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is
        acceptable. Never shrink it by importing run-task.ts.
     Tests go in the new file test/the-run-task-verb-lives-in-its-own-module.test.ts, with `test(` titles exactly as in the proofs below. They read the two source
-    files as text, need no git and no network, and the verb's existing behavioural tests must pass untouched.
+    files as text, need no git and no network, and the verb's existing behavioural assertions, fixtures and
+    falsifiers must pass unchanged. Source-reader-only location edits are restricted by design item 4.
   acceptance:
     - claim: "the new test file passes"
       proof: "unit test: test/the-run-task-verb-lives-in-its-own-module.test.ts"
