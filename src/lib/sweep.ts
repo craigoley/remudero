@@ -19622,18 +19622,21 @@ export async function runSweep(
                 }
               }
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
-              const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment");
-              const closedAmendment = scopeAmendment && ledgerLines.some(row => row.step === PR_TERMINAL_STEP &&
-                row.state === "closed" && Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
-              if (closedAmendment && deps.fixProgressJudge) {
+              const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment" &&
+                row.head_sha === pr.headSha && (row.pr_number === undefined || Number(row.pr_number) === pr.prNumber));
+              const amendmentTerminal = scopeAmendment && ledgerLines.findLast(row => row.step === PR_TERMINAL_STEP &&
+                Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
+              const closedAmendment = amendmentTerminal?.state === "closed";
+              if (scopeAmendment && closedAmendment && deps.fixProgressJudge) {
                 progressParkedReason = `amendment-closed: scope amendment ${scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number} closed without merging`;
                 const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                   row.head_sha === pr.headSha && row.stand_down_reason === progressParkedReason);
                 if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
                 if (!await askProgress()) break;
               }
-              if (refusedSameRed?.scopeAmendment && !closedAmendment) {
-                const reason = `fix report requests a scope amendment: ${refusedSameRed.scopeAmendment}`;
+              if (scopeAmendment && ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
+                  !["merged", "closed"].includes(String(amendmentTerminal?.state))) {
+                const reason = `fix report requests a scope amendment: ${refusedSameRed?.scopeAmendment ?? scopeAmendment.paths}`;
                 const alreadyEscalated = ledgerLines.some((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
                   line.head_sha === pr.headSha && JSON.stringify(line.scope_amendment_red_checks) === JSON.stringify(redCheckNames(pr)));
@@ -19645,6 +19648,16 @@ export async function runSweep(
                 standDownReason = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
                   line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.scope_amendment_red_checks !== undefined)) ?? reason;
                 break;
+              }
+              if (scopeAmendment?.outcome === "refused") {
+                progressParkedReason = `scope-amendment-refused: ${scopeAmendment.reason}: ${scopeAmendment.detail}`;
+              }
+              if (scopeAmendment?.outcome === "refused" && scopeAmendment.reason === "path-not-changed") {
+                const paths = Array.isArray(scopeAmendment.paths) ? scopeAmendment.paths.join(", ") : scopeAmendment.detail;
+                const constraint = `Scope amendment refused (path-not-changed): ${scopeAmendment.detail}; ` +
+                  `make the edit to ${paths} and leave it saved and uncommitted, then report NEEDS_SCOPE`;
+                pr.pendingAnswer = { ...pr.pendingAnswer,
+                  constraint: [pr.pendingAnswer?.constraint, constraint].filter(Boolean).join("\n\n") };
               }
               // PR-13039: the fix rung stands down at a head whose round handed off NEEDS_DESIGN; the hold starts on
               // the contract that round worked on, so an amendment that answers it takes main into the branch.
