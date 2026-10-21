@@ -14,20 +14,28 @@ Invariants (JANITOR.md "Preserve-then-retire"):
   file over the size limit, when a worktree is locked, or when any probe fails.
 - Clones and bare repositories are deleted only when no other account can enter this home and a
   complete census found no kept borrower of their objects.
+- Housekeeping changes no history: a repository with too many packs is repacked keeping every
+  object, and outside any checkout idle dumps are compressed (deleted after dump_retain_days) and
+  idle regenerable build folders are removed.
 Usage: preserve-retire.py --home DIR [--apply] [--config PATH]
 """
-import argparse, json, os, re, shlex, shutil, stat, subprocess, sys, tarfile, tempfile, time
+import argparse, glob, gzip, json, os, re, shlex, shutil, stat, subprocess, sys, tarfile, tempfile, time
 
 CONFIG_REL = ".local/state/remudero/preserve-retire.json"
 STAMP_REL = ".local/state/remudero/preserve-retire.last"
 MIN_IDLE_HOURS = 6
 DEFAULTS = {"enabled": False, "idle_hours": 24, "retain_days": 7, "interval_hours": 6,
             "preserve_root": "Remudero-preserved", "max_untracked_mb": 50, "census_seconds": 180,
-            "roots": ["Remudero", "rmd-work", ".codex/work-artifacts", "Developer/remudero-operator-worktrees"],
+            "repack_min_packs": 50, "repack_seconds": 1800, "dump_min_mb": 5, "dump_retain_days": 14,
+            "roots": ["Remudero", "rmd-work", ".codex/work-artifacts", "Developer/remudero-operator-worktrees",
+                      "Developer/remudero-operator-recovered-worktrees-*", "Downloads/remudero-*"],
             "published_remotes": ["https://github.com/craigoley/", "git@github.com:craigoley/",
                                   "ssh://git@github.com/craigoley/"]}
 # Regenerable trees that are neither preserved nor counted as data.
 SKIP_DIRS = ("node_modules", "coverage", "dist", ".turbo", ".next")
+# Outside a checkout these are removed once idle; `dist` may be a deliverable, so it stays.
+BUILD_DIRS = ("node_modules", "coverage", ".turbo", ".next")
+DUMP_SUFFIXES = (".json", ".jsonl", ".ndjson", ".log", ".lcov", ".info")
 CENSUS_PRUNE = {"Library", ".Trash", "Music", "Movies", "Pictures", "node_modules"}
 MIN_FREE_BYTES = 1 << 30
 MAIN_HISTORY = 20000
@@ -93,17 +101,29 @@ def load_config(home, path):
     if not isinstance(raw, dict) or set(raw) - set(DEFAULTS):
         return None, "refused: config has unknown keys"
     cfg = dict(DEFAULTS, **raw)
-    ints = ("idle_hours", "retain_days", "interval_hours", "max_untracked_mb", "census_seconds")
+    ints = ("idle_hours", "retain_days", "interval_hours", "max_untracked_mb", "census_seconds",
+            "repack_min_packs", "repack_seconds", "dump_min_mb", "dump_retain_days")
     if any(type(cfg[k]) is not int or cfg[k] < 0 for k in ints) or cfg["idle_hours"] < MIN_IDLE_HOURS:
         return None, f"refused: numeric settings must be whole numbers, idle_hours >= {MIN_IDLE_HOURS}"
     if cfg["enabled"] is not True:
         return None, "disabled (config enabled=false)"
     cfg["preserve_root"] = os.path.join(home, cfg["preserve_root"])
-    cfg["roots"] = [os.path.join(home, r) for r in cfg["roots"]]
+    if any(type(r) is not str or os.path.isabs(r) or ".." in r.split("/") for r in cfg["roots"]):
+        return None, "refused: roots must be relative to the home"
+    cfg["roots"] = expand_roots(home, cfg["roots"])
     for root in cfg["roots"]:
         if cfg["preserve_root"] == root or cfg["preserve_root"].startswith(root + "/") or root.startswith(cfg["preserve_root"] + "/"):
             return None, "refused: preserve_root overlaps a scan root"
     return cfg, ""
+
+
+def expand_roots(home, roots):
+    """Absolute scan roots; a root containing `*` names every folder it matches."""
+    out = []
+    for r in roots:
+        p = os.path.join(home, r)
+        out += sorted(m for m in glob.glob(p) if os.path.isdir(m) and not os.path.islink(m)) if "*" in r else [p]
+    return out
 
 
 def protected_paths(home, cfg):
@@ -521,6 +541,146 @@ def free_bytes(path):
     return shutil.disk_usage(path).free
 
 
+# ---------- housekeeping ----------
+
+def changed_after(top, cutoff):
+    """First entry under `top` (itself included) changed after `cutoff`; unreadable counts as changed."""
+    try:
+        st = os.lstat(top)
+        if max(st.st_mtime, st.st_ctime) > cutoff:
+            return top
+        for dirpath, dirs, files in os.walk(top, onerror=_raise):
+            for name in files + dirs:
+                p = os.path.join(dirpath, name)
+                st = os.lstat(p)
+                if max(st.st_mtime, st.st_ctime) > cutoff:
+                    return p
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(dirpath, d))]
+    except OSError:
+        return top
+    return ""
+
+
+def rmtree_writable(path):
+    """Remove a tree whose folders may be read-only (dependency clones are)."""
+    def retry(func, p, _exc):
+        os.chmod(os.path.dirname(p), 0o700)
+        if not os.path.islink(p) and os.path.isdir(p):
+            os.chmod(p, 0o700)
+        func(p)
+    shutil.rmtree(path, onerror=retry)
+
+
+def loose_folders(cfg, protected):
+    """Folders under the roots that belong to no repository, walked top-down."""
+    for root in cfg["roots"]:
+        if not os.path.isdir(root) or os.path.islink(root):
+            continue
+        for dirpath, dirs, files in os.walk(root):
+            if inside(dirpath, protected) or ".git" in dirs or ".git" in files or (
+                    "HEAD" in files and "objects" in dirs and "refs" in dirs):
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(dirpath, d))]
+            yield dirpath, dirs, files
+
+
+def compress(path):
+    """gzip `path` beside itself, keeping its times; the original goes only after a full read-back."""
+    st = os.stat(path)
+    tmp = path + ".gz.incoming"
+    try:
+        with open(path, "rb") as src, gzip.open(tmp, "wb", 6) as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+        size = 0
+        with gzip.open(tmp, "rb") as back:
+            while chunk := back.read(1 << 20):
+                size += len(chunk)
+        now = os.stat(path)
+        if size != st.st_size or (now.st_mtime, now.st_size) != (st.st_mtime, st.st_size):
+            raise Hold("changed-while-compressing")
+        os.utime(tmp, (st.st_atime, st.st_mtime))
+        os.rename(tmp, path + ".gz")
+        os.remove(path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def housekeeping(cfg, protected, repos, snap, now, apply):
+    """Repack, compress, expire and clear what retirement never reaches. Returns counts."""
+    counts = {"repacked": 0, "compressed": 0, "dumps-expired": 0, "build-dirs-removed": 0}
+    planned = {"REPACKED": "WOULD-REPACK", "REMOVED": "WOULD-REMOVE", "EXPIRED": "WOULD-EXPIRE",
+               "COMPRESSED": "WOULD-COMPRESS"}
+    verb = (lambda done: done) if apply else planned.get
+    stores = sorted({r.store for r in repos if r.store and os.path.isdir(r.store)
+                     and any(r.store.startswith(root + "/") for root in cfg["roots"])
+                     and not inside(r.store, protected)})
+    for store in stores:
+        pack_dir = os.path.join(store, "objects", "pack")
+        packs = len([f for f in os.listdir(pack_dir) if f.endswith(".pack")]) if os.path.isdir(pack_dir) else 0
+        if packs < cfg["repack_min_packs"] or os.path.exists(os.path.join(store, "gc.pid")):
+            continue
+        if apply:
+            # -l leaves borrowed objects with their lender; --keep-unreachable drops nothing.
+            out = run(["git", "--git-dir", store, "repack", "-a", "-d", "-l", "--keep-unreachable", "-q"],
+                      timeout=cfg["repack_seconds"])
+            if out.returncode != 0:
+                say("HOLD", "repack-failed", store)
+                continue
+            packs = f"{packs}->{len([f for f in os.listdir(pack_dir) if f.endswith('.pack')])}"
+        counts["repacked"] += 1
+        say(verb("REPACKED"), f"packs={packs}", store)
+    if snap is None:
+        say("HOLD", "housekeeping (process-visibility-unknown)")
+        return counts
+    cutoff, expiry = now - cfg["idle_hours"] * 3600, now - cfg["dump_retain_days"] * 86400
+    for dirpath, dirs, files in loose_folders(cfg, protected):
+        for d in [d for d in dirs if d in BUILD_DIRS]:
+            dirs.remove(d)
+            p = os.path.join(dirpath, d)
+            # node_modules is always an install; the others only at a package root, since a folder
+            # of the same name elsewhere may be fixture data.
+            if (d != "node_modules" and "package.json" not in files) or changed_after(p, cutoff) or in_use(p, snap):
+                continue
+            if apply:
+                try:
+                    rmtree_writable(p)
+                except OSError as error:
+                    say("HOLD", f"remove-failed ({error.__class__.__name__})", p)
+                    continue
+            counts["build-dirs-removed"] += 1
+            say(verb("REMOVED"), "build-dir", p)
+        for name in files:
+            p = os.path.join(dirpath, name)
+            plain = name.endswith(DUMP_SUFFIXES)
+            if not (plain or (name.endswith(".gz") and name[:-3].endswith(DUMP_SUFFIXES))):
+                continue
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            last = max(st.st_mtime, st.st_ctime)
+            if not stat.S_ISREG(st.st_mode) or in_use(p, snap):
+                continue
+            # Compression keeps the original modification time, so the age survives it.
+            if st.st_mtime < expiry and last < cutoff:
+                if apply:
+                    os.remove(p)
+                counts["dumps-expired"] += 1
+                say(verb("EXPIRED"), f"dump unchanged {cfg['dump_retain_days']}d+", p)
+            elif plain and last < cutoff and st.st_size >= cfg["dump_min_mb"] << 20 and not os.path.exists(p + ".gz"):
+                if apply:
+                    try:
+                        compress(p)
+                    except (Hold, OSError) as error:
+                        say("HOLD", f"compress-failed ({error.__class__.__name__})", p)
+                        continue
+                counts["compressed"] += 1
+                say(verb("COMPRESSED"), f"{st.st_size >> 20}MB", p)
+    return counts
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--home", required=True)
@@ -626,6 +786,8 @@ def main():
             say("HOLD", f"remove-failed ({error.__class__.__name__})", r.path)
     for store in sorted({r.store for r in order if r.kind == "worktree" and r.store and os.path.isdir(r.store)}):
         run(["git", "--git-dir", store, "worktree", "prune"])
+    tidy = housekeeping(cfg, protected, repos, fresh, now, a.apply)
+    say("housekeeping", " ".join(f"{k}={v}" for k, v in tidy.items()) + f" apply={int(a.apply)}")
     if a.apply:
         expire(cfg, now)
         os.makedirs(os.path.dirname(stamp_file), exist_ok=True)
