@@ -96,7 +96,6 @@ jobs:
     needs: [commitlint]
     if: ${{ always() && !cancelled() }}
     env:
-      RMD_CI_DEPENDENCY_EVIDENCE: ${{ runner.temp }}/ci-dependency-evidence/evidence.json
       RMD_CI_DEPENDENCY_DIGEST: ${{ needs.commitlint.outputs.dependency_digest }}
       RMD_CI_DEPENDENCY_PRODUCER_SHA: ${{ needs.commitlint.outputs.dependency_producer_sha }}
     # Producer failure/skip never skips the matrix; its dependency check remains fail-closed.
@@ -111,6 +110,10 @@ jobs:
     # defect returns intact. Re-derive this if that cap is ever retuned (W1-T312).
     timeout-minutes: 35
     steps:
+      - name: Set this runner's dependency evidence path
+        id: dependency-evidence-path
+        run: |
+          echo "RMD_CI_DEPENDENCY_EVIDENCE=$RUNNER_TEMP/ci-dependency-evidence/evidence.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # `origin/main` must RESOLVE on the runner: test/recon-gaps-relayed.test.ts shells

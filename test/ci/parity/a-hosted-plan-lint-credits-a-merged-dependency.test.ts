@@ -247,3 +247,23 @@ test("the protected-base producer loader ignores candidate configuration", t => 
   assert.equal(observe(invocation), "trusted");
   assert.equal(existsSync(marker), false, "candidate code must never run in the protected producer");
 });
+
+
+test("hosted dependency paths initialize at runner step scope before evidence consumption", t => {
+  const workflow = parse(readFileSync(".github/workflows/ci.yml", "utf8"));
+  const ci = workflow.jobs.ci;
+  assert.doesNotMatch(JSON.stringify(ci.env), /\$\{\{\s*runner[.]/,
+    "runner context is unavailable in a job-level environment");
+  const steps = ci.steps as Array<{ id?: string; if?: string; run?: string }>;
+  const index = steps.findIndex(step => step.id === "dependency-evidence-path");
+  const download = steps.findIndex(step => step.run?.includes('gh run download "$GITHUB_RUN_ID"'));
+  assert.ok(index >= 0 && index < download, "the runner path must exist before any evidence consumption");
+  assert.equal(steps[index]!.if, undefined, "missing producer evidence must retain its fail-closed path");
+  const root = ownedFixtureDir(t, "dependency path with spaces").dir;
+  const envFile = join(root, "github-env");
+  execFileSync("bash", ["-euo", "pipefail", "-c", steps[index]!.run!], {
+    env: { ...process.env, RUNNER_TEMP: root, GITHUB_ENV: envFile },
+  });
+  assert.equal(readFileSync(envFile, "utf8"),
+    `RMD_CI_DEPENDENCY_EVIDENCE=${root}/ci-dependency-evidence/evidence.json\n`);
+});
