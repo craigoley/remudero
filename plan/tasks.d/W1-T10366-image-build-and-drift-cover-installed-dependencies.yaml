@@ -1,0 +1,117 @@
+- id: W1-T10366
+  title: "Image build and drift decisions cover the dependencies the existing image recipe can install"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  priority: 1
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  status: queued
+  attempts: 0
+  origin: "operator-approved security/runtime follow-through 2026-10-21; Hono patch #13398"
+  plan_refs: [W1-T4061, W1-T5018, W1-T5367, W1-T9094, W1-T9487]
+  files:
+    - .github/workflows/acr-build.yml
+    - src/lib/deployer.ts
+    - src/lib/deploy-judge.ts
+    - src/lib/image-dependency-inputs.mjs
+    - src/lib/image-dependency-inputs.d.mts
+    - src/lib/baked-runtime-inputs.ts
+    - deploy/install-host-units.sh
+    - test/acr-build-trigger.test.ts
+    - test/acr-build-sdk-trigger.test.ts
+    - test/a-playwright-bump-rebuilds-the-image.test.ts
+    - test/the-image-drift-watchdog-watches-the-worker-sdk.test.ts
+    - test/baked-supervisor-inputs.test.ts
+    - test/a-busy-primary-reaches-its-image-recycle.test.ts
+  rationale: |
+    OBSERVED at captured main c8a55054a4275c3e4c7e2308e47e947460d4be70:
+    #13398 changes root lockfile Hono4.13.7 to4.13.11. The exact shipped ACR guard
+    returns build=false for that real committed before/after pair; its baked-path positive
+    control returns true. ACR run39644818093 succeeded while its build/push steps were skipped.
+    This is not proof that a patched image was published or adopted. New-process resolution
+    in each application's image working directory still read4.13.7 at19:34. A separately
+    observed mounted checkout has installed4.13.11; neither observation inspects a running
+    process's module cache. Do not conflate these distinct installation/runtime boundaries.
+
+    The workflow compares only Playwright, the worker SDK and selected loader entries.
+    The deployer compares Playwright/SDK and therefore also lacks a general installed-artifact
+    input contract. Root package.json is not a push trigger. A merged lockfile security fix can
+    leave the image unchanged even though the source alert is fixed. Another package-specific
+    exception would preserve this class of gap. W4061/W5018/W5367 own narrower shipped signals;
+    W9094/W9487 own role-specific image convergence, not this missing dependency coverage.
+
+    Critically, deploy/Dockerfile's /app install is npm ci --omit=dev OR full npm ci.
+    A production-only fingerprint would be unsound while that fallback exists. Dev entries
+    may be installed; only a recipe-proved semantic no-op is a legitimate no-build control.
+    Do not remove or modify the install fallback to make an exclusion test pass.
+
+    Bounded scope: all455 advertised heads were subject-scanned, with complete13-open-PR
+    file lists at19:46:30. Moved heads were rechecked against their prior measured subject,
+    with actual Hono/image positives and a negative honours-word control. A supplemental
+    all-head deployer/proposed-helper/workflow scan found no generalized fingerprint/Hono
+    implementation, with actual deployer workerSdkChanged as the corpus positive control.
+    This is not absence of unpublished work; recheck all source/subject/credit/claims before
+    building. The backup PR13317's approved catalog contribution is a separate existing owner.
+  design: |
+    Establish a deterministic semantic contract for the existing installation recipe's
+    material root dependency inputs. Prefer one small plain-JavaScript helper compatible with
+    both the workflow's existing Node step and the typed runtime reader, with an explicit type
+    companion if needed. No npm install, network request or provider call belongs in this reader.
+    Cover resolved package version, integrity, location, dependency graph, entry addition/removal
+    and installation-relevant flags/metadata. Until the full-install fallback changes separately,
+    conservatively include its possible closure instead of dropping dev entries. Trace optional,
+    platform-specific and manifest/workspace effects; do not infer them from a single dev flag.
+    Canonical whitespace/object-key reordering must not cause an image build. Unknown/unreadable,
+    malformed or incomplete required inputs must never become a known unchanged/zero verdict.
+
+    Wire the real ACR BUILD decision and the runtime drift/newest-input walk to the same material
+    contract. Add missing manifest triggers when their contents affect installation. The newest
+    input must name the commit the workflow builds, including an integrity-only or transitive
+    change. Keep existing browser/SDK/loader positives, manual dispatch meaning, role-scoped
+    baked-path behavior, unknown convergence, health, pause/stop, backoff and resource safeguards.
+    Do not turn every unrelated source merge into an image build or add an advisory exemption.
+
+    If the helper joins the measured baked runtime import closure, add only its required catalog
+    entries to the existing workflow, installer and baked-runtime lists and run their maintained
+    closure tests. Do not change workflow permissions/jobs, scanner coverage, test selection,
+    baseline ceilings or production settings. If a protected-input registry or another undeclared
+    consumer genuinely needs editing, use the normal exact scope amendment route before editing
+    it, not a hidden import or a catalog omission. No manual build/deploy/recycle is authorized.
+
+    Extend existing physical ACR/deployer suites using their maintained git fixtures. Execute
+    the workflow script and real drift/newest-input readers on committed before/after trees,
+    including the actual Hono patch, a transitive version/integrity/edge/add/remove change,
+    optional/platform metadata, a manifest input, malformed/missing inputs and canonical no-ops.
+    Correct older left-pad-is-irrelevant fixtures only by replacing them with genuine semantic
+    no-ops: the current recipe can install left-pad. Preserve their SDK/Playwright obligations.
+    New tests, if needed, require rmd test-place and a scope amendment for their computed paths.
+
+    Freeze tests and remove the material-comparison wiring separately from its shared function.
+    Demonstrate intended wrong BUILD/drift/newest-input outcomes, not missing-module, missing-test
+    or parse failures. Restore exact source. Run maintained caller/census/import-closure checks
+    and same-tree coverage with nonzero SF instrumentation for every changed executable source.
+    Distinguish local proof, hosted CI/review, merge, real image-build step, digest, installation
+    and exercised runtime outcome. A green no-op workflow or closed source alert is not adoption.
+  acceptance:
+    - claim: "the real workflow and runtime drift reader agree on material installed dependency changes"
+      proof: "unit test: image build and runtime drift agree on installed dependency changes"
+    - claim: "the existing full-install fallback is covered while semantic formatting no-ops remain no-build"
+      proof: "unit test: image dependency inputs cover the full-install fallback without formatting rebuilds"
+    - claim: "unknown inputs cannot become known-zero drift and the newest input names the real build commit"
+      proof: "unit test: image dependency uncertainty and newest input identity remain explicit"
+  falsifier: |
+    Retain the new tests and remove only dependency materiality or either producer/consumer wire.
+    Real committed Hono/transitive/uncertainty fixtures must fail for the intended observed
+    decision, not a missing helper, ghost test path or syntax error. Restore exact bytes and rerun.
+  note: |
+    Normal native operator mint reserved W1-T10366 at refs/rmd-id/W1-T10366 on
+    2026-10-21T19:47:52.973Z, anchor1fd2f224e2d4fc8e457ef1e98ca4c9c948fe208b,
+    holder codex/image-installed-inputs-plan-20261021. The stored holder is URL-encoded;
+    verify through the maintained reservation-chain parser, not a raw substring guess.
+    The mint exited0 and took one attempt with no takeover. Held is not filed or implemented.
+    Existing source/runtime ownership, full normal checks and all production holds remain.
