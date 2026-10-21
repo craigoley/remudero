@@ -175,9 +175,9 @@ export async function produceCiDependencyEvidence(context, { request = path => g
           typeof pr.merged_at !== 'string' || !Number.isFinite(Date.parse(pr.merged_at)) || Date.parse(pr.merged_at) > context.nowMs ||
           pr.html_url !== `https://github.com/${context.repository}/pull/${number}` ||
           pr.base?.repo?.full_name?.toLowerCase() !== context.repository.toLowerCase() || pr.base?.ref !== 'main' ||
-          !SHA.test(pr.merge_commit_sha ?? '') || typeof pr.body !== 'string' || typeof pr.head?.ref !== 'string') continue;
+          !SHA.test(pr.merge_commit_sha ?? '') || (pr.body !== null && typeof pr.body !== 'string') || typeof pr.head?.ref !== 'string') continue;
       const sources = [];
-      if (new RegExp(`^Remudero-Task: ${id}$`, 'm').test(pr.body)) sources.push('trailer');
+      if (new RegExp(`^Remudero-Task: ${id}$`, 'm').test(pr.body ?? '')) sources.push('trailer');
       if (new RegExp(`^run-${id}-[0-9]+$`).test(pr.head.ref)) sources.push('head-branch');
       if (!sources.length) continue;
       try { git(['merge-base', '--is-ancestor', pr.merge_commit_sha, context.base]); }
