@@ -9385,6 +9385,22 @@ function gardenRecordRefusalFromSource(pr: OpenPrView, source: string): string |
   return refusals.length ? `${id}: ${refusals.join("; ")}` : undefined;
 }
 
+/** PR-13008: the blocking `[check] message` rows under each `✗ <id>: N violation(s)` header any failing log
+ *  names, deduped and capped, so a plan-only escalation says WHAT is wrong, not only which check is red. */
+export function planLintViolationsFromCiFailures(failures: readonly CiFailure[], max = 3, chars = 240): string[] {
+  const named = new Set<string>();
+  for (const failure of failures) {
+    let id: string | undefined;
+    for (const line of failure.logTail.split("\n")) {
+      const header = /✗ (\S+): \d+ violation\(s\)/.exec(line);
+      const row = /\[([a-z0-9-]+)\] (.+)$/.exec(line);
+      if (header) id = header[1];
+      else if (id !== undefined && row && !line.includes("⚠")) named.add(`${id} [${row[1]}] ${row[2]!.trim()}`.slice(0, chars));
+    }
+  }
+  return [...named].slice(0, max);
+}
+
 export type PlanRepairDecision =
   | { signature: "held-task-id"; action: "renumber"; check: string; heldIds: string[]; title?: string }
   | { signature: "title-length"; action: "retitle"; check: string; title: string; jobId?: string }
@@ -9458,6 +9474,7 @@ export function planRepairHistoryFromLedger(lines: readonly Record<string, unkno
   const keys = new Set<string>();
   for (const line of lines) {
     if (line.step !== PLAN_REPAIR_STEP || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
+    if (line.outcome === "unwired") continue; // PR-13008: a light pass's no-op never spends the full pass's attempt.
     const head = `${line.pr_number}@${line.head_sha}`;
     keys.add(line.action === "wait" ? `${head}@base-red-wait` : `${head}@${String(line.signature)}`);
     if (line.cause === "stale-base") keys.add(`${line.pr_number}@stale-base`);
@@ -17099,7 +17116,7 @@ export async function runSweep(
       ...(decision.action === "retitle" ? { title: decision.title } : {}),
       ...result,
     });
-    planRepairHistory.add(`${pr.prNumber}@${pr.headSha}@${decision.signature}`);
+    if (result.outcome !== "unwired") planRepairHistory.add(`${pr.prNumber}@${pr.headSha}@${decision.signature}`);
     if (["renumbered", "retitled", "updated"].includes(result.outcome)) {
       return { repaired: true, reason: `plan repair (${decision.signature}): ${decision.action} on ${decision.check} — ${result.outcome}` };
     }
@@ -18502,12 +18519,14 @@ export async function runSweep(
       }
       disposition = repair.repaired ? "wait" : planRoundExhausted ? "blocked-ambiguous" : "refused-escalate";
       const red = (pr.ciFailures ?? []).map((failure) => failure.name).join(", ") || "a required check";
+      const named = planLintViolationsFromCiFailures(pr.ciFailures ?? []);
+      const violation = named.length > 0 ? ` — its log names: ${named.join("; ")}` : "";
       reason = repair.repaired
         ? repair.reason
         : planConflictRound
         ? `merge conflict (mergeState dirty) — the plan-scoped conflict round on this fleet plan PR is exhausted${repair.reason} — escalating`
         : `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
-          `fix is dispatched; the plan violation needs a plan repair${repair.reason}`;
+          `fix is dispatched; the plan violation needs a plan repair${violation}${repair.reason}`;
     }
     // W1-T3306: capped proof grades live only on `review.posted`, so the capped-green arm refusal
     // routes through the EXISTING fix rung here. #10298: it reads the #5960 escalation row's head too,
