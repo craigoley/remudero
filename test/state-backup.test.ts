@@ -257,8 +257,8 @@ test("a state backup restores engine dependency links without following their ta
 test("engine dependency references do not excuse missing irreplaceable state", () => {
   const state = seedStateDir();
   const external = tmpDir("rmd-engine-install-");
-  writeFileSync(join(external, "sentinel"), "external dependency payload");
-  chmodSync(join(external, "sentinel"), 0o640);
+  writeFileSync(join(external, "sentinel"), "external dependency payload", { mode: 0o640 });
+  const sentinelMode = statSync(join(external, "sentinel")).mode & 0o777;
   seedEngine(state, external);
   for (const rel of ["node_modules/critical", "engines/not-a-hash/node_modules/critical"]) {
     mkdirSync(dirname(join(state, rel)), { recursive: true });
@@ -283,7 +283,7 @@ test("engine dependency references do not excuse missing irreplaceable state", (
   restoreState(snapshot.archiveDir, restored);
   assert.equal(readlinkSync(join(restored, dependencyRel)), external);
   assert.equal(readFileSync(join(external, "sentinel"), "utf8"), "external dependency payload");
-  assert.equal(statSync(join(external, "sentinel")).mode & 0o777, 0o640);
+  assert.equal(statSync(join(external, "sentinel")).mode & 0o777, sentinelMode);
   symlinkSync("missing-register", join(state, "critical-register"));
   const failedBackups = tmpDir("rmd-engine-backups-");
   assert.throws(() => snapshotState(state, failedBackups), StateBackupError);
@@ -337,8 +337,8 @@ test("invalid engine dependency reconstruction evidence refuses before restore w
   const originalManifest = readFileSync(manifestPath, "utf8");
   const target = tmpDir("rmd-engine-restore-");
   writeFileSync(join(target, "keep"), "untouched");
-  const refuses = () => {
-    assert.throws(() => restoreState(snapshot.archiveDir, target), /engine dependency reconstruction/);
+  const refuses = (reason = /engine dependency reconstruction/) => {
+    assert.throws(() => restoreState(snapshot.archiveDir, target), reason);
     assert.deepEqual(readdirSync(target), ["keep"]);
     assert.equal(readFileSync(join(target, "keep"), "utf8"), "untouched");
   };
@@ -361,7 +361,10 @@ test("invalid engine dependency reconstruction evidence refuses before restore w
   writeFileSync(manifestPath, "{");
   refuses();
   rmSync(manifestPath);
-  refuses();
+  refuses(/missing manifest/);
+  mkdirSync(manifestPath);
+  refuses(/non-regular manifest/);
+  rmSync(manifestPath, { recursive: true });
   writeFileSync(manifestPath, originalManifest);
   const lockPath = join(snapshot.archiveDir, engineRel, "package-lock.json");
   const lock = readFileSync(lockPath);

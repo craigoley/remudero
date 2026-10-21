@@ -105,7 +105,8 @@ export function validateEngineDependencyLinks(root: string, entries: readonly st
   const manifestStat = lstatSync(manifestFile, { throwIfNoEntry: false });
   if (!manifestStat && paths.length === 0 && !expected) return undefined;
   try {
-    if (!manifestStat?.isFile()) refuse("missing or non-regular manifest");
+    if (!manifestStat) refuse("missing manifest");
+    if (!manifestStat.isFile()) refuse("non-regular manifest");
     if (paths.length === 0) refuse("manifest has no engine dependency links");
     const raw = objectJson(readFileSync(manifestFile), ENGINE_LINK_MANIFEST);
     if (!Array.isArray(raw.criticalState) || raw.criticalState.some((rel) => !CRITICAL_STATE.includes(rel)) ||
