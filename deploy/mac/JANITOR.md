@@ -29,6 +29,58 @@ Before pruning old regular leaves from a mixed-age scratch tree, the cleaner
 checks the enclosing tree's process/CWD/open-file activity and rechecks it at
 each deletion boundary. Activity or an unavailable probe retains the tree.
 
+The same leaf policy now covers `~/Remudero/.session-scratch`, including loose
+regular files at its root. Each leaf needs six hours of both mtime and ctime
+inactivity; a recent sibling retains the container. Credentials, Git checkouts,
+symlinks, special files, scheduled logs and patch/diff/rej/orig evidence retain
+their direct-child tree. Wholly idle safe directories still retire together.
+Old empty directories are removed under the same guards; a directory whose
+ctime changed during leaf removal waits until a later pass. The summary reports
+session scratch files and directories separately, with decision receipts.
+
+The account janitor also reclaims physical, account-owned direct children named
+`~/.cache/remudero-*` after the entire tree has been idle for six hours. It keeps
+`~/.cache/remudero`, its own lock, every `*.lock` name, and trees containing Git
+metadata, bundles, locks, symlinks, foreign owners or special files. A receipt
+identifies store-fill caches as historical/external with an unverified creator:
+the checked-in core store-fill fixture uses temporary storage. A leaking creator
+must be identified and fixed separately.
+
+With no account npm/npx process, `~/.npm/_cacache/content-v2` and `~/.npm/_npx`
+release old regular leaves after fresh activity/ownership/structure checks.
+The janitor runs `npm cache verify --cache "$HOME/.npm"` after content pruning.
+When npm is absent from cron's PATH, the existing whole-artifact policy applies
+instead, requiring every entry (including the index) to be idle. Worker-home
+cache handling and the six-hour minimum remain unchanged.
+
+Before probing idle checkouts, the janitor can normalize relative alternates or
+replace a dangling entry with a known same-home lender containing HEAD. It saves
+`objects/info/alternates.pre-repair` without overwriting earlier evidence, then
+checks HEAD and `git fsck --connectivity-only --no-reflogs <HEAD>`. Failed probes
+restore the original bytes and record `repair-reverted`; successful repairs
+record `repaired`. Missing lenders, live paths, partial clones and uncertain
+ownership retain the checkout. Dry runs only describe a repair. Ordinary
+publication and preservation checks still decide any later retirement.
+
+`janitor-free-samples.tsv` beside the decision receipt keeps the last 200 pass
+samples of timestamp/free bytes. A declining fitted trend projected to fill the
+disk within three observed pass intervals produces one `low-space-report:`
+block; inside one interval is critical. Stable/growing free space and insufficient
+samples do not page by a fixed GiB floor. The existing EMERGENCY line and author
+preflight reserve retain their thresholds.
+
+The report uses one bounded `du -xsk` observation per visible home child and known
+root, under the existing 45-second inspection ceiling. Seen bytes sum only home
+children, avoiding double-counting nested known roots. It includes swap from
+`sysctl vm.swapusage`, `unaccounted = used - seen - swap`, and the operator's
+action in other accounts and system areas this account cannot read. Incomplete
+measurements remain labeled unknown/incomplete. It reports preservation's state;
+when disabled it computes a read-only dry-run count/bytes with the installed
+helper's default selection and lender guards. This estimate precedes preservation
+checks and creates no config, archive, stamp or checkout changes. Preserve-retire
+remains opt-in. Report rows use the `low-space-report` reason code; new successful
+cache and scratch removals use `removed`.
+
 ## Preventing new validation growth
 
 The `scripts/preflight-author.mjs` CLI checks Mac workspace and TMPDIR capacity
