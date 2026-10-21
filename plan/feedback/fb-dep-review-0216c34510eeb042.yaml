@@ -1,0 +1,135 @@
+id: fb-dep-review-0216c34510eeb042
+ts: 2026-10-21T16:15:41.203Z
+raw: |-
+  Land the dependency bump(s) of Dependabot PR #13351, whose red is its own: chore(deps): bump the image-cli-minor-and-patch group in /deploy with 2 updates
+
+  Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes.
+  A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest
+  allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:
+  tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked
+  SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.
+  Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries
+  their hunks, or Dependabot does once main carries the versions.
+
+  PR: https://github.com/craigoley/remudero/pull/13351
+  Head: 5ba87c7620306cd8a9da0769540c807aa36b167d
+  Bumps: @anthropic-ai/claude-code 2.1.296 -> 2.1.302, @openai/codex 0.162.1 -> 0.163.0
+  Red checks: ci-gate, coverage-ratchet
+  Sibling Dependabot PRs folded in: #13350 (@anthropic-ai/claude-agent-sdk 0.3.296 -> 0.3.302, playwright 1.64.0 -> 1.64.1, zod 4.6.6 -> 4.6.7, @axe-core/playwright 4.13.0 -> 4.14.0, @commitlint/cli 21.2.3 -> 21.2.4, @commitlint/config-conventional 21.2.3 -> 21.2.4, commit-and-tag-version 13.2.1 -> 13.3.0); #13352 (github/codeql-action/init 4.38.3 -> 4.39.0, github/codeql-action/analyze 4.38.3 -> 4.39.0, github/codeql-action/upload-sarif 4.38.3 -> 4.39.0)
+
+  Dependabot proposal body:
+
+  Bumps the image-cli-minor-and-patch group in /deploy with 2 updates: [@anthropic-ai/claude-code](https://github.com/anthropics/claude-code) and [@openai/codex](https://github.com/openai/codex/tree/HEAD/codex-cli).
+
+  Updates `@anthropic-ai/claude-code` from 2.1.296 to 2.1.302
+  <details>
+  <summary>Release notes</summary>
+  <p><em>Sourced from <a href="https://github.com/anthropics/claude-code/releases">@​anthropic-ai/claude-code's releases</a>.</em></p>
+  <blockquote>
+  <h2>v2.1.302</h2>
+  <h2>What's changed</h2>
+  <ul>
+  <li>Added <code>CLAUDE_CODE_AUTO_MODE_MODEL</code> to choose the model the client-side auto mode classifier uses; it does not change the model for server-side auto mode</li>
+  <li>Added an <code>Idle compaction</code> row to <code>/config</code> for turning idle compaction off or back on; the notices shown after an idle compaction now say how to turn it off</li>
+  <li>Added a notice to <code>/design-sync</code> and <code>/design-login</code> that standalone Claude Design (claude.ai/design) closes by December 14, 2026</li>
+  <li>Fixed a &quot;Prompt is too long&quot; error when stopping a turn while the conversation was being compacted</li>
+  <li>Fixed requests failing with &quot;diagnostics: Extra inputs are not permitted&quot; after switching to Vertex or Bedrock mid-session</li>
+  <li>Fixed the Read tool loading an image file of any size, or a pipe or device named like an image, entirely into memory; image sources over 128 MB are now refused</li>
+  <li>Fixed <code>/autocompact</code> and <code>/effort</code> saving to the wrong model when a gateway names Opus 4 or 4.1 with a prefix, such as <code>anthropic/claude-opus-4-1</code></li>
+  <li>Fixed a prompt cache miss when a tool added mid-session was loaded again through ToolSearch or after compaction</li>
+  <li>Fixed <code>claude plugin</code> and other subcommands sometimes exiting before a queued settings or config write finished, which could lose the change or leave a <code>.tmp</code> file behind</li>
+  <li>Fixed plugin marketplaces re-cloning on every refresh, and newly installed git plugins showing version &quot;unknown&quot;, when git defaults to the reftable ref format</li>
+  <li>Fixed the PowerShell tool not finding commands in a plugin's <code>bin/</code> folder, and reporting an error when a search that finds nothing (rg, grep, findstr, git grep) is piped into <code>Select-Object</code> or another formatting cmdlet</li>
+  <li>Fixed Claude in the desktop app pointing you to claude.ai settings or <code>/mcp</code> to authorize or reconnect an MCP server where that option isn't available</li>
+  <li>Fixed artifact publishes sometimes failing when Claude sent an empty list of edits, and Claude retrying an artifact update the wrong way after a newer version of the artifact turned it away</li>
+  <li>Fixed <code>classifier_category</code> missing from OpenTelemetry <code>tool_decision</code> events for most auto mode classifier blocks, and new <code>tool_decision</code> attributes pushing out <code>tool_use_id</code>, <code>tool_source</code> and <code>tool_parameters</code> when <code>OTEL_LOGRECORD_ATTRIBUTE_COUNT_LIMIT</code> is low</li>
+  <li>Fixed rows in the agents view staying blank after moving down a long list or folding a section</li>
+  <li>Fixed <code>claude remote-control --help</code> not printing its usage and exiting when not signed in</li>
+  <li>Fixed <code>/design consent</code> and <code>/design revoke</code> suggesting <code>/design-login</code> when they fail in a cloud session, where it isn't available; the message now points to claude.ai/design/settings</li>
+  <li>Fixed MCP servers showing no tools, or every tool call failing, when the server negotiates protocol version 2026-07-28 but omits <code>resultType</code>, <code>ttlMs</code> or <code>cacheScope</code></li>
+  <li>Fixed prompt suggestions spending usage credits on models your plan pays for only with credits: they are now skipped after a reply billed to credits</li>
+  <li>Fixed URLs written in backticks being clickable only on their first row when they wrap; the whole URL is now one link in terminals that support hyperlinks</li>
+  <li>Fixed <code>claude plugin details &lt;name&gt;@builtin</code> suggesting <code>claude plugin list</code>, which never shows built-in plugins, when the plugin isn't found; it now points to <code>/plugin</code></li>
+  <li>Fixed an emoji that a link starts inside wrapping one column too wide, which hid it in question previews and turned tables into lists</li>
+  <li>Fixed worktree isolation refusing to create or resume worktrees under git 2.56 or later when a stray <code>.git</code> file points at a directory that doesn't exist</li>
+  <li>Fixed a cloud session's cost and usage restarting from zero after the session resumed in a new process</li>
+  <li>Self-hosted runner: Fixed git fetches failing with &quot;bad object refs/heads&quot; in sessions that reuse a checkout stored in git's reftable format</li>
+  <li>Windows: Fixed every file write being refused or asked about for projects on exFAT or FAT32 drives, including in sessions started with <code>--plugin-dir</code></li>
+  <li>Improved startup time with many plugins enabled: plugin command and agent files now take far fewer file system calls to load, most of all on Windows</li>
+  <li>Improved auto mode with the server-side classifier: a conversation too long for the safety check is now compacted, instead of every checked tool call being denied</li>
+  <li>Improved the message when a background session reopened from another folder has no LLM gateway: it now says why, instead of &quot;Not logged in&quot;</li>
+  <li>Changed <code>claude -p</code> and Agent SDK sessions with no permission mode to start in <code>default</code> mode on third-party providers, with telemetry off or on a fresh install; <code>--permission-mode auto</code> keeps auto</li>
+  <li>Changed fork subagents (<code>subagent_type: &quot;fork&quot;</code>) to be on by default in <code>claude -p</code>, the Agent SDK, the desktop app and VS Code, as they already are in the terminal; <code>CLAUDE_CODE_FORK_SUBAGENT=0</code> turns them off, and <code>claude mcp serve</code> never offers them</li>
+  <li>Changed the desktop app and VS Code to always run the main conversation's subagents in the background, as the terminal does, rather than let Claude choose; a subagent's own Agent calls in <code>claude -p</code>, the Agent SDK, the desktop app and VS Code now run in the foreground by default</li>
+  <li>Changed the <code>← for agents</code> footer hint to hide 10 seconds after a session opens; the count of agents waiting on you still shows</li>
+  <li>Changed where the Claude in Chrome instructions sit in the system prompt so that new conversations can read them from the shared prompt cache</li>
+  <li>Changed prompt and agent hooks so that at most 12 of one event run at a time; the rest wait their turn</li>
+  <li>Changed the message shown when your organization's policy turns off <code>/feedback</code>: it now points to GitHub issues instead of an organization admin</li>
+  <li>[VSCode] Fixed text after an unclosed code block in a list showing as plain text while a reply streams, then turning into code</li>
+  <li>[VSCode] Fixed MCP server sign-in from the panel opening a broken authorization page when the server URL contains a query string</li>
+  <li>[VSCode] Fixed the <code>@browser</code> banner saying &quot;Browser connected&quot; when no browser with the Claude extension can be reached</li>
+  <li>[Cloud sessions] Added a banner on a routine's page that says why its last run didn't start, such as your organization reaching its limit on concurrent cloud sessions</li>
+  <li>[Cloud sessions] Fixed &quot;Rewind to here&quot; failing on every message except the newest in cloud sessions; self-hosted runners need Claude Code v2.1.246 or later</li>
+  <li>[Cloud sessions] Fixed the pull request status bar in cloud sessions flipping a pull request with merge conflicts back to ready while GitHub rechecked it</li>
+  <li>[Cloud sessions] Fixed routine runs showing as Completed after their cloud session stopped unexpectedly, and as Cancelled when archived before they started, instead of failed</li>
+  <li>[Cloud sessions] Fixed the diff view in cloud sessions missing changes or failing to load after the session's GitHub repository was renamed or moved</li>
+  <li>[Cloud sessions] Fixed a scheduled routine run that failed partway being run again from the start an hour or more later, which could repeat work such as posting the same report twice</li>
+  <li>[Cloud sessions] Fixed an open cloud session sometimes not showing messages sent from another device until you reloaded the page or clicked away and back</li>
+  <li>[Cloud sessions] Improved the error shown when a cloud session fails to start: it now says &quot;Connection lost&quot; or &quot;Server error&quot; instead of &quot;Something went wrong&quot;</li>
+  </ul>
+  <!-- raw HTML omitted -->
+  </blockquote>
+  <p>... (truncated)</p>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/anthropics/claude-code/commit/c017428c8c27e604840435048d5bce6a9a22c040"><code>c017428</code></a> chore: Update CHANGELOG.md and feed.xml</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/03b5892ee77de289bcd5dfa39f541525ade74aff"><code>03b5892</code></a> chore: Update CHANGELOG.md and feed.xml</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/94506ff0d3bd9185f1752da36e968775021fb48f"><code>94506ff</code></a> chore: Update CHANGELOG.md and feed.xml</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/19eb0958df265ee24f59bd25163c175b4c6d4b43"><code>19eb095</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/9b4f0d6ef8ceaf62f6b46babb9a4d84bec541a2e"><code>9b4f0d6</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/db93774d73e8fdbaf315a6f4c175ae99ad3d515a"><code>db93774</code></a> chore: Update CHANGELOG.md and feed.xml</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/b0b7bed9820350bb0942e32c7f00752a99ea3555"><code>b0b7bed</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/bf2323b3021c9d3db7a31e1e7d61068c3f704497"><code>bf2323b</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/b3caf7560b0422544e60db010fe75cfd57e0541e"><code>b3caf75</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/addd7a69690bb5f5484c2a47583a8f88c4842a6e"><code>addd7a6</code></a> chore: Update mods/</li>
+  <li>Additional commits viewable in <a href="https://github.com/anthropics/claude-code/compare/v2.1.296...v2.1.302">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+  Updates `@openai/codex` from 0.162.1 to 0.163.0
+
+  Dependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.
+
+  [//]: # (dependabot-automerge-start)
+  [//]: # (dependabot-automerge-end)
+
+  ---
+
+  <details>
+  <summary>Dependabot commands and options</summary>
+  <br />
+
+  You can trigger Dependabot actions by commenting on this PR:
+  - `@dependabot rebase` will rebase this PR
+  - `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it
+  - `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency
+  - `@dependabot ignore <dependency name> major version` will close this group update PR and stop Dependabot creating any more for the specific dependency's major version (unless you unignore this specific dependency's major version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name> minor version` will close this group update PR and stop Dependabot creating any more for the specific dependency's minor version (unless you unignore this specific dependency's minor version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name>` will close this group update PR and stop Dependabot creating any more for the specific dependency (unless you unignore this specific dependency or upgrade to it yourself)
+  - `@dependabot unignore <dependency name>` will remove all of the ignore conditions of the specified dependency
+  - `@dependabot unignore <dependency name> <ignore condition>` will remove the ignore condition of the specified dependency and ignore conditions
+
+
+  </details>
+attachments: []
+origin: repair#dep-review
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-agent-sdk@0.3.302,@anthropic-ai/claude-code@2.1.302,@axe-core/playwright@4.14.0,@commitlint/cli@21.2.4,@commitlint/config-conventional@21.2.4,@openai/codex@0.163.0,commit-and-tag-version@13.3.0,github/codeql-action/analyze@4.39.0,github/codeql-action/init@4.39.0,github/codeql-action/upload-sarif@4.39.0,playwright@1.64.1,zod@4.6.7
+thread_id: null

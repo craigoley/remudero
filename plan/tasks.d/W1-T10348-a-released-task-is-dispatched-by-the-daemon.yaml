@@ -1,0 +1,142 @@
+- id: W1-T10348
+  title: "A RELEASED verify:human TASK IS DISPATCHED BY THE DAEMON — runDaemon's selection never passes releasedIds, so drain.ts files every verify:human task under verify-not-auto however it was released, and the machine-filing judge's durable route is masked by its own settled map; 18 released tasks sat 8 days with zero dispatch rows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern, which released verify:human tasks the daemon's selector admits; release writing, the operator-build route and every other filter are unchanged
+  band_meaning: span
+  budget_usd: 10.00
+  priority: 1  # requested by the operator session 2026-10-21: operator releases are silently dead in production
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-21: W1-T6372, W1-T7271 and W1-T7736, released by rmd approve on 2026-10-13, have no dispatch row in 8 days"
+  plan_refs: [W1-T147, W1-T3206, W1-T3216, W1-T5351, W1-T6358, W1-T8771, W1-T9045, W1-T3271, W1-T5359, W1-T5406]
+  files:
+    - src/lib/drain.ts
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - src/run-task.ts
+    - src/lib/machine-filing-judge.ts
+    - test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts
+  rationale: |
+    READ 2026-10-21 at origin/main 03e4f4ac7. Ledger read on host remudero (~/rmd-state2/state, the core
+    container's /home/node/Remudero/state): live ledger.ndjson plus all 149 rotations from 2026-10-13 to 2026-10-21T13:11Z.
+    THE DAEMON'S SELECTOR NEVER RECEIVES THE RELEASED SET.
+      - drain.ts `isDispatchEligible` refuses a task when `t.verify !== "auto" && opts.releasedIds?.has(t.id) !== true`
+        and files it under `verify-not-auto`.
+      - The daemon builds its NextRunnableOpts literal `dispatchOpts` in `runDaemon` (src/lib/daemon.ts, the tick's
+        `const dispatchOpts: NextRunnableOpts = {`). It carries no `releasedIds` key. The tick's `runnableCandidates`
+        call and the lane-refill call both spread that literal, so neither passes a released set.
+      - `git log -S releasedIds -- src/lib/daemon.ts` is empty: the daemon's selector has never had one.
+      - Only three paths read releases: `rmd drain` (run-task.ts wires `readLedgerLines` into `runDrain`), the daemon's
+        console-kick path (`assertRunnable(..., resolveReleasedIds(deps))`), and the run child's own admission
+        (run-task.ts `assertRunnable(plan, task, isMerged, releasedTaskIds(readLedgerRawLines(ledgerPath)))`).
+        The daemon's ordinary tick never dispatches a released task, so the run child is never reached.
+      - The daemon already has the reader: src/cli/commands/daemon.ts wires `readLedgerLines` into its deps.
+    THE DURABLE ROUTE IS MASKED BY THE JUDGE'S `settled` MAP.
+      - machine-filing-judge.ts's header says the daemon reads releases only from the live ledger, so an operator
+        release is meant to become a pinned ruling on the record (verify: auto, verdict "operator"). That route works
+        for some records: W1-T6107 and W1-T10208 were pinned and merged, and W1-T10258 was pinned by #13183.
+      - In `runMachineFilingJudge`, `due` keeps a record only when `state.settled?.[t.id] !== taskRulingPin(t)`, and
+        that test runs BEFORE the `released.has(t.id)` branch.
+      - `settled` is written when an escalate ruling was found already on main (`machine_judge.already_landed`,
+        W1-T5359/W1-T5406). Its value is the record's pin, and a release does not change the pin.
+      - machine-filing-judge.json on the host: settled["W1-T6372"] = a1fdb142..., settled["W1-T7271"] = 02f857db...,
+        settled["W1-T7736"] = b204e222.... Each equals the record's current risk_ruling.pin and `taskRulingPin`
+        (recomputed locally). `needsMachineJudgement(task, releases)` is true for all three, yet none is ever due.
+      - `parkedEscalation` excludes operator releases, so no re-ask reaches them either. Across the rotations there is
+        no machine_judge row for any of the three after the release.
+    MACHINE RELEASES ARE NEITHER READ NOR DURABLE.
+      - The verify-human cadence released 15 tasks with `ratify.approved` rows (`released_by: verify-human-judge`,
+        `author_class: machine`). `approveParkedTask` records a durable release only when there is no provenance, so
+        these exist only as ledger rows, which the daemon does not read.
+      - All 15 records still carry a current-pin risk_ruling `action: escalate` from the machine-filing judge. The two
+        judges disagree on every one, and several sit next to security gates: W1-T10134 (security-merge-policy),
+        W1-T10248 (code-scanning-merge-policy) and W1-T10281 (CodeQL).
+      - If the daemon simply read every `ratify.approved` row, all 15 would dispatch at once over the escalations.
+        That is why item 2 below decides which releases dispatch honours.
+    RETENTION.
+      - `ratify.approved` is in DECISION_RELEVANT_LEDGER_STEPS but capped at MAX_RETAINED_LINES_PER_STEP (200, newest
+        kept). There are 118 live rows today, the oldest from 2026-09-28. Proposal ratifications write the same step.
+      - The machine-filing judge's header measured the cap shedding 75 releases on 2026-09-29.
+      - operator-releases.json holds 9 operator releases (W1-T6107, W1-T5717, W1-T6372, W1-T7271, W1-T7736,
+        W1-T10160, W1-T10208, W1-T10258, W1-T9523). No dispatch path reads it.
+    MEASURED: THE 18 RELEASED, STILL-QUEUED TASKS ARE OTHERWISE DISPATCHABLE.
+      - W1-T6372, W1-T7271, W1-T7736 (operator) and W1-T10122, W1-T10235, W1-T10134, W1-T10237, W1-T10241,
+        W1-T10243, W1-T10281, W1-T10248, W1-T10267, W1-T9263, W1-T10231, W1-T9943, W1-T9948, W1-T10016, W1-T10138
+        (machine). All are status queued, with depends_on [], no dispatch_hold and no .github/workflows/ path in
+        files:. Priorities run 1 to 3, and ten of them sit between 1.0 and 1.41, at the front of the queue.
+      - So low priority does not explain it (b), and neither does any other filter (c).
+      - Zero `dispatch.*` rows name any of them in the live ledger or in any rotation since 2026-10-13.
+    THE COUNTER-EXAMPLE WAS NOT A FLEET DISPATCH.
+      - W1-T10258 (released 2026-10-20T17:50:28Z) became `verify: auto` through the judge's pin in #13183
+        (b934dfd71, 19:44Z).
+      - It now declares .github/workflows/ci.yml, which routes it to operator-build.
+      - Its refs/rmd-dispatch/W1-T10258 claim reads "rmd-dispatch claim 74761@Craigs-Mac-mini
+        2026-10-20T20:04:26Z", a hand claim. W1-T9523's claim is also from Craigs-Mac-mini (11:50:08Z).
+    THE SILENCE. `onFiltered` feeds only the idle tally (daemon.idle_reasons), which is written only when the daemon is
+    idle and caps its ids. No row says "released, but filtered". The last idle_reasons row in the live ledger is from
+    2026-10-10, and no rotation since 2026-10-14 holds one with a non-zero verify-not-auto count.
+    OVERLAP SWEEP 2026-10-21. plan/tasks.d and the 15 open PRs.
+      - W1-T8771 (in flight, claimed) names a disjoint-pack pass-over in a row and edits drain.ts and daemon.ts.
+        This task adds a different row at a different site. The dispatch file-overlap partition serialises the two.
+      - W1-T9045 (in flight, claimed) changes the family prior in machine-filing-judge.ts. It does not touch `due`
+        or `settled`.
+      - No open PR touches releasedIds, resolveReleasedIds, operator-releases.json or the judge's settled map.
+      - W1-T10349 also edits machine-filing-judge.ts (the re-ask path). The file-overlap partition serialises them.
+      - W1-T147 (the overnight chaos drill) also lists src/lib/daemon.ts and src/run-task.ts. It injects faults and
+        reads recovery rows; it does not touch dispatch selection or releases.
+  design: |
+    No fixed bounds. Each pass reads the release record once, at the boundary W1-T6358 set, never once per task.
+    1. ONE RESOLVER FOR EVERY ADMISSION SITE.
+       - The released set unions the ledger's `ratify.approved` rows with state/operator-releases.json, so an
+         operator release that rotation sheds is still honoured.
+       - The same resolver serves the daemon tick, the daemon lane refill, the daemon console kick, `rmd drain` and
+         the run child's `assertRunnable`. No site keeps a ledger-only read.
+       - No reader wired still yields an empty set.
+    2. WHICH RELEASES DISPATCH HONOURS.
+       - An operator release (no `author_class: machine`, or listed in operator-releases.json) is honoured as written.
+       - A machine release is honoured unless the record carries a current-pin risk_ruling with `action: escalate`.
+         That escalation went to a person (operator ruling 2026-09-29), and a second machine judge may not overrule it.
+       - Such a task stays filtered as verify-not-auto and is named per item 4.
+    3. THE DAEMON PASSES IT.
+       - `runDaemon` resolves the set once per tick from `deps.readLedgerLines` and a new durable-release reader, and
+         sets `releasedIds` on `dispatchOpts`.
+       - The lane refill inherits it through the spread it already does.
+       - src/cli/commands/daemon.ts wires the durable reader from the state dir.
+    4. A RELEASED TASK THAT DISPATCH FILTERS OUT IS NAMED.
+       - A wrapper around the tick's `onFiltered` writes `dispatch.released_filtered {task, reason, release_author}`
+         when a task in the released set is filtered, or when a machine release is set aside under item 2.
+       - It writes once per (task, reason) per daemon process, so a stable filter is not re-logged every tick and a
+         changed reason is.
+    5. THE JUDGE PINS AN OPERATOR RELEASE EVEN WHEN AN ESCALATE RULING WAS SETTLED.
+       - In `runMachineFilingJudge`'s `due` filter, a `settled` entry does not mask an operator release on a record
+         that still reads `verify: human`.
+       - A landed operator pin flips the record to verify: auto, so a settled operator ruling still ends the question.
+  acceptance:
+    - claim: "the daemon's tick dispatches a verify:human task an operator released with rmd approve"
+      proof: 'grep: test("W1-T10348: the daemon dispatches an operator-released verify:human task" in test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts'
+    - claim: "an operator release whose ratify.approved row rotation shed is still dispatchable from operator-releases.json"
+      proof: 'grep: test("W1-T10348: a release that rotation shed is still honoured from operator-releases\.json" in test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts'
+    - claim: "a released task the selector filters out, including a machine release over a current-pin escalate ruling, is named once in a dispatch.released_filtered row with its reason"
+      proof: 'grep: test("W1-T10348: a released task dispatch filters out is named with its reason" in test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts'
+    - claim: "the machine-filing judge pins an operator release on a record whose earlier escalate ruling sits in its settled map"
+      proof: 'grep: test("W1-T10348: the judge pins an operator release over a settled escalation" in test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts"
+  falsifier: |
+    - Drop `releasedIds` from the daemon's dispatchOpts: the released task is filtered as verify-not-auto and the
+      first test fails.
+    - Read only the ledger: a release present only in operator-releases.json stays parked and the second test fails.
+    - Keep `onFiltered` tally-only: no dispatch.released_filtered row is written and the third test fails.
+    - Test `settled` before the release branch: the judge writes nothing for the release and the fourth test fails.
+    Regression guards, kept by the same file:
+    - An unreleased verify:human task is still filtered as verify-not-auto.
+    - A released task whose files: touch .github/workflows/ still routes to operator-build (W1-T5351).
+    - A released task still meets dispatch_hold, unmet depends_on, an open PR and a pushed run branch.
+    - A machine release with no escalate ruling dispatches.
+    - The ledger is read once per tick, not once per candidate (W1-T6358).
+    - No reader wired yields an empty set.
+    - The console-kick path keeps admitting an operator release.
