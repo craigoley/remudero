@@ -15,7 +15,8 @@
  *   * upstream calls are serial per limiter and paced from GitHub's own signals: `retry-after`, a
  *     secondary-limit refusal's backoff, and `x-ratelimit-remaining`/`-reset` spread to the reset.
  *
- * WRITES ARE UNCHANGED: a write sent here is refused by name, and `rmd gh` sends writes straight to `gh`.
+ * WRITES ARE UNCHANGED: a write sent here is refused by name, and `rmd gh` refuses writes and auth calls;
+ * a write runs as a plain `gh` call, where hooks/deny-floor.sh judges it.
  * NO FIXED BOUNDS: every number below is an initial guess the broker adapts from GitHub's own signals,
  * and `rmd gh-broker status` prints it. The gain is MEASURED: `status --since <dur>` reads the log.
  *
@@ -38,7 +39,7 @@ import {
 } from "./gh-read-broker-client.js";
 import {
   classifyGhLimitFailure, DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghRunForBroker,
-  ghArgvIsWrite, ghBrokerClassForActor, parseGhRateLimitHeaders, splitGhHeaderBlock,
+  ghArgvIsWrite, ghBrokerClassForActor, parseGhApiArgv, parseGhRateLimitHeaders, splitGhHeaderBlock,
 } from "./github-transport.js";
 import { deriveLedgerActor } from "./ledger.js";
 
@@ -68,8 +69,6 @@ export interface GhBrokerSubject {
   number: number | null;
 }
 
-const API_FLAGS_WITH_VALUE = new Set(["-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field", "--input",
-  "-q", "--jq", "-t", "--template", "-p", "--preview", "--hostname", "--cache"]);
 const PORCELAIN_READS: Record<string, readonly string[]> = {
   pr: ["view", "list", "checks", "diff", "status"],
   issue: ["view", "list", "status"],
@@ -93,39 +92,20 @@ function apiSubjects(endpoint: string): GhBrokerSubject[] {
   return [{ repo: m[1], number: m[2] === undefined ? null : Number(m[2]) }];
 }
 
-/** PURE: what kind of read `args` is, which limiter it spends, and what it is about. */
-export function classifyGhBrokerRead(args: readonly string[], repo?: string): GhBrokerClassified {
+/** PURE but for reading a local GraphQL query file: what kind of read `args` is, which limiter it
+ *  spends, and what it is about. WRITE OR READ IS NOT DECIDED HERE: it is {@link ghArgvIsWrite}, the one
+ *  rule every gh path shares, judged in `cwd`, the directory the upstream call would run in. */
+export function classifyGhBrokerRead(args: readonly string[], repo?: string, cwd?: string): GhBrokerClassified {
   const wantsInclude = args.includes("-i") || args.includes("--include");
   const base = { wantsInclude, upstreamArgs: [...args], subjects: [] as GhBrokerSubject[] };
-  if (ghArgvIsWrite(args)) return { ...base, kind: "write", limiter: "core" };
-  if (args[0] === "api") {
-    let endpoint: string | undefined;
-    let payload = false;
-    let explicitGet = false;
-    let opaque = false;
-    const fieldValues: string[] = [];
-    for (let i = 1; i < args.length; i += 1) {
-      const arg = args[i];
-      const [name, inline] = arg.startsWith("--") && arg.includes("=") ? [arg.slice(0, arg.indexOf("=")), arg.slice(arg.indexOf("=") + 1)] : [arg, undefined];
-      if (API_FLAGS_WITH_VALUE.has(name)) {
-        const value = inline ?? args[i + 1] ?? "";
-        if (inline === undefined) i += 1;
-        if (name === "-X" || name === "--method") explicitGet = value.toUpperCase() === "GET";
-        if (["-f", "--raw-field", "-F", "--field", "--input"].includes(name)) { payload = true; fieldValues.push(value); }
-        if (["-q", "--jq", "-t", "--template", "--cache"].includes(name)) opaque = true;
-      } else if (arg === "--paginate" || arg === "--slurp") opaque = true;
-      else if (!arg.startsWith("-") && endpoint === undefined) endpoint = arg;
-    }
-    if (endpoint === "graphql") {
-      // A mutation is a write, whatever flag carries it.
-      if (fieldValues.some((v) => /(?:^|=)\s*mutation\b/.test(v))) return { ...base, kind: "write", limiter: "graphql" };
-      return { ...base, kind: "opaque", limiter: "graphql" };
-    }
-    // `gh api` with fields and no explicit method sends a POST.
-    if (payload && !explicitGet) return { ...base, kind: "write", limiter: "core" };
-    const limiter: GhBrokerLimiter = /(?:^|\/)search\//.test(endpoint ?? "") ? "search" : "core";
-    const subjects = apiSubjects(endpoint ?? "");
-    if (opaque || payload) return { ...base, kind: "opaque", limiter, subjects };
+  const api = args[0] === "api" ? parseGhApiArgv(args) : undefined;
+  if (ghArgvIsWrite(args, { cwd })) return { ...base, kind: "write", limiter: api?.endpoint === "graphql" ? "graphql" : "core" };
+  if (api !== undefined) {
+    if (api.endpoint === "graphql") return { ...base, kind: "opaque", limiter: "graphql" };
+    const limiter: GhBrokerLimiter = /(?:^|\/)search\//.test(api.endpoint ?? "") ? "search" : "core";
+    const subjects = apiSubjects(api.endpoint ?? "");
+    // A GET with fields sends them as a query string: its output is still one body, but keyed as a unit.
+    if (api.opaqueOutput || api.fields.length > 0 || api.input !== undefined) return { ...base, kind: "opaque", limiter, subjects };
     return { ...base, kind: "api-rest", limiter, subjects, upstreamArgs: args.filter((a) => a !== "-i" && a !== "--include") };
   }
   const verbs = PORCELAIN_READS[args[0] ?? ""];
@@ -559,7 +539,7 @@ export class GhReadBroker {
   private async readOnce(request: GhBrokerReadRequest, onProgress?: (p: GhBrokerProgress) => void): Promise<GhBrokerResult> {
     const startedMs = this.now();
     const cls: GhBrokerClass = isGhBrokerClass(request.class) ? request.class : "background";
-    const c = classifyGhBrokerRead(request.args, request.repo);
+    const c = classifyGhBrokerRead(request.args, request.repo, request.cwd);
     const finish = (result: GhBrokerResult, extra: Record<string, unknown> = {}): GhBrokerResult => {
       this.counts[result.outcome] += 1;
       this.log({ class: cls, key: extra.key, outcome: result.outcome, limiter: c.limiter, wait_ms: this.now() - startedMs, ...extra });
@@ -871,7 +851,7 @@ function resolvePorcelainRepo(args: readonly string[], env: NodeJS.ProcessEnv): 
   return flagValue(args, "-R", "--repo") ?? (env.GH_REPO || undefined);
 }
 
-/** Runs `gh` directly with inherited stdio, for writes and when no broker is live; resolves its exit code. */
+/** Runs a `gh` read directly with inherited stdio when no broker is live; resolves its exit code. */
 export function runGhDirect(args: string[]): Promise<number> {
   return new Promise((resolve) => {
     const child = spawn("gh", args, { stdio: "inherit" });
@@ -911,9 +891,16 @@ export async function ghCommand(
     err(`${GH_COMMAND_USAGE}\n`);
     return 2;
   }
-  const socketPath = ghArgvIsWrite(args) ? undefined : ghReadBrokerLive(env);
-  if (socketPath === undefined) return runDirect(args);
+  // A READ CLIENT. A write (the one write rule, ghArgvIsWrite) or any `auth` call is refused, never run:
+  // run here it would pass hooks/deny-floor.sh's gh rules, which judge the command a session typed.
   const cwd = process.cwd();
+  if (args[0] === "auth" || ghArgvIsWrite(args, { cwd })) {
+    err(`rmd gh: refused - rmd gh serves GitHub reads only, and \`gh ${args.slice(0, 2).join(" ")}\` is ${args[0] === "auth" ? "an auth call" : "a write"}.\n`);
+    err("  Run it as a plain `gh` call, where the deny floor judges it.\n");
+    return 2;
+  }
+  const socketPath = ghReadBrokerLive(env);
+  if (socketPath === undefined) return runDirect(args);
   try {
     const result = await read(socketPath, args, {
       class: cls, caller: ghBrokerCallerId(env), fresh, cwd, repo: resolvePorcelainRepo(args, env),

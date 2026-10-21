@@ -1,0 +1,49 @@
+- id: W1-T10087
+  title: "The shared PR opener executes remaining acceptance criteria, not criteria already credited with satisfied_by"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # One shared-opener concern spanning the sync and async production paths.
+  band_meaning: span
+  origin: "operator-approved follow-through 2026-10-17; #12258 and actual shared-opener controls"
+  files:
+    - src/lib/pr-open.ts
+    - test/a-pr-opens-with-a-judgeable-body.test.ts
+    - test/a-pr-open-proof-runs-off-the-daemon-loop.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W8707 already credits its production captureRepositoryFlow criterion to #11180 with satisfied_by.
+    filedCriteria returns every row and both shared opener paths execute the credited proof again.
+    Actual-module v2 controls on a positively recognized filed-task branch show executed_stale for the
+    credited old proof, an undefined-proof string operation for a schema-valid credited proofless row,
+    and successful execution for an independent new-only criterion. The invalid T1-branch v1 diagnostic
+    is retained as RED and is not evidence. W3729 fixed review discrimination, not this shared opener.
+    Preserve W8707's remaining criteria, four retained branches and every existing credit; no retirement.
+  design: |
+    Derive credited versus executable criteria once from the actual filed plan, matching the review
+    contract's satisfied_by truthiness. Keep credited claim/provenance visible as non-executable context;
+    never fabricate a proof, execute a credited proof, count it as newly executed or mint fresh credit.
+    Render/compare/execute every remaining criterion in order, with all existing malformed-body, trailer,
+    stale-proof and failed-proof checks retained. Missing or invalid unsatisfied proofs still refuse.
+    Reuse this derivation for sync opening, asynchronous pre-running and async opening so they cannot drift.
+    A task with no executable criteria must produce a named typed disposition, not an empty acceptance
+    block, raw TypeError, invented proof, automatic retirement or broad success. Preserve the unfiled lane.
+    Cover credited rows both with and without legacy proof text, a mixed failing remaining criterion,
+    all-credited input, healthy already-authored bodies, and the real default shell-out proof runner.
+    Use existing test files/helpers; do not add a new run-task importer or weaken the importer ratchet.
+  acceptance:
+    - claim: "sync opening preserves prior-credit context and executes only the remaining filed criteria, including a proofless credited row"
+      proof: "unit test: the shared PR opener does not execute a satisfied_by criterion"
+    - claim: "async opening and pre-running use the same credited-versus-executable split and still refuse a failing remaining proof"
+      proof: "unit test: async PR opening checks every remaining proof beside prior credit"
+    - claim: "an all-credited task has a named typed disposition without fabricated acceptance or raw string errors"
+      proof: "unit test: an all-credited filed task has no invented executable proof"
+  falsifier: |
+    Remove the split: the recording real-grep runner sees the credited stale proof or a string exception.
+    Skip the full list when any credit exists: the failing remaining proof is accepted and its control fails.
+    Filter only sync or only async: the corresponding mixed-criteria test fails.
