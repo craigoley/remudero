@@ -27,7 +27,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
-import { autoTriageCheck, buildAutoTriageDaemonHooks } from "../src/run-task.js";
+import { autoTriageCheck, buildAutoTriageDaemonHooks, AUTO_TRIAGE_CONTRACT_VERSION } from "../src/run-task.js";
+import { buildRatificationRow } from "../src/lib/ratification.js";
 import { loadPolicy, policyPath, validatePolicy, PolicyError, type Policy } from "../src/lib/policy.js";
 import { decideAutoTriage } from "../src/lib/auto-triage.js";
 import type { Config } from "../src/lib/config.js";
@@ -83,6 +84,69 @@ test("an injected disabled policy governs, whatever the checked-in policy says",
   } finally {
     cleanup();
   }
+});
+
+test("repair priority cannot run through an old operation pin or a disabled triage rung", async () => {
+  const { config, cleanup } = tmpConfig();
+  let reads = 0;
+  const repairSnapshot = () => { reads++; return undefined; };
+  try {
+    const policy = policyFixture({ enabled: true, minIntervalMinutes: 60, maxPerDay: 4 });
+    const row = buildRatificationRow("autoTriage", policy.values.autoTriage, "v1", "operator", new Date(0));
+    assert.notEqual(AUTO_TRIAGE_CONTRACT_VERSION, "v1", "a candidate-order change must move the operation contract");
+    const pinned = buildAutoTriageDaemonHooks({ config, policy, repairSnapshot,
+      ratifications: new Map([["autoTriage", row]]) });
+    const decision = await pinned.checkAutoTriage({ deferralPending: true, dispatchCount: 0, laneBudget: 1 });
+    assert.equal(decision.fire, false);
+    assert.match(decision.reason, /refused|drifted/);
+    const disabled = buildAutoTriageDaemonHooks({ config, repairSnapshot,
+      policy: policyFixture({ enabled: false, minIntervalMinutes: 60, maxPerDay: 4 }) });
+    assert.equal((await disabled.checkAutoTriage({ deferralPending: true, dispatchCount: 0, laneBudget: 1 })).fire, false);
+    assert.equal(reads, 0, "ordinary admission refuses before even consulting the cache supplier");
+  } finally { cleanup(); }
+});
+
+test("the wired triage check chooses a verified repair through its real default reader and preserves the cap", async () => {
+  const { config, cleanup } = tmpConfig();
+  const now = new Date("2026-10-21T20:00:00Z");
+  const feedbackRoot = join(config.root, "feedback-repo");
+  const feedbackDir = join(feedbackRoot, "plan", "feedback");
+  const dir = join(config.root, "state", "dep-review-holds", "craigoley", "remudero");
+  const repair = "fb-repair", incident = "incident-old", head = "a".repeat(40);
+  mkdirSync(feedbackDir, { recursive: true }); mkdirSync(dir, { recursive: true });
+  writeFileSync(join(feedbackDir, `${incident}.yaml`), "status: new\nts: 2026-10-15T00:00:00Z\n");
+  writeFileSync(join(feedbackDir, `${repair}.yaml`), "status: new\nts: 2026-10-21T16:00:00Z\n");
+  writeFileSync(join(config.root, "state", "last-auto-triage.json"), JSON.stringify({ fires: [] }));
+  writeFileSync(join(dir, "own-red-proposals.json"), JSON.stringify({ proposals: [{ feedbackId: repair,
+    prNumbers: [13350], bumps: ["sdk@1.0.1"] }] }));
+  writeFileSync(join(dir, "PR13350.json"), JSON.stringify({ ownRed: { feedbackId: repair, headSha: head,
+    bumps: [{ dependency: "sdk", fromVersion: "1.0.0", toVersion: "1.0.1" }], redChecks: ["ci"],
+    firstSeenMs: now.getTime() - 7200000, lastSeenMs: now.getTime() } }));
+  let reads = 0, red = true;
+  const hooks = buildAutoTriageDaemonHooks({ config, feedbackRoot, now: () => now,
+    policy: policyFixture({ enabled: true, minIntervalMinutes: 1, maxPerDay: 1 }), ratifications: new Map(),
+    repairSnapshot: () => { reads++; return { owner: "craigoley", repo: "remudero", asOfMs: now.getTime(), prs: [{
+      prNumber: 13350, headSha: head, headRefName: "dependabot/npm_and_yarn/sdk", checksState: red ? "red" : "green",
+      createdAt: "2026-10-21T16:00:00Z",
+    }] }; },
+  });
+  try {
+    const signals = { deferralPending: true, dispatchCount: 0, laneBudget: 1 };
+    const prioritized = await hooks.checkAutoTriage(signals);
+    assert.equal(prioritized.fire, true);
+    if (!prioritized.fire) throw new Error(prioritized.reason);
+    assert.equal(prioritized.feedbackId, repair);
+    assert.match(prioritized.reason, /verified aged dependency repair/);
+    red = false;
+    const ordinary = await hooks.checkAutoTriage(signals);
+    assert.equal(ordinary.fire, true);
+    if (!ordinary.fire) throw new Error(ordinary.reason);
+    assert.equal(ordinary.feedbackId, incident, "a green PR cannot displace FIFO");
+    const before = reads;
+    writeFileSync(join(config.root, "state", "last-auto-triage.json"), JSON.stringify({ fires: [now.toISOString()] }));
+    assert.equal((await hooks.checkAutoTriage(signals)).fire, false);
+    assert.equal(reads, before, "priority never permits another fire beyond the existing cap");
+  } finally { cleanup(); }
 });
 
 test("an injected enabled policy is not refused for being disabled", async () => {
