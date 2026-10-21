@@ -71,6 +71,7 @@ test("an exit line of any code with or without its period is not evidence of why
 });
 
 test("a real error annotation beside the exit line is kept and the exit line dropped", () => {
+  let logReads = 0;
   const failures = fetchCiFailures(
     "o",
     "r",
@@ -79,12 +80,14 @@ test("a real error annotation beside the exit line is kept and the exit line dro
     {
       fetchAnnotations: () => ["diff-coverage: BLOCKED", "  - src/lib/learnings.ts:621", "Process completed with exit code 1."],
       fetchJobLog: () => {
-        throw new Error("the log is not read when an annotation already names the failure");
+        logReads += 1;
+        throw new Error("HTTP 403");
       },
     },
   );
   assert.equal(failures[0]?.tailSource, "annotations");
   assert.equal(failures[0]?.logTail, "diff-coverage: BLOCKED\n  - src/lib/learnings.ts:621");
+  assert.equal(logReads, 1, "an unreadable log leaves the actionable annotations as the fallback");
 });
 
 // The job-log endpoint stamps every line, which the TAP pattern (anchored at the line start) never

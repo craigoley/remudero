@@ -5,8 +5,11 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.22
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10329 — 1 round in 3 d (PR #13313, 10-21). The failure
+  # is the authority ratchet refusing a new external write with no AUTHORITY_TABLE row, which is the gate working.
+  # A remedy in src/lib/authority.ts that prevents the round would weaken it.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/authority-ratchet.test.ts"

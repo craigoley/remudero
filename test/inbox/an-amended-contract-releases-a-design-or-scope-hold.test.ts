@@ -101,6 +101,8 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
   test("a NEEDS_SCOPE hold releases when the task's scope is amended on main", async () => {
     const rows: Record<string, unknown>[] = [
       { step: "sweep.disposed", task_id: TASK, pr_number: 13039, head_sha: HEAD, disposition: "blocked-fixable", acted: true, red_checks: [RED] },
+      { step: "fix.scope_amendment", task_id: TASK, pr_number: 13039, head_sha: HEAD,
+        outcome: "created", amendmentNumber: 13106, paths: ["src/lib/scout-gardener.ts"] },
       { step: "fix.commit_refused", task_id: TASK, head_sha: HEAD, reason: "non-test paths need scope",
         scope_amendment_detail: "NEEDS_SCOPE src/lib/scout-gardener.ts" },
     ];

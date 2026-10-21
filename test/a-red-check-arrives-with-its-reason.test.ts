@@ -53,7 +53,7 @@ const NODE_TEST_FAILURE_LOG = [
   "afterword that must not be carried forever",
 ].join("\n");
 
-test("a failing check with annotations reaches the fix rung carrying their text, not just its conclusion", () => {
+test("a failing check with annotations carries the readable log's failure to the fix rung", () => {
   const r = recorder({
     annotations: { "101": ["diff-coverage: BLOCKED -- src/lib/review.ts:1101"] },
     logs: { "101": NODE_TEST_FAILURE_LOG },
@@ -64,10 +64,14 @@ test("a failing check with annotations reaches the fix rung carrying their text,
     fetchJobLog: r.fetchJobLog,
   });
 
-  assert.equal(failure?.logTail, "diff-coverage: BLOCKED -- src/lib/review.ts:1101");
-  assert.equal(failure?.tailSource, "annotations");
+  assert.match(failure?.logTail ?? "", /comment-load baseline rejects new file/);
+  assert.doesNotMatch(failure?.logTail ?? "", /diff-coverage: BLOCKED/);
+  assert.equal(failure?.tailSource, "log");
   assert.equal(failure?.annotationFallback?.outcome, "recovered");
-  assert.deepEqual(r.logCalls, [], "usable annotation evidence means the larger log is not read");
+  assert.deepEqual(failure?.annotations, [
+    { message: "diff-coverage: BLOCKED -- src/lib/review.ts:1101", from_passing_test: false },
+  ]);
+  assert.deepEqual(r.logCalls, ["101"], "the readable failure is checked before choosing an excerpt");
 });
 
 test("a bare exit-code annotation falls through to the job log and extracts the failure region", () => {
