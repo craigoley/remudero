@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   author_class: machine
   principles: {tdd: strict}
   priority: 1
@@ -18,8 +18,6 @@
     - .github/workflows/acr-build.yml
     - src/lib/deployer.ts
     - src/lib/deploy-judge.ts
-    - src/lib/image-dependency-inputs.mjs
-    - src/lib/image-dependency-inputs.d.mts
     - src/lib/baked-runtime-inputs.ts
     - deploy/install-host-units.sh
     - test/acr-build-trigger.test.ts
@@ -59,9 +57,12 @@
     building. The backup PR13317's approved catalog contribution is a separate existing owner.
   design: |
     Establish a deterministic semantic contract for the existing installation recipe's
-    material root dependency inputs. Prefer one small plain-JavaScript helper compatible with
-    both the workflow's existing Node step and the typed runtime reader, with an explicit type
-    companion if needed. No npm install, network request or provider call belongs in this reader.
+    material root dependency inputs using the existing workflow and deployer adapters. Keep the
+    workflow's small native-Node comparison and the runtime extraction behaviorally equivalent
+    through one shared test corpus that executes both real consumers. Do not install the whole
+    repository just to run the build decision. A new shared module, if genuinely needed, requires
+    normal path/scope admission and measured catalog wiring first; none is implicitly declared.
+    No npm install, network request or provider call belongs in the decision reader.
     Cover resolved package version, integrity, location, dependency graph, entry addition/removal
     and installation-relevant flags/metadata. Until the full-install fallback changes separately,
     conservatively include its possible closure instead of dropping dev entries. Trace optional,
@@ -115,3 +116,5 @@
     verify through the maintained reservation-chain parser, not a raw substring guess.
     The mint exited0 and took one attempt with no takeover. Held is not filed or implemented.
     Existing source/runtime ownership, full normal checks and all production holds remain.
+    Machine authoring remains explicit. verify: human preserves Law5 until a real operator
+    or ratified-judge ruling clears this task; no risk verdict or automatic release is fabricated.
