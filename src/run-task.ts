@@ -78,6 +78,8 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
+// @ts-expect-error executable gate module has no declaration file.
+import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -25122,6 +25124,32 @@ function checkAcceptanceChangedFiles(): string[] {
     .filter(Boolean);
 }
 
+/** Explain copied build evidence using only shards in this branch's plan-only diff. */
+function checkAcceptanceFilingHint(criteria: AcceptanceCriterion[], refusal: string, deps: CheckAcceptanceDeps): string | undefined {
+  try {
+    const changed = (deps.changedFiles ?? checkAcceptanceChangedFiles)();
+    if (!isPlanOnlyDiff(changed)) return undefined;
+    const refused = new Set([...refusal.matchAll(/criterion (\d+)/g)].map((m) => Number(m[1]) - 1));
+    for (const shard of changed.filter((path) => /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path) && existsSync(path))) {
+      for (const task of parseTasksFromYaml(readFileSync(shard, "utf8"), shard)) {
+        const copied = criteria.some((criterion, index) => {
+          if (!refused.has(index)) return false;
+          const proof = criterion.proof?.trim() ?? "";
+          return (task.files ?? []).some((path) => proof.endsWith(` in ${path}`) || proof === `unit test: ${path}`) ||
+            (/^unit test:/i.test(proof) && (task.files ?? []).length > 0 &&
+              (task.acceptance ?? []).some((c) => c.proof?.trim() === proof));
+        });
+        if (copied) return `this is ${task.id}'s BUILD proof; a filing PR proves the filing, e.g. ` +
+          `grep: ^- id: ${task.id}$ in ${shard}, or a distinctive design phrase in the shard.`;
+      }
+    }
+    return undefined;
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    return `filing context unavailable: ${reason}; the proof refusal still applies.`;
+  }
+}
+
 /** Seam for {@link replayGoldensCommand} (W1-T2689). Every field is injectable so the whole verb --
  *  including its refusals -- is unit-drivable without dispatching a worker or touching a ledger. */
 export interface ReplayGoldensDeps {
@@ -25354,20 +25382,9 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     releaseBaseProofDir(process.cwd(), built, baseRemoveWorktree);
   }
 
-  // #11704 (2026-10-14): acceptance-author-gate refuses a body `grep:` pattern wrapped in quotes or backticks
-  // (wrappedGrepPattern, authorTimeProofShapeRefusal) whether or not it matches, and this verb printed OK on it.
-  // The gate skips the check when the criteria come from a trailer's shard, so this does too.
-  const wrapped = trailerResolved ? [] : criteria.flatMap((c, i) => {
-    const w = wrappedGrepPattern(c.proof ?? "");
-    return w ? [`criterion ${i + 1} wraps its grep pattern in ${w.delimiter}; use: grep: ${w.bare} in <path>`] : [];
-  });
   // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
   // still discriminate instead, and the exit code follows non-zero, the gate's own contract.
   const okOrStale = (okLine: string): number => {
-    if (wrapped.length > 0) {
-      console.log(`REFUSED by acceptance-author-gate (proof-shape): ${wrapped.join("; ")}.`);
-      return 1;
-    }
     if (staleCount === 0) {
       console.log(okLine);
       return 0;
@@ -25418,6 +25435,15 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     trailerResolves: (id) => id === taskId && trailerResolved,
   });
   if (authorCheck.ok) {
+    // Reuse the gate's private authorTimeProofShapeRefusal through its existing entry point.
+    // No PR identity/diff metadata is supplied: only body proofs are judged on this arm.
+    const gate = acceptanceBodyGate({ body, trailerResolves: () => false, root: process.cwd() });
+    if (!gate.ok) {
+      console.log(`REFUSED by acceptance-author-gate (${gate.defect}): ${gate.message}`);
+      const hint = checkAcceptanceFilingHint(criteria, gate.message, deps);
+      if (hint) console.log(hint);
+      return 1;
+    }
     return okOrStale("OK — the parser resolves exactly what was written, and every proof is non-empty.");
   }
   if (!d.headerFound) {
