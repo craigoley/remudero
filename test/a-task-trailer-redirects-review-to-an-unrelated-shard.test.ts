@@ -82,7 +82,7 @@ function fixture(): { planPath: string; bodyPath: (body: string) => string } {
   };
 }
 
-const OWN_BLOCK = ["A body carrying its own well-formed block.", "", "## Acceptance", "", "- my own claim | grep: thing in src/lib/thing.ts", ""].join("\n");
+const OWN_BLOCK = ["A body carrying its own well-formed block.", "", "## Acceptance", "", "- my own claim | grep: checkAcceptanceCommand in src/run-task.ts", ""].join("\n");
 const withTrailer = (taskId: string) => `${OWN_BLOCK}\nRemudero-Task: ${taskId}\n`;
 
 /** Run the command capturing stdout, so the assertions read what an operator actually sees. */
