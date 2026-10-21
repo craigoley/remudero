@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse, stringify } from "yaml";
@@ -214,4 +215,35 @@ test("hosted wiring seals protected-base evidence before candidate code and reta
   assert.match(workflow.jobs.ci.env.RMD_CI_DEPENDENCY_DIGEST, /needs\.commitlint\.outputs\.dependency_digest/);
   assert.ok(workflow.jobs.ci.steps.some((step: { run?: string }) => step.run?.includes('gh run download "$GITHUB_RUN_ID"') &&
     step.run.includes('ci-dependency-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}')));
+});
+
+test("the protected-base producer loader ignores candidate configuration", t => {
+  const root = ownedFixtureDir(t, "hosted-producer-loader").dir;
+  const runtime = join(root, "trusted"), candidate = join(root, "candidate"), marker = join(root, "candidate-executed");
+  mkdirSync(join(runtime, "node_modules/tsx/dist"), { recursive: true }); mkdirSync(candidate);
+  writeFileSync(join(runtime, "package.json"), '{"type":"module"}');
+  writeFileSync(join(candidate, "package.json"), '{"type":"module"}');
+  writeFileSync(join(runtime, "node_modules/tsx/dist/loader.mjs"), `import ${JSON.stringify(import.meta.resolve("tsx"))};\n`);
+  writeFileSync(join(runtime, "tsconfig.json"), JSON.stringify({ compilerOptions: { paths: { "fixture-binding": ["./binding.ts"] } } }));
+  writeFileSync(join(runtime, "binding.ts"), 'export const value = "trusted";\n');
+  writeFileSync(join(runtime, "producer.ts"), 'export { value } from "fixture-binding";\n');
+  writeFileSync(join(candidate, "tsconfig.json"), JSON.stringify({ compilerOptions: { paths: { "fixture-binding": ["./binding.ts"] } } }));
+  writeFileSync(join(candidate, "binding.ts"), `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "executed"); export const value = "candidate";\n`);
+  const workflow = parse(readFileSync(".github/workflows/ci.yml", "utf8"));
+  const run = workflow.jobs.commitlint.steps.find((step: { id?: string }) => step.id === "dependency-evidence").run as string;
+  const command = run.split("\n").find(line => line.includes('node --import "$dependency_runtime/node_modules/tsx/dist/loader.mjs"'));
+  assert.ok(command, "the actual protected-runtime loader invocation must exist");
+  const invocation = command.trim().replace(/ <<'NODE'$/, "");
+  const input = 'import { pathToFileURL } from "node:url"; const { value } = await import(pathToFileURL(process.argv[2] + "/producer.ts").href); console.log(value);';
+  const observe = (line: string) => execFileSync("bash", ["-euo", "pipefail", "-c", `${line} <<'PROBE'\n${input}\nPROBE`], {
+    cwd: candidate, encoding: "utf8", env: { ...process.env, TSX_TSCONFIG_PATH: undefined,
+      dependency_runtime: runtime, dependency_base: "a".repeat(40), dependency_dir: root },
+    // BACKSTOP: terminate a loader probe that never exits.
+    timeout: 30_000,
+  }).trim();
+  const unpinned = invocation.replace(/^TSX_TSCONFIG_PATH="\$dependency_runtime\/tsconfig\.json"\s+/, "");
+  assert.equal(observe(unpinned), "candidate", "positive control: the checkout configuration redirects the real loader");
+  assert.equal(existsSync(marker), true); rmSync(marker);
+  assert.equal(observe(invocation), "trusted");
+  assert.equal(existsSync(marker), false, "candidate code must never run in the protected producer");
 });

@@ -1110,7 +1110,7 @@ jobs:
           dependency_dir="$(mktemp -d "$RUNNER_TEMP/rmd-ci-dependency-evidence-XXXXXX")"
           git archive "$dependency_base" | tar -x -C "$dependency_runtime"
           (cd "$dependency_runtime" && npm ci --ignore-scripts --no-audit --no-fund)
-          node --import "$dependency_runtime/node_modules/tsx/dist/loader.mjs" --input-type=module - "$dependency_runtime" "$dependency_base" "$dependency_dir" <<'NODE'
+          TSX_TSCONFIG_PATH="$dependency_runtime/tsconfig.json" node --import "$dependency_runtime/node_modules/tsx/dist/loader.mjs" --input-type=module - "$dependency_runtime" "$dependency_base" "$dependency_dir" <<'NODE'
           import { appendFileSync, writeFileSync } from 'node:fs';
           import { join } from 'node:path';
           import { pathToFileURL } from 'node:url';
