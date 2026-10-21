@@ -1,0 +1,68 @@
+- id: W1-T10347
+  title: "A failed Inbox interpretation stays read-only instead of requesting a redraft"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  principles: {tdd: strict}
+  origin: "operator:console-inbox-readonly-fallback-20261021"
+  files:
+    - src/lib/inbox-responder.ts
+    - test/an-inbox-item-is-a-conversation.test.ts
+    - test/inbox/failed-interpretation-is-read-only.test.ts
+  rationale: |
+    Rule 19 / #588: drive answerThread through realThreadDecider and the existing non-dispatch
+    receipt wrapper, retaining a joined failed worker attempt while proving no business action.
+    An isolated controlled-worker fixture on 2026-10-21 found that "What happens next?" reaches
+    reframe when its interpreter returns an empty failed result or throws after assignment.
+    This is not evidence a live redraft occurred. The path is decideFor falling back to an empty
+    keyword question, then answerThread converting empty questions into edit under W1-T9252.
+    The operator chose "Read-only fallback; explicit commands unchanged". W1-T10272 owns model
+    evidence audit/regression, not this behavior change. W1-T10283 owns reply-to-work causality;
+    preserve its contracts and coordinate before publication, without competing pushes.
+    OWASP LLM06 Excessive Agency recommends limiting autonomous effects and retaining approvals
+    for high-impact actions. Interpreter failure is not evidence of user intent to modify work.
+  design: |
+    Distinguish a failed/unusable configured interpreter from a successfully validated decision
+    and from the existing no-interpreter keyword mode. When a configured interpreter throws,
+    returns null, invalid JSON or an invalid decision, keep a plain unclassified question
+    read-only. Explain that interpretation was unavailable, that nothing was changed, and how
+    the operator can retry or use the existing buttons. Do not infer redraft from missing intent.
+    Explicit keyword actions after interpreter failure retain their existing behavior, including
+    state guards and approval-as-suggestion only. Successful validated model decisions and the
+    existing no-interpreter direction-to-redraft behavior remain unchanged. Do not add semantic
+    question regexes or pretend keyword matches fully understand prose.
+    Preserve the existing question bound, idempotent thread processing and plain-language output.
+    Exhausted clarification must remain read-only, never turn back into edit. No fallback may
+    write a proposal mutation or claim work was filed; normal answer/attempt receipts still record
+    what happened. Any retry is initiated by the operator, not automatically scheduled here.
+    Keep one assignment and one attempt per real interpreter invocation, including throws after
+    selection. Use the real benchmarkNonDispatchSpawn wrapper with a controlled raw worker and
+    a private ledger sink; no model/provider calls in tests, no automatic retry or new provider.
+    Add the regression in the computed test/inbox/ folder. Update only the existing conversation
+    fixture assertion that currently expects an invalid empty model answer to request a redraft;
+    retain positive explicit-command, valid-model and no-interpreter direction controls.
+    No new action tier, API, retry endpoint, permission, billing, budget, service or deployment
+    setting is included. This task does not repair stale conversation-list reads or claim the
+    whole Inbox is healthy. Initial machine filing remains unjudged until normal release.
+  acceptance:
+    - claim: "Failed empty or unparseable interpretation of a plain question yields a read-only answer and never a redraft"
+      proof: "unit test: W1-T10347: unusable interpretation of a plain question never requests a redraft"
+    - claim: "Thrown interpretation preserves one failed attempt, a read-only answer, and idempotence without automatic retry"
+      proof: "unit test: W1-T10347: a thrown interpreter stays read-only with one joined attempt and no retry"
+    - claim: "Explicit keyword actions keep their existing allowed effects and approval remains a suggestion after interpreter failure"
+      proof: "unit test: W1-T10347: explicit commands retain their existing flow after interpretation failure"
+    - claim: "Valid model decisions and no-interpreter direction behavior are preserved, and exhausted fallback questions remain read-only"
+      proof: "unit test: W1-T10347: fallback safety preserves valid decisions and bounded conversation behavior"
+  falsifier: |
+    First run the new physical tests against unchanged production and retain complete TAP with
+    failed plain-question cases. Implement only the approved boundary distinction, then rerun.
+    In a disposable clone remove only the boundary repair, keeping identical test bytes: the
+    plain-question regression must fail again. Exact restoration must pass with no skipped or
+    cancelled cases. Count reframe callbacks, proposal-mutation ledger rows, thread answers and
+    worker assignment/attempts; zero effects needs working explicit-command positive controls.
