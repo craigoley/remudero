@@ -15,7 +15,8 @@
  *   * upstream calls are serial per limiter and paced from GitHub's own signals: `retry-after`, a
  *     secondary-limit refusal's backoff, and `x-ratelimit-remaining`/`-reset` spread to the reset.
  *
- * WRITES ARE UNCHANGED: a write sent here is refused by name, and `rmd gh` sends writes straight to `gh`.
+ * WRITES ARE UNCHANGED: a write sent here is refused by name, and `rmd gh` refuses writes and auth calls;
+ * a write runs as a plain `gh` call, where hooks/deny-floor.sh judges it.
  * NO FIXED BOUNDS: every number below is an initial guess the broker adapts from GitHub's own signals,
  * and `rmd gh-broker status` prints it. The gain is MEASURED: `status --since <dur>` reads the log.
  *
@@ -850,7 +851,7 @@ function resolvePorcelainRepo(args: readonly string[], env: NodeJS.ProcessEnv): 
   return flagValue(args, "-R", "--repo") ?? (env.GH_REPO || undefined);
 }
 
-/** Runs `gh` directly with inherited stdio, for writes and when no broker is live; resolves its exit code. */
+/** Runs a `gh` read directly with inherited stdio when no broker is live; resolves its exit code. */
 export function runGhDirect(args: string[]): Promise<number> {
   return new Promise((resolve) => {
     const child = spawn("gh", args, { stdio: "inherit" });
@@ -890,9 +891,15 @@ export async function ghCommand(
     err(`${GH_COMMAND_USAGE}\n`);
     return 2;
   }
-  // The one write rule (ghArgvIsWrite): a write never reaches the broker, which would refuse it.
+  // A READ CLIENT. A write (the one write rule, ghArgvIsWrite) or any `auth` call is refused, never run:
+  // run here it would pass hooks/deny-floor.sh's gh rules, which judge the command a session typed.
   const cwd = process.cwd();
-  const socketPath = ghArgvIsWrite(args, { cwd }) ? undefined : ghReadBrokerLive(env);
+  if (args[0] === "auth" || ghArgvIsWrite(args, { cwd })) {
+    err(`rmd gh: refused - rmd gh serves GitHub reads only, and \`gh ${args.slice(0, 2).join(" ")}\` is ${args[0] === "auth" ? "an auth call" : "a write"}.\n`);
+    err("  Run it as a plain `gh` call, where the deny floor judges it.\n");
+    return 2;
+  }
+  const socketPath = ghReadBrokerLive(env);
   if (socketPath === undefined) return runDirect(args);
   try {
     const result = await read(socketPath, args, {
