@@ -24,13 +24,13 @@
  * is the operator-approved exception (2026-10-20), an account-local helper installed like the Mac janitor
  * by deploy/mac/install-gh-read-broker.sh. It makes only GitHub READS, as the account's own `gh` identity.
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync, chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync,
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import {
   brokerGhRead, brokerRequest, GH_BROKER_CLASSES, GH_BROKER_HEARTBEAT, GH_BROKER_INVALIDATIONS, GH_BROKER_SOCKET,
@@ -38,10 +38,12 @@ import {
   type GhBrokerClass, type GhBrokerOutcome, type GhBrokerProgress, type GhBrokerReadRequest, type GhBrokerResult,
 } from "./gh-read-broker-client.js";
 import {
-  classifyGhLimitFailure, DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghRunForBroker,
-  ghArgvIsWrite, ghBrokerClassForActor, parseGhApiArgv, parseGhRateLimitHeaders, splitGhHeaderBlock,
+  classifyGhLimitFailure, DEFAULT_GH_CALL_TIMEOUT_MS, DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghRunForBroker,
+  ghArgvIsWrite, ghBrokerClassForActor, parseGhApiArgv, parseGhRateLimitHeaders, refuseSentinelGhToken, splitGhHeaderBlock,
 } from "./github-transport.js";
 import { deriveLedgerActor } from "./ledger.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { hostWorktreeGitEnv, pinWorktreeGit } from "./worktree-git.js";
 
 // ── WHAT A READ IS ──────────────────────────────────────────────────────────────────────────────
 
@@ -92,6 +94,73 @@ function apiSubjects(endpoint: string): GhBrokerSubject[] {
   return [{ repo: m[1], number: m[2] === undefined ? null : Number(m[2]) }];
 }
 
+function apiUsesStdin(args: readonly string[]): boolean {
+  if (args[0] !== "api") return false;
+  const api = parseGhApiArgv(args);
+  return api.input === "-" || api.fields.some((f) => f.typed && f.value === "@-");
+}
+
+/** Keep gh's rendering flags out of the request identity, including attached short flag values. */
+function apiRequestArgs(args: readonly string[], rendering = false): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const name = arg.split("=")[0];
+    if (["-i", "--include"].includes(name)) continue;
+    if (name === "--cache" || (!rendering && ["-q", "--jq", "-t", "--template"].includes(name))) {
+      if (!arg.includes("=")) i++;
+      continue;
+    }
+    if (!rendering && (/^-[qt].+/.test(arg) || ["--silent", "--verbose"].includes(name))) continue;
+    out.push(arg);
+    if (["-H", "--header", "-p", "--preview", "-f", "--raw-field", "-F", "--field", "-X", "--method", "--input", "--hostname"].includes(arg) && i + 1 < args.length) out.push(args[++i]);
+  }
+  return out;
+}
+
+/** A missing file/context is a passthrough, never a cache identity shared with another failure. */
+function apiRequestIdentity(request: GhBrokerReadRequest): unknown[] | undefined {
+  const args = apiRequestArgs(request.args);
+  const api = parseGhApiArgv(args);
+  try {
+    const hashFile = (path: string) => createHash("sha256").update(readFileSync(resolve(request.cwd ?? process.cwd(), path))).digest("hex");
+    const fields = api.fields.map((f) => [f.typed, f.key, f.typed && f.value.startsWith("@") ? ["sha256", hashFile(f.value.slice(1))] : f.value]);
+    const input = api.input === undefined ? undefined : hashFile(api.input);
+    const placeholders = [api.endpoint ?? "", ...api.fields.map((f) => f.value)].join("\n");
+    let context: unknown;
+    if (/\{(?:owner|repo|branch)\}/.test(placeholders)) {
+      const cwd = request.cwd ?? process.cwd();
+      // Pin the repository and neutralise executable config. These two commands only read metadata;
+      // unlike worktree operations, they must admit the account's remote.*.gh-resolved marks.
+      const pin = pinWorktreeGit(cwd);
+      const git = (args: string[]) => execFileSync("git", args, {
+        encoding: "utf8", env: hostWorktreeGitEnv(pin), timeout: DEFAULT_GH_CALL_TIMEOUT_MS, killSignal: "SIGKILL",
+      });
+      const remotes = git(["config", "--local", "--get-regexp", "^remote\\..*\\.(url|gh-resolved)$"]);
+      const branch = placeholders.includes("{branch}") ? git(["symbolic-ref", "--quiet", "HEAD"]) : undefined;
+      context = [remotes, branch];
+    }
+    // Field file paths are replaced by their bytes; all other request flags retain gh's ordering.
+    const shape = args.filter((arg, i) => {
+      if (["-f", "-F", "--field", "--raw-field", "--input", "-X", "--method"].includes(arg)) return false;
+      if (["-f", "-F", "--field", "--raw-field", "--input", "-X", "--method"].includes(args[i - 1])) return false;
+      return !/^(?:--(?:field|raw-field|input|method)=|-[fFX].+)/.test(arg);
+    });
+    return [api.method, shape, fields, input, request.repo ?? "", context];
+  } catch (cause) {
+    // gh owns the diagnostic. No identity is safer than memoising an unreadable input or repository.
+    void cause;
+    return undefined;
+  }
+}
+
+function directoryBytes(dir: string): number {
+  return readdirSync(dir, { withFileTypes: true }).reduce((sum, item) => {
+    const path = join(dir, item.name);
+    return sum + (item.isDirectory() ? directoryBytes(path) : statSync(path).size);
+  }, 0);
+}
+
 /** PURE but for reading a local GraphQL query file: what kind of read `args` is, which limiter it
  *  spends, and what it is about. WRITE OR READ IS NOT DECIDED HERE: it is {@link ghArgvIsWrite}, the one
  *  rule every gh path shares, judged in `cwd`, the directory the upstream call would run in. */
@@ -105,7 +174,7 @@ export function classifyGhBrokerRead(args: readonly string[], repo?: string, cwd
     const limiter: GhBrokerLimiter = /(?:^|\/)search\//.test(api.endpoint ?? "") ? "search" : "core";
     const subjects = apiSubjects(api.endpoint ?? "");
     // A GET with fields sends them as a query string: its output is still one body, but keyed as a unit.
-    if (api.opaqueOutput || api.fields.length > 0 || api.input !== undefined) return { ...base, kind: "opaque", limiter, subjects };
+    if (api.opaqueOutput || api.fields.length > 0 || api.input !== undefined || args.some((a) => /^--(?:silent|verbose)(?:=|$)/.test(a))) return { ...base, kind: "opaque", limiter, subjects };
     return { ...base, kind: "api-rest", limiter, subjects, upstreamArgs: args.filter((a) => a !== "-i" && a !== "--include") };
   }
   const verbs = PORCELAIN_READS[args[0] ?? ""];
@@ -215,6 +284,8 @@ interface GhBrokerCacheEntry {
   stdout: string;
   stderr: string;
   subjects: GhBrokerSubject[];
+  apiView?: string;
+  requestIds?: string[];
 }
 
 function headerField(headers: string, name: string): string | undefined {
@@ -243,9 +314,19 @@ export interface GhUpstreamResult {
 }
 
 /** The account's own `gh`, as a direct call would run it. Injected in tests: no real `gh`, no network. */
-export type GhUpstreamExec = (args: string[], opts: { cwd?: string }) => Promise<GhUpstreamResult>;
+export type GhUpstreamExec = (args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }) => Promise<GhUpstreamResult>;
 
-export const defaultGhUpstreamExec: GhUpstreamExec = (args, opts) => ghRunForBroker(args, { cwd: opts.cwd, maxBuffer: 1 << 26 });
+export const defaultGhUpstreamExec: GhUpstreamExec = async (args, opts) => {
+  if (!opts.env) return ghRunForBroker(args, { cwd: opts.cwd, maxBuffer: 1 << 26 });
+  try {
+    refuseSentinelGhToken("gh", args, opts.env);
+    const result = await execFileLoopBounded("gh", args, { cwd: opts.cwd, env: opts.env, encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS });
+    return { ...result, exitCode: 0 };
+  } catch (cause) {
+    const error = cause as { stdout?: string; stderr?: string; code?: unknown; message?: string };
+    return { stdout: String(error.stdout ?? ""), stderr: String(error.stderr ?? error.message ?? cause), exitCode: typeof error.code === "number" ? error.code : 1 };
+  }
+};
 
 export interface GhReadBrokerCounts {
   "hit-fresh": number;
@@ -272,6 +353,7 @@ interface QueuedJob {
 interface InFlight {
   job: QueuedJob;
   promise: Promise<GhBrokerResult>;
+  view: string;
 }
 
 /** Initial guesses, each printed by `status` with the value the broker holds now. */
@@ -305,6 +387,7 @@ export class GhReadBroker {
   private invalidationOffset = 0;
   private seq = 0;
   private loginPromise: Promise<string> | undefined;
+  private apiFilterCache: "unverified" | "shared" | "filter-keyed" = "unverified";
 
   /** `exec` is the account's own `gh`; `freeBytes` is the cache volume's free space, read at each write —
    *  the cache's budget is a share of it. Tests inject all four: no real `gh`, no network, no real time. */
@@ -327,7 +410,7 @@ export class GhReadBroker {
     for (const name of readdirSync(join(dir, "cache"))) {
       if (!name.endsWith(".json")) continue;
       const entry = this.readEntry(name.slice(0, -".json".length));
-      if (entry) this.entries.set(entry.key, { bytes: statSync(this.entryPath(entry.key)).size, subjects: entry.subjects });
+      if (entry) this.entries.set(entry.key, { bytes: statSync(this.entryPath(entry.key)).size + this.ghCacheBytes(entry.key), subjects: entry.subjects });
     }
     // Invalidations written before this broker started describe cache it never served stale.
     try {
@@ -357,6 +440,15 @@ export class GhReadBroker {
     return join(this.dir, "cache", `${key}.json`);
   }
 
+  private ghCachePath(key: string): string {
+    return join(this.dir, "cache", `${key}.gh`);
+  }
+
+  private ghCacheBytes(key: string): number {
+    const path = this.ghCachePath(key);
+    return readdirSync(join(this.dir, "cache")).includes(`${key}.gh`) ? directoryBytes(path) : 0;
+  }
+
   private readEntry(key: string): GhBrokerCacheEntry | undefined {
     const memo = this.memo.get(key);
     if (memo) return memo;
@@ -374,6 +466,7 @@ export class GhReadBroker {
     this.entries.delete(key);
     this.memo.delete(key);
     rmSync(this.entryPath(key), { force: true });
+    rmSync(this.ghCachePath(key), { recursive: true, force: true });
   }
 
   /** LEAST RECENTLY USED out, until the cache fits its share of the free disk measured at this write. */
@@ -384,7 +477,7 @@ export class GhReadBroker {
     renameSync(tmp, this.entryPath(entry.key));
     this.memo.set(entry.key, entry);
     this.entries.delete(entry.key);
-    this.entries.set(entry.key, { bytes: Buffer.byteLength(text), subjects: entry.subjects });
+    this.entries.set(entry.key, { bytes: Buffer.byteLength(text) + this.ghCacheBytes(entry.key), subjects: entry.subjects });
     const budget = this.cacheShareOfFree * this.freeBytes();
     let total = [...this.entries.values()].reduce((sum, e) => sum + e.bytes, 0);
     for (const [key, meta] of this.entries) {
@@ -540,6 +633,9 @@ export class GhReadBroker {
     const startedMs = this.now();
     const cls: GhBrokerClass = isGhBrokerClass(request.class) ? request.class : "background";
     const c = classifyGhBrokerRead(request.args, request.repo, request.cwd);
+    c.subjects = c.subjects.map((subject) => /\{(?:owner|repo)\}/.test(subject.repo) ? { ...subject, repo: request.repo ?? "*" } : subject);
+    const api = request.args[0] === "api";
+    const view = JSON.stringify(request.args);
     const finish = (result: GhBrokerResult, extra: Record<string, unknown> = {}): GhBrokerResult => {
       this.counts[result.outcome] += 1;
       this.log({ class: cls, key: extra.key, outcome: result.outcome, limiter: c.limiter, wait_ms: this.now() - startedMs, ...extra });
@@ -557,14 +653,20 @@ export class GhReadBroker {
     this.applyInvalidations();
     const login = await this.login();
     const host = flagValue(request.args, "--hostname") ?? "github.com";
-    const keyed = c.kind === "api-rest" ? c.upstreamArgs : request.args;
+    const identity = api && !apiUsesStdin(request.args) ? apiRequestIdentity(request) : undefined;
+    if (api && identity === undefined) c.kind = "passthrough";
+    const keyed = api ? [identity ?? [view, request.cwd], this.apiFilterCache === "filter-keyed" ? view : ""] : request.args;
     const key = createHash("sha256")
-      .update(JSON.stringify([login, host, c.kind, c.kind === "api-rest" ? "" : request.repo ?? request.cwd ?? "", keyed]))
+      .update(JSON.stringify(["request-v2", login, host, api ? "api" : c.kind, api ? "" : request.repo ?? request.cwd ?? "", keyed]))
       .digest("hex");
     const cached = c.kind === "passthrough" ? undefined : this.readEntry(key);
     if (cached && !request.fresh && this.fresh(cached, this.now())) {
       this.touch(key);
-      return finish(this.render(cached, c.wantsInclude, "hit-fresh"), { key: key.slice(0, 12) });
+      if (api && cached.apiView !== view && !(c.kind === "api-rest" && cached.kind === "api-rest")) {
+        const result = await this.upstream(c, request, key, cached, true);
+        return finish(result, { key: key.slice(0, 12), request_key: key, gh_filtered_locally: result.outcome === "hit-fresh" });
+      }
+      return finish(this.render(cached, c.wantsInclude, "hit-fresh"), { key: key.slice(0, 12), request_key: key, gh_filtered_locally: false });
     }
     const joined = this.inflight.get(key);
     if (joined) {
@@ -572,7 +674,10 @@ export class GhReadBroker {
       if (GH_BROKER_CLASSES.indexOf(cls) < GH_BROKER_CLASSES.indexOf(joined.job.cls)) joined.job.cls = cls;
       if (onProgress) joined.job.listeners.push(onProgress);
       const result = await joined.promise;
-      return finish({ ...result, outcome: "coalesced" }, { key: key.slice(0, 12) });
+      if (api && joined.view !== view && result.exitCode === 0) {
+        return this.readOnce(request, onProgress);
+      }
+      return finish({ ...result, outcome: "coalesced" }, { key: key.slice(0, 12), request_key: key, gh_filtered_locally: false });
     }
     let resolveResult!: (r: GhBrokerResult) => void;
     const promise = new Promise<GhBrokerResult>((resolve) => (resolveResult = resolve));
@@ -587,7 +692,7 @@ export class GhReadBroker {
         resolveResult(result);
       },
     };
-    this.inflight.set(key, { job, promise });
+    this.inflight.set(key, { job, promise, view });
     const queue = this.queues.get(c.limiter) ?? [];
     this.queues.set(c.limiter, queue);
     queue.push(job);
@@ -595,7 +700,7 @@ export class GhReadBroker {
     void this.drain(c.limiter);
     try {
       const result = await promise;
-      return finish(result, { key: key.slice(0, 12), upstream_ms: upstreamMs, gap_ms: this.pacer(c.limiter).gapMs });
+      return finish(result, { key: key.slice(0, 12), request_key: key, gh_filtered_locally: false, upstream_ms: upstreamMs, gap_ms: this.pacer(c.limiter).gapMs });
     } finally {
       this.inflight.delete(key);
     }
@@ -606,20 +711,35 @@ export class GhReadBroker {
     request: GhBrokerReadRequest,
     key: string,
     cached: GhBrokerCacheEntry | undefined,
+    replay = false,
   ): Promise<GhBrokerResult> {
     const nowAtStart = this.now();
-    const args = [...c.upstreamArgs];
-    if (c.kind === "api-rest") {
+    const api = request.args[0] === "api" && c.kind !== "passthrough";
+    const args = api ? apiRequestArgs(c.upstreamArgs, true) : [...c.upstreamArgs];
+    const conditional = c.kind === "api-rest" && cached?.kind === "api-rest" && !replay && (cached.etag || cached.lastModified);
+    const expectedReplay = replay && this.ghCacheBytes(key) > 0;
+    if (api) {
       args.push("-i");
-      if (cached?.etag) args.push("-H", `If-None-Match: ${cached.etag}`);
-      else if (cached?.lastModified) args.push("-H", `If-Modified-Since: ${cached.lastModified}`);
+      if (!replay) rmSync(this.ghCachePath(key), { recursive: true, force: true });
+      if (conditional && cached?.etag) args.push("-H", `If-None-Match: ${cached.etag}`);
+      else if (conditional && cached?.lastModified) args.push("-H", `If-Modified-Since: ${cached.lastModified}`);
+      else if (c.kind !== "api-rest" || replay) args.push("--cache", `${Math.max(0, replay && cached ? (cached.maxAgeMs ?? this.opaqueFreshMs) - (nowAtStart - cached.storedAtMs) : this.opaqueFreshMs)}ms`);
     }
-    this.counts.upstream_calls += 1;
-    const raw = await this.exec(args, { cwd: request.cwd });
+    const env = api || request.repo ? { ...process.env, GH_REPO: request.repo ?? "", ...(api ? { XDG_CACHE_HOME: this.ghCachePath(key) } : {}) } : undefined;
+    const raw = await this.exec(args, { cwd: request.cwd, env });
     const nowMs = this.now();
-    const split = c.kind === "api-rest" || c.wantsInclude ? splitGhHeaderBlock(raw.stdout) : { headers: "", body: raw.stdout };
+    const split = api || c.kind === "api-rest" || c.wantsInclude
+      ? splitGhHeaderBlock(raw.stdout, request.args.includes("--paginate") || request.args.includes("--slurp")) : { headers: "", body: raw.stdout };
     const status = httpStatus(split.headers);
-    this.pacer(c.limiter).record(nowMs, { headers: split.headers, stderr: raw.stderr, status, exitCode: raw.exitCode });
+    const requestIds = [...raw.stdout.matchAll(/^x-github-request-id:\s*([^\r\n]+)/gim)].map((m) => m[1]);
+    const local = replay && raw.exitCode === 0 && requestIds.length > 0 && JSON.stringify(requestIds) === JSON.stringify(cached?.requestIds);
+    if (local) this.apiFilterCache = "shared";
+    else {
+      if (expectedReplay) this.apiFilterCache = "filter-keyed";
+      this.counts.upstream_calls += 1;
+      this.pacer(c.limiter).lastStartMs = nowAtStart;
+      this.pacer(c.limiter).record(nowMs, { headers: split.headers, stderr: raw.stderr, status, exitCode: raw.exitCode });
+    }
     const maxAgeMs = ghMaxAgeMs(split.headers);
     if (maxAgeMs !== undefined) this.opaqueFreshMs = maxAgeMs;
     if (c.kind === "api-rest" && status === 304 && cached) {
@@ -632,20 +752,21 @@ export class GhReadBroker {
     }
     if (raw.exitCode !== 0 || (status !== undefined && status >= 300)) {
       // NOT CACHED: every waiter gets this failure, and the next read tries again.
-      const stdout = c.kind === "api-rest" && !c.wantsInclude ? split.body : raw.stdout;
+      const stdout = api && !c.wantsInclude ? split.body : raw.stdout;
       return { stdout, stderr: raw.stderr, exitCode: raw.exitCode === 0 ? 1 : raw.exitCode, outcome: "upstream-error" };
     }
     if (c.kind !== "passthrough") {
       this.writeEntry({
-        key, kind: c.kind as GhBrokerReadKind, storedAtMs: nowAtStart,
-        maxAgeMs: c.kind === "api-rest" ? maxAgeMs : this.opaqueFreshMs,
+        key, kind: c.kind as GhBrokerReadKind, storedAtMs: local ? cached!.storedAtMs : nowAtStart,
+        maxAgeMs: local ? cached!.maxAgeMs : c.kind === "api-rest" ? maxAgeMs : maxAgeMs ?? this.opaqueFreshMs,
         // A run log only exists once the run completed (`gh run view --log` refuses before), so it never changes.
         immutable: c.kind === "run-log",
         etag: headerField(split.headers, "etag"), lastModified: headerField(split.headers, "last-modified"),
-        headers: split.headers, body: split.body, stdout: raw.stdout, stderr: raw.stderr, subjects: c.subjects,
+        headers: split.headers, body: split.body, stdout: api && !c.wantsInclude ? split.body : raw.stdout, stderr: raw.stderr,
+        subjects: c.subjects, apiView: api ? JSON.stringify(request.args) : undefined, requestIds,
       });
     }
-    return { stdout: c.kind === "api-rest" && !c.wantsInclude ? split.body : raw.stdout, stderr: raw.stderr, exitCode: 0, outcome: "upstream-200" };
+    return { stdout: api && !c.wantsInclude ? split.body : raw.stdout, stderr: raw.stderr, exitCode: 0, outcome: local ? "hit-fresh" : "upstream-200" };
   }
 
   status(): Record<string, unknown> {
@@ -665,6 +786,7 @@ export class GhReadBroker {
     }
     return {
       type: "status",
+      api_filter_cache: this.apiFilterCache,
       counts: { ...this.counts },
       queues,
       limiters,
@@ -684,6 +806,7 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
   const byOutcome: Record<string, number> = {};
   let reads = 0;
   let upstream = 0;
+  let filteredLocally = 0;
   let longestInteractiveWaitMs = 0;
   const since = clockFromMillisFn(() => sinceMs).iso();
   let files: string[] = [];
@@ -695,7 +818,7 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
   for (const name of files) {
     for (const line of readFileSync(join(dir, "log", name), "utf8").split("\n")) {
       if (!line) continue;
-      let row: { ts?: string; outcome?: string; class?: string; wait_ms?: number };
+      let row: { ts?: string; outcome?: string; class?: string; wait_ms?: number; gh_filtered_locally?: boolean };
       try {
         row = JSON.parse(line) as typeof row;
       } catch {
@@ -703,6 +826,7 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
       }
       if ((row.ts ?? "") < since) continue;
       reads += 1;
+      if (row.gh_filtered_locally) filteredLocally += 1;
       byOutcome[row.outcome ?? "unknown"] = (byOutcome[row.outcome ?? "unknown"] ?? 0) + 1;
       if (row.outcome === "upstream-200" || row.outcome === "upstream-error" || row.outcome === "revalidated-304") upstream += 1;
       if (row.class === "interactive") longestInteractiveWaitMs = Math.max(longestInteractiveWaitMs, row.wait_ms ?? 0);
@@ -710,6 +834,7 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
   }
   return {
     files: files.length, reads, upstream_calls: upstream, by_outcome: byOutcome,
+    filtered_locally: filteredLocally,
     served_without_upstream_share: reads === 0 ? null : (reads - upstream) / reads,
     longest_interactive_wait_ms: longestInteractiveWaitMs,
   };
@@ -899,6 +1024,7 @@ export async function ghCommand(
     err("  Run it as a plain `gh` call, where the deny floor judges it.\n");
     return 2;
   }
+  if (apiUsesStdin(args)) return runDirect(args);
   const socketPath = ghReadBrokerLive(env);
   if (socketPath === undefined) return runDirect(args);
   try {

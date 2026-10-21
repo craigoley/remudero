@@ -1775,8 +1775,11 @@ daemonMemory:
 # closed set), digest, or deliver. `shadow` ledgers `escalation.triaged` with the would-be outcome and
 # still delivers every escalation as needs-human; `act` follows the outcome. MANUAL and HARD_STOP are
 # always delivered in either mode. `maxAutoResolvesPerPass` is capped at 5 by the parser.
+# OPERATOR 2026-10-21: act. Shadow 10-14..10-21 triaged 662 escalations: 648 deliver, 3 digest, 11
+# auto_resolve (8 plan_amendment_pr for W1-T8707/W1-T9865/W1-T10250, each a confirmed stale-proof
+# refusal; 3 rekick_once). Shadow left stale-proof tasks wedged (W1-T5670 12 days).
 escalationTriage:
-  mode: shadow
+  mode: act
   maxAutoResolvesPerPass: 5
 
 # W1-T8864: the issue-revalidation garden (src/lib/issue-revalidation-garden.ts) re-checks every open
