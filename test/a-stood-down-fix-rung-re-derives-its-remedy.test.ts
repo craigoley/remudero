@@ -173,7 +173,7 @@ for (const mode of ["conflict", "ci"] as const) {
     const f = designFixture(t, mode); f.rows[1]!.contract_revision = "contract-A"; f.write();
     let revision = "contract-A", refreshed = 0;
     f.deps.readTaskContractRevision = () => revision;
-    f.deps.updateBranch = async () => { refreshed++; return "updated"; };
+    f.deps.updateBranch = async () => { refreshed++; return "updated" as const; };
     await runSweep([f.pr], f.deps);
     assert.equal(f.effects.escalations.length, 1); assert.equal(refreshed, 0);
     revision = "contract-B";
@@ -192,7 +192,7 @@ test("a design amendment defers without branch-update capability and remains pen
   f.deps.readTaskContractRevision = () => "contract-B";
   const light = await runSweep([f.pr], f.deps);
   assert.match(light.actions[0]!.reason, /deferred to full sweep/);
-  f.deps.updateBranch = async () => { refreshed++; return "updated"; };
+  f.deps.updateBranch = async () => { refreshed++; return "updated" as const; };
   await runSweep([f.pr], f.deps);
   assert.equal(refreshed, 1); assert.equal(f.effects.admissions, 0); assert.equal(f.effects.fixes, 0);
 });
@@ -211,7 +211,7 @@ test("a design amendment that changes during observation never admits the old he
   const f = designFixture(t, "ci"); f.rows[1]!.contract_revision = "contract-A"; f.write();
   let read = 0, refreshed = 0;
   f.deps.readTaskContractRevision = () => ++read === 1 ? "contract-B" : "contract-A";
-  f.deps.updateBranch = async () => { refreshed++; return "updated"; };
+  f.deps.updateBranch = async () => { refreshed++; return "updated" as const; };
   const result = await runSweep([f.pr], f.deps);
   assert.equal(refreshed, 0); assert.equal(f.effects.admissions, 0); assert.equal(f.effects.fixes, 0);
   assert.match(result.actions[0]!.reason, /changed during/);
