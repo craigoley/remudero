@@ -23,8 +23,8 @@
 // test/checkout-writers.test.ts, and test/moving-base-changed-files.test.ts, and runs inside the
 // existing `ci` job's `npm run test:ci` with no new wiring at all.
 //
-// WHY EXTENSION FILTERING, NOT AN ALLOWLIST. Three tracked PNGs carry NUL bytes legitimately and
-// must keep passing. Filtering the sweep to source extensions (no list of binary paths to rot, and
+// WHY EXTENSION FILTERING, NOT AN ALLOWLIST. The tracked attachment PNG carries NUL bytes legitimately
+// and must keep passing. Filtering the sweep to source extensions (no list of binary paths to rot, and
 // no drift check needed) is preferred per this task's design unless a tracked SOURCE turns up that
 // the filter misses — it did not: the fifth raw-NUL source recon found at this task's HEAD
 // (`src/lib/verdict-calibration.ts`, introduced by #1614/W1-T424 the same day) is a `.ts` file, so
@@ -101,10 +101,8 @@ test("PROPERTY the five previously-blind sources are individually clean", () => 
   }
 });
 
-test("PROPERTY the three tracked PNGs still contain a NUL and still pass the gate unbanned", () => {
+test("PROPERTY the tracked attachment PNG still contains a NUL and still passes the gate unbanned", () => {
   const pngs = [
-    "docs/design-review/w1-t153/shell-1440.png",
-    "docs/design-review/w1-t153/shell-390.png",
     "plan/feedback/attachments/fb-1784433603527-48134e/shot.png",
   ];
   const tracked = new Set(
@@ -116,7 +114,7 @@ test("PROPERTY the three tracked PNGs still contain a NUL and still pass the gat
     const buf = readFileSync(join(REPO_ROOT, png));
     assert.notEqual(buf.indexOf(0), -1, `${png} no longer contains a NUL byte — pick a different real-PNG fixture`);
   }
-  // The gate excludes these three before it ever opens them, so they cannot appear as violations.
+  // The gate excludes this attachment before it ever opens it, so it cannot appear as a violation.
   const flagged = rawNulViolations(REPO_ROOT)
     .map((v) => v.path)
     .filter((p) => pngs.includes(p));

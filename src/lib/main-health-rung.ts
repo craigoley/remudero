@@ -384,6 +384,36 @@ export interface MainRepairRevertRequest {
   readonly failingChecks: readonly string[];
   readonly fixPrUrl?: string;
   readonly whyFixInsufficient: string;
+  /** W1-T10269 — why the revert opens. Absent (or `red-main`) is W1-T6403's red main. A reviewer
+   *  regression is not red on main: its body names the outcome-mix evidence, not failing checks. */
+  readonly reason?: MainRepairRevertReason;
+}
+
+export type MainRepairRevertReason =
+  | { readonly kind: "red-main" }
+  | { readonly kind: "reviewer-regression"; readonly incidentId: string; readonly evidence: string };
+
+/** W1-T10269 — the revert PR's title and opening lines for a reviewer regression; undefined for a red main. */
+export function reviewerRegressionRevertText(
+  request: MainRepairRevertRequest,
+): { title: string; lead: string[] } | undefined {
+  const reason = request.reason;
+  if (reason?.kind !== "reviewer-regression") return undefined;
+  const pr = request.offendingPr !== undefined ? `#${request.offendingPr}` : request.offendingSha.slice(0, 12);
+  return {
+    title: `revert(review): revert ${pr}, the merge that regressed the reviewer`,
+    lead: [
+      `Reverts \`${request.offendingSha}\` (${request.offendingPr !== undefined ? `#${request.offendingPr}` : "an unnamed PR"}), ` +
+        `the first review-material merge before reviewer incident \`${reason.incidentId}\`.`,
+      "",
+      "The reviewer's own outcome mix departed from its history (W1-T10269):",
+      "",
+      ...reason.evidence.split("\n").map((line) => `> ${line}`),
+      "",
+      "Until this merges or a fix returns the reviewer to its baseline, reviews run from origin/main with this",
+      "merge reverted on top. It is closed automatically if a fix makes it unnecessary.",
+    ],
+  };
 }
 
 /** A revert PR opened, or the revert refused (a conflicting `git revert`, or a failed push or open). */

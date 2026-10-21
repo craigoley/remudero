@@ -16523,7 +16523,17 @@ export async function runSweep(
     const diagnoses: string[] = fields.blocker_cause ? [fields.blocker_cause] : [];
     // W1-T8167: a review admitted for this head and not yet posted/failed/refused is a live owner, not a stall.
     // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
-    if (fields.blocker === "awaiting-review") {
+    // A review whose setup refused at this head, with no review started since, is no live owner: each pass
+    // re-admits it and it refuses again, so name the refusal instead of deferring (#13305: 156 refusals, 4.5 h).
+    const refusals = fields.blocker === "awaiting-review"
+      ? stageRows.filter(row => row.step === "review.semantic_setup_refused" && row.head_sha === pr.headSha) : [];
+    const lastRefusalMs = Date.parse(String(refusals.at(-1)?.ts));
+    const refusing = refusals.length > 0 && !stageRows.some(row => Date.parse(String(row.ts)) >= lastRefusalMs &&
+      (row.step === "review.pending_posted" || LIVE_REVIEW_CLOSING_STEPS.has(String(row.step))));
+    if (refusing) {
+      diagnoses.push(`review setup refused at this head on every pass (${String(refusals.at(-1)?.reason)}, ` +
+        `${refusals.length} refusals)`);
+    } else if (fields.blocker === "awaiting-review") {
       const admitted = stageRows.findLast(row => row.step === "sweep.review_admitted" &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
       const admittedAtMs = admitted === undefined ? NaN : Date.parse(String(admitted.ts));
@@ -18678,7 +18688,7 @@ export async function runSweep(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
-    let terminalDesignHold: { amended: boolean; revision?: string; roundId: string } | undefined;
+    let terminalDesignHold: { amended: boolean; revision?: string; observedRevision?: string; roundId: string } | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
@@ -18698,7 +18708,7 @@ export async function runSweep(
           reason = "terminal design handoff task contract revision unavailable — no fix admitted";
         } else {
           const amended = current !== undefined && standingOn !== undefined && current !== standingOn;
-          terminalDesignHold = { amended, revision: standingOn ?? current, roundId: handoff.roundId };
+          terminalDesignHold = { amended, revision: standingOn ?? current, observedRevision: current, roundId: handoff.roundId };
           disposition = amended ? "blocked-fixable" : "refused-escalate";
           reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
             : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
@@ -19093,9 +19103,13 @@ export async function runSweep(
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }) };
     const refreshAmendedContract = async (
-      latched: readonly Record<string, unknown>[], inputKey?: string,
+      latched: readonly Record<string, unknown>[], inputKey?: string, observedRevision?: string,
     ): Promise<string | undefined> => {
       const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+      if (observedRevision !== undefined && current !== observedRevision) {
+        acted = false;
+        return "task contract changed during design-handoff observation — no fix admitted";
+      }
       const standingOn = latched.findLast(row => typeof row.progress_contract_revision === "string")
         ?.progress_contract_revision as string | undefined;
       const record = (revision: string | undefined) => {
@@ -19404,7 +19418,7 @@ export async function runSweep(
             }
             case "blocked-fixable": {
               if (terminalDesignHold?.amended) {
-                const amended = await refreshAmendedContract([{ progress_contract_revision: terminalDesignHold.revision }]);
+                const amended = await refreshAmendedContract([{ progress_contract_revision: terminalDesignHold.revision }], undefined, terminalDesignHold.observedRevision);
                 if (amended === undefined) acted = false;
                 standDownReason = amended ?? "task contract changed during design-handoff observation — no fix admitted";
                 break;

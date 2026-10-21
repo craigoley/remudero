@@ -15,7 +15,7 @@
 //
 // OUT OF SCOPE: deciding when a capped review is fix-rung-actionable (sweep.ts, unchanged), the
 // lower-privilege human-flagging rung (`insertPlanRepairFlag`/`dispatchPlanOnlyRepair`, W1-T3390,
-// left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
+// left untouched), and a taskless PR, refused shard-not-found here (its body repair is W1-T10339).
 
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -26,7 +26,7 @@ import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
+import { execWhitelistedProof, INSTRUMENT_SURFACE, matchedLinesAreAllComments, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
@@ -143,6 +143,14 @@ function targetsPlanShard(whitelisted: WhitelistedProof, planShardPaths: Readonl
   return typeof target === "string" && planShardPaths.has(target);
 }
 
+/** The reviewer's comment-only downgrade reads the grep pattern against the target file's text (review.ts
+ *  `matchedLineCommentContext`); the same context here keeps a validated replacement from being capped again. */
+function grepCommentContext(parsed: WhitelistedProof, cwd: string): { pattern: string; fileText: string } | undefined {
+  const dialect = parsed.authorSelectedArgv !== true && parsed.args.length === 4 && parsed.args[0] === "-arn" && parsed.args[1] === "--";
+  const path = dialect ? join(cwd, parsed.args[3]!) : undefined;
+  return path !== undefined && existsSync(path) ? { pattern: parsed.args[2]!, fileText: readFileSync(path, "utf8") } : undefined;
+}
+
 export interface ProofAmendmentValidationInput {
   readonly headCwd: string;
   readonly baseCwd: string | undefined;
@@ -225,6 +233,12 @@ export function validateProofAmendmentProposal(
       return {
         ok: false,
         refusal: { reason: "not-discriminating", detail: `replacement does not pass at the implementation head: ${entry.newProof}` },
+      };
+    }
+    if (parsed.kind === "grep" && matchedLinesAreAllComments(parsed.matchedLines ?? [], grepCommentContext(parsed, input.headCwd))) {
+      return {
+        ok: false,
+        refusal: { reason: "not-discriminating", detail: `replacement matches only comment lines, which the reviewer caps: ${entry.newProof}` },
       };
     }
     if (input.baseCwd === undefined) {
@@ -584,6 +598,12 @@ export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "inel
  *  unable to finish (#12776). Every other instrument, including the mutation score floor, is still refused. */
 export const SCOPE_GRANTABLE_INSTRUMENTS: ReadonlySet<string> = new Set(["stryker.conf.json", "scripts/mutation-relevant-paths.json"]);
 
+/** An instrument no scope amendment grants (PR 13223): the fix lane escalates it once instead of re-asking. */
+export function isUngrantableInstrumentPath(path: string): boolean {
+  return !SCOPE_GRANTABLE_INSTRUMENTS.has(path) &&
+    (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path));
+}
+
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
   const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
   const build = request.kind === "build";
@@ -612,10 +632,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
       return refuse("invalid-path", path);
     }
     if (path.startsWith("plan/")) return refuse("plan-path", path);
-    if (!SCOPE_GRANTABLE_INSTRUMENTS.has(path) &&
-        (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path))) {
-      return refuse("instrument-path", path);
-    }
+    if (isUngrantableInstrumentPath(path)) return refuse("instrument-path", path);
     if (path.startsWith("test/")) return refuse("test-path", path);
     if (!request.changedPaths.includes(path)) return refuse("path-not-changed", path);
   }

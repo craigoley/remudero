@@ -208,11 +208,19 @@ test("an unreadable design contract stays unavailable before an admission or wri
 });
 
 test("a design amendment that changes during observation never admits the old head", async t => {
-  const f = designFixture(t, "ci"); f.rows[1]!.contract_revision = "contract-A"; f.write();
-  let read = 0, refreshed = 0;
-  f.deps.readTaskContractRevision = () => ++read === 1 ? "contract-B" : "contract-A";
-  f.deps.updateBranch = async () => { refreshed++; return "updated" as const; };
-  const result = await runSweep([f.pr], f.deps);
-  assert.equal(refreshed, 0); assert.equal(f.effects.admissions, 0); assert.equal(f.effects.fixes, 0);
-  assert.match(result.actions[0]!.reason, /changed during/);
+  // Reversion, a second amendment and an unavailable reread must all stop the observed action.
+  for (const reread of ["contract-A", "contract-C", undefined]) {
+    const f = designFixture(t, "ci"); f.rows[1]!.contract_revision = "contract-A"; f.write();
+    let read = 0, refreshed = 0;
+    f.deps.readTaskContractRevision = () => ++read === 1 ? "contract-B" : reread;
+    f.deps.updateBranch = async () => { refreshed++; return "updated" as const; };
+    const result = await runSweep([f.pr], f.deps);
+    assert.equal(refreshed, 0, `changed reread ${reread} cannot authorize a branch refresh`);
+    assert.equal(f.effects.admissions, 0); assert.equal(f.effects.fixes, 0);
+    assert.match(result.actions[0]!.reason, /changed during/);
+    f.deps.readTaskContractRevision = () => "contract-stable";
+    await runSweep([f.pr], f.deps);
+    assert.equal(refreshed, 1, "a later stable amendment must remain eligible for ordinary base adoption");
+    assert.equal(f.effects.admissions, 0); assert.equal(f.effects.fixes, 0);
+  }
 });

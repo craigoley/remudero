@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { clockFromMillisFn } from "../src/lib/clock.js";
+import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
+import type { Config } from "../src/lib/config.js";
 import { runDaemon } from "../src/lib/daemon.js";
 import { machineTokens } from "../src/lib/inbox-plain.js";
 import {
@@ -36,6 +38,7 @@ import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { inboxThreadDecider, type RunResult } from "../src/run-task.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
 
 const VH = "verify-human:W1-T235";
 const RULING = "ruling:operator-owned";
@@ -324,7 +327,7 @@ test("W1-T4088: the responder keeps to what the item allows and to plain text", 
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "bring it back", store);
   assert.equal(await answerThread(inboxThreadId(RULING), f.responder(async () => { throw new Error("down"); })), "restore");
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "hmm", store);
-  assert.equal(await answerThread(inboxThreadId(RULING), f.responder(async () => ({ action: "question", reply: "" }))), "edit", "W1-T9252: an empty question is direction");
+  assert.equal(await answerThread(inboxThreadId(RULING), f.responder(async () => ({ action: "question", reply: "" }))), "question", "W1-T10347: an invalid model answer is not a redraft direction");
   // A request that is not allowed once the questions are used up points at the buttons.
   for (const text of ["?", "??"]) {
     appendThreadMessage(inboxThreadIdentity(RULING), "reply", text, store);
@@ -483,4 +486,196 @@ test("W1-T5269: a read that outruns its classification answers from the held one
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+// Keep the actual responder/decider/receipt composition. Only raw worker results and their
+// private sink are controlled; no provider, service or business-action callback is invoked.
+function failedInterpretation(f: Fixture, input: { text?: string; isError?: boolean; throws?: boolean }) {
+  let calls = 0;
+  const raw = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
+    const id = `inbox-fallback-attempt-${++calls}`;
+    const assignment: WorkerSelectionAssignment = {
+      version: 1, id, phase: "pre-execution",
+      requested: { model: "requested-model", effort: "medium", maxTurns: 2 },
+      selected: { provider: "cash", model: "selected-model", effort: "medium" },
+      routing: { mode: "mount-affinity", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } },
+      candidates: [],
+    };
+    assert.deepEqual(args.tools, []);
+    args.onSelectionAssignment?.(assignment);
+    if (input.throws) throw new Error("controlled interpreter outage");
+    return {
+      sessionId: id, costUsd: 0.25, numTurns: 1, text: input.text ?? "", blocks: [], stderr: "",
+      subtype: input.isError ? "error" : "success", isError: input.isError === true,
+      apiError: false, permissionDenials: [], childEnvKeys: [], provider: "cash", effort: "medium",
+      model: "requested-model", routedModel: "selected-model", servedModel: "actual-model",
+      tokens: { input: 4, output: 2, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+      compactionEvents: [], qualitySuspect: false, selectionAssignmentId: id, workerDurationMs: 11,
+    } as WorkerResult;
+  };
+  const instrumented = benchmarkNonDispatchSpawn("inbox-response", raw);
+  const decide = realThreadDecider({
+    mount: { model: "requested-model", effort: "medium", maxTurns: 2, contextBudget: 1000 },
+    cwd: f.root, settingsFile: join(f.root, "unused-settings.json"),
+    spawn: args => instrumented({ ...args, config: { root: f.root } as Config }),
+  });
+  return { deps: f.responder(decide), calls: () => calls };
+}
+
+function fallbackRows(f: Fixture): Array<Record<string, any>> {
+  return readFileSync(f.ledgerPath, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+}
+
+function assertReadOnlyFallback(f: Fixture) {
+  assert.deepEqual(f.reframed, []);
+  assert.deepEqual(f.approved, []);
+  assert.equal(fallbackRows(f).some(row => ["panel.proposal_reframe_requested", "panel.proposal_declined", "panel.proposal_restored", "ratify.approved"].includes(row.step)), false);
+  const all = readAllThreads({ threadStorePath: inboxThreadStorePath(f.root) });
+  assert.equal(all.status, "ok");
+  const last = all.status === "ok" ? all.threads.get(inboxThreadId(RULING))!.at(-1)! : undefined;
+  assert.equal(last!.role, "escalation");
+  assert.equal(last!.extra?.did, undefined);
+  assert.equal(last!.extra?.suggestedAction, undefined);
+  assert.deepEqual(machineTokens(last!.body), []);
+  return last!;
+}
+
+test("W1-T10347: unusable interpretation of a plain question never requests a redraft", async () => {
+  for (const input of [
+    { text: "", isError: true },
+    { text: "{unparseable" },
+    { text: '{"action":"launch","reply":"Unexpected action"}' },
+    { text: '{"action":"edit","reply":"Redraft requested"}', isError: true },
+  ]) {
+    const f = fixture();
+    try {
+      const reader = failedInterpretation(f, input);
+      appendThreadMessage(inboxThreadIdentity(RULING), "reply", "What happens next?", { threadStorePath: inboxThreadStorePath(f.root) });
+      assert.equal(await answerThread(inboxThreadId(RULING), reader.deps), "question");
+      const last = assertReadOnlyFallback(f);
+      assert.match(last.body, /could not|couldn.t|unavailable/i);
+      assert.match(last.body, /nothing.*changed/i);
+      assert.match(last.body, /again|retry/i);
+      assert.equal(reader.calls(), 1);
+      const rows = fallbackRows(f);
+      assert.equal(rows.filter(row => row.step === "worker.assignment").length, 1);
+      const attempts = rows.filter(row => row.step === "worker.attempt");
+      assert.equal(attempts.length, 1);
+      assert.equal(attempts[0]!.success, !input.isError, "interpretation failure must not rewrite the raw worker outcome");
+      assert.equal(attempts[0]!.served_model, "actual-model");
+      assert.equal(await answerThread(inboxThreadId(RULING), reader.deps), undefined);
+      assert.equal(reader.calls(), 1, "no automatic retry after answering");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T10347: a thrown interpreter stays read-only with one joined attempt and no retry", async () => {
+  const f = fixture();
+  try {
+    const reader = failedInterpretation(f, { throws: true });
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "What happens next?", { threadStorePath: inboxThreadStorePath(f.root) });
+    assert.equal(await answerThread(inboxThreadId(RULING), reader.deps), "question");
+    assertReadOnlyFallback(f);
+    const rows = fallbackRows(f), assignments = rows.filter(row => row.step === "worker.assignment"), attempts = rows.filter(row => row.step === "worker.attempt");
+    assert.equal(assignments.length, 1);
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0]!.selection_assignment_id, assignments[0]!.worker_assignment.id);
+    assert.equal(attempts[0]!.success, false);
+    assert.equal(attempts[0]!.worker_failure, "spawn-threw-before-result");
+    assert.equal(rows.filter(row => row.step === "inbox.thread_answered").length, 1);
+    assert.equal(await answerThread(inboxThreadId(RULING), reader.deps), undefined);
+    assert.equal(reader.calls(), 1);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("W1-T10347: explicit commands retain their existing flow after interpretation failure", async () => {
+  const f = fixture(), store = { threadStorePath: inboxThreadStorePath(f.root) };
+  try {
+    const deps = f.responder(async () => { throw new Error("controlled unavailable interpreter"); });
+    for (const [text, action] of [["decline this", "decline"], ["bring it back", "restore"], ["redraft it with the smaller scope", "edit"], ["go ahead", "approve"]] as const) {
+      appendThreadMessage(inboxThreadIdentity(RULING), "reply", text, store);
+      assert.equal(await answerThread(inboxThreadId(RULING), deps), action);
+    }
+    assert.deepEqual(f.reframed, [[RULING, "redraft it with the smaller scope"]]);
+    assert.deepEqual(f.approved, [], "approval prose remains a suggestion, not execution");
+    const all = readAllThreads(store);
+    assert.equal(all.status, "ok");
+    assert.equal(all.status === "ok" ? all.threads.get(inboxThreadId(RULING))!.at(-1)!.extra?.suggestedAction : undefined, "approve");
+    assert.equal(fallbackRows(f).some(row => row.step === "ratify.approved"), false);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("W1-T10347: fallback safety preserves valid decisions and bounded conversation behavior", async () => {
+  const f = fixture(), store = { threadStorePath: inboxThreadStorePath(f.root) };
+  try {
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "hmm, not sure", store);
+    assert.equal(await answerThread(inboxThreadId(RULING), f.responder()), "edit", "existing no-interpreter direction mode is unchanged");
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Change the proposal", store);
+    assert.equal(await answerThread(inboxThreadId(RULING), f.responder(async () => ({ action: "edit", reply: "I asked for a redraft.", note: "Keep the valid direction" }))), "edit");
+    assert.deepEqual(f.reframed, [[RULING, "hmm, not sure"], [RULING, "Keep the valid direction"]]);
+    f.reframed.length = 0;
+    const before = fallbackRows(f).filter(row => row.step === "panel.proposal_reframe_requested").length;
+    const unavailable = f.responder(async () => null);
+    for (let index = 0; index <= MAX_THREAD_QUESTIONS; index++) {
+      appendThreadMessage(inboxThreadIdentity(RULING), "reply", "What happens next?", store);
+      assert.equal(await answerThread(inboxThreadId(RULING), unavailable), index < MAX_THREAD_QUESTIONS ? "question" : "none");
+    }
+    assert.deepEqual(f.reframed, []);
+    assert.equal(fallbackRows(f).filter(row => row.step === "panel.proposal_reframe_requested").length, before, "exhausted fallback never becomes an edit");
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("W1-T10347: failed interpretation requires an unmistakable command before any proposal change", async () => {
+  const messages = [
+    "When should I decline this?",
+    "Please explain why I should reject this.",
+    "I do not want to decline this.",
+    "Don't edit this.",
+    "If this fails, close it.",
+    'The review says "decline this".',
+    '"decline this"',
+    "`decline this`",
+    "decline this?",
+    "decline this, or keep it?",
+    "When should I restore this?",
+    "How would I redraft it with a smaller scope?",
+    "We can change it later.",
+    "Do not go ahead.",
+    "looks good, but don't approve",
+    "please decline this and restore that",
+    "undo this only if safe",
+    "decline this\nthen bring it back",
+    "please edit it?",
+  ];
+  for (const text of messages) {
+    const f = fixture();
+    try {
+      const reader = failedInterpretation(f, { text: "", isError: true });
+      appendThreadMessage(inboxThreadIdentity(RULING), "reply", text, { threadStorePath: inboxThreadStorePath(f.root) });
+      assert.equal(await answerThread(inboxThreadId(RULING), reader.deps), "question", text);
+      assertReadOnlyFallback(f);
+      assert.equal(reader.calls(), 1, "uncertain intent cannot retry the model");
+      assert.equal(fallbackRows(f).filter(row => row.step === "worker.attempt").length, 1);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T10347: an explicit edit command keeps action words in its payload as feedback", async () => {
+  const f = fixture(), store = { threadStorePath: inboxThreadStorePath(f.root) };
+  try {
+    const unavailable = f.responder(async () => null);
+    const direction = "Please redraft it with a note to restore the archived material.";
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", direction, store);
+    assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "edit");
+    assert.deepEqual(f.reframed, [[RULING, direction]], "preserve the original feedback, not an embedded restore command");
+    assert.equal(fallbackRows(f).filter(row => row.step === "panel.proposal_restored").length, 0);
+    assert.equal(fallbackRows(f).filter(row => row.step === "panel.proposal_declined").length, 0);
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "  PLEASE decline this!  ", store);
+    assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "decline");
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Restore this proposal.", store);
+    assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "restore");
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Please go ahead!", store);
+    assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "approve");
+    assert.deepEqual(f.approved, [], "approval remains a button suggestion, never execution");
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });

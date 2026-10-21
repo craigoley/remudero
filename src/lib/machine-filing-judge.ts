@@ -584,6 +584,10 @@ interface MachineJudgeState {
    *  not re-rendered while the daemon's lagging checkout still reads it as due (W1-T5359, 2026-10-02:
    *  W1-T5309's merged ruling was re-landed 38 times, each an empty commit that stalled the loop). */
   settled?: Record<string, string>;
+  /** W1-T10348: the subset of `settled` that was settled as an OPERATOR release, by the same pin. Only
+   *  this masks a release: an escalate ruling settled earlier keeps the same pin when the operator
+   *  releases the record, so `settled` alone hid W1-T6372, W1-T7271 and W1-T7736 for 8 days. */
+  settledReleases?: Record<string, string>;
   /** An operator release whose `verify: auto` rewrite the linter refuses (a ruling-shaped record, which
    *  ruling-verify keeps at `verify: human`), by the pin it was refused at. A release skips `declined`, so
    *  without this an unchanged record was re-rendered every pass: W1-T5717, 515 identical refusals
@@ -1001,10 +1005,10 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const due = plan.tasks.filter(
     (t) =>
       needsMachineJudgement(t, released) &&
-      state.settled?.[t.id] !== taskRulingPin(t) &&
+      // W1-T10348: a release is masked only by a settled RELEASE; a settled escalation is what it overrules.
       (released.has(t.id)
-        ? state.refusedReleases?.[t.id] !== taskRulingPin(t)
-        : !excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t)),
+        ? state.settledReleases?.[t.id] !== taskRulingPin(t) && state.refusedReleases?.[t.id] !== taskRulingPin(t)
+        : state.settled?.[t.id] !== taskRulingPin(t) && !excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t)),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
   const dueIds = new Set(due.map((t) => t.id));
@@ -1014,6 +1018,12 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   // Kept only while the plan still reads the record at the pin it was settled at.
   state.settled = Object.fromEntries(
     Object.entries(state.settled ?? {}).filter(([id, pin]) => {
+      const t = plan.byId.get(id);
+      return t !== undefined && pin === taskRulingPin(t);
+    }),
+  );
+  state.settledReleases = Object.fromEntries(
+    Object.entries(state.settledReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
       return t !== undefined && pin === taskRulingPin(t);
     }),
@@ -1194,6 +1204,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           // again commits nothing or only a timestamp. Settled by its pin instead (W1-T5359, W1-T5406).
           delete state.rulings[r.task.id];
           state.settled[r.task.id] = taskRulingPin(r.task);
+          if (r.byOperator) (state.settledReleases ??= {})[r.task.id] = taskRulingPin(r.task);
           report.settled.push(r.task.id);
           ports.log("machine_judge.already_landed", { task_id: r.task.id, pin });
           continue;

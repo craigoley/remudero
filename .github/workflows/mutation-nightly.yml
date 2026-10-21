@@ -62,8 +62,10 @@ jobs:
         run: npm ci
       - name: List this run's mutate candidates (all of src/**; test/** is never produced by this glob)
         run: find src -type f \( -name '*.ts' -o -name '*.tsx' \) | sort > nightly-candidates.txt
+      # W1-T9873: recursive, so a test moved into a subfolder still counts as an importer; fixture
+      # trees are left out. test/ci-workflows-find-nested-tests.test.ts runs this step on a tree.
       - name: List the test files the per-file mapping is derived from
-        run: find test -maxdepth 1 -type f -name '*.test.ts' | sort > nightly-test-files.txt
+        run: find test -type f -name '*.test.ts' -not -path 'test/fixtures/*' | sort > nightly-test-files.txt
       # PLAN, not just scope: Stryker's `commandRunner.command` is one command for the whole run,
       # so mutating a wide, sampled scope with it needs one command PER FILE, derived from each
       # file's own direct test importers — never a single command spanning the whole sample.

@@ -1,0 +1,73 @@
+- id: W1-T10336
+  title: "A PR BODY THAT ALREADY PASSES ITS ACCEPTANCE GATE IS NEVER ESCALATED AS HAVING NO REPAIR — on #13039 (W1-T9265) the light pass repaired the body at 02:25:33Z on 2026-10-21, the gate's `edited` run passed at 02:25:35Z, and at 02:31:21Z a full pass whose snapshot predated both called `repairPrMetadata` again, which read the already-healthy live body, found nothing to edit, answered \"the body red has no deterministic acceptance repair\" and opened BLOCKED #13281; the fix rung then stood down on it 15 times until 04:51Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, what the metadata route answers when the live body needs no edit; a body that fails its gate with no cure still escalates
+  band_meaning: blast-radius
+  origin: "coordinator brief f1021b item 5 (2026-10-21), from the #13039 builder's root-cause notes (logs-8864/s13039-rc-stored-body.md); the brief's premise that the gate was not re-run is REFUTED below, and the shard is scoped to what the evidence shows"
+  plan_refs: [W1-T5544, W1-T4459, W1-T78, W1-T2799, W1-T10314]
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/sweep/a-body-that-already-passes-its-gate-is-not-escalated.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger on host remudero (rmd-state2, read-only, rows deduplicated by ts) and GitHub's workflow runs
+    for head 17e9cfff1 (read 2026-10-21T11:19Z through the cadence wrapper, logs-8864/f1021b-runs13039.tsv):
+    - 02:19:49Z `Acceptance author gate` run 39532402792 (pull_request) concluded failure.
+    - 02:21:48Z `daemon.sweep.started`: a full pass began, reading its ledger snapshot once (`readLedger` near the top
+      of `runSweep`, src/lib/sweep.ts).
+    - 02:25:33Z a LIGHT pass wrote `sweep.disposed` with `metadata_red_checks` [acceptance-author-gate] and
+      `metadata_repair_outcome` repaired ("edited body through the PR REST endpoint").
+    - 02:25:35Z the edit's `Acceptance author gate` run 39532941622 (pull_request) concluded SUCCESS. So the gate did
+      re-run on the repaired body and passed; the brief's "gate not re-run" premise does not hold. `CI gate` run
+      39532941647 at the same second concluded failure (the code reds).
+    - 02:31:21Z the full pass disposed the same head `metadata_repair_outcome` escalated, "the body red has no
+      deterministic acceptance repair; scope or proof amendment is required", and opened BLOCKED #13281 (cause ci).
+    - 02:52:40Z..04:51:31Z 15 `fix.stood_down` rows (site rung.strike) cite #13281 as already open; #13281 closed only
+      when the PR merged (05:36:55Z, resolution merged). The #13039 builder counted 13 of them, 03:31Z..04:24Z.
+    READ at origin/main 16f4c28fc (symbols, not lines):
+    - The metadata arm in `runSweep` looks for a prior same-head `metadata_repair_outcome` repaired/escalated row in
+      that pass's `ledgerLines` snapshot; a repair another pass wrote after the snapshot is invisible, so it calls
+      `repairMetadata` again.
+    - `repairPrMetadata` (src/run-task.ts) reads the LIVE body. `acceptanceGateBodyRepair` returns undefined for a body
+      that is already `ok: true` ("nothing to repair", its own doc), and the divergence cure returns nothing for a
+      healthy block, so `repairPrMetadata` answers `noCure` with the "no deterministic acceptance repair" text, and the
+      arm escalates a defect the live body no longer has.
+    NOT COVERED ELSEWHERE: W1-T10314 (queued, #13307) re-admits a strike past an open metadata-only escalation for a
+    code red it never named, which would have freed the 15 stand-downs; it does not stop the false escalation. W1-T5544
+    (merged) built the body cures. Swept origin/main plan/tasks.d and every open PR head's plan tree for
+    repairPrMetadata, metadata_repair_outcome and acceptanceGateBodyRepair: no shard covers it.
+    A JOB RE-RUN IS NOT THE REMEDY: the gate reads the pull_request event payload directly (its workflow's own step
+    name), so re-running the failed 02:19Z job would replay that event's OLD body (INFERRED from GitHub's re-run
+    semantics), and here the `edited` run had already passed.
+  design: |
+    1. `repairPrMetadata` distinguishes "the live body needs no edit" from "the body fails and has no cure": when the
+       body-checked reds are present but the live body passes `acceptanceAuthorTimeCheck` and (with the gate red) its
+       block already matches the task's criteria at the head, it returns a typed `alreadyHealthy` result naming that,
+       never `noCure`.
+    2. The sweep's metadata arm records `metadata_repair_outcome: already-healthy` for that result, opens no
+       escalation and dispatches no worker; the existing "awaiting a fresh edited-event verdict" wait applies.
+    3. A body that fails its gate with no derivable cure keeps today's escalation. No new GitHub read: the live body is
+       the read `repairPrMetadata` already makes.
+    4. src/run-task.ts sits at its comment-load ceiling (W1-T9332): add no comment lines beyond what the change removes.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/sweep/a-body-that-already-passes-its-gate-is-not-escalated.test.ts"
+    - claim: "a metadata red whose live body already passes the author-time check is recorded already-healthy and opens no escalation (the #13039 shape)"
+      proof: "grep: W1-T10336: a live body that already passes its gate opens no escalation in test/sweep/a-body-that-already-passes-its-gate-is-not-escalated.test.ts"
+    - claim: "a body that fails its gate with no derivable cure is still escalated"
+      proof: "grep: W1-T10336: a failing body with no cure is still escalated in test/sweep/a-body-that-already-passes-its-gate-is-not-escalated.test.ts"
+  falsifier: |
+    Remove the `alreadyHealthy` arm and the #13039-shaped fixture (gate red in the pass's view, live body already
+    repaired) is escalated with "no deterministic acceptance repair" again. Treat every no-edit result as healthy and
+    the failing-body test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger: `escalation.issue_opened` rows whose summary says "no deterministic
+    acceptance repair" while a same-head `metadata_repair_outcome` repaired row precedes them. Healthy shape: none.
