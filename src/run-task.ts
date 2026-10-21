@@ -18695,7 +18695,8 @@ function* writeFixCensusSnapshotSteps(
   try {
     const headSha = (yield* step(() => runGit(root, ["rev-parse", "HEAD"]))).trim();
     const mainSha = (yield* step(() => runGit(root, ["rev-parse", "origin/main"]))).trim();
-    const mergeBase = (yield* step(() => runGit(root, ["merge-base", headSha, mainSha]))).trim();
+    const mergeParents = (yield* step(() => runGit(root, ["rev-parse", "--revs-only", "MERGE_HEAD"]))).trim().split(/\s+/).filter(Boolean);
+    const mergeBase = (yield* step(() => runGit(root, ["merge-base", ...(mergeParents.length ? [mainSha, headSha, ...mergeParents] : [headSha, mainSha])]))).trim();
     const censusPath = (p: string) =>
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));

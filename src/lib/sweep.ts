@@ -14681,6 +14681,50 @@ function priorActionsFromLedger(
   };
 }
 
+export type TerminalFixDesignHandoff =
+  | { kind: "none" }
+  | { kind: "unavailable"; reason: string }
+  | { kind: "handoff"; reason: string; roundId: string };
+
+/** Bind the rung's first cached handoff to a completed round for this exact PR and head. */
+export function terminalFixDesignHandoff(
+  pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): TerminalFixDesignHandoff {
+  const key = fixLedgerTaskIdFor(pr);
+  const held = lines.find(row => row.step === "fix.needs_design" && row.task_id === key && row.head_sha === pr.headSha);
+  if (held === undefined) return { kind: "none" };
+  const unavailable = (): TerminalFixDesignHandoff => ({ kind: "unavailable",
+    reason: "terminal design handoff context unavailable — no fix admitted" });
+  const stamp = (row: Record<string, unknown>) => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  const at = stamp(held);
+  if (key === undefined || !/^[a-f0-9]{40}$/.test(pr.headSha) || !Number.isSafeInteger(pr.prNumber) || pr.prNumber < 1 ||
+      typeof held.reason !== "string" || !held.reason.trim() || !Number.isFinite(at) ||
+      typeof held.run_id !== "string" || !held.run_id || typeof held.host !== "string" || !held.host ||
+      typeof held.actor_pid !== "number" || !Number.isSafeInteger(held.actor_pid) || held.actor_pid < 1) return unavailable();
+  const ownPr = (row: Record<string, unknown>) =>
+    (row.pr_number === undefined || row.pr_number === pr.prNumber) &&
+    typeof row.repair_pr_url === "string" && prUrlKey(row.repair_pr_url) === prUrlKey(pr.prUrl);
+  if ((held.pr_number !== undefined && held.pr_number !== pr.prNumber) ||
+      (held.repair_pr_url !== undefined && !ownPr(held))) return unavailable();
+  const related = lines.filter(row => row.task_id === key && row.head_sha === pr.headSha &&
+    row.run_id === held.run_id && row.host === held.host && row.actor_pid === held.actor_pid);
+  const completed = related.filter(row => row.step === "fix.done" && row.fix_outcome === "NEEDS_DESIGN" &&
+    ownPr(row) && typeof row.round_id === "string" && row.round_id && Number.isFinite(stamp(row)) && stamp(row) >= at &&
+    related.some(start => start.step === "fix.dispatch" && start.round_id === row.round_id && ownPr(start) &&
+      Number.isFinite(stamp(start)) && stamp(start) <= at));
+  const rounds = new Set(completed.map(row => row.round_id));
+  if (rounds.size !== 1) return unavailable();
+  const terminal = completed[0]!;
+  // A later round which is still working keeps the existing dispatch/owner wait.
+  const newerLiveRound = lines.some(row => row.task_id === key && row.head_sha === pr.headSha &&
+    row.step === "fix.dispatch" && ownPr(row) && stamp(row) > stamp(terminal) &&
+    !lines.some(done => done.step === "fix.done" && done.task_id === key && done.head_sha === pr.headSha &&
+      done.run_id === row.run_id && done.round_id === row.round_id && ownPr(done) && stamp(done) >= stamp(row)));
+  if (newerLiveRound) return { kind: "none" };
+  return { kind: "handoff", reason: held.reason, roundId: terminal.round_id as string };
+}
+
 /** W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING A
  *  NEW HEAD? `prior.fixed` records only that a fix was DISPATCHED, never an outcome, and clears only
  *  on a new head — so a dispatch that ran and ENDED without pushing leaves the key set and every
@@ -18614,6 +18658,19 @@ export async function runSweep(
       reason =
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
+    }
+    if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
+        !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
+        !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+      const handoff = terminalFixDesignHandoff(pr, ledgerLines);
+      if (handoff.kind === "handoff") {
+        disposition = "refused-escalate";
+        reason = `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
+        ruleBlockerByIndex.set(prIndex, "escalated");
+      } else if (handoff.kind === "unavailable") {
+        disposition = "wait";
+        reason = handoff.reason;
+      }
     }
     byDisposition[disposition]++;
     const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue && !sloLadderDue;
