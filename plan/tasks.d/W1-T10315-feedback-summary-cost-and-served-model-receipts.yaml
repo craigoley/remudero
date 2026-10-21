@@ -1,0 +1,70 @@
+- id: W1-T10315
+  title: "Trace feedback-summary missing-cost receipts and restore cost and served-model evidence at the shared wrapper"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: feedback#fb-1792030216299-e56dd6
+  plan_refs: ["§7B", "W1-T4580", "W1-T4596", "W1-T4650", "W1-T4707", "W1-T9553"]
+  files:
+    - src/lib/feedback.ts
+    - src/lib/benchmark-run.ts
+    - test/feedback.test.ts
+    - test/benchmark-nondispatch-attempts.test.ts
+  rationale: |
+    The captured answer requests one repair covering seven feedback-summary terminal
+    receipts lacking costUsd and the same lane's servedModel gap (#11067). The original
+    cost record reports 44/51 observed, and the model record 43/50; these are historical
+    reported measurements, not a fresh audit. W1-T9553 repairs stale feedback records,
+    not receipt propagation. W1-T4580/W1-T4596 established receipt infrastructure but
+    do not settle this residual population.
+    realDecisionSummarizer in feedback.ts uses benchmarkNonDispatchSpawn("feedback-summary")
+    from benchmark-run.ts. That wrapper already calls benchmarkWorkerAttemptResources,
+    which conditionally emits total_cost_usd and carries served_model and its reason;
+    the normalized evidence reader observes terminal.costUsd and terminal.servedModel.
+    A percentage alone therefore does not prove which boundary loses the values.
+    Rule 19: an integration test must drive the feedback caller through the shared
+    wrapper and inspect its actual ledger receipts; separate helper tests are insufficient.
+  design: |
+    Trace all seven originally reported missing-cost receipts by immutable assignment/run
+    identity through worker result, shared wrapper, ledger fields, benchmark_run receipt
+    and evidence projection. Use the complete ledger union with per-form coverage controls,
+    a retained-cost positive control, audited window and newest source timestamp. Record
+    each disposition and supporting evidence in the implementation PR. If the historical
+    seven cannot be recovered, state the missing corpus explicitly; do not substitute seven
+    convenient recent rows or claim the historical audit complete. Audit the same lane's
+    served-model omissions alongside cost, linking the #11067 record.
+    Repair the evidenced loss in the shared wrapper and its feedback-summary caller wiring.
+    Preserve real zero costs, reported costs on error results and fallback attempts, actual
+    served identity (including a model different from the request), provider-unreportable
+    reasons, assignment joins and separate fallback receipts. Never invent a requested-model
+    identity or replace an unknown cost with zero. Do not rewrite historical ledger rows.
+    Exempt missing cost only for calls confirmed to have failed without any cost receipt;
+    record the failure evidence and named reason. Failure status alone is insufficient:
+    a failed call with reported usage/cost retains it. Unresolved or successful missing-cost
+    calls remain visible debt. A provider's named inability to report model identity remains
+    distinguishable from an unexplained omission and never counts as observed identity.
+    Exercise realDecisionSummarizer through the production wrapper with an isolated ledger
+    and controlled worker transport, then feed its actual receipts through the existing
+    benchmark evidence projection. Cover success, failed results with cost, confirmed
+    failure without a receipt, fallback, missing telemetry and sink failure. Preserve worker
+    results, exceptions, callbacks and fallback behavior when telemetry fails. Reuse existing
+    suites; no new global classification policy, coverage-floor reduction or advisory gate
+    change. Coordinate shared-wrapper overlap with existing daemon/isolation/ci-judge work.
+  acceptance:
+    - claim: "The feedback-summary caller through the shared wrapper retains reported cost including zero and error-result cost, actual served model or named unavailable reason, and assignment identity in ledger receipts consumed by the existing evidence projection"
+      proof: "unit test: test/feedback.test.ts"
+    - claim: "Shared-wrapper fallback and failure receipts preserve available cost and model evidence; confirmed failure without a cost receipt stays explicitly unavailable, unexplained missingness is not fabricated, and telemetry failures preserve worker behavior"
+      proof: "unit test: test/benchmark-nondispatch-attempts.test.ts"
+  falsifier: |
+    Remove the propagation repair and show the caller-to-ledger regression fails, then
+    restore it to pass. A failed result carrying a nonzero cost must never be exempted;
+    a served model differing from the request must survive unchanged. Report seven
+    historical per-receipt dispositions or explicitly identify unrecoverable evidence.
+  priority: 4
+  status: queued
+  attempts: 0

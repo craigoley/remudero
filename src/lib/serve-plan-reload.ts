@@ -9,6 +9,7 @@
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createHash } from "node:crypto";
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
 import { systemClock, type Clock } from "./clock.js";
 import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type Plan, type QuarantinedTask } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -122,7 +123,7 @@ function workerFailure(reason: string): Error {
 /** {@link readServePlanAtRef} on a one-shot worker thread: git is async already, and the parse over
  *  every task no longer holds serve's event loop. A worker that answers `ok: false` rejects as a failed
  *  read; one that cannot start or dies first rejects with an error {@link isPlanReloadWorkerFailure} recognises. */
-export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: URL = new URL(import.meta.url)): Promise<PlanRead> {
+export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: URL = bundledWorkerUrl(import.meta.url)): Promise<PlanRead> {
   return new Promise((resolve, reject) => {
     let worker: Worker;
     try {

@@ -40,4 +40,17 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
   exec node "$DIR/scripts/rmd-help.mjs"
 fi
 
+if [ "${1:-}" = "daemon" ]; then
+  RMD_MAIN_CHOICE="$(node "$DIR/scripts/build-child-entries.mjs" --root "$DIR" --main-entry "$1" 2>/dev/null || true)"
+  RMD_MAIN_KIND="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f1)"
+  RMD_MAIN_REASON="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f2)"
+  RMD_MAIN_BUNDLE="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f3)"
+  if [ "$RMD_MAIN_KIND" = "bundle" ] && [ -f "$RMD_MAIN_BUNDLE" ]; then
+    export RMD_MAIN_ENTRY="bundle:$RMD_MAIN_REASON"
+    exec node --enable-source-maps "$RMD_MAIN_BUNDLE" "$@"
+  fi
+  export RMD_MAIN_ENTRY="tsx:${RMD_MAIN_REASON:-resolver-gave-no-answer}"
+  unset RMD_MAIN_CHOICE RMD_MAIN_KIND RMD_MAIN_REASON RMD_MAIN_BUNDLE
+fi
+
 exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"

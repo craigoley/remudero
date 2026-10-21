@@ -10,7 +10,7 @@
   plan_refs: [W1-T208, W1-T378, W1-T1036, W1-T9855, W1-T4547, W1-T10298]
   files:
     - docs/forensics/live-worktrees-pruned-by-a-run-start.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, core ledger (read-only; rotations named 2026-10-19/20 plus live, newest row 2026-10-20T22:00:59Z):

@@ -1,0 +1,165 @@
+- id: W1-T10339
+  title: "A STOOD-DOWN REPAIR IS NOT RE-DISPATCHED ON THE SAME HEAD, AND A TASKLESS PR'S CAPPED PROOF IS REPAIRED IN ITS BODY — the sweep routes a run-unfiled PR's capped proof to a fix round whose prompt forbids editing the body and offers only a plan amendment no shard can take, the worker hands back NEEDS_DESIGN, and W1-T1110's re-arm then reads every later same-head stand-down as an ended rung and dispatches again: #13282 stood down 112 times at one head in 7 hours"
+  repo: remudero
+  depends_on: [W1-T10282]  # W1-T10282 (queued, hand-claimed 2026-10-21) escalates an exact-head NEEDS_DESIGN before fix admission in src/lib/sweep.ts; this task reuses that escalation and must not race it in the same file
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern, what the sweep does with a capped or stood-down repair at inputs that have not changed; review, arming, strike accounting and trailered PRs' plan-amendment route are unchanged
+  band_meaning: span
+  budget_usd: 12.00
+  priority: 1  # requested by the operator session 2026-10-21: 382 same-head re-dispatches in 7 days, each one held fix capacity from real work
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-21: #13282 sat on plan-proof-unrunnable from 03:29Z with a fix stand-down every ~4 minutes at one head"
+  plan_refs: [W1-T10282, W1-T9955, W1-T1110, W1-T3306, W1-T3434, W1-T2381]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/classify.ts
+    - src/lib/prompt-render.ts
+    - src/lib/body-repair.ts
+    - src/run-task.ts
+    - test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts
+  rationale: |
+    READ 2026-10-21 at origin/main 7dfbbc15b. Ledger read on host remudero (~/rmd-state2/state), live ledger.ndjson
+    plus every rotation from 2026-10-14 to 2026-10-21T10:49Z, deduplicated.
+    THE CASE, #13282 (run-unfiled-1792550136714, no task trailer, so its PR BODY is the authoritative Acceptance).
+      - 02:52Z: remudero-review posted success but CAPPED at head db669da1b. The body's one proof,
+        `grep: OPERATOR 2026-10-21: act in plan/policy.yaml`, graded `executed_stale`: "every executor-returned
+        matching line is a comment; non-discriminating".
+      - The sweep disposed it `blocked-fixable`, blocker `plan-proof-unrunnable`, blocker_owner `plan-repair`, reason
+        "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR
+        body".
+      - 03:49Z: one real fix round (fix.dispatch, worker.attempt). The worker answered NEEDS_DESIGN: "stale plan
+        proof requires a parent-owned amendment; this worker cannot edit the task criteria".
+      - 04:22Z to 11:19Z: 112 `fix.stood_down` rows, site `rung.needs_design`, all at head db669da1b, about one every
+        4 minutes. The sweep's repeat_streak reached 149, and `sweep.repeat_escalated` was written at 10:51Z.
+        Dispatch went on.
+      - Each dispatch held light-pass fix capacity. On passes without room the row read "NOT DISPATCHED this pass:
+        live host capacity exhausted ... a fix needs 3602 MiB (measured; typical 1332)".
+      - None of the 112 rows carries an `issue_url` or an `error`, and no `escalation.*` row names 13282. The rung's
+        own escalation (run-task.ts, the `priorDesign` branch) delivered nothing on every pass. The cause is
+        UNMEASURED.
+      - The loop ended only when a hand push moved the head to cb70c6e9 at about 11:33Z with a rewritten body.
+    DEFECT (a), MISROUTING. A taskless PR's capped proof is sent to a round that cannot repair it.
+      - src/lib/sweep.ts: the capped route (W1-T3306, the block ending in the reason string above) sets
+        `planProofBlockedPrs`, and `finalBlocker` reads it as `planProofUnrunnable`.
+      - `planRepairCapable` is true whenever `deps.dispatchPlanOnlyRepair` is wired, so src/lib/pr-blocker.ts
+        names the owner `plan-repair`, although a taskless PR has no shard to repair.
+      - `planCappedRepair` / `judgeCappedRepair` (src/lib/classify.ts) return `repair_body` while
+        `bodyStrikes < bodyCeiling`. Body strikes never advance, because a stand-down spends none, so the progress
+        judge is never consulted.
+      - The round's evidence carries `proofDiscrimination`, so FIX_MODE_RULES picks mode `proof-discrimination`.
+        Its prompt (src/lib/prompt-render.ts) says "THE PLAN, NOT THIS PR'S BODY, IS WHAT A TRAILERED PR IS JUDGED
+        AGAINST", "Do NOT edit the PR body's Acceptance block", and asks for a PROOF_AMENDMENT that a parent-owned
+        process writes.
+      - run-task.ts sends that proposal only to `dispatchProofAmendmentWrite` -> `requestProofAmendment`, which
+        writes a plan shard.
+      - For an untrailered PR every one of those statements is false. The sweep's reason says "repair the PR
+        body", and the prompt forbids exactly that. The worker's NEEDS_DESIGN is the correct answer to the prompt
+        it was given.
+      - src/lib/body-repair.ts has no taskless or capped-proof path at all. Its `diagnoseBodyDefects` even reports
+        `no-trailer` on every run-unfiled body. Its validators (`diagnoseUnrunnableProofs`,
+        `repairedProofsAreSafeToPush`) guard only the acceptance-author-gate body write in run-task.ts.
+      - sweep.ts already knows the distinction elsewhere: `carriesTaskTrailer(pr)` gates the W1-T5544 proof-repair
+        route.
+    DEFECT (b), NO-PROGRESS RE-DISPATCH. Nothing compares a stood-down rung's inputs with the current ones.
+      - `fixRungStalledWithoutNewHead` (src/lib/sweep.ts, W1-T1110) reads any `fix.stood_down` whose outcome is not
+        `handed_off` as `stalled`. `fixSeedRead` then returns `ended`, so the `blocked-fixable` dedup is false and
+        the PR is dispatched again.
+      - runFixRung's `priorDesign` check (run-task.ts) finds the same-head `fix.needs_design` and stands down
+        before any worker runs. Every later dispatch at that head is therefore certain to stand down: a futile
+        dispatch, by construction.
+      - The sweep's `designHandoff` hold (from #13318) only refreshes on a changed task-contract revision, and
+        otherwise falls through to dispatch. A taskless PR has no contract revision.
+      - `repeat_streak` / `sweep.repeat_escalated` cannot stop this. By W1-T2381 the row "IS THE WHOLE OUTPUT — no
+        deps.escalate() call", and it counts dispositions; it is not a dispatch gate.
+      - For a taskless PR the input that can change at an unchanged head is the BODY. Both the sweep hold and the
+        rung's `priorDesign` reuse are keyed on the head alone, so a repaired body at the same head would be held
+        forever.
+    BREADTH, 2026-10-14..10-21: 540 distinct `fix.stood_down` rows. 28 (task, site, head) groups stood down more
+    than once at an unchanged head, giving 382 stand-downs beyond the first.
+      - rung.needs_design: 285. W1-T10070 (#13121) had 136 at 10b5d5447, 10-20 18:14Z to 10-21 03:46Z;
+        W1-T10282 owns that case. PR-13282 had 112, PR-12703 15, W1-T10040 13, and W1-T9265 11 + 4 at two heads.
+      - rung.strike: 85. Each was "a needs-human escalation for this exact (task, PR, head) is ALREADY OPEN"; for
+        example PR-13218 stood down 12, 9, 3 and 3 times at four heads.
+      - rung.unfiled_scope: 11. rung.workflow_scope: 1.
+      - rung.strike releases when an issue closes, a different input. It is named here and NOT in this task's
+        scope.
+    #13008 IS A DIFFERENT SHAPE.
+      - It is a plan-only filing red on lint-plan: machine-filing-admission, W1-T10160 dependency credit
+        unavailable for W1-T9658.
+      - It is disposed `refused-escalate`, escalated once at head 846276ed2 and deduped after that: 16 of 17 rows
+        are acted:false. No dispatch loop.
+      - Its `plan-proof-unrunnable` label comes from `finalBlocker`'s `isBlockedCi(pr) && pr.isPlanFiling` arm,
+        owner NONE.
+    OVERLAP SWEEP 2026-10-21 (plan/tasks.d, and 8 open PRs read through the broker):
+      - W1-T10282 (queued, P1.33, dispatch ref renewed 11:37Z, no PR yet) escalates an exact-head NEEDS_DESIGN
+        before another fix admission. It is head-keyed and does not touch the taskless route or the body key, so
+        this task depends on it.
+      - W1-T9955 (queued) is the opposite fault for a PR with NO task id: its ended rung is never read, so it parks
+        silently. Once it lands, those PRs reach this task's rule too.
+      - No open PR touches the capped route, the proof-discrimination prompt or the W1-T1110 re-arm.
+  design: |
+    No fixed bounds. A repair is re-dispatched when, and only when, something it read has changed.
+    1. A TASKLESS CAPPED PROOF IS A BODY REPAIR. For a PR where `carriesTaskTrailer(pr)` is false:
+       - The sweep's capped route never sets the plan-repair owner. `planRepairCapable` is false for it, the blocker
+         owner is the fix lane, and `planCappedRepair` / `judgeCappedRepair` never return `repair_plan_shard`.
+       - The fix round renders a body variant of the `proof-discrimination` prompt. It says this PR has no task, so
+         its BODY's Acceptance block is what review judges. It asks for the same PROOF_AMENDMENT block (claim and
+         old_proof byte-for-byte, new_proof). It says the harness, not the worker, writes the body.
+       - run-task.ts validates each proposed entry with the checks `requestProofAmendment` already runs: identical
+         claim, parseable proof, a hit at head and a miss at the merge base through `buildBaseProofDir`. Then
+         `repairedProofsAreSafeToPush` must accept the rewritten criteria.
+       - Only then is the live body rewritten through the existing body writer (`updatePrBody`), replacing those
+         proof lines and nothing else. The round ledgers `fix.body_proof_repaired` with the old and new body digest.
+       - It never calls `dispatchProofAmendmentWrite`. A trailered PR keeps today's plan-amendment route unchanged.
+       - A refused or empty proposal ends the round as a stand-down that records why. Item 2 then holds it.
+       - The rewritten body is a new review input, so review re-runs on its own edited event as it does for any
+         body edit.
+    2. A STAND-DOWN RECORDS WHAT IT READ, AND THE SWEEP DOES NOT RE-DISPATCH UNTIL ONE OF THOSE THINGS CHANGES.
+       - Every `fix.stood_down` row records: the head sha; the task-contract revision it worked on (as
+         `fix.needs_design` already does); and, for a taskless PR, a sha256 of the PR body it read.
+       - `fixRungStalledWithoutNewHead` / `fixSeedRead` read such a stand-down as `ended` (re-dispatchable) only when
+         the current PR differs on one of those inputs. Otherwise it reads as a standing hold. A stand-down written
+         before this field existed keeps today's reading.
+       - On the first pass that finds the hold, the sweep escalates it once through W1-T10282's exact-head escalation
+         route, with the stand-down's own reason. It ledgers the outcome whether delivered or not. On every later
+         pass it records an acted:false stand-down that names the hold, spends no capacity and dispatches no worker.
+       - A changed head, contract revision or (taskless) body releases the hold, and the next pass routes the PR
+         normally.
+       - runFixRung's `priorDesign` reuse in run-task.ts compares the same inputs, so a body repaired at an unchanged
+         head gets a real round instead of an instant stand-down.
+       - Rows that are not stand-downs keep W1-T1110's reading: a live rung stays deduped, and a handed_off
+         stand-down stays a live wait until the sweep receives it.
+    3. OUT OF SCOPE, NAMED. The `rung.strike` "needs-human escalation ALREADY OPEN" stand-down (85 of the 382) is
+       released by an issue closing, and stays as it is. The `sweep.repeat_escalated` row stays a ledger-only
+       counter (W1-T2381).
+    Tests go in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts (or the folder
+    `rmd test-place` computes). They use runSweep and runFixRung with injected deps, a ledger fixture shaped from
+    #13282's rows, a fake body writer and a fake review. No real gh, worker or network.
+  acceptance:
+    - claim: "a taskless PR's capped proof round asks for a body proof replacement and writes the validated replacement into the PR body, never a plan amendment"
+      proof: 'grep: test("W1-T10339: a taskless capped proof is repaired in the PR body" in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts'
+    - claim: "the sweep never names plan-repair as a taskless capped PR's owner and never picks the plan-shard rung for it"
+      proof: 'grep: test("W1-T10339: a taskless capped PR is never routed to plan repair" in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts'
+    - claim: "a repair that stood down at an unchanged head, contract and body is escalated once and not dispatched again"
+      proof: 'grep: test("W1-T10339: a stood-down repair is not re-dispatched on unchanged inputs" in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts'
+    - claim: "a body edit at an unchanged head releases a taskless PR's stood-down repair, in the sweep and in the fix rung's own reuse"
+      proof: 'grep: test("W1-T10339: a body edit releases a taskless stand-down at the same head" in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts"
+  falsifier: |
+    Keep the proof-discrimination prompt and the plan-amendment writer for an untrailered PR: the body is never
+    rewritten, and the first test fails.
+    Leave planRepairCapable true for a taskless PR: the blocker owner reads plan-repair, and the second test fails.
+    Keep W1-T1110's reading of every stand-down as ended: the next pass dispatches again at the same head, and the
+    third test fails.
+    Key the hold or the rung's priorDesign reuse on the head alone: the repaired body is held, or stood down with no
+    worker, and the fourth test fails.
+    Regression guards, kept by the same file:
+    - A trailered PR's capped proof still goes to the plan-amendment route.
+    - A new head releases every hold.
+    - A live in-flight rung is still deduped.
+    - A handed_off stand-down is still a live wait.
+    - A stand-down row without the new fields keeps today's re-dispatch.

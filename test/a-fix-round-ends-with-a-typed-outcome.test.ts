@@ -281,3 +281,40 @@ test("W1-T5532: the default base probe runs a failing test at the fetched main t
   assert.equal(refund?.reason, "worker-base-red-verified");
   assert.equal(refund?.main_sha, f.repo.git("rev-parse", "HEAD"));
 });
+
+test("PR-13121: a refused commit's FIXED claim lands on fix.done as NOT_LANDED", async () => {
+  const idle = fixture("REPORT\nFIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(ci): repair");
+  await runFixRung(idle.run);
+  const done = idle.rows.find((r) => r.step === "fix.done");
+  assert.equal(done?.subtype, "commit_refused");
+  assert.equal(done?.fix_outcome, "NOT_LANDED");
+  assert.equal(done?.worker_fix_outcome, "FIXED");
+  const landed = fixture("REPORT\nFIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(src): repair");
+  landed.setEdit(() => writeFileSync(join(landed.repo.dir, "src/fix.ts"), "fixed source\n"));
+  await runFixRung(landed.run);
+  assert.equal(landed.rows.find((r) => r.step === "fix.done")?.fix_outcome, "FIXED", "control: a landed FIXED stays FIXED");
+});
+
+test("PR-13121: a NEEDS_DESIGN stand-down escalates once per head and names the issue on every pass", async () => {
+  const design = fixture("REPORT\nFIX_OUTCOME: NEEDS_DESIGN the harness must commit the merge");
+  const url = "https://github.com/acme/remudero/issues/77";
+  let creates = 0;
+  let fail = true;
+  design.run.deps.issues = { listOpen: () => [], comment: () => {}, create: () => {
+    creates++;
+    if (fail) throw new Error("issue surface unavailable");
+    return url;
+  } };
+  await runFixRung(design.run);
+  const undelivered = await runFixRung(design.run);
+  assert.equal(undelivered.outcome, "needs_design");
+  assert.equal(undelivered.issueUrl, undefined);
+  const stands = () => design.rows.filter((r) => r.step === "fix.stood_down" && r.site === "rung.needs_design");
+  assert.match(String(stands()[0]!.error), /issue surface unavailable/);
+  fail = false;
+  assert.equal((await runFixRung(design.run)).issueUrl, url);
+  assert.equal((await runFixRung(design.run)).issueUrl, url);
+  assert.equal(creates, 2, "one failed delivery, then one issue for this head");
+  assert.deepEqual(stands().map((r) => r.issue_url), [undefined, url, url]);
+  assert.equal(design.counts().spawns, 1, "no stand-down spends a worker");
+});

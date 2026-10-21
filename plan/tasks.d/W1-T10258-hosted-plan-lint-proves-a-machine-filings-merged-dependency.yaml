@@ -16,7 +16,9 @@
     - .github/workflows/ci.yml
     - scripts/lib/ci-dependency-evidence.mjs
     - scripts/lib/ci-dependency-evidence.d.mts
-    - test/ci/a-hosted-plan-lint-credits-a-merged-dependency.test.ts
+    - test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts
+    - test/the-census-watches-its-own-base.test.ts
+    - test/the-merge-queue-runs-the-recorded-literal-gates.test.ts
   rationale: |
     OBSERVED 2026-10-20. #12894 (merged 00:26Z) made filing lint admit a machine-authored
     task's depends_on only on verified merge credit (plan.ts machineFilingAdmissionViolations).
@@ -49,19 +51,31 @@
     fallback and no write to any credit store. The evidence never becomes durable production
     credit; #13018's tests already guard that. This edits ci.yml, so it waits for the
     operator's release (verify: human).
+    Two existing workflow fixtures must model the same approved scheduling contract: the
+    main census admits only an independent unconditional matrix or needs:[commitlint] with
+    always() && !cancelled(), while retaining the strict push census invocation. The merge
+    queue fixture models literal == and != comparisons, including absent digest stays false,
+    and continues to reject unsupported expressions. It models GITHUB_ENV writes, pins the
+    new inline lint entrypoint with the same PR/queue base, and explicitly proves an unavailable
+    protected archive exports no invented digest or producer identity. No production gate, required check,
+    census threshold, exclusion or dependency-credit policy is relaxed.
   acceptance:
     - claim: "a machine filing whose dependency merged passes hosted lint with producer evidence"
-      proof: 'grep: test("W1-T10258: hosted plan lint credits a merged dependency from same-run producer evidence" in test/ci/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
+      proof: 'grep: test("W1-T10258: hosted plan lint credits a merged dependency from same-run producer evidence" in test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
     - claim: "absent, foreign or tampered producer evidence stays UNKNOWN and red"
-      proof: 'grep: test("W1-T10258: hosted plan lint keeps a dependency UNKNOWN without valid producer evidence" in test/ci/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
+      proof: 'grep: test("W1-T10258: hosted plan lint keeps a dependency UNKNOWN without valid producer evidence" in test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
+    - claim: "the main census keeps exact unconditional scheduling and rejects parent skips or event filters"
+      proof: 'grep: test("main census scheduling rejects parent skips and event filters" in test/the-census-watches-its-own-base.test.ts'
+    - claim: "the merge queue fixture keeps absent evidence false and unsupported syntax rejected"
+      proof: 'grep: test("merge queue expression fixture preserves absent evidence and rejects unsupported syntax" in test/the-merge-queue-runs-the-recorded-literal-gates.test.ts'
   falsifier: |
     Remove the producer step. The first test must report "dependency credit unavailable
     (UNKNOWN)" for W1-T9658-shaped evidence.
   risk_ruling:
-    verdict: "operator"
+    verdict: "high"
     action: proceed
     confidence: 1
     reasons:
-      - "released by the operator with rmd approve"
-    judged_at: "2026-10-20T18:45:34.674Z"
-    pin: "35dcee8c005074b65501b3d101af3c6e82661597645ca8d7a154c9e242d22c2e"
+      - "Approve the bounded W1-T10258 companion amendment at pin c568334e. Finish #13008, #13039 and the remaining repairs through the normal gates. Stay within all guardrails. Specific bounded six-path specification c568334e and companion scheduling/queue-fixture contracts only. Ordinary author and all hosted, coverage, security, native-review and merge gates retained; no manual merge, host/capacity change or queued fleet-branch push."
+    judged_at: "2026-10-21T10:23:15Z"
+    pin: "c568334e3af98f991eb4ae23275d550f52b03db93b8d2e8d55b7aefeb03e6356"
