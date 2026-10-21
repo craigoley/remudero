@@ -257,6 +257,8 @@ test("a pending main merge gives the census its prospective merged base without 
   assert.equal(snapshot.mergeBase, main, "a normal pending main merge has main as its prospective merge base");
   assert.equal(snapshot.baseBlobs[inherited], readFileSync(join(repo.dir, inherited), "utf8"));
   assert.equal(snapshot.baseBlobs["src/branch.ts"], "export const own = 0;\n");
-  assert.equal(readFileSync(join(repo.dir, "src/branch.ts"), "utf8"), "export const own = Date.now();\n",
+  assert.equal(snapshot.headSha, head, "the branch's committed census inputs remain selected as head");
+  assert.ok(snapshot.headPaths.includes("src/branch.ts"));
+  assert.equal(repo.git("diff", "--name-only", snapshot.mergeBase, "--", "src/branch.ts"), "src/branch.ts",
     "the branch's own newly unsafe census input remains different from the measured base");
 });
