@@ -476,6 +476,12 @@
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/live-worktrees-pruned-by-a-run-start.md",
+      "title": "Live worktrees removed by a run's startup prune",
+      "summary": "W1-T10299: pruning safeguards differ; the October 20 incident's cause and live-worktree loss frequency remain unmeasured.",
+      "grepHint": "Live worktrees removed by a run's startup prune"
+    },
+    {
       "path": "docs/forensics/measurement-cadence.md",
       "title": "measurement-cadence.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -584,6 +590,12 @@
       "grepHint": "self-sync.ts forensics"
     },
     {
+      "path": "docs/forensics/serve-non-heap-rss-growth.md",
+      "title": "Serve non-heap RSS growth attribution",
+      "summary": "Offline measurements and the evidence still needed to attribute live growth for W1-T10293.",
+      "grepHint": "Serve non-heap RSS growth attribution"
+    },
+    {
       "path": "docs/forensics/serve.md",
       "title": "serve.ts comment forensics",
       "summary": "The measured forensics and design arguments behind `src/lib/serve.ts`, kept out of the source so",
@@ -660,6 +672,12 @@
       "title": "Staged private ownership / peer capacity protocol",
       "summary": "Source-only redesign for #11906. No live path, permission, flag, daemon, review,",
       "grepHint": "Staged private ownership / peer capacity protocol"
+    },
+    {
+      "path": "docs/forensics/the-retro-backoff-has-no-ceiling.md",
+      "title": "The retro backoff has no ceiling",
+      "summary": "The time arm grows without a ceiling; a cap's effect on actual attempts remains unmeasured without the attempt and tick history.",
+      "grepHint": "The retro backoff has no ceiling"
     },
     {
       "path": "docs/forensics/tick-read-worker.md",

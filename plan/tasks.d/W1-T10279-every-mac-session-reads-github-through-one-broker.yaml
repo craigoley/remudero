@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — how a Mac session's GitHub READS reach GitHub; writes, core's floor (W1-T10271) and the app-token identity (W1-T4085) are unchanged
   band_meaning: span
   priority: 1  # operator-2026-10-20: the shared read floor starves interactive sessions and agents on the Mac
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-20: the Mac-wide gh read floor starves sessions and agents; file a local GitHub read broker"
   plan_refs: [W1-T3275, W1-T3297, W1-T4085, W1-T10271, W1-T999, W1-T1066]

@@ -13,14 +13,19 @@
   files:
     - src/cli/commands/daemon.ts
     - src/lib/inbox-thread.ts
+    - src/lib/inbox-thread-view.ts
+    - src/lib/inbox-view.ts
     - src/lib/inbox-responder.ts
     - src/lib/inbox.ts
     - src/lib/panel-graph.ts
     - src/lib/instance-inbox-proposal.ts
     - src/lib/instance-inbox-contract.ts
+    - src/lib/ledger-path.ts
     - openapi/daemon.yaml
     - src/run-task.ts
     - test/inbox/inbox-feedback-response-causal-link.test.ts
+    - test/an-instance-reframes-only-its-current-proposal.test.ts
+    - test/inbox-thread-view.test.ts
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=feb9a487f7353c77
@@ -106,6 +111,35 @@
     receipts and same-committed-tree instrumented diff coverage, naming the SHA; helper-only mocks,
     test-title greps and a fabricated mutant result are not evidence.
   note: |
+    Cached correspondence qualification adds only src/lib/inbox-thread-view.ts, the existing
+    src/lib/inbox-view.ts producer and test/inbox-thread-view.test.ts caller suite. The cached view currently rebuilds an item with
+    only proposal id, summary, plain text and lane, dropping the source scope and feedback history
+    required by this task's already-approved unknown-versus-linked read contract. Use the native
+    producer-owned persisted classification and its exact snapshot identity; never infer repository
+    authority from message labels, a selected account, text similarity or a timestamp join. Preserve
+    the actual producer inbox root in the private persisted snapshot scope while retaining its
+    existing instance and repository identity; copied or root-less evidence cannot grant authority.
+    Keep private roots out of browser payloads. Validate complete snapshot-bound page cursors using
+    the canonical producer codec, preserving legacy numeric pages and all missing, mixed, foreign,
+    duplicate, gap and inconsistent-count refusals rather than loosening source qualification.
+    Preserve source age and readonly readiness. Missing, foreign, ambiguous or mismatched source snapshots
+    must keep correspondence unknown, never manufacture zero pending inputs or acknowledgements.
+    Memoization must observe source-generation and explicit-retraction changes. Preserve every
+    existing incomplete-page, unavailable-store and source-provenance assertion; close the fixture's
+    own producer/database resources before deleting its private root, without retries or skips.
+    No live work, claims, source binding, permission, provider, budget, cadence, service setting,
+    risk ruling or validation/review/merge gate changes. Original reservation and high-risk span,
+    all behavioral acceptance requirements and single-writer coordination remain unchanged.
+
+    Caller qualification adds only src/lib/ledger-path.ts and the existing instance-reframe
+    regression fixture. The ledger helper needs a type-only Config-to-Pick<Config, "root">
+    narrowing so a verified forwarded input can use its declared source root without reading
+    the account's default configuration; the ledger path expression and runtime values stay
+    unchanged. Preserve every hold, supersession, replay and source-isolation assertion in
+    test/an-instance-reframes-only-its-current-proposal.test.ts while asserting the additional
+    immutable captured-input metadata. The observed old-shape mismatch is not permission to
+    weaken these assertions. No new authority, risk ruling, provider call or service change.
+
     Scope correction: the production responder callback now lives in src/cli/commands/daemon.ts.
     That callback forwards to fleetRatify.reframe and currently discards the returned handoff.
     Add only this existing composition file so the already-required consumed input identity and
