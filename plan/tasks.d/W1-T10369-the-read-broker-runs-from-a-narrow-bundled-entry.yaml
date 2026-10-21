@@ -1,0 +1,62 @@
+- id: W1-T10369
+  title: "THE GITHUB READ BROKER RUNS FROM A NARROW BUNDLED ENTRY, NOT THE WHOLE tsx RUN-TASK GRAPH — `rmd gh-broker serve` loads src/run-task.ts through tsx to reach one small module, so the always-on broker unit peaked at 262 MB (its node child's VmHWM 216 MB) on 2026-10-21; start it the way #13218 starts the daemon main, from a bundled entry with source maps"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which entry the broker process starts from; what the broker serves and how it paces are unchanged
+  band_meaning: span
+  origin: "coordinator brief f1021b item 15 (2026-10-21): `rmd gh-broker serve` uses ~320 MB RSS because it loads the whole tsx run-task entry"
+  plan_refs: [W1-T10279, W1-T9117, W1-T9082, W1-T8777, W1-T10368]
+  files:
+    - src/gh-broker-main.ts
+    - src/run-task.ts
+    - scripts/build-child-entries.mjs
+    - bin/rmd
+    - test/worker/the-read-broker-runs-from-a-narrow-bundled-entry.test.ts
+  status: queued
+  priority: 2  # the broker runs all the time on the host whose memory budget the box plan tracks
+  attempts: 0
+  rationale: |
+    OBSERVED on host remudero, 2026-10-21 ~20:15Z (unit cgroup and /proc status memory lines only):
+    `systemctl --user show remudero-gh-read-broker.service` MemoryPeak 261,906,432 B, MemoryCurrent 21,835,776 B;
+    the unit's main process VmRSS 42,688 kB (VmHWM 55,828 kB) and its node child VmRSS 62,936 kB, VmHWM 216,012 kB.
+    The coordinator measured ~320 MB RSS earlier. The broker had restarted at ~19:55Z (see W1-T10368), so these
+    peaks cover a short window.
+    READ at origin/main b49411212 (symbols, not lines):
+    - The unit's ExecStart runs `bin/rmd gh-broker serve`. bin/rmd routes only `daemon` through
+      `scripts/build-child-entries.mjs --main-entry` to a bundle (#13218); every other verb, this one included, runs
+      `src/run-task.ts` under tsx, which imports the whole CLI graph before `ghBrokerCommand`
+      (src/lib/gh-read-broker.ts) runs.
+    - `CHILD_ENTRIES` in scripts/build-child-entries.mjs already builds narrow entries (`check-proof-main`, `run-child`),
+      and the main-entry resolver vouches for a current bundle with its linked map, falling back to tsx with a reason.
+    NOT COVERED ELSEWHERE: W1-T9117 (amended 10-20) re-scopes the bundle work to serve's main; W1-T10279 (merged) built
+    the broker. Swept origin/main plan/tasks.d and every open PR head's plan tree for gh-broker and GhReadBroker: no
+    shard moves the broker's entry.
+  design: |
+    1. A narrow `src/gh-broker-main.ts` imports only what `ghBrokerCommand` needs and exports `runGhBrokerMain(argv)`.
+       The `gh-broker` verb handler in src/run-task.ts calls `runGhBrokerMain(` (the tsx fallback), and the bundled entry
+       runs the same function when it is the process's main module, so both starts share one code path.
+    2. scripts/build-child-entries.mjs builds it as a main entry beside the daemon's, with its source map, and the
+       `--main-entry` resolver answers for `gh-broker`.
+    3. bin/rmd routes `gh-broker serve` through that resolver exactly as it routes `daemon`: a bundle the resolver
+       vouches for runs with `--enable-source-maps`; any doubt runs tsx and says why in `RMD_MAIN_ENTRY`.
+    4. Measure and record in the PR: the unit's MemoryPeak and the child's VmHWM over the same window before and after,
+       from the same host; no budget or threshold is added.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/worker/the-read-broker-runs-from-a-narrow-bundled-entry.test.ts"
+    - claim: "bin/rmd starts gh-broker serve from its bundle when the resolver vouches for it"
+      proof: "grep: W1-T10369: gh-broker serve starts from its bundle in test/worker/the-read-broker-runs-from-a-narrow-bundled-entry.test.ts"
+    - claim: "the narrow entry does not import src/run-task.ts"
+      proof: "grep: W1-T10369: the broker entry never imports run-task in test/worker/the-read-broker-runs-from-a-narrow-bundled-entry.test.ts"
+    - claim: "the gh-broker verb's tsx path runs the same entry function"
+      proof: "grep: runGhBrokerMain( in src/run-task.ts"
+  falsifier: |
+    Route gh-broker through tsx again and the bundle test reds; import run-task.ts from the narrow entry and the import
+    test reds.
+  note: |
+    EFFECT, measured on the host after merge: remudero-gh-read-broker.service MemoryPeak over a day, against the
+    261.9 MB above.
