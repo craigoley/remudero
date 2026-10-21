@@ -155,6 +155,10 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts", key: "0o644", count: 2,
+    reason: "The shared-slot fixture must have a public mode bit for the reader to select legacy recovery. This tests explicit mode classification, not an OS access denial, and works at every uid.",
+  },
+  {
     kind: "chmod", file: "review/evidence-storage.test.ts", key: "0o644", count: 1,
     reason: "The evidence policy rejects group/world-readable metadata explicitly before parsing; this checks stat mode, not an OS access denial, and is therefore uid-independent.",
   },
