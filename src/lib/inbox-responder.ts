@@ -426,8 +426,15 @@ async function decideFor(ctx: ThreadDecisionContext, deps: InboxResponderDeps): 
       // deliberate: a writer outage falls back to the keyword reading below, never to silence.
       decision = null;
     }
+    if (decision) return decision;
+    const fallback = keywordDecision(ctx.replyText);
+    // Failed interpretation is not evidence of a direction to modify the proposal. Keep
+    // explicit keyword commands, but never let an unclassified failure become a redraft.
+    return fallback.action === "question"
+      ? { action: "question", reply: "I couldn't interpret your reply just now. Nothing was changed. Try sending it again, or use the buttons." }
+      : fallback;
   }
-  return decision ?? keywordDecision(ctx.replyText);
+  return keywordDecision(ctx.replyText);
 }
 
 /** Answer ONE thread whose last message is the operator's. Returns the action taken, or
@@ -583,6 +590,7 @@ export function realThreadDecider(opts: {
   return async (ctx) => {
     const args = buildDecisionSummarySpawnArgs({ input: { context: "" }, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const result = await spawn({ ...args, prompt: buildThreadDecisionPrompt(ctx) });
+    if (result.isError) return null;
     const match = /\{[\s\S]*\}/.exec(result.text);
     if (!match) return null;
     try {
