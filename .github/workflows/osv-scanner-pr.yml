@@ -41,7 +41,7 @@ jobs:
 
       - name: Run scanner on existing code
         id: scan-old
-        uses: google/osv-scanner-action/osv-scanner-action@8ac9e5ce44cc7178e0e04229a91bdcc003166e57 # v2.6.0
+        uses: google/osv-scanner-action/osv-scanner-action@9a96bc4d2b09685b6142bcfe25a3dc17cb2d7347 # v2.6.0
         continue-on-error: true
         with:
           scan-args: |-
@@ -59,7 +59,7 @@ jobs:
 
       - name: Run scanner on proposed code
         id: scan-new
-        uses: google/osv-scanner-action/osv-scanner-action@8ac9e5ce44cc7178e0e04229a91bdcc003166e57 # v2.6.0
+        uses: google/osv-scanner-action/osv-scanner-action@9a96bc4d2b09685b6142bcfe25a3dc17cb2d7347 # v2.6.0
         continue-on-error: true
         with:
           scan-args: |-
