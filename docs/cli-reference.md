@@ -361,7 +361,7 @@ Run a gh READ through this Mac account's GitHub read broker; prints exactly what
 rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>
 ```
 
-W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Writes go straight to gh, unpaced. With no live broker it runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.
+W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Reads only: a write (the one write rule, ghArgvIsWrite) or any auth call is refused with exit 2 and never run; run it as a plain gh call, where hooks/deny-floor.sh judges it. With no live broker a read runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.
 
 ### `rmd gh-broker`
 

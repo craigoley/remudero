@@ -373,7 +373,7 @@ test("W1-T10279: classifying a read names its limiter and what it is about", () 
   assert.equal(parseGhBrokerDuration("soon"), undefined);
 });
 
-test("W1-T10279: rmd gh prints what gh would, sends writes straight to gh, and needs a live broker to broker", { timeout: 60_000 }, async (t) => {
+test("W1-T10279: rmd gh prints what gh would, refuses writes, and needs a live broker to broker", { timeout: 60_000 }, async (t) => {
   const cache = tmp(t, "cli");
   const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
   const clock = virtualClock();
@@ -392,7 +392,8 @@ test("W1-T10279: rmd gh prints what gh would, sends writes straight to gh, and n
   };
   assert.deepEqual(await run(["--", "pr", "view", "7"]), { code: 0, out: "out\n", err: "warn\n", direct: [] });
   assert.equal((await run(["--class", "interactive", "--fresh", "--", "pr", "view", "8"])).code, 4, "the exit code of the gh run itself");
-  assert.deepEqual((await run(["--", "pr", "edit", "7", "--body", "x"])).direct, [["pr", "edit", "7", "--body", "x"]], "writes go to gh");
+  const edit = await run(["--", "pr", "edit", "7", "--body", "x"]);
+  assert.deepEqual([edit.code, edit.direct], [2, []], "a write is refused: rmd gh is a read client, a write runs as plain gh");
   assert.equal((await run(["pr", "view", "7"])).code, 2, "the `--` is required");
   assert.equal((await run(["--class", "nope", "--", "pr", "view"])).code, 2);
   assert.equal((await run(["--"])).code, 2);

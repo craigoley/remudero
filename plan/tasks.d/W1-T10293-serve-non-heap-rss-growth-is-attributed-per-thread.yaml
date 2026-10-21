@@ -10,7 +10,7 @@
   plan_refs: [W1-T10291, W1-T10292, W1-T10295, W1-T9404, W1-T5355, W1-T5480]
   files:
     - docs/forensics/serve-non-heap-rss-growth.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, 764 `serve.memory` rows 2026-10-18T23:23Z..10-20T15:15Z, 25 serve generations (core ledger, read-only;

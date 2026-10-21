@@ -12,7 +12,7 @@
   origin: "operator-authorized validation followthrough 2026-10-18: complete evidence is not qualification"
   plan_refs: [W1-T9919, W1-T10094, W1-T9796]
   files: [scripts/census-precheck.mjs, test/census-reader-runtime-calibration.test.ts, test/a-rejected-census-measurement-retains-its-complete-capture.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on main 19935605997: runCensusChild deletes every outputComplete capture
