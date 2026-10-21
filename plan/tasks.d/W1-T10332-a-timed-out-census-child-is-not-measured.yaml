@@ -12,7 +12,7 @@
   plan_refs: [W1-T7744, W1-T4656, W1-T4693, W1-T9484, W1-T10253]
   files:
     - src/run-task.ts
-    - test/ci/a-timed-out-census-child-is-not-measured.test.ts
+    - test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts
   status: queued
   priority: 1  # the operator ruled; a refusal on a timeout kept a resolved merge off a PR for ten hours
   attempts: 0
@@ -57,11 +57,11 @@
     5. src/run-task.ts sits at its comment-load ceiling (W1-T9332): add no comment lines beyond what the change removes.
   acceptance:
     - claim: "the new test file passes"
-      proof: "unit test: test/ci/a-timed-out-census-child-is-not-measured.test.ts"
-    - claim: "a precheck child killed at its 60 s bound is reported not measured, naming the precheck, and the round's commit is not refused"
-      proof: "grep: W1-T10332: a precheck killed at its bound is not measured and names the precheck in test/ci/a-timed-out-census-child-is-not-measured.test.ts"
+      proof: "unit test: test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts"
+    - claim: "a precheck child that times out at its 60 s bound is reported not measured, naming the precheck, and the round's commit is not refused"
+      proof: "grep: W1-T10332: a precheck that times out is not measured and names the precheck in test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts"
     - claim: "a reach suite that runs and fails still refuses, and the refusal names the reach suite"
-      proof: "grep: W1-T10332: a reach suite that runs and fails still refuses in test/ci/a-timed-out-census-child-is-not-measured.test.ts"
+      proof: "grep: W1-T10332: a reach suite that runs and fails still refuses in test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts"
   falsifier: |
     Restore today's arm (any signal or error on either child builds the reach-suite refusal) and the #13121-shaped
     fixture, a precheck child killed at 60 s, is refused with "grows 1 census count(s)" naming the reach suite again.

@@ -1,0 +1,62 @@
+- id: W1-T10346
+  title: "WHY DOES A REVIEW REFUSE `head-task-metadata-unavailable` FOR HOURS? — since 2026-10-14, 70 task keys besides PR-13121 refused review setup that way, for up to ~12 h each (W1-T9653 146 rows, W1-T9659 131, W1-T10184 96, TRIAGE-evidence-coverage-inbox-response-served-model 95, main-repair-ratchet-105b1219ee15 56); classify every key by cause and propose the fix before any change"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: low  # an investigation record; no review, metadata or escalation behaviour changes in this task
+  priority: 2
+  origin: "coordinator brief f1021b item 9 (2026-10-21), from the #13305 root-cause builder (logs-8864/s13305-class-since1014.txt, s13305-rc-body.md); PR #13355 (merged 13:43Z) makes such a refusal surface as a stalled stage but not reviewable"
+  plan_refs: [W1-T3387, W1-T9232, W1-T10269, W1-T5865]
+  files:
+    - docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED by the #13305 builder: `zgrep` over all 401 `ledger.*.ndjson.gz` archives plus the live ledger.ndjson,
+    10-14..10-21, with PR-13121 as the positive control: 71 keys wrote `review.reviewer.skipped reason
+    head-task-metadata-unavailable` (PR-13121 and 70 others), 23 of them TRIAGE or main-repair ids
+    (logs-8864/s13305-class-since1014.txt).
+    OBSERVED by this filing, core ledger rotations from 2026-10-17T22:33Z plus the live file, rows deduplicated:
+    - The `missing` field splits the keys. W1-T9653 (146 rows), W1-T9659 (131), W1-T10184 (96) and W1-T9399 (8) are
+      missing only `budget_usd`; TRIAGE-evidence-coverage-inbox-response-served-model (60), main-repair-ratchet-105b1219ee15
+      (31), TRIAGE-fb-1791916356285-50ef47 (5) and PR-13121 (82) are missing `risk` and `budget_usd`.
+    - At origin/main 2107c092e the shards of W1-T9653, W1-T9659, W1-T10184 and W1-T9399 exist and carry no
+      `budget_usd` line. So for those keys the shard was NOT missing at head; it lacked a field. This contradicts the
+      brief's "no shard at head" reading for real ids and is the first thing to establish per key.
+    READ at origin/main 2107c092e (symbols, not lines):
+    - W1-T10269 (queued) records that #12954 (8b37a0a1b, merged 2026-10-20T01:15Z) made the review command refuse
+      `review.semantic_setup_refused head-task-metadata-unavailable` whenever a shard has no `budget_usd`; the 10-20
+      burst (W1-T9653 from 03:11Z) follows it.
+    - `usesUntaskedReviewMetadata` (src/lib/tick-read-worker.ts) gives bounded defaults only to `unfiled`, a missing id,
+      or a generated lane id (RETRO/TRIAGE/PLAN/APPROVE/main-repair) when the PR's run branch carries that same id, so a
+      TRIAGE or main-repair id reaching review some other way falls through to the refusal.
+    - W1-T9232 (merged) refreshes a build head that lacks its own task record; it does not cover a record that exists
+      but lacks a field.
+    NOT COVERED ELSEWHERE: W1-T10269 heals reviewer regressions in general and W1-T3387 (merged) surfaced the untasked
+    skip; neither classifies these keys. PR #13355 (merged 2026-10-21T13:43Z, commit 03e4f4ac7) defaults synthetic PR-<n> ids and makes a refusing review
+    escalate at the stage backstop; it leaves real and generated ids refusing. Swept origin/main plan/tasks.d and
+    every open PR head's plan tree for head-task-metadata-unavailable and semantic_setup_refused: no other shard.
+  design: |
+    Write docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md with these sections (headings verbatim):
+    1. "## Every refusing key" — each key since 2026-10-14 with its row count, first and last ts, the PR(s) and heads it
+       refused on, and the `missing` fields. State the window, the corpus's newest ts, the file count per ledger form,
+       and the PR-13121 positive control.
+    2. "## Cause per key" — for each key, one of: shard present at head but missing a field (and since which commit);
+       head cut before the shard merged (W1-T9232's path, and why that path did not fire); a generated lane id that
+       `usesUntaskedReviewMetadata` does not admit (which branch it arrived on); or another cause, named. Give the
+       evidence row or commit for each.
+    3. "## Remedy proposal" — the smallest fix per cause class (for example, review defaults for a shard missing only
+       `budget_usd`, a lint refusing a shard without it, or admitting the generated id on its real branch shape), each
+       filed as its own implement task with a falsifier from a named key. Any default value is an operator decision and
+       is named as one. No review behaviour changes in this task.
+  acceptance:
+    - claim: "the record lists every refusing key since 10-14 with its counts, heads and missing fields, under a positive control"
+      proof: "grep: ## Every refusing key in docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md"
+    - claim: "the record names a cause for each key with its evidence"
+      proof: "grep: ## Cause per key in docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md"
+    - claim: "the record proposes a fix per cause class"
+      proof: "grep: ## Remedy proposal in docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md"
+  falsifier: |
+    At origin/main docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md does not exist, so all three
+    grep proofs read 0.
