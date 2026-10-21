@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: low
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-20: red-PR stall triage (#13096)"
   plan_refs: [W1-T1223, W1-T2431, W1-T3194, W1-T9932, W1-T5543]

@@ -6,7 +6,7 @@
   verify: human
   risk: low
   priority: 1.9
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "scout:retro.preflight_failed"
