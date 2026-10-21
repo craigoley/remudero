@@ -470,6 +470,12 @@
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/live-worktrees-pruned-by-a-run-start.md",
+      "title": "Live worktrees removed by a run's startup prune",
+      "summary": "W1-T10299: pruning safeguards differ; the October 20 incident's cause and live-worktree loss frequency remain unmeasured.",
+      "grepHint": "Live worktrees removed by a run's startup prune"
+    },
+    {
       "path": "docs/forensics/measurement-cadence.md",
       "title": "measurement-cadence.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
