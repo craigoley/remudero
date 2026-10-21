@@ -134,13 +134,11 @@ test("the wired triage check chooses a verified repair through its real default 
     const signals = { deferralPending: true, dispatchCount: 0, laneBudget: 1 };
     const prioritized = await hooks.checkAutoTriage(signals);
     assert.equal(prioritized.fire, true);
-    if (!prioritized.fire) throw new Error(prioritized.reason);
     assert.equal(prioritized.feedbackId, repair);
     assert.match(prioritized.reason, /verified aged dependency repair/);
     red = false;
     const ordinary = await hooks.checkAutoTriage(signals);
     assert.equal(ordinary.fire, true);
-    if (!ordinary.fire) throw new Error(ordinary.reason);
     assert.equal(ordinary.feedbackId, incident, "a green PR cannot displace FIFO");
     const before = reads;
     writeFileSync(join(config.root, "state", "last-auto-triage.json"), JSON.stringify({ fires: [now.toISOString()] }));
