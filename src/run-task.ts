@@ -14306,7 +14306,15 @@ export async function runFixRung(opts: {
       return { outcome: "stood_down", review, strikes: green ? strikes - 1 : strikes, retriggers,
         reason: green ? "flake-confirmed" : "flake claim refuted" };
     }
+    const amendProofs = (proofEvidence: ProofDiscriminationEvidence) => dispatchProofAmendmentWrite({
+      prUrl: opts.prUrl, taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config, reviewBase: opts.reviewBase,
+      evidence: proofEvidence, transcriptText: workerTranscript(fixResult), priorHeadSha, log: deps.log,
+      review: { state: review.state, capped: review.capped, criteria: review.criteria, reviewerOutcome: review.reviewerOutcome },
+      getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
+    });
     if (fixAction.kind === "hand-off") {
+      // A NEEDS_DESIGN round still carries the PROOF_AMENDMENT its prompt asks for (W1-T8921, W1-T5689: dropped here).
+      if (evidence.proofDiscrimination) amendProofs(evidence.proofDiscrimination);
       const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
       deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, contract_revision: currentContractRevision,
         ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
@@ -14421,19 +14429,7 @@ export async function runFixRung(opts: {
       // W1-T5544: a proof-repair round that produced no pushable test edit may instead carry a PROOF_AMENDMENT — the
       // parent validates it on the gate-log evidence and opens the one proof-only plan PR. Best-effort, logged either way.
       if (proofRepairRound && proofDiscriminationNow) {
-        dispatchProofAmendmentWrite({
-          prUrl: opts.prUrl,
-          taskId: opts.taskId,
-          worktreePath: opts.worktreePath,
-          config: opts.config,
-          reviewBase: opts.reviewBase,
-          evidence: proofDiscriminationNow,
-          transcriptText: workerTranscript(fixResult),
-          review: { state: review.state, capped: review.capped, criteria: review.criteria },
-          priorHeadSha,
-          log: deps.log,
-          getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
-        });
+        amendProofs(proofDiscriminationNow);
       }
       logFixDone();
       if (censusCheck?.refusal) {
@@ -14720,19 +14716,7 @@ export async function runFixRung(opts: {
     if (fixMode === "proof-discrimination" && evidence.proofDiscrimination) {
       // NOT `reviewReport`: for this mode it was just overwritten with the live PR BODY (above) —
       // the worker's PROOF_AMENDMENT proposal lives only in its own transcript.
-      dispatchProofAmendmentWrite({
-        prUrl: opts.prUrl,
-        taskId: opts.taskId,
-        worktreePath: opts.worktreePath,
-        config: opts.config,
-        reviewBase: opts.reviewBase,
-        evidence: evidence.proofDiscrimination,
-        transcriptText: workerTranscript(fixResult),
-        review: { state: review.state, capped: review.capped, criteria: review.criteria },
-        priorHeadSha,
-        log: deps.log,
-        getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
-      });
+      amendProofs(evidence.proofDiscrimination);
     }
     // W1-T3557: RE-RESOLVE THE CONTRACT AT THE CURRENT PR HEAD, right before it is handed to the
     // reviewer — never earlier, so a strike's own push (just landed, just gone CI-green above)
@@ -15422,7 +15406,7 @@ export function dispatchProofAmendmentWrite(
      *  only in its own transcript, never in `reviewReport` (which this mode overwrites with the
      *  live PR body before this runs). */
     transcriptText: string;
-    review: { state: ReviewRunResult["state"]; capped: boolean; criteria: ReviewRunResult["criteria"] };
+    review: { state: ReviewRunResult["state"]; capped: boolean; criteria: ReviewRunResult["criteria"]; reviewerOutcome?: string };
     priorHeadSha: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     /** Lazy: only actually read once a non-empty proposal exists — mirrors the pre-extraction
@@ -15495,7 +15479,8 @@ export function dispatchProofAmendmentWrite(
           isOpen: true,
           planOnly: false,
           taskId: params.taskId,
-          reviewState: params.review.state,
+          // The sweep sends capped evidence only from a posted SUCCESS review; its reconstruction's `failure` is a placeholder.
+          reviewState: params.review.reviewerOutcome === "sweep-reconstructed" ? "success" : params.review.state,
           capped: params.review.capped,
           criteria: params.review.criteria.map((c) => ({ claim: c.claim, proof: c.proof, met: c.met })),
         },

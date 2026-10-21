@@ -1,0 +1,71 @@
+- id: W1-T10332
+  title: "A CENSUS CHILD KILLED AT ITS 60 S BOUND IS REPORTED NOT MEASURED, NAMING THE CHILD — the fix rung's census check (`fixCensusSnapshotSteps`) reads a timed-out child as \"this branch grows 1 census count(s) CI will refuse\" and names test/the-affected-suite-reach-ratchet.test.ts even when the precheck child was the one killed; on 2026-10-20 it refused #13121's resolved merge twice (15:44Z, 17:39Z) on `SIGTERM`. OPERATOR RULING 2026-10-21: a timeout is not measured, not grown"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, how the fix rung's census check reads a child its own 60 s bound killed; a census child that runs and fails still refuses
+  band_meaning: blast-radius
+  origin: "OPERATOR RULING 2026-10-21 (~05:45Z, relayed by the coordinator, brief f1021b item 1): when the harness census-precheck's 60 s child times out (SIGTERM), report the result as \"not measured\" naming the timed-out child, instead of refusing the commit with text saying the reach suite grows 1 census count; CI and pre-push still measure. Raised as an operator decision in PR #13305's body."
+  plan_refs: [W1-T7744, W1-T4656, W1-T4693, W1-T9484, W1-T10253]
+  files:
+    - src/run-task.ts
+    - test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts
+  status: queued
+  priority: 1  # the operator ruled; a refusal on a timeout kept a resolved merge off a PR for ten hours
+  attempts: 0
+  rationale: |
+    THE RULING (operator, 2026-10-21 ~05:45Z): a census child that the fix rung's own 60 s bound kills is "not measured",
+    named by the child that timed out. It is never "this branch grows 1 census count". The pre-push hook and hosted CI
+    still measure every census, so the branch is still checked before merge.
+    OBSERVED, core ledger on host remudero (rmd-state2, read-only; 67 rotations from 2026-10-18 plus the live file,
+    newest row 2026-10-21T10:31Z, rotation copies deduplicated by ts):
+    - 2026-10-20T15:44:51Z and 17:39:12Z, task W1-T10070 (PR #13121), mode merge-conflict: `fix.census_check` outcome
+      `refused`, then `fix.commit_refused` with "census-precheck: this branch grows 1 census count(s) CI will refuse:
+      census-suite: test/the-affected-suite-reach-ratchet.test.ts fails — SIGTERM". Both rounds' merges were correct;
+      PR #13121 then sat conflicted until a hand merge (it merged 04:06Z on 10-21).
+    - Window 2026-10-17T22:42Z..2026-10-21T10:30Z: 177 `fix.census_check` rows, 170 `partially-measured`, 7 `refused`;
+      the two above are the only refusals whose text names SIGTERM. Positive control: the query finds all 177 rows and
+      both known incidents.
+    READ at origin/main 16f4c28fc and 2107c092e (symbols, not lines). `fixCensusSnapshotSteps` (src/run-task.ts) runs
+    scripts/census-precheck.mjs, then, if that printed no refusal, the reach suite, each with `timeout: 60_000`. Any
+    `error` or `signal` on EITHER child, or a non-zero, non-2 precheck status, builds one refusal whose text always names
+    the reach suite and whose reason is `precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output`.
+    A precheck killed at 60 s is therefore reported as the reach suite failing. The async runner `spawnCensusChild`
+    reports its own bound's kill as `error` (`bound.timeoutError`), the sync one (`spawnSync`'s `timeout`) as `signal`;
+    both must read as a timeout. The round's commit is refused only on `censusCheck.refusal` (the `harnessCommit`
+    closure in the fix rung); `unmeasured` is only logged (`fix.census_check` outcome `partially-measured`).
+    PR #13305 (merged 2026-10-21T11:16Z, commit add51ce94) measures merge rounds from main, which removes this
+    incident's cause (a changed set holding all of main's delta). It does not change how a timeout is read (re-read
+    at origin/main 2107c092e: the refusal arm is unchanged); its body named that as this operator decision.
+    NOT COVERED ELSEWHERE: W1-T10253 is the pre-push hook's census-precheck (bwrap, reader arm), not the fix rung's
+    harness check. Swept origin/main plan/tasks.d and every open PR head's plan tree for fixCensusSnapshotSteps,
+    census_check and the reach-suite path: no shard covers it.
+  design: |
+    1. In `fixCensusSnapshotSteps`, a child killed by its 60 s bound (a `signal`, or the bound's timeout `error`) is a
+       TIMEOUT. It sets `unmeasured` to a line naming the child and its bound, for example
+       "census-precheck: not measured — scripts/census-precheck.mjs timed out at 60 s (SIGTERM); CI and pre-push still
+       measure". It never sets `refusal`.
+    2. A precheck timeout does not stop the reach suite from running; the reach suite's own result is judged alone. A
+       reach-suite timeout is reported the same way, naming the reach suite.
+    3. A child that ran and failed keeps today's refusal, and its text names the child that failed (the precheck or the
+       reach suite), never the other one.
+    4. `fix.census_check` gains `timed_out_child` (the script or suite path) on a timeout, beside outcome
+       `partially-measured`. No new ledger step, env var or bound; the 60 s bounds are unchanged.
+    5. src/run-task.ts sits at its comment-load ceiling (W1-T9332): add no comment lines beyond what the change removes.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts"
+    - claim: "a precheck child that times out at its 60 s bound is reported not measured, naming the precheck, and the round's commit is not refused"
+      proof: "grep: W1-T10332: a precheck that times out is not measured and names the precheck in test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts"
+    - claim: "a reach suite that runs and fails still refuses, and the refusal names the reach suite"
+      proof: "grep: W1-T10332: a reach suite that runs and fails still refuses in test/ci/a-timed-out-fix-round-precheck-child-is-not-measured.test.ts"
+  falsifier: |
+    Restore today's arm (any signal or error on either child builds the reach-suite refusal) and the #13121-shaped
+    fixture, a precheck child killed at 60 s, is refused with "grows 1 census count(s)" naming the reach suite again.
+    Drop the refusal for a real reach-suite failure and the second test reds.
+  note: |
+    EFFECT, measured from the core ledger after merge: `fix.commit_refused` rows whose refusal text names SIGTERM or a
+    timeout. Healthy shape: none; a timeout appears as `fix.census_check` `partially-measured` with `timed_out_child`.
