@@ -366,7 +366,11 @@ test("scope recovery refuses symlinks and non-regular companions before saving",
     writeFileSync(join(root, "target.ts"), "unrelated content\n");
     symlinkSync(join(root, "target.ts"), join(root, "link.ts"));
     mkdirSync(join(root, "directory.ts"));
-    for (const [path, expected] of [["link.ts", /ELOOP/], ["directory.ts", /not a regular file/], ["missing.ts", /ENOENT/]] as const) {
+    mkdirSync(join(root, "real-dir"));
+    writeFileSync(join(root, "real-dir", "inner.ts"), "unrelated content\n");
+    symlinkSync(join(root, "real-dir"), join(root, "linked-dir"));
+    for (const [path, expected] of [["link.ts", /ELOOP/], ["directory.ts", /not a regular file/], ["missing.ts", /ENOENT/],
+      ["linked-dir/inner.ts", /unsafe recovery parent/], ["target.ts/inner.ts", /unsafe recovery parent/]] as const) {
       assert.throws(() => amendments.saveBuildScopeRecovery({
         root, taskId: TASK_ID, branch: `run-${TASK_ID}-1`, amendmentUrl: "",
         worktreePath: root, headSha: "a".repeat(40), companions: [path],
