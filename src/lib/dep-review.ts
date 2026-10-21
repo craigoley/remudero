@@ -206,6 +206,20 @@ function titleClauses(tail: string): string[] | undefined {
 export function fitDependabotTitle(title: string, body: string): DependabotTitleFit {
   if (!overHeaderLimit(title)) return { kind: "fits" };
   const prefix = CONVENTIONAL_TITLE_PREFIX_RE.exec(title)?.[0] ?? "";
+  const pin = actionShaPinSummary(title);
+  if (pin) {
+    // The body retains both full pins. A display abbreviation must never replace the
+    // only exact identity evidence consumed by isActionShaPinOnlyProposal.
+    const retained = body.split("\n").filter((line) => DEPENDABOT_SUMMARY_LINE_RE.test(line))
+      .some((line) => {
+        const summary = actionShaPinSummary(line);
+        return summary?.action === pin.action && summary.fromSha === pin.fromSha && summary.toSha === pin.toSha;
+      });
+    if (!retained) return { kind: "unfittable", reason: "the body does not retain the action and both full SHA pins" };
+    const fitted = `${prefix}bump ${pin.action} to ${pin.toSha.slice(0, 12)}`;
+    if (overHeaderLimit(fitted)) return { kind: "unfittable", reason: "the action identity alone exceeds the title limit" };
+    return { kind: "fitted", title: fitted };
+  }
   const rest = title.slice(prefix.length).replace(/\s+/g, " ").trim();
   const single = SINGLE_BUMP_RE.exec(rest), group = single ? null : GROUP_BUMP_RE.exec(rest);
   const clauses = single ?? group ? titleClauses(rest.slice((single ?? group)![0].length)) : undefined;
