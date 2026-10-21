@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { classifyReviewOutcome, recordedReviewVerdictLines, reviewReplayLedgerFields,
   type ReviewReplayInput } from "#src/lib/review-outcome-class.js";
 import { deriveReviewReplaySample, parseReviewReplaySample, replayReviewSample,
@@ -14,7 +15,7 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { reviewCommand } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
 
-const samplePath = new URL("../fixtures/review-replay/sample.ndjson", import.meta.url);
+const samplePath = join(REPO_ROOT, "test/fixtures/review-replay/sample.ndjson");
 const input = (overrides: Partial<ReviewReplayInput> = {}): ReviewReplayInput => ({
   stage: "semantic", plan_only: false, required_semantic: true, criteria_count: 1,
   risk_present: true, budget_present: true, untasked: false, head_task_resolved: true,
@@ -84,7 +85,7 @@ test("W1-T10270: the sample is refreshed from the ledger and excludes regressed 
 
 // @source-text-subject: the declared wiring proof checks both production call sites, not policy behavior.
 test("W1-T10270: production review decisions route through the replayed seam", () => {
-  const source = readFileSync(new URL("../../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
   const run = source.slice(source.indexOf("async function runReview("), source.indexOf("async function reviewCommand("));
   const command = source.slice(source.indexOf("async function reviewCommand("));
   assert.match(run, /const replayDecision = classifyReviewOutcome\(replayInput\)/);
