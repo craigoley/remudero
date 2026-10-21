@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -821,23 +821,18 @@ test("W1-T10269: the loaded code sha is read from git's files, every layout, wit
   assert.throws(() => health.checkoutHeadSha(broken), /neither a sha nor a ref/);
   writeFileSync(join(broken, "gd", "HEAD"), "ref: refs/heads/gone\n");
   assert.throws(() => health.checkoutHeadSha(broken), /refs\/heads\/gone is not resolvable/);
-  if (process.getuid?.() !== 0) {
-    chmodSync(join(broken, ".git"), 0o000);
-    assert.throws(() => health.checkoutHeadSha(broken), /EACCES/, "an unreadable file is not an absence");
-    chmodSync(join(broken, ".git"), 0o644);
-  }
+  const looped = scratch(t, "looped");
+  symlinkSync(join(looped, ".git"), join(looped, ".git"));
+  assert.throws(() => health.checkoutHeadSha(looped), /ELOOP/, "an unreadable file is not an absence");
 });
 
 test("W1-T10269: the ledger reader refuses an unreadable ledger rather than reading it as empty", async (t) => {
   const notADir = join(scratch(t, "notdir"), "file");
   writeFileSync(notADir, "x");
   await assert.rejects(health.readReviewerHealthRows(notADir, null), /ENOTDIR/);
-  if (process.getuid?.() === 0) return;
   const stateDir = scratch(t, "unreadable");
-  writeFileSync(join(stateDir, "ledger.ndjson"), "{}\n");
-  chmodSync(join(stateDir, "ledger.ndjson"), 0o000);
-  await assert.rejects(health.readReviewerHealthRows(stateDir, null), /EACCES/);
-  chmodSync(join(stateDir, "ledger.ndjson"), 0o644);
+  symlinkSync(join(stateDir, "ledger.ndjson"), join(stateDir, "ledger.ndjson"));
+  await assert.rejects(health.readReviewerHealthRows(stateDir, null), /ELOOP/);
 });
 
 test("W1-T10269: runReview in shadow judges and stops before any arm or status", async (t) => {
