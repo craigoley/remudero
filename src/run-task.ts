@@ -344,7 +344,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -1078,7 +1078,10 @@ import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
 import { createTaskFilingHistoryInvocation, resolveTaskFilingHistory,
   type FilingHistoryOptions, type TaskFilingHistoryInvocation } from "./lib/task-filing-history.js";
-import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "./lib/required-semantic-review.js";
+import { requiredSemanticDecisionDigest } from "./lib/required-semantic-review.js";
+import { classifyReviewOutcome, recordedReviewVerdictLines, reviewReplayLedgerFields, type ReviewReplayInput,
+  type ReviewOutcomeDecision } from "./lib/review-outcome-class.js";
+import { refreshReviewReplaySample, reviewReplayGardenSpec } from "./lib/review-replay-sample.js";
 import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
@@ -8380,6 +8383,7 @@ async function runReview(args: {
   prUrl: string;
   /** W1-T10269: judge, then stop before any arm, status or comment — the reviewer-health shadow. */
   shadow?: boolean;
+  reviewReplaySetupInput?: ReviewReplayInput;
   /** W1-T9970 test seam: the reviewer's image; `null` is off-container. Default {@link readRuntimeImageSha}. */
   runtimeImageSha?: string | null;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
@@ -8532,6 +8536,19 @@ async function runReview(args: {
 }): Promise<ReviewRunResult> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const headSha = readHeadShaRest(prUrl);
+  let replayInput: ReviewReplayInput = args.reviewReplaySetupInput ?? {
+    stage: "setup", plan_only: false, required_semantic: args.requireSemanticReview === true,
+    criteria_count: task.acceptance?.length ?? 0, risk_present: task.risk !== undefined,
+    budget_present: task.budget_usd !== undefined, untasked: false, head_task_resolved: true,
+    own_task_record_missing: false, reviewer_outcome: "not_attempted", verdict_lines: [],
+  };
+  const recordReplay = (decision: ReviewOutcomeDecision): void => {
+    if (args.shadow) return;
+    const sha = reviewerHealthRowFields("review.posted").reviewer_code_sha;
+    log("review.replay_input", reviewReplayLedgerFields(replayInput, decision, {
+      pr_url: prUrl, head_sha: headSha, reviewer_code_sha: typeof sha === "string" ? sha : null,
+    }));
+  };
   // A substituted worker transcript is not a material PR input. Production fix-rung callers
   // supply the independently fetched body; a degraded caller with neither fails open toward
   // retrying rather than letting unrelated worker prose consume the cap.
@@ -8563,6 +8580,8 @@ async function runReview(args: {
     });
     if (!pending.posted && pending.lifecycle !== undefined) {
       const reason = `pr_${pending.lifecycle}`;
+      replayInput = { ...replayInput, publication_refusal: "pr-lifecycle-stood-down" };
+      recordReplay(classifyReviewOutcome(replayInput));
       log("review.stood_down", { reason, head_sha: headSha, pr_url: prUrl });
       return {
         state: "failure", criteria: [], testTheater: false,
@@ -8581,6 +8600,8 @@ async function runReview(args: {
   // bound is a named refusal below, never a hang.
   const diffOutcome = await fetchPrDiff(prUrl, headSha, prDiffSourceAsync(repoRoot));
   if (diffOutcome.kind === "refused") {
+    replayInput = { ...replayInput, publication_refusal: "diff-unreadable" };
+    recordReplay(classifyReviewOutcome(replayInput));
     // The pending status remains unsatisfied. Record a named refusal and return a withheld
     // result so both the CLI and sweep can retry or escalate without losing this attempt.
     log("review.diff_unreadable", { pr_url: prUrl, head_sha: headSha, reason: diffOutcome.reason });
@@ -8851,9 +8872,13 @@ async function runReview(args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
-  const semanticRefusal = requiredSemanticRefusal({ required: args.requireSemanticReview === true,
-    planOnly: planOnlySkip, outcome, criteriaCount: criteria.length, verdicts: semantic });
+  replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
+    criteria_count: criteria.length, reviewer_outcome: outcome,
+    verdict_lines: recordedReviewVerdictLines(reviewerFindingText ?? "", criteria.length) };
+  const replayDecision = classifyReviewOutcome(replayInput);
+  const semanticRefusal = replayDecision.class === "posted" ? undefined : replayDecision.reason;
   if (semanticRefusal !== undefined) {
+    recordReplay(replayDecision);
     log("review.semantic_incomplete", { reason: semanticRefusal, head_sha: headSha, pr_url: prUrl,
       reviewer_outcome: outcome, review_decision_digest: decisionDigest });
     say(`remudero-review: verdict WITHHELD — ${semanticRefusal}; no verdict publication or merge effect`);
@@ -9030,6 +9055,8 @@ async function runReview(args: {
   // against an already-merged/closed PR. See lib/review.ts's W1-T228 block
   // comment for the full design.
   if (verdict.taskIdOwnershipWithheld) {
+    replayInput = { ...replayInput, publication_refusal: "task-id-ownership-withheld" };
+    recordReplay(classifyReviewOutcome(replayInput));
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
     log("review.post_refused", withheldReviewRefusalRow({ headSha, prUrl, reason: verdict.taskIdOwnershipWithheld, ownership: verdict.taskIdOwnership, inputDigest }));
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
@@ -9073,10 +9100,14 @@ async function runReview(args: {
       { disarm: args.disarm },
     );
     if (!posted.posted) {
+      replayInput = { ...replayInput, publication_refusal: "conflict-hold-publication-failed" };
+      recordReplay(classifyReviewOutcome(replayInput));
       say(`remudero-review: conflict hold FAILED to post for ${headSha.slice(0, 7)} — ${posted.reason}`);
       return { ...verdict, headSha, reviewerOutcome: outcome, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
     }
   } else if (!posted.posted) {
+    replayInput = { ...replayInput, publication_refusal: "terminal-publication-refused" };
+    recordReplay(classifyReviewOutcome(replayInput));
     // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
     // `review.post_refused` with the full reason; this is the loud console
     // twin so a refusal is as visible as an ordinary posted verdict is.
@@ -9192,6 +9223,7 @@ async function runReview(args: {
     changeset_fence_unbalanced_at_eof: verdict.changesetFenceUnbalancedAtEof ?? null,
   };
   log("review.posted", reviewPostedRow);
+  recordReplay(replayDecision);
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
   // {@link "./lib/review.js".UnwiredAdvisory}'s doc), naming the PR (taskId + headSha + prUrl), the
@@ -23552,6 +23584,20 @@ export function makeLandingReviewRequest(
   };
 }
 
+export function reviewReplayCommand(rest: string[]): number {
+  if (rest[0] !== "refresh" || rest.length !== 1) {
+    console.error("usage: rmd review-replay refresh");
+    return 2;
+  }
+  const config = loadConfig();
+  const root = resolve(process.cwd());
+  const sha = reviewerHealthRowFields("review.posted").reviewer_code_sha;
+  if (typeof sha !== "string") throw new Error("review replay generator revision is unavailable");
+  const sample = refreshReviewReplaySample({ stateDir: dirname(ledgerPathFor(config)), root, generatorRevision: sha });
+  console.log(`review replay: ${sample.rows.length} distinct inputs; classes ${sample.header.classes.join(", ")}`);
+  return 0;
+}
+
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   deps = { ...reviewOptionsFromFlags(rest), ...deps };
   const {
@@ -23779,6 +23825,21 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
 
   let spawnReviewer = false, reviewerMount: Mount | undefined;
   let settingsFile = "";
+  const replaySetupInput: ReviewReplayInput = {
+    stage: "setup", plan_only: false, required_semantic: executionMode === "semantic",
+    criteria_count: criteria.length, risk_present: taskRisk !== undefined, budget_present: taskBudgetUsd !== undefined,
+    untasked: (!taskId || taskId === UNFILED_RUN_SENTINEL) ||
+      (resolverDivergence === undefined && usesUntaskedReviewMetadata(taskId, view.headRefName)),
+    head_task_resolved: headTaskResolved, own_task_record_missing: ownTaskRecordMissing,
+    reviewer_outcome: "not_attempted", verdict_lines: [],
+  };
+  const recordSetupReplay = (input: ReviewReplayInput, decision: ReviewOutcomeDecision): void => {
+    const sha = reviewerHealthRowFields("review.posted").reviewer_code_sha;
+    log("review.replay_input", reviewReplayLedgerFields(input, decision, {
+      pr_url: view.url, head_sha: view.headRefOid, reviewer_code_sha: typeof sha === "string" ? sha : null,
+    }));
+  };
+  const setupDecision = classifyReviewOutcome(replaySetupInput);
   if (executionMode === "semantic") {
     // Unfiled PRs and exact generated lanes use bounded defaults; semantic review remains required.
     // A missing real task shard still refuses rather than inheriting these defaults (W1-T3387).
@@ -23798,7 +23859,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       // Only a derived task id whose shard did not resolve at this head reaches here: a plan-resolution fault, not an untasked PR.
       // Its reason stays distinct from `semantic-setup-unavailable`.
       log("review.reviewer.skipped", { reason: "head-task-metadata-unavailable", missing });
-      if (!ownTaskRecordMissing) {
+      if (setupDecision.class === "refused") {
+        recordSetupReplay(replaySetupInput, setupDecision);
         log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
         console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
         return 2;
@@ -23817,6 +23879,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       } catch (e) {
         reviewerMount = undefined;
         settingsFile = "";
+        const unavailableInput = { ...replaySetupInput, setup_unavailable: true };
+        recordSetupReplay(unavailableInput, classifyReviewOutcome(unavailableInput));
         log("review.reviewer.skipped", {
           reason: "semantic-setup-unavailable",
           error: String((e as Error)?.message ?? e),
@@ -23885,6 +23949,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.
   // The sweep reads this row, refreshes the branch from main and re-reviews the new head.
   if (ownTaskRecordMissing) {
+    const withheldInput = { ...replaySetupInput, publication_refusal: OWN_TASK_RECORD_MISSING_CAUSE };
+    recordSetupReplay(withheldInput, classifyReviewOutcome(withheldInput));
     log("review.reviewer.skipped", {
       reason: OWN_TASK_RECORD_MISSING_CAUSE, pr_number: view.number, pr_url: view.url, head_sha: view.headRefOid,
       derived_repair: "refresh the branch from main", missing: ["risk", "budget_usd", "criteria"],
@@ -23934,6 +24000,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     () =>
       withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(runId, () =>
         runReviewDep({
+          reviewReplaySetupInput: replaySetupInput,
           owner,
           repo,
           prUrl: view.url,
@@ -39018,6 +39085,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
+    case "review-replay": {
+      const d = deps("review-replay");
+      return gardenPass(reviewReplayGardenSpec(d, () => {
+        const sha = reviewerHealthRowFields("review.posted").reviewer_code_sha;
+        if (typeof sha !== "string") throw new Error("review replay generator revision is unavailable");
+        return sha;
+      }), d);
+    }
     case "inbox": {
       return withDue(async () => {
         const { scope, ports } = await inboxGardenerRunTaskPorts(ctx);
@@ -53618,6 +53693,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence. `replay ci-friction` replays the ci-friction remedy ladder over the past --days (default 7) at --step-hours (default 6) from the ledger union and main's plan history, read-only.",
   },
   {
+    name: "review-replay",
+    syntax: "rmd review-replay refresh",
+    summary: "Refresh the recorded review sample from the complete retained ledger union.",
+    detail: "Derives every distinct healthy input shape, excludes regressed reviewer shas, and refuses empty or incomplete evidence. Writes test/fixtures/review-replay/sample.ndjson for replay in CI.",
+  },
+  {
     name: "escalate",
     syntax: "rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...",
     summary: "Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.",
@@ -54392,6 +54473,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     },
   ],
   ["merge-hold", (rest) => mergeHoldCommand(rest)],
+  ["review-replay", (rest) => reviewReplayCommand(rest)],
   ["feedback-reconcile", async (rest) => await feedbackReconcileCommand(rest)],
   [
     "dep-review",

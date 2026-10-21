@@ -35,6 +35,7 @@ import {
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { resolveTestPath, type ResolveTestPathOptions } from "./test-path-resolver.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
+import { REVIEW_MATERIAL_ADVANCE_PATHS } from "./self-sync.js";
 
 export { stripComments };
 
@@ -387,10 +388,23 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   for (const f of files) if (SUITE.test(f)) pick(f, "changed test");
 
   // The reverse import graph, walked breadth-first from every changed module or contract.
-  const { importers, namedDependencies } = buildAffectedSuitesGraph(input.files, files);
+  const { importers, namedDependencies, directImports } = buildAffectedSuitesGraph(input.files, files);
+  const reviewPath = new Set<string>(REVIEW_MATERIAL_ADVANCE_PATHS);
+  const reviewQueue = [...reviewPath];
+  while (reviewQueue.length > 0) {
+    for (const dependency of directImports.get(reviewQueue.shift()!) ?? []) {
+      if (!dependency.startsWith("src/lib/") || reviewPath.has(dependency)) continue;
+      reviewPath.add(dependency);
+      reviewQueue.push(dependency);
+    }
+  }
+  const reviewReplaySuite = "test/review/a-review-path-change-replays-recorded-reviews.test.ts";
+  const reviewReplayRequired = input.files.has(reviewReplaySuite) && files.some(file => reviewPath.has(file));
+  if (reviewReplayRequired) pick(reviewReplaySuite, "replays recorded reviews for the review path and its transitive imports");
   const changedSet = new Set(files);
   // Suites that name a changed file by path (spawn it, read it): a one-hop read the narrow arm keeps.
   const pathNamers = new Set<string>();
+  if (reviewReplayRequired) pathNamers.add(reviewReplaySuite);
   for (const [file, named] of namedDependencies) {
     if (SUITE.test(file) && [...named].some((p) => changedSet.has(p))) pathNamers.add(file);
   }
