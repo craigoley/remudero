@@ -474,7 +474,7 @@ import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type Daemo
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_ENV, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, findOffendingMerge, gitIn, readReviewerHealthRows, reviewerHealCommand, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerRegressionEvidenceText, reviewerShadowStep, type HealedTreeSeams, type ReviewerHealthDeps, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_ENV, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, findOffendingMerge, gitIn, readReviewerHealthRows, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerRegressionEvidenceText, reviewerShadowStep, type HealedTreeGit, type ReviewerHealthStore, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -2053,10 +2053,10 @@ export function buildReviewerCodeFreshnessGate(
   };
 }
 
-/** W1-T10269 — the seams {@link buildReviewerHealthRoute} composes; each defaults to production. */
-export interface ReviewerHealthRouteSeams {
-  health?: Partial<Omit<ReviewerHealthDeps, "effects">> & { effects?: Partial<ReviewerHealthDeps["effects"]> };
-  tree?: Partial<HealedTreeSeams>;
+/** W1-T10269 — what a caller of {@link buildReviewerHealthRoute} may replace; each defaults to production. */
+export interface ReviewerHealthRouteOverrides {
+  health?: Partial<Omit<ReviewerHealthStore, "effects">> & { effects?: Partial<ReviewerHealthStore["effects"]> };
+  tree?: Partial<HealedTreeGit>;
   /** The healed child: `rmd review` run from the healed tree with the incident id in its env. */
   spawnHealed?: (tree: string, args: string[], onFailure: (failure: string) => void, env: NodeJS.ProcessEnv) => Promise<number>;
   /** The shadow: today's reviewer from a fresh origin/main tree, publishing nothing. */
@@ -2080,22 +2080,16 @@ export function buildReviewerHealthRoute(
   config: Config,
   ledgerPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  seams: ReviewerHealthRouteSeams = {},
+  seams: ReviewerHealthRouteOverrides = {},
 ): (prArg: string, rest: string[], reviewDeps: ReviewCommandDeps, normal: () => Promise<number>) => Promise<number> {
   const git = seams.tree?.git ?? gitIn(repoDir);
   const self = seams.self ?? (() => resolveOwnerRepo());
   const runId = `reviewer-health-${systemClock.now()}`;
   const pullOf = (url: string) => /\/pull\/(\d+)$/.exec(url)?.[1] ?? "";
-  const effects: ReviewerHealthDeps["effects"] = {
+  const effects: ReviewerHealthStore["effects"] = {
     findOffendingMerge: (healthy, regressed) => findOffendingMerge(git, healthy, regressed),
-    isAncestor: (ancestor, descendant) => {
-      try {
-        git(["merge-base", "--is-ancestor", ancestor, descendant]);
-        return true;
-      } catch {
-        return false; // deliberate: not an ancestor, or unknown here — either way not the healthy side
-      }
-    },
+    isAncestor: (ancestor, descendant) => git(["merge-base", "--is-ancestor", ancestor, descendant]).then(() => true,
+      () => false), // not an ancestor, or unknown here: either way not the healthy side
     escalate: async (incident, conflict) => {
       const { owner, repo } = self();
       const url = await tryEscalateAsync(reviewerRegressionEscalation(incident, conflict), { issues: ghIssueGatewayAsync(owner, repo), ledgerPath, runId });
@@ -2128,7 +2122,7 @@ export function buildReviewerHealthRoute(
     },
     ...seams.health?.effects,
   };
-  const health: ReviewerHealthDeps = {
+  const health: ReviewerHealthStore = {
     statePath: reviewerHealthStatePath(dirname(ledgerPath)),
     readRows: (cursor) => readReviewerHealthRows(dirname(ledgerPath), cursor),
     log: (step, extra = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra }),
@@ -2137,10 +2131,12 @@ export function buildReviewerHealthRoute(
     effects,
   };
   const worktreeRoot = join(repoDir, "..", "worktrees");
-  const treeTools = (): FreshTreeTools => ({ git, addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot });
-  const tree: HealedTreeSeams = {
+  // The fresh-tree helper inspects with a synchronous git; it goes through the hardened leaf, as fleetRatifyGateway's does.
+  const treeTools = (): FreshTreeTools => ({ git: (args) => hostWorktreeGit(args[1] ?? repoDir, args.slice(2)),
+    addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot });
+  const tree: HealedTreeGit = {
     git,
-    treeGit: (dir, args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).toString(),
+    treeGit: (dir, args) => hostWorktreeGitAsync(dir, args),
     cut: (prefix, sha) => prepareFreshOriginMainTree(repoDir, treeTools(), prefix, sha),
     remove: (dir) => worktreeRemove(repoDir, dir),
     ...seams.tree,
@@ -2150,18 +2146,14 @@ export function buildReviewerHealthRoute(
   const spawnHealed = seams.spawnHealed ?? spawnRmdReviewForFreshTree;
   const escalatedConflicts = new Set<string>();
   return async (prArg, rest, reviewDeps, normal) => {
-    let originMainSha: string | null = null;
-    try {
-      originMainSha = git(["rev-parse", "origin/main"]).trim();
-    } catch {
-      originMainSha = null; // deliberate: health still ingests; no current reviewer is judged this call
-    }
+    // An unreadable origin/main still ingests; no current reviewer is judged this call.
+    const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
     const decision = await evaluateReviewerHealth(health, { originMainSha });
     if (decision.route === "normal") return normal();
     const incident: ReviewerIncident = decision.incident;
     // A healed tree built from a PR's head never reviews that same PR: the revert-built tree judges it.
     const withPr = decision.withPr !== null && String(decision.withPr) !== prArg ? decision.withPr : undefined;
-    const healed = buildHealedReviewerTree(tree, incident.offending!.sha, withPr === undefined ? {} : { withPr });
+    const healed = await buildHealedReviewerTree(tree, incident.offending!.sha, withPr === undefined ? {} : { withPr });
     if (healed.state === "empty") {
       log("reviewer.healed_patch_empty", { incident_id: incident.id, origin_main_sha: healed.originMainSha, pr: prArg });
       return normal();
@@ -53321,12 +53313,6 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T9874: a test's folder is computed, not chosen. Extracts the test's value, type-only and helper imports (helpers followed through test/helpers|setup|lib), repo path strings and imported symbol names with a comment-aware scanner, then scores every module by reach weight x IDF x symbol count plus name bonuses, sums per subsystem and maps the winner to one of the 21 folders (or rules/ for a suite that reads the repo as text). The data is scripts/test-placement/subsystem-map.json and test-folders.tsv. Prints the folder, the confidence (high, medium, low, none) and the reasons for each path; --json prints the same as an array. Exits 2 on no path or an unknown flag, 1 on a path that does not exist.",
   },
   {
-    name: "reviewer-heal",
-    syntax: "rmd reviewer-heal --with-pr <n> | --clear",
-    summary: "Name the fix PR a healed reviewer merges on origin/main when the offending merge's revert no longer applies.",
-    detail: "W1-T10269: while a reviewer-regression incident is open, daemon reviews run from a healed tree, origin/main with the offending merge reverted on top. When that revert no longer applies cleanly, --with-pr <n> records the operator's explicit choice in state/reviewer-health.json: the healed tree becomes origin/main merged with PR <n>'s head instead. A healed tree built from a PR never reviews that same PR; the revert-built tree judges it, or it escalates. --clear returns to the revert. Writes only the state file; never posts, pushes or merges.",
-  },
-  {
     name: "claim",
     syntax: "rmd claim <task-id> [--drop]",
     summary: "Take, hold, renew or drop the dispatch claim the fleet honours, for a hand-build.",
@@ -54453,8 +54439,6 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["host-alert", async (rest) => hostAlertCommand(rest)],
   ["test-place", (rest) => testPlaceCommand(rest)],
   ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommand(rest)],
-  ["reviewer-heal", (rest) => reviewerHealCommand(rest, { statePath: reviewerHealthStatePath(dirname(ledgerPathFor(loadConfig()))),
-    now: () => systemClock.iso(), out: (line) => console.log(line), err: (line) => console.error(line) })],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),

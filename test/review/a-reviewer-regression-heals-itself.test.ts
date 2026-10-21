@@ -15,7 +15,7 @@ import { gzipSync } from "node:zlib";
 import { test, type TestContext } from "node:test";
 import * as health from "#src/lib/reviewer-health.js";
 import { postReviewStatusGuarded } from "#src/lib/review.js";
-import { checkReviewerCodeFreshness } from "#src/lib/self-sync.js";
+import { checkReviewerCodeFreshness, type ReviewerCodeFreshness } from "#src/lib/self-sync.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { MainRepairRevertRequest } from "#src/lib/main-health-rung.js";
 import { reviewerRegressionRevertText } from "#src/lib/main-health-rung.js";
@@ -25,6 +25,8 @@ import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 const REPO_URL = "https://github.com/acme/remudero/pull";
+/** A fixture module's import line, spelled so this file's own text carries no relative specifier. */
+const importLine = (names: string, path: string): string => `import { ${names} } from ${JSON.stringify(["", path].join("./"))};`;
 const fake = (seed: string): string => createHash("sha1").update(seed).digest("hex");
 let clock = Date.parse("2026-10-19T00:00:00.000Z");
 const tick = (): string => new Date((clock += 1000)).toISOString();
@@ -64,14 +66,14 @@ function tenTwenty(t: TestContext): TenTwenty {
   const origin = gitRepo({ bare: true, kind: "reviewer-heal-origin" });
   const work = gitRepo({ kind: "reviewer-heal-work" });
   const c0 = commitFile(work, {
-    "src/lib/review.ts": 'import { refusal } from "./required-semantic-review.js";\nexport const judge = () => refusal();\n',
+    "src/lib/review.ts": `${importLine("refusal", "required-semantic-review.js")}\nexport const judge = () => refusal();\n`,
     "src/lib/required-semantic-review.ts": "export const refusal = () => undefined;\n",
     "docs/notes.md": "notes\n",
   }, "the healthy reviewer (#100)");
   const m1 = commitFile(work, { "docs/notes.md": "notes, revised\n" }, "docs: revise the notes (#101)");
   const m2 = commitFile(work, {
     "src/lib/required-semantic-review.ts": 'export const refusal = () => "required-semantic-incomplete-verdicts";\n',
-    "src/lib/review.ts": 'import { refusal } from "./required-semantic-review.js";\nexport const judge = () => refusal();\nexport const strict = true;\n',
+    "src/lib/review.ts": `${importLine("refusal", "required-semantic-review.js")}\nexport const judge = () => refusal();\nexport const strict = true;\n`,
   }, "fix(review): refuse incomplete required semantic evaluation (#102)");
   work.addRemote("origin", origin.dir);
   work.git("push", "-q", "origin", "main");
@@ -86,16 +88,16 @@ const pushMain = (f: TenTwenty, files: Record<string, string>, subject: string):
 };
 
 /** Healed-tree seams over the daemon clone: a detached worktree per cut, as the fresh-tree helper does. */
-function treeSeams(f: TenTwenty): health.HealedTreeSeams {
+function treeSeams(f: TenTwenty): health.HealedTreeGit {
   return {
-    git: (args) => f.daemon.git(...args),
-    treeGit: (dir, args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }),
+    git: async (args) => f.daemon.git(...args),
+    treeGit: async (dir, args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }),
     cut: (prefix, sha) => {
       const path = join(f.root, `${prefix}-${sha.slice(0, 12)}-${Math.random().toString(36).slice(2, 8)}`);
       f.daemon.git("worktree", "add", "-q", "--detach", path, sha);
       return path;
     },
-    remove: (dir) => f.daemon.git("worktree", "remove", "--force", dir),
+    remove: (dir) => { f.daemon.git("worktree", "remove", "--force", dir); },
   };
 }
 
@@ -111,19 +113,12 @@ function harness(t: TestContext, git: health.GitText, overrides: Partial<health.
   const queue: Row[] = [];
   const logs: Array<{ step: string; extra: Row }> = [];
   const calls: Calls = { escalate: [], revert: [], closeIssue: [], closePr: [] };
-  const deps: health.ReviewerHealthDeps = {
+  const deps: health.ReviewerHealthStore = {
     statePath,
     readRows: async () => ({ rows: queue.splice(0), cursor: { liveOffset: 0 } }),
     effects: {
       findOffendingMerge: (healthy, regressed) => health.findOffendingMerge(git, healthy, regressed),
-      isAncestor: (a, b) => {
-        try {
-          git(["merge-base", "--is-ancestor", a, b]);
-          return true;
-        } catch {
-          return false;
-        }
-      },
+      isAncestor: (a, b) => git(["merge-base", "--is-ancestor", a, b]).then(() => true, () => false),
       escalate: async (incident, conflict) => {
         calls.escalate.push({ incident, ...(conflict ? { conflict } : {}) });
         return "https://github.com/acme/remudero/issues/1";
@@ -159,7 +154,7 @@ const onset = (f: TenTwenty): Row[] => [withheld(f.m2, 201), withheld(f.m2, 202)
 
 async function openTenTwenty(t: TestContext, overrides: Partial<health.ReviewerHealthEffects> = {}) {
   const f = tenTwenty(t);
-  const h = harness(t, (args) => f.daemon.git(...args), overrides);
+  const h = harness(t, async (args) => f.daemon.git(...args), overrides);
   h.queue.push(...baseline(f));
   const seeded = await health.evaluateReviewerHealthNow(h.deps, { originMainSha: f.c0 });
   assert.equal(seeded.route, "normal");
@@ -195,7 +190,7 @@ test("W1-T10269: the 10-20 outcome shape opens a reviewer-regression incident na
 });
 
 test("W1-T10269: an outcome mix inside the baseline opens no incident", async (t) => {
-  const h = harness(t, () => { throw new Error("no git needed"); });
+  const h = harness(t, async () => { throw new Error("no git needed"); });
   // A baseline that already carries withholds: 20 of 300 units.
   let pr = 1;
   for (let i = 0; i < 30; i++) {
@@ -229,14 +224,14 @@ test("W1-T10269: the healed reviewer is origin/main plus the revert and W1-T228 
   health.resetHealedReviewerTrees();
   const { f, h } = await openTenTwenty(t);
   const seams = treeSeams(f);
-  const healed = health.buildHealedReviewerTree(seams, f.m2);
+  const healed = await health.buildHealedReviewerTree(seams, f.m2);
   assert.equal(healed.state, "ready");
   if (healed.state !== "ready") return;
   const at = (args: string[]) => execFileSync("git", ["-C", healed.path, ...args], { encoding: "utf8" }).trim();
   assert.equal(healed.originMainSha, f.m2);
   assert.equal(at(["rev-parse", "HEAD^1"]), f.m2, "origin/main is the healed commit's parent");
   assert.equal(at(["merge-base", "HEAD", "origin/main"]), f.m2, "so its merge-base with origin/main IS origin/main");
-  assert.equal(readFileSync(join(healed.path, "src/lib/required-semantic-review.ts"), "utf8"), "export const refusal = () => undefined;\n",
+  assert.equal(at(["show", "HEAD:src/lib/required-semantic-review.ts"]), "export const refusal = () => undefined;",
     "the offending merge is reverted");
   assert.equal(readFileSync(join(healed.path, "docs/notes.md"), "utf8"), "notes, revised\n", "the non-review merge stays");
   // W1-T228, exactly as the child reads it: the guarded path of the reviewer's own freshness check.
@@ -245,10 +240,10 @@ test("W1-T10269: the healed reviewer is origin/main plus the revert and W1-T228 
   assert.equal(fresh.status, "fresh", JSON.stringify(fresh));
   const ledgerPath = join(scratch(t, "publish"), "state", "ledger.ndjson");
   const posts: string[] = [];
-  const publish = (freshness: typeof fresh, sha: string) => postReviewStatusGuarded({
+  const publish = (freshness: ReviewerCodeFreshness, sha: string) => postReviewStatusGuarded({
     owner: "acme", repo: "remudero", sha, state: "success", description: "PASS", taskId: "PR-205", evidence: "executed",
     ledgerPath, runId: `publish-${sha.slice(0, 7)}`, prUrl: `${REPO_URL}/205`, reviewerCodeFreshness: freshness,
-    fetchLifecycle: () => ({ merged: false, closed: false }), post: ({ state }) => { posts.push(state); },
+    fetchLifecycle: () => ({ merged: false, closed: false }), post: ({ state }: { state: string }) => { posts.push(state); },
   } as never);
   const published = await publish(fresh, fake("head-205"));
   assert.equal(published.posted, true, `the healed verdict publishes: ${published.reason ?? ""}`);
@@ -287,12 +282,12 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   health.resetHealedReviewerTrees();
   const { f, h } = await openTenTwenty(t);
   const seams = treeSeams(f);
-  const first = health.buildHealedReviewerTree(seams, f.m2);
+  const first = await health.buildHealedReviewerTree(seams, f.m2);
   assert.equal(first.state, "ready");
-  const again = health.buildHealedReviewerTree(seams, f.m2);
+  const again = await health.buildHealedReviewerTree(seams, f.m2);
   assert.deepEqual(again, first, "the same origin/main reuses its healed tree");
   const m3 = pushMain(f, { "docs/other.md": "other\n" }, "docs: another page (#103)");
-  const moved = health.buildHealedReviewerTree(seams, f.m2);
+  const moved = await health.buildHealedReviewerTree(seams, f.m2);
   assert.equal(moved.state, "ready");
   if (moved.state !== "ready" || first.state !== "ready") return;
   assert.equal(moved.originMainSha, m3, "rebuilt when origin/main moves");
@@ -300,7 +295,7 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   assert.equal(execFileSync("git", ["-C", moved.path, "rev-parse", "HEAD^1"], { encoding: "utf8" }).trim(), m3);
   // A later merge rewrites the offending lines: the revert no longer applies.
   const m4 = pushMain(f, { "src/lib/required-semantic-review.ts": 'export const refusal = () => "something else";\n' }, "fix(review): reword (#104)");
-  const conflict = health.buildHealedReviewerTree(seams, f.m2);
+  const conflict = await health.buildHealedReviewerTree(seams, f.m2);
   assert.equal(conflict.state, "conflict");
   if (conflict.state !== "conflict") return;
   assert.equal(conflict.originMainSha, m4);
@@ -327,7 +322,7 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   f.work.git("revert", "--no-edit", m4);
   f.work.git("revert", "--no-edit", f.m2);
   f.work.git("push", "-q", "origin", "main");
-  assert.equal(health.buildHealedReviewerTree(seams, f.m2).state, "empty");
+  assert.equal((await health.buildHealedReviewerTree(seams, f.m2)).state, "empty");
   assert.equal(await route("209", [], {}, async () => { normal++; return 0; }), 0);
   assert.ok(logs.includes("reviewer.healed_patch_empty"));
 });
@@ -335,7 +330,7 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
 test("W1-T10269: the incident opens one revert PR of the offending merge", async (t) => {
   health.resetHealedReviewerTrees();
   const f = tenTwenty(t);
-  const h = harness(t, (args) => f.daemon.git(...args));
+  const h = harness(t, async (args) => f.daemon.git(...args));
   h.queue.push(...baseline(f));
   await health.evaluateReviewerHealthNow(h.deps, { originMainSha: f.c0 });
   const requests: MainRepairRevertRequest[] = [];
@@ -458,7 +453,7 @@ test("W1-T10269: the per-sha backstop pools the oldest shas into the baseline", 
 
 test("W1-T10269: the seed replays history with effects off and raises only a regression judging today", async (t) => {
   const f = tenTwenty(t);
-  const carried = harness(t, (args) => f.daemon.git(...args));
+  const carried = harness(t, async (args) => f.daemon.git(...args));
   carried.queue.push(...baseline(f), ...onset(f));
   const decision = await health.evaluateReviewerHealthNow(carried.deps, { originMainSha: fake("today") });
   assert.equal(decision.route, "normal");
@@ -467,7 +462,7 @@ test("W1-T10269: the seed replays history with effects off and raises only a reg
   const state = health.loadReviewerHealthState(carried.statePath);
   assert.equal(state.closed.length, 1, "carried as closed, for a recurrence to reopen");
   assert.equal(state.closed[0]!.offending?.sha, f.m2);
-  const raised = harness(t, (args) => f.daemon.git(...args));
+  const raised = harness(t, async (args) => f.daemon.git(...args));
   raised.queue.push(...baseline(f), ...onset(f));
   const live = await health.evaluateReviewerHealthNow(raised.deps, { originMainSha: f.m2 });
   assert.equal(live.route, "healed");
@@ -479,7 +474,7 @@ test("W1-T10269: the seed replays history with effects off and raises only a reg
 test("W1-T10269: an incident without a healthy ancestor or a review-material merge escalates and reviews normally", async (t) => {
   const f = tenTwenty(t);
   // No healthy sha precedes the regression in git: the baseline shas are not on main.
-  const lone = harness(t, (args) => f.daemon.git(...args));
+  const lone = harness(t, async (args) => f.daemon.git(...args));
   lone.queue.push(...Array.from({ length: 200 }, (_, i) => posted(fake(`lone-${i % 40}`), i + 1)));
   await health.evaluateReviewerHealthNow(lone.deps, { originMainSha: null });
   lone.queue.push(...onset(f));
@@ -489,15 +484,15 @@ test("W1-T10269: an incident without a healthy ancestor or a review-material mer
   assert.match(health.loadReviewerHealthState(lone.statePath).incident!.offendingUnavailable!, /no healthy reviewer code sha/);
   assert.equal(lone.calls.revert.length, 0);
   // Merge history unreadable.
-  const blind = harness(t, (args) => f.daemon.git(...args), { findOffendingMerge: () => { throw new Error("git gone"); } });
+  const blind = harness(t, async (args) => f.daemon.git(...args), { findOffendingMerge: async () => { throw new Error("git gone"); } });
   blind.queue.push(...baseline(f));
   await health.evaluateReviewerHealthNow(blind.deps, { originMainSha: null });
   blind.queue.push(...onset(f));
   await health.evaluateReviewerHealthNow(blind.deps, { originMainSha: f.m2 });
   assert.match(health.loadReviewerHealthState(blind.statePath).incident!.offendingUnavailable!, /merge history unreadable: git gone/);
   // Nothing review-material in range: only the docs merge.
-  assert.equal(health.findOffendingMerge((args) => f.daemon.git(...args), f.c0, f.m1), undefined);
-  const none = harness(t, (args) => f.daemon.git(...args), { findOffendingMerge: () => undefined });
+  assert.equal(await health.findOffendingMerge(async (args) => f.daemon.git(...args), f.c0, f.m1), undefined);
+  const none = harness(t, async (args) => f.daemon.git(...args), { findOffendingMerge: async () => undefined });
   none.queue.push(...baseline(f));
   await health.evaluateReviewerHealthNow(none.deps, { originMainSha: null });
   none.queue.push(...onset(f));
@@ -564,7 +559,7 @@ test("W1-T10269: evaluation seeds in the background, serializes, and degrades to
   const statePath = join(stateDir, "reviewer-health.json");
   const logs: string[] = [];
   let reads = 0;
-  const deps: health.ReviewerHealthDeps = {
+  const deps: health.ReviewerHealthStore = {
     statePath,
     readRows: async () => { reads++; return { rows: [posted(fake("serial"), reads)], cursor: { liveOffset: reads } }; },
     effects: {} as health.ReviewerHealthEffects,
@@ -595,7 +590,7 @@ test("W1-T10269: evaluation seeds in the background, serializes, and degrades to
   assert.equal(health.loadReviewerHealthState(statePath).seq, 0);
 });
 
-test("W1-T10269: rmd reviewer-heal records the operator's fix PR, and the healed tree merges it", async (t) => {
+test("W1-T10269: the operator's fix-PR choice is recorded, and the healed tree merges it", async (t) => {
   health.resetHealedReviewerTrees();
   const { f, h } = await openTenTwenty(t);
   const out: string[] = [];
@@ -610,7 +605,7 @@ test("W1-T10269: rmd reviewer-heal records the operator's fix PR, and the healed
   f.work.git("push", "-q", "origin", `${fix}:refs/pull/77/head`);
   f.work.git("checkout", "-q", "main");
   const seams = treeSeams(f);
-  const healed = health.buildHealedReviewerTree(seams, f.m2, { withPr: 77 });
+  const healed = await health.buildHealedReviewerTree(seams, f.m2, { withPr: 77 });
   assert.equal(healed.state, "ready");
   if (healed.state !== "ready") return;
   assert.equal(healed.patch, "with-pr");
@@ -631,7 +626,7 @@ test("W1-T10269: rmd reviewer-heal records the operator's fix PR, and the healed
   f.work.git("push", "-q", "origin", `${clash}:refs/pull/79/head`);
   f.work.git("reset", "-q", "--hard", "HEAD^");
   pushMain(f, { "src/lib/required-semantic-review.ts": "main moved\n" }, "main moves (#105)");
-  assert.equal(health.buildHealedReviewerTree(seams, f.m2, { withPr: 79 }).state, "conflict");
+  assert.equal((await health.buildHealedReviewerTree(seams, f.m2, { withPr: 79 })).state, "conflict");
   assert.equal(health.reviewerHealCommand(["--clear"], io), 0);
   assert.equal(health.loadReviewerHealthState(h.statePath).operatorHeal, null);
 });
@@ -640,18 +635,18 @@ test("W1-T10269: the healed tree builder refuses rather than falls back", async 
   health.resetHealedReviewerTrees();
   const f = tenTwenty(t);
   const seams = treeSeams(f);
-  const noOrigin = health.buildHealedReviewerTree({ ...seams, git: () => { throw new Error("offline"); } }, f.m2);
+  const noOrigin = await health.buildHealedReviewerTree({ ...seams, git: async () => { throw new Error("offline"); } }, f.m2);
   assert.deepEqual(noOrigin, { state: "unavailable", originMainSha: null, reason: "origin/main unreadable: offline" });
-  const offMain = health.buildHealedReviewerTree(seams, fake("not-on-main"));
+  const offMain = await health.buildHealedReviewerTree(seams, fake("not-on-main"));
   assert.equal(offMain.state, "unavailable");
-  const uncut = health.buildHealedReviewerTree({ ...seams, cut: () => { throw new Error("no worktree"); } }, f.m2);
+  const uncut = await health.buildHealedReviewerTree({ ...seams, cut: () => { throw new Error("no worktree"); } }, f.m2);
   assert.match(uncut.state === "unavailable" ? uncut.reason : "", /could not be cut: no worktree/);
   // A cached tree someone dirtied is rebuilt, not reused.
-  const first = health.buildHealedReviewerTree(seams, f.m2);
+  const first = await health.buildHealedReviewerTree(seams, f.m2);
   assert.equal(first.state, "ready");
   if (first.state !== "ready") return;
   writeFileSync(join(first.path, "src/lib/review.ts"), "dirty\n");
-  const rebuilt = health.buildHealedReviewerTree(seams, f.m2);
+  const rebuilt = await health.buildHealedReviewerTree(seams, f.m2);
   assert.ok(rebuilt.state === "ready" && rebuilt.path !== first.path);
   // A merge commit reverts against its first parent.
   f.work.git("checkout", "-q", "-b", "side");
@@ -661,17 +656,17 @@ test("W1-T10269: the healed tree builder refuses rather than falls back", async 
   const merge = f.work.git("rev-parse", "HEAD");
   f.work.git("push", "-q", "origin", "main");
   f.daemon.git("fetch", "-q", "origin", "main");
-  assert.equal(health.findOffendingMerge((args) => f.daemon.git(...args), f.m2, merge)?.pr, 106);
-  const healedMerge = health.buildHealedReviewerTree(seams, merge);
+  assert.equal((await health.findOffendingMerge(async (args) => f.daemon.git(...args), f.m2, merge))?.pr, 106);
+  const healedMerge = await health.buildHealedReviewerTree(seams, merge);
   assert.equal(healedMerge.state, "ready");
 });
 
-test("W1-T10269: blame reads run-task.ts's review path and the modules it imports", (t) => {
+test("W1-T10269: blame reads run-task.ts's review path and the modules it imports", async (t) => {
   const repo = gitRepo({ kind: "reviewer-heal-blame" });
   void t;
   const runTask = (extra: string) => [
-    'import { helper } from "./lib/helper.js";',
-    'import { other } from "./lib/other.js";',
+    importLine("helper", "lib/helper.js"),
+    importLine("other", "lib/other.js"),
     "export async function runReview() { return helper(); }",
     "export async function reviewCommand() { return runReview(); }",
     "export function buildFreshTreeReviewRunner() { return 1; }",
@@ -684,12 +679,12 @@ test("W1-T10269: blame reads run-task.ts's review path and the modules it import
   commitFile(repo, { "src/run-task.ts": runTask("2") }, "an unrelated run-task hunk (#2)");
   commitFile(repo, { "src/lib/other.ts": "export const other = () => 2;\n" }, "a module only unrelated code imports (#3)");
   const helperChange = commitFile(repo, { "src/lib/helper.ts": "export const helper = () => 2;\n" }, "the review path's helper (#4)");
-  const git: health.GitText = (args) => repo.git(...args);
-  assert.deepEqual(health.reviewPathImportedModules(git, helperChange), ["src/lib/helper.ts"]);
-  const blamed = health.findOffendingMerge(git, base, helperChange);
+  const git: health.GitText = async (args) => repo.git(...args);
+  assert.deepEqual(await health.reviewPathImportedModules(git, helperChange), ["src/lib/helper.ts"]);
+  const blamed = await health.findOffendingMerge(git, base, helperChange);
   assert.equal(blamed?.pr, 4, "the first review-material commit, past an unrelated run-task hunk and module");
   const reviewHunk = commitFile(repo, { "src/run-task.ts": runTask("2").replace("return helper();", "return helper() + 1;") }, "a review-path hunk (#5)");
-  const viaRunTask = health.findOffendingMerge(git, helperChange, reviewHunk);
+  const viaRunTask = await health.findOffendingMerge(git, helperChange, reviewHunk);
   assert.match(viaRunTask?.reason ?? "", /^src\/run-task\.ts: hunk /);
 });
 

@@ -22,15 +22,15 @@
  * never by re-scanning the ledger (core memory ruling 10-10). The first boot seeds them with one
  * streaming, step-filtered read of the ledger union.
  */
-import { execFileSync } from "node:child_process";
 import { closeSync, createReadStream, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import { upperNormalQuantile, wilsonInterval } from "./model-drift.js";
 import { REVIEW_MATERIAL_ADVANCE_PATHS, reviewAdvanceIsMaterial, reviewPathSpans, runTaskAdvanceTouchesReviewPath } from "./self-sync.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const REVIEWER_HEALTH_VERSION = "reviewer-health-v1" as const;
 export const REVIEWER_HEALTH_FILENAME = "reviewer-health.json";
@@ -125,7 +125,7 @@ export interface ReviewerHealthState {
   pending: Record<string, Array<{ unit: string; cls: ReviewerOutcomeClass; reason: string | null; at: string }>>;
   incident: ReviewerIncident | null;
   closed: Array<ReviewerIncident & { closedAt: string }>;
-  /** `rmd reviewer-heal --with-pr <n>`: the operator's explicit choice of a fix PR to heal with. */
+  /** The operator's explicit choice of a fix PR to heal with (reviewerHealCommand --with-pr <n>). */
   operatorHeal: { withPr: number; at: string } | null;
   coverage: { rows: number; unattributed: number };
 }
@@ -378,22 +378,23 @@ export function returnedToBaseline(state: ReviewerHealthState, incident: Reviewe
 }
 
 export interface OffendingMerge { sha: string; subject: string; pr: number | null; reason: string }
-export type GitText = (args: string[]) => string;
+/** git in one checkout, off the event loop (the daemon review path must not block it). */
+export type GitText = (args: string[]) => Promise<string>;
 
 /** The src/lib modules the review path imports: src/lib/review.ts's own relative imports, and the
  *  import lines run-task.ts's review path reaches. #12954 added required-semantic-review.ts, which
  *  REVIEW_MATERIAL_ADVANCE_PATHS does not list. */
-export function reviewPathImportedModules(git: GitText, sha: string): string[] {
+export async function reviewPathImportedModules(git: GitText, sha: string): Promise<string[]> {
   const found = new Set<string>();
-  const show = (path: string): string | undefined => {
+  const show = async (path: string): Promise<string | undefined> => {
     try {
-      return git(["show", `${sha}:${path}`]);
+      return await git(["show", `${sha}:${path}`]);
     } catch {
       return undefined; // deliberate: a path absent at this sha imports nothing
     }
   };
-  for (const match of (show("src/lib/review.ts") ?? "").matchAll(/from\s+["']\.\/([^"']+)\.js["']/g)) found.add(`src/lib/${match[1]}.ts`);
-  const runTask = show("src/run-task.ts");
+  for (const match of ((await show("src/lib/review.ts")) ?? "").matchAll(/from\s+["']\.\/([^"']+)\.js["']/g)) found.add(`src/lib/${match[1]}.ts`);
+  const runTask = await show("src/run-task.ts");
   const spans = runTask === undefined ? undefined : reviewPathSpans(runTask);
   if (runTask !== undefined && spans !== undefined && "spans" in spans) {
     const reached = runTask.split("\n").filter((_line, index) => spans.spans.some(([from, to]) => index + 1 >= from && index + 1 <= to));
@@ -404,26 +405,46 @@ export function reviewPathImportedModules(git: GitText, sha: string): string[] {
 
 /** The first first-parent commit in healthy..regressed whose own diff is review-material. A squash
  *  merge and a merge commit both diff against their first parent. undefined: none qualifies. */
-export function findOffendingMerge(git: GitText, healthySha: string, regressedSha: string): OffendingMerge | undefined {
-  const commits = git(["rev-list", "--first-parent", "--reverse", `${healthySha}..${regressedSha}`]).split("\n").map((s) => s.trim()).filter(Boolean);
-  const widened = new Set<string>([...REVIEW_MATERIAL_ADVANCE_PATHS, ...reviewPathImportedModules(git, regressedSha)]);
+export async function findOffendingMerge(git: GitText, healthySha: string, regressedSha: string): Promise<OffendingMerge | undefined> {
+  const commits = (await git(["rev-list", "--first-parent", "--reverse", `${healthySha}..${regressedSha}`])).split("\n").map((s) => s.trim()).filter(Boolean);
+  const widened = new Set<string>([...REVIEW_MATERIAL_ADVANCE_PATHS, ...(await reviewPathImportedModules(git, regressedSha))]);
   for (const sha of commits) {
     const parent = `${sha}^1`;
-    const paths = git(["diff", "--name-only", parent, sha]).split("\n").map((s) => s.trim()).filter(Boolean);
+    const paths = (await git(["diff", "--name-only", parent, sha])).split("\n").map((s) => s.trim()).filter(Boolean);
     // run-task.ts counts only when a hunk meets its review path (W1-T4469), never as a whole file.
     const material = paths.filter((path) => path !== "src/run-task.ts" && (widened.has(path) || reviewAdvanceIsMaterial([path])));
     let reason: string | undefined;
     if (material.length > 0) reason = `touches ${material.join(", ")}`;
     else if (paths.includes("src/run-task.ts")) {
-      const touched = runTaskAdvanceTouchesReviewPath(git, parent, sha);
+      const touched = runTaskAdvanceTouchesReviewPath(await prefetchedRunTaskGit(git, parent, sha), parent, sha);
       if (touched.touchesReviewPath) reason = `src/run-task.ts: ${touched.reason}`;
     }
     if (reason === undefined) continue;
-    const subject = git(["log", "-1", "--format=%s", sha]).trim();
+    const subject = (await git(["log", "-1", "--format=%s", sha])).trim();
     const pr = /\(#(\d+)\)\s*$/.exec(subject)?.[1] ?? /^Merge pull request #(\d+)/.exec(subject)?.[1];
     return { sha, subject, pr: pr === undefined ? null : Number(pr), reason };
   }
   return undefined;
+}
+
+/** runTaskAdvanceTouchesReviewPath reads three things through a synchronous git: the run-task.ts
+ *  diff and both blobs. They are read here off the event loop first and served from memory; an
+ *  unread one throws, which that function already reads as "touches the review path". */
+async function prefetchedRunTaskGit(git: GitText, from: string, to: string): Promise<(args: string[]) => string> {
+  const reads = [["diff", "-U0", `${from}..${to}`, "--", "src/run-task.ts"], ["show", `${from}:src/run-task.ts`], ["show", `${to}:src/run-task.ts`]];
+  const served = new Map<string, string>();
+  for (const args of reads) {
+    try {
+      served.set(args.join("\u0000"), await git(args));
+    } catch {
+      // deliberate: an unread side stays unserved, and the sync reader below throws for it
+    }
+  }
+  return (args) => {
+    const text = served.get(args.join("\u0000"));
+    if (text === undefined) throw new Error(`git ${args.join(" ")} was not read`);
+    return text;
+  };
 }
 
 /** A healed reviewer tree: origin/main with the offending merge reverted (or an operator-named fix PR
@@ -434,15 +455,16 @@ export type HealedTree =
   | { state: "conflict"; originMainSha: string; reason: string; paths: string[] }
   | { state: "unavailable"; originMainSha: string | null; reason: string };
 
-export interface HealedTreeSeams {
+/** The git a healed tree is built with: the daemon checkout's, and a tree's own. */
+export interface HealedTreeGit {
   /** git in `repoDir` (args only). */
   git: GitText;
   /** git inside a tree. */
-  treeGit: (tree: string, args: string[]) => string;
+  treeGit: (tree: string, args: string[]) => Promise<string>;
   /** Cuts (or proves) a clean detached tree at `sha` under `prefix`, runnable; the fresh-tree helper. */
-  cut: (prefix: string, sha: string) => string;
+  cut: (prefix: string, sha: string) => string | Promise<string>;
   /** Removes a tree this builder cut and could not finish. */
-  remove: (tree: string) => void;
+  remove: (tree: string) => void | Promise<void>;
 }
 
 const HEAL_IDENTITY = ["-c", "user.name=remudero reviewer-heal", "-c", "user.email=reviewer-heal@remudero.invalid"];
@@ -450,15 +472,15 @@ const healedMemo = new Map<string, { path: string; sha: string }>();
 
 /** Build (or reuse) the healed tree for `offendingSha` at origin/main. Never an old head, never an
  *  engine tree: every route here starts from origin/main. */
-export function buildHealedReviewerTree(
-  seams: HealedTreeSeams,
+export async function buildHealedReviewerTree(
+  seams: HealedTreeGit,
   offendingSha: string,
   opts: { withPr?: number } = {},
-): HealedTree {
+): Promise<HealedTree> {
   let originMainSha: string;
   try {
-    seams.git(["fetch", "--quiet", "origin", "main"]);
-    originMainSha = seams.git(["rev-parse", "origin/main"]).trim();
+    await seams.git(["fetch", "--quiet", "origin", "main"]);
+    originMainSha = (await seams.git(["rev-parse", "origin/main"])).trim();
   } catch (error) {
     return { state: "unavailable", originMainSha: null, reason: `origin/main unreadable: ${String((error as Error)?.message ?? error)}` };
   }
@@ -467,9 +489,9 @@ export function buildHealedReviewerTree(
   const known = healedMemo.get(key);
   if (known !== undefined) {
     try {
-      const head = seams.treeGit(known.path, ["rev-parse", "HEAD"]).trim();
-      const parent = seams.treeGit(known.path, ["rev-parse", "HEAD^1"]).trim();
-      const dirty = seams.treeGit(known.path, ["status", "--porcelain", "-uno"]).trim();
+      const head = (await seams.treeGit(known.path, ["rev-parse", "HEAD"])).trim();
+      const parent = (await seams.treeGit(known.path, ["rev-parse", "HEAD^1"])).trim();
+      const dirty = (await seams.treeGit(known.path, ["status", "--porcelain", "-uno"])).trim();
       if (head === known.sha && parent === originMainSha && dirty === "") {
         return { state: "ready", path: known.path, sha: known.sha, originMainSha, patch, ...(opts.withPr === undefined ? {} : { withPr: opts.withPr }) };
       }
@@ -481,51 +503,51 @@ export function buildHealedReviewerTree(
   if (opts.withPr === undefined) {
     try {
       // Already reverted (or otherwise undone) on main: the healed tree IS origin/main.
-      seams.git(["merge-base", "--is-ancestor", offendingSha, originMainSha]);
+      await seams.git(["merge-base", "--is-ancestor", offendingSha, originMainSha]);
     } catch {
       return { state: "unavailable", originMainSha, reason: `${offendingSha.slice(0, 12)} is not on origin/main ${originMainSha.slice(0, 12)}` };
     }
   }
   let tree: string;
   try {
-    tree = seams.cut(`healed-${(opts.withPr === undefined ? offendingSha : `pr${opts.withPr}`).slice(0, 12)}`, originMainSha);
+    tree = await seams.cut(`healed-${(opts.withPr === undefined ? offendingSha : `pr${opts.withPr}`).slice(0, 12)}`, originMainSha);
   } catch (error) {
     return { state: "unavailable", originMainSha, reason: `healed tree could not be cut: ${String((error as Error)?.message ?? error)}` };
   }
   // A merge commit reverts against its first parent, as findOffendingMerge diffed it; a squash merge has one parent.
-  const mainline = mainlineArgs(seams, offendingSha);
+  const mainline = await mainlineArgs(seams, offendingSha);
   try {
     if (opts.withPr === undefined) {
-      seams.treeGit(tree, [...HEAL_IDENTITY, "revert", "--no-commit", ...mainline, offendingSha]);
-      const staged = seams.treeGit(tree, ["diff", "--cached", "--name-only"]).trim();
+      await seams.treeGit(tree, [...HEAL_IDENTITY, "revert", "--no-commit", ...mainline, offendingSha]);
+      const staged = (await seams.treeGit(tree, ["diff", "--cached", "--name-only"])).trim();
       if (staged === "") {
-        seams.treeGit(tree, ["revert", "--abort"]);
-        seams.remove(tree);
+        await seams.treeGit(tree, ["revert", "--abort"]);
+        await seams.remove(tree);
         return { state: "empty", originMainSha };
       }
-      seams.treeGit(tree, [...HEAL_IDENTITY, "commit", "--quiet", "--no-verify", "-m", `Revert ${offendingSha.slice(0, 12)} (reviewer-heal, W1-T10269)`]);
+      await seams.treeGit(tree, [...HEAL_IDENTITY, "commit", "--quiet", "--no-verify", "-m", `Revert ${offendingSha.slice(0, 12)} (reviewer-heal, W1-T10269)`]);
     } else {
-      seams.treeGit(tree, ["fetch", "--quiet", "origin", `refs/pull/${opts.withPr}/head`]);
-      seams.treeGit(tree, [...HEAL_IDENTITY, "merge", "--no-ff", "--no-edit", "--no-verify", "FETCH_HEAD"]);
+      await seams.treeGit(tree, ["fetch", "--quiet", "origin", `refs/pull/${opts.withPr}/head`]);
+      await seams.treeGit(tree, [...HEAL_IDENTITY, "merge", "--no-ff", "--no-edit", "--no-verify", "FETCH_HEAD"]);
     }
   } catch (error) {
     let paths: string[] = [];
     try {
-      paths = seams.treeGit(tree, ["diff", "--name-only", "--diff-filter=U"]).split("\n").map((s) => s.trim()).filter(Boolean);
+      paths = (await seams.treeGit(tree, ["diff", "--name-only", "--diff-filter=U"])).split("\n").map((s) => s.trim()).filter(Boolean);
     } catch {
       // deliberate: the conflict stands without its path list
     }
     try {
-      seams.treeGit(tree, opts.withPr === undefined ? ["revert", "--abort"] : ["merge", "--abort"]);
+      await seams.treeGit(tree, opts.withPr === undefined ? ["revert", "--abort"] : ["merge", "--abort"]);
     } catch {
       // deliberate: the tree is removed next either way
     }
-    if (opts.withPr === undefined && offendingChangesAbsent(seams, tree, offendingSha, mainline)) {
-      seams.remove(tree);
+    if (opts.withPr === undefined && (await offendingChangesAbsent(seams, tree, offendingSha, mainline))) {
+      await seams.remove(tree);
       return { state: "empty", originMainSha };
     }
     try {
-      seams.remove(tree);
+      await seams.remove(tree);
     } catch {
       // deliberate: an unremoved tree is reaped with the reviewer's other trees
     }
@@ -533,32 +555,32 @@ export function buildHealedReviewerTree(
     return { state: "conflict", originMainSha, paths,
       reason: `${what} does not apply cleanly on origin/main ${originMainSha.slice(0, 12)}: ${String((error as Error)?.message ?? error).split("\n")[0]}` };
   }
-  const sha = seams.treeGit(tree, ["rev-parse", "HEAD"]).trim();
+  const sha = (await seams.treeGit(tree, ["rev-parse", "HEAD"])).trim();
   healedMemo.set(key, { path: tree, sha });
   return { state: "ready", path: tree, sha, originMainSha, patch, ...(opts.withPr === undefined ? {} : { withPr: opts.withPr }) };
 }
 
 /** A revert that does not apply may mean main already undid the merge (a revert PR merged): then
  *  re-applying the merge itself applies cleanly. That reads as an empty patch, never a conflict. */
-function offendingChangesAbsent(seams: HealedTreeSeams, tree: string, offendingSha: string, mainline: string[]): boolean {
+async function offendingChangesAbsent(seams: HealedTreeGit, tree: string, offendingSha: string, mainline: string[]): Promise<boolean> {
   try {
-    seams.treeGit(tree, [...HEAL_IDENTITY, "cherry-pick", "--no-commit", ...mainline, offendingSha]);
-    const staged = seams.treeGit(tree, ["diff", "--cached", "--name-only"]).trim();
+    await seams.treeGit(tree, [...HEAL_IDENTITY, "cherry-pick", "--no-commit", ...mainline, offendingSha]);
+    const staged = (await seams.treeGit(tree, ["diff", "--cached", "--name-only"])).trim();
     return staged !== "";
   } catch {
     return false; // deliberate: neither direction applies, so it is a conflict
   } finally {
     try {
-      seams.treeGit(tree, ["reset", "--hard", "--quiet", "HEAD"]);
+      await seams.treeGit(tree, ["reset", "--hard", "--quiet", "HEAD"]);
     } catch {
       // deliberate: the tree is removed by the caller either way
     }
   }
 }
 
-function mainlineArgs(seams: HealedTreeSeams, sha: string): string[] {
+async function mainlineArgs(seams: HealedTreeGit, sha: string): Promise<string[]> {
   try {
-    return seams.git(["rev-list", "--parents", "-n", "1", sha]).trim().split(/\s+/).length > 2 ? ["-m", "1"] : [];
+    return (await seams.git(["rev-list", "--parents", "-n", "1", sha])).trim().split(/\s+/).length > 2 ? ["-m", "1"] : [];
   } catch {
     return []; // deliberate: an unreadable parent list reverts as a single-parent commit, and a conflict says so
   }
@@ -605,7 +627,7 @@ export function reviewerRegressionEscalation(incident: ReviewerIncident, conflic
     ].join("\n"),
     options: [
       { label: "Let the revert PR merge", detail: "Its review runs on the healed tree; the incident closes once the reviewer's outcomes return to baseline.", kind: { type: "operator-only" } },
-      { label: "Heal with a fix PR", detail: `Run \`rmd reviewer-heal --with-pr <n>\` to review from origin/main merged with that PR instead of the revert${pr === null ? "" : ` of #${pr}`}.`, kind: { type: "operator-only" } },
+      { label: "Heal with a fix PR", detail: `Record the fix PR as \`operatorHeal\` in state/reviewer-health.json (reviewerHealCommand) to review from origin/main merged with it instead of the revert${pr === null ? "" : ` of #${pr}`}.`, kind: { type: "operator-only" } },
       { label: "Close as a false alarm", detail: "Close this issue and the revert PR; the detector keeps measuring and closes the incident itself once the reviewer reads healthy.", kind: { type: "operator-only" } },
     ],
     recommendation: conflict ? "Heal with a fix PR" : "Let the revert PR merge",
@@ -617,9 +639,9 @@ export function reviewerRegressionEscalation(incident: ReviewerIncident, conflic
 }
 
 export interface ReviewerHealthEffects {
-  findOffendingMerge(healthySha: string, regressedSha: string): OffendingMerge | undefined;
+  findOffendingMerge(healthySha: string, regressedSha: string): Promise<OffendingMerge | undefined>;
   /** True when `ancestor` is on `descendant`'s history: a last healthy sha must precede the regression in git. */
-  isAncestor(ancestor: string, descendant: string): boolean;
+  isAncestor(ancestor: string, descendant: string): Promise<boolean>;
   /** Raise the incident as an assigned issue (with `conflict`: its healed tree cannot be built);
    *  returns the issue url, or null when it could not be filed. */
   escalate(incident: ReviewerIncident, conflict?: { reason: string; paths: readonly string[] }): Promise<string | null>;
@@ -630,7 +652,9 @@ export interface ReviewerHealthEffects {
   closePr(url: string, comment: string): Promise<void>;
 }
 
-export interface ReviewerHealthDeps {
+/** Where reviewer health keeps and reads its evidence, and what it may do: the state file, the ledger
+ *  reader, its own log and clock, and the incident's effects. */
+export interface ReviewerHealthStore {
   statePath: string;
   /** New rows since the cursor (null: the first read, which seeds from the whole union). */
   readRows(cursor: ReviewerHealthCursor | null): Promise<{ rows: Iterable<Record<string, unknown>>; cursor: ReviewerHealthCursor }>;
@@ -669,14 +693,14 @@ function signatureOf(rec: ReviewerShaRecord): string[] {
  *  on that one only, once, after. */
 interface Act { live: boolean }
 
-function newestHealthyAncestor(state: ReviewerHealthState, deps: ReviewerHealthDeps, rec: ReviewerShaRecord): ReviewerShaRecord | undefined {
+async function newestHealthyAncestor(state: ReviewerHealthState, deps: ReviewerHealthStore, rec: ReviewerShaRecord): Promise<ReviewerShaRecord | undefined> {
   const earlier = Object.values(state.shas)
     .filter((other) => other.seq < rec.seq && !other.healed && other.regressedAt === undefined)
     .sort((a, b) => b.seq - a.seq);
   for (const other of earlier) {
     if (judgeReviewerSha(state, other.sha).state !== "healthy") continue;
     try {
-      if (deps.effects.isAncestor(other.sha, rec.sha)) return other;
+      if (await deps.effects.isAncestor(other.sha, rec.sha)) return other;
     } catch {
       // deliberate: an unknown sha (a PR head, a pruned tree) cannot be the healthy side of the range
     }
@@ -684,7 +708,7 @@ function newestHealthyAncestor(state: ReviewerHealthState, deps: ReviewerHealthD
   return undefined;
 }
 
-function openIncident(state: ReviewerHealthState, deps: ReviewerHealthDeps, rec: ReviewerShaRecord, judgment: ReviewerShaJudgment, act: Act): void {
+async function openIncident(state: ReviewerHealthState, deps: ReviewerHealthStore, rec: ReviewerShaRecord, judgment: ReviewerShaJudgment, act: Act): Promise<void> {
   const signature = signatureOf(rec);
   const bootHeadSha = rec.firstFailHost === undefined ? null : state.bootHeads[rec.firstFailHost] ?? null;
   const prior = [...state.closed].reverse().find((c) => c.signature.some((s) => signature.includes(s)));
@@ -696,13 +720,13 @@ function openIncident(state: ReviewerHealthState, deps: ReviewerHealthDeps, rec:
     incident = { ...rest, signature: [...new Set([...rest.signature, ...signature])].sort(), evidence: judgment, reopenedFrom: prior.id };
     state.closed = state.closed.filter((c) => c.id !== prior.id);
   } else {
-    const lastHealthy = newestHealthyAncestor(state, deps, rec);
+    const lastHealthy = await newestHealthyAncestor(state, deps, rec);
     let offending: OffendingMerge | undefined;
     let offendingUnavailable: string | undefined;
     if (lastHealthy === undefined) offendingUnavailable = "no healthy reviewer code sha precedes the regression";
     else {
       try {
-        offending = deps.effects.findOffendingMerge(lastHealthy.sha, rec.sha);
+        offending = await deps.effects.findOffendingMerge(lastHealthy.sha, rec.sha);
         if (offending === undefined) offendingUnavailable = `no review-material merge in ${lastHealthy.sha.slice(0, 12)}..${rec.sha.slice(0, 12)}`;
       } catch (error) {
         offendingUnavailable = `merge history unreadable: ${String((error as Error)?.message ?? error)}`;
@@ -725,7 +749,7 @@ function openIncident(state: ReviewerHealthState, deps: ReviewerHealthDeps, rec:
 }
 
 /** The incident's outward effects: the assigned issue, then one revert PR of the offending merge. */
-async function raiseIncident(deps: ReviewerHealthDeps, incident: ReviewerIncident): Promise<void> {
+async function raiseIncident(deps: ReviewerHealthStore, incident: ReviewerIncident): Promise<void> {
   try {
     incident.issueUrl = await deps.effects.escalate(incident);
   } catch (error) {
@@ -748,7 +772,7 @@ async function raiseIncident(deps: ReviewerHealthDeps, incident: ReviewerInciden
     reason: incident.revertRefused.reason, conflict_paths: incident.revertRefused.paths });
 }
 
-async function closeIncident(state: ReviewerHealthState, deps: ReviewerHealthDeps, judgment: ReviewerShaJudgment, act: Act): Promise<void> {
+async function closeIncident(state: ReviewerHealthState, deps: ReviewerHealthStore, judgment: ReviewerShaJudgment, act: Act): Promise<void> {
   const incident = state.incident!;
   state.closed = [...state.closed, { ...incident, closedAt: deps.now() }].slice(-MAX_CLOSED_REVIEWER_INCIDENTS);
   state.incident = null;
@@ -767,7 +791,7 @@ async function closeIncident(state: ReviewerHealthState, deps: ReviewerHealthDep
     try {
       await deps.effects.closePr(incident.revertPrUrl, `${comment} A fix made this revert unnecessary.`);
     } catch (error) {
-      deps.log("reviewer.regression_revert_close_failed", { incident_id: incident.id, pr_url: incident.revertPrUrl, error: String((error as Error)?.message ?? error) });
+      deps.log("reviewer.regression_revert_close_failed", { incident_id: incident.id, revert_pr: incident.revertPrUrl, error: String((error as Error)?.message ?? error) });
     }
   }
   if (incident.issueUrl) {
@@ -783,7 +807,7 @@ async function closeIncident(state: ReviewerHealthState, deps: ReviewerHealthDep
 
 /** Ingest `rows`, judge the shas they touched (oldest first, so the onset departs first), then test
  *  the open incident's close against `current`. */
-async function stepReviewerHealth(state: ReviewerHealthState, deps: ReviewerHealthDeps, rows: Iterable<Record<string, unknown>>,
+async function stepReviewerHealth(state: ReviewerHealthState, deps: ReviewerHealthStore, rows: Iterable<Record<string, unknown>>,
   current: string | null, act: Act): Promise<void> {
   const touched = ingestReviewerHealthRows(state, rows);
   const candidates = touched.map((sha) => state.shas[sha])
@@ -794,7 +818,7 @@ async function stepReviewerHealth(state: ReviewerHealthState, deps: ReviewerHeal
     if (judgment.state !== "regressed") continue;
     rec.regressedAt = deps.now();
     if (state.incident === null) {
-      openIncident(state, deps, rec, judgment, act);
+      await openIncident(state, deps, rec, judgment, act);
       if (act.live) await raiseIncident(deps, state.incident!);
       continue;
     }
@@ -820,7 +844,7 @@ function newestReviewerSha(state: ReviewerHealthState): string | null {
  * Read the reviewer's new outcomes, judge them, open or close the incident, and say how THIS review
  * routes. `originMainSha` is the current reviewer: origin/main's code.
  */
-export async function evaluateReviewerHealthNow(deps: ReviewerHealthDeps, input: { originMainSha: string | null }): Promise<ReviewerHealthDecision> {
+export async function evaluateReviewerHealthNow(deps: ReviewerHealthStore, input: { originMainSha: string | null }): Promise<ReviewerHealthDecision> {
   const state = loadReviewerHealthState(deps.statePath);
   const read = await deps.readRows(state.cursor);
   if (state.cursor === null) {
@@ -871,7 +895,7 @@ const seeding = new Map<string, Promise<unknown>>();
  * and the first boot's seed — a whole-union read — runs in the background while reviews route as
  * today. Any failure routes normally and is ledgered; it never blocks a review.
  */
-export async function evaluateReviewerHealth(deps: ReviewerHealthDeps, input: { originMainSha: string | null }): Promise<ReviewerHealthDecision> {
+export async function evaluateReviewerHealth(deps: ReviewerHealthStore, input: { originMainSha: string | null }): Promise<ReviewerHealthDecision> {
   if (seeding.has(deps.statePath)) return { route: "normal", reason: "reviewer health is seeding from the ledger union", current: null };
   if (!existsSync(deps.statePath) || loadReviewerHealthState(deps.statePath).cursor === null) {
     const seed = evaluateReviewerHealthNow(deps, input).catch((error: unknown) => {
@@ -882,7 +906,8 @@ export async function evaluateReviewerHealth(deps: ReviewerHealthDeps, input: { 
   }
   const prior = chains.get(deps.statePath) ?? Promise.resolve();
   const run = prior.then(() => evaluateReviewerHealthNow(deps, input), () => evaluateReviewerHealthNow(deps, input));
-  chains.set(deps.statePath, run.catch(() => undefined));
+  // The chain only orders the next evaluation; this caller awaits `run` below and ledgers its failure.
+  chains.set(deps.statePath, run.catch(() => undefined /* deliberate: ordered, not swallowed; see the await below */));
   try {
     return await run;
   } catch (error) {
@@ -948,25 +973,26 @@ export async function readReviewerHealthRows(stateDir: string, cursor: ReviewerH
   return { rows, cursor: { ...(newest === undefined ? {} : { afterRotation: newest }), liveOffset: prefix, ...(live === undefined ? {} : { liveIno: live.ino }) } };
 }
 
-/** `rmd reviewer-heal --with-pr <n>` (or `--clear`): the operator's explicit choice of a fix PR the
- *  healed reviewer merges instead of the revert, when the revert no longer applies. */
-export function reviewerHealCommand(rest: readonly string[], deps: { statePath: string; now: () => string; out: (line: string) => void; err: (line: string) => void }): number {
-  const state = loadReviewerHealthState(deps.statePath);
+/** The operator's explicit choice of a fix PR the healed reviewer merges instead of the revert, when the
+ *  revert no longer applies (`--with-pr <n>`, or `--clear`). Its `rmd reviewer-heal` verb is not registered
+ *  yet: a new CLI-only verb needs a row in the console-parity baseline, the operator's call. */
+export function reviewerHealCommand(rest: readonly string[], io: { statePath: string; now: () => string; out: (line: string) => void; err: (line: string) => void }): number {
+  const state = loadReviewerHealthState(io.statePath);
   if (rest.includes("--clear")) {
     state.operatorHeal = null;
-    saveReviewerHealthState(deps.statePath, state);
-    deps.out("reviewer-heal: cleared; the healed reviewer reverts the offending merge");
+    saveReviewerHealthState(io.statePath, state);
+    io.out("reviewer-heal: cleared; the healed reviewer reverts the offending merge");
     return 0;
   }
   const at = rest.indexOf("--with-pr");
   const value = at < 0 ? undefined : rest[at + 1];
   if (value === undefined || !/^[1-9][0-9]*$/.test(value)) {
-    deps.err("usage: rmd reviewer-heal --with-pr <n> | --clear");
+    io.err("usage: reviewer-heal --with-pr <n> | --clear");
     return 2;
   }
-  state.operatorHeal = { withPr: Number(value), at: deps.now() };
-  saveReviewerHealthState(deps.statePath, state);
-  deps.out(`reviewer-heal: the healed reviewer merges PR #${value} on origin/main${state.incident ? ` for ${state.incident.id}` : " once an incident opens"}`);
+  state.operatorHeal = { withPr: Number(value), at: io.now() };
+  saveReviewerHealthState(io.statePath, state);
+  io.out(`reviewer-heal: the healed reviewer merges PR #${value} on origin/main${state.incident ? ` for ${state.incident.id}` : " once an incident opens"}`);
   return 0;
 }
 
@@ -974,7 +1000,7 @@ let loadedSha: { value: string | null } | undefined;
 
 /** The HEAD of the checkout this module was loaded from: the boot head in the daemon, the tree's sha
  *  in a fresh-tree or healed child. Read once per process; nothing moves a reviewer checkout (W1-T445). */
-export function loadedReviewerCodeSha(read: () => string = () => gitIn(fileURLToPath(new URL("../../", import.meta.url)))(["rev-parse", "HEAD"])): string | null {
+export function loadedReviewerCodeSha(read: () => string = () => checkoutHeadSha(fileURLToPath(new URL("../../", import.meta.url)))): string | null {
   if (loadedSha === undefined) {
     try {
       const sha = read().trim();
@@ -984,6 +1010,29 @@ export function loadedReviewerCodeSha(read: () => string = () => gitIn(fileURLTo
     }
   }
   return loadedSha.value;
+}
+
+/** A checkout's HEAD sha read from its git files, spawning nothing: `.git` (a dir, or a worktree's
+ *  `gitdir:` pointer file), HEAD, then the ref it names in the worktree or common dir or packed-refs. */
+export function checkoutHeadSha(root: string): string {
+  let gitDir = join(root, ".git");
+  if (statSync(gitDir).isFile()) {
+    const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(gitDir, "utf8"));
+    if (!pointer) throw new Error(`${gitDir} names no gitdir`);
+    gitDir = resolve(root, pointer[1]!.trim());
+  }
+  const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+  if (SHA.test(head)) return head;
+  const ref = /^ref:\s*(\S+)$/.exec(head)?.[1];
+  if (ref === undefined) throw new Error(`${gitDir}/HEAD names neither a sha nor a ref`);
+  const common = existsSync(join(gitDir, "commondir")) ? resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim()) : gitDir;
+  for (const dir of [gitDir, common]) {
+    if (existsSync(join(dir, ref))) return readFileSync(join(dir, ref), "utf8").trim();
+  }
+  const packed = existsSync(join(common, "packed-refs")) ? readFileSync(join(common, "packed-refs"), "utf8") : "";
+  const line = packed.split("\n").find((l) => l.endsWith(` ${ref}`));
+  if (line === undefined) throw new Error(`${ref} is not resolvable in ${common}`);
+  return line.split(" ")[0]!;
 }
 
 /** Test seam: forget the memoized loaded sha. */
@@ -1010,7 +1059,7 @@ export function reviewerHealthStatePath(stateDir: string): string {
   return join(stateDir, REVIEWER_HEALTH_FILENAME);
 }
 
-/** git in a directory, for the default seams. */
+/** git in a directory, for the default seams: the hardened leaf, off the event loop. */
 export function gitIn(dir: string): GitText {
-  return (args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe", maxBuffer: 256 * 1024 * 1024 });
+  return (args) => hostWorktreeGitAsync(dir, args, { maxBuffer: 256 * 1024 * 1024 });
 }
