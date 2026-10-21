@@ -91,6 +91,22 @@ test("a resolved shard without budget_usd runs the semantic reviewer under the d
   assert.ok(!ledger.some((r) => r.step === "review.reviewer.skipped" || r.step === "review.semantic_setup_refused"));
 });
 
+test("a hand-fix PR's synthetic PR-<n> trailer gets bounded untasked review defaults, never a metadata refusal", async () => {
+  // #13305 (2026-10-21): body trailer `Remudero-Task: PR-13121` on a fix- branch; 156 refusals, no review posted.
+  const { args, ledger, code } = await review(
+    "## Acceptance\n- x | grep: review in src/lib/review.ts\n\nRemudero-Task: PR-13121", "fix-merge-round-1792544312770");
+  assert.equal(code, 0, "a synthetic PR id must be reviewed, not refused");
+  assert.equal(args.task.id, "PR-13121");
+  assert.equal(args.spawnReviewer, true);
+  assert.equal(args.requireSemanticReview, true);
+  assert.equal(args.task.risk, "medium");
+  assert.equal(args.budgetUsd, UNTASKED_REVIEW_BUDGET_USD);
+  assert.equal(ledger.filter((row) => row.step === "review.reviewer.untasked_defaults").length, 1);
+  assert.ok(!ledger.some((row) => row.step === "review.reviewer.skipped" || row.step === "review.semantic_setup_refused"));
+  for (const branch of ["fix-x-1", "run-PR-13121-1", "codex/foreign"]) assert.equal(usesUntaskedReviewMetadata("PR-13121", branch), true);
+  for (const id of ["PR-", "PR-0", "PR-12a", "pr-12", "XPR-12"]) assert.equal(usesUntaskedReviewMetadata(id, "fix-x-1"), false, id);
+});
+
 const unfiledHead = "run-unfiled-1791211800000";
 
 test("generated triage and main-repair ids receive required semantic review without fictional plan shards", async () => {
