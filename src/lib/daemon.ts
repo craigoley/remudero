@@ -455,6 +455,7 @@ export function restartWorkHistory(rawLines: readonly string[], nowMs: number): 
 /** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
  *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
 export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
+export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended"]);
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
  *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
@@ -481,7 +482,8 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
       continue;
     }
     const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
-      : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
+      : row.step === "verdict" && row.verdict === "handed_off" && typeof row.reason === "string" &&
+        CHECKPOINT_HANDOFF_REASONS.has(row.reason) && !row.pr_url;
     if (row.step !== "verdict" && !receipt) continue;
     if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
     if (row.step === "verdict" && typeof row.stage === "string" && PRE_RESTORE_RUN_VERDICT_STAGES.has(row.stage)) continue;
