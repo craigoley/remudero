@@ -187,7 +187,15 @@ test("W1-T10348: a release that rotation shed is still honoured from operator-re
     readLedgerLines: () => [release("W1-T7")],
   });
   assert.deepEqual(broken.spawned, ["W1-T7"]);
-  assert.ok(broken.rows.some((r) => r.step === "dispatch.durable_releases_unreadable"));
+  assert.ok(broken.rows.some((r) => r.step === "dispatch.releases_unreadable" && typeof r.extra.durable_error === "string"));
+
+  // A throwing ledger reader never throws into selection and does not hide the durable releases.
+  const throwing = drainLib.resolveReleases({
+    readLedgerLines: () => { throw new Error("EACCES: ledger unreadable"); },
+    readDurableReleases: () => new Set(["W1-T8"]),
+  }, plan());
+  assert.deepEqual([...throwing.ids], ["W1-T8"]);
+  assert.equal(throwing.ledgerUnreadable, "EACCES: ledger unreadable");
 });
 
 // ── 4. A RELEASED TASK THAT DISPATCH FILTERS OUT IS NAMED ─────────────────────────────────────────

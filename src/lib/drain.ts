@@ -1646,6 +1646,8 @@ export interface ReleaseResolution {
   setAside: ReadonlySet<string>;
   /** Why operator-releases.json could not be read; the ledger's releases still stand. */
   durableUnreadable?: string;
+  /** Why the ledger could not be read; the durable releases still stand. */
+  ledgerUnreadable?: string;
 }
 
 /**
@@ -1661,12 +1663,17 @@ export interface ReleaseResolution {
  */
 export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResolution {
   const authors = new Map<string, ReleaseAuthor>();
-  for (const [id, author] of releaseAuthorsFromLedger(deps.readLedgerLines?.() ?? [])) authors.set(id, author);
+  // Either record unreadable releases nothing from it, never throws into selection, and is named to the caller.
+  let ledgerUnreadable: string | undefined;
+  try {
+    for (const [id, author] of releaseAuthorsFromLedger(deps.readLedgerLines?.() ?? [])) authors.set(id, author);
+  } catch (e) {
+    ledgerUnreadable = String((e as Error)?.message ?? e);
+  }
   let durableUnreadable: string | undefined;
   try {
     for (const id of deps.readDurableReleases?.() ?? []) authors.set(id, "operator");
   } catch (e) {
-    // An unreadable durable record releases nothing more: the ledger's releases still stand, and the caller names it.
     durableUnreadable = String((e as Error)?.message ?? e);
   }
   const ids = new Set<string>();
@@ -1677,7 +1684,11 @@ export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResol
     if (author === "machine" && escalated) setAside.add(id);
     else ids.add(id);
   }
-  return { ids, authors, setAside, ...(durableUnreadable !== undefined ? { durableUnreadable } : {}) };
+  return {
+    ids, authors, setAside,
+    ...(durableUnreadable !== undefined ? { durableUnreadable } : {}),
+    ...(ledgerUnreadable !== undefined ? { ledgerUnreadable } : {}),
+  };
 }
 
 /** Each released id's author from its `ratify.approved` rows: an operator row outranks a machine one for the same task. */

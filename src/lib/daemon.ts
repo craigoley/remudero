@@ -6329,7 +6329,12 @@ export async function runDaemon(
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
     const tickReleases = resolveReleases(deps, planForBatch);
-    if (tickReleases.durableUnreadable !== undefined) log("dispatch.durable_releases_unreadable", { error: tickReleases.durableUnreadable });
+    if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
+      log("dispatch.releases_unreadable", {
+        ...(tickReleases.ledgerUnreadable !== undefined ? { ledger_error: tickReleases.ledgerUnreadable } : {}),
+        ...(tickReleases.durableUnreadable !== undefined ? { durable_error: tickReleases.durableUnreadable } : {}),
+      });
+    }
     let forcedNext: Task | undefined;
     let forcedKick: { taskId: string; origin: string } | undefined;
     if (deps.pendingKicks) {
