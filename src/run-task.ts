@@ -469,6 +469,7 @@ import {
   type MergedSet,
   type OpenPrCheck,
   resolveReleasedIds,
+  type ReleaseReaders,
 } from "./lib/drain.js";
 import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
@@ -18322,7 +18323,8 @@ async function runTask(
 
   // W1-T3216: the released set is passed so an operator-ratified verify:human task runs here too.
   // Read once, at this single-task entry point — there is no pass to amortise it over.
-  assertRunnable(plan, task, isMerged, releasedTaskIds(readLedgerRawLines(ledgerPath)));
+  // W1-T10348: the shared resolver, so a release rotation shed still runs and an overruled machine release does not.
+  assertRunnable(plan, task, isMerged, resolveReleasedIds(releaseReadersFor(ledgerPath), plan));
 
   // ── §5C LAYER A: deterministic task linter, FAIL-CLOSED pre-dispatch guard
   // (MASTER-PLAN §5C). Four malformed tasks (W1-T6, W1-T9, W1-T12) reached a
@@ -37039,7 +37041,7 @@ async function drainCommand(
         // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
         // released set once per pass. Omitting this line is not a degraded feature — it is the
         // dead one #4715 shipped, so it is asserted by test rather than left to review.
-        readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
+        ...releaseReadersFor(ledgerPathFor(config)),
         // W1-T2397: the two halves of the observation. #3120 shipped the predicate live and said so
         // — `openSiblingBuild` is computed on every projection pass while
         // `NextRunnableOpts.openSiblingBuildFor`/`onOpenSiblingBuild` had no production caller,
@@ -49233,6 +49235,11 @@ export function approveParkedTask(
   deps.recordThreadRow?.(releaseRow);
   if (!deps.provenance) deps.recordDurableRelease?.(taskId);
   return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
+}
+
+/** W1-T10348: the two release records beside a ledger, for the shared resolver (drain.ts `resolveReleases`). */
+export function releaseReadersFor(ledgerPath: string): ReleaseReaders {
+  return { readLedgerLines: () => readLedgerRawLines(ledgerPath), readDurableReleases: () => readOperatorReleases(dirname(ledgerPath)) };
 }
 
 /** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring

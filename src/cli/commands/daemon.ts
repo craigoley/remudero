@@ -61,6 +61,7 @@ import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { type Plan } from "../../lib/plan.js";
+import { readOperatorReleases } from "../../lib/machine-filing-judge.js";
 import { terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
 import { loadMounts, mountsPath } from "../../lib/mounts.js";
 import { loadPolicy, policyPath } from "../../lib/policy.js";
@@ -1301,6 +1302,8 @@ export async function daemonCommand(
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
         // W1-T534/W1-T916 hit two lines below, and the one #4715 shipped for this very feature.
         readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
+        // W1-T10348: the operator releases rotation cannot shed, beside the ledger they were written to.
+        readDurableReleases: () => readOperatorReleases(dirname(ledgerPathFor(config))),
         readRestartHistory: () => {
           return readRestartHistoryLines(dirname(ledgerPathFor(config)));
         },
