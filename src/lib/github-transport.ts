@@ -1134,13 +1134,15 @@ export function readGhReadCadenceStampMs(path: string | undefined): number | und
  *
  *  W1-T10271: `text` is what the read leaves in the file — empty, exactly as the hook's `: >` leaves
  *  it, for a read that counts against a gated window, or {@link ghAdvisoryStampText} for a daemon's
- *  advisory read. `atMs` sets the mtime on the caller's clock, the one every reader judges it by. */
+ *  advisory read. `atMs` sets the mtime on the caller's clock, defaulting to the cadence clock so
+ *  a shifted clock cannot turn a fresh stamp into an undecidable future read. */
 export function stampGhRead(path: string | undefined, text = "", atMs?: number): void {
   if (path === undefined) return;
   try {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, text);
-    if (atMs !== undefined) utimesSync(path, atMs / 1000, atMs / 1000);
+    const stampMs = atMs ?? systemClock.now();
+    utimesSync(path, stampMs / 1000, stampMs / 1000);
   } catch {
     // FAIL OPEN (design (v)): losing the stamp costs pacing accuracy, never the call itself.
   }
