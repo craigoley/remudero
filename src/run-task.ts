@@ -1,4 +1,5 @@
 import { daemonCommand as daemonCommandFromModule, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
@@ -39091,7 +39092,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // canary it judges and rolls back. The headroom sweep is an ES module, so it starts once loaded.
     case "config": {
       const d = deps("config");
-      return import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
+      return tsImport(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href, import.meta.url).then(
         (): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           // Leave the build seam absent: production must use the heap-bounded measurement worker.
