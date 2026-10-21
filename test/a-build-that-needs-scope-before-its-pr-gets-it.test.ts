@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -321,46 +320,74 @@ test("a saved patch that conflicts with main leaves the fresh build clean and na
   } finally { f.cleanup(); }
 });
 
-test("scope recovery reads the checked companion even if its pathname is replaced", (t) => {
+test("scope recovery never reads a companion through a replaced ancestor or leaf", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scope-recovery-race-`));
-  const companion = join(root, "companion.ts");
-  const replacement = join(root, "replacement.ts");
-  writeFileSync(companion, "checked companion\n", { mode: 0o755 });
-  writeFileSync(replacement, "unrelated content\n");
-  const read = fs.readFileSync;
-  let replaced = false;
-  let checkedFd: number | undefined;
-  t.mock.method(fs, "readFileSync", (...args: Parameters<typeof readFileSync>) => {
-    if (!replaced && (args[0] === companion || typeof args[0] === "number")) {
-      if (typeof args[0] === "number") checkedFd = args[0];
-      replaced = true;
-      renameSync(companion, join(root, "original.ts"));
-      symlinkSync(replacement, companion);
-    }
-    return read(...args);
+  const lib = join(root, "src", "lib");
+  const outside = join(root, "outside");
+  const save = (swap: () => void) => amendments.saveBuildScopeRecovery({
+    root, taskId: TASK_ID, branch: `run-${TASK_ID}-1`, amendmentUrl: "https://github.com/acme/remudero/pull/7",
+    worktreePath: root, headSha: "a".repeat(40), companions: ["src/lib/companion.ts"],
+    git: (args) => args[0] === "diff" ? (args.includes("--name-only") ? "src/consumer.ts\0" : "saved patch") : "a".repeat(40),
+    // The real descriptor-relative reader, run right after the path is swapped: no check-then-open window is left to win.
+    io: { run: (script, input) => { swap(); return execFileSync("python3", ["-I", "-c", script], { input, encoding: "utf8" }); } },
   });
-  syncBuiltinESMExports();
   try {
-    const path = amendments.saveBuildScopeRecovery({
-      root, taskId: TASK_ID, branch: `run-${TASK_ID}-1`, amendmentUrl: "https://github.com/acme/remudero/pull/7",
-      worktreePath: root, headSha: "a".repeat(40), companions: ["companion.ts"],
-      git: (args) => args[0] === "diff" ? (args.includes("--name-only") ? "src/consumer.ts\0" : "saved patch") : "a".repeat(40),
-    });
-    assert.equal(replaced, true, "the pathname was replaced at the byte-read boundary");
+    mkdirSync(lib, { recursive: true });
+    mkdirSync(outside);
+    writeFileSync(join(lib, "companion.ts"), "checked companion\n", { mode: 0o755 });
+    writeFileSync(join(outside, "companion.ts"), "outside the worktree\n");
+    const path = await save(() => {});
     const saved = readBuildScopeRecovery(path, TASK_ID);
     if (saved.status !== "verified") assert.fail(saved.reason);
-    assert.equal(Buffer.from(saved.data.companions[0]!.bytes, "base64").toString(), "checked companion\n");
+    assert.equal(Buffer.from(saved.data.companions[0]!.bytes, "base64").toString(), "checked companion\n", "control: an unswapped companion is read");
     assert.equal(saved.data.companions[0]!.mode, 0o755);
-    assert.equal(typeof checkedFd, "number");
-    assert.throws(() => fs.fstatSync(checkedFd!), { code: "EBADF" });
+    rmSync(join(root, "state"), { recursive: true, force: true });
+    await assert.rejects(save(() => {
+      renameSync(lib, join(root, "src", "lib-original"));
+      symlinkSync(outside, lib);
+    }), /scope recovery requires a regular path/, "a replaced ancestor directory is refused, not followed");
+    rmSync(lib);
+    renameSync(join(root, "src", "lib-original"), lib);
+    await assert.rejects(save(() => {
+      renameSync(join(lib, "companion.ts"), join(lib, "original.ts"));
+      symlinkSync(join(outside, "companion.ts"), join(lib, "companion.ts"));
+    }), /scope recovery requires a regular path/, "a replaced leaf is refused, not followed");
+    assert.equal(existsSync(join(root, "state")), false, "a refused read saves nothing");
   } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("scope recovery refuses symlinks and non-regular companions before saving", () => {
+test("a restore refuses an existing companion and names a cleanup that did not finish", async () => {
+  const saved = { version: 1 as const, taskId: TASK_ID, branch: `run-${TASK_ID}-1`, amendmentUrl: "", headSha: "a".repeat(40),
+    patch: "saved patch", committedPaths: ["src/consumer.ts"], companions: [{ path: "src/lib/rule-suites.ts", bytes: "eA==", mode: 0o644 }] };
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scope-recovery-restore-`));
+  const reply = (entries: unknown) => JSON.stringify({ ok: true, entries });
+  try {
+    await assert.rejects(amendments.restoreBuildScopeRecovery(saved, root, () => "", {
+      run: () => reply([{ path: "src/lib/rule-suites.ts", data: "eQ==", mode: 0o644 }]),
+    }), /recovery companion already exists: src\/lib\/rule-suites\.ts/);
+    const restores: boolean[] = [];
+    const git: string[][] = [];
+    const failed = await amendments.restoreBuildScopeRecovery(saved, root, (args) => { git.push(args); return ""; }, {
+      run: (_script, input) => {
+        const { restore } = JSON.parse(input) as { restore: boolean };
+        if (!restore) return reply([{ path: "src/lib/rule-suites.ts", data: null, mode: 0 }]);
+        restores.push(restore);
+        return JSON.stringify({ ok: false, error: restores.length === 1 ? "restore refused" : "cleanup refused" });
+      },
+    }).then(() => undefined, (error: unknown) => error);
+    assert.ok(failed instanceof AggregateError, String(failed));
+    assert.match(failed.message, /cleanup did not finish: .*cleanup refused/);
+    assert.match(String(failed.errors[0]), /restore refused/);
+    assert.deepEqual(git.at(-1), ["reset", "--hard", "HEAD"]);
+    assert.equal(existsSync(join(root, ".rmd-build-scope.patch")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scope recovery refuses symlinks and non-regular companions before saving", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scope-recovery-file-`));
   try {
     writeFileSync(join(root, "target.ts"), "unrelated content\n");
@@ -369,9 +396,10 @@ test("scope recovery refuses symlinks and non-regular companions before saving",
     mkdirSync(join(root, "real-dir"));
     writeFileSync(join(root, "real-dir", "inner.ts"), "unrelated content\n");
     symlinkSync(join(root, "real-dir"), join(root, "linked-dir"));
-    for (const [path, expected] of [["link.ts", /ELOOP/], ["directory.ts", /not a regular file/], ["missing.ts", /ENOENT/],
-      ["linked-dir/inner.ts", /unsafe recovery parent/], ["target.ts/inner.ts", /unsafe recovery parent/]] as const) {
-      assert.throws(() => amendments.saveBuildScopeRecovery({
+    for (const [path, expected] of [["link.ts", /requires a regular path/], ["directory.ts", /Is a directory/],
+      ["missing.ts", /companion is missing: missing\.ts/], ["linked-dir/inner.ts", /requires a regular path/],
+      ["target.ts/inner.ts", /requires a regular path/]] as const) {
+      await assert.rejects(amendments.saveBuildScopeRecovery({
         root, taskId: TASK_ID, branch: `run-${TASK_ID}-1`, amendmentUrl: "",
         worktreePath: root, headSha: "a".repeat(40), companions: [path],
         git: () => assert.fail("an unsafe companion must fail before any git operation"),

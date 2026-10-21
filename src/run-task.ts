@@ -20084,7 +20084,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       try {
         const paths = [...scopeRecovery.data.committedPaths, ...scopeRecovery.data.companions.map((c) => c.path)];
         if (paths.some((path) => !pathIsUnderDeclaredSurface(path, task.files ?? []))) throw new Error("saved paths are outside the amended task scope");
-        restoreBuildScopeRecovery(scopeRecovery.data, worktreePath, (args) => hostWorktreeGit(worktreePath, args));
+        await restoreBuildScopeRecovery(scopeRecovery.data, worktreePath, (args) => hostWorktreeGit(worktreePath, args));
         log("implement.scope_restored", { recovery_path: scopeRecovery.path, source_head_sha: scopeRecovery.data.headSha, paths });
         scopeRecoveryPrompt = `\nRecovered build work from ${scopeRecovery.data.branch} after scope amendment ${scopeRecovery.data.amendmentUrl}. ` +
           "The saved harness changes and companions are present as uncommitted edits. Continue this work and include it in your report.\n";
@@ -21069,7 +21069,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (scopeNeeded) {
       harvestFollowupsFromReport(fullText(impl), { label: "implement", runId, log, say });
       const { amendment } = scopeNeeded;
-      const recoveryPath = saveBuildScopeRecovery({ root: config.root, taskId, branch, worktreePath,
+      const recoveryPath = await saveBuildScopeRecovery({ root: config.root, taskId, branch, worktreePath,
         headSha: harnessCommitted!.sha, amendmentUrl: "amendmentUrl" in amendment ? amendment.amendmentUrl : "",
         companions: scopeNeeded.companions.map((c) => c.path), git: (args) => hostWorktreeGit(worktreePath, args) });
       log("implement.scope_needed", { recovery_path: recoveryPath, paths: scopeNeeded.companions.map((c) => c.path),

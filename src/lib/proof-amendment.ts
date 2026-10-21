@@ -19,8 +19,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
-  chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync,
-  readdirSync, renameSync, rmSync, writeFileSync,
+  closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
@@ -756,24 +755,20 @@ export function readBuildScopeRecovery(path: string, taskId: string): BuildScope
   }
 }
 
-/** The commit is pinned independently of the disposable run ref. Read back the complete byte manifest before cleanup. */
-export function saveBuildScopeRecovery(input: {
+/** The commit is pinned independently of the disposable run ref. Read back the complete byte manifest before cleanup.
+ *  Companion bytes are read through {@link scopeWorkFiles}, descriptor-relative from the worktree root, so neither a
+ *  replaced leaf nor a replaced ancestor directory can point the read outside the worktree. */
+export async function saveBuildScopeRecovery(input: {
   root: string; taskId: string; branch: string; amendmentUrl: string; worktreePath: string; headSha: string;
-  companions: readonly string[]; git: (args: string[]) => string;
-}): string {
+  companions: readonly string[]; git: (args: string[]) => string; io?: ScopeWorkIo;
+}): Promise<string> {
   const { taskId, branch, amendmentUrl, headSha, git } = input;
-  const companions = input.companions.map((path) => {
-    if (!safeRecoveryPath(path)) throw new Error(`unsafe recovery path: ${path}`);
-    assertRecoveryParents(input.worktreePath, path);
-    const fullPath = join(input.worktreePath, path);
-    const fd = openSync(fullPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    try {
-      const stat = fstatSync(fd);
-      if (!stat.isFile()) throw new Error(`companion is not a regular file: ${path}`);
-      return { path, bytes: readFileSync(fd).toString("base64"), mode: stat.mode & 0o111 ? 0o755 : 0o644 };
-    } finally {
-      closeSync(fd);
-    }
+  for (const path of input.companions) if (!safeRecoveryPath(path)) throw new Error(`unsafe recovery path: ${path}`);
+  const read = await scopeWorkFiles(input.worktreePath, input.companions.map((path) => ({ path, data: null, mode: 0 })), false,
+    input.io ?? scopeWorkIo);
+  const companions = read.map(({ path, data, mode }) => {
+    if (data === null) throw new Error(`companion is missing: ${path}`);
+    return { path, bytes: data, mode: mode & 0o111 ? 0o755 : 0o644 };
   });
   const data: BuildScopeRecovery = { version: 1, taskId, branch, amendmentUrl, headSha, companions,
     patch: git(["diff", "--binary", `${headSha}^`, headSha]),
@@ -794,39 +789,28 @@ export function saveBuildScopeRecovery(input: {
   return path;
 }
 
-function assertRecoveryParents(root: string, path: string): void {
-  let parent = root;
-  for (const part of path.split("/").slice(0, -1)) {
-    parent = join(parent, part);
-    if (existsSync(parent) && (!lstatSync(parent).isDirectory() || lstatSync(parent).isSymbolicLink())) {
-      throw new Error(`unsafe recovery parent: ${parent}`);
-    }
-  }
-}
-
-export function restoreBuildScopeRecovery(
-  saved: BuildScopeRecovery, worktreePath: string, git: (args: string[]) => string,
-): void {
-  for (const c of saved.companions) {
-    assertRecoveryParents(worktreePath, c.path);
-    if (existsSync(join(worktreePath, c.path))) throw new Error(`recovery companion already exists: ${c.path}`);
-  }
+/** Writes and cleans up companions through {@link scopeWorkFiles}, the same confined path the read took. */
+export async function restoreBuildScopeRecovery(
+  saved: BuildScopeRecovery, worktreePath: string, git: (args: string[]) => string, io: ScopeWorkIo = scopeWorkIo,
+): Promise<void> {
+  const entries = saved.companions.map((c) => ({ path: c.path, data: c.bytes, mode: c.mode }));
+  const absent = entries.map(({ path }) => ({ path, data: null, mode: 0 }));
+  const existing = (await scopeWorkFiles(worktreePath, absent, false, io)).find((entry) => entry.data !== null);
+  if (existing) throw new Error(`recovery companion already exists: ${existing.path}`);
   const patchPath = join(worktreePath, ".rmd-build-scope.patch");
   try {
     writeFileSync(patchPath, saved.patch);
     git(["apply", "--check", "--3way", patchPath]);
     git(["apply", "--3way", patchPath]);
-    for (const c of saved.companions) {
-      const path = join(worktreePath, c.path);
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, Buffer.from(c.bytes, "base64"));
-      chmodSync(path, c.mode);
-      if (readFileSync(path).toString("base64") !== c.bytes) throw new Error(`restored companion differs: ${c.path}`);
-    }
+    await scopeWorkFiles(worktreePath, entries, true, io);
     git(["reset", "--mixed", "HEAD"]);
   } catch (error) {
     git(["reset", "--hard", "HEAD"]);
-    for (const c of saved.companions) rmSync(join(worktreePath, c.path), { force: true });
+    try {
+      await scopeWorkFiles(worktreePath, absent, true, io);
+    } catch (cleanup) {
+      throw new AggregateError([error, cleanup], `scope recovery restore failed and its companion cleanup did not finish: ${String(cleanup)}`);
+    }
     throw error;
   } finally {
     rmSync(patchPath, { force: true });
@@ -862,7 +846,7 @@ function scopeWorkParts(path: string): string[] {
 
 interface ScopeWorkEntry { path: string; data: string | null; mode: number }
 
-interface ScopeWorkIo { run: (script: string, input: string) => string | Promise<string> }
+export interface ScopeWorkIo { run: (script: string, input: string) => string | Promise<string> }
 // BACKSTOP: bound the rare recovery subprocess and its private IPC, never truncate saved work.
 const SCOPE_WORK_IO_TIMEOUT_MS = 30_000;
 const SCOPE_WORK_IO_MAX_BYTES = 64 * 1024 * 1024;
@@ -979,9 +963,9 @@ except (OSError, ValueError) as error:
     print(json.dumps(dict(ok=False, error=message)))
 `;
 
-async function scopeWorkFiles(input: ScopeAmendmentWork, entries: ScopeWorkEntry[], restore: boolean, io: ScopeWorkIo): Promise<ScopeWorkEntry[]> {
+async function scopeWorkFiles(worktreePath: string, entries: ScopeWorkEntry[], restore: boolean, io: ScopeWorkIo): Promise<ScopeWorkEntry[]> {
   for (const entry of entries) scopeWorkParts(entry.path);
-  const result = JSON.parse(await io.run(SCOPE_WORK_FILES, JSON.stringify({ root: resolve(input.worktreePath), entries, restore })));
+  const result = JSON.parse(await io.run(SCOPE_WORK_FILES, JSON.stringify({ root: resolve(worktreePath), entries, restore })));
   if (result.ok !== true) throw new ScopeRecoveryError(String(result.error ?? "scope recovery filesystem unavailable"));
   if (!Array.isArray(result.entries)) throw new Error("scope recovery filesystem response did not verify");
   return result.entries;
@@ -1035,7 +1019,7 @@ export async function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: Scop
   } catch (error) {
     if (!(error instanceof MissingScopeWorkError)) throw error;
   }
-  const entries = await scopeWorkFiles(input, [...new Set(input.paths)].sort().map((path) => ({ path, data: null, mode: 0 })), false, io);
+  const entries = await scopeWorkFiles(input.worktreePath, [...new Set(input.paths)].sort().map((path) => ({ path, data: null, mode: 0 })), false, io);
   const payload = JSON.stringify(entries);
   const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
     digest: createHash("sha256").update(payload).digest("hex") });
@@ -1068,6 +1052,6 @@ export async function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: Scop
 
 export async function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string[]> {
   const entries = readScopeWork(input);
-  await scopeWorkFiles(input, entries, true, io);
+  await scopeWorkFiles(input.worktreePath, entries, true, io);
   return entries.map((entry) => entry.path);
 }
