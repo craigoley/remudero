@@ -1,0 +1,67 @@
+- id: W1-T10318
+  title: "Trace and repair containment served-model evidence at its receipt write boundary"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: feedback#fb-1792030218433-dd1b77
+  plan_refs: ["§7B", "W1-T4596", "W1-T4650", "W1-T4707", "W1-T9553", "W1-T10315"]
+  files:
+    - src/lib/containment.ts
+    - src/lib/benchmark-run.ts
+    - test/containment.test.ts
+    - test/benchmark-nondispatch-attempts.test.ts
+  rationale: |
+    The captured answer asks for containment's served-model gap to become work.
+    The original record reported 49/61 joined calls (80.3%) against a 90% floor;
+    this is historical evidence, not a current measurement. W1-T9553 records a later
+    51% reading and repairs stale finding publication, not containment receipts.
+    W1-T4650 handles provider reporting and W1-T4707 handles A/A classification;
+    neither establishes containment's caller-to-ledger invariant. W1-T4596 retires
+    duplicate receipt infrastructure, while explicitly leaving runtime coverage audit
+    independent. probeContainment uses benchmarkNonDispatchSpawn("containment"),
+    whose shared wrapper already carries served_model and served_model_reason through
+    benchmarkWorkerAttemptResources. Diagnose the missing population before assuming
+    the containment module drops a field. Rule 19: one integration proof must span
+    the production caller, receipt writer and evidence reader.
+  design: |
+    Audit containment assignments and terminal receipts over the complete ledger union,
+    with coverage counts for every rotation form, a positive retained-model control,
+    window bounds and newest source timestamp. Trace missing identities through worker
+    result, shared wrapper, ledger receipt and existing evidence projection. Record
+    per-cause dispositions in the implementation PR; state unrecoverable historical
+    evidence explicitly rather than presenting a new sample as the original 61 calls.
+    Restore actual served identity at the evidenced loss boundary, or retain the
+    provider's named unreportable reason where identity legitimately cannot be reported.
+    Preserve an identity different from the requested model; never fill from the request,
+    treat failure status as an exemption, or count a reason as observed model identity.
+    Unexplained omissions remain visible debt. If current propagation is already correct,
+    document why the lane lacks identity with receipts and regression coverage rather
+    than adding redundant writes. Do not rewrite historical ledger rows.
+    Drive the containment probe through the production non-dispatch wrapper with an
+    isolated ledger and controlled worker transport, then consume the resulting receipts
+    through the existing evidence projection. Cover success, failed or timed-out results
+    carrying model telemetry, declared unreportability, unexplained missing telemetry,
+    retries and receipt-sink failure. Preserve containment decisions, fail-closed behavior,
+    worker exceptions, callbacks and distinct attempt joins. Reuse the declared existing
+    suites. Coordinate benchmark-run overlap with W1-T10315 and other lane repairs.
+    No coverage-floor reduction, gardener change, routing change, global classification
+    rewrite or weakening of containment is authorized by this task.
+  acceptance:
+    - claim: "The containment caller through the production wrapper writes actual served identity or the provider's named unreportable reason into joined receipts consumed by the evidence reader, including reported identity on failed results and identity differing from the request"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "Retry and failure receipts retain available model evidence on distinct assignments, unexplained omissions remain missing, and telemetry-sink failure preserves worker and containment behavior"
+      proof: "unit test: test/benchmark-nondispatch-attempts.test.ts"
+  falsifier: |
+    Remove the evidenced propagation repair and show the caller-to-receipt regression
+    fails, then restore it to pass. A provider-unreportable result must keep its reason
+    without becoming observed identity; an unexplained omission must remain missing.
+    If diagnosis finds no propagation defect, provide the audited dispositions and
+    a regression that fails when the demonstrated identity/reason propagation is removed.
+  priority: 4
+  status: queued
+  attempts: 0
