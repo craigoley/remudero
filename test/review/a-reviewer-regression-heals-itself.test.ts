@@ -22,6 +22,7 @@ import { reviewerRegressionRevertText } from "#src/lib/main-health-rung.js";
 import { buildReviewerHealthRoute, mainRepairRevertBody, reviewCommand, runReview } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 const REPO_URL = "https://github.com/acme/remudero/pull";
@@ -594,7 +595,7 @@ test("W1-T10269: the operator's fix-PR choice is recorded, and the healed tree m
   health.resetHealedReviewerTrees();
   const { f, h } = await openTenTwenty(t);
   const out: string[] = [];
-  const io = { statePath: h.statePath, now: () => "2026-10-21T00:00:00.000Z", out: (l: string) => out.push(l), err: (l: string) => out.push(l) };
+  const io = { statePath: h.statePath, clock: { iso: () => "2026-10-21T00:00:00.000Z" }, out: (l: string) => out.push(l), err: (l: string) => out.push(l) };
   assert.equal(health.reviewerHealCommand(["--with-pr"], io), 2);
   assert.equal(health.reviewerHealCommand(["--with-pr", "77"], io), 0);
   assert.deepEqual(health.loadReviewerHealthState(h.statePath).operatorHeal, { withPr: 77, at: "2026-10-21T00:00:00.000Z" });
@@ -690,7 +691,7 @@ test("W1-T10269: blame reads run-task.ts's review path and the modules it import
 
 test("W1-T10269: terminal rows carry the judging code's sha; a shadow review is renamed and publishes nothing", async (t) => {
   health.resetLoadedReviewerCodeSha();
-  const own = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8", cwd: join(import.meta.dirname, "..", "..") }).trim();
+  const own = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8", cwd: REPO_ROOT }).trim();
   assert.equal(health.loadedReviewerCodeSha(), own, "the HEAD this module was loaded from");
   health.resetLoadedReviewerCodeSha();
   assert.equal(health.loadedReviewerCodeSha(() => { throw new Error("no git"); }), null);
@@ -711,7 +712,7 @@ test("W1-T10269: terminal rows carry the judging code's sha; a shadow review is 
   let shadowArg: unknown;
   const code = await reviewCommand("8", ["--repo", "acme/remudero", health.REVIEWER_SHADOW_FLAG], {
     resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }), enforceReviewSubjectCheckout: false,
-    loadConfig: () => ({ root, installRoot: join(import.meta.dirname, "..", "..") }) as Config,
+    loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
     fetchView: () => ({ number: 8, html_url: `${REPO_URL}/8`, state: "open", body: "## Acceptance\n- x — grep: x in y\n", head: { sha: head, ref: "b" } }),
     fetchHead: () => {}, postReviewPending: async () => { pending++; return { posted: false }; },
     contributorAdmission: async () => { admissions++; },
@@ -734,7 +735,7 @@ test("W1-T10269: terminal rows carry the judging code's sha; a shadow review is 
   assert.ok(!rows.some((r) => r.step === "review.semantic_incomplete" || r.step === "review.posted"));
   const ok = await reviewCommand("8", ["--repo", "acme/remudero", health.REVIEWER_SHADOW_FLAG], {
     resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }), enforceReviewSubjectCheckout: false,
-    loadConfig: () => ({ root, installRoot: join(import.meta.dirname, "..", "..") }) as Config,
+    loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
     fetchView: () => ({ number: 8, html_url: `${REPO_URL}/8`, state: "open", body: "", head: { sha: head, ref: "b" } }),
     fetchHead: () => {}, postReviewPending: async () => ({ posted: false }), contributorAdmission: async () => {},
     materialize: () => ({ worktreePath: undefined, failure: { errorClass: "test", message: "fixture" } }) as never,

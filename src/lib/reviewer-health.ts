@@ -25,6 +25,7 @@
 import { closeSync, createReadStream, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
@@ -976,7 +977,7 @@ export async function readReviewerHealthRows(stateDir: string, cursor: ReviewerH
 /** The operator's explicit choice of a fix PR the healed reviewer merges instead of the revert, when the
  *  revert no longer applies (`--with-pr <n>`, or `--clear`). Its `rmd reviewer-heal` verb is not registered
  *  yet: a new CLI-only verb needs a row in the console-parity baseline, the operator's call. */
-export function reviewerHealCommand(rest: readonly string[], io: { statePath: string; now: () => string; out: (line: string) => void; err: (line: string) => void }): number {
+export function reviewerHealCommand(rest: readonly string[], io: { statePath: string; clock: Pick<Clock, "iso">; out: (line: string) => void; err: (line: string) => void }): number {
   const state = loadReviewerHealthState(io.statePath);
   if (rest.includes("--clear")) {
     state.operatorHeal = null;
@@ -990,7 +991,7 @@ export function reviewerHealCommand(rest: readonly string[], io: { statePath: st
     io.err("usage: reviewer-heal --with-pr <n> | --clear");
     return 2;
   }
-  state.operatorHeal = { withPr: Number(value), at: io.now() };
+  state.operatorHeal = { withPr: Number(value), at: io.clock.iso() };
   saveReviewerHealthState(io.statePath, state);
   io.out(`reviewer-heal: the healed reviewer merges PR #${value} on origin/main${state.incident ? ` for ${state.incident.id}` : " once an incident opens"}`);
   return 0;
