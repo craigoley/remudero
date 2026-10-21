@@ -6099,6 +6099,7 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
 
 ## Banked queue
 
+- ratification-candidate: W1-T5071 — proof-debt:W1-T5071, 2026-10-14 proposal (W1-T9485); matching candidate recorded in plan/tasks.yaml.
 - Grill-me protocol as in-harness interactive intake (`rmd chat`) — post-WS-4.
 - Agent Teams as an optional worker sub-mode for parallel exploration inside one task.
 - **Beads import/export adapter** — tasks.yaml stays the schema-tight native substrate; Beads (23k★,
