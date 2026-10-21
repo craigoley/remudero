@@ -1,0 +1,42 @@
+- id: W1-T10363
+  title: "A PROOF AMENDMENT WRITES THE NEW PROOF VERBATIM — `replaceProofScalar` (src/lib/proof-amendment.ts) calls `String.prototype.replace` with a STRING replacement, so a new proof containing `$&`, `$'`, `` $` `` or `$$` is expanded by JavaScript's replacement patterns and the shard receives a proof nobody proposed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: low  # one line: the replacement becomes a function, so the text is inserted as written
+  band_meaning: blast-radius
+  origin: "coordinator brief f1021b item 11 (2026-10-21), found while reviewing root-cause PR #13397, which makes this writer live for NEEDS_DESIGN rounds"
+  plan_refs: [W1-T3434, W1-T10339]
+  files:
+    - src/lib/proof-amendment.ts
+    - test/fix-lane/a-proof-amendment-writes-the-new-proof-verbatim.test.ts
+  status: queued
+  priority: 2  # #13397 put this writer on the live path; a grep proof is a regex, and `$` is a common regex character
+  attempts: 0
+  rationale: |
+    READ at origin/main 5ed301f42 (symbols, not lines): `replaceProofScalar` (src/lib/proof-amendment.ts) finds the
+    `proof:` line holding `oldProof` under the matching `claim:` and returns
+    `lines[proofIdx].replace(oldProof, newProof)`. With a string second argument, `String.prototype.replace`
+    interprets `$&` (the match), `` $` `` and `$'` (the text before and after it) and `$$` (one `$`). A `grep:` proof is a
+    basic regex, so `$` is common (an end anchor such as `act$`); a new proof such as `grep: a$' in f` or one containing
+    `$&` is rewritten into different text. `$` followed by any other character passes through unchanged, so a plain
+    end anchor alone survives, which is why the defect has not shown yet.
+    PR #13397 (merged 2026-10-21T17:39:30Z, commit 2e185df91) makes the NEEDS_DESIGN hand-off reach `requestProofAmendment` and so this writer; before it, the writer
+    never ran in production (one `proof_amendment.requested` row in all retained history, a refusal).
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and every open PR head's plan tree for replaceProofScalar:
+    no shard.
+  design: |
+    1. `replaceProofScalar` inserts `newProof` exactly as given: a replacer function (`() => newProof`) or an index
+       splice, never a string replacement pattern.
+    2. Nothing else in the function changes: the same line, the same claim check, the same `undefined` on drift.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/fix-lane/a-proof-amendment-writes-the-new-proof-verbatim.test.ts"
+    - claim: "a new proof containing dollar-ampersand, dollar-quote and double-dollar sequences is written into the shard byte for byte"
+      proof: "grep: W1-T10363: a new proof with dollar sequences is written verbatim in test/fix-lane/a-proof-amendment-writes-the-new-proof-verbatim.test.ts"
+  falsifier: |
+    Restore the string replacement and the fixture proof holding `$&` and `$'` is written with the old proof and the
+    line's tail spliced in.

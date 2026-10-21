@@ -1,0 +1,62 @@
+- id: W1-T10362
+  title: "THE REVIEWER'S COMMENT MASK READS EACH FILE IN ITS OWN LANGUAGE — `commentMaskByLine` (src/lib/review.ts) applies JavaScript comment rules to every file, so plan/policy.yaml's header line 8 (`src/lib/*.ts`) opens a `/*` block that never closes, every later policy line reads as a comment, and a true `grep:` proof there is capped `executed_stale` (comment-only): `grep: mode: act in plan/policy.yaml` matched the real value line `  mode: act` on #13282 and was still capped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human  # OPERATOR APPROVAL NEEDED TO BUILD: src/lib/review.ts is an instrument path (the reviewer grades every proof through it); released by the operator, never dispatched on its own
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which characters of a matched line count as a comment for a given file type; the TS/JS reading is unchanged
+  band_meaning: blast-radius
+  origin: "coordinator brief f1021b item 10 (2026-10-21), from the #13282 unstick and root-cause PR #13397 (logs-8864/s13282-proof-probe.log, s13397-stored-body.md)"
+  plan_refs: [W1-T3210, W1-T7821, W1-T3306, W1-T3434, W1-T10339]
+  files:
+    - src/lib/review.ts
+    - test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts
+  status: queued
+  priority: 1.5  # every grep proof into a YAML or Markdown file after a stray `/*` is capped; a taskless PR then loops on a proof that is true
+  attempts: 0
+  rationale: |
+    OBSERVED, the #13282 builder's probe (logs-8864/s13282-proof-probe.log): review.ts's own functions run at #13282's
+    head db669da1b against merge base 06eadaf30:
+    - `grep: mode: act in plan/policy.yaml` -> executed_stale (comment-only), matched line 1782 `  mode: act`.
+    - `grep: OPERATOR 2026-10-21: act in plan/policy.yaml` -> executed_stale (comment-only), matched line 1778 (a real
+      YAML `#` comment, rightly capped).
+    - `grep: ^  mode: act$ in plan/policy.yaml` -> executed_pass, the same line 1782.
+    #13282 sat on plan-proof-unrunnable from 03:29Z to 11:33Z on 10-21 (W1-T10339's rationale) and moved only when an
+    operator session hand-rewrote its proof to the anchored form.
+    READ at origin/main 5ed301f42 (symbols, not lines):
+    - `commentMaskByLine` (src/lib/review.ts) walks the whole file with one state machine: `//` line comments, `/* */`
+      blocks and JS string quotes, whatever the file type. `matchedLinesAreAllComments` uses its mask for the matched
+      lines.
+    - plan/policy.yaml line 8 reads "cadence) were literals scattered across src/lib/*.ts — a value change …": the `/*`
+      inside `src/lib/*.ts` opens a block, and nothing later in the YAML closes it.
+    - PR #13397 (root cause of #13282, merged 2026-10-21T17:39:30Z, commit 2e185df91) makes
+      `validateProofAmendmentProposal` refuse a replacement whose head match is only comment lines, through this same
+      predicate. That stops an amendment the reviewer would cap again, but it
+      inherits this mask, so a true YAML proof is refused there too.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and every open PR head's plan tree for commentMaskByLine and
+    matchedLinesAreAllComments. W1-T3210 (merged) built the comment-only grade; W1-T7821 (queued) makes `rmd check-proof`
+    call the same predicate and so inherits this fix; no shard changes the mask itself.
+  design: |
+    1. `commentMaskByLine` takes the matched file's path and picks the comment grammar from its extension:
+       JS/TS family (.ts, .tsx, .js, .mjs, .cjs) keep today's `//` and `/* */` rules with string quotes; YAML
+       (.yaml, .yml) masks from an unquoted `#` to end of line (a `#` inside a quoted scalar is not a comment);
+       shell-like files with a `#` grammar may share the YAML rule; Markdown (.md) and any extension with no known
+       grammar mask nothing.
+    2. `matchedLinesAreAllComments` passes the path it already holds. Every caller of the mask (the reviewer's
+       grading and #13397's amendment validator) gets the same reading, never a second copy.
+    3. No grading rule changes beyond which characters count as a comment; a YAML `#` comment line is still capped.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts"
+    - claim: "a grep proof matching a YAML value line after a stray `/*` in a YAML comment is graded on the line, not capped (the policy.yaml shape)"
+      proof: "grep: W1-T10362: a YAML value line after a stray slash-star is not a comment in test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts"
+    - claim: "a YAML `#` comment line and a TS block comment are still read as comments"
+      proof: "grep: W1-T10362: a YAML hash comment and a TS block comment are still comments in test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts"
+  falsifier: |
+    Keep the JS-only mask and the policy.yaml-shaped fixture (header line holding `src/lib/*.ts`, a later `  mode: act`)
+    grades `grep: mode: act` comment-only again. Mask nothing for YAML and the `#`-comment test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger: review grades of `executed_stale` (comment-only) whose matched
+    line, read in its own file's grammar, carries no comment. Healthy shape: none.

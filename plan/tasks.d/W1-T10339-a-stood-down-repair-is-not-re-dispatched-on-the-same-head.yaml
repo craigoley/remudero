@@ -100,6 +100,23 @@
       - W1-T9955 (queued) is the opposite fault for a PR with NO task id: its ended rung is never read, so it parks
         silently. Once it lands, those PRs reach this task's rule too.
       - No open PR touches the capped route, the proof-discrimination prompt or the W1-T1110 re-arm.
+    AMENDED 2026-10-21 by coordinator brief f1021b item 13, after root-cause PR #13397 merged (17:39:30Z, commit
+    2e185df91). Its changes as its stored body states them (logs-8864/s13397-stored-body.md); the merge is newer than
+    this filing's fetched main (64b0ccba2), so the builder re-reads them at its own base. No operator-pinned field
+    (origin, priority, depends_on) is changed.
+      - #13397 makes runFixRung's NEEDS_DESIGN hand-off arm pass a proof-discrimination round's transcript to
+        `dispatchProofAmendmentWrite` before it returns, treats a sweep-reconstructed capped review as the posted
+        success review, and makes `validateProofAmendmentProposal` (src/lib/proof-amendment.ts) refuse a replacement
+        whose head match is only comment lines (the reviewer's `matchedLinesAreAllComments`).
+      - So the trailered "plan-amendment route" this task's regression guard keeps was DEAD before #13397: five rounds
+        since 10-10 (W1-T5689, W1-T8921, PR-12997 twice, PR-13282) carried a PROOF_AMENDMENT block and none was
+        written. The guard now protects a live route.
+      - A taskless round now also reaches the writer, which refuses it `shard-not-found` and writes a
+        `proof_amendment.requested` refusal row before the round returns. The `priorDesign` reuse and the stand-down
+        hold below will see that row.
+      - The body route must validate through `validateProofAmendmentProposal` itself, so it inherits the comment-only
+        refusal (and the language-aware comment mask, W1-T10362, when that lands) instead of a parallel copy of the
+        checks.
   design: |
     No fixed bounds. A repair is re-dispatched when, and only when, something it read has changed.
     1. A TASKLESS CAPPED PROOF IS A BODY REPAIR. For a PR where `carriesTaskTrailer(pr)` is false:
@@ -108,12 +125,15 @@
        - The fix round renders a body variant of the `proof-discrimination` prompt. It says this PR has no task, so
          its BODY's Acceptance block is what review judges. It asks for the same PROOF_AMENDMENT block (claim and
          old_proof byte-for-byte, new_proof). It says the harness, not the worker, writes the body.
-       - run-task.ts validates each proposed entry with the checks `requestProofAmendment` already runs: identical
-         claim, parseable proof, a hit at head and a miss at the merge base through `buildBaseProofDir`. Then
+       - run-task.ts validates each proposed entry through `validateProofAmendmentProposal`
+         (src/lib/proof-amendment.ts), the validator `requestProofAmendment` runs: identical claim, parseable proof, a
+         hit at head and a miss at the merge base through `buildBaseProofDir`, and (since #13397) no head match made of
+         comment lines only. Never a second copy of those checks (amended 2026-10-21). Then
          `repairedProofsAreSafeToPush` must accept the rewritten criteria.
        - Only then is the live body rewritten through the existing body writer (`updatePrBody`), replacing those
          proof lines and nothing else. The round ledgers `fix.body_proof_repaired` with the old and new body digest.
-       - It never calls `dispatchProofAmendmentWrite`. A trailered PR keeps today's plan-amendment route unchanged.
+       - It never calls `dispatchProofAmendmentWrite` for a taskless PR (since #13397 that call only records a
+         `shard-not-found` refusal). A trailered PR keeps the plan-amendment route #13397 made live, unchanged.
        - A refused or empty proposal ends the round as a stand-down that records why. Item 2 then holds it.
        - The rewritten body is a new review input, so review re-runs on its own edited event as it does for any
          body edit.
@@ -130,6 +150,9 @@
          normally.
        - runFixRung's `priorDesign` reuse in run-task.ts compares the same inputs, so a body repaired at an unchanged
          head gets a real round instead of an instant stand-down.
+       - A `proof_amendment.requested` refusal row written by the same round (the #13397 hand-off) belongs to that
+         round: it is neither a changed input nor a release, and the hold and the `priorDesign` reuse read through it
+         (amended 2026-10-21).
        - Rows that are not stand-downs keep W1-T1110's reading: a live rung stays deduped, and a handed_off
          stand-down stays a live wait until the sweep receives it.
     3. OUT OF SCOPE, NAMED. The `rung.strike` "needs-human escalation ALREADY OPEN" stand-down (85 of the 382) is
@@ -147,6 +170,8 @@
       proof: 'grep: test("W1-T10339: a stood-down repair is not re-dispatched on unchanged inputs" in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts'
     - claim: "a body edit at an unchanged head releases a taskless PR's stood-down repair, in the sweep and in the fix rung's own reuse"
       proof: 'grep: test("W1-T10339: a body edit releases a taskless stand-down at the same head" in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts'
+    - claim: "a taskless body proof replacement whose head match is only comment lines is refused through validateProofAmendmentProposal, and the body is not written"
+      proof: 'grep: test("W1-T10339: a comment-only body proof replacement is refused by the shared validator" in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts'
     - claim: "the new test file passes"
       proof: "unit test: test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts"
   falsifier: |
@@ -158,7 +183,8 @@
     Key the hold or the rung's priorDesign reuse on the head alone: the repaired body is held, or stood down with no
     worker, and the fourth test fails.
     Regression guards, kept by the same file:
-    - A trailered PR's capped proof still goes to the plan-amendment route.
+    - A trailered PR's capped proof still goes to the plan-amendment route (live since #13397; dead before it).
+    - A same-round `proof_amendment.requested` refusal row does not release the hold.
     - A new head releases every hold.
     - A live in-flight rung is still deduped.
     - A handed_off stand-down is still a live wait.

@@ -1,0 +1,66 @@
+- id: W1-T10370
+  title: "`rmd pr-state <n...>` ANSWERS A PR's STATE FROM THE CORE LEDGER FIRST AND ASKS GITHUB ONLY WHEN THE LEDGER IS STALE — head sha, check rollup, mergeability, review state, auto-merge and terminal state, each with its as-of time and source, revalidated by ONE batched read-broker query only for the PRs whose newest row is older than --max-age or lacks a field (operator-approved filing, 2026-10-21)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, a read-only verb that answers PR state from the ledger with a stale-while-revalidate fallback; no fleet decision reads it
+  band_meaning: span
+  origin: "OPERATOR APPROVED FILING 2026-10-21 (coordinator brief f1021b item 16): a ledger-first PR-state reader, stale-while-revalidate"
+  plan_refs: [W1-T3281, W1-T3083, W1-T10279]
+  files:
+    - src/lib/pr-state.ts
+    - src/run-task.ts
+    - test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts
+  status: queued
+  priority: 1.5  # every operator and builder session asks these questions many times an hour
+  attempts: 0
+  rationale: |
+    THE ASK (operator-approved, 2026-10-21): one read verb, `rmd pr-state <n...> [--max-age <dur>]`, or an extension of
+    an existing verb if one fits. REPORTED by the coordinator, measured 10-21: 208 gated GitHub calls and 16.7
+    agent-hours waiting on them; a status check for 6 PRs cost 0 GitHub calls from the ledger, against 1 batched call.
+    OBSERVED in this filing's own session: the newest `sweep.disposed`, `sweep.refresh.outcome`, `review.posted`,
+    `automerge.*` and `pr.terminal` rows answered every PR question asked of PRs 13008, 13039, 13121 and 13218 on
+    10-21, with the fleet writing such rows every few minutes under its own App identity.
+    READ at origin/main b49411212 (symbols, not lines):
+    - `rmd pr-owner <n>` (`prOwnerCommand`, src/run-task.ts, W1-T3281) already reads the local ledger union for ONE PR
+      and answers OWNED/FREE/UNKNOWN with the corpus's newest timestamp; it answers ownership, not state.
+    - `rmd pr-checks <n>` (W1-T3083) reads GitHub every time, for checks only.
+    - Rows carrying the fields: `sweep.disposed` (head_sha, disposition, merge_state, blocker), `sweep.merge_probe`,
+      `review.posted`, `automerge.armed` / `automerge.arm_skipped`, `pr.terminal` (merged/closed); the
+      `sweep.plan_filing_classified` and `refresh.*` rows carry head context.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and every open PR head's plan tree for pr-state, pr-owner and
+    pr-checks: the hits are the merged tasks that built those two verbs.
+  design: |
+    1. A new verb `pr-state`, handled by `prStateCommand` (src/lib/pr-state.ts) and registered in src/run-task.ts beside
+       `pr-owner`, sharing pr-owner's ledger-union reader (one reader, never a second ledger walk). `pr-owner`'s own
+       contract (ownership, OWNED/FREE/UNKNOWN) is unchanged.
+    2. For each requested PR, from the core ledger's newest rows with that `pr_number`: head sha; check rollup
+       (green/red/pending plus failing names); mergeability; review state; auto-merge armed; terminal state
+       (merged/closed). Each field prints its as-of timestamp and the step it came from.
+    3. A PR whose newest row is older than `--max-age`, or that lacks a field, is revalidated through the read broker
+       (`rmd gh --class agent` transport) with ONE batched GraphQL query covering every such PR in the call. It never
+       polls and never retries in a loop; a failed revalidation prints the ledger answer marked stale with the error.
+    4. The default `--max-age` is derived from the sweep's own cadence (about two sweep periods, read from the
+       ledger's recent sweep pass rows or the policy that sets it), never a new literal; a changed default is the
+       operator's call.
+    5. Read-only: no ledger write, no GitHub write.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts"
+    - claim: "a PR whose newest ledger rows are within --max-age is answered from the ledger with no broker call"
+      proof: "grep: W1-T10370: a fresh ledger answer makes no broker call in test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts"
+    - claim: "PRs whose rows are stale or missing a field are revalidated by one batched broker query"
+      proof: "grep: W1-T10370: stale PRs are revalidated by one batched broker query in test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts"
+    - claim: "every printed field carries its as-of timestamp and source"
+      proof: "grep: W1-T10370: every field prints its as-of time and source in test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts"
+    - claim: "the CLI dispatches the pr-state verb to its handler"
+      proof: "grep: prStateCommand( in src/run-task.ts"
+  falsifier: |
+    Make the verb call the broker unconditionally and the fresh-ledger test reds (one call where none is allowed). Skip
+    the revalidation and the stale test reds. Drop the as-of stamp and the third test reds.
+  note: |
+    EFFECT, measured after merge: builder and operator `rmd gh` reads of pull state per hour, from the broker's own
+    request log, before and after.
