@@ -45,7 +45,7 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
   ["src/lib/git-push.ts", "worktreePushExecAsync"],
   ["src/run-task.ts", "commitWorkerEdits"],
   ["src/run-task.ts", "appendTaskTrailerToCommit"],
-  ["src/run-task.ts", "irreversibleSignalForWorktree"],
+  ["src/cli/commands/run-task-verb.ts", "irreversibleSignalForWorktree"],
   ["src/run-task.ts", "pushFixRound"],
   ["src/lib/worker.ts", "stampRunWorktreeAssignment"],
   // W1-T6122: the WORKER/REVIEWER sites outside run-task.ts.
@@ -111,6 +111,10 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
  * resolved every caller-chosen tree at its callers. Exact in both directions, so it only shrinks.
  */
 export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: string }>> = {
+  "src/cli/commands/run-task-verb.ts": {
+    count: 1,
+    reason: "CHECKOUT: refreshManagedCheckout moved with the verb; still classed in RUN_TASK_WIDENED_SITES (W1-T9332)",
+  },
   "src/cli/commands/daemon.ts": {
     count: 3,
     reason:
@@ -246,7 +250,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "the managed source checkout (-C repoDir)",
   },
   "src/run-task.ts": {
-    count: 66,
+    count: 65,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",

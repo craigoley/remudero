@@ -44,6 +44,8 @@ const MOVED_SOURCE = fileURLToPath(new URL(`../${MOVED_FILE}`, import.meta.url))
 /** W1-T9333: daemonCommand moved here; this table still classes its sites. */
 const DAEMON_FILE = "src/cli/commands/daemon.ts";
 const DAEMON_SOURCE = fileURLToPath(new URL(`../${DAEMON_FILE}`, import.meta.url));
+const RUN_TASK_VERB_FILE = "src/cli/commands/run-task-verb.ts";
+const RUN_TASK_VERB_SOURCE = fileURLToPath(new URL(`../${RUN_TASK_VERB_FILE}`, import.meta.url));
 
 type SiteClass = "CHECKOUT";
 
@@ -123,7 +125,7 @@ const sorted = (r: Record<string, number>): Record<string, number> =>
   Object.fromEntries(Object.entries(r).sort(([a], [b]) => a.localeCompare(b)));
 
 describe("W1-T6135: every widened git site left in run-task.ts is a classed CHECKOUT site", () => {
-  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}\n${readFileSync(DAEMON_SOURCE, "utf8")}`;
+  const text = [SOURCE, MOVED_SOURCE, DAEMON_SOURCE, RUN_TASK_VERB_SOURCE].map((path) => readFileSync(path, "utf8")).join("\n");
   const actual = widenedByFunction(text);
 
   it("the census sees the file: a positive control on the widened pattern", () => {
@@ -147,8 +149,10 @@ describe("W1-T6135: every widened git site left in run-task.ts is a classed CHEC
     const entry = WIDENED_SITE_EXCEPTIONS[FILE];
     const moved = WIDENED_SITE_EXCEPTIONS[MOVED_FILE];
     const daemon = WIDENED_SITE_EXCEPTIONS[DAEMON_FILE];
-    assert.ok(entry && moved && daemon, `${FILE}, ${MOVED_FILE} and ${DAEMON_FILE} have widened exceptions`);
-    assert.equal(entry.count + moved.count + daemon.count, sum);
+    const verb = WIDENED_SITE_EXCEPTIONS[RUN_TASK_VERB_FILE];
+    assert.ok(entry && moved && daemon && verb, "the entrypoint and all three extracted modules have widened exceptions");
+    assert.equal(entry.count + moved.count + daemon.count + verb.count, sum);
+    assert.match(verb.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(moved.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(daemon.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(entry.reason, /^CHECKOUT\b/);

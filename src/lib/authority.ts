@@ -135,6 +135,17 @@ export interface AuthorityRow {
  * `module`. The baseline is empty: every write measured at this task's own HEAD is entered below.
  */
 export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
+  {
+    id: "restore-checkpoint-branch",
+    action: "recreate an absent run branch at its saved checkpoint head",
+    module: "src/cli/commands/run-task-verb.ts",
+    symbol: "restoreBoundaryCheckpoint",
+    boundary: "git-push",
+    gate: "always",
+    ledgerSteps: ["implement.checkpoint_branch_recreated"],
+    verb: "rmd run-task / rmd drain (checkpoint resume)",
+    note: "Saved-checkpoint recovery verifies the fetched object and leases an absent remote ref; no policy opt-in.",
+  },
   // ── src/lib/arm-auto-merge.ts (W1-T2887: moved from src/run-task.ts, which still imports and
   // re-exports every symbol below so every verb/call site is unchanged) ───────────────────────
   {

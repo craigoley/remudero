@@ -60,7 +60,7 @@ import { bodyWithFailingProofAtOpen, defaultProofRunnerAsync, openPullRequestChe
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
-import { systemClock, type Clock } from "../../lib/clock.js";
+import { fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "../../lib/cash-trial.js";
 import { benchmarkNonDispatchSpawn, callerOwnsBenchmarkReceipt, type BenchmarkStackEvidence, dispatchTaskShape, fixLaneBenchmarkWork, type BenchmarkWorkInput } from "../../lib/benchmark-run.js";
 import { type RepairReceiptContext } from "../../lib/repair-cost-evidence.js";
@@ -131,6 +131,7 @@ import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../l
 export type GitRunner = (args: string[], stdin?: string) => string;
 
 export interface RunTaskCommandHost {
+  readonly masterPlanPath: (planPath: string) => string;
   readonly syncPlanOrRefuse: (planPath: string, opts: { allowStale: boolean; log: (step: string, extra?: Record<string, unknown>) => void; say: (msg: string) => void; planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan; quarantine?: (quarantined: QuarantinedTask[]) => void }) => SyncedPlan | { error: string };
   readonly lintPlanForReview: (headCheckoutDir: string | undefined) => Promise<PlanLintOutcome>;
   readonly proofRepairRoundRefusalInWorktree: (input: { worktreePath: string; roundStartSha: string | undefined; stageable: readonly string[]; proofs: readonly string[]; childRoot?: string; childStore?: ChildEntryStoreOptions }) => { reason: string; undeclared: string[] } | undefined;
@@ -1278,6 +1279,7 @@ export const ALREADY_SATISFIED_VERIFY_ATTEMPTS = 3;
 
 export const PLAN_RECORD_ABSENT = "absent";
 
+// BACKSTOP: limits a recon worker that fails to finish its read-only report.
 export const RECON_MAX_TURNS = 40;
 
 const RULE_HEADLINES_SRC = "plan#W1-T2508";
@@ -1591,10 +1593,10 @@ function buildWorkerStateSensor(args: {
   taskId: string;
   root: string;
   quietFloorMs?: number;
-  now?: () => number;
+  now?: Clock["now"];
   pollMs?: number;
 }): WorkerStateSensor {
-  const now = args.now ?? Date.now;
+  const now = args.now ?? systemClock.now;
   const tracker = new WorkerStateTracker(args.quietFloorMs ?? DEFAULT_WORKER_QUIET_FLOOR_MS);
   const tailPath = join(args.root, "state", "runs", `${args.runId}.tail`);
   let tailLines: string[] = [];
@@ -1654,7 +1656,7 @@ function buildWorkerStateSensor(args: {
       writeWorkerTailBestEffort(tailPath, tailLines);
     }
     const toolEnded = activeTool !== undefined && event.kind !== "tool-executing";
-    const eventAt = new Date(event.tsMs).toISOString();
+    const eventAt = fixedClock(event.tsMs).iso();
     const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
     const toolCallIndex = event.kind === "tool-executing" ? nextToolCallIndex++ : undefined;
     try {
@@ -1912,7 +1914,8 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
   try {
     const patch = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD"], { maxBuffer: 64 * 1024 * 1024 });
     return diffIsClassifiedIrreversible(patch);
-  } catch {
+  } catch (error) {
+    void error; // An unreadable patch supplies no positive evidence of a critical change.
     return false;
   }
 }
@@ -1940,7 +1943,8 @@ function mergeShaNow(prUrl: string, fetch: GhApiFetcher = ghJson): string | unde
     return typeof row?.merge_commit_sha === "string" && row.merge_commit_sha.length > 0
       ? row.merge_commit_sha
       : undefined;
-  } catch {
+  } catch (error) {
+    void error; // An unreadable merge sha leaves the lost-race escalation without that optional evidence.
     return undefined;
   }
 }
@@ -2541,7 +2545,8 @@ function reconMaskedContextNote(
 function fileDigestOrAbsent(p: string): string {
   try {
     return sha256Hex(readFileSync(p, "utf8"));
-  } catch {
+  } catch (error) {
+    void error; // Unreadable and absent files share recon's input-comparison sentinel.
     return "absent";
   }
 }
@@ -2597,7 +2602,8 @@ function loadReconArtifact(root: string, taskId: string): ReconArtifact | undefi
       return parsed as ReconArtifact;
     }
     return undefined;
-  } catch {
+  } catch (error) {
+    void error; // An unreadable or corrupt cache requires fresh recon, just like a cache miss.
     return undefined;
   }
 }
@@ -2721,7 +2727,7 @@ function resolveRunMounts(
   // The fresh advisory reviewer is its OWN mount-governed phase (task_type="reviewer",
   // W1-T63/P10); the blocked_review fix rung rides its own "fix" row (W1-T76) —
   // both resolved here alongside the task's own mount, never an undeclared literal.
-  // impl-BP — RESOLVE THE RECON ROW, the one `routes:` entry nothing read. `.remudero/
+  // impl-BP — RESOLVE THE RECON ROW, the one `routes:` entry nothing read. The project
   // mounts.yaml` has carried a fully-specified `recon:` block (haiku for low-risk/docs/plan-lint,
   // sonnet for medium/high src) since the class axis landed, and the recon spawn passed neither
   // `model` nor `effort` — so every recon in this repo's history ran on the SDK default. Measured
@@ -4338,7 +4344,7 @@ export async function runTask(
 
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
-  const runId = `${taskId}-${Date.now()}`;
+  const runId = `${taskId}-${systemClock.now()}`;
   const log = benchmarkRunLedgerLogger((step, fields) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }),
     opts.benchmarkStackEvidence ?? workerBoundaryStack);
@@ -5521,7 +5527,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           return {
             localHost: hostname(),
             namespaceBootMs,
-            namespaceBootIso: new Date(namespaceBootMs).toISOString(),
+            namespaceBootIso: fixedClock(namespaceBootMs).iso(),
             pidPresent: pidIsPresent(anchor.pid),
           };
         },
@@ -5636,7 +5642,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // reapStaleWorktrees' widowed-lock pass deletes a `.lock` whose directory does not exist yet.
     // W1-T4356: written BEFORE the checkout lock is released, so a peer's refresh sees this borrower.
     mkdirSync(worktreePath, { recursive: true });
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
     // W1-T2621: `log` goes last so a test's `worktreeBaseDeps` can never swallow this run's ledger.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
     await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
@@ -5769,9 +5775,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
-    // carries a content-hash-cached PLAN INDEX derived from MASTER-PLAN.md, not the plan body.
+    // carries a content-hash-cached PLAN INDEX derived from the master plan, not the plan body.
     // `loadPlanIndex` is non-fatal when the source is missing and never writes a generated file.
-    const planIndex = loadPlanIndex(join(dirname(planPath), "..", "MASTER-PLAN.md"));
+    const planIndex = loadPlanIndex(host.masterPlanPath(planPath));
     const planIndexBlock = planIndex ? renderPlanIndex(planIndex) : "";
     // W1-T164: task-scoped operator guidance notes — read from the durable console-editable
     // store (`repoRoot`, the SAME root worker.ts's question store reads/writes), scoped strictly
@@ -5973,7 +5979,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
               observed: parsedForArtifact.observed,
               inferred: parsedForArtifact.inferred,
               couldnt_verify: parsedForArtifact.couldntVerify,
-              written_at: new Date().toISOString(),
+              written_at: systemClock.iso(),
               run_id: runId,
             });
           }
@@ -5994,7 +6000,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // LAYERED — project + user-overall + global, P32/W1-T145): inject the
     // distrust rule, the autonomy clause, and the task-matched LEARNINGS
     // facts. `loadLayeredLearningsForTaskFiles` reads the PROJECT layer via
-    // the index-based LOOKUP (W1-T33's `learnings/index.json`, not a scan —
+    // the index-based LOOKUP (W1-T33's learnings index, not a scan —
     // it parses only the corpus shards task.files could match), then merges
     // in the USER-OVERALL layer (a fleet-readable home outside this repo)
     // and the RMD-GLOBAL layer (a hash-pinned artifact — a tampered/missing
@@ -6416,7 +6422,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     // ── DECISION_REQUEST → auto-choose RECOMMENDED → resume (§4).
     const decision = parseDecisionRequest(fullText(impl));
-    if (decision && !parseReport(fullText(impl))?.prUrl) {
+    const decisionReport = parseReport(fullText(impl));
+    if (decision && (!decisionReport || !decisionReport.prUrl)) {
       const chosen = decision.recommended ?? decision.options[0] ?? "(first option)";
       // W1-T32: decision-record hygiene. Every DECISION_REQUEST is auto-chosen and
       // ledgered — that never changes — but only decisions worth a human's
@@ -6577,7 +6584,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
     const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
-    if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
+    const preopenReport = parseReport(fullText(impl));
+    if (preopenGate !== undefined && (!preopenReport || !preopenReport.prUrl)) {
       const workerYield = await yieldAtWorkerBoundary("worker", "preopen_gate");
       if (workerYield) return workerYield;
       const gate = await preopenGate(worktreePath);
@@ -6614,7 +6622,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       }
     }
 
-    if (!parseReport(fullText(impl))?.prUrl) {
+    const boundaryReport = parseReport(fullText(impl));
+    if (!boundaryReport || !boundaryReport.prUrl) {
       const workerYield = await yieldAtWorkerBoundary("worker", "pushing");
       if (workerYield) return workerYield;
     }
@@ -6623,7 +6632,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const question = parseQuestion(fullText(impl));
     if (question) {
       const logged = appendQuestion(repoRoot, {
-        ts: new Date().toISOString(),
+        ts: systemClock.iso(),
         task: taskId,
         question: question.question,
         current_assumption: question.currentAssumption,
@@ -6902,49 +6911,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // indistinguishable from one another.
       log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail, evidence: pushCause.evidence });
       say(`fallback push firing for ${branch} — cause: ${pushCause.cause} (${pushCause.detail})`);
-      // W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG — the ONE orchestrator-initiated push in this
-      // file (the worker itself normally pushes from inside its own sandbox; this fallback runs on
-      // whatever the worktree holds, which is exactly the shape a refreshed/collapsed/squashed
-      // branch would have). Computed FRESH from this worktree, never a cached list, and BEFORE the
-      // push, so the ledger line is written against the diff that is about to reach origin.
-      //
-      // THE ANSWER TO AN OVERRUN IS NO LONGER A REFUSAL (W1-T434). It used to return verdict
-      // "failed" with no push, and that answer DESTROYED ITS OWN EVIDENCE: the branch never
-      // reached origin and died with the reaped worktree, so nobody could afterwards tell a
-      // phantom revert from an under-declared `files:` — the two shapes produce an identical file
-      // list, and the refusal deleted the only artifact that separates them. Four refusals in one
-      // week cost roughly $29 of already-completed work each time it fired (operator report,
-      // UNMEASURED here), while the very class it exists to contain merged anyway through the
-      // worker's own sandbox push (W1-T393's implementation, #1521, touching src/lib/ledger.ts
-      // beyond its declared files) — because this guard reaches ONE of gitPushRunBranch's nine
-      // call sites and only when the branch is ABSENT from origin. It could punish the fallback
-      // path after the money was spent; it could never contain a worker.
-      //
-      // WHAT IS GIVEN UP, STATED RATHER THAN GLOSSED. The DETECTION is unchanged — the detector
-      // below is untouched and still names exactly the same paths — but the BLOCK becomes a FLAG,
-      // and `unwiredAdvisories` folds into neither `state` nor `floorState` (lib/review.ts), while
-      // `armAutoMergeAtOpen` arms the instant the PR exists. So on this one path a phantom revert
-      // that passes CI and the review floor can now merge carrying the revert, where before it
-      // could not reach origin at all. That is accepted because real containment is the merge gate
-      // (Standing rule 3B), because the branch surviving is what lets a human adjudicate at all,
-      // and because a guard covering one push site was never the containment it read as.
-      //
-      // AND ONE CASE GOES QUIET RATHER THAN SOFT: `scopeGuardOutOfScopeFiles` treats an
-      // absent/empty declared scope as "everything is out of scope", but review-side
-      // `scopeViolationFiles` deliberately does the opposite and never fires on an empty scope. A
-      // task declaring no `files:` therefore still ledgers `scope_guard.overrun` here — the
-      // detector is untouched — but earns NO PR advisory. The ledger keeps it; the comment does not.
-      //
-      // THREE-DOT, AND THIS WAS A REAL DEFECT RATHER THAN A STYLE PREFERENCE. Two-dot
-      // `origin/main..HEAD` diffs the two TIPS, so every file merged to main AFTER this worktree
-      // was cut reads as something this branch changed. MEASURED: a drain booted at 3147755
-      // dispatched W1-T395, #1533 merged mid-run, and the guard refused the push naming
-      // `src/run-task.ts` and `test/drain-gateway-batched.test.ts` — #1533's files, which the
-      // worker never opened. A merge to main must not break a running drain.
-      //
-      // `origin/main...HEAD` diffs against the MERGE BASE — what THIS BRANCH changed relative to
-      // where it started — which is the question the guard is actually asking, and is already the
-      // convention `lib/ci-parity.ts` uses at both of its own diff sites.
+      // W1-T142/W1-T434: measure scope from this worktree immediately before the fallback push.
+      // Push and flag overruns: refusing here destroyed the only published evidence and never
+      // contained the worker's own pushes. Empty scope still logs an overrun without a PR advisory.
+      // Use the merge-base diff; comparing tips falsely charges the branch for later main merges.
       let diffFiles: string[] | undefined;
       try {
         diffFiles = hostWorktreeGit(worktreePath, MERGE_BASE_DIFF_ARGS)
@@ -7513,36 +7483,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       }
     }
 
-    // ── W1-T185 (Gap 1, criteria 2-3), raised by W1-T229: THE AUTO-MERGE
-    // ARMING PATH refuses ANY CAPPED verdict, unattended — the #411 shape
-    // (0/5 proofs executed, posted as an uncapped PASS, merged with no human
-    // reading the diff). W1-T229 removed the tdd:strict exemption this used
-    // to carry: a capped, non-tdd:strict PR previously armed exactly as if it
-    // were an ordinary PASS, which made prose the DEFAULT merge floor (since
-    // `{tdd: strict}` is opt-in, not the default). No autonomous run carries
-    // an operator override of its own: an override is a HUMAN decision,
-    // granted out of band via `rmd review <pr> --override-capped-by/
-    // --override-capped-reason` and recovered here from the SAME ledger every
-    // other precedence check in this file reads (readLedgerLines). A verdict
-    // that isn't capped arms exactly as before — decideAutoMergeArm only ever
-    // REFUSES the one shape rule 22's fixture (iii) named.
-    //
-    // KNOWN RESIDUAL GAP (explicitly out of this task's stated file scope,
-    // `plan/tasks.yaml` W1-T185 `files:`): `sweep.ts`'s independent
-    // "checks green + review success -> mergeable" reconciliation does not
-    // yet consult `capped`/an override — a PR this refuses stays OPEN and
-    // UNARMED, but a later sweep poll could still arm it via that separate
-    // path. Left for a follow-up task rather than widened here unreviewed.
-    //
-    // A SECOND, SAME-SHAPED RESIDUAL GAP (W1-T947, explicitly out of THIS task's stated file
-    // scope — `plan/tasks.d/W1-T947-*.yaml` `files:` names only review.ts, run-task.ts and this
-    // test file): `decideArmFromLedgerVerdict`/`armAutoMerge` (lib/review.ts, lib/run-task.ts) —
-    // the SWEEP's and `rmd review`'s independent re-arm path, reached via
-    // `withdrawArmIfVerdictRefuses`/`armIfVerdictPermits` — call the SAME `decideAutoMergeArm`
-    // this task raised, but neither passes it an `irreversible` signal (no live worktree diff
-    // is available at ledger-recovery time the way it is here). A PR this run's two gates
-    // correctly refuse could still be armed later by a sweep pass or a manual `rmd review`.
-    // Named here, not silently absorbed, per this task's own design clause (v).
+    // W1-T185/W1-T229: capped verdicts require an operator override recovered from the ledger;
+    // tdd:strict never exempts them. This blocks the #411 shape: unexecuted proofs arming a PR.
+    // W1-T947: ledger-recovery re-arm paths lack this live worktree's irreversible-change signal.
     const tddStrict = isTddStrict(task.principles);
     // W1-T948: the specialist panel's testing trigger (specialist-panel.ts)
     // reads the SAME `principles` this line just did, through the panel's one
@@ -7812,36 +7755,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
     }
 
-    // ── ARM (W1-T125, DEFERRED BY W1-T975): register GitHub auto-merge only NOW —
-    // the FIRST point this run has a verdict it is willing to stand behind: ci
-    // went green, the review passed (or the fix rung earned a pass), the
-    // capped-verdict gate above did not refuse, and the risk judge above did not
-    // escalate. Every earlier exit (ci-not-green before review, fix-rung
-    // exhausted, stood down, a capped refusal, a risk-judge escalation) RETURNS
-    // before this line, so it leaves the PR with NO standing arm.
-    //
-    // WHY THIS MOVED (W1-T975): an already-armed PR short-circuits the sweep's
-    // own arming decision (`alreadyDone = pr.autoMergeArmed === true`,
-    // lib/sweep.ts) — the ONE place a durable risk-judge refusal (W1-T970) can
-    // ever be consulted. Arming at PR-open (the old W1-T125 site) left every
-    // early exit above with a standing arm that routed a would-be merge AROUND
-    // that predicate, permanently, not merely early — and a disarm on those
-    // exits would not have closed the gap: the sweep RE-ARMS on
-    // checks-green + review-success (lib/sweep.ts), which nullified five of
-    // five measured disarm races. Deferring the arm to here means an abandoned
-    // PR's only remaining route to a merge is the sweep's `mergeable` decision,
-    // so a durable refusal installed there is never bypassed.
-    //
-    // The LATE blocked_ci exit below (after pollToGate) still keeps its arm —
-    // by the time this line runs the review HAS been posted and the risk judge
-    // HAS passed, so that exit is unaffected: it polls an already-armed PR,
-    // exactly as before this task.
-    // W1-T1256: the no-merge boundary. `opts.noMerge` is set ONLY by `wipeTestCommand`, for
-    // BOTH arms of a wipe-test pair — the policy decision itself is pure and lives in
-    // wipe-test.ts (`resolveWipeTestArmPermission`); this call site only consults it and skips
-    // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
-    // never merge out from under the pair it belongs to.
-    // Check shadow before wipe-test; the counterfactual uses this same live arm decision.
+    // W1-T975: arm only after CI, review, capped-verdict and risk gates pass. Earlier arming
+    // bypassed the sweep's durable refusal through its already-armed shortcut; disarms raced re-arms.
+    // A later blocked_ci exit keeps this earned arm. W1-T1256: wipe-test pairs never arm.
+    // Check shadow first so its counterfactual uses the same live arm decision.
     if (shadowInstance) {
       const shadowVerdict = shadowLiveWouldHaveDone(true);
       log("shadow.verdict", {

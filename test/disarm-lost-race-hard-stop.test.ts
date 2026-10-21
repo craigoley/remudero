@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+// @source-text-subject: the structural checks enumerate disarm call sites across the CLI and its verb module.
+
 import {
   armRunIdFromLedger,
   disposeDisarm,
@@ -248,7 +250,8 @@ test("mergeShaNow: reads merge_commit_sha off the single-PR REST row, and never 
 });
 
 test("STRUCTURAL: all THREE disarmAutoMerge call sites follow the outcome — none logs automerge.disarmed unconditionally", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8") + "\n" +
+    readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
   // The capped/irreversible branch disposes its awaited outcome directly. The risk-judge branch
   // goes through `riskJudgeDisarm`, which owns the same await + disposition behind the seam tested
   // behaviorally in test/the-sweeps-own-pushes-and-the-risk-judges-disarm-are-awaited.test.ts.
@@ -257,7 +260,7 @@ test("STRUCTURAL: all THREE disarmAutoMerge call sites follow the outcome — no
   assert.equal(direct.length, 1, `expected the capped-refusal call site to dispose its awaited outcome, found ${direct.length}`);
   assert.match(
     src,
-    /export async function riskJudgeDisarm\([\s\S]{0,500}?return disposeDisarm\(await disarm\(ctx\.prUrl\), ctx, disposition\);/,
+    /(?:export )?async function riskJudgeDisarm\([\s\S]{0,500}?return disposeDisarm\(await disarm\(ctx\.prUrl\), ctx, disposition\);/,
     "the risk-judge disarm seam awaits the injected operation and disposes its actual outcome",
   );
   assert.match(
