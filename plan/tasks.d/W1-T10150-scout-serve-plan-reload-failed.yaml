@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 3.55
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10150 — 0 serve.plan_reload_failed rows in 3 d (it had
+  # 2 in the 7 d before filing); the symptom has stopped.
   attempts: 0
   author_class: machine
   origin: "scout:serve.plan_reload_failed"

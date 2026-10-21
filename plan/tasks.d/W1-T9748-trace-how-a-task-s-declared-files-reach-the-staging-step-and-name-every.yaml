@@ -7,8 +7,12 @@
   verify: human
   risk: high
   band_meaning: span
-  priority: 4
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9748 — Research into 'no surface to stage' refusals: 0
+  # such fix.commit_refused rows in 3 d (refusals now are 'non-test paths need scope' and 'the worker changed
+  # nothing'), and that fix_refusal cause has a merged prevention source (W1-T5377). Dependency W1-T7699 is
+  # merged.
   # backlog gardener: band=4 evidence=42482fcf9f143f61
   attempts: 0
   files:
