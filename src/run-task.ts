@@ -1048,6 +1048,7 @@ import {
   parseProofAmendmentProposal,
   requestProofAmendment,
   requestScopeAmendment,
+  isUngrantableInstrumentPath,
   readBuildScopeRecovery,
   saveBuildScopeRecovery,
   restoreBuildScopeRecovery,
@@ -14155,8 +14156,9 @@ export async function runFixRung(opts: {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha,
         ...(fixAction.attribution ? { attribution: fixAction.attribution.kind, attribution_reason: fixAction.attribution.reason } : {}) });
       const workflowPaths = fixAction.paths.filter((path) => path.startsWith(".github/workflows/"));
-      if (workflowPaths.length > 0 || unfiledScope) {
-        const scopeKind = workflowPaths.length > 0 ? "workflow" : "unfiled";
+      const instrumentPaths = fixAction.paths.filter(isUngrantableInstrumentPath);
+      if (workflowPaths.length > 0 || instrumentPaths.length > 0 || unfiledScope) {
+        const scopeKind = workflowPaths.length > 0 ? "workflow" : instrumentPaths.length > 0 ? "instrument" : "unfiled";
         const paths = [...new Set(fixAction.paths)].sort();
         const identityKey = createHash("sha256").update(JSON.stringify([prNumber, priorHeadSha, paths])).digest("hex");
         const prior = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
@@ -14168,9 +14170,11 @@ export async function runFixRung(opts: {
             headSha: priorHeadSha, cause: "ci", contractRevision: identityKey,
             summary: scopeKind === "workflow"
               ? `PR #${prNumber} needs a workflow repair outside the fix lane — ${opts.prUrl}`
+              : scopeKind === "instrument" ? `PR #${prNumber} needs an instrument edit only the operator can grant — ${opts.prUrl}`
               : `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`,
             detail: `@${opts.reviewBase.owner}: ${opts.prUrl} ` + (scopeKind === "workflow"
               ? `needs workflow edits that the fix lane cannot amend or commit: ${workflowPaths.join(", ")}.`
+              : scopeKind === "instrument" ? `needs instrument edits a scope amendment always refuses (instrument-path): ${instrumentPaths.join(", ")}.`
               : "has no plan record to amend.") + ` Round ${roundId} ` +
               `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}\n\n` +
               `Worker's NEEDS_SCOPE diagnosis (including any main-inherited cause):\n${fixReport}\n\n` +
