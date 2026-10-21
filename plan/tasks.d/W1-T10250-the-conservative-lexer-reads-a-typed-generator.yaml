@@ -14,6 +14,9 @@
     - src/lib/test-impact-map.ts
     - test/ci/suites/a-typed-generator-is-lexed-not-refused.test.ts
     - test/the-literal-masker-parses-a-nested-template-substitution.test.ts
+  # refusal-amendment (W1-T10250, run W1-T10250-1792521487833, 2026-10-21T15:05:15.932Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T10250: a filed proof already passes at the merge base, so branch run-W1-T10250-1792521487833 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1  # every PR that touches run-task.ts (or 22 other src files) pays a full-suite author run it cannot finish on the Azure host
   attempts: 0

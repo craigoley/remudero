@@ -1,0 +1,101 @@
+- id: W1-T10350
+  title: "THE DETERMINISTIC HIGH-RISK BACKSTOP JUDGES A PATH'S CLASS, NOT THE WORDS IN ITS NAME — SENSITIVE_SURFACE escalates test/deploy/*, test/infra/*, test/*-tokens.test.ts and plan/deploy-recovery-design.md as deploy or secrets work, and a merge-policy word in a docs-only investigation escalates it as a policy change"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern, which declared paths and texts the deterministic backstop escalates; every privileged class keeps escalating, and the judge, landing and re-ask paths are unchanged
+  band_meaning: span
+  budget_usd: 8.00
+  priority: 2  # requested by the operator session 2026-10-21
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-21: the backstop escalated W1-T10264 for test/deploy/..., W1-T10188 for plan/deploy-recovery-design.md and W1-T9378 for the word bypass"
+  plan_refs: [W1-T9042, W1-T10349, W1-T9874]
+  files:
+    - src/lib/machine-filing.ts
+    - test/triage/the-backstop-judges-path-classes-not-words.test.ts
+  rationale: |
+    READ 2026-10-21 at origin/main 03e4f4ac7.
+    THE CODE (src/lib/machine-filing.ts).
+      - `deterministicEscalation` escalates when any declared path matches `SENSITIVE_SURFACE` or
+        `MERGE_POLICY_PATH`. The reason it gives is "a secrets, auth, CI, deploy, merge-policy or ruling path".
+      - It then runs `BACKSTOP_TEXT` over the title, prompt and acceptance claims.
+      - `machineShardRisk` reads the same `SENSITIVE_SURFACE` to give a machine record `risk: high`.
+      - `SENSITIVE_SURFACE`'s alternatives match a word in ANY path segment:
+        `(^|/)(deploy|infra|docker)[^/]*(/|$)` and `(^|[/._-])(secrets?|credentials?|tokens?|auth|permissions?)([/._-]|$)`.
+      - The test-placement taxonomy (W1-T9874, `rmd test-place`) computes test folders named test/deploy/ and
+        test/infra/. So every test placed there trips the deploy rule mechanically.
+      - The merge-policy text rule matches `(bypass|disabl)\w* ... (reviews?|gates?|checks?)`. It cannot tell an
+        investigation OF a bypass from a change that bypasses a gate.
+    MEASURED: `deterministicEscalation` over every queued record on main fires on 113 records.
+      - FALSE POSITIVES ON PATHS: 11 records.
+        - test/deploy/: W1-T10264, W1-T10165.
+        - test/infra/: W1-T10239, W1-T10306, W1-T10312.
+        - Other test files: W1-T450 (test/deploy-failed-latch-superseded.test.ts), W1-T8384 (test/daemon-lane-tokens.test.ts),
+          W1-T9520 (test/scout-automerge-...test.ts), W1-T9654 (test/a-credential-less-...test.ts),
+          W1-T9796 (test/a-run-child-owns-its-github-token-...test.ts).
+        - Plan prose: W1-T10188 (plan/deploy-recovery-design.md).
+        - W1-T10264, W1-T10188, W1-T10239, W1-T10306 and W1-T9520 carry a pinned escalate whose only reason is this
+          backstop.
+      - GENUINE, AND THEY MUST KEEP ESCALATING:
+        - 35 under .github/workflows/, 2 more under .github/, 1 under .claude/.
+        - 18 under deploy/ (deploy/mac/ included).
+        - 4 on plan/policy.yaml, 1 on CLAUDE.md.
+        - src/lib/deployer.ts (W1-T10075, W1-T9552, W1-T9794, W1-T9921) and src/lib/arm-auto-merge.ts (W1-T7747,
+          W1-T9549).
+        - scripts/merge-queue-canary.mjs (W1-T7736).
+      - TEXT HITS:
+        - 15 secrets/auth, 10 merge-policy, 8 deletion, 1 irreversible.
+        - Three sit on records whose declared paths are all tests or docs: W1-T9378 ("bypass of lint-plan gate";
+          files docs/investigation.md; type recon), W1-T216 ("auto-merge"; test-only) and W1-T4274 ("remove the
+          ONE alert-flagged unneeded-defensive branch", a code branch; test-only).
+        - A record that declares only tests or prose cannot change merge policy or delete data through its diff.
+    OVERLAP SWEEP 2026-10-21. plan/tasks.d and the 15 open PRs.
+      - No queued task or open PR edits SENSITIVE_SURFACE, MERGE_POLICY_PATH, BACKSTOP_TEXT or deterministicEscalation.
+      - W1-T9042 (merged) masks a machine filer's own cause key. That stays.
+      - W1-T10349 makes a change in the backstop's answer re-open a backstop-pinned record, so the records above get
+        one real judge ask once this lands.
+  design: |
+    A path is classed by WHERE it sits before any word in it is read. No new threshold.
+    1. PRIVILEGED CLASSES ESCALATE AS TODAY, WHATEVER ELSE THE PATH CONTAINS.
+       - Every path under .github/ (workflows and scripts), .claude/ and settings/.
+       - Repo-root deploy/, infra/ and docker/, and every Dockerfile.
+       - plan/policy.yaml, DECISIONS.md and CLAUDE.md.
+       - Every MERGE_POLICY_PATH match outside tests and prose.
+       - Source or config whose module is deploy, secrets, credential, token, auth or permission machinery (for
+         example src/lib/deployer.ts, src/lib/arm-auto-merge.ts).
+    2. NON-PRIVILEGED CLASSES ARE NOT ESCALATED FOR A WORD IN THEIR NAME.
+       - A test file (under test/, or named *.test.*), docs/**, and markdown prose under plan/.
+       - plan/*.yaml, plan/policy.yaml, DECISIONS.md and CLAUDE.md are not prose here.
+       - `machineShardRisk` uses the same classifier.
+    3. TEXT RULES.
+       - The secrets/auth rule and the irreversible-action rule stay deterministic for every record.
+       - The merge-policy and deletion rules stay deterministic for a record that declares any path outside item 2's
+         classes, or no path at all.
+       - For a record whose declared paths are all in item 2's classes, a merge-policy or deletion hit is handed to
+         the risk judge as a named concern in its input, not as an automatic escalation. The judge still applies
+         MACHINE_JUDGE_ESCALATE_ONLY_IF.
+    4. ONE CLASSIFIER. Export the path-class function so the judge input, the backstop and the risk band read one answer.
+  acceptance:
+    - claim: "a test file or plan document whose path names deploy, infra, tokens or credentials is not escalated by the backstop and does not raise a machine record's risk band"
+      proof: 'grep: test("W1-T10350: a test or plan document named for deploy, infra or tokens is not a privileged path" in test/triage/the-backstop-judges-path-classes-not-words.test.ts'
+    - claim: "a merge-policy or deletion word in a record that declares only tests or docs goes to the risk judge as a named concern instead of a deterministic escalation"
+      proof: 'grep: test("W1-T10350: a policy word in a prose-only record goes to the judge, not the backstop" in test/triage/the-backstop-judges-path-classes-not-words.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/triage/the-backstop-judges-path-classes-not-words.test.ts"
+  falsifier: |
+    - Keep the segment-word regexes for test and prose paths: test/deploy/x.test.ts, test/infra/y.test.ts,
+      test/daemon-lane-tokens.test.ts and plan/deploy-recovery-design.md still escalate, and the first test fails.
+    - Keep the text rule unconditional: W1-T9378's record still escalates deterministically, and the second test fails.
+    Regression guards, kept by the same file ("every genuinely privileged path still escalates"). Each of these still
+    returns a deterministic escalation:
+    - .github/workflows/ci.yml, .github/scripts/x.mjs, .claude/skills/x/SKILL.md, settings/worker.json.
+    - deploy/mac/x.sh, deploy/Dockerfile, infra/x.tf.
+    - src/lib/deployer.ts, src/lib/arm-auto-merge.ts, scripts/merge-queue-canary.mjs, src/lib/github-token.ts.
+    - plan/policy.yaml, DECISIONS.md, CLAUDE.md.
+    The text guards:
+    - A secrets/auth word escalates even in a prose-only record.
+    - A merge-policy or deletion word escalates in a record that declares a source path or no path.
+    The backstop is never weakened for workflows, secrets, auth or merge policy.
