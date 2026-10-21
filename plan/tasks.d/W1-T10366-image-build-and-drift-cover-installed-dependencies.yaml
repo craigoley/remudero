@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   author_class: machine
   principles: {tdd: strict}
   priority: 1
@@ -116,5 +116,17 @@
     verify through the maintained reservation-chain parser, not a raw substring guess.
     The mint exited0 and took one attempt with no takeover. Held is not filed or implemented.
     Existing source/runtime ownership, full normal checks and all production holds remain.
-    Machine authoring remains explicit. verify: human preserves Law5 until a real operator
-    or ratified-judge ruling clears this task; no risk verdict or automatic release is fabricated.
+    Machine authoring remains explicit. Craig Oley approved the exact eleven-existing-file
+    scope and the plan-only author NOT RUN/full-CI publication route on 2026-10-21.
+    The maintained rmd approve command recorded the release at2026-10-21T20:27:52.059Z;
+    the maintained renderer pinned that actual operator release below. No model verdict,
+    implementation acceptance, production action or new hosted-author attempt is implied.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+      - "Craig Oley explicitly approved this exact 11-existing-file scope and a plan-only author NOT RUN/full-CI route on 2026-10-21; no production action or new hosted-author attempt"
+    judged_at: "2026-10-21T20:27:52.059Z"
+    pin: "87e2905eed0a5845c33aac9c1eecc7c20c2624916c6e6d595669298748873bea"
