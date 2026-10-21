@@ -5344,14 +5344,16 @@ export interface CiFailure {
    *  causes). Present ONLY when the tail is empty and a cause was observed, absent whenever a tail
    *  was captured — so `logUnavailable !== undefined` never fires on a real tail. */
   logUnavailable?: CiLogUnavailableCause;
-  /** WHICH source filled {@link logTail}. `"annotations"` is the fallback, reached only when the
-   *  log read came back empty or failed, so a readable log can never be displaced by it. Absent
+  /** WHICH source filled {@link logTail}. `"annotations"` is the fallback when the log is unreadable
+   *  or names no failing test or step. Annotations printed by passing tests are excluded. Absent
    *  exactly when {@link logUnavailable} is present — the two are complements. */
   tailSource?: CiTailSource;
-  /** WHAT the annotation fallback did, when reached; absent entirely when the log answered. Kept
+  /** WHAT the annotation read found, independently of which source supplies the excerpt. Kept
    *  separate from {@link logUnavailable} so a fallback can never take back the cause W1-T2291
    *  named. */
   annotationFallback?: CiAnnotationFallback;
+  /** Annotations observed in passing TAP output remain auditable but cannot supply failure evidence. */
+  annotations?: Array<{ message: string; from_passing_test: boolean }>;
 }
 
 export const ARTIFACT_FINALIZE_INTERMEDIARY_403 = "artifact-finalize-intermediary-403" as const;
