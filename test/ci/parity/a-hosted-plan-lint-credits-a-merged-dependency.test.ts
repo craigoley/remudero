@@ -210,7 +210,7 @@ test("hosted wiring seals protected-base evidence before candidate code and reta
   assert.match(lint, /ciDependencyEvidenceForInvocation\(args\)/);
   assert.doesNotMatch(lint, /offline:/);
   assert.deepEqual(workflow.jobs.ci.needs, ["commitlint"]);
-  assert.equal(workflow.jobs.ci.if, "${{ !cancelled() }}");
+  assert.equal(workflow.jobs.ci.if, "${{ always() && !cancelled() }}");
   assert.match(workflow.jobs.ci.env.RMD_CI_DEPENDENCY_DIGEST, /needs\.commitlint\.outputs\.dependency_digest/);
   assert.ok(workflow.jobs.ci.steps.some((step: { run?: string }) => step.run?.includes('gh run download "$GITHUB_RUN_ID"') &&
     step.run.includes('ci-dependency-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}')));

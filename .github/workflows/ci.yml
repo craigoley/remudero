@@ -94,7 +94,7 @@ jobs:
   ci:
     name: ci-shard (${{ matrix.shard }}/8)
     needs: [commitlint]
-    if: ${{ !cancelled() }}
+    if: ${{ always() && !cancelled() }}
     env:
       RMD_CI_DEPENDENCY_EVIDENCE: ${{ runner.temp }}/ci-dependency-evidence/evidence.json
       RMD_CI_DEPENDENCY_DIGEST: ${{ needs.commitlint.outputs.dependency_digest }}
