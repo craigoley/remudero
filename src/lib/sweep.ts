@@ -1,7 +1,7 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, unfiledScopeStandDown,
+import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
   type FixProgressWitness,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
@@ -16677,7 +16677,7 @@ export async function runSweep(
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
     for (const pr of openPrs) {
-      const scopeHold = isFixCandidate(pr) ? unfiledScopeStandDown(ledgerLines, pr) : undefined;
+      const scopeHold = isFixCandidate(pr) ? scopeEscalationStandDown(ledgerLines, pr)?.reason : undefined;
       if (scopeHold) {
         judgedUnavailable.set(pr.prNumber, scopeHold);
         next.push({ ...pr, progressContinue: { reason: scopeHold, unavailable: true } });
@@ -19425,8 +19425,19 @@ export async function runSweep(
                 standDownReason = amended ?? "task contract changed during design-handoff observation — no fix admitted";
                 break;
               }
-              const scopeHold = unfiledScopeStandDown(ledgerLines, pr);
-              if (scopeHold) { acted = false; spent = false; standDownReason = scopeHold; break; }
+              const scopeHold = scopeEscalationStandDown(ledgerLines, pr);
+              if (scopeHold?.kind === "unfiled") { acted = false; spent = false; standDownReason = scopeHold.reason; break; }
+              // #13317: the operator's answer (an amended contract) takes main in once, releasing an instrument/workflow hold.
+              if (scopeHold) {
+                acted = false;
+                spent = false;
+                extraDisposedFields = { ...extraDisposedFields, operator_scope_hold: scopeHold.kind };
+                standDownReason = await refreshAmendedContract([
+                  ...(scopeHold.contractRevision !== undefined ? [{ progress_contract_revision: scopeHold.contractRevision }] : []),
+                  ...ledgerLines.filter((line) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                    line.head_sha === pr.headSha && line.operator_scope_hold === scopeHold.kind)]) ?? scopeHold.reason;
+                break;
+              }
               const preflightEscalation = preflightEscalations.get(pr.prNumber);
               if (preflightEscalation !== undefined) {
                 const reason = preflightEscalation.alreadyDelivered
