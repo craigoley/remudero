@@ -78,6 +78,8 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
+// @ts-expect-error executable gate module has no declaration file.
+import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -1046,6 +1048,9 @@ import {
   parseProofAmendmentProposal,
   requestProofAmendment,
   requestScopeAmendment,
+  readBuildScopeRecovery,
+  saveBuildScopeRecovery,
+  restoreBuildScopeRecovery,
   saveScopeAmendmentWork,
   restoreScopeAmendmentWork,
   type ScopeAmendmentOutcome,
@@ -13368,8 +13373,25 @@ export async function runFixRung(opts: {
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
     if (priorDesign) {
       const reason = String(priorDesign.reason);
-      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design" });
-      return { outcome: "needs_design", review, strikes, retriggers, reason };
+      const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
+        row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
+      let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
+      let deliveryError: { error: string } | undefined;
+      if (!issueUrl) try {
+        issueUrl = (await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+          headSha: priorHeadSha, cause: "ci", contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
+          summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
+          detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
+            `at this head without a round. The worker's diagnosis:\n\n${reason}`,
+          options: [{ label: "repair-cause", detail: "repair what the diagnosis names; a new head resumes the fix lane" },
+            { label: "hand-fix", detail: "push a fix to this PR by hand; a new head resumes the fix lane" }],
+          recommendation: "repair-cause", consequence: "this PR stays red and unmerged at this head" },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge })) || undefined;
+      } catch (error) {
+        deliveryError = { error: String(error) };
+      }
+      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design", issue_url: issueUrl, ...deliveryError });
+      return { outcome: "needs_design", review, strikes, retriggers, reason, issueUrl };
     }
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     // W1-T2328: the ci-log evidence THIS round's dispatch (below) is about to target, snapshotted
@@ -13672,7 +13694,8 @@ export async function runFixRung(opts: {
         standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` };
     }
 
-    const censusCheck = await checkFixCensusSnapshotAsync(opts.worktreePath, censusSnapshotPath, deps.log);
+    const censusCheck = await checkFixCensusSnapshotAsync(opts.worktreePath, await censusSnapshotForCheck(opts.worktreePath,
+      censusSnapshotPath, currentMergeConflict !== undefined, deps.writeFixCensusSnapshot, deps.log), deps.log);
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
@@ -13966,6 +13989,7 @@ export async function runFixRung(opts: {
       round_id: roundId,
       ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
       fix_outcome: fixOutcome?.kind ?? "unstated",
+      ...(harnessCommitRefused && fixOutcome?.kind === "FIXED" ? { fix_outcome: "NOT_LANDED", worker_fix_outcome: "FIXED" } : {}),
       ...fixClaimFields,
       head_sha: priorHeadSha,
       pushed_head_sha: pushedHeadSha,
@@ -14122,7 +14146,8 @@ export async function runFixRung(opts: {
     }
     if (fixAction.kind === "hand-off") {
       const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
-      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
+      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, contract_revision: currentContractRevision,
+        ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
       logFixDone();
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
     }
@@ -17004,7 +17029,10 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   prCreateExec?: Parameters<typeof runGhPrCreate>[4];
   prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
   /** W1-T10026: test seam for a build's left-out-import scope request; production asks `requestScopeAmendment`. */
+  implementPush?: typeof gitPushRunBranchAsync;
   implementScopeAmendment?: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome;
+  implementScopeAmendmentPortsIo?: Parameters<typeof buildProofAmendmentWritePorts>[1];
+  implementScopeAmendmentState?: (url: string) => Promise<"open" | "merged" | "closed">;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -18034,6 +18062,10 @@ async function runTask(
     otherOpenPrReader?: OpenPrJsonReader;
     prCreateExec?: Parameters<typeof runGhPrCreate>[4];
     prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
+    implementPush?: RunTaskBodyOptions["implementPush"];
+    implementScopeAmendment?: RunTaskBodyOptions["implementScopeAmendment"];
+    implementScopeAmendmentPortsIo?: RunTaskBodyOptions["implementScopeAmendmentPortsIo"];
+    implementScopeAmendmentState?: RunTaskBodyOptions["implementScopeAmendmentState"];
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     selectedModeFileIO?: RegistryFileIO;
     pairedTrial?: Partial<PairedTrialInput>;
@@ -18679,6 +18711,15 @@ export function fixCensusAppliesToRepo(
   return false;
 }
 
+export async function censusSnapshotForCheck(
+  root: string, path: string | undefined, merging: boolean,
+  write: ((root: string, log: (step: string, extra?: Record<string, unknown>) => void) => string | undefined | Promise<string | undefined>) | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  if (path === undefined || !merging || write === undefined) return path;
+  return (await write(root, log)) ?? path;
+}
+
 export function writeFixCensusSnapshot(root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit: typeof hostWorktreeGit = hostWorktreeGit): string | undefined {
   return runStepsSync(writeFixCensusSnapshotSteps(root, log, runGit));
 }
@@ -18695,13 +18736,14 @@ function* writeFixCensusSnapshotSteps(
   try {
     const headSha = (yield* step(() => runGit(root, ["rev-parse", "HEAD"]))).trim();
     const mainSha = (yield* step(() => runGit(root, ["rev-parse", "origin/main"]))).trim();
-    const mergeParents = (yield* step(() => runGit(root, ["rev-parse", "--revs-only", "MERGE_HEAD"]))).trim().split(/\s+/).filter(Boolean);
-    const mergeBase = (yield* step(() => runGit(root, ["merge-base", ...(mergeParents.length ? [mainSha, headSha, ...mergeParents] : [headSha, mainSha])]))).trim();
+    const mergeHeadPath = resolve(root, (yield* step(() => runGit(root, ["rev-parse", "--git-path", "MERGE_HEAD"]))).trim());
+    const mergingMain = existsSync(mergeHeadPath) && readFileSync(mergeHeadPath, "utf8").split("\n")[0]!.trim() === mainSha;
+    const mergeBase = mergingMain ? mainSha : (yield* step(() => runGit(root, ["merge-base", headSha, mainSha]))).trim();
     const censusPath = (p: string) =>
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
     function* paths(args: string[]): Steps<string[]> {
-      return (yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p));
+      return [...new Set((yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p)))];
     }
     const headPaths = yield* paths(["ls-files"]);
     const basePaths = yield* paths(["ls-tree", "-r", "--name-only", mergeBase]);
@@ -18734,7 +18776,8 @@ function* writeFixCensusSnapshotSteps(
     if (lstatSync(join(root, "state")).isSymbolicLink()) throw new Error("census state directory is a symlink");
     const path = join(mkdtempSync(join(root, "state", "rmd-census-")), "snapshot.json");
     writeFileSync(path, JSON.stringify(snapshot), { flag: "wx", mode: 0o444 });
-    log("fix.census_snapshot", { outcome: "available", path, head_sha: headSha, main_sha: mainSha, merge_base: mergeBase });
+    log("fix.census_snapshot", { outcome: "available", path, head_sha: headSha, main_sha: mainSha, merge_base: mergeBase,
+      ...(mergingMain ? { merge_head: mainSha } : {}) });
     return path;
   } catch (error) {
     log("fix.census_snapshot", { outcome: "unavailable", reason: String(error) });
@@ -19349,7 +19392,23 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     task,
     log,
   );
+  const scopePointer = join(config.root, "state", "recovery", "build-scope", taskId, "latest.json");
+  let scopeRecovery: ReturnType<typeof readBuildScopeRecovery> | undefined;
+  let scopeWait: { amendmentUrl: string; paths: string[] } | undefined;
+  if (existsSync(scopePointer)) {
+    try {
+      const pointer = JSON.parse(readFileSync(scopePointer, "utf8"));
+      scopeRecovery = readBuildScopeRecovery(pointer.path, taskId);
+      if (pointer.amendmentUrl && Array.isArray(pointer.paths) && pointer.paths.some((path: string) => !pathIsUnderDeclaredSurface(path, task.files ?? []))) {
+        scopeWait = { amendmentUrl: pointer.amendmentUrl, paths: pointer.paths };
+      }
+    } catch (error) {
+      scopeRecovery = { status: "unverifiable", path: scopePointer, reason: String(error) };
+    }
+  }
   log("run.start", {
+    ...(scopeRecovery ? { scope_recovery: scopeRecovery.status, recovery_path: scopeRecovery.path,
+      ...(scopeRecovery.status !== "verified" ? { recovery_reason: scopeRecovery.reason } : {}) } : {}),
     repo: task.repo,
     type: task.type,
     risk: task.risk,
@@ -19366,6 +19425,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     soft_threshold_usd: softThresholdUsd,
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
+
+  if (scopeWait) {
+    let state: string;
+    try {
+      state = await (opts.implementScopeAmendmentState ?? readBuildScopeAmendmentState)(scopeWait.amendmentUrl);
+    } catch (error) {
+      state = "unreadable";
+      log("implement.scope_wait_unreadable", { amendment_url: scopeWait.amendmentUrl, reason: String(error) });
+    }
+    if (state !== "closed") {
+      log("verdict", { verdict: "blocked_inflight", reason: "scope_amendment_pending", amendment_url: scopeWait.amendmentUrl,
+        scopeAmendmentsPending: state === "open" ? 1 : 0, amendment_state: state, cost_usd: 0 });
+      return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_inflight" };
+    }
+  }
 
   // The decision and its failure-tolerant arms live in `exploreMount`, which never throws; only real data sources are wired here.
   // `runId` is clock-derived, so no harness can steer this call onto explore — the arms are seamed.
@@ -20039,6 +20113,22 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
       }
     }
+    let scopeRecoveryPrompt = "";
+    if (scopeRecovery?.status === "verified" && !scopeWait) {
+      try {
+        const paths = [...scopeRecovery.data.committedPaths, ...scopeRecovery.data.companions.map((c) => c.path)];
+        if (paths.some((path) => !pathIsUnderDeclaredSurface(path, task.files ?? []))) throw new Error("saved paths are outside the amended task scope");
+        await restoreBuildScopeRecovery(scopeRecovery.data, worktreePath, (args) => hostWorktreeGit(worktreePath, args));
+        log("implement.scope_restored", { recovery_path: scopeRecovery.path, source_head_sha: scopeRecovery.data.headSha, paths });
+        scopeRecoveryPrompt = `\nRecovered build work from ${scopeRecovery.data.branch} after scope amendment ${scopeRecovery.data.amendmentUrl}. ` +
+          "The saved harness changes and companions are present as uncommitted edits. Continue this work and include it in your report.\n";
+      } catch (error) {
+        log("implement.scope_recovery_fresh", { recovery_path: scopeRecovery.path, reason: String(error) });
+      }
+    } else if (scopeRecovery) {
+      log("implement.scope_recovery_fresh", { recovery_path: scopeRecovery.path,
+        reason: scopeRecovery.status === "verified" ? "amendment closed without granting scope" : scopeRecovery.reason });
+    }
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
@@ -20411,7 +20501,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const prompt = `${renderedImplementPrompt}${scopeRecoveryPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -21008,12 +21098,17 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       amend: opts.implementScopeAmendment ?? ((request) => requestScopeAmendment(request, buildProofAmendmentWritePorts({
         taskId, worktreePath: repoDir, config, owner, repo: task.repo, prNumber: request.prNumber, ledgerLinesNow: [], log,
         gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
-      }))),
+      }, opts.implementScopeAmendmentPortsIo))),
     });
     if (scopeNeeded) {
       harvestFollowupsFromReport(fullText(impl), { label: "implement", runId, log, say });
-      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log);
       const { amendment } = scopeNeeded;
+      const recoveryPath = await saveBuildScopeRecovery({ root: config.root, taskId, branch, worktreePath,
+        headSha: harnessCommitted!.sha, amendmentUrl: "amendmentUrl" in amendment ? amendment.amendmentUrl : "",
+        companions: scopeNeeded.companions.map((c) => c.path), git: (args) => hostWorktreeGit(worktreePath, args) });
+      log("implement.scope_needed", { recovery_path: recoveryPath, paths: scopeNeeded.companions.map((c) => c.path),
+        head_sha: harnessCommitted!.sha, amendment_url: "amendmentUrl" in amendment ? amendment.amendmentUrl : "" });
+      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log);
       log("verdict", {
         verdict: "no_pr",
         reason: "scope_needed",
@@ -21273,7 +21368,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
-        await gitPushRunBranchAsync(worktreePath);
+        await (opts.implementPush ?? gitPushRunBranchAsync)(worktreePath);
       } catch (err) {
         const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err) ?? prePushGateRefusal(err);
         if (!refusal) throw err;
@@ -21339,7 +21434,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // read that tip. `appendTaskTrailerToCommit` amends only when the trailer is missing, so
     // an already-trailered commit (a worker that wrote it itself) pays no second amend.
     if (appendTaskTrailerToCommit(worktreePath, taskId)) {
-      await gitPushRunBranchAsync(worktreePath, { force: true });
+      await (opts.implementPush ?? gitPushRunBranchAsync)(worktreePath, { force: true });
     }
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
@@ -25060,6 +25155,32 @@ function checkAcceptanceChangedFiles(): string[] {
     .filter(Boolean);
 }
 
+/** Explain copied build evidence using only shards in this branch's plan-only diff. */
+function checkAcceptanceFilingHint(criteria: AcceptanceCriterion[], refusal: string, deps: CheckAcceptanceDeps): string | undefined {
+  try {
+    const changed = (deps.changedFiles ?? checkAcceptanceChangedFiles)();
+    if (!isPlanOnlyDiff(changed)) return undefined;
+    const refused = new Set([...refusal.matchAll(/criterion (\d+)/g)].map((m) => Number(m[1]) - 1));
+    for (const shard of changed.filter((path) => /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path) && existsSync(path))) {
+      for (const task of parseTasksFromYaml(readFileSync(shard, "utf8"), shard)) {
+        const copied = criteria.some((criterion, index) => {
+          if (!refused.has(index)) return false;
+          const proof = criterion.proof?.trim() ?? "";
+          return (task.files ?? []).some((path) => proof.endsWith(` in ${path}`) || proof === `unit test: ${path}`) ||
+            (/^unit test:/i.test(proof) && (task.files ?? []).length > 0 &&
+              (task.acceptance ?? []).some((c) => c.proof?.trim() === proof));
+        });
+        if (copied) return `this is ${task.id}'s BUILD proof; a filing PR proves the filing, e.g. ` +
+          `grep: ^- id: ${task.id}$ in ${shard}, or a distinctive design phrase in the shard.`;
+      }
+    }
+    return undefined;
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    return `filing context unavailable: ${reason}; the proof refusal still applies.`;
+  }
+}
+
 /** Seam for {@link replayGoldensCommand} (W1-T2689). Every field is injectable so the whole verb --
  *  including its refusals -- is unit-drivable without dispatching a worker or touching a ledger. */
 export interface ReplayGoldensDeps {
@@ -25292,20 +25413,9 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     releaseBaseProofDir(process.cwd(), built, baseRemoveWorktree);
   }
 
-  // #11704 (2026-10-14): acceptance-author-gate refuses a body `grep:` pattern wrapped in quotes or backticks
-  // (wrappedGrepPattern, authorTimeProofShapeRefusal) whether or not it matches, and this verb printed OK on it.
-  // The gate skips the check when the criteria come from a trailer's shard, so this does too.
-  const wrapped = trailerResolved ? [] : criteria.flatMap((c, i) => {
-    const w = wrappedGrepPattern(c.proof ?? "");
-    return w ? [`criterion ${i + 1} wraps its grep pattern in ${w.delimiter}; use: grep: ${w.bare} in <path>`] : [];
-  });
   // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
   // still discriminate instead, and the exit code follows non-zero, the gate's own contract.
   const okOrStale = (okLine: string): number => {
-    if (wrapped.length > 0) {
-      console.log(`REFUSED by acceptance-author-gate (proof-shape): ${wrapped.join("; ")}.`);
-      return 1;
-    }
     if (staleCount === 0) {
       console.log(okLine);
       return 0;
@@ -25356,6 +25466,15 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     trailerResolves: (id) => id === taskId && trailerResolved,
   });
   if (authorCheck.ok) {
+    // Reuse the gate's private authorTimeProofShapeRefusal through its existing entry point.
+    // No PR identity/diff metadata is supplied: only body proofs are judged on this arm.
+    const gate = acceptanceBodyGate({ body, trailerResolves: () => false, root: process.cwd() });
+    if (!gate.ok) {
+      console.log(`REFUSED by acceptance-author-gate (${gate.defect}): ${gate.message}`);
+      const hint = checkAcceptanceFilingHint(criteria, gate.message, deps);
+      if (hint) console.log(hint);
+      return 1;
+    }
     return okOrStale("OK — the parser resolves exactly what was written, and every proof is non-empty.");
   }
   if (!d.headerFound) {
@@ -42593,6 +42712,16 @@ export function requiredCompanions(
   return [...importers].sort(([a], [b]) => a.localeCompare(b)).map(([path, by]) => ({ path, importers: by.sort() }));
 }
 
+export async function readBuildScopeAmendmentState(
+  url: string, fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<"open" | "merged" | "closed"> {
+  const pr = await fetch(["pr", "view", url, "--json", "state,mergedAt"]) as { state?: string; mergedAt?: string };
+  if (pr.mergedAt || pr.state === "MERGED") return "merged";
+  if (pr.state === "OPEN") return "open";
+  if (pr.state === "CLOSED") return "closed";
+  throw new Error("scope amendment state is unreadable");
+}
+
 /**
  * W1-T10026: A BUILD WHOSE COMMITTED FILES IMPORT A LEFT-OUT FILE ASKS FOR SCOPE. #12575 opened with three committed
  * files importing a module the harness commit dropped, so every check died ERR_MODULE_NOT_FOUND. With no required
@@ -42616,8 +42745,8 @@ export async function askScopeForLeftOutImports(input: {
   input.log("implement.scope_needed", { task_id: input.taskId, paths, importers, head_sha: sha });
   let amendment: ScopeAmendmentOutcome;
   try {
-    amendment = await input.amend({ taskId: input.taskId, prNumber: 0, prUrl: "", headSha: sha, headRef: input.branch,
-      paths, changedPaths: [...undeclared] });
+    amendment = await input.amend({ taskId: input.taskId, kind: "build", importers: [...new Set(companions.flatMap((c) => c.importers))], prNumber: 0, prUrl: "", headSha: sha, headRef: input.branch,
+      paths, changedPaths: [...undeclared, ...companions.flatMap((c) => c.importers)] });
   } catch (error) {
     amendment = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
   }

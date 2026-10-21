@@ -1,30 +1,71 @@
 - id: W1-T9523
-  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — analytics.source_snapshot_failed landed 4 ledger rows across the trailing window and no task cites it"
+  title: "Slow-lane analytics resumes bounded scans without publishing partial data as fresh"
   repo: remudero
   depends_on: []
   type: implement
   verify: human
-  risk: low
+  risk: high
+  band_meaning: span
   priority: 4
   status: queued
   attempts: 0
   author_class: machine
   origin: "scout:analytics.source_snapshot_failed"
   files:
+    - src/lib/read-model-slow-lane.ts
+    - test/analytics-view.test.ts
     - test/scout-analytics-source-snapshot-failed.test.ts
   acceptance:
-    - claim: "analytics.source_snapshot_failed stops recurring: its cause is fixed rather than its rows hidden"
-      proof: "grep: test(\"W1-T9523: analytics.source_snapshot_failed no longer recurs\" in test/scout-analytics-source-snapshot-failed.test.ts"
-  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+    - claim: "the real slow-lane scanner resumes cold and invalidated scans across bounded legs without publishing a partial success"
+      proof: "unit test: W1-T9523: slow-lane bounded legs resume to the same complete analytics fold"
+    - claim: "invalid incomplete and unavailable source evidence cannot become a fresh empty snapshot or cross repository boundaries"
+      proof: "unit test: W1-T9523: slow-lane progress preserves unavailable evidence and repository isolation"
+    - claim: "partial analytics work leaves other due repositories and Inbox classification serviceable and obeys lease and switch publication guards"
+      proof: "unit test: W1-T9523: partial analytics does not starve Inbox or publish after ownership loss"
+    - claim: "timeouts still abort at the existing bound and only a completed scan advances the successful source time"
+      proof: "unit test: W1-T9523: bounded analytics retains timeout and completed-source semantics"
+  note: |
+    MACHINE-AUTHORED scout proposal; verify: human remains held. The operator approved only this
+    bounded scope/contract amendment in the console follow-up chat on 2026-10-21, not a new risk
+    verdict, execution release or deployment. The old one-test-only escalation cannot authorize
+    this changed contract; native reparkStaleRuling removes that obsolete pin. Original judgment
+    and rationale remain in Git history. Do not fabricate a replacement ruling or release.
+    The original scout test declaration remains last for the existing parked-proposal schema;
+    behavior belongs in the existing analytics-view suite, not a test-name-only sentinel.
   rationale: |
-    The ledger step analytics.source_snapshot_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 3 in the newer.
-    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
-    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
-  risk_ruling:
-    verdict: "low"
-    action: escalate
-    confidence: 0.6
-    reasons:
-      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is one new test file (test/scout-analytics-source-snapshot-failed.test.ts), with no declared touch of secrets, auth, permissions, deletion, merge/deploy/infra, or review policy.; on the change's description/files alone, no diff was read — The acceptance is a grep-verifiable test name, so the finding can be checked from what is shown, and the PR still passes CI and review.; on the change's description/files alone, no diff was read — Mild concerns: the filing says the writing code is not yet located, so the real fix may reach beyond the declared file. The scout family has a weak record (0 merged, 1 declined). Neither shows a danger category from the escalation rule, so I keep it low."
-    judged_at: "2026-10-15T00:54:08.930Z"
-    pin: "e279abee4aa403193e607bb0755a1b697a24a0651743a95da253bec1a8923496"
+    The original scout observed four analytics.source_snapshot_failed rows across its trailing
+    window. Recurrence is a class signal, not proof that every row has the same root cause.
+    At source f70e352746a1cb9d1245de1f5c49ada5614e14be the slow lane uses the non-yielding
+    deriveAnalyticsSnapshotFromCheckpointedLedger wrapper, unlike the existing legacy cache's
+    scanAnalyticsLedger continuation. A timed-out full scan cannot retain its partial fold.
+    A controlled 2026-10-21 ledger union observed core fail after 120029 ms while site and
+    console completed. The separate legacy scan advanced across rewritten rotations; this
+    does not prove identical invalidation or the sole cause of the slow-lane failure.
+    Natural core recovery at 06:09:02.262 is a counterexample to permanent failure. Later ledger
+    projector lag independently made the combined agent reading stale. Preserve both facts.
+  design: |
+    Reuse scanAnalyticsLedger's existing partial-result contract, with per-instance bounded
+    progress separate from its last fully successful checkpoint. Retain the 120-second timeout
+    and existing half-timeout leg budget; do not raise bounds, add provider calls or introduce
+    request-time ledger scans. Continue progress on subsequent scheduled legs, not a busy loop.
+    NEVER publish partial analytics as a successful source snapshot. Retain the prior payload
+    and its actual source clock until a complete readable fold is available; distinguish
+    attempt/progress/failure from successful source completion in bounded diagnostic evidence.
+    Keep repository isolation, serial work, existing lease/switch publication guards, rotation
+    and source invalidation, missing/unreadable/malformed corpus semantics and unknown prices.
+    A partial instance must yield service to other due instances and normal Inbox units.
+    Keep progress in this lane's existing lifetime or prove restart durability explicitly;
+    never silently reuse foreign, corrupt or stale progress. No unbounded identifiers as metric
+    labels, prompts, credentials, monetary assumptions, new permissions or spending changes.
+
+    Test runSlowLaneWorker's actual default scanner with private real gzip/plain/live ledgers
+    and a controlled clock. Both cold start and rewritten-checkpoint legs must retain progress,
+    emit no partial success, and eventually equal a one-pass positive control without replay
+    duplication. Cover timeout/abort, corrupt progress, unreadable earlier legs, new rotations,
+    changed or missing live source, repository isolation, disabled view and lease loss. Prove
+    another due repository and Inbox remain serviceable. Remove only continuation wiring and
+    require the behavioral assertion to fail, then restore exact source and retain all tests,
+    caller/census checks, same-head instrumented coverage, native author, canonical stored
+    proofs, governed review and hosted CI. New source paths require a separate amendment.
+    Source merge, qualified loaded adoption, natural fresh cached API and signed-in Agent
+    behavior are separate acceptance stages; no deployment or forced refresh is authorized.

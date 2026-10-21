@@ -453,10 +453,11 @@ refresh_process_snapshot() {
 }
 
 clean_artifact() {
-  local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
+  local artifact="$1" min_age="${2:-$AGE_HOURS}" policy="${3:-}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
   # Dynamically scoped to log(): only reuse this candidate's existing size probe.
   local RMD_DECISION_KNOWN_BYTES=unknown
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
+  if [ "$policy" = residual ] && ! residual_cache_safe "$artifact"; then log "SKIP protected residual-cache $artifact"; return; fi
   # Unique test results/materialization receipts are durable even inside a
   # generated dependency tree. The bounded duplicate helper preserves them.
   if [ "${artifact##*/}" = node_modules ] && { [ -e "$artifact/.vite" ] || [ -L "$artifact/.vite" ] || [ -e "$artifact/.rmd-dependency-seed.json" ] || [ -L "$artifact/.rmd-dependency-seed.json" ]; }; then
@@ -469,6 +470,7 @@ clean_artifact() {
   if [ -n "$found" ]; then log "SKIP protected repository-or-bundle $artifact"; return; fi
   parent=$(dirname "$artifact")
   while [ "$parent" != / ]; do
+    [ "$policy" != residual ] || [ "$parent" != "${USER_HOME%/*}" ] || break
     if [ -e "$parent/.git" ]; then
       activity_root="$parent"
       status=$(rmd_retirement_git "$parent" status --porcelain --untracked-files=all 2>/dev/null) || {
@@ -537,6 +539,7 @@ clean_artifact() {
     # already-approved generated artifact. `find -P` avoids following any
     # dependency symlinks; if any directory cannot be made writable, fail
     # closed and leave the artifact in place.
+    if [ "$policy" = residual ] && ! residual_cache_safe "$artifact"; then log "SKIP changed residual-cache $artifact"; return; fi
     if ! find -P "$artifact" -type d -exec chmod u+rwx {} + 2>/dev/null; then
       log "FAILED read-only-or-unverified $artifact"
       return 0
@@ -544,12 +547,66 @@ clean_artifact() {
     if rm -rf -- "$artifact" 2>/dev/null; then
       reclaimed_kb=$((reclaimed_kb+kb)); removed=$((removed+1))
       log "REMOVED ${age}h $((kb/1024))M $artifact"
+      [ "$policy" != residual ] || rmd_decision_record "$DECISION_LOG" "residual cache removed: $artifact" removed removed || exit 2
     else
       log "FAILED        $artifact"
     fi
   else
     estimated_kb=$((estimated_kb+kb)); planned=$((planned+1))
     log "WOULD-REMOVE ${age}h $((kb/1024))M $artifact"
+  fi
+}
+
+residual_cache_safe() {
+  local path="$1" parent="$1" found
+  while [ "$parent" != "${USER_HOME%/*}" ] && [ "$parent" != / ]; do
+    [ ! -L "$parent" ] && [ ! -e "$parent/.git" ] || return 1
+    parent=${parent%/*}; [ -n "$parent" ] || parent=/
+  done
+  found=$(find -P "$path" -xdev \( ! -user "$RUN_USER" -o -type l -o -name .git -o -name '*.bundle' -o -name '*.lock' -o -name lock -o \( ! -type d ! -type f \) \) -print -quit 2>/dev/null) || return 1
+  [ -z "$found" ]
+}
+
+npm_idle() {
+  local commands
+  commands=$(ps -U "$(id -u)" -ww -o command= 2>/dev/null) || return 1
+  ! printf '%s\n' "$commands" | grep -E '(^|[ /])(npm|npx)([ /]|$)|/(npm|npx)-cli\.js' >/dev/null
+}
+
+prune_account_npm() {
+  local root="$1" content="$2" file entries stamp kb
+  [ -d "$root" ] && residual_cache_safe "$root" && npm_idle || return 0
+  if ! command -v npm >/dev/null 2>&1; then
+    clean_artifact "$root" "$AGE_HOURS" residual
+    return
+  fi
+  [ -d "$content" ] || return
+  entries=$(find -P "$content" -xdev -type f -print -quit 2>/dev/null) || { log "SKIP npm content scan failed $root"; return; }
+  [ -n "$entries" ] || return
+  while IFS= read -r -d '' file; do
+    stamp=$(artifact_mtime "$file") || continue
+    [ "$(( $(date +%s) - stamp ))" -ge "$((AGE_HOURS*3600))" ] || continue
+    kb=$(du -xsk "$file" 2>/dev/null | cut -f1)
+    case "$kb" in ''|*[!0-9]*) continue ;; esac
+    refresh_process_snapshot && npm_idle && residual_cache_safe "$root" || { log "SKIP npm activity or structure unknown $root"; return; }
+    is_live "$root" && return
+    is_cwd_in "$root"; [ "$?" = 1 ] || return
+    is_open "$root"; [ "$?" = 1 ] || return
+    stamp=$(artifact_mtime "$file") || continue
+    [ "$(( $(date +%s) - stamp ))" -ge "$((AGE_HOURS*3600))" ] || continue
+    if [ "$APPLY" = 1 ]; then
+      if rm -f -- "$file"; then
+        removed=$((removed+1)); reclaimed_kb=$((reclaimed_kb+kb))
+        log "REMOVED npm content $file"
+        rmd_decision_record "$DECISION_LOG" "npm content removed: $file" removed removed "$((kb*1024))" || exit 2
+      else log "FAILED npm content removal $file"; fi
+    else log "WOULD-REMOVE npm content $file"; fi
+  done < <(find -P "$content" -xdev -type f -print0 2>/dev/null)
+  if [ "$APPLY" = 1 ] && npm_idle && residual_cache_safe "$root" && refresh_process_snapshot; then
+    is_live "$root" && return
+    is_cwd_in "$root"; [ "$?" = 1 ] || return
+    is_open "$root"; [ "$?" = 1 ] || return
+    [ "${root##*/}" != _cacache ] || npm cache verify --cache "$USER_HOME/.npm" >> "$LOG" 2>&1 || log "WARN npm cache verify failed $root"
   fi
 }
 
@@ -769,6 +826,114 @@ clean_scratch_directory() {
     log "WOULD-REMOVE-SCRATCH age>=${AGE_HOURS}h $((kb/1024))M $path"
   fi
 }
+
+repair_alternates() {
+  local repo="$1" stamp line alternate head_path
+  command -v python3 >/dev/null 2>&1 || return
+  alternate=$(rmd_retirement_git "$repo" rev-parse --path-format=absolute --git-path objects/info/alternates 2>/dev/null) || return
+  [ -f "$alternate" ] && [ ! -L "$alternate" ] || return
+  [ "$(artifact_owner "$repo")" = "$RUN_USER" ] || return
+  for head_path in "$alternate" "$(rmd_retirement_git "$repo" rev-parse --path-format=absolute --git-path HEAD 2>/dev/null)"; do
+    stamp=$(artifact_mtime "$head_path") || return
+    [ "$(( $(date +%s) - stamp ))" -ge "$((MINIMUM_AGE_HOURS*3600))" ] || return
+  done
+  stamp=$(checkout_activity_mtime "$repo") || return
+  [ "$(( $(date +%s) - stamp ))" -ge "$((MINIMUM_AGE_HOURS*3600))" ] || return
+  refresh_process_snapshot || return
+  is_live "$repo" && return
+  is_cwd_in "$repo"; [ "$?" = 1 ] || return
+  is_open "$repo"; [ "$?" = 1 ] || return
+  while IFS= read -r line; do
+    case "$line" in
+      repaired:*|repair-reverted:*)
+        rmd_decision_record "$DECISION_LOG" "$line" "${line%%:*}" "${line%%:*}" || exit 2 ;;
+    esac
+    log "$line"
+  done < <(python3 -I - "$USER_HOME" "$repo" "$APPLY" "${RETAINED_CHECKOUTS[@]}" <<'PYTHON'
+import os, pathlib, re, stat, subprocess, sys
+home, repo, apply, *known = sys.argv[1:]
+def owned(path):
+    path = os.path.abspath(path)
+    if not path.startswith(home + os.sep): return False
+    while path != home:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or st.st_uid != os.getuid(): return False
+        path = os.path.dirname(path)
+    return True
+def store(path):
+    marker = pathlib.Path(path, '.git')
+    gd = marker if marker.is_dir() else pathlib.Path(path, marker.read_text().strip().removeprefix('gitdir: '))
+    gd = pathlib.Path(os.path.abspath(gd))
+    if (gd / 'commondir').is_file(): gd = pathlib.Path(os.path.abspath(gd / (gd / 'commondir').read_text().strip()))
+    return gd / 'objects'
+def git(*args):
+    return subprocess.run(['git', '-C', repo, *args], capture_output=True, timeout=30,
+                          env=dict(os.environ, GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0', GIT_OPTIONAL_LOCKS='0'))
+def repair():
+    objects = store(repo)
+    alt = objects / 'info/alternates'
+    if not alt.is_file() or not owned(alt) or alt.stat().st_nlink != 1: return
+    if git('config', '--get-regexp', r'^(extensions\.partialclone|remote\..*\.promisor)$').stdout: return
+    original = alt.read_bytes()
+    lines = original.decode().splitlines()
+    resolved = []
+    for line in lines:
+        if not line or line.startswith('#'): resolved.append(line); continue
+        path = pathlib.Path(os.path.abspath(objects / line))
+        if not path.is_dir():
+            # Use only a known account-local lender that actually has HEAD.
+            head = git('rev-parse', '--verify', 'HEAD').stdout.strip().decode()
+            if not re.fullmatch(r'[0-9a-f]{40,64}', head): return
+            path = None
+            lenders = []
+            for lender in known:
+                try: lenders.append(store(lender))
+                except (OSError, ValueError): continue
+            for namespace in ('.local/share/remudero/git-pools', 'Remudero/repos', 'Remudero', 'rmd-work'):
+                root = pathlib.Path(home, namespace)
+                if not root.is_dir() or not owned(root): continue
+                for lender in root.iterdir():
+                    if (lender / 'HEAD').is_file() and (lender / 'refs').is_dir() and (lender / 'objects').is_dir():
+                        lenders.append(lender / 'objects')
+            for candidate in lenders:
+                if candidate == objects or not candidate.is_dir() or not owned(candidate): continue
+                config = subprocess.run(['git', '--git-dir', str(candidate.parent), 'config', '--get-regexp', r'^(extensions\.partialclone|remote\..*\.promisor)$'],
+                                        capture_output=True, timeout=30)
+                if config.stdout or config.returncode not in (0, 1): continue
+                out = subprocess.run(['git', '--git-dir', str(candidate.parent), 'cat-file', '-e', head + '^{commit}'],
+                                     capture_output=True, timeout=30, env=dict(os.environ, GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0'))
+                if out.returncode == 0: path = candidate; break
+            if path is None: return
+        if not owned(path): return
+        resolved.append(str(path))
+    replacement = ('\n'.join(resolved) + '\n').encode()
+    if replacement == original: return
+    if apply != '1': print('WOULD-REPAIR alternates: ' + repo); return
+    backup = pathlib.Path(str(alt) + '.pre-repair')
+    # Never overwrite evidence from an earlier repair or follow a backup link.
+    if os.path.lexists(backup): return
+    with open(backup, 'xb') as out: out.write(original)
+    os.chmod(backup, 0o600)
+    try:
+        if alt.read_bytes() != original: raise ValueError('alternates changed before repair')
+        alt.write_bytes(replacement)
+        head = git('rev-parse', '--verify', 'HEAD')
+        if head.returncode or head.stderr: raise ValueError('HEAD re-probe failed')
+        check = git('fsck', '--connectivity-only', '--no-reflogs', head.stdout.strip().decode())
+        if check.returncode or check.stderr: raise ValueError('HEAD connectivity re-probe failed')
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        alt.write_bytes(original)
+        print('repair-reverted: ' + repo + ' reason=' + str(error))
+        return
+    print('repaired: ' + repo + ' alternates=' + ','.join(resolved))
+try:
+    repair()
+except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired) as error:
+    print('SKIP alternates repair: ' + repo + ' reason=' + str(error))
+PYTHON
+  )
+}
+for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do repair_alternates "$repo"; done
 
 # Direct children of each approved container are independently assessed. This
 # reaches lanes-wt and ignored scratch beneath the canonical checkout without
@@ -1003,6 +1168,20 @@ for cache in \
   [ -d "$cache" ] && [ ! -L "$cache" ] || continue
   clean_artifact "$cache" "$AGE_HOURS"
 done
+
+# Account-local test caches are separate from the persistent remudero cache.
+for cache in "$USER_HOME/.cache"/remudero-*; do
+  [ "$cache" != "$LOCK_DIR" ] || continue
+  case "${cache##*/}" in *.lock) continue ;; esac
+  [ -d "$cache" ] && [ ! -L "$cache" ] || continue
+  if ! refresh_process_snapshot; then log "SKIP cache process visibility unknown $cache"; continue; fi
+  case "${cache##*/}" in remudero-store-fill-*)
+    log "cache rationale: $cache creator=unidentified historical/external store-fill runner; core test/the-core-fleet-fills-the-child-entry-store.test.ts uses tmpdir, not this home cache" ;;
+  esac
+  clean_artifact "$cache" "$AGE_HOURS" residual
+done
+prune_account_npm "$USER_HOME/.npm/_cacache" "$USER_HOME/.npm/_cacache/content-v2"
+prune_account_npm "$USER_HOME/.npm/_npx" "$USER_HOME/.npm/_npx"
 
 # Some task runners make immutable dependency snapshots directly under
 # rmd-work. They intentionally omit .git, so checkout discovery cannot see
@@ -1422,7 +1601,111 @@ PYTHON
     fi
   fi
 fi
-if [ "$AFTER" -lt "$MIN_FREE_GIB" ]; then
-  log "WARN low-space: ${AFTER}GiB free is under the ${MIN_FREE_GIB}GiB floor"
+if command -v python3 >/dev/null 2>&1; then
+  while IFS= read -r report_line; do
+    rmd_decision_record "$DECISION_LOG" "$report_line" info low-space-report || exit 2
+    log "$report_line"
+  done < <(python3 -I - "$USER_HOME" "$SCRIPT_DIR" "$OS_NAME" "$preserve_status" <<'PYTHON'
+import importlib.util, os, pathlib, re, signal, statistics, subprocess, sys, time
+sys.dont_write_bytecode = True
+home, scripts, system, preserve = sys.argv[1:]
+# Share the generated-cache pass's 45-second inspection ceiling; never leave du running.
+deadline = time.monotonic() + 45
+def run(args):
+    return subprocess.run(args, capture_output=True, text=True, timeout=max(.01, deadline-time.monotonic()))
+def report():
+    mount = '/System/Volumes/Data' if system == 'Darwin' else '/'
+    disk = run(['df', '-k', mount])
+    if disk.returncode: raise ValueError('df failed')
+    fields = disk.stdout.splitlines()[1].split()
+    used, free = int(fields[2])*1024, int(fields[3])*1024
+    samples = pathlib.Path(home, '.local/state/remudero/janitor-free-samples.tsv')
+    parent = samples.parent
+    while str(parent) != home:
+        if parent.is_symlink() or parent.stat().st_uid != os.getuid(): raise ValueError('sample parent unverified')
+        parent = parent.parent
+    rows = []
+    if samples.exists() or samples.is_symlink():
+        if samples.is_symlink() or not samples.is_file() or samples.stat().st_uid != os.getuid(): raise ValueError('samples unverified')
+        for line in samples.read_text().splitlines()[-200:]:
+            parts = line.split()
+            if len(parts) == 2 and all(p.isdigit() for p in parts): rows.append(tuple(map(int, parts)))
+    now = int(time.time())
+    rows = sorted(dict((t, b) for t, b in rows if t < now).items())[-199:] + [(now, free)]
+    with open(samples, 'w') as out: out.writelines(f'{t}\t{b}\n' for t, b in rows)
+    os.chmod(samples, 0o600)
+    if len(rows) < 2: return
+    cadence = statistics.median(b[0]-a[0] for a, b in zip(rows, rows[1:]))
+    xs = [t-rows[0][0] for t, _ in rows]; ys = [b for _, b in rows]
+    mx, my = statistics.mean(xs), statistics.mean(ys)
+    slope = sum((x-mx)*(y-my) for x, y in zip(xs, ys))/sum((x-mx)**2 for x in xs)
+    if slope >= 0: return
+    passes = free / -slope / cadence
+    if passes > 3: return  # W1-T4804: NEAR_PASSES=3; inside one pass is critical.
+    print(f'low-space-report: begin free-bytes={free} time-to-full-passes={passes:.2f} tier={"critical" if passes <= 1 else "near"}', flush=True)
+    sizes = {}
+    def size(path):
+        if path not in sizes:
+            out = run(['du', '-xsk', '--', path])
+            sizes[path] = int(out.stdout.split()[0])*1024 if out.returncode == 0 and out.stdout.split() else None
+        return sizes[path]
+    children = [str(p) for p in pathlib.Path(home).iterdir() if not p.is_symlink()]
+    seen = 0; complete = True
+    for path in children:
+        value = size(path)
+        if value is None: complete = False
+        else: seen += value
+    known = ['Remudero', 'rmd-work', '.codex/work-artifacts', 'Developer/remudero-operator-worktrees', '.npm', '.cache']
+    for name in known:
+        path = str(pathlib.Path(home, name))
+        if os.path.isdir(path) and not os.path.islink(path): size(path)
+    for path, value in sorted(sizes.items(), key=lambda item: -(item[1] or 0)):
+        print(f'low-space-report: top-consumer: bytes={value if value is not None else "unknown"} {path}')
+    swap = run(['sysctl', 'vm.swapusage'])
+    match = re.search(r'used\s*=\s*([0-9.]+)([KMG])', swap.stdout) if swap.returncode == 0 else None
+    swap_bytes = int(float(match[1])*1024**('KMG'.index(match[2])+1)) if match else None
+    print(f'low-space-report: swap: bytes={swap_bytes if swap_bytes is not None else "unknown"} {swap.stdout.strip()}')
+    remainder = used-seen-swap_bytes if swap_bytes is not None else 'unknown'
+    print(f'low-space-report: unaccounted={remainder} used={used} seen={seen} seen-complete={complete}; other accounts and system areas this account cannot read; operator acts there')
+    enabled = 'yes' if preserve in ('completed', 'throttled') else 'no' if preserve == 'disabled' else 'unknown'
+    print(f'low-space-report: preserve-retire state={preserve} enabled={enabled}', flush=True)
+    if preserve == 'disabled':
+        # Reuse the installed helper's selection and lender closure, read-only.
+        # No config, preserve directory, stamp, archive or worktree is written.
+        spec = importlib.util.spec_from_file_location('preserve_retire', os.path.join(scripts, 'preserve-retire.py'))
+        helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+        original_run = helper.run
+        helper.run = lambda cmd, **kw: original_run(cmd, **dict(kw, timeout=min(kw.get('timeout', 600), max(.01, deadline-time.monotonic()))))
+        cfg = dict(helper.DEFAULTS)
+        cfg['roots'] = [os.path.join(home, p) for p in cfg['roots']]
+        cfg['preserve_root'] = os.path.join(home, cfg['preserve_root'])
+        repos = helper.discover(cfg, helper.protected_paths(home, cfg)); keep = {}
+        snap = helper.process_snapshot()
+        for repo in repos:
+            helper.resolve_git(repo)
+            why = repo.hold or ('foreign-owner' if os.lstat(repo.path).st_uid != os.getuid() else '')
+            if not why: why = 'process-unknown' if snap is None else helper.recent_path(repo, now-cfg['idle_hours']*3600) or helper.in_use(repo.path, snap)
+            if not why and repo.gitdir and os.path.exists(os.path.join(repo.gitdir, 'locked')): why = 'locked'
+            if why: keep[repo.path] = why
+        private = helper.home_private(home)
+        borrowers = helper.borrower_census(home, min(cfg['census_seconds'], max(.01, deadline-time.monotonic()))) if private else {}
+        helper.keep_closure(repos, keep, borrowers or {}, private and borrowers is not None)
+        candidates = [r.path for r in repos if r.path not in keep]
+        # Disjoint candidates avoid double-counting nested checkouts.
+        outer = [p for p in candidates if not any(p.startswith(q+'/') for q in candidates if p != q)]
+        values = [size(p) for p in outer]
+        total = sum(values) if all(v is not None for v in values) else 'unknown'
+        print(f'low-space-report: preserve-retire: disabled; dry-run defaults count={len(candidates)} bytes={total}; estimate before preservation checks, opt-in unchanged')
+    print('low-space-report: end', flush=True)
+def expired(signum, frame): raise TimeoutError('inspection budget exhausted')
+signal.signal(signal.SIGALRM, expired); signal.alarm(45)
+try:
+    report()
+except (OSError, ValueError, IndexError, subprocess.TimeoutExpired, TimeoutError) as error:
+    print(f'low-space-report: unavailable/incomplete reason={error}; consumer/reclaim quantities unknown', flush=True)
+finally:
+    signal.alarm(0)
+PYTHON
+  )
 fi
 exit 0

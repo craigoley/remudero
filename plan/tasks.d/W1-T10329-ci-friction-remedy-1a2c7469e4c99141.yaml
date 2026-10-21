@@ -1,0 +1,50 @@
+- id: W1-T10329
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/authority-ratchet.test.ts cost 30.1 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.22
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/authority-ratchet.test.ts"
+  files:
+    - src/lib/authority.ts
+    - test/github/ci-friction-remedy-1a2c7469e4c99141.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/authority-ratchet.test.ts"
+      proof: "grep: test(\"W1-T10329: check:test:test/authority-ratchet.test.ts is prevented, not retried\" in test/github/ci-friction-remedy-1a2c7469e4c99141.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/authority-ratchet.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/authority-ratchet.test.ts cost 30.1 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/authority.ts: test/authority-ratchet.test.ts imports it
+    - test/authority-ratchet.test.ts: named by the failing check
+    - the rounds name a failing test: test/authority-ratchet.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13313 (https://github.com/craigoley/remudero/pull/13313) at 2026-10-21T09:30:52.039Z: ci-log round — comment-load-ratchet: test/authority-ratchet.test.ts; assertion-discrimination: test/authority-ratchet.test.ts; rule-checks: test/authority-ratchet.test.ts
+        failing tests: every tracked src file with a detectable external write is named in AUTHORITY_TABLE by module
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/authority-ratchet.test.ts:1:2262
+          | ✖ every tracked src file with a detectable external write is named in AUTHORITY_TABLE by module (112.922575ms)
+          |   AssertionError [ERR_ASSERTION]: AUTHORITY_TABLE (src/lib/authority.ts) is missing a row for: src/cli/commands/run-task-verb.ts (["git-push-argv"]) — a new external write must name its gate before it can merge
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'src/cli/commands/run-task-verb.ts'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/authority-ratchet.test.ts:99:10)
+    - PR #10491 (https://github.com/craigoley/remudero/pull/10491) at 2026-10-09T22:56:32.167Z: ci-log round — rule-checks: test/authority-ratchet.test.ts
+        failing tests: runPreflightFast: real commands for all seven admitted census entries pass on this HEAD, even if host contention triggers a cost-only refusal; PROPERTY no negated optional-chain conflator exists beyond the reviewed baseline
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

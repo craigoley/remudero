@@ -23,6 +23,7 @@ interface BuildModule {
   CHILD_ENTRIES: readonly { name: string; source: string }[];
   WORKER_ENTRIES: readonly string[];
   OUT_DIR: string;
+  RECIPE_VERSION: number;
   workerBundleName(module: string): string;
 }
 // Required, as src/lib/child-entry-argv.ts requires it, so this process holds one instance of the script.
@@ -171,7 +172,7 @@ test("W1-T10058: changed or unqualified inputs rebuild instead of claiming reuse
     ["source", () => writeFileSync(join(dir, build.WORKER_ENTRIES[0]!), "export const at = 2;\n"), /source-changed/],
     ["lockfile", () => writeFileSync(join(dir, "package-lock.json"), '{ "lockfileVersion": 3, "n": 2 }\n'), /source-changed/],
     ["malformed manifest", () => writeFileSync(join(OUT(dir), "manifest.json"), "{ not json"), /no-manifest/],
-    ["incomplete manifest", () => writeFileSync(join(OUT(dir), "manifest.json"), JSON.stringify({ schema: 2, recipe: 4 })), /manifest-invalid/],
+    ["incomplete manifest", () => writeFileSync(join(OUT(dir), "manifest.json"), JSON.stringify({ schema: 2, recipe: build.RECIPE_VERSION })), /manifest-invalid/],
     ["missing manifest", () => rmSync(join(OUT(dir), "manifest.json")), /no-manifest/],
     ["missing child entry", () => rmSync(join(OUT(dir), `${build.CHILD_ENTRIES[1]!.name}.mjs`)), /bundle-missing/],
   ];

@@ -159,16 +159,18 @@ test("W1-T10026: a left-out file nothing committed imports is still dropped", as
 test("W1-T10026: a refused scope amendment ends the build with its reason, never a bare PR", async () => {
   const f = fixture();
   try {
-    // No seam: the production route asks the real scope-amendment workflow, which amends only for an open PR.
-    const { result, created } = await dispatch(f, IMPORTING);
+    const { result, created } = await dispatch(f, IMPORTING, () => ({
+      kind: "refused", reason: "shard-not-found", detail: "fixture: task shard unavailable",
+    }));
     const rows = f.rows();
     assert.equal(created.length, 0);
     const amendment = rows.find((row) => row.step === "implement.scope_amendment");
     assert.equal(amendment?.outcome, "refused");
-    assert.equal(amendment?.reason, "invalid-pr");
+    assert.equal(amendment?.reason, "shard-not-found");
     const verdict = rows.find((row) => row.step === "verdict");
     assert.equal(verdict?.reason, "scope_needed");
-    assert.equal(verdict?.amendment_reason, "invalid-pr");
+    assert.equal(verdict?.amendment_reason, "shard-not-found");
+    assert.equal(verdict?.amendment_detail, "fixture: task shard unavailable");
     assert.equal(result.verdict, "no_pr");
   } finally {
     f.cleanup();
