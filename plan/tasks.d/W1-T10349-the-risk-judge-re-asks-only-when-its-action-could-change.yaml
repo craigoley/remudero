@@ -1,0 +1,108 @@
+- id: W1-T10349
+  title: "THE RISK JUDGE RE-ASKS A PARKED ESCALATION ONLY WHEN ITS ACTION COULD CHANGE — any drift in the family confidence bar counts as moved evidence, so 624 of 652 re-asks in a week fired on bar drift alone, 191 of them a model call, and each unchanged answer doubled a cadence that never governed, to 1.4e21 ms"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low  # Rule 19: one concern, when the machine-filing judge re-asks a parked escalation; rulings, landing, withdrawal and the backstop itself are unchanged
+  band_meaning: span
+  budget_usd: 8.00
+  priority: 1  # each spurious re-ask is a model call: 191 calls, about 11M input tokens in a week
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-21: machine_judge.reasked fired 40 times each on W1-T9002, W1-T9003 and W1-T9023, every one moved: [confidence_bar], cadence_due: false"
+  plan_refs: [W1-T8830, W1-T9043, W1-T9045, W1-T10348, W1-T10350]
+  files:
+    - src/lib/machine-filing-judge.ts
+    - test/triage/the-risk-judge-re-asks-only-when-its-action-could-change.test.ts
+  rationale: |
+    READ 2026-10-21 at origin/main 03e4f4ac7. Ledger: every machine_judge.* row and every lane risk-judge
+    worker.attempt row in the core ledger's rotations from 2026-10-12 to 2026-10-21T13:11Z plus the live tail, deduplicated
+    by line (host remudero, ~/rmd-state2/state).
+    THE CODE (src/lib/machine-filing-judge.ts).
+      - `reaskParkedEscalations` computes `inputs = machineJudgeEvidence(task, earnedConfidenceBar(...), cost, isMerged)`
+        and `moved = movedEvidence(entry.inputs, inputs)`. It skips a record only when
+        `moved.length === 0 && !cadenceDue`.
+      - `movedEvidence` reports "confidence_bar" whenever `then.bar !== now.bar`. The bar is
+        `1 - (1 - base) * 2 * mean` over the family's Beta record, which moves whenever ANY task in the family merges
+        or is retired. So it differs on almost every pass.
+      - `judgeMachineShard` returns the deterministic backstop's escalation before any model call (confidence 1,
+        verdict high). Otherwise it calls the risk judge model.
+      - A bar move cannot change the action for a recorded `high` verdict. For a recorded `low` verdict it changes
+        the action only if the bar crosses the recorded confidence, which `planRiskJudgeAction` can decide without
+        a model.
+      - `noteReask` sets `repeats: changed ? 0 : r.repeats + 1` for EVERY unchanged re-ask, whatever triggered it. It
+        also adds 1 to the family's `asked` count for every re-ask, deterministic ones included.
+      - `reaskIntervalMs` = SCALE x odds x 2^repeats. So the bar-drift loop doubled a cadence interval that never
+        triggered, and that interval reached 1.4e20 ms.
+    MEASURED, 2026-10-14T18:48Z to 2026-10-21T11:29Z (53 judge passes).
+      - machine_judge.reasked: 652 rows over 83 tasks. moved ["confidence_bar"]: 624; moved []: 28.
+        cadence_due false: 622.
+      - Results: 615 unchanged escalate, 37 changed to proceed, 9 reask_held.
+      - Top tasks: W1-T9002, W1-T9003 and W1-T9023 40 each; W1-T9377, W1-T9411 and W1-T9416 39 each.
+      - 461 re-asks were the deterministic backstop (confidence 1, verdict high). They cost no model call, but each
+        wrote a row and inflated its family's `asked` count.
+      - 191 re-asks called the model. Each matched one lane risk-judge worker.attempt on the same pid within the pass
+        (191 of 191 matched). Together: 10,956,228 input tokens (8,417,590 cache-read), 56,408 output tokens,
+        100.5 worker-minutes, notional $6.35. Billing was mostly subscription, with 79 api-billed attempts across all
+        risk-judge calls in the window.
+      - 171 of the 191 model calls were triggered by bar drift alone.
+      - The 37 flips came from the model sampling differently, not from the bar. 31 were bar-only triggers where the
+        bar moved by under 0.01 while the new confidence (0.68 to 0.85) sat far above it. Re-asking a sampled judge
+        until it says proceed is judge-shopping, not new evidence.
+      - interval_ms: median 4.0e11, maximum 1.36e21. 152 rows exceed 1e15. Example: W1-T9002 at
+        2026-10-20T18:54Z had interval_ms 1.41e20 and cadence_due false.
+    OVERLAP SWEEP 2026-10-21. plan/tasks.d and the 15 open PRs.
+      - W1-T9045 (in flight) makes the family prior learn from operator rulings. That moves the bar more often,
+        which makes this fix more pressing. It changes `familyTrackRecord`, not the re-ask trigger.
+      - W1-T9054 batches the judge's landings, not its asks.
+      - W1-T10348 edits the same file's `due` filter. The dispatch file-overlap partition serialises the two.
+      - W1-T10350 changes the backstop. Item 3 below makes a backstop change re-open a backstop-pinned record.
+  design: |
+    No fixed bounds and no strike cap. Ask the model only when something it has not seen could change the ACTION.
+    1. THE BAR IS DECIDED WITHOUT A MODEL CALL.
+       - When the family bar moves, re-apply `planRiskJudgeAction` to the record's pinned verdict and confidence at
+         the new bar.
+       - A `high` verdict never flips on a bar move, so nothing is asked.
+       - A `low` verdict whose recorded confidence now clears the bar lands as a re-pinned proceed through the one
+         judge PR, with no model call. Its reason names the bar crossing.
+       - The bar alone is no longer in `movedEvidence`'s ask triggers.
+    2. WHAT STILL ASKS THE MODEL.
+       - The record's pin (an edit re-pins, as today), merged depends_on, the cost the family's gardener prices, the
+         deterministic backstop's answer, or the cadence falling due.
+    3. A BACKSTOP-PINNED ESCALATION IS RE-EVALUATED DETERMINISTICALLY.
+       - While `deterministicEscalation` still fires with the same reason, the record writes no reasked row and does
+         not touch its family's re-ask record.
+       - When the backstop stops firing (a record edit, or W1-T10350's change), the model is asked once, as a moved
+         input named "backstop".
+    4. THE CADENCE COUNTS ONLY CADENCE RE-ASKS.
+       - `repeats` increments only on a cadence-triggered model re-ask with an unchanged answer. An input-triggered
+         re-ask leaves the backoff where it was.
+       - The family's `asked` and `flipped` counts only model re-asks.
+       - The reasked row carries `next_due_at` as an ISO time beside `interval_ms`, so a reader sees a date and not a
+         raw 1e20.
+  acceptance:
+    - claim: "a parked escalation whose only moved input is the family confidence bar is not sent to the risk judge model"
+      proof: 'grep: test("W1-T10349: a confidence bar drift alone never asks the model" in test/triage/the-risk-judge-re-asks-only-when-its-action-could-change.test.ts'
+    - claim: "a bar that falls below a recorded low verdict's confidence re-pins the record as proceed without a model call"
+      proof: 'grep: test("W1-T10349: a bar crossing a recorded low verdict flips the ruling without the model" in test/triage/the-risk-judge-re-asks-only-when-its-action-could-change.test.ts'
+    - claim: "a backstop-pinned escalation writes no reasked row and leaves its family's re-ask record unchanged until the backstop's answer changes, and is then asked once"
+      proof: 'grep: test("W1-T10349: a backstop-pinned escalation is re-asked only when the backstop stops firing" in test/triage/the-risk-judge-re-asks-only-when-its-action-could-change.test.ts'
+    - claim: "only a cadence-triggered unchanged re-ask doubles the interval, and the reasked row carries an ISO next_due_at"
+      proof: 'grep: test("W1-T10349: only a cadence re-ask doubles the interval" in test/triage/the-risk-judge-re-asks-only-when-its-action-could-change.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/triage/the-risk-judge-re-asks-only-when-its-action-could-change.test.ts"
+  falsifier: |
+    - Keep "confidence_bar" as an ask trigger: the stub judge is called on a bar-only move and the first test fails.
+    - Re-ask instead of re-applying planRiskJudgeAction: the stub judge is called, or nothing flips, and the second
+      test fails.
+    - Re-ask a backstop record on every pass: a reasked row is written and `asked` grows, and the third test fails.
+    - Increment repeats on an input-triggered re-ask: the interval doubles and the fourth test fails.
+    Regression guards, kept by the same file:
+    - A merged dependency, a changed cost or a due cadence still asks the model once.
+    - An edited record re-pins and is judged fresh.
+    - An unchanged answer writes nothing to the plan.
+    - A flip lands through the one judge PR.
+    - W1-T9043's 30-day withdrawal is unchanged.
+    - An operator-released record is never re-asked.
