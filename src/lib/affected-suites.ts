@@ -425,6 +425,11 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     pathReaders.push(mkdtempCensus);
   }
   const changedSrcTypeScript = files.some((f) => f.startsWith("src/") && f.endsWith(".ts"));
+  // W1-T10140: caller classification walks src/ and scripts/ as text, beyond import/symbol reach.
+  const callerCensus = suitePath("test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts");
+  if (input.files.has(callerCensus) && files.some((f) => /^(?:src|scripts)\/.*\.(?:ts|mjs)$/.test(f))) {
+    pathReaders.push(callerCensus);
+  }
   const declaredSenderCensus = suitePath("test/every-message-names-one-declared-sender.test.ts");
   if (input.files.has(declaredSenderCensus) && changedSrcTypeScript) {
     pathReaders.push(declaredSenderCensus);
