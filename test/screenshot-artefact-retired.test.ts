@@ -42,6 +42,7 @@ test("test/screenshot-artefact-retired.test.ts: neither design-review image rema
 function runGateProperty(title: string): void {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  env.NODE_V8_COVERAGE = "";
   const result = spawnSync(process.execPath, [
     "--test", "--test-reporter=tap", "--import", "tsx",
     "--import", "./test/setup/tmp-hygiene.ts",
