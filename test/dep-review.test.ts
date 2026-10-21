@@ -761,8 +761,13 @@ test("W1-T9689 the default dep review reader binds checks to the selected head",
   const statuses = { sha, total_count: 1, statuses: [{ id: 300, context: "coverage-ratchet", state: "success",
     created_at: "2026-10-15T11:00:00Z", updated_at: "2026-10-15T11:01:00Z" }] };
   const workflows = { total_count: 2, workflow_runs: [10, 11].map(id => ({ id, workflow_id: 5, check_suite_id: id + 490, head_sha: sha, run_attempt: 1 })) };
+  const pagedChecks = Array.from({ length: 123 }, (_, index) => ({ ...check(1000 + index, 11, "success", "11"),
+    name: index === 0 ? "ci-gate" : `check-${index}` }));
   const cases = [
     { label: "real async child, late older-run red, and commit status", code: 0 },
+    { label: "real async child reads all 123 check runs", code: 0,
+      checks: { total_count: 123, check_runs: pagedChecks.slice(0, 100) },
+      checkPage2: { total_count: 123, check_runs: pagedChecks.slice(100) } },
     { label: "current red", code: 1, checks: { total_count: 1, check_runs: [{ ...green, conclusion: "failure" }] } },
     { label: "pending", code: 1, checks: { total_count: 1, check_runs: [{ ...green, status: "in_progress", conclusion: null }] } },
     { label: "newer pending beside older green", code: 1, checks: { total_count: 2, check_runs: [check(101, 10, "success", "10"), { ...green, status: "in_progress", conclusion: null }] } },
@@ -788,6 +793,7 @@ test("W1-T9689 the default dep review reader binds checks to the selected head",
       { when: "pr view", stdout: JSON.stringify({ number: 3654, url, title: PR80_FITTED_TITLE, body: PR80_BODY, headRefOid: sha,
         author: DEPENDABOT_GRAPHQL_AUTHOR, statusCheckRollup: GREEN_CHECKS }) },
       { when: "/pulls/3654", stdout: JSON.stringify(pull) },
+      ...(row.checkPage2 ? [{ when: "/check-runs?per_page=100&filter=all&page=2", stdout: JSON.stringify(row.checkPage2) }] : []),
       { when: "/check-runs", delaySeconds: 0.15, stdout: row.stdout ?? JSON.stringify(row.checks ?? runs), exit: row.exit },
       { when: "/status", stdout: JSON.stringify(row.statuses ?? statuses) },
       { when: "/actions/runs?", delaySeconds: 0.05, stdout: JSON.stringify(row.workflows ?? workflows) },
@@ -816,12 +822,103 @@ test("W1-T9689 the default dep review reader binds checks to the selected head",
       assert.equal(posted, row.code === 0 ? 1 : 0); assert.equal(armed, row.code === 0 ? 1 : 0);
       assert.ok(shim.calls().some(c => c.includes(`/commits/${sha}/check-runs?`) && c.includes("filter=all")), "actual head-bound all-attempt REST read");
       assert.ok(duringCheck, "the real default child is in flight while the event loop remains responsive");
+      if (row.checkPage2) assert.ok(shim.calls().some(call => call.includes("filter=all&page=2")), "the default child requests the second exact-head page");
       if (row.code === 1) assert.ok(readLedgerObjects(ledgerPath).some(r => r.step === "dep-review.decided" && r.decision === "hold"));
     } finally {
       clearInterval(pulse); process.env.PATH = savedPath; console.log = savedLog;
       rmSync(tmp, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true });
     }
   });
+});
+
+function selectedPaginationFixture() {
+  const sha = "a".repeat(40), target = { number: 3654, url: "https://github.com/craigoley/remudero/pull/3654", headSha: sha, body: PR80_BODY };
+  const pull = { id: 8, number: target.number, html_url: target.url, state: "open", merged: false,
+    head: { sha }, base: { repo: { id: 55, full_name: "craigoley/remudero" } }, body: target.body };
+  const checks: Record<string, unknown>[] = Array.from({ length: 123 }, (_, index) => ({ id: 10_000 + index,
+    name: `check-${index}`, head_sha: sha, status: "completed", conclusion: "success", started_at: "2026-10-15T11:00:00Z" }));
+  const statuses = Array.from({ length: 101 }, (_, index) => ({ id: 20_000 + index, context: `status-${index}`,
+    state: "success", created_at: "2026-10-15T11:00:00Z" }));
+  const workflows = Array.from({ length: 101 }, (_, index) => ({ id: 1000 + index, workflow_id: 8,
+    check_suite_id: 2000 + index, head_sha: sha, run_attempt: 1 }));
+  checks[122] = { ...checks[122], name: "page-two-required", app: { slug: "github-actions" }, check_suite: { id: 2100 } };
+  const calls: string[] = [];
+  const read = async (args: string[]) => {
+    const path = args[1]; calls.push(path);
+    if (path.includes("/pulls/")) return pull;
+    const url = new URL(path, "https://api.github.com/");
+    assert.equal(url.searchParams.get("per_page"), "100", "every population requests the same explicit page size");
+    const page = Number(url.searchParams.get("page"));
+    assert.ok(page > 0);
+    const key = path.includes("/check-runs") ? "check_runs" : path.includes("/status") ? "statuses" : "workflow_runs";
+    const population = key === "check_runs" ? checks : key === "statuses" ? statuses : workflows;
+    if (key === "check_runs") assert.equal(url.searchParams.get("filter"), "all");
+    if (key === "workflow_runs") assert.equal(url.searchParams.get("head_sha"), sha);
+    return { total_count: population.length, [key]: population.slice((page - 1) * 100, page * 100), ...(key === "statuses" ? { sha } : {}) };
+  };
+  return { sha, target, pull, checks, statuses, workflows, calls, read };
+}
+
+test("selected dependency evidence paginates every population and retains a page-two red", async () => {
+  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  for (const conclusion of ["success", "failure"]) {
+    const f = selectedPaginationFixture();
+    f.checks[122].conclusion = conclusion;
+    const result = await readSelectedDepReviewChecks("craigoley", "remudero", f.target, f.read);
+    assert.equal(result.kind, "observed");
+    if (result.kind !== "observed") throw new Error(result.reason);
+    assert.equal(result.checks.length, 224, "all 123 checks and 101 statuses survive the complete read");
+    const last = result.checks.find(check => check.name === "page-two-required");
+    assert.equal(last?.workflowRunId, 1100, "native producer identity can come from the last workflow page");
+    assert.equal(last?.workflowId, 8);
+    assert.equal(last?.conclusion, conclusion.toUpperCase());
+    const decision = decideDepReview({ author: DEPENDABOT_GRAPHQL_AUTHOR, title: PR80_FITTED_TITLE, body: PR80_BODY,
+      diff: PR80_DIFF, checks: result.checks });
+    assert.equal(decision.decision, conclusion === "success" ? "arm" : "hold");
+    assert.equal(f.calls.length, 8, "two PR identity reads and exactly two pages of each population");
+  }
+});
+
+test("selected dependency pagination refuses incomplete changing overlapping and foreign pages", async (t) => {
+  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  for (const stage of ["check_runs", "statuses", "workflow_runs"]) {
+    for (const defect of ["read failure", "short page", "empty page", "total drift", "duplicate", "foreign head", "null row", "invalid total"]) {
+      await t.test(`${stage}: ${defect}`, async () => {
+        const f = selectedPaginationFixture();
+        const result = await readSelectedDepReviewChecks("craigoley", "remudero", f.target, async args => {
+          const value = await f.read(args);
+          const path = args[1], current = path.includes("/check-runs") ? "check_runs" : path.includes("/status") ? "statuses" : "workflow_runs";
+          if (current !== stage || !path.includes("page=2")) return value;
+          if (defect === "read failure") throw new Error("fixture read unavailable");
+          const body = value as Record<string, unknown>, page = body[stage] as Array<Record<string, unknown>>;
+          if (defect === "short page") page.pop();
+          if (defect === "empty page") body[stage] = [];
+          if (defect === "total drift") body.total_count = Number(body.total_count) + 1;
+          if (defect === "duplicate") page[0] = { ...page[0], id: stage === "check_runs" ? 10_000 : stage === "statuses" ? 20_000 : 1000 };
+          if (defect === "foreign head") {
+            if (stage === "statuses") body.sha = "b".repeat(40);
+            else page[0] = { ...page[0], head_sha: "b".repeat(40) };
+          }
+          if (defect === "null row") body[stage] = page.map((row, index) => index === 0 ? null : row);
+          if (defect === "invalid total") body.total_count = -1;
+          return body;
+        });
+        assert.equal(result.kind, "unknown");
+        assert.ok(f.calls.length <= 7, "a failed population stops before final selected-PR confirmation");
+      });
+    }
+  }
+});
+
+test("selected dependency pagination keeps zero and exact-page populations single-read", async () => {
+  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  for (const count of [0, 100]) {
+    const f = selectedPaginationFixture();
+    f.checks.length = count; f.statuses.length = count; f.workflows.length = count;
+    const result = await readSelectedDepReviewChecks("craigoley", "remudero", f.target, f.read);
+    assert.equal(result.kind, "observed");
+    assert.equal(f.calls.length, 5, "zero and complete first pages never request page two");
+  }
 });
 
 test("W1-T9689 selected evidence retains snapshots and explicit unknown shape outcomes", async (t) => {

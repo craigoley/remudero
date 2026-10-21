@@ -655,12 +655,28 @@ export async function readSelectedDepReviewChecks(
   const record = (value: unknown): Record<string, unknown> | undefined =>
     value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
   const timestamp = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
-  const rows = (value: unknown, key: string): Record<string, unknown>[] | undefined => {
-    const body = record(value);
-    if (body === undefined) return undefined;
-    const list = body[key];
-    if (!Array.isArray(list) || !Number.isSafeInteger(body.total_count) || body.total_count !== list.length || !list.every(row => record(row) !== undefined)) return undefined;
-    return list;
+  const rows = async (args: string[], key: string, bound?: (body: Record<string, unknown>) => boolean): Promise<Record<string, unknown>[] | undefined> => {
+    // GitHub caps a requested REST page at 100 rows. The first declared total bounds
+    // this walk; any changing, short or overlapping population remains unknown.
+    const pageSize = 100, endpoint = new URL(args[1], "https://api.github.com/");
+    endpoint.searchParams.set("per_page", String(pageSize));
+    let total: number | undefined;
+    const all: Record<string, unknown>[] = [], seen = new Set<unknown>();
+    for (let page = 1; total === undefined || all.length < total; page++) {
+      endpoint.searchParams.set("page", String(page));
+      const body = record(await read([args[0], endpoint.pathname.slice(1) + endpoint.search, ...args.slice(2)]));
+      if (!body || !Number.isSafeInteger(body.total_count) || (body.total_count as number) < 0 || (bound && !bound(body))) return undefined;
+      total ??= body.total_count as number;
+      const list = body[key];
+      if (body.total_count !== total || !Array.isArray(list) || list.length !== Math.min(pageSize, total - all.length) ||
+          !list.every(row => record(row) !== undefined)) return undefined;
+      for (const row of list as Record<string, unknown>[]) {
+        if (seen.has(row.id)) return undefined;
+        seen.add(row.id);
+        all.push(row);
+      }
+    }
+    return all;
   };
   const pull = (value: unknown) => {
     const p = record(value), head = record(p?.head), repository = record(record(p?.base)?.repo);
@@ -679,17 +695,16 @@ export async function readSelectedDepReviewChecks(
     stage = "check_runs";
     const args = checkRunsRestArgs(owner, repo, target.headSha);
     args[1] += "&filter=all";
-    const checks = rows(await read(args), "check_runs");
+    const checks = await rows(args, "check_runs");
     if (!checks || new Set(checks.map(c => c.id)).size !== checks.length || checks.some(c => !id(c.id) || c.head_sha !== target.headSha ||
       typeof c.name !== "string" || !c.name || typeof c.status !== "string" || !timestamp(c.started_at) ||
       (c.conclusion != null && typeof c.conclusion !== "string") || (c.completed_at != null && !timestamp(c.completed_at)))) return unknown("check_runs_incomplete_or_unbound");
     stage = "commit_statuses";
-    const statusBody = await read(combinedStatusRestArgs(owner, repo, target.headSha));
-    const statuses = rows(statusBody, "statuses");
-    if (record(statusBody)?.sha !== target.headSha || !statuses || statuses.some(s => !id(s.id) || typeof s.context !== "string" || !s.context ||
+    const statuses = await rows(combinedStatusRestArgs(owner, repo, target.headSha), "statuses", body => body.sha === target.headSha);
+    if (!statuses || statuses.some(s => !id(s.id) || typeof s.context !== "string" || !s.context ||
       typeof s.state !== "string" || !timestamp(s.created_at) || (s.updated_at != null && !timestamp(s.updated_at)))) return unknown("commit_statuses_incomplete_or_unbound");
     stage = "workflow_runs";
-    const workflows = rows(await read(runsForHeadRestArgs(owner, repo, target.headSha)), "workflow_runs");
+    const workflows = await rows(runsForHeadRestArgs(owner, repo, target.headSha), "workflow_runs");
     if (!workflows || new Set(workflows.map(r => r.id)).size !== workflows.length || workflows.some(r => !id(r.id) || !id(r.workflow_id) ||
       !id(r.check_suite_id) || !id(r.run_attempt) || r.head_sha !== target.headSha)) return unknown("workflow_runs_incomplete_or_unbound");
     const rollup = rollupFromRest(checks as Parameters<typeof rollupFromRest>[0], statuses as Parameters<typeof rollupFromRest>[1], workflows as NonNullable<Parameters<typeof rollupFromRest>[2]>);
