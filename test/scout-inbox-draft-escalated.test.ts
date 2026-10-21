@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import { fixedClock } from "#src/lib/clock.js";
 import { SCOUT_WINDOW_MS, isFailureShapedStep, scoutGardenSpec, scoutSymptoms } from "#src/lib/scout-gardener.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = Date.UTC(2026, 9, 8, 12);
 const at = (fractionOfWindow: number): string => new Date(NOW - SCOUT_WINDOW_MS * fractionOfWindow).toISOString();
