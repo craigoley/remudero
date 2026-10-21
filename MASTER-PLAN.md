@@ -77,6 +77,34 @@ regression views. Grouping reduces duplicate cards but never deletes ledger evid
 tied to a shipped artifact, regression requires newer evidence, and snooze ends on a named
 condition or new activity. W1-T3853 and W1-T3854 make these rules durable and source-labeled.
 
+## Release bake rule status (W1-T9662)
+
+As researched on 2026-10-21, the operator's **30‑minute bake** has a historical ruling,
+but whether it remains a current requirement is **unresolved**. W1-T4529's `origin` records
+the 2026-09-24 ruling: a healthy primary bakes a release for 30 minutes before fleet promotion.
+Its design requires no crash-loop flag and an unchanged restart count during that window;
+an unhealthy bake revokes the release instead.
+
+The implementation is retired, not delivered: W1-T4529 depends on retired W1-T4528's release
+tags, which depend on withdrawn W1-T4527's primary identity. See the corresponding shards in
+`plan/tasks.d/`. At the inspected checkout, `src/lib/release-tags.ts` and the proposed
+`test/the-primary-bakes-a-release-before-the-fleet.test.ts` are absent; `src/lib/deployer.ts`
+contains `runDeployCycle` but no `checkReleaseBake`. This is repository evidence, not a live
+deployment measurement.
+
+The [October 5 operator-authorized audit](https://github.com/craigoley/remudero/issues/8597#issuecomment-5998083081)
+explicitly preserves retirement/deferred-roadmap status and says revival requires a separate
+operator decision. Retirement of the implementation does not establish rescission of the
+policy. [Merged PR #12048](https://github.com/craigoley/remudero/pull/12048) ratified the research
+and conditional planning tasks on October 15; its body explicitly says W1-T9662 is not yet
+implemented. It supplies no reaffirmation or rescission of the original requirement.
+
+Disposition: keep the old chain retired. A current operator ruling affirming or rescinding
+the requirement remains necessary; the inspected records and GitHub discussion do not settle
+it. If reaffirmed, W1-T9663 calls for a fresh task with its own release-tag and primary-identity
+prerequisites, rather than revival of W1-T4529. No fleet promotion or runtime enforcement is
+claimed by this research.
+
 ## NET STATE
 
 ### CAPABILITY SNAPSHOT
