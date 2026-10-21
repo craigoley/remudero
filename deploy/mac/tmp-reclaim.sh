@@ -88,7 +88,17 @@ else
 fi
 TSX_PRUNED_N=0; TSX_SKIPPED=0
 del_k=0; del_n=0; risky=(); risky_n=0
-session_del_k=0; session_del_n=0
+session_del_k=0; session_del_n=0; session_file_n=0; session_file_k=0
+RECEIPT_GUARD="$SEED_GUARD_DIR/workspace-retirement-guard.sh"
+[ -f "$RECEIPT_GUARD" ] || RECEIPT_GUARD="$SEED_GUARD_DIR/../workspace-retirement-guard.sh"
+[ ! -f "$RECEIPT_GUARD" ] || source "$RECEIPT_GUARD"
+
+session_receipt() {
+  local message="$1" action="$2"
+  local receipt="${REMUDERO_JANITOR_DECISION_LOG:-$HOME/.local/state/remudero/janitor-decisions.tsv}"
+  command -v rmd_decision_record >/dev/null || return 1
+  mkdir -p "$(dirname "$receipt")" && rmd_decision_record "$receipt" "$message" "$action" "$action"
+}
 
 report_risk() {
   local reason="$1" path="$2"
@@ -406,11 +416,18 @@ process_tmp_entry() {
   fi
 }
 
-# Session scratch is a separate, narrower policy: remove only complete direct-child directories
-# whose every item is older than six hours. Loose files are deliberately left alone. The same
-# ownership, symlink, Git, credential, scheduled-log, process/CWD/open-file checks still apply.
+# Session scratch also judges regular leaves individually in mixed-age trees.
 session_scratch_risk() {
-  local path="$1" found status log_file why
+  local path="$1" found status log_file why parent boundary
+  boundary="$HOME"
+  [ -z "${RMD_RECLAIM_SESSION_ROOT+x}" ] || boundary="$SESSION_ROOT_REAL"
+  parent="$path"
+  while [ "$parent" != "$boundary" ] && [ "$parent" != / ]; do
+    [ ! -L "$parent" ] || { echo 'session scratch enclosing symlink'; return 0; }
+    [ ! -e "$parent/.git" ] || { echo "Git checkout/worktree: $parent/.git"; return 0; }
+    parent=${parent%/*}; [ -n "$parent" ] || parent=/
+  done
+  [ ! -e "$parent/.git" ] || { echo 'session scratch enclosing Git checkout'; return 0; }
   why=$(artifact_risk "$path")
   [ -z "$why" ] || { echo "$why"; return 0; }
   found=$(find "$path" -xdev ! -type d ! -type f -print -quit 2>/dev/null); status=$?
@@ -419,6 +436,9 @@ session_scratch_risk() {
   found=$(find "$path" -xdev -type f \( -name '.env' -o -name '.env.*' -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' -o -iname '*credential*' -o -iname '*keychain*' -o -iname '*.pem' -o -iname '*.p12' -o -iname '*.pfx' -o -iname '*.keytab' -o -name 'id_rsa*' -o -name 'id_ed25519*' \) -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'session scratch sensitive-name scan unavailable'; return 0; }
   [ -z "$found" ] || { echo "credential-like filename: $found"; return 0; }
+  found=$(find "$path" -xdev \( -iname '*.patch' -o -iname '*.diff' -o -iname '*.rej' -o -iname '*.orig' -o -name '*.lock' -o -name '*.pid' \) -print -quit 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] || { echo 'session scratch evidence scan unavailable'; return 0; }
+  [ -z "$found" ] || { echo "retained evidence or coordination file: $found"; return 0; }
   while IFS= read -r -d '' log_file; do
     if why=$(scheduled_log_risk "$log_file"); then echo "$why"; return 0; fi
   done < <(find "$path" -xdev -type f -name '*.log' -print0 2>/dev/null)
@@ -426,37 +446,74 @@ session_scratch_risk() {
 }
 
 process_session_scratch_dir() {
-  local path="$1" recent status why k resolved entry_owner
-  [ -d "$path" ] || return 0
+  local path="$1" recent status why k file entries
+  [ -e "$path" ] || [ -L "$path" ] || return 0
   if [ -L "$path" ]; then report_risk 'session scratch directory is a symlink' "$path"; return 0; fi
-  entry_owner=$(owner "$path" 2>/dev/null)
-  if [ "$entry_owner" != "$ME" ]; then
-    report_risk "owned by ${entry_owner:-unknown}; age check requires owner account" "$path"
-    return 0
-  fi
-  resolved=$(cd "$path" 2>/dev/null && pwd -P)
-  if [ -z "$resolved" ] || [ "$resolved" != "$path" ]; then
-    report_risk 'session scratch path changed or could not be resolved' "$path"; return 0
-  fi
-  recent=$(find "$path" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); status=$?
-  if [ "$status" -ne 0 ]; then report_risk 'session scratch age scan unavailable' "$path"; return 0; fi
-  if [ -n "$recent" ]; then report_risk 'recent content inside session scratch directory' "$path"; return 0; fi
   why=$(session_scratch_risk "$path")
   if [ -n "$why" ]; then report_risk "$why" "$path"; return 0; fi
-  k=$(du -xsk "$path" 2>/dev/null | cut -f1)
-  if [ -z "$k" ]; then report_risk 'session scratch size scan unavailable' "$path"; return 0; fi
-  if [ "$APPLY" = 1 ]; then
+  # Preserve whole-tree retirement for an entirely idle direct child. Mixed
+  # trees instead release eligible leaves without deleting their container.
+  if [ -d "$path" ]; then
     recent=$(find "$path" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); status=$?
-    if [ "$status" -ne 0 ]; then report_risk 'session scratch age recheck unavailable' "$path"; return 0; fi
-    [ -z "$recent" ] || { report_risk 'recent content appeared before session scratch deletion' "$path"; return 0; }
+    [ "$status" = 0 ] || { report_risk 'session scratch age scan unavailable' "$path"; return; }
+    if [ -z "$recent" ]; then
+      k=$(du -xsk "$path" 2>/dev/null | cut -f1)
+      case "$k" in ''|*[!0-9]*) report_risk 'session scratch size unavailable' "$path"; return ;; esac
+      if [ "$APPLY" = 1 ]; then
+        session_receipt "session scratch directory eligible: $path" planned || return
+        why=$(session_scratch_risk "$path")
+        [ -z "$why" ] || { report_risk "$why" "$path"; return; }
+        recent=$(find "$path" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); status=$?
+        [ "$status" = 0 ] && [ -z "$recent" ] || return
+        rm -rf -- "$path" || { report_risk 'session scratch delete failed' "$path"; return; }
+        session_receipt "session scratch directory removed: $path" removed || exit 2
+        printf 'deleted old session scratch directory (%s KiB): %s\n' "$k" "$path"
+      else
+        printf 'WOULD DELETE old session scratch directory %s (%s KiB)\n' "$path" "$k"
+      fi
+      session_del_k=$((session_del_k+k)); session_del_n=$((session_del_n+1)); return
+    fi
+    report_risk 'recent content inside session scratch directory; assessing idle leaves' "$path"
+  fi
+  entries=$(find "$path" -xdev -type f -mmin "+$AGE_MIN" -cmin "+$AGE_MIN" -print -quit 2>/dev/null) || {
+    report_risk 'session scratch leaf scan unavailable' "$path"; return 0;
+  }
+  [ -n "$entries" ] || entries=''
+  while IFS= read -r -d '' file; do
+    k=$(du -xsk "$file" 2>/dev/null | cut -f1)
+    case "$k" in ''|*[!0-9]*) report_risk 'session scratch size unavailable' "$file"; continue ;; esac
+    recent=$(find "$file" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); status=$?
+    [ "$status" = 0 ] && [ -z "$recent" ] || continue
+    # The direct-child tree must remain unused, even when only one leaf goes.
     why=$(session_scratch_risk "$path")
     if [ -n "$why" ]; then report_risk "$why" "$path"; return 0; fi
-    if ! rm -rf -- "$path"; then report_risk 'session scratch delete failed/incomplete' "$path"; return 0; fi
-    printf 'deleted old session scratch directory (%s KiB): %s\n' "$k" "$path"
-  else
-    printf 'WOULD DELETE old session scratch directory %s (%s KiB)\n' "$path" "$k"
-  fi
-  session_del_k=$((session_del_k + k)); session_del_n=$((session_del_n + 1))
+    if [ "$APPLY" = 1 ]; then
+      session_receipt "session scratch eligible: $file" planned || { report_risk 'decision receipt unavailable' "$file"; return; }
+      recent=$(find "$file" -maxdepth 0 \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print 2>/dev/null); status=$?
+      [ "$status" = 0 ] && [ -z "$recent" ] && [ -f "$file" ] && [ ! -L "$file" ] || continue
+      if ! rm -f -- "$file"; then report_risk 'session scratch delete failed' "$file"; continue; fi
+      session_receipt "session scratch removed: $file" removed || exit 2
+      printf 'deleted old session scratch file: %s\n' "$file"
+    else
+      printf 'WOULD DELETE session scratch file %s (%s KiB)\n' "$file" "$k"
+    fi
+    session_file_n=$((session_file_n+1)); session_file_k=$((session_file_k+k))
+  done < <(find "$path" -xdev -type f -mmin "+$AGE_MIN" -cmin "+$AGE_MIN" -print0 2>/dev/null)
+  [ -d "$path" ] || return 0
+  # Unlinking a leaf changes its parent's ctime; preserve that fresh directory
+  # until a later pass rather than exempting janitor-touched metadata from age.
+  while IFS= read -r -d '' file; do
+    why=$(session_scratch_risk "$path")
+    [ -z "$why" ] || { report_risk "$why" "$path"; return; }
+    recent=$(find "$file" -maxdepth 0 \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print 2>/dev/null); status=$?
+    [ "$status" = 0 ] && [ -z "$recent" ] || continue
+    if [ "$APPLY" = 1 ]; then
+      session_receipt "session scratch directory eligible: $file" planned || return
+      rmdir -- "$file" 2>/dev/null || continue
+      session_receipt "session scratch directory removed: $file" removed || exit 2
+    fi
+    session_del_n=$((session_del_n+1))
+  done < <(find "$path" -xdev -depth -type d -empty -mmin "+$AGE_MIN" -cmin "+$AGE_MIN" -print0 2>/dev/null)
 }
 
 cd "$ROOT" || exit 1
@@ -532,11 +589,11 @@ if [ "$TSX_ONLY" = 0 ] && { [ -e "$SESSION_ROOT" ] || [ -L "$SESSION_ROOT" ]; };
     ROOT_REAL="$SESSION_ROOT_REAL"
     while IFS= read -r -d '' p; do
       process_session_scratch_dir "$p"
-    done < <(find "$SESSION_ROOT_REAL" -mindepth 1 -maxdepth 1 -type d -mmin "+$AGE_MIN" -print0 2>/dev/null)
+    done < <(find "$SESSION_ROOT_REAL" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
   fi
 fi
 ROOT_REAL=$(cd "$ROOT" 2>/dev/null && pwd -P)
-del_n=$((del_n + session_del_n)); del_k=$((del_k + session_del_k))
+del_n=$((del_n + session_del_n + session_file_n)); del_k=$((del_k + session_del_k + session_file_k))
 AFTER_AVAIL_KB=$(df -k "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
 case "$BEFORE_AVAIL_KB:$AFTER_AVAIL_KB" in
   *[!0-9:]*|:*|*:) actual_delta="unknown" ;;
@@ -550,6 +607,8 @@ printf 'tsx files %s: %d, skipped caches=%d; df avail %s -> %s KiB (delta %s KiB
   "$([ "$APPLY" = 1 ] && printf 'pruned' || printf 'would-prune')" "$TSX_PRUNED_N" "$TSX_SKIPPED" "${BEFORE_AVAIL_KB:-unknown}" "${AFTER_AVAIL_KB:-unknown}" "$actual_delta"
 printf 'session scratch dirs %s: %d, %d MB (root %s; age window %d min)\n' \
   "$([ "$APPLY" = 1 ] && printf 'deleted' || printf 'would-delete')" "$session_del_n" "$((session_del_k / 1024))" "$SESSION_ROOT" "$AGE_MIN"
+printf 'session scratch files %s: %d, %d MB\n' \
+  "$([ "$APPLY" = 1 ] && printf 'deleted' || printf 'would-delete')" "$session_file_n" "$((session_file_k / 1024))"
 
 if [ $APPLY = 1 ]; then
   mkdir -p "$(dirname "$REPORT")"
