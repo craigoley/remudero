@@ -866,7 +866,6 @@ test("selected dependency evidence paginates every population and retains a page
     f.checks[122].conclusion = conclusion;
     const result = await readSelectedDepReviewChecks("craigoley", "remudero", f.target, f.read);
     assert.equal(result.kind, "observed");
-    if (result.kind !== "observed") throw new Error(result.reason);
     assert.equal(result.checks.length, 224, "all 123 checks and 101 statuses survive the complete read");
     const last = result.checks.find(check => check.name === "page-two-required");
     assert.equal(last?.workflowRunId, 1100, "native producer identity can come from the last workflow page");
