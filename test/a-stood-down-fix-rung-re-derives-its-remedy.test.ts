@@ -204,6 +204,7 @@ test("an unreadable design contract stays unavailable before an admission or wri
   const result = await runSweep([f.pr], f.deps);
   assert.equal(result.actions[0]!.disposition, "wait");
   assert.match(result.actions[0]!.reason, /contract revision unavailable/);
+  assert.match(result.actions[0]!.reason, /plan source unavailable/, "the actual failed read remains observable");
   assert.deepEqual(f.effects, { admissions: 0, fixes: 0, escalations: [] });
 });
 

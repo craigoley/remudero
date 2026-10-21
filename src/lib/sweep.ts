@@ -18700,12 +18700,12 @@ export async function runSweep(
           row.head_sha === pr.headSha && row.needs_design_hold === true && typeof row.progress_contract_revision === "string");
         const standingOn = (recorded?.progress_contract_revision as string | undefined) ??
           (typeof held.contract_revision === "string" ? held.contract_revision : undefined);
-        let current: string | undefined, unreadable = false;
+        let current: string | undefined, unreadable: { reason: string } | undefined;
         try { current = pr.taskId === undefined ? undefined : deps.readTaskContractRevision?.(pr.taskId); }
-        catch { unreadable = true; }
+        catch (error) { unreadable = { reason: String(error) }; }
         if (unreadable) {
           disposition = "wait";
-          reason = "terminal design handoff task contract revision unavailable — no fix admitted";
+          reason = `terminal design handoff task contract revision unavailable — no fix admitted: ${unreadable.reason}`;
         } else {
           const amended = current !== undefined && standingOn !== undefined && current !== standingOn;
           terminalDesignHold = { amended, revision: standingOn ?? current, observedRevision: current, roundId: handoff.roundId };
