@@ -695,7 +695,7 @@ import { discoverSourceTextReaders, readerJoins, type SourceTextReader } from ".
 // MECHANICAL remedy (a new file's baseline row, never a raised ceiling) before the implement
 // worker's final commit. See {@link commitWorkerEditsWithCensusFix} below for the call site.
 import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
-import { coverageNarrowRowFields, coverageNarrowSuites, judgeCoverage, type CoverageRun, type CoverageVerdict } from "./lib/coverage-narrow.js";
+import { COVERAGE_SOURCE_FILE, coverageNarrowRowFields, coverageNarrowSuites, judgeCoverage, type CoverageRun, type CoverageVerdict } from "./lib/coverage-narrow.js";
 // W1-T4108 — the same suite selector CI's shadow selector and `--coverage`'s report-only step
 // already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
 // default step can never independently derive a second notion of "which suites reach a changed
@@ -19117,7 +19117,8 @@ export type CoveragePrecheckPorts = {
   conflictMarkers?: (wt: string) => string[];
 };
 
-const COVERAGE_SRC_FILE = /^src\/.*\.ts$/;
+/** W1-T5309: CI's own gate predicate — src/ TypeScript and src/ or scripts/ ESM — so an .mjs change is measured. */
+const COVERAGE_SRC_FILE = COVERAGE_SOURCE_FILE;
 const COVERAGE_UNCOVERED_HEADLINE = /^diff-coverage: (?:BLOCKED -- this diff adds|INVALID process-boundary)/m;
 const COVERAGE_MISSING_SF = /no SF record in the coverage report/;
 const COVERAGE_TEXT_CAP = 4000;
@@ -21529,7 +21530,19 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       dropTierRowsBeforePush(worktreePath, log);
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
-      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
+      const precheck = await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo });
+      const coverageRefusal = coveragePushRefusal(precheck, log, "fallback_push");
+      // W1-T5309: an `uncovered-narrow` gap refuses nothing. The worker gets ONE pre-PR repair with the narrow pass's
+      // lines, then the push below proceeds whatever that attempt did; CI's coverage-ratchet stays the authority.
+      if (precheck.outcome === "uncovered-narrow") {
+        const advisory = await repairCensusRefusedPush({
+          refusal: { text: `${COVERAGE_PUSH_CHECK}: the diff's own and direct-importer suites leave these added lines uncovered (advisory; the push proceeds after this one attempt) —\n${precheck.text}`, censuses: ["diff-coverage"], offeredBaselines: [] },
+          task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, resumeSessionProvider: impl.provider, mount: fixMount,
+          settingsFile, config: { ...config, fixStrikeCap: 1 }, budgetUsd, ledgerPath, spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
+          spawn: trackRepairLadder(spawn, { config, log }), account, log, say, recheck: async () => undefined,
+        }).catch((error: unknown) => ({ outcome: "error", reason: String((error as Error)?.message ?? error) }));
+        say(`coverage: one advisory repair for an uncovered-narrow head ended ${advisory.outcome}; pushing as before`);
+      }
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         await (opts.implementPush ?? gitPushRunBranchAsync)(worktreePath);

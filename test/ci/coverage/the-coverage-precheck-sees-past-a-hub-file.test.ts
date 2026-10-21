@@ -11,6 +11,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+// @ts-expect-error The gate is a plain .mjs script without a declaration file.
 import { changedSourceFiles } from "#scripts/diff-coverage.mjs";
 import type { AffectedSelection } from "#src/lib/affected-suites.js";
 import type { Config } from "#src/lib/config.js";
@@ -316,7 +317,7 @@ test("W1-T5309: an uncovered-narrow implement push gets one pre-PR repair, then 
     const prompt = String(run.fixCalls[0]!.prompt);
     assert.ok(prompt.includes("src/feature.ts:1"), "the worker is handed the narrow pass's own uncovered line");
     assert.equal(stage.hookLog()[0], `accepted ${run.built[0]}`, "the repair changed nothing, and the head pushed anyway");
-    assert.notEqual(run.result?.verdict, "failed", "an advisory gap never fails the build");
+    assert.doesNotMatch(String(rowsOf(run.rows, "verdict").at(-1)?.reason), /coverage|census/, "an advisory gap never fails the build (offline, the run ends at `no PR opened`)");
     assert.equal(calls.length, 1, "no recheck gates the push: CI stays the authority");
     assert.deepEqual(rowsOf(run.rows, "push.coverage_precheck").map((r) => [r.site, r.outcome]), [["fallback_push", "uncovered-narrow"]]);
   } finally {
