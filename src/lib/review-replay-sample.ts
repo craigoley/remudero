@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { loadReviewerHealthState, reviewerHealthStatePath } from "./reviewer-health.js";
 import { classifyReviewOutcome, reviewReplayInputDigest, type ReviewOutcomeClass,
   type ReviewOutcomeDecision, type ReviewReplayInput } from "./review-outcome-class.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
@@ -116,10 +117,10 @@ function legacyRow(row: Record<string, unknown>, prior: readonly Record<string, 
 }
 
 export function deriveReviewReplaySample(ledger: readonly Record<string, unknown>[],
-  options: { generatorRevision: string; since?: string }): ReviewReplaySample {
-  const regressed = new Set(ledger.filter(r => r.step === "reviewer.regression_opened" || r.step === "reviewer.regression_extended")
+  options: { generatorRevision: string; since?: string; regressedReviewerShas?: readonly string[] }): ReviewReplaySample {
+  const regressed = new Set([...(options.regressedReviewerShas ?? []), ...ledger.filter(r => r.step === "reviewer.regression_opened" || r.step === "reviewer.regression_extended")
     .flatMap(r => [r.regressed_reviewer_code_sha, r.step === "reviewer.regression_extended" ? r.reviewer_code_sha : undefined])
-    .filter((sha): sha is string => typeof sha === "string"));
+    .filter((sha): sha is string => typeof sha === "string")]);
   const byRun = new Map<string, Record<string, unknown>[]>();
   for (const raw of ledger) {
     if (typeof raw.run_id !== "string") continue;
@@ -150,24 +151,56 @@ export function deriveReviewReplaySample(ledger: readonly Record<string, unknown
   return sample;
 }
 
-export function refreshReviewReplaySample(options: { stateDir: string; root: string; generatorRevision: string;
+/** Seed replay can carry an incident closed without emitting its per-sha ledger marks. */
+function reviewerRegressionExclusions(stateDir: string): string[] {
+  const state = loadReviewerHealthState(reviewerHealthStatePath(stateDir));
+  if (!record(state.cursor) || !Number.isSafeInteger(state.cursor.liveOffset) || state.cursor.liveOffset < 0 ||
+      typeof state.seededAt !== "string" || !Number.isFinite(Date.parse(state.seededAt)) ||
+      !record(state.shas) || !Array.isArray(state.closed) ||
+      (state.incident !== null && !record(state.incident))) {
+    throw new Error("review replay refuses unavailable reviewer health state");
+  }
+  const shas = new Set<string>();
+  const add = (sha: unknown): void => {
+    if (typeof sha !== "string" || !sha) throw new Error("review replay refuses invalid reviewer regression identity");
+    shas.add(sha);
+  };
+  for (const [sha, rec] of Object.entries(state.shas)) {
+    if (!record(rec)) throw new Error("review replay refuses invalid reviewer health record");
+    if (rec.regressedAt === undefined) continue;
+    if (typeof rec.regressedAt !== "string" || !rec.regressedAt || rec.sha !== sha) {
+      throw new Error("review replay refuses invalid reviewer regression record");
+    }
+    add(sha);
+  }
+  for (const incident of [...state.closed, ...(state.incident === null ? [] : [state.incident])]) {
+    if (!record(incident)) throw new Error("review replay refuses invalid reviewer incident");
+    add(incident.regressedSha);
+  }
+  return [...shas];
+}
+
+function readReviewReplaySample(options: { stateDir: string; generatorRevision: string;
   since?: string; readLedger?: typeof readLedgerUnionRecordsSync }): ReviewReplaySample {
   const ledger = (options.readLedger ?? readLedgerUnionRecordsSync)(options.stateDir,
     { step: REVIEW_REPLAY_READ_STEPS, requireArchives: true, refuseIncomplete: true });
   if (!ledger.ok || ledger.torn > 0) throw new Error("review replay refuses an incomplete ledger union");
-  const sample = deriveReviewReplaySample(ledger.rows, options);
+  return deriveReviewReplaySample(ledger.rows, { ...options,
+    regressedReviewerShas: reviewerRegressionExclusions(options.stateDir) });
+}
+
+export function refreshReviewReplaySample(options: { stateDir: string; root: string; generatorRevision: string;
+  since?: string; readLedger?: typeof readLedgerUnionRecordsSync }): ReviewReplaySample {
+  const sample = readReviewReplaySample(options);
   writeAtomic(join(options.root, REVIEW_REPLAY_SAMPLE_PATH), serializeReviewReplaySample(sample));
   return sample;
 }
 
 export function reviewReplayGardenSpec(deps: GardenerDeps, generatorRevision: () => string):
   GardenSpec<"refresh", string, GardenAction<"refresh"> & { content: string }, GardenCheckout> {
-  const inventory = (): string => {
-    const ledger = readLedgerUnionRecordsSync(deps.stateDir,
-      { step: REVIEW_REPLAY_READ_STEPS, requireArchives: true, refuseIncomplete: true });
-    if (!ledger.ok || ledger.torn > 0) throw new Error("review replay refuses an incomplete ledger union");
-    return serializeReviewReplaySample(deriveReviewReplaySample(ledger.rows, { generatorRevision: generatorRevision() }));
-  };
+  const inventory = (): string => serializeReviewReplaySample(readReviewReplaySample({
+    stateDir: deps.stateDir, generatorRevision: generatorRevision(),
+  }));
   return { name: "review-replay", classes: ["refresh"], decision: ["refresh"],
     cheapFingerprint: () => inventory(), inventory, fingerprint: content => content,
     candidates: content => {

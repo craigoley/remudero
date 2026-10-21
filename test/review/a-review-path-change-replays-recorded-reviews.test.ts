@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -11,6 +11,9 @@ import { deriveReviewReplaySample, parseReviewReplaySample, replayReviewSample,
   refreshReviewReplaySample, REVIEW_REPLAY_SAMPLE_PATH, reviewReplayGardenSpec,
   serializeReviewReplaySample } from "#src/lib/review-replay-sample.js";
 import { selectAffectedSuites } from "#src/lib/affected-suites.js";
+import { readConfigGardenLedgerRows } from "#src/lib/config-gardener.js";
+import { evaluateReviewerHealthNow, loadReviewerHealthState, reviewerHealthStatePath,
+  saveReviewerHealthState } from "#src/lib/reviewer-health.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { reviewCommand } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
@@ -29,6 +32,21 @@ const row = (i: ReviewReplayInput, recordedClass = classifyReviewOutcome(i).clas
   }),
 });
 const derive = (rows: Record<string, unknown>[]) => deriveReviewReplaySample(rows, { generatorRevision: "test" });
+
+async function seedReviewerHealth(stateDir: string, rows: Record<string, unknown>[]) {
+  const logs: Record<string, unknown>[] = [];
+  const unexpected = (): never => { throw new Error("seed must not perform an external effect"); };
+  let tick = 0;
+  await evaluateReviewerHealthNow({ originMainSha: null }, reviewerHealthStatePath(stateDir),
+    async () => ({ rows, cursor: { liveOffset: 0 } }), async () => unexpected(),
+    { ledgerPath: join(stateDir, "ledger.ndjson"), runId: "seed-test", issues: {
+      create: async () => unexpected(), listOpen: async () => [], ensureLabel: async () => true,
+      comment: async () => unexpected(), closeWithComment: async () => unexpected(),
+    } }, { openFixPr: async () => unexpected(), openRevertPr: async () => unexpected() },
+    (step, extra = {}) => logs.push({ step, ...extra }),
+    { iso: () => new Date(Date.UTC(2026, 9, 21, 0, 0, tick++)).toISOString() });
+  return logs;
+}
 
 test("W1-T10270: every recorded review replays to its recorded verdict class", (t) => {
   const sample = parseReviewReplaySample(readFileSync(samplePath, "utf8"));
@@ -92,10 +110,11 @@ test("W1-T10270: production review decisions route through the replayed seam", (
   assert.match(command, /const setupDecision = classifyReviewOutcome\(replaySetupInput\)/);
   assert.match(command, /if \(setupDecision.class === "refused"\) \{[\s\S]{0,700}?return 2/);
   assert.doesNotMatch(run, /requiredSemanticRefusal\(/);
+  const relative = (...segments: string[]): string => segments.join("/");
   const files = new Map([
     ["src/lib/self-sync.ts", ""],
-    ["src/run-task.ts", 'import "./lib/required-semantic-review.js";'],
-    ["src/lib/required-semantic-review.ts", 'import "./nested.js";'],
+    ["src/run-task.ts", `import "${relative(".", "lib", "required-semantic-review.js")}";`],
+    ["src/lib/required-semantic-review.ts", `import "${relative(".", "nested.js")}";`],
     ["src/lib/nested.ts", ""],
     ["test/review/a-review-path-change-replays-recorded-reviews.test.ts", ""],
   ]);
@@ -116,7 +135,7 @@ test("W1-T10270: verdict recording drops prose and bounds duplicate tokens indep
   assert.equal(classifyReviewOutcome(input({ stage: "setup", setup_unavailable: true })).class, "refused");
 });
 
-test("W1-T10270: refresh reads compressed, plain and live ledger rows and leaves the sample on refusal", (t) => {
+test("W1-T10270: refresh reads compressed, plain and live ledger rows and leaves the sample on refusal", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}review-replay-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const stateDir = join(root, "state");
@@ -125,6 +144,7 @@ test("W1-T10270: refresh reads compressed, plain and live ledger rows and leaves
   writeFileSync(join(stateDir, "ledger.2026-10-17.ndjson.gz"), gzipSync(ndjson(row(input()))));
   writeFileSync(join(stateDir, "ledger.2026-10-18.ndjson"), ndjson(row(input({ reviewer_outcome: "spawn_error" }))));
   writeFileSync(join(stateDir, "ledger.ndjson"), ndjson(row(input({ stage: "setup", setup_unavailable: true }))));
+  await seedReviewerHealth(stateDir, []);
   const sample = refreshReviewReplaySample({ stateDir, root, generatorRevision: "test" });
   assert.equal(sample.rows.length, 3, "each ledger form contributes a distinct shape");
   assert.deepEqual(sample.header.classes, ["posted", "refused", "withheld"]);
@@ -170,4 +190,119 @@ test("W1-T10270: a production setup refusal records the replay input before any 
   assert.equal(replay[0]!.recorded_class, "refused");
   assert.equal(typeof replay[0]!.reviewer_code_sha, "string");
   replayReviewSample(derive(replay));
+});
+
+
+test("W1-T10270: the real config-garden union reader retains a replay row's PR identity", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}review-replay-reader-`));
+  try {
+    const recorded = { ...row(input()), ts: new Date().toISOString(), run_id: "replay-reader", task_id: "W1-T10270" };
+    const unrelated = { ts: recorded.ts, step: "unrelated.telemetry", run_id: "noise" };
+    writeFileSync(join(stateDir, "ledger.ndjson"), [recorded, unrelated].map(r => JSON.stringify(r)).join("\n") + "\n");
+    assert.deepEqual(readConfigGardenLedgerRows(stateDir), [recorded]);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+
+test("W1-T10270: seed-carried closed regressions and their silent extensions never enter a refreshed sample", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}review-replay-carried-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir);
+  const bad = "b".repeat(40), extension = "c".repeat(40), healthy = "d".repeat(40);
+  const healthRows: Record<string, unknown>[] = [];
+  let pr = 1;
+  const outcome = (sha: string, failure: boolean): Record<string, unknown> => ({
+    ts: "2026-10-20T00:00:00.000Z", host: "fixture", step: failure ? "review.semantic_incomplete" : "review.posted",
+    reviewer_code_sha: sha, pr_url: `https://github.com/acme/remudero/pull/${pr++}`, head_sha: "e".repeat(40),
+    plan_only: false, reviewer_outcome: "success", reason: failure ? "required-semantic-incomplete-verdicts" : undefined,
+  });
+  for (let sha = 1; sha <= 20; sha++) for (let unit = 0; unit < 5; unit++) {
+    healthRows.push(outcome(sha.toString(16).padStart(40, "0"), false));
+  }
+  for (const sha of [bad, extension]) for (let unit = 0; unit < 6; unit++) healthRows.push(outcome(sha, true));
+  const emitted = await seedReviewerHealth(stateDir, healthRows);
+  assert.equal(emitted.filter(r => r.step === "reviewer.regression_carried").length, 1);
+  assert.equal(emitted.filter(r => r.step === "reviewer.regression_opened" || r.step === "reviewer.regression_extended").length, 0);
+  const state = loadReviewerHealthState(reviewerHealthStatePath(stateDir));
+  assert.equal(state.incident, null);
+  assert.equal(state.closed.length, 1);
+  assert.equal(state.closed[0]!.regressedSha, bad);
+  assert.ok(state.shas[bad]!.regressedAt);
+  assert.ok(state.shas[extension]!.regressedAt, "seed marks the later judging code without an extended event");
+  const inputs = [row(input(), "posted", healthy), row(input({ reviewer_outcome: "error" }), "withheld", bad),
+    row(input({ stage: "setup", setup_unavailable: true }), "refused", extension)];
+  const ndjson = (rows: Record<string, unknown>[]) => rows.map(r => JSON.stringify(r)).join("\n") + "\n";
+  writeFileSync(join(stateDir, "ledger.2026-10-20.ndjson.gz"), gzipSync(ndjson(healthRows)));
+  writeFileSync(join(stateDir, "ledger.2026-10-21.ndjson"), ndjson(emitted));
+  writeFileSync(join(stateDir, "ledger.ndjson"), ndjson(inputs));
+  assert.equal(derive([...healthRows, ...emitted, ...inputs]).rows.length, 3, "ledger-only derivation cannot see seed marks");
+  const refreshed = refreshReviewReplaySample({ stateDir, root, generatorRevision: "test" });
+  assert.deepEqual(refreshed.rows.map(r => r.reviewer_code_sha), [healthy]);
+  replayReviewSample(refreshed);
+  const spec = reviewReplayGardenSpec({ stateDir, repoRoot: root,
+    openWorkspace: () => { throw new Error("not opened by inventory"); }, log: () => {} }, () => "test");
+  assert.deepEqual(parseReviewReplaySample(spec.inventory()).rows.map(r => r.reviewer_code_sha), [healthy]);
+  // The closed incident retains the onset even after its tracked per-sha record is pooled away.
+  delete state.shas[bad];
+  saveReviewerHealthState(reviewerHealthStatePath(stateDir), state);
+  assert.deepEqual(refreshReviewReplaySample({ stateDir, root, generatorRevision: "test" }).rows.map(r => r.reviewer_code_sha), [healthy]);
+  state.incident = state.closed[0]!;
+  state.closed = [];
+  saveReviewerHealthState(reviewerHealthStatePath(stateDir), state);
+  assert.deepEqual(parseReviewReplaySample(spec.inventory()).rows.map(r => r.reviewer_code_sha), [healthy], "active onset also survives a missing tracked record");
+});
+
+test("W1-T10270: an unavailable health projection refuses refresh and inventory while a seeded healthy projection permits them", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}review-replay-health-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "ledger.2026-10-20.ndjson.gz"), gzipSync(""));
+  writeFileSync(join(stateDir, "ledger.ndjson"), JSON.stringify(row(input())) + "\n");
+  const target = join(root, REVIEW_REPLAY_SAMPLE_PATH);
+  mkdirSync(join(target, ".."), { recursive: true });
+  writeFileSync(target, "previous sample bytes\n");
+  const statePath = reviewerHealthStatePath(stateDir);
+  const spec = reviewReplayGardenSpec({ stateDir, repoRoot: root,
+    openWorkspace: () => { throw new Error("not opened by inventory"); }, log: () => {} }, () => "test");
+  const refuses = (): void => {
+    assert.throws(() => refreshReviewReplaySample({ stateDir, root, generatorRevision: "test" }), /review replay refuses/);
+    assert.throws(() => spec.inventory(), /review replay refuses/);
+    assert.equal(readFileSync(target, "utf8"), "previous sample bytes\n");
+  };
+  refuses(); // Genuine absence is not an authoritative clean judgment.
+  for (const text of ["{torn", '{"version":"older"}', '{"version":"reviewer-health-v1","cursor":null}']) {
+    writeFileSync(statePath, text);
+    refuses();
+  }
+  rmSync(statePath);
+  await seedReviewerHealth(stateDir, []);
+  const seeded = readFileSync(statePath, "utf8");
+  const state = loadReviewerHealthState(statePath);
+  assert.notEqual(state.cursor, null);
+  assert.notEqual(state.seededAt, null);
+  assert.deepEqual(state.shas, {});
+  for (const corrupt of [{ ...state, cursor: undefined }, { ...state, cursor: { liveOffset: -1 } },
+    { ...state, seededAt: "invalid" }, { ...state, shas: null }, { ...state, closed: [null] },
+    { ...state, incident: { regressedSha: null } },
+    { ...state, shas: { bad: { sha: "bad", regressedAt: null } } },
+    { ...state, shas: { bad: null } }]) {
+    writeFileSync(statePath, JSON.stringify(corrupt));
+    refuses();
+  }
+  rmSync(statePath);
+  mkdirSync(statePath); // The normative reader also treats a directory as no file.
+  refuses();
+  rmSync(statePath, { recursive: true });
+  symlinkSync(statePath, statePath); // A real default read error, independent of filesystem permissions.
+  assert.throws(() => refreshReviewReplaySample({ stateDir, root, generatorRevision: "test" }), { code: "ELOOP" });
+  assert.throws(() => spec.inventory(), { code: "ELOOP" });
+  assert.equal(readFileSync(target, "utf8"), "previous sample bytes\n");
+  rmSync(statePath);
+  writeFileSync(statePath, seeded);
+  assert.equal(refreshReviewReplaySample({ stateDir, root, generatorRevision: "test" }).rows.length, 1);
+  assert.equal(parseReviewReplaySample(spec.inventory()).rows.length, 1);
 });
