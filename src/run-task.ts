@@ -474,6 +474,7 @@ import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type Daemo
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
+import { REVIEWER_INCIDENT_ENV, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, findOffendingMerge, gitIn, readReviewerHealthRows, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerRegressionEvidenceText, reviewerShadowStep, type HealedTreeGit, type ReviewerHealthStore, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -555,6 +556,7 @@ import {
   presenceMode,
   setPresenceMode,
   tryEscalate,
+  tryEscalateAsync,
   type Escalation,
   type EscalationClass,
   type EscalationJudgeVerdict,
@@ -595,7 +597,7 @@ import {
   type RestRollupEntry,
   fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
-import { mainCeilingLogReducer, mainRepairRecordsFromLedger, mainRepairMergesBrief, withMainHealthOnLightPass, type MainCeilingLogVerdict, type MainRatchetRecordOutcome, type MainRatchetRecordRequest, type MainRepairFixRequest, type MainRepairLane, type MainRepairRevertOutcome, type MainRepairRevertRequest } from "./lib/main-health-rung.js";
+import { mainCeilingLogReducer, mainRepairRecordsFromLedger, mainRepairMergesBrief, reviewerRegressionRevertText, withMainHealthOnLightPass, type MainCeilingLogVerdict, type MainRatchetRecordOutcome, type MainRatchetRecordRequest, type MainRepairFixRequest, type MainRepairLane, type MainRepairRevertOutcome, type MainRepairRevertRequest } from "./lib/main-health-rung.js";
 import { emailChannel, imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -2052,6 +2054,147 @@ export function buildReviewerCodeFreshnessGate(
   };
 }
 
+/** W1-T10269 — what a caller of {@link buildReviewerHealthRoute} may replace; each defaults to production. */
+export interface ReviewerHealthRouteOverrides {
+  health?: Partial<Omit<ReviewerHealthStore, "effects">> & { effects?: Partial<ReviewerHealthStore["effects"]> };
+  tree?: Partial<HealedTreeGit>;
+  /** The healed child: `rmd review` run from the healed tree with the incident id in its env. */
+  spawnHealed?: (tree: string, args: string[], onFailure: (failure: string) => void, env: NodeJS.ProcessEnv) => Promise<number>;
+  /** The shadow: today's reviewer from a fresh origin/main tree, publishing nothing. */
+  shadow?: (prArg: string, args: string[], originMainSha: string) => Promise<number | undefined>;
+  withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
+  self?: () => { owner: string; repo: string };
+  /** The revert PR opener; production is the main-repair lane's. */
+  openRevert?: (owner: string, repo: string, config: Config, request: MainRepairRevertRequest, ledgerPath: string, runId: string) => Promise<MainRepairRevertOutcome>;
+}
+
+/**
+ * W1-T10269 — A REVIEWER REGRESSION HEALS ITSELF: every daemon review asks reviewer health first
+ * (src/lib/reviewer-health.ts). With no open incident the review runs exactly as before. With one,
+ * it runs from a HEALED tree — origin/main with the offending merge reverted on top, rebuilt whenever
+ * origin/main moves, so W1-T228 reads it fresh — never from an old head or an engine tree; while
+ * today's reviewer has no judgment yet it also runs in shadow, publishing nothing. A healed tree that
+ * cannot be built escalates and the review falls back to today's path, unchanged.
+ */
+export function buildReviewerHealthRoute(
+  repoDir: string,
+  config: Config,
+  ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  seams: ReviewerHealthRouteOverrides = {},
+): (prArg: string, rest: string[], reviewDeps: ReviewCommandDeps, normal: () => Promise<number>) => Promise<number> {
+  const git = seams.tree?.git ?? gitIn(repoDir);
+  const self = seams.self ?? (() => resolveOwnerRepo());
+  const runId = `reviewer-health-${systemClock.now()}`;
+  const pullOf = (url: string) => /\/pull\/(\d+)$/.exec(url)?.[1] ?? "";
+  const effects: ReviewerHealthStore["effects"] = {
+    findOffendingMerge: (healthy, regressed) => findOffendingMerge(git, healthy, regressed),
+    isAncestor: (ancestor, descendant) => git(["merge-base", "--is-ancestor", ancestor, descendant]).then(() => true,
+      () => false), // not an ancestor, or unknown here: either way not the healthy side
+    escalate: async (incident, conflict) => {
+      const { owner, repo } = self();
+      const url = await tryEscalateAsync(reviewerRegressionEscalation(incident, conflict), { issues: ghIssueGatewayAsync(owner, repo), ledgerPath, runId });
+      if (url) await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", owner]).catch((error: unknown) =>
+        log("reviewer.regression_assign_failed", { issue_url: url, error: String((error as Error)?.message ?? error) }));
+      return url;
+    },
+    openRevertPr: async (incident) => {
+      const { owner, repo } = self();
+      return (seams.openRevert ?? openMainRepairRevertPr)(owner, repo, config, {
+        branch: "main", headSha: incident.regressedSha, offendingSha: incident.offending.sha,
+        ...(incident.offending.pr === null ? {} : { offendingPr: incident.offending.pr }),
+        failingChecks: [], whyFixInsufficient: "no fix had returned the reviewer to its baseline",
+        reason: { kind: "reviewer-regression", incidentId: incident.id, evidence: reviewerRegressionEvidenceText(incident) },
+      }, ledgerPath, runId);
+    },
+    closeIssue: async (url, comment) => {
+      const { owner, repo } = self();
+      await ghIssueGatewayAsync(owner, repo).closeWithComment?.(url, comment);
+    },
+    readPr: async (url) => {
+      const { owner, repo } = self();
+      const pr = (await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${pullOf(url)}`])) as { state?: unknown; merged?: unknown };
+      return pr?.merged === true ? "merged" : pr?.state === "open" ? "open" : "closed";
+    },
+    closePr: async (url, comment) => {
+      const { owner, repo } = self();
+      await ghJsonAsync(["api", "--method", "POST", `repos/${owner}/${repo}/issues/${pullOf(url)}/comments`, "-f", `body=${comment}`]);
+      await ghJsonAsync(["api", "--method", "PATCH", `repos/${owner}/${repo}/pulls/${pullOf(url)}`, "-f", "state=closed"]);
+    },
+    ...seams.health?.effects,
+  };
+  const health: ReviewerHealthStore = {
+    statePath: reviewerHealthStatePath(dirname(ledgerPath)),
+    readRows: (cursor) => readReviewerHealthRows(dirname(ledgerPath), cursor),
+    log: (step, extra = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra }),
+    now: () => systemClock.iso(),
+    ...seams.health,
+    effects,
+  };
+  const worktreeRoot = join(repoDir, "..", "worktrees");
+  // The fresh-tree helper inspects with a synchronous git; it goes through the hardened leaf, as fleetRatifyGateway's does.
+  const treeTools = (): FreshTreeTools => ({ git: (args) => hostWorktreeGit(args[1] ?? repoDir, args.slice(2)),
+    addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot });
+  const tree: HealedTreeGit = {
+    git,
+    treeGit: (dir, args) => hostWorktreeGitAsync(dir, args),
+    cut: (prefix, sha) => prepareFreshOriginMainTree(repoDir, treeTools(), prefix, sha),
+    remove: (dir) => worktreeRemove(repoDir, dir),
+    ...seams.tree,
+  };
+  const shadowRun = seams.shadow ?? ((prArg: string, args: string[], originMainSha: string) =>
+    buildFreshTreeReviewRunner(repoDir, { ...treeTools(), spawnReview: spawnRmdReviewForFreshTree })(prArg, args, { originMainSha }));
+  const spawnHealed = seams.spawnHealed ?? spawnRmdReviewForFreshTree;
+  const escalatedConflicts = new Set<string>();
+  return async (prArg, rest, reviewDeps, normal) => {
+    // An unreadable origin/main still ingests; no current reviewer is judged this call.
+    const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
+    const decision = await evaluateReviewerHealth(health, { originMainSha });
+    if (decision.route === "normal") return normal();
+    const incident: ReviewerIncident = decision.incident;
+    // A healed tree built from a PR's head never reviews that same PR: the revert-built tree judges it.
+    const withPr = decision.withPr !== null && String(decision.withPr) !== prArg ? decision.withPr : undefined;
+    const healed = await buildHealedReviewerTree(tree, incident.offending!.sha, withPr === undefined ? {} : { withPr });
+    if (healed.state === "empty") {
+      log("reviewer.healed_patch_empty", { incident_id: incident.id, origin_main_sha: healed.originMainSha, pr: prArg });
+      return normal();
+    }
+    if (healed.state !== "ready") {
+      log("reviewer.healed_tree_unavailable", { incident_id: incident.id, pr: prArg, state: healed.state, reason: healed.reason,
+        ...(healed.state === "conflict" ? { conflict_paths: healed.paths } : {}), origin_main_sha: healed.originMainSha });
+      const key = `${incident.id}:${healed.originMainSha}`;
+      if (healed.state === "conflict" && !escalatedConflicts.has(key)) {
+        escalatedConflicts.add(key);
+        await effects.escalate(incident, healed).catch((error: unknown) =>
+          log("reviewer.regression_escalation_failed", { incident_id: incident.id, error: String((error as Error)?.message ?? error) }));
+      }
+      return normal();
+    }
+    const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
+    if (decision.shadow && originMainSha !== null) {
+      const code = await shadowRun(prArg, [...childArgs, REVIEWER_SHADOW_FLAG], originMainSha).catch((error: unknown) => {
+        log("reviewer.shadow_failed", { incident_id: incident.id, pr: prArg, error: String((error as Error)?.message ?? error) });
+        return undefined;
+      });
+      log("reviewer.shadow_ran", { incident_id: incident.id, pr: prArg, origin_main_sha: originMainSha, exit_code: code ?? null });
+    }
+    let failure: string | undefined;
+    let code: number;
+    try {
+      code = await (seams.withWorktreeLease ?? withReviewerWorktreeLease)(healed.path, () =>
+        spawnHealed(healed.path, [prArg, ...childArgs], (why) => { failure = why; }, { ...process.env, [REVIEWER_INCIDENT_ENV]: incident.id }));
+    } catch (error) {
+      // COULD NOT RUN: today's path reviews, as it would with no incident; never an older reviewer.
+      log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, error: String((error as Error)?.message ?? error) });
+      return normal();
+    }
+    log("review.ran_from_healed_tree", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, origin_main_sha: healed.originMainSha,
+      offending_sha: incident.offending!.sha, patch: healed.patch, ...(healed.withPr === undefined ? {} : { with_pr: healed.withPr }),
+      exit_code: code, ...(code === 0 ? {} : { failure: failure ?? "no failure reported" }) });
+    return code;
+  };
+}
+
 /** W1-T4415 — the sweep's draft-readying effect: `gh pr ready` on one draft, ledgered by
  *  {@link readyDraftPullRequest}. Marking ready is the whole write; it never merges or closes. */
 export function readyDraftViaGh(
@@ -2262,6 +2405,9 @@ export function buildSweepEffects(
     reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
     instanceRegistryTextImpl?: () => string | undefined;
     feedbackLandingStateRoot?: string;
+    /** W1-T10269 test seam: the reviewer-health route. Omitted ⇒ the real route in a live process,
+     *  none under test (a review there runs exactly as before). */
+    reviewerHealthRouteImpl?: ReturnType<typeof buildReviewerHealthRoute>;
   },
 ): Pick<
   SweepDeps,
@@ -2349,7 +2495,7 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, feedbackLandingStateRoot, ...libDeps } = deps;
+  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, feedbackLandingStateRoot, reviewerHealthRouteImpl, ...libDeps } = deps;
   // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
@@ -2366,6 +2512,11 @@ export function buildSweepEffects(
       spawnReview: spawnRmdReviewForFreshTree,
     }),
   );
+  // W1-T10269: every review asks reviewer health first; with no open incident it is the gate above, unchanged.
+  const reviewerHealthRoute = reviewerHealthRouteImpl ??
+    (deriveLedgerActor() === "test" ? undefined : buildReviewerHealthRoute(repoRoot, deps.config, deps.ledgerPath, deps.log));
+  const reviewGateCall = (prArg: string, rest: string[], opts: ReviewCommandDeps): Promise<number> =>
+    reviewerHealthRoute ? reviewerHealthRoute(prArg, rest, opts, () => reviewerCodeGate.call(prArg, rest, opts)) : reviewerCodeGate.call(prArg, rest, opts);
   const reviewFallbackRunner =
     deps.reviewRunner ??
     ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string) => {
@@ -2374,7 +2525,7 @@ export function buildSweepEffects(
         ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }) };
       return deps.reviewCommandImpl
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
-        : reviewerCodeGate.call(String(_prNumber), args, opts);
+        : reviewGateCall(String(_prNumber), args, opts);
     });
   const reviewRepoDir =
     deps.repo === (deps.localRepoName ?? resolveOwnerRepo().repo) ? repoRoot : join(deps.config.root, "repos", deps.repo);
@@ -2574,7 +2725,7 @@ export function buildSweepEffects(
     captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log, feedbackLandingStateRoot),
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
-    reviewCommandImpl: reviewerCodeGate.call,
+    reviewCommandImpl: reviewGateCall,
     reviewReuseRunner,
     reviewerCodeStaleThisPassImpl: reviewerCodeGate.staleThisPass,
     stallNotice: escalatePostReviewStall,
@@ -8226,6 +8377,8 @@ async function runReview(args: {
   owner: string;
   repo: string;
   prUrl: string;
+  /** W1-T10269: judge, then stop before any arm, status or comment — the reviewer-health shadow. */
+  shadow?: boolean;
   /** W1-T9970 test seam: the reviewer's image; `null` is off-container. Default {@link readRuntimeImageSha}. */
   runtimeImageSha?: string | null;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
@@ -8393,8 +8546,8 @@ async function runReview(args: {
   // read failure — `fetchLifecycle` has no retry of its own, unlike the post itself) is caught
   // HERE and degrades the SAME way: legibility is strictly additive, so a pending-post hiccup must
   // never abort the review it exists to make visible — the terminal post below still runs and is
-  // what actually gates the merge, exactly as it always has.
-  try {
+  // what actually gates the merge, exactly as it always has. A shadow review (W1-T10269) posts nothing.
+  if (!args.shadow) try {
     const pending = await postReviewPending({
       owner,
       repo,
@@ -8835,6 +8988,13 @@ async function runReview(args: {
   // named reason on the posted description itself — the operator reading the
   // commit status (not just the ledger) sees WHY, never only "unavailable".
   const description = reviewPostedDescription(verdict, args.materializationFailure);
+  // W1-T10269: the shadow's would-be terminal. It reached publication and publishes nothing.
+  if (args.shadow) {
+    log(REVIEWER_SHADOW_VERDICT_STEP, { state: verdict.state, head_sha: headSha, pr_url: prUrl, reviewer_outcome: outcome,
+      review_decision_digest: decisionDigest });
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: "reviewer-health shadow: no publication",
+      reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
 
   // impl-BF — WITHDRAW AN EXISTING ARM BEFORE THE STATUS GOES UP.
   //
@@ -23487,15 +23647,20 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
   const runId = `review-PR${view.number}-${Date.now()}`;
   const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
+  // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
+  const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review",
-      ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }), ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step: reviewerShadowStep(step, shadow), lane: "review",
+      ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }), ...extra,
+      ...reviewerHealthRowFields(step) });
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
-  await observeAdmissionDisposition(config.contributorAdmission,
-    { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root, log,
-    adoptionComment === undefined ? undefined : Number(adoptionComment));
-  await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
-    ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
+  if (!shadow) {
+    await observeAdmissionDisposition(config.contributorAdmission,
+      { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root, log,
+      adoptionComment === undefined ? undefined : Number(adoptionComment));
+    await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
+      ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
+  }
   const reviewSubject = resolveReviewSubjectCheckout({
     config,
     rest,
@@ -23700,7 +23865,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     });
   }
   const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
-  try {
+  if (!shadow) try {
     await postReviewPendingDep({
       owner,
       repo,
@@ -23812,10 +23977,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           ledgerPath,
           runId,
           openTaskIds,
+          ...(shadow ? { shadow: true } : {}),
         })),
       ),
     baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
   );
+  // W1-T10269: a shadow review ends at its verdict: no restore, no status, no comment, no arm.
+  if (shadow) return verdict.verdictWithheld ? 2 : 0;
 
   // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
   // daemon may have posted pending after that decision; replay must check the live context and
@@ -51111,6 +51279,9 @@ export function mainRepairRevertCriteria(
 export function mainRepairRevertBody(request: MainRepairRevertRequest, evidence: { testFiles?: readonly string[]; revertDiff?: string } = {}): string {
   const taskId = mainRepairRevertTaskId(request.offendingSha);
   const pr = request.offendingPr !== undefined ? `#${request.offendingPr}` : "an unnamed PR";
+  // W1-T10269: a reviewer regression names its outcome-mix evidence, not failing checks.
+  const regression = reviewerRegressionRevertText(request);
+  if (regression) return [...regression.lead, "", renderAcceptanceBlock(mainRepairRevertCriteria(request, evidence)), "", `Remudero-Task: ${taskId}`].join("\n");
   return [
     `Reverts \`${request.offendingSha}\` (${pr}), the first red merge on \`${request.branch}\`.`,
     "",
@@ -51174,7 +51345,7 @@ export async function openMainRepairRevertPr(
     const subject = request.offendingPr !== undefined ? `revert #${request.offendingPr}` : `revert ${request.offendingSha.slice(0, 12)}`;
     const created = (await fetch(
       ratifyPrCreateRestArgs(owner, repo, {
-        title: `revert(main): ${subject}, the first red merge on ${request.branch}`,
+        title: reviewerRegressionRevertText(request)?.title ?? `revert(main): ${subject}, the first red merge on ${request.branch}`,
         body: mainRepairRevertBody(request, evidence),
         head: branch,
         base: request.branch,

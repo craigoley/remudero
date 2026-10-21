@@ -59,6 +59,8 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "main.repair.pr_unreadable": A_LANE_RUN_ID,
   "main-repair.pr_opened": A_LANE_RUN_ID,
   "main-repair.revert_pr_opened": A_LANE_RUN_ID,
+  // W1-T10269: a reviewer-health shadow's would-be terminal, under the review's review-PR run id and renamed shadow.*.
+  "review.shadow_verdict": A_LANE_RUN_ID,
   "main-repair.ratchet_pr_opened": A_LANE_RUN_ID,
   "main-repair.ratchet_pr_superseded": A_LANE_RUN_ID,
   "main-repair.ratchet_standing": A_LANE_RUN_ID,
