@@ -1675,9 +1675,11 @@ export function resolveReviewTaskId(
   return taskIdFromRunBranch(headRefName);
 }
 
-/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review. */
+/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review.
+ *  A synthetic `PR-<n>` id (a hand-fix PR's trailer) names no shard either: it gets the defaults a trailerless PR
+ *  gets, on any branch, so the trailer can never cost a review (#13305: refused on every pass for 4.5 h). */
 export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
-  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL) return true;
+  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL || /^PR-[1-9]\d*$/.test(taskId)) return true;
   return taskIdFromRunBranch(headRefName) === taskId &&
     /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
 }

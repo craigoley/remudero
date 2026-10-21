@@ -16481,7 +16481,17 @@ export async function runSweep(
     const diagnoses: string[] = fields.blocker_cause ? [fields.blocker_cause] : [];
     // W1-T8167: a review admitted for this head and not yet posted/failed/refused is a live owner, not a stall.
     // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
-    if (fields.blocker === "awaiting-review") {
+    // A review whose setup refused at this head, with no review started since, is no live owner: each pass
+    // re-admits it and it refuses again, so name the refusal instead of deferring (#13305: 156 refusals, 4.5 h).
+    const refusals = fields.blocker === "awaiting-review"
+      ? stageRows.filter(row => row.step === "review.semantic_setup_refused" && row.head_sha === pr.headSha) : [];
+    const lastRefusalMs = Date.parse(String(refusals.at(-1)?.ts));
+    const refusing = refusals.length > 0 && !stageRows.some(row => Date.parse(String(row.ts)) >= lastRefusalMs &&
+      (row.step === "review.pending_posted" || LIVE_REVIEW_CLOSING_STEPS.has(String(row.step))));
+    if (refusing) {
+      diagnoses.push(`review setup refused at this head on every pass (${String(refusals.at(-1)?.reason)}, ` +
+        `${refusals.length} refusals)`);
+    } else if (fields.blocker === "awaiting-review") {
       const admitted = stageRows.findLast(row => row.step === "sweep.review_admitted" &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
       const admittedAtMs = admitted === undefined ? NaN : Date.parse(String(admitted.ts));
