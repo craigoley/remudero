@@ -48,14 +48,17 @@ const blockedOn = (...lines: string[]) =>
 const ok: CoverageRun = { status: 0, output: "diff-coverage: OK", timedOut: false };
 const wide = (n: number) => Array.from({ length: n }, (_, i) => `test/reach-${String(i).padStart(4, "0")}.test.ts`);
 
+/** An import line a fixture test file carries (built, so this suite itself holds no location-relative specifier). */
+const importLine = (name: string, from: string) => `import { ${name} } from "${[".."].concat(from).join("/")}";\n${name}();\n`;
+
 /** A tree whose diff touches a HUB (45 direct-importer suites) and a small module (its own test and one importer). */
 function hubAndSmallTree(): { dir: string; changed: string[] } {
   const tree = gitRepo({ kind: "w5309-hub-tree" });
   mkdirSync(join(tree.dir, "test"), { recursive: true });
-  writeFileSync(join(tree.dir, "test", "own.test.ts"), 'import { small } from "../src/lib/small.ts";\nsmall();\n');
-  writeFileSync(join(tree.dir, "test", "small-importer.test.ts"), 'import { small } from "../src/lib/small.ts";\nsmall();\n');
+  writeFileSync(join(tree.dir, "test", "own.test.ts"), importLine("small", "src/lib/small.ts"));
+  writeFileSync(join(tree.dir, "test", "small-importer.test.ts"), importLine("small", "src/lib/small.ts"));
   for (let i = 0; i < 45; i++) {
-    writeFileSync(join(tree.dir, "test", `hub-${String(i).padStart(2, "0")}.test.ts`), 'import { hub } from "../src/hub.ts";\nhub();\n');
+    writeFileSync(join(tree.dir, "test", `hub-${String(i).padStart(2, "0")}.test.ts`), importLine("hub", "src/hub.ts"));
   }
   tree.git("add", "-A");
   tree.git("commit", "-q", "-m", "tree");
@@ -158,7 +161,7 @@ test("W1-T5309: the precheck judges a changed mjs source file as CI does", async
 
   const tree = gitRepo({ kind: "w5309-mjs-tree" });
   mkdirSync(join(tree.dir, "test"), { recursive: true });
-  writeFileSync(join(tree.dir, "test", "c.test.ts"), 'import { c } from "../scripts/c.mjs";\nc();\n');
+  writeFileSync(join(tree.dir, "test", "c.test.ts"), importLine("c", "scripts/c.mjs"));
   tree.git("add", "-A");
   tree.git("commit", "-q", "-m", "tree");
   assert.deepEqual(await coverageNarrowSuites(tree.dir, ["scripts/c.mjs"]), ["test/c.test.ts"], "an .mjs file's direct importers join the narrow pass");
