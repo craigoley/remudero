@@ -1287,6 +1287,85 @@ export async function defaultCiJobLogRegionAsync(owner: string, repo: string, jo
   return reducer.finish();
 }
 
+// Delay only annotation lines until their TAP verdict; keep the rest of a large job streaming.
+function annotationLogReducer(annotations: NonNullable<CiFailure["annotations"]>, tailLines: number) {
+  const reducer = ciFailureRegionReducer(tailLines);
+  const retention = [gateVerdictRetention(), ruleSuitesRetention(), poolVerdictRetention(), testSummaryRetention()];
+  const frames: Array<{ indent: number; seen: Set<number>; lines: Set<string> }> = [];
+  const passed = new Set<number>();
+  const failed = new Set<number>();
+  const primary: string[] = [];
+  let inFailure = false;
+  let inSpecFailure = false;
+  let lastError: string | undefined;
+  let hasFailure = false;
+  const emit = (line: string) => {
+    const tap = CI_TAP_FAILURE_LINE.test(line);
+    const fail = /^\s*FAIL\b/.test(line) || CI_FAILING_TESTS_LINE.test(line.trim());
+    if (tap) inFailure = true;
+    if (CI_FAILING_TESTS_LINE.test(line.trim())) inSpecFailure = true;
+    if (CI_TEST_SUMMARY_LINE.test(line)) inSpecFailure = false;
+    if (tap || fail || inFailure || inSpecFailure) {
+      if (primary.length < Math.max(1, tailLines)) primary.push(line);
+    }
+    if (inFailure && CI_TAP_BLOCK_END_LINE.test(line)) inFailure = false;
+    if (line.startsWith("##[error]")) lastError = line;
+    if (tap || fail || (line.startsWith("##[error]") && !isBareExitCodeAnnotation(line.slice(9)))) hasFailure = true;
+    reducer.push(line);
+    for (const retainer of retention) retainer.push(line);
+  };
+  const close = (passing: boolean) => {
+    const frame = frames.pop()!;
+    for (const index of frame.seen) {
+      (passing ? passed : failed).add(index);
+      annotations[index].from_passing_test = passed.has(index) && !failed.has(index);
+    }
+    if (!passing) for (const line of frame.lines) {
+      emit(line);
+      if (primary.length < Math.max(1, tailLines)) primary.push(line);
+    }
+  };
+  return {
+    push(rawLine: string) {
+      const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
+      const start = /^(\s*)# Subtest:/.exec(line);
+      const verdict = /^(\s*)(not )?ok \d+ - /.exec(line);
+      if (start) {
+        while (frames.length && frames.at(-1)!.indent >= start[1].length) close(false);
+        frames.push({ indent: start[1].length, seen: new Set(), lines: new Set() });
+      }
+      if (verdict) {
+        while (frames.length && frames.at(-1)!.indent > verdict[1].length) close(false);
+        if (frames.at(-1)?.indent === verdict[1].length) close(verdict[2] === undefined);
+      }
+      const matches = annotations.flatMap((annotation, index) => line.includes(annotation.message) ? [index] : []);
+      const frame = frames.at(-1);
+      if (matches.length && frame) {
+        for (const index of matches) frame.seen.add(index);
+        frame.lines.add(line);
+        if (frame.lines.size > Math.max(1, tailLines)) frame.lines.delete(frame.lines.values().next().value!);
+      } else {
+        for (const index of matches) {
+          failed.add(index);
+          annotations[index].from_passing_test = false;
+        }
+        emit(line);
+      }
+    },
+    finish() {
+      while (frames.length) close(false);
+      // Step context can crowd a distant test out of the ordinary region. Keep that test first.
+      const region = primary.length ? [...primary, ...(lastError && !primary.includes(lastError) ? [lastError] : [])]
+        .slice(0, Math.max(1, tailLines)).join("\n") : reducer.finish();
+      return {
+        region: retention.reduceRight((text, retainer) => retainer.wrap(text),
+          retainGeneratorRemediesForRegion(reducer.finish(), region)),
+        hasFailure, lastError,
+      };
+    },
+  };
+}
+
 export function fetchCiFailures(
   owner: string,
   repo: string,
@@ -1351,11 +1430,13 @@ function* ciFailuresSteps(
     let annotationFallback: CiAnnotationFallback | undefined;
     let runnerTimeoutLines: string | undefined;
     let finalizeAnnotation: string | undefined;
+    let annotations: NonNullable<CiFailure["annotations"]> = [];
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
         annotationReads += 1;
         const messages = (yield* step(() => fetch.fetchAnnotations(owner, repo, jobId))).filter((m) => m.trim() !== "");
         const evidence = messages.filter((m) => !isBareExitCodeAnnotation(m));
+        annotations = evidence.map((message) => ({ message, from_passing_test: false }));
         const bareExitOnly = messages.length > 0 && evidence.length === 0;
         // W1-T8038: a job killed at its ceiling annotates only the runner's own timeout lines, which name no test.
         // They are kept, and the job log is read beside them below.
@@ -1399,11 +1480,28 @@ function* ciFailuresSteps(
     } else if (jobId) {
       annotationFallback = { outcome: "skipped-limit" };
     }
-    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code" || runnerTimeoutLines !== undefined ||
-        finalizeAnnotation !== undefined)) {
+    if (jobId) {
       try {
         const readRegion = fetch.readJobLogRegion;
-        if (readRegion) logTail = yield* step(() => readRegion(owner, repo, jobId, tailLines));
+        if (annotations.length > 0 && runnerTimeoutLines === undefined && finalizeAnnotation === undefined) {
+          const reducer = annotationLogReducer(annotations, tailLines);
+          if (readRegion) yield* step(() => ghLinesAsync(
+            ["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], (line) => reducer.push(line)));
+          else {
+            const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
+            for (const line of out.split("\n")) reducer.push(line);
+          }
+          const { region, hasFailure, lastError } = reducer.finish();
+          const evidence = annotations.filter((a) => !a.from_passing_test).map((a) => a.message);
+          if (!hasFailure && evidence.length) {
+            logTail = [...evidence, ...(lastError ? [lastError] : [])].join("\n");
+            tailSource = "annotations";
+          } else {
+            logTail = region;
+            tailSource = logTail.trim() ? "log" : undefined;
+          }
+          logUnavailable = logTail.trim() ? undefined : { kind: "empty-log" };
+        } else if (readRegion) logTail = yield* step(() => readRegion(owner, repo, jobId, tailLines));
         else {
           const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
           const extracted = extractCiFailureRegion(out, tailLines);
@@ -1424,7 +1522,7 @@ function* ciFailuresSteps(
           if (logTail.trim() === "") logTail = finalizeAnnotation;
           logUnavailable = undefined;
           tailSource = logTail === finalizeAnnotation ? "annotations" : "log";
-        } else {
+        } else if (annotations.length === 0) {
           logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
           if (logUnavailable === undefined) tailSource = "log";
         }
@@ -1447,9 +1545,15 @@ function* ciFailuresSteps(
           logTail = finalizeAnnotation;
           logUnavailable = undefined;
           tailSource = "annotations";
+        } else if (annotations.some((a) => !a.from_passing_test)) {
+          logTail = annotations.filter((a) => !a.from_passing_test).map((a) => a.message)
+            .join("\n").split("\n").slice(-tailLines).join("\n");
+          logUnavailable = undefined;
+          tailSource = "annotations";
         } else {
           logUnavailable = { kind: "fetch-failed", detail };
           logTail = "";
+          tailSource = undefined;
         }
       }
     }
@@ -1462,6 +1566,7 @@ function* ciFailuresSteps(
       ...(logUnavailable === undefined ? {} : { logUnavailable }),
       ...(tailSource ? { tailSource } : {}),
       ...(annotationFallback ? { annotationFallback } : {}),
+      ...(annotations.length ? { annotations } : {}),
     });
   }
   // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
