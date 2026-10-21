@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, dependencySeedIdentity, DEPENDENCY_SEED_MIN_IDLE_MS, materializeDependencySeed, sweepDependencySeeds } from "../src/lib/dependency-seeds.js";
+import { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, dependencySeedIdentity, DEPENDENCY_SEED_MIN_IDLE_MS, legacyHostNamespace, materializeDependencySeed, sweepDependencySeeds } from "../src/lib/dependency-seeds.js";
 
 function writable(path: string): void {
   const s = lstatSync(path);
@@ -310,4 +310,19 @@ test("dependency seed installer publishes complete immutable tools and preserves
   rmSync(join(versions, version, "scripts", "dependency-seeds.mjs"));
   assert.throws(() => execFileSync("bash", [installer], { env, stdio: "pipe" }), /Command failed/);
   assert.deepEqual(readFileSync(wrapper), saved);
+}));
+
+test("a pre-namespace consumer record on a macOS host path is read from the host; other legacy records stay retained", () => fixture((root, donor, checkout) => {
+  assert.equal(legacyHostNamespace("/Users/someone/Remudero/run", "darwin"), "host");
+  assert.equal(legacyHostNamespace("/private/var/folders/x/T/run", "darwin"), "host");
+  assert.equal(legacyHostNamespace("/workspace/run", "darwin"), undefined, "a container-only path stays unverified");
+  assert.equal(legacyHostNamespace("/Users/someone/run", "linux"), undefined, "Linux has real mount namespaces");
+  const store = join(root, "seeds");
+  const result = materializeDependencySeed(checkout, { ...identityOptions, root: store, sourceDir: donor, now: 0 });
+  if (result.status !== "materialized") throw new Error("missing seed");
+  const consumer = join(result.seed, "consumers", readdirSync(join(result.seed, "consumers"))[0]);
+  writeFileSync(consumer, JSON.stringify({ checkout }));
+  writable(join(checkout, "node_modules")); rmSync(join(checkout, "node_modules"), { recursive: true });
+  const [row] = sweepDependencySeeds(store, { now: Date.now(), isOpen: () => false });
+  assert.equal(row.reason, process.platform === "darwin" ? "unreferenced and idle for six hours" : "foreign or unverified consumer mount namespace");
 }));

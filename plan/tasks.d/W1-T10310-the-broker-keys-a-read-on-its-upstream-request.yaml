@@ -9,7 +9,7 @@
   risk: medium  # Rule 19: one concern, what one brokered read is keyed and cached on; pacing, routing and writes are unchanged
   band_meaning: span
   priority: 1  # operator-2026-10-21: every Mac session now reads through the broker; two of the three cases serve a WRONG answer today
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-20: an agent measured two reads of one URL with different --jq going upstream twice"
   plan_refs: [W1-T10279, W1-T10302, W1-T3275]

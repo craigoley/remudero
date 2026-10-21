@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-20: red-PR stall triage (#13039)"
   plan_refs: [W1-T1223, W1-T6465, W1-T7959, W1-T9807, W1-T4459, W1-T10043, W1-T10070, W1-T100, W1-T9748]

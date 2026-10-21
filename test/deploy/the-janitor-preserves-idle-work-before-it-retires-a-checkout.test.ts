@@ -5,6 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 const HELPER = join(process.cwd(), "deploy/mac/preserve-retire.py");
 const JANITOR = join(process.cwd(), "deploy/mac/remudero-janitor.sh");
@@ -376,5 +377,103 @@ test("the janitor summary distinguishes dry-run, disabled, throttled and unknown
       assert.ok(summary.includes(c.fields), summary);
       assert.ok(summary.includes(`removed=0 removed-complete=${c.complete}`), summary);
     }
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("housekeeping repacks a repository with too many packs and keeps every object, even in a kept checkout", () => {
+  const fx = setup({ repack_min_packs: 3 });
+  try {
+    const repo = clone(fx, "Remudero/many-packs");
+    git(repo, "config", "maintenance.auto", "false");  // or a commit's background maintenance merges them
+    // One pack per fetch-sized batch, as repeated fetches with automatic gc off leave them.
+    const pack = () => execFileSync("git", ["-C", repo, "pack-objects", "--revs", "-q", ".git/objects/pack/pack"], { input: "HEAD\n", env: GIT_ENV });
+    for (let i = 0; i < 4; i++) { commit(repo, `f${i}.txt`, `${i}\n`, `commit ${i}`); pack(); }
+    const orphan = execFileSync("git", ["-C", repo, "hash-object", "-w", "--stdin"], { input: "unreachable\n", encoding: "utf8", env: GIT_ENV }).trim();
+    // Packed and no longer loose, so only --keep-unreachable can carry it through the repack.
+    execFileSync("git", ["-C", repo, "pack-objects", "-q", ".git/objects/pack/pack"], { input: orphan + "\n", env: GIT_ENV });
+    git(repo, "prune-packed");
+    const packs = () => readdirSync(join(repo, ".git/objects/pack")).filter(n => n.endsWith(".pack")).length;
+    assert.ok(packs() >= 4, `fixture made ${packs()} packs`);
+    // The real clock makes the checkout active, so it is kept and only repacked.
+    const r = helper(fx, ["--apply"], {}, Math.floor(Date.now() / 1000));
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /REPACKED packs=\d+->1 .*many-packs\/\.git/);
+    assert.match(r.stdout, /housekeeping repacked=1 /);
+    assert.equal(packs(), 1);
+    assert.equal(existsSync(repo), true);
+    git(repo, "cat-file", "-e", orphan);
+    git(repo, "fsck", "--no-dangling");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("outside any checkout an idle dump is compressed, an old one expires and idle build folders are removed", () => {
+  const fx = setup({ dump_min_mb: 1, dump_retain_days: 14 });
+  try {
+    const run = join(fx.home, "Remudero/run-notes");
+    const pkg = join(run, "pkg"), fixtures = join(run, "source/test/ci");
+    for (const dir of [join(run, "node_modules/x"), join(pkg, "coverage"), join(fixtures, "coverage")]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(run, "node_modules/x/index.js"), "x\n");
+    writeFileSync(join(pkg, "package.json"), "{}\n");
+    writeFileSync(join(pkg, "coverage/lcov.info"), "SF:a\n");
+    writeFileSync(join(fixtures, "coverage/expected.txt"), "fixture data\n");
+    const big = "[" + '"subject",'.repeat(150_000) + '"end"]';
+    writeFileSync(join(run, "subjects.json"), big);
+    writeFileSync(join(run, "open.json"), big);
+    writeFileSync(join(run, "small.json"), "{}\n");
+    writeFileSync(join(run, "old.log"), "old\n");
+    touch(join(run, "old.log"), NOW - 20 * 24 * HOUR);
+    const kept = clone(fx, "Remudero/run-notes/checkout");
+    writeFileSync(join(kept, "inside.json"), big);
+    mkdirSync(join(kept, "node_modules"));
+    writeFileSync(join(fx.lsof), [join(run, "open.json"), join(kept, "README")].join("\n") + "\n");
+
+    const dry = helper(fx, []);
+    assert.equal(dry.status, 0, dry.stderr + dry.stdout);
+    assert.match(dry.stdout, /housekeeping repacked=0 compressed=1 dumps-expired=1 build-dirs-removed=2 apply=0/);
+    assert.equal(existsSync(join(run, "subjects.json")), true, "a dry run changes nothing");
+
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(gunzipSync(readFileSync(join(run, "subjects.json.gz"))).toString("utf8"), big);
+    assert.equal(existsSync(join(run, "subjects.json")), false);
+    assert.equal(existsSync(join(run, "old.log")), false, "unchanged for 14 days");
+    assert.equal(existsSync(join(run, "node_modules")), false);
+    assert.equal(existsSync(join(pkg, "coverage")), false);
+    for (const path of [join(run, "open.json"), join(run, "small.json"), join(fixtures, "coverage/expected.txt"),
+      join(kept, "inside.json"), join(kept, "node_modules")]) assert.equal(existsSync(path), true, path);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a root pattern scans every folder it matches and nothing beside them", () => {
+  const fx = setup();
+  try {
+    const matched = clone(fx, "Downloads/remudero-recovery-1/repo");
+    const other = clone(fx, "Downloads/other-project/repo");
+    writeFileSync(join(fx.home, "Downloads/remudero-key.pem"), "secret\n");
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /RETIRED clone .*Downloads\/remudero-recovery-1\/repo/);
+    assert.equal(existsSync(matched), false);
+    assert.equal(existsSync(other), true);
+    assert.equal(readFileSync(join(fx.home, "Downloads/remudero-key.pem"), "utf8"), "secret\n");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the janitor sweeps unreferenced dependency seeds with the account's sweeper", () => {
+  const fx = setup();
+  try {
+    mkdirSync(join(fx.home, ".local/bin"), { recursive: true });
+    const calls = join(fx.root, "seed-calls");
+    writeFileSync(join(fx.home, ".local/bin/remudero-dependencies"), `#!/bin/bash
+printf '%s\\n' "$*" >> '${calls}'
+echo '[{"seed":"/s/a","action":"remove","reason":"unreferenced and idle for six hours"},{"seed":"/s/b","action":"keep","reason":"referenced by checkout"}]'
+`, { mode: 0o755 });
+    const r = janitor(fx, true);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /dependency-seeds: removed=1 kept=1/);
+    assert.equal(readFileSync(calls, "utf8"), "sweep --apply\n");
+    rmSync(calls);
+    assert.equal(janitor(fx, false).status, 0);
+    assert.equal(existsSync(calls), false, "a dry run never sweeps");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });

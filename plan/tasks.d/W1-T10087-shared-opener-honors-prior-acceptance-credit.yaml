@@ -13,7 +13,7 @@
     - src/lib/pr-open.ts
     - test/a-pr-opens-with-a-judgeable-body.test.ts
     - test/a-pr-open-proof-runs-off-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
