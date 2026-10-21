@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -36,7 +36,7 @@ import {
   type GhApiFetcher,
 } from "../src/lib/open-prs-rest.js";
 import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { fixCommand, type routeFix } from "../src/run-task.js";
+import { fixCommand, routeFix, buildSweepEffects, type RegisteredFixOwnerSnapshot } from "../src/run-task.js";
 import { ghJson, type GhRateLimitReading } from "../src/lib/worker.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { Config } from "../src/lib/config.js";
@@ -2046,4 +2046,140 @@ test("fixCommand builds its sweep effects from its OWN resolved values, and rout
   for (const key of ["dispatchFix", "escalate", "arm"] as const) {
     assert.equal(typeof (seen as unknown as Record<string, unknown>)[key], "function", `effects must carry ${key}`);
   }
+});
+
+
+const OPERATOR_SECURITY_PR = 13317;
+const operatorSecurityAlert = (head = SHA) => ({ number: 909, state: "open", tool: { name: "CodeQL" },
+  rule: { id: "js/file-system-race", security_severity_level: "high" },
+  most_recent_instance: { commit_sha: head, ref: "refs/heads/source", location: { path: "src/lib/state-backup-engine-links.ts", start_line: 56 },
+    message: { text: "the file may have changed since it was checked" } } });
+
+async function operatorSecurityFixture(t: test.TestContext, options: {
+  codeql?: "failure" | "pending" | "absent"; alerts?: unknown; falsePositive?: boolean; unreadableAlerts?: boolean;
+  lookupState?: "open" | "closed"; realCheckoutRefusal?: boolean; dispatch?: Parameters<typeof routeFix>[2]["dispatchFix"];
+} = {}) {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-scanner-`));
+  mkdirSync(join(root, "state"));
+  const stamp = new Date().toISOString();
+  const checks = [{ id: 1, name: "ci-gate", status: "completed", conclusion: "success", started_at: stamp },
+    ...(options.codeql === "absent" ? [] : [{ id: 2, name: "CodeQL", status: options.codeql === "pending" ? "in_progress" : "completed",
+      conclusion: options.codeql === "pending" ? null : "failure", started_at: stamp }])];
+  const shim = ghShim([
+    { when: "headRefName", stdout: JSON.stringify({ headRefName: "run-W1-T10086-1792566232199", headRefOid: SHA, body: "Remudero-Task: W1-T10086" }) },
+    { when: `/pulls/${OPERATOR_SECURITY_PR}`, stdout: JSON.stringify({ number: OPERATOR_SECURITY_PR,
+      html_url: `https://github.com/acme/operator-security/pull/${OPERATOR_SECURITY_PR}`, state: options.lookupState ?? "open", merged: false,
+      title: "fix the backup links", body: "Remudero-Task: W1-T10086", updated_at: stamp,
+      head: { ref: "run-W1-T10086-1792566232199", sha: SHA }, auto_merge: null }) },
+    { when: "/check-runs?", stdout: JSON.stringify({ check_runs: checks }) },
+    { when: `/commits/${SHA}/status`, stdout: JSON.stringify({ statuses: [{ id: 3, context: "remudero-review", state: "success", created_at: stamp }] }) },
+    { when: "required_status_checks", stdout: JSON.stringify({ contexts: ["ci-gate", "remudero-review"] }) },
+    { when: "/code-scanning/alerts?", stdout: JSON.stringify(options.alerts ?? [operatorSecurityAlert()]), exit: options.unreadableAlerts ? 1 : 0 },
+    { when: "", exit: 1 },
+  ], { kind: "operator-scanner-gh" });
+  const ledgerPath = join(root, "state/ledger.ndjson");
+  if (options.falsePositive) writeFileSync(ledgerPath, JSON.stringify({ ts: stamp, step: "code_scanning.judged_false_positive",
+    pr_number: OPERATOR_SECURITY_PR, head_sha: SHA, reason: "existing exact-head ruling" }) + "\n");
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+  t.after(() => { process.env.PATH = previousPath; rmSync(root, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true }); });
+  const dispatched: Parameters<Parameters<typeof routeFix>[2]["dispatchFix"]>[] = [];
+  let observed: OpenPrView | undefined;
+  let checkoutDispatch: Parameters<typeof routeFix>[2]["dispatchFix"] | undefined;
+  if (options.realCheckoutRefusal) {
+    const ownerPath = join(root, "registered-owner");
+    const snapshot: RegisteredFixOwnerSnapshot = { path: ownerPath, pathState: "managed", attachmentState: "exact",
+      treeState: "clean", remoteState: "exact", historyState: "contained", claimState: "clear",
+      processState: "unknown", processProbeReason: "cwd_unreadable", ageMs: 60_000, localSha: SHA, remoteSha: SHA };
+    const task = { id: "W1-T10086", title: "preserve backup links", risk: "high", acceptance: [], files: ["src/lib/state-backup-engine-links.ts"] } as never;
+    checkoutDispatch = buildSweepEffects({ owner: "acme", repo: "operator-security", config: { root, claudeBin: "/bin/true" } as Config,
+      ledgerPath, runId: "OPERATOR-SECURITY-CLAIM", plan: { tasks: [task], byId: new Map([["W1-T10086", task]]) },
+      policy: DEFAULT_SWEEP_POLICY, log: () => {}, resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
+      registeredWorktreeOwnerImpl: () => ownerPath,
+      registeredOwnerRecovery: { capture: () => snapshot, remove: () => assert.fail("do not remove an unreadable owner") },
+      spawnImpl: async () => assert.fail("no security worker before the normal ownership guard"),
+    }).dispatchFix;
+  }
+  const code = await fixCommand([String(OPERATOR_SECURITY_PR)], {
+    config: { root, claudeBin: "/bin/true", installRoot: process.cwd() } as Config,
+    self: { owner: "acme", repo: "operator-security" },
+    route: (state, pr, effects, policy) => {
+      observed = pr;
+      return routeFix(state, pr, { ...effects, dispatchFix: checkoutDispatch ?? options.dispatch ?? ((...args) => { dispatched.push(args); return true; }) }, policy);
+    },
+  });
+  return { code, dispatched, observed, calls: shim.calls() };
+}
+
+test("operator fix reads failed CodeQL alerts through the default REST transport while required checks remain green", async (t) => {
+  const got = await operatorSecurityFixture(t);
+  assert.equal(got.code, 0);
+  assert.equal(got.observed?.checksState, "green", "security evidence never misstates required checks");
+  assert.equal(got.dispatched.length, 1);
+  assert.deepEqual(got.dispatched[0]![1].ciFailures?.map(f => f.name), ["CodeQL alert #909 (js/file-system-race)"]);
+  assert.match(got.dispatched[0]![1].ciFailures![0]!.logTail!, /state-backup-engine-links.ts:56/);
+  assert.match(got.dispatched[0]![1].ciFailures![0]!.logTail!, /UNTRUSTED SCANNER EVIDENCE/);
+  assert.doesNotMatch(got.dispatched[0]![1].ciFailures![0]!.logTail!, /judge ruled/);
+  assert.ok(got.calls.some(call => call.includes("/code-scanning/alerts?ref=refs/pull/13317/merge&state=open")));
+  assert.ok(!got.calls.some(call => /pr (?:view|merge|close)|--method (?:POST|PATCH|DELETE)/.test(call)), "REST reads only; no merge permission");
+});
+
+for (const [label, options] of [
+  ["pending CodeQL", { codeql: "pending" }], ["absent CodeQL", { codeql: "absent" }],
+  ["no open alerts", { alerts: [] }], ["wrong head", { alerts: [operatorSecurityAlert("f".repeat(40))] }],
+  ["malformed listing", { alerts: {} }], ["unreadable listing", { unreadableAlerts: true }],
+  ["settled false positive", { falsePositive: true }],
+  ["closed pull request", { lookupState: "closed" }],
+] as const) {
+  test(`operator fix refuses scanner repair for ${label}`, async (t) => {
+    const got = await operatorSecurityFixture(t, options);
+    assert.equal(got.code, 1);
+    assert.equal(got.dispatched.length, 0);
+    assert.equal(got.observed?.checksState, "green");
+    if (("codeql" in options && (options.codeql === "pending" || options.codeql === "absent")) || "falsePositive" in options) {
+      assert.ok(!got.calls.some(call => call.includes("/code-scanning/alerts?")), "an unsettled/absent check or settled false positive cannot request a new repair");
+    }
+  });
+}
+
+test("operator scanner repair preserves a normal dispatch claim refusal", async (t) => {
+  let calls = 0;
+  const got = await operatorSecurityFixture(t, { dispatch: () => { calls++; return { claimDeclined: true, ownerRecoveryReason: "process_cwd_probe_unreadable" }; } });
+  assert.equal(calls, 1);
+  assert.equal(got.code, 1);
+  assert.equal(got.dispatched.length, 0);
+});
+
+test("operator scanner repair asks the existing progress judge after prior strikes and honors its refusal", async () => {
+  const view = { prNumber: OPERATOR_SECURITY_PR, prUrl: "https://github.com/acme/operator-security/pull/13317", taskId: "W1-T10086",
+    reviewState: "success", checksState: "green", unmetCriteria: [], priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
+    lastActivityAt: new Date().toISOString(), headSha: SHA, autoMergeArmed: false, ciFailures: [{ name: "CodeQL", logTail: "failed results check" }],
+    codeqlHeadAlerts: { headSha: SHA, alerts: [{ alertNumber: 909, ruleId: "js/file-system-race", severity: "high",
+      path: "src/lib/state-backup-engine-links.ts", line: 56, message: "race" }] } } as OpenPrView;
+  let judged = 0, dispatched = 0;
+  const result = await routeFix("OPEN", view, { ledgerLines: () => [], dispatchFix: () => { dispatched++; }, escalate: () => {},
+    fixProgressJudge: async input => { judged++; assert.ok(input.currentRed.some(red => red.includes("909"))); return undefined; } });
+  assert.equal(judged, 1);
+  assert.equal(dispatched, 0);
+  assert.equal(result.outcome, "refused");
+  assert.match(result.reason, /progress judge unavailable/);
+  assert.equal(view.priorStrikes, DEFAULT_SWEEP_POLICY.strikeCap, "the strike count is never reset");
+  const unreadable = await routeFix("OPEN", view, { dispatchFix: () => assert.fail("unknown rulings never dispatch"),
+    escalate: () => assert.fail("unknown history is not a judged escalation"), ledgerLines: () => { throw new Error("unreadable"); } });
+  assert.equal(unreadable.outcome, "refused");
+  assert.match(unreadable.reason, /ruling history unavailable/);
+  const missing = await routeFix("OPEN", view, { dispatchFix: () => assert.fail("missing history never dispatches"), escalate: () => {} });
+  assert.equal(missing.outcome, "refused");
+  const suppressed = await routeFix("OPEN", view, { dispatchFix: () => assert.fail("a settled false positive is honored"), escalate: () => {},
+    ledgerLines: () => [{ step: "code_scanning.judged_false_positive", pr_number: OPERATOR_SECURITY_PR, head_sha: SHA }] });
+  assert.equal(suppressed.outcome, "refused");
+});
+
+
+test("operator scanner repair reaches the real shared checkout guard and refuses an unreadable owner without spawning", async (t) => {
+  const got = await operatorSecurityFixture(t, { realCheckoutRefusal: true });
+  assert.equal(got.observed?.checksState, "green");
+  assert.equal(got.code, 1);
+  assert.equal(got.dispatched.length, 0);
+  assert.ok(got.calls.some(call => call.includes("headRefName")), "the real shared dispatch performs its own head read before refusing ownership");
 });
