@@ -211,3 +211,11 @@ test("W1-T10079: each named inbox route builder serves its own verb's table row"
     assert.deepEqual([route.method, route.path, route.tier], ["POST", spec.path, spec.tier], name);
   }
 });
+
+test("W1-T10079: the help lines rmd --help scans as literals are the verb table's own text", () => {
+  for (const name of ["reply", "archive", "snooze", "keep"]) {
+    const spec = INBOX_VERBS.find(verb => verb.name === name)!;
+    const command = COMMANDS.find(c => c.name === name)!;
+    assert.deepEqual([command.syntax, command.summary], [spec.syntax, spec.summary], name);
+  }
+});

@@ -53793,10 +53793,30 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range",
   },
 
-  { name: "reply", ...inboxVerbHelp("reply") },
-  { name: "archive", ...inboxVerbHelp("archive") },
-  { name: "snooze", ...inboxVerbHelp("snooze") },
-  { name: "keep", ...inboxVerbHelp("keep") },
+  {
+    name: "reply",
+    syntax: 'rmd reply <threadId> --text "<text>" [--intent-id <id>]',
+    summary: "Reply on an operator inbox thread.",
+    detail: inboxVerbHelp("reply").detail,
+  },
+  {
+    name: "archive",
+    syntax: "rmd archive <proposalId> [--unarchive]",
+    summary: "Set an inbox item aside, or undo its archive.",
+    detail: inboxVerbHelp("archive").detail,
+  },
+  {
+    name: "snooze",
+    syntax: "rmd snooze <proposalId> --until <RFC3339-UTC>|--wake",
+    summary: "Hide an inbox item until a UTC instant, or wake it now.",
+    detail: inboxVerbHelp("snooze").detail,
+  },
+  {
+    name: "keep",
+    syntax: 'rmd keep <proposalId> [--reason "<text>"] [--unkeep]',
+    summary: "Record the current observation as kept, or undo that decision.",
+    detail: inboxVerbHelp("keep").detail,
+  },
 
 ] as const;
 
