@@ -2176,9 +2176,9 @@ jobs:
     name: mutation-ratchet
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
-    # W1-T1009: LIGHT band. This job installed Playwright until W1-T133 removed that step, so it
-    # is not immune to the same stall class even though the measured hangs were elsewhere.
-    timeout-minutes: 10
+    # W1-T10217: a PR's first Stryker run is cold and a cancelled one caches nothing; 10m cut off 5 cold runs.
+    # 32m = the slowest projected cold job (22.4m) x one head's measured pace spread (1.38x); see its test.
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -8529,7 +8529,7 @@ async function runReview(args: {
   };
   const recordReplay = (decision: ReviewOutcomeDecision): void => {
     if (args.shadow) return;
-    const sha = reviewerHealthRowFields("review.posted").reviewer_code_sha;
+    const sha = reviewerHealthRowFields("review.posted", undefined).reviewer_code_sha;
     log("review.replay_input", reviewReplayLedgerFields(replayInput, decision, {
       pr_url: prUrl, head_sha: headSha, reviewer_code_sha: typeof sha === "string" ? sha : null,
     }));
@@ -23577,7 +23577,7 @@ export function reviewReplayCommand(rest: string[]): number {
   }
   const config = loadConfig();
   const root = resolve(process.cwd());
-  const sha = reviewerHealthRowFields("review.posted").reviewer_code_sha;
+  const sha = reviewerHealthRowFields("review.posted", undefined).reviewer_code_sha;
   if (typeof sha !== "string") throw new Error("review replay generator revision is unavailable");
   const sample = refreshReviewReplaySample({ stateDir: dirname(ledgerPathFor(config)), root, generatorRevision: sha });
   console.log(`review replay: ${sample.rows.length} distinct inputs; classes ${sample.header.classes.join(", ")}`);
@@ -23820,7 +23820,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     reviewer_outcome: "not_attempted", verdict_lines: [],
   };
   const recordSetupReplay = (input: ReviewReplayInput, decision: ReviewOutcomeDecision): void => {
-    const sha = reviewerHealthRowFields("review.posted").reviewer_code_sha;
+    const sha = reviewerHealthRowFields("review.posted", flagValue(rest, REVIEWER_INCIDENT_FLAG)).reviewer_code_sha;
     log("review.replay_input", reviewReplayLedgerFields(input, decision, {
       pr_url: view.url, head_sha: view.headRefOid, reviewer_code_sha: typeof sha === "string" ? sha : null,
     }));
@@ -39074,7 +39074,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "review-replay": {
       const d = deps("review-replay");
       return gardenPass(reviewReplayGardenSpec(d, () => {
-        const sha = reviewerHealthRowFields("review.posted").reviewer_code_sha;
+        const sha = reviewerHealthRowFields("review.posted", undefined).reviewer_code_sha;
         if (typeof sha !== "string") throw new Error("review replay generator revision is unavailable");
         return sha;
       }), d);

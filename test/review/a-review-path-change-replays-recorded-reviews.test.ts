@@ -94,8 +94,8 @@ test("W1-T10270: production review decisions route through the replayed seam", (
   assert.doesNotMatch(run, /requiredSemanticRefusal\(/);
   const files = new Map([
     ["src/lib/self-sync.ts", ""],
-    ["src/run-task.ts", 'import "#test/review/lib/required-semantic-review.js";'],
-    ["src/lib/required-semantic-review.ts", 'import "#test/review/nested.js";'],
+    ["src/run-task.ts", 'import "./lib/required-semantic-review.js";'],
+    ["src/lib/required-semantic-review.ts", 'import "./nested.js";'],
     ["src/lib/nested.ts", ""],
     ["test/review/a-review-path-change-replays-recorded-reviews.test.ts", ""],
   ]);

@@ -413,6 +413,13 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   }
 }
 
+/** A record written before namespaces were recorded: on macOS a path the host itself owns
+ * (`/Users`, `/private`, `/var/folders`, `/tmp`) is read from the host, as a bind mount keeps the
+ * same path. Anything else, and any record on Linux, stays unverified. */
+export function legacyHostNamespace(checkout: string, platform: string = process.platform): string | undefined {
+  return platform === "darwin" && /^\/(Users|private|var\/folders|tmp)\//.test(checkout) ? "host" : undefined;
+}
+
 /** GC requires a successful all-account open-file check, six idle hours and zero checkout references. */
 export function sweepDependencySeeds(root: string, opts: { apply?: boolean; now?: number; isOpen?: (path: string) => boolean } = {}): Array<{ seed: string; action: "keep" | "remove"; reason: string }> {
   ownedDirectory(root);
@@ -433,7 +440,7 @@ export function sweepDependencySeeds(root: string, opts: { apply?: boolean; now?
         const { checkout, mountNamespace } = JSON.parse(readFileSync(join(seed, "consumers", name), "utf8")) as { checkout: string; mountNamespace?: string };
         if (typeof checkout !== "string" || !isAbsolute(checkout)) throw new Error("invalid consumer reference");
         const currentNamespace = process.platform === "linux" ? readlinkSync("/proc/self/ns/mnt") : "host";
-        if (mountNamespace !== currentNamespace) { reason = "foreign or unverified consumer mount namespace"; continue; }
+        if ((mountNamespace ?? legacyHostNamespace(checkout)) !== currentNamespace) { reason = "foreign or unverified consumer mount namespace"; continue; }
         const marker = join(checkout, "node_modules", CONSUMER_MARKER);
         try {
           const ref = JSON.parse(readFileSync(marker, "utf8")) as { seed: string };
