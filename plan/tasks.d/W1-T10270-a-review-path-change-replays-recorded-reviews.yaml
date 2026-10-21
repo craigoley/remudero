@@ -24,10 +24,19 @@
     - src/lib/required-semantic-review.ts
     - src/lib/review.ts
     - src/lib/garden-registry.ts
+    - src/lib/config-gardener.ts
     - src/lib/affected-suites.ts
     - src/run-task.ts
     - test/fixtures/review-replay/sample.ndjson
     - test/review/a-review-path-change-replays-recorded-reviews.test.ts
+  amendment: |
+    W1-T10270 companion reconciliation (2026-10-21 stuck-PR recovery): include
+    src/lib/config-gardener.ts only to register review.replay_input in the existing
+    CONFIG_GARDEN_LEDGER_STEPS filtered-read vocabulary. The new replay receipt already carries
+    pr_url; the unchanged priced-step census requires that consumer to retain the row.
+    This adds no pricing, spend, budget, governor, trust or write authority. Preserve the
+    census and every existing acceptance criterion and falsifier; do not add an exemption.
+    Prove the real union reader retains this row and still filters unrelated telemetry.
   rationale: |
     READ on origin/main 04ed915a7 (2026-10-20).
 
