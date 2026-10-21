@@ -4,7 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  acquireTestSlot, probeReservedTree, testSlotReservationIdentity, TEST_SLOT_RUN_ENV,
+  acquireTestSlot, probeReservedTree, readTestSlotCgroup, testSlotReservationIdentity, TEST_SLOT_RUN_ENV,
   type TestSlotHolder,
 } from "#src/lib/test-slot.js";
 
@@ -19,6 +19,12 @@ function holder(): ScopedHolder {
   return { pid: 424242, host: hostname(), bootId: "boot", pidNs: "ns", ownerUid: process.getuid?.(),
     processStart: "proc:100", ownerNonce: "dead-owner", startedAt: at, heartbeatAt: at,
     label: "dead owner", workIdentity: "reservation-marker-v1", cgroupScope: { path: scopePath, dedicated: true } };
+}
+
+/** A legacy shared-mode slot record, which a waiter reads for tree-based recovery. */
+function writeSharedSlot(path: string, held: TestSlotHolder): void {
+  writeFileSync(path, JSON.stringify(held));
+  chmodSync(path, 0o644);
 }
 
 function scopeHost(scope: "gone" | "empty" | "live" | "nested" | "denied" = "gone", owner: string | Error = failure("ENOENT")) {
@@ -65,8 +71,7 @@ test("W1-T10251: a waiter reclaims a dead owner's slot on cgroup-scope evidence"
   const dir = mkdtempSync(join(tmpdir(), "rmd-t10251-waiter-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, "slot-1.json"), held = holder(), host = scopeHost();
-  writeFileSync(path, JSON.stringify(held));
-  chmodSync(path, 0o644);
+  writeSharedSlot(path, held);
   const rows: Record<string, unknown>[] = [];
   const lease = acquireTestSlot("waiter", { dir, slots: 1, waitBoundMs: 0, platform: "linux",
     hostname, bootId: () => "boot", pidNamespace: () => "ns", isPidAlive: () => false,
@@ -177,4 +182,58 @@ test("scope evidence requires owner death, matching identities and complete popu
     ? `${TEST_SLOT_RUN_ENV}=${JSON.stringify({ nonce: held.ownerNonce, pid: held.pid, start: held.processStart })}\0`
     : read(path);
   assert.equal(probeReservedTree(held, markedHost).state, "live", "failed scope reads still use live marker evidence");
+});
+
+// The measured builder shape on the Azure host (2026-10-21, run-u1165.scope): systemd-run --scope starts
+// `timeout … job.sh`, the job wraps the preflight in a second `timeout`, and each `timeout` takes a new process
+// group. The owner's own wrappers are therefore in another group, yet the scope holds nothing but this run.
+function builderScope(extra: { pid: number; ppid: number; group: number }[] = []) {
+  const procs = [
+    { pid: 900, ppid: 7, group: 900 },            // outer `timeout -k 60 7200 … job.sh`
+    { pid: 901, ppid: 900, group: 900 },          // the job script
+    { pid: 902, ppid: 901, group: 902 },          // inner `timeout` around the preflight
+    { pid: process.pid, ppid: 902, group: 902 },  // the slot owner
+    ...extra,
+  ];
+  const stats = new Map(procs.map(p => [p.pid, `${p.pid} (wrapper) S ${p.ppid} ${p.group} ${"0 ".repeat(15)}100 0`]));
+  stats.set(7, `7 (systemd) S 1 7 ${"0 ".repeat(15)}1 0`);
+  stats.set(1, `1 (systemd) S 0 1 ${"0 ".repeat(15)}1 0`);
+  const read = (path: string): string => {
+    if (path === "/proc/self/cgroup") return `0::${scopePath}\n`;
+    const pid = path === "/proc/self/stat" ? process.pid : Number(path.split("/")[2]);
+    const found = stats.get(pid);
+    if (found === undefined || !path.endsWith("/stat")) throw failure("ENOENT");
+    return found;
+  };
+  return readTestSlotCgroup({ platform: "linux", read, readCgroup: path => {
+    assert.equal(path, `/sys/fs/cgroup${scopePath}/cgroup.procs`);
+    return `${procs.map(p => p.pid).join("\n")}\n`;
+  } });
+}
+
+test("W1-T10251: a builder scope that only wraps the owner in its own ancestors is dedicated", t => {
+  const recorded = builderScope();
+  assert.deepEqual(recorded, { path: scopePath, dedicated: true }, JSON.stringify(recorded));
+  // End to end: the record that writer publishes lets a waiter free the slot once the owner and scope are gone.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t10251-builder-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "slot-1.json"), held = { ...holder(), cgroupScope: recorded }, host = scopeHost();
+  writeSharedSlot(path, held);
+  const rows: Record<string, unknown>[] = [];
+  const lease = acquireTestSlot("waiter", { dir, slots: 1, waitBoundMs: 0, platform: "linux",
+    hostname, bootId: () => "boot", pidNamespace: () => "ns", isPidAlive: () => false,
+    load: () => ({ cores: 8, load1: 0 }), treeProbe: record => probeReservedTree(record, host),
+    log: line => rows.push(JSON.parse(line)) });
+  t.after(() => lease.release());
+  assert.equal(lease.outcome, "acquired", lease.note);
+  assert.deepEqual(rows.filter(row => row.step === "test_slot.reclaimed_quiescent").map(row => row.coverage), ["cgroup-scope"]);
+});
+
+test("a builder scope that also holds a sibling or an unrelated group stays shared", () => {
+  // A sibling the job script started beside the owner, and a process outside the owner's ancestry.
+  for (const extra of [{ pid: 903, ppid: 901, group: 903 }, { pid: 904, ppid: 7, group: 904 }]) {
+    const recorded = builderScope([extra])!;
+    assert.equal(recorded.dedicated, false, JSON.stringify(extra));
+    assert.equal(recorded.reason, "scope contains another process group");
+  }
 });
