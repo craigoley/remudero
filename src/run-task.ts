@@ -19395,13 +19395,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   if (scopeWait) {
     let state: string;
     try {
-      state = await (opts.implementScopeAmendmentState ?? (async (url: string) => {
-        const pr = await ghJsonAsync(["pr", "view", url, "--json", "state,mergedAt"]) as { state: string; mergedAt?: string };
-        if (pr.mergedAt || pr.state === "MERGED") return "merged";
-        if (pr.state === "OPEN") return "open";
-        if (pr.state === "CLOSED") return "closed";
-        throw new Error("scope amendment state is unreadable");
-      }))(scopeWait.amendmentUrl);
+      state = await (opts.implementScopeAmendmentState ?? readBuildScopeAmendmentState)(scopeWait.amendmentUrl);
     } catch (error) {
       state = "unreadable";
       log("implement.scope_wait_unreadable", { amendment_url: scopeWait.amendmentUrl, reason: String(error) });
@@ -42658,6 +42652,16 @@ export function requiredCompanions(
     for (const dep of deps) if (left.has(dep)) importers.set(dep, [...(importers.get(dep) ?? []), file]);
   }
   return [...importers].sort(([a], [b]) => a.localeCompare(b)).map(([path, by]) => ({ path, importers: by.sort() }));
+}
+
+export async function readBuildScopeAmendmentState(
+  url: string, fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<"open" | "merged" | "closed"> {
+  const pr = await fetch(["pr", "view", url, "--json", "state,mergedAt"]) as { state?: string; mergedAt?: string };
+  if (pr.mergedAt || pr.state === "MERGED") return "merged";
+  if (pr.state === "OPEN") return "open";
+  if (pr.state === "CLOSED") return "closed";
+  throw new Error("scope amendment state is unreadable");
 }
 
 /**

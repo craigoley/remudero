@@ -380,3 +380,16 @@ test("scope recovery refuses symlinks and non-regular companions before saving",
     assert.equal(existsSync(join(root, "state")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("a build's scope wait reads its amendment PR's state from GitHub's own fields", async () => {
+  const { readBuildScopeAmendmentState } = await import("#src/run-task.js");
+  const url = "https://github.com/acme/remudero/pull/7";
+  const asked: string[][] = [];
+  const reply = (body: unknown) => async (args: string[]) => { asked.push(args); return body; };
+  assert.equal(await readBuildScopeAmendmentState(url, reply({ state: "MERGED" })), "merged");
+  assert.equal(await readBuildScopeAmendmentState(url, reply({ state: "CLOSED", mergedAt: "2026-10-21T00:00:00Z" })), "merged");
+  assert.equal(await readBuildScopeAmendmentState(url, reply({ state: "OPEN" })), "open");
+  assert.equal(await readBuildScopeAmendmentState(url, reply({ state: "CLOSED" })), "closed");
+  await assert.rejects(readBuildScopeAmendmentState(url, reply({ state: "DRAFT" })), /scope amendment state is unreadable/);
+  assert.deepEqual(asked[0], ["pr", "view", url, "--json", "state,mergedAt"]);
+});
