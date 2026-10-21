@@ -171,7 +171,7 @@ for (const [name, title] of [
       const [local] = rows(cli), [remote] = rows(http);
       assert.equal(local.origin, "rmd-cli");
       for (const field of ["step", "task_id", name === "snooze" ? "until" : "archived"]) assert.equal(local[field], remote[field]);
-      assert.equal(await inboxVerbCommand(name, [ID, name === "snooze" ? "--wake" : "--undo"], buildInboxVerbActions(cli)), 0);
+      assert.equal(await inboxVerbCommand(name, [ID, name === "snooze" ? "--wake" : "--unarchive"], buildInboxVerbActions(cli)), 0);
       assert.deepEqual(JSON.parse(readFileSync(inboxTriagePath(join(cli.inboxRoot, "state")), "utf8")), {});
     } finally { await new Promise<void>(resolve => service.close(() => resolve())); }
   });
@@ -180,7 +180,7 @@ for (const [name, title] of [
 test("inbox commands reject malformed flags, unknown items and past snoozes without a ledger write", async t => {
   const deps = world(t), actions = buildInboxVerbActions(deps);
   for (const [name, args] of [["snooze", [ID]], ["snooze", [ID, "--wake", "--until", UNTIL]],
-    ["archive", [ID, "--reason", "x"]], ["keep", [ID, "--reason"]], ["archive", [ID, "--undo", "--undo"]]] as const) {
+    ["archive", [ID, "--reason", "x"]], ["keep", [ID, "--reason"]], ["archive", [ID, "--unarchive", "--unarchive"]]] as const) {
     assert.equal(await inboxVerbCommand(name, [...args], actions), 2);
   }
   assert.equal(await inboxVerbCommand("snooze", [ID, "--until", "yesterday"], actions), 2);
@@ -197,6 +197,6 @@ test("rmd keep records a reversible observation with its reason", async t => {
   assert.equal(row.reason, "watch the next run");
   assert.equal(row.origin, "rmd-cli");
   assert.ok(JSON.parse(readFileSync(inboxTriagePath(join(deps.inboxRoot, "state")), "utf8"))[ID].keptState);
-  assert.equal(await inboxVerbCommand("keep", [ID, "--undo"], actions), 0);
+  assert.equal(await inboxVerbCommand("keep", [ID, "--unkeep"], actions), 0);
   assert.deepEqual(JSON.parse(readFileSync(inboxTriagePath(join(deps.inboxRoot, "state")), "utf8")), {});
 });

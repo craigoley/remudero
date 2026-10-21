@@ -125,9 +125,9 @@ usage:
   rmd note <id> <text...>   # Record an operator guidance note against a task or proposal, for the weekly feedback docket.
   rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
   rmd reply <threadId> --text "<text>" [--intent-id <id>]   # Reply on an operator inbox thread.
-  rmd archive <proposalId> [--undo]   # Set an inbox item aside, or undo its archive.
+  rmd archive <proposalId> [--unarchive]   # Set an inbox item aside, or undo its archive.
   rmd snooze <proposalId> --until <RFC3339-UTC>|--wake   # Hide an inbox item until a UTC instant, or wake it now.
-  rmd keep <proposalId> [--reason "<text>"] [--undo]   # Record the current observation as kept, or undo that decision.
+  rmd keep <proposalId> [--reason "<text>"] [--unkeep]   # Record the current observation as kept, or undo that decision.
 
 An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits
 NON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.
@@ -1248,7 +1248,7 @@ Reply on an operator inbox thread. Acts directly on config.root state and record
 Set an inbox item aside, or undo its archive.
 
 ```
-rmd archive <proposalId> [--undo]
+rmd archive <proposalId> [--unarchive]
 ```
 
 Set an inbox item aside, or undo its archive. Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.
@@ -1268,7 +1268,7 @@ Hide an inbox item until a UTC instant, or wake it now. Acts directly on config.
 Record the current observation as kept, or undo that decision.
 
 ```
-rmd keep <proposalId> [--reason "<text>"] [--undo]
+rmd keep <proposalId> [--reason "<text>"] [--unkeep]
 ```
 
 Record the current observation as kept, or undo that decision. Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.

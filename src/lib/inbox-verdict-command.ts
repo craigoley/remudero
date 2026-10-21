@@ -46,13 +46,19 @@ export const INBOX_VERBS = [
   verb({ name: "reply", path: "/v1/inbox/thread/reply", tier: "low", tool: "reply_thread", syntax: 'rmd reply <threadId> --text "<text>" [--intent-id <id>]',
     summary: "Reply on an operator inbox thread.", properties: { threadId: { type: "string", pattern: "^thread:.+::inbox::-::-$" }, text: { ...text, maxLength: 4000 }, intentId: { type: "string", pattern: "^[A-Za-z0-9._:-]{8,128}$" } },
     required: ["threadId", "text"], flags: { "--text": { field: "text" }, "--intent-id": { field: "intentId" } } }),
-  verb({ name: "archive", path: "/v1/inbox/archive", tier: "low", tool: "archive_proposal", syntax: "rmd archive <proposalId> [--undo]",
-    summary: "Set an inbox item aside, or undo its archive.", properties: { proposalId, archived: { type: "boolean" } }, required: ["proposalId", "archived"], flags: { "--undo": { field: "archived", value: false } } }),
+  verb({ name: "archive", path: "/v1/inbox/archive", tier: "low", tool: "archive_proposal", syntax: "rmd archive <proposalId> [--unarchive]",
+    summary: "Set an inbox item aside, or undo its archive.", properties: { proposalId, archived: { type: "boolean" } }, required: ["proposalId", "archived"], flags: { "--unarchive": { field: "archived", value: false } } }),
   verb({ name: "snooze", path: "/v1/inbox/snooze", tier: "low", tool: "snooze_proposal", syntax: "rmd snooze <proposalId> --until <RFC3339-UTC>|--wake",
     summary: "Hide an inbox item until a UTC instant, or wake it now.", properties: { proposalId, until: { type: ["string", "null"] } }, required: ["proposalId", "until"], flags: { "--until": { field: "until" }, "--wake": { field: "until", value: null } } }),
-  verb({ name: "keep", path: "/v1/inbox/keep", tier: "low", tool: "keep_proposal", syntax: 'rmd keep <proposalId> [--reason "<text>"] [--undo]',
-    summary: "Record the current observation as kept, or undo that decision.", properties: { proposalId, kept: { type: "boolean" }, reason: { type: "string" } }, required: ["proposalId"], flags: { "--reason": { field: "reason" }, "--undo": { field: "kept", value: false } } }),
+  verb({ name: "keep", path: "/v1/inbox/keep", tier: "low", tool: "keep_proposal", syntax: 'rmd keep <proposalId> [--reason "<text>"] [--unkeep]',
+    summary: "Record the current observation as kept, or undo that decision.", properties: { proposalId, kept: { type: "boolean" }, reason: { type: "string" } }, required: ["proposalId"], flags: { "--reason": { field: "reason" }, "--unkeep": { field: "kept", value: false } } }),
 ];
+
+export function inboxVerbHelp(name: InboxVerbName): { syntax: string; summary: string; detail: string } {
+  const spec = INBOX_VERBS.find(v => v.name === name)!;
+  return { syntax: spec.syntax, summary: spec.summary,
+    detail: `${spec.summary} Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.` };
+}
 
 export function validateInboxVerbArguments(spec: typeof INBOX_VERBS[number], body: unknown): string | undefined {
   if (!body || typeof body !== "object" || Array.isArray(body)) return "arguments must be an object";

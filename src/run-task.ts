@@ -726,7 +726,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { INBOX_VERBS, inboxVerbCommand, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { INBOX_VERBS, inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -53793,10 +53793,10 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range",
   },
 
-  ...INBOX_VERBS.filter(verb => ["archive", "snooze", "keep", "reply"].includes(verb.name)).map(verb => ({
-    name: verb.name, syntax: verb.syntax, summary: verb.summary,
-    detail: `${verb.summary} Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.`,
-  })),
+  { name: "reply", ...inboxVerbHelp("reply") },
+  { name: "archive", ...inboxVerbHelp("archive") },
+  { name: "snooze", ...inboxVerbHelp("snooze") },
+  { name: "keep", ...inboxVerbHelp("keep") },
 
 ] as const;
 
