@@ -10,6 +10,7 @@ import type { CiFailure, OpenPrView, SweepDeps } from "#src/lib/sweep.js";
 // issue only said "red on lint-plan" and recommended re-arming the code-fix rung that cannot stage plan
 // files. The light pass's `sweep.plan_repair` also wrote outcome "unwired" (no updateBranch there), and that
 // row burned the head's one base-red attempt, so no full pass could ever press the refresh.
+// Hand fix: PR 13287.
 
 const NOW = Date.parse("2026-10-20T04:30:00Z");
 const HEAD = "8".repeat(40);
