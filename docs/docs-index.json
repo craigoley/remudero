@@ -110,6 +110,12 @@
       "grepHint": "Audit fixtures"
     },
     {
+      "path": "docs/audits/head-identity-gate-open-plan-pr-exposure.md",
+      "title": "Open plan PR exposure to head-identity-gate (W1-T9376)",
+      "summary": "The October 20, 2026 snapshot contains one qualifying open PR, #13008. It is not exposed to the historical synthetic-merge checkout failure; its observed gate…",
+      "grepHint": "Open plan PR exposure to head-identity-gate (W1-T9376)"
+    },
+    {
       "path": "docs/audits/pr-4045-stale-head-fix-race-2026-09.md",
       "title": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)",
       "summary": "Scope: W1-T4464. Read-only forensic pass: one artifact plus its docs-index entry; no source,",

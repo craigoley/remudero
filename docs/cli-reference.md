@@ -36,6 +36,8 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>   # Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.
+  rmd gh-broker serve | status [--since <dur>] | stop   # Serve, inspect or stop the per-account GitHub read broker (Mac only; installed by deploy/mac).
   rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>   # Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
   rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
@@ -346,6 +348,26 @@ rmd ledger-grep <pattern>
 ```
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
+
+### `rmd gh`
+
+Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.
+
+```
+rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>
+```
+
+W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Writes go straight to gh, unpaced. With no live broker it runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.
+
+### `rmd gh-broker`
+
+Serve, inspect or stop the per-account GitHub read broker (Mac only; installed by deploy/mac).
+
+```
+rmd gh-broker serve | status [--since <dur>] | stop
+```
+
+W1-T10279: serve listens on <cache>/remudero/gh-broker/broker.sock (directory 0700, this uid only) and rewrites a heartbeat file every interval it advertises there; hooks/deny-floor.sh reads it to route raw gh reads to rmd gh. status prints queue depth by class, each limiter's gap, hold and primary spread, and counts of hit-fresh, coalesced, revalidated-304, upstream-200 and refused; --since <n>s|m|h|d summarises the request log (reads, upstream calls, share served without upstream, longest interactive wait). stop ends the server. deploy/mac/install-gh-read-broker.sh installs the launchd agent that keeps serve running; nothing on Azure changes.
 
 ### `rmd inspect`
 

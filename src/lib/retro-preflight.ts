@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { acquireTestSlotAsync, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotOptions } from "./test-slot.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /** PRIMARY CONTROL: maximum combined stdout/stderr bytes retained for one preflight attempt. */
 export const RETRO_PREFLIGHT_CAPTURE_BYTES = 16 * 1024;
@@ -54,13 +58,14 @@ export const RETRO_PREFLIGHT_STALL_MS = 15 * 60 * 1000;
  */
 export const RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS = 60 * 60 * 1000;
 /**
- * Exit classes produced by the harness's own BOUNDS rather than by the suite under test
- * (W1-T2803). A terminated run may retain partial assertion or cancellation evidence, but the
- * execution bound is not a completed suite verdict. {@link runRetroPrepublishPreflight} stands
- * down rather than resuming the Architect against an unchanged bound. `tests_failed` is a real
- * verdict about the plan and is exactly what the repair rung is for.
+ * Exit classes produced by the harness's own bounds rather than by the suite under test
+ * (W1-T2803). A terminated run may retain partial assertion or cancellation evidence, but it
+ * has no completed suite verdict. {@link runRetroPrepublishPreflight} stands down rather than
+ * retrying against an unchanged bound. `tests_failed` still enters the repair rung.
  */
 const BOUND_FAILURE_CLASSES = new Set(["process_timeout", "output_limit_exceeded", "process_spawn_failed"]);
+/** W1-T10144: the diff classes ci.yml's plan-reading lane narrows by changed paths (W1-T5698). */
+const CHANGED_PATH_CLASSES = new Set(["PLAN_ONLY", "DOCS_ONLY"]);
 const MAX_FAILING_TESTS = 20;
 const MAX_FAILING_TEST_NAME_BYTES = 300;
 const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
@@ -129,10 +134,22 @@ interface AttemptSlot {
   note: string;
 }
 
+/** W1-T10144: the branch's changed paths as ci.yml diffs its PR, or why git could not say. */
+export type RetroChangedFiles = { files: string[] } | { unreadable: string };
+
+/** Which suite set an attempt ran, and the broad count it would otherwise have run. */
+interface SuiteSelection {
+  mode: "changed-paths" | "broad";
+  reason: string;
+  changedPathCount: number | null;
+  broadSuiteCount: number | null;
+}
+
 interface AttemptResult {
   ok: boolean;
   suiteCount: number;
   elapsedMs: number;
+  selection?: SuiteSelection;
   /** Absent when no suite run started (enumeration failed, or a synthetic failure). */
   slot?: AttemptSlot;
   failure?: AttemptFailure;
@@ -152,6 +169,9 @@ export interface RunRetroPrepublishPreflightOptions {
     now?: () => number;
     /** Seams for the host-wide test slot the suite run takes. Production omits this. */
     testSlot?: Omit<TestSlotOptions, "sleep">;
+    /** W1-T10144: production reads {@link retroBranchChangedFiles}; `tmpRoot` holds the path list. */
+    changedFiles?: (worktreePath: string) => Promise<RetroChangedFiles>;
+    tmpRoot?: string;
   };
 }
 
@@ -367,33 +387,86 @@ function commandOptions(worktreePath: string): Parameters<RetroPrepublishRunner>
   };
 }
 
-async function enumerateSuites(worktreePath: string, run: RetroPrepublishRunner): Promise<{
+/** W1-T10144: `git diff --name-only origin/main...HEAD` in the retro worktree — ci.yml's own diff of the PR. */
+export async function retroBranchChangedFiles(worktreePath: string): Promise<RetroChangedFiles> {
+  try {
+    const out = await hostWorktreeGitAsync(worktreePath, ["diff", "--name-only", "origin/main...HEAD"], { log: () => {} });
+    return { files: out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) };
+  } catch (error) {
+    // Not an answer: the attempt keeps the broad suite set and its row names this reason.
+    return { unreadable: String((error as Error)?.message ?? error).slice(0, MAX_FAILING_TEST_NAME_BYTES) };
+  }
+}
+
+const listArg = ["--import", "tsx", "scripts/diff-class.mjs"];
+
+/** W1-T10144: the arguments that narrow the listing the way ci.yml narrows a plan-only PR; broad otherwise. */
+async function changedPathScope(worktreePath: string, run: RetroPrepublishRunner,
+  changedFiles: (worktreePath: string) => Promise<RetroChangedFiles>, tmpRoot: string,
+): Promise<{ args: string[]; selection: SuiteSelection; cleanup: () => void }> {
+  const broad = (reason: string, changedPathCount: number | null = null) => ({
+    args: [], selection: { mode: "broad" as const, reason, changedPathCount, broadSuiteCount: null }, cleanup: () => {} });
+  const changed = await changedFiles(worktreePath);
+  if ("unreadable" in changed) return broad(`changed paths unreadable: ${changed.unreadable}`);
+  if (changed.files.length === 0) return broad("no changed path", 0);
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(tmpRoot, "rmd-retro-changed-"));
+    writeFileSync(join(dir, "changed-files.txt"), `${changed.files.join("\n")}\n`);
+  } catch (error) {
+    // No list to narrow by: the attempt keeps the broad suite set and its row names why.
+    return broad(`changed-path list unwritable: ${String((error as Error)?.message ?? error)}`, changed.files.length);
+  }
+  const list = join(dir, "changed-files.txt");
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  const verdict = await run(process.execPath, [...listArg, "--changed-files", list], commandOptions(worktreePath));
+  const diffClass = normalizedOutput(verdict.stdout).trim();
+  if (verdict.status !== 0 || !CHANGED_PATH_CLASSES.has(diffClass)) {
+    cleanup();
+    return broad(`diff class ${diffClass || `unreadable (exit ${verdict.status})`}`, changed.files.length);
+  }
+  return { args: ["--changed-files", list], cleanup,
+    selection: { mode: "changed-paths", reason: `diff class ${diffClass}`, changedPathCount: changed.files.length, broadSuiteCount: null } };
+}
+
+async function enumerateSuites(worktreePath: string, run: RetroPrepublishRunner,
+  changedFiles: (worktreePath: string) => Promise<RetroChangedFiles>, tmpRoot: string,
+): Promise<{
   suites: string[];
   result: RetroPrepublishCommandResult;
+  selection: SuiteSelection;
 }> {
-  const result = await run(
-    process.execPath,
-    ["--import", "tsx", "scripts/diff-class.mjs", "--list-plan-reading-suites"],
-    commandOptions(worktreePath),
-  );
+  const scope = await changedPathScope(worktreePath, run, changedFiles, tmpRoot);
+  let result: RetroPrepublishCommandResult;
+  try {
+    result = await run(process.execPath, [...listArg, "--list-plan-reading-suites", ...scope.args], commandOptions(worktreePath));
+  } finally {
+    scope.cleanup();
+  }
   const stdout = normalizedOutput(result.stdout);
+  const stderr = normalizedOutput(result.stderr);
   const suites = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  return { suites, result: { ...result, stdout, stderr: normalizedOutput(result.stderr) } };
+  const broadSuiteCount = Number(/previous_count=(\d+)/.exec(stderr)?.[1] ?? NaN);
+  return { suites, result: { ...result, stdout, stderr },
+    selection: { ...scope.selection, broadSuiteCount: Number.isSafeInteger(broadSuiteCount) ? broadSuiteCount : null } };
 }
 
 async function runAttempt(
   worktreePath: string,
   run: RetroPrepublishRunner,
   now: () => number,
-  testSlot?: Omit<TestSlotOptions, "sleep">,
+  deps: RunRetroPrepublishPreflightOptions["deps"],
 ): Promise<AttemptResult> {
   const startedAt = now();
-  const enumeration = await enumerateSuites(worktreePath, run);
+  const testSlot = deps?.testSlot;
+  const enumeration = await enumerateSuites(worktreePath, run, deps?.changedFiles ?? retroBranchChangedFiles, deps?.tmpRoot ?? tmpdir());
+  const selection = enumeration.selection;
   if (enumeration.result.status !== 0 || enumeration.suites.length === 0) {
     return {
       ok: false,
       suiteCount: enumeration.suites.length,
       elapsedMs: Math.max(0, now() - startedAt),
+      selection,
       failure: {
         exitClass: exitClass(
           enumeration.result,
@@ -446,7 +519,7 @@ async function runAttempt(
   const stdout = normalizedOutput(result.stdout);
   const stderr = normalizedOutput(result.stderr);
   if (result.status === 0) {
-    return { ok: true, suiteCount: enumeration.suites.length, elapsedMs: Math.max(0, now() - startedAt), slot: slotRow };
+    return { ok: true, suiteCount: enumeration.suites.length, elapsedMs: Math.max(0, now() - startedAt), slot: slotRow, selection };
   }
   const classified = classifyPreflightOutput(`${stdout}\n${stderr}`);
   return {
@@ -454,6 +527,7 @@ async function runAttempt(
     suiteCount: enumeration.suites.length,
     elapsedMs: Math.max(0, now() - startedAt),
     slot: slotRow,
+    selection,
     failure: {
       exitClass: exitClass(result, ordinaryTestFailureClass(classified)),
       status: result.status,
@@ -505,6 +579,10 @@ function logAttempt(
     test_slot_waited_ms: result.slot?.waitedMs ?? null,
     test_slot_priority: result.slot?.priority ?? null,
     test_slot_note: result.slot?.note ?? null,
+    suite_selection: result.selection?.mode ?? null,
+    suite_selection_reason: result.selection?.reason ?? null,
+    changed_path_count: result.selection?.changedPathCount ?? null,
+    broad_suite_count: result.selection?.broadSuiteCount ?? null,
     ...provenanceFields(opts.provenance),
   };
   if (result.ok) {
@@ -584,28 +662,32 @@ export async function runRetroPrepublishPreflight(
 ): Promise<RetroPrepublishResult> {
   const run = opts.deps?.run ?? runRetroPrepublishCommand;
   const now = opts.deps?.now ?? Date.now;
-  const first = await runAttempt(opts.worktreePath, run, now, opts.deps?.testSlot);
+  const first = await runAttempt(opts.worktreePath, run, now, opts.deps);
   logAttempt(opts, 1, first);
   if (first.ok) return { ok: true, attempts: 1, suiteCount: first.suiteCount, repaired: false };
 
-  // W1-T2803: retain the stand-down, not its disproven empty-evidence premise. A timeout can
-  // follow real assertion failures; those names survive in the preceding failure row. They do
-  // not establish a completed suite verdict or justify a paid retry against an unchanged bound.
-  //
-  // ORDINARY failures are untouched: `tests_failed` still repairs and still re-runs, which is the
-  // rung this preflight exists to drive. A stand-down on EVERY failure would delete it.
+  // W1-T2803: a bound failure stands down, even if it retained assertion names. Those names are
+  // partial evidence, not a completed suite verdict. W1-T10144: report the names without claiming
+  // the evidence is empty. Ordinary `tests_failed` still repairs and re-runs.
   if (BOUND_FAILURE_CLASSES.has(first.failure!.exitClass)) {
+    const named = first.failure!.failingTests.length;
+    const interruption = first.failure!.exitClass === "process_spawn_failed"
+      ? "preflight could not start"
+      : "preflight hit an execution bound";
     opts.log("retro.preflight_repair_stood_down", {
       attempt: 1,
       exit_class: first.failure!.exitClass,
       elapsed_ms: first.elapsedMs,
       suite_count: first.suiteCount,
-      retained_failing_test_names: first.failure!.failingTests.length,
+      failing_count: named,
+      retained_failing_test_names: named,
       retained_cancelled_test_names: first.failure!.cancelledTests.length,
       has_summary: first.failure!.hasSummary,
-      reason:
-        "preflight hit an execution bound or could not start; retained output is not a complete " +
-        "plan verdict — standing down rather than resuming against an unchanged bound",
+      reason: named === 0
+        ? `the ${first.failure!.exitClass} failure carries no failing test name in retained output — ` +
+          `${interruption}; the suite verdict is incomplete, so standing down under the same conditions`
+        : `the ${first.failure!.exitClass} bound stopped the run after it named ${named} failing test(s) — ` +
+          `${interruption}; retained output is not a complete plan verdict, so standing down under the same conditions`,
       ...provenanceFields(opts.provenance),
     });
     return { ok: false, attempts: 1, suiteCount: first.suiteCount, repaired: false };
@@ -637,7 +719,7 @@ export async function runRetroPrepublishPreflight(
     return { ok: false, attempts: 2, suiteCount: first.suiteCount, repaired: true };
   }
 
-  const second = await runAttempt(opts.worktreePath, run, now, opts.deps?.testSlot);
+  const second = await runAttempt(opts.worktreePath, run, now, opts.deps);
   logAttempt(opts, 2, second);
   return { ok: second.ok, attempts: 2, suiteCount: second.suiteCount, repaired: true };
 }

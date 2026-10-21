@@ -27,3 +27,11 @@
     - PR #9216: 0.09 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on src/lib/retro-closure.ts (ours -11, theirs -11), src/lib/retro.ts (ours -25, theirs -19), src/run-task.ts (ours -61, theirs -2), test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts (ours -2, theirs -2), test/retro-closure-per-attempt-never-searches-history.test.ts (ours -0, theirs -0), test/retro-shipped-wiring.test.ts (ours -2, theirs -2), test/retro-trigger-corpus.test.ts (ours -2, theirs -2), test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts (ours -8, theirs -8) — dispatching the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head
     - PR #11956: 0.03 PR-hours — merge conflict (mergeState dirty) — no valid conflicting-file evidence was captured — not dispatched — files: none captured — escalating — mergeability unread this pass; inherited last known "dirty" observed 2026-10-15T19:33:16.154Z for this exact head 15d62a6 (W1-T4470)
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The rationale claims conflict-rebase failed to clear eligible episodes, but its largest cited episode was withheld because a restart was draining; other episodes were dispatched or escalated for branch ownership or missing evidence. These examples do not establish the claimed owner failure.; on the change's description/files alone, no diff was read — The acceptance requires automatic clearance, while the record does not specify which eligibility condition or owner behavior needs repair. The supplied gates explicitly require HIGH when the finding cannot be verified from what is shown."
+    judged_at: "2026-10-20T22:42:05.606Z"
+    pin: "d22e32d1ed228b7fc997e0c9b6f6035db7e7fa62024563d3e6b2a99c16aa458b"

@@ -1,0 +1,71 @@
+- id: W1-T10293
+  title: "ATTRIBUTE SERVE'S NON-HEAP RSS GROWTH BEFORE MOVING ANY THREAD — `serve.memory` `unattributed_bytes` rises from ~490 MiB p50 in a generation's first hour to ~1,040-1,100 MiB after two hours while serve's heaps stay flat, and PR #13207's bench shows a TERMINATED worker thread still leaves about two thirds of its peak in the parent's allocator; measure what each short-lived thread kind leaves behind, then name which ones a `forkWorkerEntry` child would pay for"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: low  # a measurement record and an offline bench; nothing in serve changes in this task
+  priority: 2
+  origin: "coordinator brief file1020c item 4 (2026-10-20); evidence logs-8864/c5-measure/ and logs-8864/c5-bench/ (PR #13207)"
+  plan_refs: [W1-T10291, W1-T10292, W1-T10295, W1-T9404, W1-T5355, W1-T5480]
+  files:
+    - docs/forensics/serve-non-heap-rss-growth.md
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, 764 `serve.memory` rows 2026-10-18T23:23Z..10-20T15:15Z, 25 serve generations (core ledger, read-only;
+    logs-8864/c5-measure/serve-memory-1019-20.ndjson). Bucketed by age within each generation (age from the
+    generation's first row), p50 in MiB:
+    | age | n | unattributed | main heap_total | sum of worker heaps | rss |
+    |---|---|---|---|---|---|
+    | 0-15 min | 129 | 492 | 928 | 2,386 | 3,906 |
+    | 15-30 min | 118 | 436 | 949 | 2,327 | 3,873 |
+    | 30-60 min | 141 | 493 | 929 | 2,287 | 3,923 |
+    | 1-2 h | 149 | 366 | 932 | 2,538 | 4,026 |
+    | 2-4 h | 121 | 1,037 | 1,047 | 2,231 | 4,512 |
+    | over 4 h | 106 | 1,099 | 1,044 | 2,331 | 4,437 |
+    So the growth after two hours is outside every heap the row sizes. CAVEAT: 107 of the 764 rows read a NEGATIVE
+    unattributed (min -1,032 MiB), the swap arithmetic W1-T10295 fixes; this record must re-read the buckets on
+    W1-T10295's basis, or state why that is not yet possible.
+    OBSERVED offline, PR #13207's bench (logs-8864/c5-bench/bench.mjs, c5-bench-results.ndjson): a 1.5 GB parent ran 12
+    passes that each built ~300 MB of parsed rows. Parent RSS held above base between passes: a persistent thread +670 MB
+    (+352 MB under serve's malloc tuning, arena_max 2, trim 128K, semi-space 16); a thread per pass, terminated after it,
+    +284 MB (+195 MB tuned); a child process per pass +1-2 MB. A terminated thread's heap goes, but about two thirds of
+    its peak stays in the parent's allocator; only an exit returns it.
+    THE CANDIDATES, short-lived threads serve starts and terminates (heap p50/max in MiB from the same rows, where the
+    row names them):
+    - status prewarm walk (`worker-heap:status:runPrewarmWorker`): 116 / 215;
+    - serve plan reload (`worker-heap:serve-plan-reload:*`): about 60 p50, up to ~400;
+    - repository telemetry (`worker-heap:repo-dashboard-route:*`): 139 / 486;
+    - read-model integrity check (`threadIntegrityCheck`) and issue request (`threadIssueRequest`), one thread per
+      request in src/lib/read-model-worker.ts; rare, and not separately named in these rows.
+    WHY DIAGNOSE FIRST: a per-pass child costs a fork and a cold module load each time (PR #13207: `ready_ms` 433-963,
+    `spawn_sync_ms` 84-196 offline). Converting a thread whose residue is small would pay that for nothing.
+    NOT COVERED ELSEWHERE: W1-T9404 (queued) is an allocator canary for the DAEMON container (serve already runs
+    arena_max 2); swept origin/main plan/tasks.d and all 15 open PR heads' plan trees (21:19Z) for unattributed_bytes,
+    terminated thread, allocator residue and forkWorkerEntry: no shard attributes serve's non-heap growth.
+  design: |
+    Write docs/forensics/serve-non-heap-rss-growth.md with these sections (headings verbatim):
+    1. "## Growth by generation age" — re-measure the table above on the newest week of `serve.memory` rows, with the
+       window, the row count, and the newest row's ts (a positive control that the window was read). Mark each figure
+       OBSERVED or INFERRED.
+    2. "## Residue per thread kind" — for each candidate, an offline bench in a parent of serve's size under serve's
+       malloc tuning: run the thread kind's REAL body N times (spawned and terminated as serve does) and record parent
+       RSS above base after each; the same N as a `forkWorkerEntry` child; the fork and load cost per run. Name the
+       commands and the sha.
+    3. "## Live attribution" — join each thread kind's spawn and exit (ledger rows, or the `serve.memory` thread list)
+       to the step changes in unattributed bytes within a generation, and say which kinds the step changes follow.
+    4. "## Proposal" — the kinds whose residue times frequency pays for a child, each as its own follow-up task to file
+       (convert first the one with the largest measured saving), and the kinds to leave as threads. No serve change in
+       this task.
+  acceptance:
+    - claim: "the record re-measures non-heap growth by generation age with its window and control"
+      proof: "grep: ## Growth by generation age in docs/forensics/serve-non-heap-rss-growth.md"
+    - claim: "the record measures each candidate thread kind's residue against a child per run"
+      proof: "grep: ## Residue per thread kind in docs/forensics/serve-non-heap-rss-growth.md"
+    - claim: "the record proposes which kinds to convert, from the measured residue"
+      proof: "grep: ## Proposal in docs/forensics/serve-non-heap-rss-growth.md"
+  falsifier: |
+    At origin/main docs/forensics/serve-non-heap-rss-growth.md does not exist, so all three grep proofs read 0.
+  note: |
+    ORDER: independent of W1-T10295, but read section 1 on its swap-aware basis if it has merged by the build.

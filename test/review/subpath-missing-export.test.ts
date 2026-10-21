@@ -49,6 +49,32 @@ test("verified local subpath exports accept literal and TAP-escaped hash spellin
     assert.match(String(await baseLacksPrAddedExports(f.output(specifier), f.base, f.head)), /base lacks export/);
 });
 
+test("subpath export attribution falls back to tsx only when the ts candidate is missing", async t => {
+  const f = fixture(t);
+  for (const root of [f.base, f.head]) rmSync(join(root, "src/a.ts"));
+  f.put(f.base, "src/a.tsx", "export const existing = 1;\n");
+  f.put(f.head, "src/a.tsx", "export const existing = 1; export const added = 3;\n");
+  assert.equal(await baseLacksPrAddedExports(f.output(), f.base, f.head),
+    "base lacks export(s) added (src/a.tsx) that the PR adds — the test cannot link there, a genuine miss");
+  rmSync(join(f.base, "src/a.tsx"));
+  assert.equal(await baseLacksPrAddedExports(f.output(), f.base, f.head), undefined);
+});
+
+test("subpath export attribution keeps module read errors unknown despite a valid fallback", async t => {
+  const f = fixture(t);
+  f.put(f.base, "src/a.tsx", "export const existing = 1;\n");
+  f.put(f.head, "src/a.tsx", "export const added = 3;\n");
+  assert.match(String(await baseLacksPrAddedExports(f.output(), f.base, f.head)), /base lacks export/);
+  for (const root of [f.base, f.head]) {
+    const path = join(root, "src/a.ts");
+    rmSync(path);
+    symlinkSync("a.ts", path);
+    assert.equal(await baseLacksPrAddedExports(f.output(), f.base, f.head), undefined, root);
+    rmSync(path);
+    f.put(root, "src/a.ts", root === f.base ? "export const existing = 1;\n" : "export const added = 3;\n");
+  }
+});
+
 test("subpath export attribution refuses changed or ambiguous package mappings", async t => {
   const f = fixture(t);
   for (const imports of [{ "#src/*": "./other/*" }, { "#src/*": { import: "./src/*" } },
