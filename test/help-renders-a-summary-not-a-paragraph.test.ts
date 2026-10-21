@@ -141,6 +141,8 @@ const BASELINE_COMMAND_NAMES = [
   "host-alert",
   "impossible-canary", "inbox", "inbox-bakeoff", "init", "inspect", "install-checkout", "issues",
   "garden",
+  "gh",
+  "gh-broker",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "live-edits", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
   "peek", "plan", "plan-reconcile", "preflight", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",

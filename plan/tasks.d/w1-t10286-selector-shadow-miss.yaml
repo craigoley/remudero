@@ -1,0 +1,30 @@
+- id: W1-T10286
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-deferred-garden-ages-against-its-own-due-interval.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-deferred-garden-ages-against-its-own-due-interval.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a floor miss on coverage run 39484775706 for PR #13195 at 0696d026161be1953c4d51472132829eaea6d413: src/lib/host-memory-admission.ts, test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts, test/an-enforced-memory-budget-waits-in-priority-order.test.ts -> test/a-deferred-garden-ages-against-its-own-due-interval.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/a-deferred-garden-ages-against-its-own-due-interval.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the floor selector includes test/a-deferred-garden-ages-against-its-own-due-interval.test.ts when this edge is exercised"
+      proof: "grep: test/a-deferred-garden-ages-against-its-own-due-interval\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/a-deferred-garden-ages-against-its-own-due-interval.test.ts for each recorded edge"
+      proof: "grep: test/a-deferred-garden-ages-against-its-own-due-interval\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed remedy is bounded to adding selector edges for one named suite and regression coverage for each recorded edge in two existing files."
+      - "The note identifies a specific coverage run, PR, commit and three candidate edges; it explicitly distinguishes observed misses from guessed import relationships."
+      - "The supplied scope requests no sensitive, destructive, irreversible or operator-only action, and no merge, deploy, infrastructure or review policy change."
+      - "The supplied family track record reports 18 merged and 0 declined tasks; no concerning gate result is shown."
+    judged_at: "2026-10-20T22:42:40.598Z"
+    pin: "fb71a0efdaca0b5c97a2fd45f3c0265fec61156c071f255baed66434d5c6551f"

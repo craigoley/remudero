@@ -54,13 +54,13 @@ function reading(entries: Array<Partial<ReadingEntry>>): HostMemoryReading {
   };
 }
 
-/** A host under memory pressure (PSI some avg10 20) whose MemAvailable the test moves. */
-function host(state: { availableMib: number }): (path: string) => string {
+/** A host whose measured pressure can vary independently of its projected reservation shortfall. */
+function host(state: { availableMib: number; psiSomeAvg10: number }): (path: string) => string {
   return (path) => {
     const table: Record<string, string> = {
       "/proc/meminfo": `MemAvailable: ${state.availableMib * 1024} kB\n`,
       "/proc/vmstat": "pswpin 100\n",
-      "/proc/pressure/memory": "some avg10=20.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+      "/proc/pressure/memory": `some avg10=${state.psiSomeAvg10.toFixed(2)} avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n`,
       "/sys/fs/cgroup/memory.current": `${2000 * MIB}\n`,
       "/sys/fs/cgroup/memory.max": `${12_000 * MIB}\n`,
       "/sys/fs/cgroup/memory.swap.current": "0\n",
@@ -77,12 +77,12 @@ function host(state: { availableMib: number }): (path: string) => string {
 interface World {
   rows: LedgerLine[];
   now: { ms: number };
-  state: { availableMib: number };
+  state: { availableMib: number; psiSomeAvg10: number };
   running: { entries: Array<Partial<ReadingEntry>> };
 }
 
 function world(): World {
-  return { rows: [], now: { ms: NOW }, state: { availableMib: 5000 }, running: { entries: [{ id: "build", workerClass: "implement", estimateMib: BUILD_MIB }] } };
+  return { rows: [], now: { ms: NOW }, state: { availableMib: 5000, psiSomeAvg10: 0 }, running: { entries: [{ id: "build", workerClass: "implement", estimateMib: BUILD_MIB }] } };
 }
 
 function ports(w: World): Partial<AdmissionPorts> {
@@ -98,6 +98,10 @@ function ports(w: World): Partial<AdmissionPorts> {
     daemonPid: () => 777,
     listStateDir: () => [],
     estimate: () => 900,
+    typical: (workerClass) => workerClass === "implement" ? BUILD_MIB : 900,
+    survival: undefined,
+    readHostServe: undefined,
+    writeFile: () => undefined,
     readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
     enforceHere: () => true,
     withLock: (action) => action(),
@@ -233,6 +237,39 @@ test("W1-T9975: a restart carries the measured due interval forward", async () =
       { cadenceMs: 200, cadenceBasis: "carried", samples: 2 }, "below two own intervals the carried median stands");
   } finally {
     resetShadowMemoryStateForTests();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T9975: a carried due interval stays deferred under PSI and ages in after recovery", async () => {
+  const root = scratchDir("garden-carried-pressure-");
+  try {
+    // The carried due age is 58 minutes: past its 57-minute cadence, below the starvation rung.
+    await generation(join(root, "state"), "DAEMON-1", NOW - 115 * 60_000 - 3_000, [COVERAGE_MS, COVERAGE_MS, COVERAGE_MS]);
+    const w = fresh();
+    w.state.psiSomeAvg10 = 20;
+    const spawn = spawnIn(root, w);
+    assert.deepEqual(await spawn(GATE, [], { stopped: false, deferral: scheduled }),
+      { kind: "deferred", reason: "memory-budget-shortfall" });
+    w.now.ms += TICK_MS;
+    const next = { stopped: false, deferral: { ...scheduled, firstAsk: false } };
+    assert.deepEqual(await spawn(GATE, [], next), { kind: "deferred", reason: "memory-budget-shortfall" });
+    const row = rowsOf(w, ENFORCE_DEFER_STEP, GATE).at(-1)!;
+    assert.equal(row.aged_blocked, "psi");
+    assert.ok((row.reasons as string[]).includes("psi"));
+    assert.deepEqual([row.cadence_ms, row.cadence_basis, row.cadence_samples], [COVERAGE_MS, "carried", 3]);
+    assert.equal(w.running.entries.length, 1, "pressure opens no child reservation");
+    assert.equal(rowsOf(w, ENFORCE_ADMIT_STEP, GATE).length, 0);
+
+    w.state.psiSomeAvg10 = 0;
+    assert.equal(await spawn(GATE, [], next), 0);
+    const [admit] = rowsOf(w, ENFORCE_ADMIT_STEP, GATE);
+    assert.ok(admit, "recovery writes the aged admission row");
+    assert.deepEqual([admit.tier, admit.deferrals, admit.waited_ms], ["aged", 2, TICK_MS]);
+    assert.deepEqual(admit.overrode, ["unrealized-reservations"]);
+  } finally {
+    resetShadowMemoryStateForTests();
+    resetMemoryAdmissionStateForTests();
     rmSync(root, { recursive: true, force: true });
   }
 });

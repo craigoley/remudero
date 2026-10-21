@@ -9,9 +9,9 @@
   risk: low
   origin: "operator session 2026-10-04: watch log, deny-floor refuses a command whose text contains ghJsonAsync"
   plan_refs: [W1-T3275, W1-T1066, W1-T4915]
-  files: [hooks/deny-floor.sh, test/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts]
+  files: [hooks/deny-floor.sh, test/github/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts]
   status: queued
-  priority: 3
+  priority: 2  # operator-2026-10-21: three stalled builds; W1-T9281 waits on it
   attempts: 0
   rationale: |
     READ 2026-10-04 on origin/main 284015b9. The watch log blamed `ghJsonAsync`; it is not the
@@ -23,6 +23,20 @@
     cadence floor refused it ("a read-shaped `gh` call 67s after the last one"). The hook already
     has `cov_segments` ("heredoc bodies and comments dropped", W1-T4915), which `invokes_gh` does
     not use. No queued task covers it.
+    AMENDED 2026-10-21 (operator session). Three builds wrote the fix and none opened a PR.
+      - 10-09 run-W1-T5670-1791505249316: pr.open_refused, refusal_class stale-proof. The worker's proof
+        "unit test: a heredoc fed to an interpreter that runs gh is still a gh call" passed at the merge
+        base too, because it guards behaviour the hook already has (escalated as #10201, closed with no
+        amendment).
+      - 10-11, two runs: freshness_yield handoffs that never resumed.
+    The old first claim bundled the new behaviour with "...while ... still are", which invites exactly
+    that stale proof. The acceptance below now names only behaviour that is absent at base. The
+    still-counted cases are REGRESSION GUARD tests the falsifier names, not acceptance proofs.
+    The test moves to test/github/, where the other rule-10 gh-routing suites live
+    (one-write-rule-for-every-gh-path), per `rmd test-place`.
+    Still live on 2026-10-20/21 under rule 10's broker routing: a python heredoc and a
+    `git commit -F - <<EOF` message mentioning gh were refused as routed reads (W1-T10311 filing,
+    #13254), and this amendment's own edit script was refused the same way.
   design: |
     Run `invokes_gh`'s word match over `cov_segments` output; keep the raw `$( gh` / backtick
     substitution check on the full text, because an unquoted heredoc expands substitutions.
@@ -31,11 +45,15 @@
     the word match. Dropping every body would let `bash <<'EOF'` / `gh pr view 1` / `EOF` run a gh
     read unrefused (reproduced 2026-10-04 against this design in a patched copy of the hook).
   acceptance:
-    - claim: "a heredoc whose body says 'over the async gh transport' is not counted as a gh call, while a gh command fed by a heredoc and a heredoc body holding a gh command substitution still are"
-      proof: "unit test: test/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts"
-    - claim: "a heredoc body fed to bash, or to ssh running bash -s, that holds a gh command is still counted as a gh call, under both a quoted and an unquoted delimiter"
+    - claim: "a data heredoc whose body only names gh (a python source edit saying 'over the async gh transport', a git commit message mentioning gh pr view) is not counted as a gh call"
+      proof: 'grep: test("W1-T5670: a data heredoc body that names gh is not a gh call" in test/github/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts'
+    - claim: "a heredoc body read by an interpreter (bash, sh, zsh, ssh ... bash -s) keeps its body in the gh match"
       proof: "grep: keep_interpreters in hooks/deny-floor.sh"
   falsifier: |
+    REGRESSION GUARDS, written as tests in the same file but never as acceptance proofs (they pass at
+    base by construction): a gh command fed by a heredoc, a heredoc body holding a `$(gh ...)`
+    substitution under an unquoted delimiter, and `bash <<'EOF'` / `ssh host bash -s <<EOF` bodies
+    holding a gh command, under both quoted and unquoted delimiters, all still count as gh calls.
     Revert to the whole-text match; the plain heredoc case is refused and the test fails.
     Drop every heredoc body regardless of the reading command; the interpreter case is allowed and
     its test fails.

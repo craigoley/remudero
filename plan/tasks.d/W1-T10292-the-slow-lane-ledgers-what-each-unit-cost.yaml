@@ -1,0 +1,58 @@
+- id: W1-T10292
+  title: "THE READ-MODEL SLOW LANE LEDGERS WHAT EACH UNIT COST — its thread posts a `unit` message with the unit's name, outcome and `ms` after every unit, and `threadSlowLane` reads only `msg.ok` from it (to reset its death count) and drops the rest, so nothing says what a pass or a unit costs, and a per-pass child for the slow lane (489 MiB p50 committed heap) cannot be judged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern, a measurement row for work the slow lane already does; no unit, schedule or view changes
+  band_meaning: span
+  origin: "coordinator brief file1020c item 3 (2026-10-20); the measure-first section of PR #13207's body (logs-8864/c5-pr-body.md)"
+  plan_refs: [W1-T5480, W1-T10293]
+  files:
+    - src/lib/read-model-slow-lane.ts
+    - test/console-api/read-model/the-slow-lane-ledgers-what-each-unit-cost.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main faefe0655 (symbols, not lines):
+    - src/lib/read-model-slow-lane.ts `runSlowLaneWorker`'s `pass` posts, per unit, `{ type: "unit", unit, ok, ms }`
+      (`SlowLaneMessage`) after `begin`, the unit's `bodies` and `end`.
+    - `threadSlowLane`'s message handler routes begin, end, log, bodies and source_snapshot, and ends with
+      `else if (msg.ok) deaths = 0`. The unit name and `ms` are never logged.
+    - The lane runs every `INBOX_CLASSIFY_INTERVAL_MS` (60 s) under `SLOW_LANE_HEAP_MB` (1,024).
+    OBSERVED, 764 `serve.memory` rows 2026-10-18T23:23Z..10-20T15:15Z, 25 serve generations (core ledger, archives
+    plus live, read-only; logs-8864/c5-measure/serve-memory-1019-20.ndjson): `worker-heap:read-model-slow-lane:spawn`
+    p50 489 MiB committed (max 830), and its used heap is at its level in the first 15 minutes of a generation (369 MiB,
+    then 366-387), which PR #13207 read as warm state between passes, not growth.
+    WHY IT MATTERS: PR #13207 moved only the oracle to a per-pass child, because the slow lane keeps memos between
+    passes and no data says what a cold pass would cost. This row is that data.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and all 15 open PR heads' plan trees (21:19Z) for
+    threadSlowLane, slow lane and SLOW_LANE: no queued shard logs the unit cost (W1-T5480, merged, sizes the thread's heap).
+  design: |
+    1. ONE ROW PER UNIT PER WINDOW, IN AN EXISTING SHAPE. `threadSlowLane` tallies each `unit` message by unit (and
+       instance, when the unit has one): runs, failed, ms, max ms. It writes the tally as `read_model.slow_unit_costs`
+       on the same 10-minute window `read_model.view_builds` already uses (`reportViewBuilds` in read-model-worker.ts),
+       with the window's bounds. Reuse that window value; add no new interval.
+    2. WHAT A COLD PASS WOULD COST. The thread also reports its used heap after each unit (from its own
+       `getHeapStatistics()`), and the tally keeps the largest growth a unit caused, so the row says which unit builds
+       the warm state.
+    3. A thread that dies mid-window loses no tally: the parent flushes what it has on `exit`.
+    4. TESTS in test/console-api/read-model/the-slow-lane-ledgers-what-each-unit-cost.test.ts (computed by
+       `computedTestFolder`; re-run `rmd test-place` on the real file), `test(` titles verbatim as in the proofs; drive
+       `threadSlowLane` with a fake worker and an injected clock.
+  acceptance:
+    - claim: "each unit's runs, failures and milliseconds reach a windowed slow_unit_costs row"
+      proof: "unit test: W1-T10292: the slow lane's unit messages are tallied into a windowed cost row"
+    - claim: "the row names the heap a unit grew the thread by"
+      proof: "unit test: W1-T10292: the cost row names the heap growth each unit caused"
+    - claim: "a thread that dies mid-window still ledgers what it reported"
+      proof: "unit test: W1-T10292: a slow lane thread that dies flushes its unit tally"
+  falsifier: |
+    At origin/main `threadSlowLane` drops every `unit` message but its `ok`, so no `read_model.slow_unit_costs` row is
+    written and all three tests fail. Log only on the window boundary, without the exit flush, and the third fails.
+  note: |
+    AFTER MERGE: a day of rows gives each unit's cost per pass and the heap it holds. That decides whether a per-pass
+    child (as PR #13207 did for the oracle) or a per-unit child pays for itself; file that as its own task then.

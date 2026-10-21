@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   risk: low
-  budget_usd: 25.00
+  budget_usd: 11.50
   priority: 4
   status: queued
   attempts: 0

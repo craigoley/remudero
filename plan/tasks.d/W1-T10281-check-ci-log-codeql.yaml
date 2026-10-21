@@ -66,3 +66,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The supplied rounds show mixed coverage failures and test failures alongside CodeQL; they do not establish a shared CodeQL cause or a verifiable prevention mechanism.; on the change's description/files alone, no diff was read — The acceptance criterion requires eliminating fix rounds for this label, but its sole grep proof checks for a test declaration rather than demonstrating prevention. The record does not resolve whether the proposed remedy fixes failures or suppresses their handling."
+    judged_at: "2026-10-20T22:41:31.844Z"
+    pin: "ee3e4760c284843fd9e5b1724be486cc5ee255138fca71ebdb800beef8562a45"

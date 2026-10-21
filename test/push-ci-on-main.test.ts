@@ -34,6 +34,7 @@ const CI_GATE_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml")
 type CiJob = {
   name?: string;
   if?: string | boolean;
+  needs?: string | string[];
   strategy?: { matrix?: { shard?: number[] } };
   steps?: Array<{ run?: string }>;
 };
@@ -70,6 +71,33 @@ async function loadCiDoc(): Promise<CiDoc> {
   return parseYaml(raw) as CiDoc;
 }
 
+function assertCiRunsAcrossEvents(ci: CiJob): void {
+  if (ci.needs === undefined) {
+    assert.equal(ci.if, undefined, "an independent CI matrix must remain unconditional");
+    return;
+  }
+  assert.deepEqual(ci.needs, ["commitlint"], "only the same-run producer is an admitted dependency");
+  assert.equal(ci.if, "${{ always() && !cancelled() }}",
+    "a producer failure or skip must not suppress the matrix on any uncancelled event");
+}
+
+test("CI scheduling guard rejects dependency skips and event filters", () => {
+  for (const ci of [
+    { needs: ["commitlint"] },
+    { needs: ["commitlint"], if: "github.event_name == 'pull_request'" },
+    { needs: ["commitlint"], if: "${{ success() }}" },
+    { needs: ["other"], if: "${{ always() && !cancelled() }}" },
+    { if: "${{ always() && !cancelled() }}" },
+  ]) assert.throws(() => assertCiRunsAcrossEvents(ci));
+});
+
+test("CI scheduling guard admits its cancellation-aware producer dependency across events", () => {
+  assert.doesNotThrow(() => assertCiRunsAcrossEvents({}));
+  assert.doesNotThrow(() => assertCiRunsAcrossEvents({
+    needs: ["commitlint"], if: "${{ always() && !cancelled() }}",
+  }));
+});
+
 // ── acceptance 1: the suite runs against main on a push ─────────────────────────────────────
 
 test("W1-T1033: the ci workflow runs the suite on a push to main", async () => {
@@ -85,12 +113,7 @@ test("W1-T1033: the ci workflow runs the suite on a push to main", async () => {
   assert.ok(ci, "ci.yml must still define the `ci` job");
   const shardCount = ci!.strategy?.matrix?.shard?.length ?? 0;
   assert.ok(shardCount > 0, "the ci job must declare at least one shard");
-  assert.equal(
-    ci!.if,
-    undefined,
-    "the `ci` job must carry no `if:` gate — it is the one job meant to run on BOTH the " +
-      "pre-existing pull_request trigger and the new push trigger",
-  );
+  assertCiRunsAcrossEvents(ci!);
 
   const runs = (ci!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
   assert.ok(
@@ -220,6 +243,7 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
     // `ci` (must run on both triggers) and `coverage-ratchet` (test/diff-coverage.test.ts asserts
     // its job body carries no `if:` at all — see the next test) carry no gate; every other job
     // does. Either way nothing here narrows what a pull_request event registers.
+    if (jobId === "ci") { assertCiRunsAcrossEvents(job); continue; }
     if (job.if === undefined) continue;
     if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "test-slow" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must register even when its shards fail`);

@@ -41,10 +41,11 @@ raw: "Approved console follow-up: bind each Inbox answer and generated redraft
   Field Trials is out of scope."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: console-followup:f1cfbadd-2f86-4bd1-b9d8-c3cfe7d2a3bc
 thread_id: null
+answered_by: null
