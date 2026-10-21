@@ -62,6 +62,12 @@
       "grepHint": "0007. Run each build in a child process that outlives the daemon, and restart the daemon only for its own code"
     },
     {
+      "path": "docs/adr/0008-the-daemon-main-runs-from-the-bundle.md",
+      "title": "0008. Start the daemon's own main from the precompiled bundle, keeping source maps on through a linked map",
+      "summary": "Status: Accepted",
+      "grepHint": "0008. Start the daemon's own main from the precompiled bundle, keeping source maps on through a linked map"
+    },
+    {
       "path": "docs/adr/README.md",
       "title": "Architecture Decision Records",
       "summary": "MASTER-PLAN §5 TIER 3: ADR discipline for IRREVERSIBLE calls. A short",
