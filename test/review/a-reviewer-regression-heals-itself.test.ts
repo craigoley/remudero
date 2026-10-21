@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -800,6 +800,44 @@ test("W1-T10269: terminal rows carry the judging code's sha; a shadow review is 
     reviewerCodeFreshness: () => ({ status: "fresh", codeSha: head, originMainSha: head, advance: "none" }),
   } as never);
   assert.equal(ok, 0, "a replayed decision ends the shadow too: nothing restored");
+});
+
+test("W1-T10269: the loaded code sha is read from git's files, every layout, with no spawn", (t) => {
+  const repo = gitRepo({ kind: "reviewer-heal-head" });
+  const head = repo.git("rev-parse", "HEAD");
+  assert.equal(health.checkoutHeadSha(repo.dir), head, "a branch: its loose ref");
+  repo.git("pack-refs", "--all");
+  assert.equal(health.checkoutHeadSha(repo.dir), head, "a packed ref");
+  const tree = repo.addWorktree(join(scratch(t, "wt"), "tree"), "side");
+  assert.equal(health.checkoutHeadSha(tree.dir), head, "a worktree: its gitdir pointer and the common dir");
+  repo.git("checkout", "-q", "--detach");
+  assert.equal(health.checkoutHeadSha(repo.dir), head, "a detached head");
+  const broken = scratch(t, "broken");
+  writeFileSync(join(broken, ".git"), "not a pointer\n");
+  assert.throws(() => health.checkoutHeadSha(broken), /names no gitdir/);
+  mkdirSync(join(broken, "gd"));
+  writeFileSync(join(broken, ".git"), "gitdir: gd\n");
+  writeFileSync(join(broken, "gd", "HEAD"), "garbage\n");
+  assert.throws(() => health.checkoutHeadSha(broken), /neither a sha nor a ref/);
+  writeFileSync(join(broken, "gd", "HEAD"), "ref: refs/heads/gone\n");
+  assert.throws(() => health.checkoutHeadSha(broken), /refs\/heads\/gone is not resolvable/);
+  if (process.getuid?.() !== 0) {
+    chmodSync(join(broken, ".git"), 0o000);
+    assert.throws(() => health.checkoutHeadSha(broken), /EACCES/, "an unreadable file is not an absence");
+    chmodSync(join(broken, ".git"), 0o644);
+  }
+});
+
+test("W1-T10269: the ledger reader refuses an unreadable ledger rather than reading it as empty", async (t) => {
+  const notADir = join(scratch(t, "notdir"), "file");
+  writeFileSync(notADir, "x");
+  await assert.rejects(health.readReviewerHealthRows(notADir, null), /ENOTDIR/);
+  if (process.getuid?.() === 0) return;
+  const stateDir = scratch(t, "unreadable");
+  writeFileSync(join(stateDir, "ledger.ndjson"), "{}\n");
+  chmodSync(join(stateDir, "ledger.ndjson"), 0o000);
+  await assert.rejects(health.readReviewerHealthRows(stateDir, null), /EACCES/);
+  chmodSync(join(stateDir, "ledger.ndjson"), 0o644);
 });
 
 test("W1-T10269: runReview in shadow judges and stops before any arm or status", async (t) => {

@@ -22,7 +22,7 @@
  * never by re-scanning the ledger (core memory ruling 10-10). The first boot seeds them with one
  * streaming, step-filtered read of the ledger union.
  */
-import { closeSync, createReadStream, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Clock } from "./clock.js";
@@ -642,10 +642,11 @@ export type ReviewerHealthDecision =
 /** An absent, unparseable or older-version file reads as empty, so the next evaluation re-seeds
  *  from the ledger union rather than judging on counts it cannot trust. */
 export function loadReviewerHealthState(path: string): ReviewerHealthState {
-  if (!existsSync(path)) return emptyReviewerHealthState();
+  const text = readOptional(path);
+  if (text === undefined) return emptyReviewerHealthState();
   let parsed: Partial<ReviewerHealthState>;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ReviewerHealthState>;
+    parsed = JSON.parse(text) as Partial<ReviewerHealthState>;
   } catch {
     return emptyReviewerHealthState(); // deliberate: a torn state file re-seeds; the ledger is the record
   }
@@ -869,7 +870,7 @@ const seeding = new Map<string, Promise<unknown>>();
  */
 export async function evaluateReviewerHealth(deps: ReviewerHealthStore, input: { originMainSha: string | null }): Promise<ReviewerHealthDecision> {
   if (seeding.has(deps.statePath)) return { route: "normal", reason: "reviewer health is seeding from the ledger union", current: null };
-  if (!existsSync(deps.statePath) || loadReviewerHealthState(deps.statePath).cursor === null) {
+  if (loadReviewerHealthState(deps.statePath).cursor === null) {
     const seed = evaluateReviewerHealthNow(deps, input).catch((error: unknown) => {
       deps.log("reviewer.health_unavailable", { phase: "seed", error: String((error as Error)?.message ?? error) });
     }).finally(() => seeding.delete(deps.statePath));
@@ -893,12 +894,19 @@ export async function settleReviewerHealthSeed(statePath: string): Promise<void>
   await seeding.get(statePath);
 }
 
-/** Where the live ledger's last complete line ends. */
-function completeLivePrefix(path: string, size: number): number {
-  if (size === 0) return 0;
-  const fd = openSync(path, "r");
+/** The live ledger's inode and where its last complete line ends, from ONE open descriptor, so the
+ *  size and the bytes read belong to the same file. An absent live ledger has no prefix. */
+function liveLedgerPrefix(path: string): { live: { ino: number } | undefined; prefix: number } {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { live: undefined, prefix: 0 };
+    throw error;
+  }
   const chunk = Buffer.allocUnsafe(64 * 1024);
   try {
+    const { ino, size } = fstatSync(fd);
     let end = size;
     let newline = -1;
     let start = 0;
@@ -907,7 +915,7 @@ function completeLivePrefix(path: string, size: number): number {
       newline = chunk.subarray(0, readSync(fd, chunk, 0, end - start, start)).lastIndexOf(0x0a);
       end = start;
     }
-    return newline < 0 ? 0 : start + newline + 1;
+    return { live: { ino }, prefix: newline < 0 ? 0 : start + newline + 1 };
   } finally {
     closeSync(fd);
   }
@@ -919,11 +927,16 @@ function completeLivePrefix(path: string, size: number): number {
  * sets of PR heads. With no cursor this is the seed: one streaming, step-filtered pass of the union.
  */
 export async function readReviewerHealthRows(stateDir: string, cursor: ReviewerHealthCursor | null): Promise<{ rows: Array<Record<string, unknown>>; cursor: ReviewerHealthCursor }> {
-  const rotations = ledgerRotationEntries(existsSync(stateDir) ? readdirSync(stateDir) : [], stateDir).map((e) => basename(e.path)).sort();
+  let names: string[] = [];
+  try {
+    names = readdirSync(stateDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error; // an absent state dir is an empty ledger
+  }
+  const rotations = ledgerRotationEntries(names, stateDir).map((e) => basename(e.path)).sort();
   const newest = rotations.at(-1);
   const livePath = ledgerLivePath(stateDir);
-  const live = existsSync(livePath) ? statSync(livePath) : undefined;
-  const prefix = live === undefined ? 0 : completeLivePrefix(livePath, live.size);
+  const { live, prefix } = liveLedgerPrefix(livePath);
   const rotated = cursor === null || (newest !== undefined && (cursor.afterRotation === undefined || newest > cursor.afterRotation));
   const sameLive = cursor !== null && !rotated && live !== undefined && cursor.liveIno === live.ino && prefix >= cursor.liveOffset;
   const rows: Array<Record<string, unknown>> = [];
@@ -987,24 +1000,40 @@ export function loadedReviewerCodeSha(read: () => string = () => checkoutHeadSha
 /** A checkout's HEAD sha read from its git files, spawning nothing: `.git` (a dir, or a worktree's
  *  `gitdir:` pointer file), HEAD, then the ref it names in the worktree or common dir or packed-refs. */
 export function checkoutHeadSha(root: string): string {
-  let gitDir = join(root, ".git");
-  if (statSync(gitDir).isFile()) {
-    const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(gitDir, "utf8"));
-    if (!pointer) throw new Error(`${gitDir} names no gitdir`);
-    gitDir = resolve(root, pointer[1]!.trim());
+  // Each file is read once and its absence classified from the read's own error: no check-then-read.
+  const dotGit = join(root, ".git");
+  const pointer = readOptional(dotGit);
+  let gitDir = dotGit;
+  if (pointer !== undefined) {
+    const named = /^gitdir:\s*(.+)$/m.exec(pointer);
+    if (!named) throw new Error(`${dotGit} names no gitdir`);
+    gitDir = resolve(root, named[1]!.trim());
   }
   const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
   if (SHA.test(head)) return head;
   const ref = /^ref:\s*(\S+)$/.exec(head)?.[1];
   if (ref === undefined) throw new Error(`${gitDir}/HEAD names neither a sha nor a ref`);
-  const common = existsSync(join(gitDir, "commondir")) ? resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim()) : gitDir;
+  const commonDir = readOptional(join(gitDir, "commondir"));
+  const common = commonDir === undefined ? gitDir : resolve(gitDir, commonDir.trim());
   for (const dir of [gitDir, common]) {
-    if (existsSync(join(dir, ref))) return readFileSync(join(dir, ref), "utf8").trim();
+    const loose = readOptional(join(dir, ref));
+    if (loose !== undefined) return loose.trim();
   }
-  const packed = existsSync(join(common, "packed-refs")) ? readFileSync(join(common, "packed-refs"), "utf8") : "";
-  const line = packed.split("\n").find((l) => l.endsWith(` ${ref}`));
+  const line = (readOptional(join(common, "packed-refs")) ?? "").split("\n").find((l) => l.endsWith(` ${ref}`));
   if (line === undefined) throw new Error(`${ref} is not resolvable in ${common}`);
   return line.split(" ")[0]!;
+}
+
+/** A file's text, or undefined when there is no FILE there (absent, or a directory). Any other
+ *  failure — permissions, I/O — is thrown: it is not an absence. */
+function readOptional(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "EISDIR" || code === "ENOTDIR") return undefined;
+    throw error;
+  }
 }
 
 /** Test seam: forget the memoized loaded sha. */
