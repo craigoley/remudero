@@ -11,7 +11,7 @@
   origin: oper#screenshot-artefact-unreferenced-2026-08-25
   plan_refs: ["W1-T153"]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=00783b3fbc0a581a
   attempts: 0
   rationale: |

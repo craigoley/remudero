@@ -10,7 +10,7 @@
   plan_refs: [W1-T4664, W1-T9119, W1-T10144, W1-T10298, W1-T10299, W1-T10300]
   files:
     - docs/forensics/the-retro-backoff-has-no-ceiling.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main c89ef695b (symbols, not lines):

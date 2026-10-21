@@ -1475,6 +1475,19 @@ fi
 # Opt-in preserve-then-retire phase (JANITOR.md "Preserve-then-retire"). It saves and verifies
 # the work this pass held, then retires the idle checkout. Without its owner-private config the
 # helper reports "disabled" and changes nothing; a dry run only plans.
+# Dependency seed generations nothing references any more; the sweeper proves idle, unreferenced
+# and unopened per generation, and keeps anything it cannot prove (deploy/DEPENDENCY-SEEDS.md).
+seed_tool="$USER_HOME/.local/bin/remudero-dependencies"
+if [ "$APPLY" = 1 ] && [ -x "$seed_tool" ] && [ ! -L "$seed_tool" ] && [ -O "$seed_tool" ]; then
+  if seed_output=$("$seed_tool" sweep --apply 2>&1); then
+    log "dependency-seeds: $(printf '%s' "$seed_output" | python3 -I -c 'import json, sys
+rows = json.load(sys.stdin)
+print("removed=%d kept=%d" % (sum(r["action"] == "remove" for r in rows), sum(r["action"] == "keep" for r in rows)))' 2>/dev/null || echo 'sweep output unreadable')"
+  else
+    log "dependency-seeds: sweep failed: $(printf '%s' "$seed_output" | tail -n 1)"
+  fi
+fi
+
 preserve_status=unavailable
 preserve_retired=unknown; preserve_held=unknown; preserve_planned=unknown
 preserve_confirmed=0; preserve_complete=no
@@ -1677,7 +1690,9 @@ def report():
         original_run = helper.run
         helper.run = lambda cmd, **kw: original_run(cmd, **dict(kw, timeout=min(kw.get('timeout', 600), max(.01, deadline-time.monotonic()))))
         cfg = dict(helper.DEFAULTS)
-        cfg['roots'] = [os.path.join(home, p) for p in cfg['roots']]
+        # A helper older than glob roots has no expand_roots; its roots are plain folders.
+        expand = getattr(helper, 'expand_roots', lambda h, roots: [os.path.join(h, r) for r in roots])
+        cfg['roots'] = expand(home, cfg['roots'])
         cfg['preserve_root'] = os.path.join(home, cfg['preserve_root'])
         repos = helper.discover(cfg, helper.protected_paths(home, cfg)); keep = {}
         snap = helper.process_snapshot()

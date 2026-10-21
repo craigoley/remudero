@@ -71,5 +71,5 @@
     Preserve both complete test summaries and identical test bytes; never manufacture a
     production change merely to make unchanged behavior discriminate against its base.
   priority: 4
-  status: queued
+  status: merged
   attempts: 0

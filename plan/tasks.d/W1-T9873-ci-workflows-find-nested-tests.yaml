@@ -15,7 +15,7 @@
     - .github/workflows/ci.yml
     - .github/workflows/recovery-drill.yml
     - test/ci-workflows-find-nested-tests.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

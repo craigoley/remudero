@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 40.00
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-20: reviewer outage after #12954 — 'let's solve root causes, not work around them'"
   plan_refs: [W1-T228, W1-T3723, W1-T3735, W1-T4469, W1-T6403, W1-T4387, W1-T4623, W1-T10270, W1-T10271]

@@ -704,6 +704,12 @@
       "grepHint": "unwired-gate-check.mjs comment forensics"
     },
     {
+      "path": "docs/forensics/why-a-review-refuses-head-task-metadata-unavailable.md",
+      "title": "Why a review refuses head-task-metadata-unavailable",
+      "summary": "Partial forensic record for W1-T10346: verified mechanisms and historical reports, with the missing cohort evidence identified explicitly.",
+      "grepHint": "Why a review refuses head-task-metadata-unavailable"
+    },
+    {
       "path": "docs/forensics/wipe-test.md",
       "title": "wipe-test.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",

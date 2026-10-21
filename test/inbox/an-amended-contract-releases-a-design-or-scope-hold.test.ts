@@ -20,7 +20,7 @@ import { runFixRung } from "#test/helpers/run-task-test.js";
  */
 
 const TASK = "W1-T9265";
-const HEAD = "0dad88f";
+const HEAD = "0dad88f".padEnd(40, "0");
 const NOW = Date.now();
 const RED = "ci-shard (1/8)";
 const pr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
@@ -31,7 +31,7 @@ const pr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
 });
 
 function fixture(rows: Record<string, unknown>[]) {
-  const state = { revision: "contract-A" as string | undefined, escalated: 0, dispatched: 0, refreshed: 0 };
+  const state = { revision: "contract-A" as string | undefined, escalated: 0, dispatched: 0, refreshed: 0, admissions: 0 };
   const deps: SweepDeps = {
     ledgerPath: "/unused/contract-hold-ledger", runId: "contract-hold-test", now: () => NOW,
     readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); },
@@ -41,6 +41,7 @@ function fixture(rows: Record<string, unknown>[]) {
     arm: () => {}, close: () => {},
     escalate: () => { state.escalated++; },
     dispatchFix: () => { state.dispatched++; },
+    claimFixAdmission: () => { state.admissions++; return { admitted: true }; },
   };
   return { deps, state };
 }
@@ -49,21 +50,33 @@ const lastDisposed = (rows: Record<string, unknown>[]) => rows.findLast(row => r
 const designRow = (revision?: string) => ({ step: "fix.needs_design", task_id: TASK, head_sha: HEAD,
   reason: "decide whether the scout or the draft ladder changes", ...(revision !== undefined ? { contract_revision: revision } : {}) });
 
+function designRows(revision?: string): Record<string, unknown>[] {
+  const common = { task_id: TASK, head_sha: HEAD, run_id: "DESIGN-ROUND", host: "fixture-host", actor_pid: 777 };
+  const round = { ...common, round_id: "DESIGN-ROUND:1", repair_pr_url: pr().prUrl };
+  return [
+    { ...round, step: "fix.dispatch", ts: new Date(NOW - 3000).toISOString(), mode: "ci-log" },
+    { ...common, ...designRow(revision), ts: new Date(NOW - 2000).toISOString() },
+    { ...round, step: "fix.done", ts: new Date(NOW - 1000).toISOString(), fix_outcome: "NEEDS_DESIGN", subtype: "success" },
+  ];
+}
+
 describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts", () => {
   test("a NEEDS_DESIGN hold takes main once when the task contract is amended under it", async () => {
-    const rows: Record<string, unknown>[] = [designRow("contract-A")];
+    const rows: Record<string, unknown>[] = designRows("contract-A");
     const f = fixture(rows);
 
     await runSweep([pr()], f.deps);
     assert.equal(f.state.refreshed, 0, "an unchanged contract changes nothing");
-    assert.equal(f.state.dispatched, 1, "the rung is still offered the head, as before");
+    assert.equal(f.state.dispatched, 0, "the completed design handoff escalates before another fix admission");
+    assert.equal(f.state.admissions, 0);
     assert.equal(lastDisposed(rows).needs_design_hold, true);
     assert.equal(lastDisposed(rows).progress_contract_revision, "contract-A");
 
     f.state.revision = "contract-B";
     await runSweep([pr()], f.deps);
     assert.equal(f.state.refreshed, 1, "the answering amendment takes main into the branch");
-    assert.equal(f.state.dispatched, 1, "no round runs against the old head's contract");
+    assert.equal(f.state.dispatched, 0, "no round runs against the old head's contract");
+    assert.equal(f.state.admissions, 0);
     const disposed = lastDisposed(rows);
     assert.equal(disposed.acted, true);
     assert.match(String(disposed.stand_down_reason), /task contract amended since this head was escalated — took main into the branch \(updated\)/);
@@ -76,7 +89,7 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
   });
 
   test("the design hold starts on the contract the round refused, so an amendment before the next pass still counts", async () => {
-    const rows: Record<string, unknown>[] = [designRow("contract-A")];
+    const rows: Record<string, unknown>[] = designRows("contract-A");
     const f = fixture(rows);
     f.state.revision = "contract-B";
 
@@ -86,7 +99,7 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
   });
 
   test("a NEEDS_DESIGN row that predates the record adopts the current contract, then releases on the next amendment", async () => {
-    const rows: Record<string, unknown>[] = [designRow()];
+    const rows: Record<string, unknown>[] = designRows();
     const f = fixture(rows);
 
     await runSweep([pr()], f.deps);
@@ -165,4 +178,15 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     assert.equal(outcome.outcome, "needs_design");
     assert.equal(rows.find((r) => r.step === "fix.needs_design")?.contract_revision, taskContractRevision(task));
   });
+});
+
+test("design-hold fixture preserves approved amendments without spending fix admission", async () => {
+  const rows = designRows("contract-A"), f = fixture(rows);
+  await runSweep([pr()], f.deps);
+  assert.equal(f.state.escalated, 1); assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+  f.state.revision = "contract-B";
+  await runSweep([pr()], f.deps);
+  assert.equal(f.state.refreshed, 1); assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+  await runSweep([pr()], f.deps);
+  assert.equal(f.state.refreshed, 1);
 });
