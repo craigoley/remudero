@@ -86,7 +86,9 @@ export function ciDependencyEvidenceForInvocation(argv, env = process.env, cwd =
     const baseAt = argv.indexOf('--base');
     if (baseAt < 0 || !argv[baseAt + 1]) throw new Error('changed-task base required');
     const head = gitOrThrow(['rev-parse', '--verify', 'HEAD^{commit}'], { cwd });
-    const base = gitOrThrow(['rev-parse', '--verify', argv[baseAt + 1] + '^{commit}'], { cwd });
+    const base = argv.includes('--merge-base')
+      ? gitOrThrow(['merge-base', argv[baseAt + 1], head], { cwd })
+      : gitOrThrow(['rev-parse', '--verify', argv[baseAt + 1] + '^{commit}'], { cwd });
     const planAt = argv.indexOf('--plan');
     if (planAt >= 0 && (!argv[planAt + 1] || resolve(cwd, argv[planAt + 1]) !== resolve(cwd, 'plan/tasks.yaml'))) throw new Error('receipt is for the canonical plan only');
     if (gitOrThrow(['status', '--porcelain', '--untracked-files=all', '--', 'plan'], { cwd }) !== '' ||
