@@ -42,7 +42,7 @@ const DIFF_COVERAGE_TAIL = [
 
 test("the failure detail is read from the annotation source when the log tail cannot be read", () => {
   const r = recorder([DIFF_COVERAGE_TAIL]);
-  const [f] = fetchCiFailures("o", "r", [failing("coverage-ratchet")], 60, r.fetch);
+  const [f] = fetchCiFailures("o", "r", [failing("coverage-ratchet")], 60, { fetchAnnotations: r.fetch, fetchJobLog: unreadableLog });
   assert.equal(f?.logUnavailable, undefined, "a tail was recovered, so no cause may be recorded");
   assert.match(f?.logTail ?? "", /diff-coverage: BLOCKED/);
   assert.equal(f?.tailSource, "annotations");
@@ -50,13 +50,10 @@ test("the failure detail is read from the annotation source when the log tail ca
   assert.deepEqual(r.calls, [["o", "r", "98137955459"]], "the check-run id is reused as-is, no new plumbing");
 });
 
-test("a readable log tail is still preferred, so existing recognisers match exactly what they match today", () => {
-  // The real `gh run view` cannot read a log here (the proxy denies it), so this asserts the
-  // ORDERING that makes preference meaningful: the fallback is consulted only after that failure,
-  // and it is consulted with the same id — never instead of the log read, and never first.
+test("annotations remain available when the job log cannot be read", () => {
   const r = recorder(["from the annotation source"]);
-  const [f] = fetchCiFailures("o", "r", [failing("ci")], 60, r.fetch);
-  assert.equal(r.calls.length, 1, "the fallback runs once, after the log read has already failed");
+  const [f] = fetchCiFailures("o", "r", [failing("ci")], 60, { fetchAnnotations: r.fetch, fetchJobLog: unreadableLog });
+  assert.deepEqual(r.calls, [["o", "r", "98137955459"]], "the annotation read runs once for the same job");
   assert.equal(f?.tailSource, "annotations");
   // And with NO job id there is nothing to fall back with, so the fallback is never reached at all.
   const r2 = recorder(["never asked for"]);
@@ -125,7 +122,7 @@ test("the producer still never throws and still names the same failing checks it
     "r",
     [failing("ci"), failing("coverage-ratchet", "1"), { name: "claims", conclusion: "SUCCESS", detailsUrl: "" }],
     60,
-    r.fetch,
+    { fetchAnnotations: r.fetch, fetchJobLog: unreadableLog },
   );
   assert.deepEqual(out.map((f) => f.name).sort(), ["ci", "coverage-ratchet"], "successes are still excluded");
   assert.doesNotThrow(() => fetchCiFailures("o", "r", undefined, 60, r.fetch));

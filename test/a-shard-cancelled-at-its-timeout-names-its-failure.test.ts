@@ -65,7 +65,7 @@ test("W1-T8038: a timed-out shard whose annotations only name the timeout reads 
   assert.equal(unread?.tailSource, "annotations");
   assert.match(unread?.logTail ?? "", /operation was canceled/);
 
-  // Annotations that name something else are still the whole tail, as before.
+  // W1-T9434: even substantive annotations are checked against the job log before they supply the tail.
   const calls2: string[] = [];
   const [other] = await fetchCiFailuresAsync("o", "r", rollup("lint"), 60, {
     fetchAnnotations: async () => ["src/a.ts:3 error TS2304: Cannot find name 'x'"],
@@ -74,8 +74,9 @@ test("W1-T8038: a timed-out shard whose annotations only name the timeout reads 
       return "unused";
     },
   });
-  assert.deepEqual(calls2, []);
+  assert.deepEqual(calls2, ["555"]);
   assert.equal(other?.tailSource, "annotations");
+  assert.equal(other?.logTail, "src/a.ts:3 error TS2304: Cannot find name 'x'");
 });
 
 test("W1-T8038: a pool defect names its leaking and victim files in the signature", async () => {

@@ -53,7 +53,8 @@ test("W1-T4461: a test failure's fix prompt names the failing test and its error
   assert.doesNotMatch(prompt, /Process completed with exit code 1/);
 });
 
-test("W1-T4461: an annotation with a real finding remains the prompt's source", () => {
+test("W1-T4461: an annotation with a real finding remains the prompt's source when the log names no failure", () => {
+  let logReads = 0;
   const [failure] = fetchCiFailures(
     "owner",
     "repo",
@@ -61,7 +62,7 @@ test("W1-T4461: an annotation with a real finding remains the prompt's source", 
     60,
     {
       fetchAnnotations: () => ["src/run-task.ts:1: lint finding"],
-      fetchJobLog: () => "not ok 1 - should not be read",
+      fetchJobLog: () => { logReads++; return "ordinary build output"; },
     },
   );
 
@@ -73,7 +74,8 @@ test("W1-T4461: an annotation with a real finding remains the prompt's source", 
   });
   assert.match(prompt, /failure detail source: annotations/);
   assert.match(prompt, /src\/run-task\.ts:1: lint finding/);
-  assert.doesNotMatch(prompt, /should not be read/);
+  assert.equal(logReads, 1, "W1-T9434 checks the log for a failing test before choosing annotations");
+  assert.doesNotMatch(prompt, /ordinary build output/);
 });
 
 test("W1-T4461: TAP extraction is bounded and preserves retry evidence", () => {

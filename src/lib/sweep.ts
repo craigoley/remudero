@@ -19315,14 +19315,16 @@ export async function runSweep(
               // Each latched pass records the contract revision it stands on; when main's differs, take main
               // into the branch once. The fix rung reads the contract AT THE HEAD (W1-T4073), so only a new
               // head carries the amendment, and a new head releases every head-keyed hold with it.
+              // PR-13039: the NEEDS_SCOPE and NEEDS_DESIGN holds below await a plan amendment too, so they
+              // release the same way; they pass no input key.
               const refreshAmendedContract = async (
-                latched: readonly Record<string, unknown>[], inputKey: string,
+                latched: readonly Record<string, unknown>[], inputKey?: string,
               ): Promise<string | undefined> => {
                 const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
                 const standingOn = latched.findLast(row => typeof row.progress_contract_revision === "string")
                   ?.progress_contract_revision as string | undefined;
                 const record = (revision: string | undefined) => {
-                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey,
+                  extraDisposedFields = { ...extraDisposedFields, ...(inputKey !== undefined ? { progress_escalated_key: inputKey } : {}),
                     ...(revision !== undefined ? { progress_contract_revision: revision } : {}) };
                 };
                 // First observation (or a latch predating the record): adopt the current contract, change nothing.
@@ -19331,6 +19333,7 @@ export async function runSweep(
                   return undefined;
                 }
                 record(standingOn);
+                acted = false;
                 if (!deps.updateBranch) {
                   return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
                 }
@@ -19631,8 +19634,23 @@ export async function runSweep(
                 }
                 extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
-                standDownReason = reason;
+                standDownReason = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
+                  line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.scope_amendment_red_checks !== undefined)) ?? reason;
                 break;
+              }
+              // PR-13039: the fix rung stands down at a head whose round handed off NEEDS_DESIGN; the hold starts on
+              // the contract that round worked on, so an amendment that answers it takes main into the branch.
+              const designHandoff = ledgerLines.findLast((line) => line.step === "fix.needs_design" &&
+                line.task_id === fixLedgerTaskIdFor(pr) && line.head_sha === pr.headSha);
+              if (designHandoff) {
+                extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true };
+                const amended = await refreshAmendedContract([{ progress_contract_revision: designHandoff.contract_revision },
+                  ...ledgerLines.filter((line) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                    line.head_sha === pr.headSha && line.needs_design_hold === true)]);
+                if (amended !== undefined) {
+                  standDownReason = amended;
+                  break;
+                }
               }
               if (refusedSameRed && fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).refusals.length === 0) {
                 progressParkedReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history`;
