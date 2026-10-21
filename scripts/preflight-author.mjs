@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
+import { sameTestFile } from '../src/lib/test-path-resolver.ts';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
@@ -203,12 +204,23 @@ export function authorEnvironment(parent) {
 }
 
 export function verifiedSuites(root, suites) {
-  return [...new Set(suites)].sort().map((suite) => {
+  let discovered;
+  return [...new Set(suites.map((suite) => {
     const path = resolve(root, suite);
-    if (!/^test\/.*\.test\.ts$/.test(suite) || !path.startsWith(resolve(root) + sep) ||
-        !lstatSync(path).isFile()) throw new Error(`unverified test target: ${suite}`);
+    if (!/^test\/.*\.test\.ts$/.test(suite) || !path.startsWith(resolve(root, 'test') + sep) ||
+        suite.split('/').includes('..')) throw new Error(`unverified test target: ${suite}`);
+    if (!existsSync(path)) {
+      // Test placement may move a suite without updating every selector or contract list.
+      // Heal only a unique basename; absence or ambiguity still refuses verification.
+      discovered ??= listTestFiles(root);
+      const matches = discovered.filter((file) => sameTestFile(file, suite));
+      if (matches.length === 0) throw new Error(`ENOENT: unverified test target: ${suite}`);
+      if (matches.length !== 1) throw new Error(`unverified test target: ${suite} (${matches.length} relocation candidates)`);
+      suite = matches[0];
+    }
+    if (!lstatSync(resolve(root, suite)).isFile()) throw new Error(`unverified test target: ${suite}`);
     return suite;
-  });
+  }))].sort();
 }
 
 export function completeTestResult(result) {
