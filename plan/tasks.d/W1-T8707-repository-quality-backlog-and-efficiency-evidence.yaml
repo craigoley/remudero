@@ -11,6 +11,9 @@
   origin: "operator console graph approval 2026-10-12; measure automated flow and self improvement"
   plan_refs: [W1-T5904, W1-T7421, W1-T8533, W1-T8667, W1-T4950]
   files: [src/lib/repository-flow.ts, src/lib/repository-flow-history.ts, src/lib/pr-open.ts, src/lib/sweep.ts, src/lib/read-model-worker.ts, src/lib/analytics-view.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/repository-flow-quality.test.ts, test/repository-flow-history.test.ts, test/repository-flow-quality-wiring.test.ts]
+  # refusal-amendment (W1-T8707, run W1-T8707-1792473097713, 2026-10-21T15:10:26.790Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T8707: a filed proof already passes at the merge base, so branch run-W1-T8707-1792473097713 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   rationale: |

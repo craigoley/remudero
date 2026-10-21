@@ -584,6 +584,12 @@ export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "inel
  *  unable to finish (#12776). Every other instrument, including the mutation score floor, is still refused. */
 export const SCOPE_GRANTABLE_INSTRUMENTS: ReadonlySet<string> = new Set(["stryker.conf.json", "scripts/mutation-relevant-paths.json"]);
 
+/** An instrument no scope amendment grants (PR 13223): the fix lane escalates it once instead of re-asking. */
+export function isUngrantableInstrumentPath(path: string): boolean {
+  return !SCOPE_GRANTABLE_INSTRUMENTS.has(path) &&
+    (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path));
+}
+
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
   const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
   const build = request.kind === "build";
@@ -612,10 +618,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
       return refuse("invalid-path", path);
     }
     if (path.startsWith("plan/")) return refuse("plan-path", path);
-    if (!SCOPE_GRANTABLE_INSTRUMENTS.has(path) &&
-        (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path))) {
-      return refuse("instrument-path", path);
-    }
+    if (isUngrantableInstrumentPath(path)) return refuse("instrument-path", path);
     if (path.startsWith("test/")) return refuse("test-path", path);
     if (!request.changedPaths.includes(path)) return refuse("path-not-changed", path);
   }
