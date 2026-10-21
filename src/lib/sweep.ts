@@ -14303,8 +14303,7 @@ export function codeScanningHeadSettled(
 
 type CodeScanningDispatchRead = { kind: "none" | "held" } | { kind: "retry"; reason: string };
 
-/** A preparation receipt owns the head until its actual rung ends or an explicit empty boot adoption proves
- * its continuation ended. Absence of fix.dispatch is not absence of a worker: that receipt is post-spawn. */
+/** Preparation holds until its rung ends or a later current boot with preceding numeric-zero adoption ends its latest owner; unknown counts, another boot or later adopted/uncertain children hold. An older terminal cannot release a newer preparation. fix.dispatch accounts post-spawn work, not worker-start. */
 function codeScanningDispatchRead(
   lines: ReadonlyArray<Record<string, unknown>>, prNumber: number, headSha: string, currentRunId?: string,
 ): CodeScanningDispatchRead {
@@ -14333,8 +14332,6 @@ function codeScanningDispatchRead(
   const activeRunId = currentRunId ?? (typeof boot?.run_id === "string" ? boot.run_id : undefined);
   const endedAtBoot = activeRunId !== undefined && activeRunId !== "" &&
     continuationEndedAtEmptyBoot(lines, effectiveAt, effectiveOwner, taskId, activeRunId);
-  // A newer run's preparation supersedes the original intent's continuation. Only a still newer
-  // explicitly empty boot can end that owner; the old owner's terminal receipt cannot release it.
   if (effectiveOwner !== ownerRunId) return endedAtBoot
     ? { kind: "retry", reason: "the latest code-scanning continuation ended at a clean boot" }
     : { kind: "held" };
@@ -14866,8 +14863,6 @@ export interface FixSeed { ts?: string; runId?: string }
 /** `orphaned`: the earlier run no longer owns a continuation; ordinary checkout/worker claims still gate redispatch. */
 export type FixSeedRead = { kind: "live" | "ended" | "orphaned"; seed: FixSeed; orphanReason?: "owner-run-ended" };
 
-/** Existing boot recovery authority: a later current boot with an explicitly empty child adoption pass.
- * Unknown/malformed counts, a different latest boot, or any later adopted/uncertain task child keep ownership. */
 function continuationEndedAtEmptyBoot(
   lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
 ): boolean {
