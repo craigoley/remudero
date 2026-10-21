@@ -440,6 +440,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_TEST_SLOTS", "How many test-suite runs may hold a host-wide slot at once; default one per four cores.", ["src/lib/test-slot.ts"]),
   envEntry("RMD_TEST_LIVE_DENY_ROOT", "Test-only operator root that ledger writes must never reach; propagated to children.", ["src/lib/live-write-guard.ts", "src/lib/env.ts"]),
   envEntry("RMD_BOOT_CHECKOUT_BLOCKED", "Set by deploy/entrypoint.sh on a STALE BOOT to the target sha its checkout could not reach; the daemon does not freshness-restart toward it (W1-T9631).", ["src/lib/daemon.ts"]),
+  envEntry("RMD_MAIN_ENTRY", "bundlemain: set by bin/rmd for the daemon verb to `<bundle|tsx>:<reason>`, the entry its main started from; the daemon ledgers it (daemon.entry.selected) and removes it from its environment.", ["src/lib/main-entry.ts"]),
   envEntry("RMD_BUNDLED_WORKERS", "W1-T9370: \"0\" starts every worker a tsx parent spawns from its .ts source instead of a current worker bundle; read once per module at its first start.", ["src/lib/child-entry-argv.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),

@@ -2194,7 +2194,7 @@ export function reportLoopLag(
   }
 }
 
-/** W1-T4429: a `"pause"` clock skips the `checkPause` re-check — it runs BECAUSE the fleet is paused. */
+/** A `"pause"` clock runs through operator holds, but a recycle PAUSE must drain without new reviews. */
 export type InterphaseReviewClockScope = "drain" | "pause";
 
 /** The review-only clock for the part of an iteration that previously had none: after the full
@@ -2264,12 +2264,18 @@ export function startInterphaseReviewClock(
 
           const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
           if (halt) continue;
+          const paused = scope === "pause" ? deps.checkPause?.() : undefined;
 
           const reviewOnly = scope !== undefined || activePasses.size > 0 || inFlightReviewCount() > 0;
           const trigger = eventWakePending ? "github-event" : "interval";
           eventWakePending = false;
           elapsedMs = 0;
           lastPassAtMs = interphaseClock.now();
+          if (isRecyclePauseDetail(paused)) {
+            held += 1;
+            log("daemon.review_clock.held", { trigger, ...scopeTag, detail: paused, reason: "recycle_pause" });
+            continue;
+          }
           if (admit && !admit("review")) {
             held += 1;
             continue;
@@ -2770,18 +2776,20 @@ function startInFlightTicker(
             // W1-T5343: a pause stops new work, never the judging of finished work (W1-T4429 design iii), and
             // 11 dispatch-phase pauses once held ~210 min with 0 reviews. So run ONE review-only pass at a time,
             // which closes the fix rung, requeue and update-branch W1-T4191 needed closed, and only while a
-            // lane is in flight: one admitted after the lanes drain could stretch a recycle's wait. STOP wins.
+            // lane is in flight, except during a recycle: any new review stretches its drain. STOP wins.
             // `daemon.sweep_light.held` keeps meaning "nothing ran" and names which guard held it.
             const stopped = deps.checkStop?.();
             const heldBy = stopped
               ? "stop"
-              : !deps.sweepLight
-                ? "no_light_pass"
-                : pausedReviewPass
-                  ? "review_in_flight"
-                  : (owner.lanesInFlight?.() ?? 0) === 0
-                    ? "no_lane"
-                    : undefined;
+              : isRecyclePauseDetail(lightHalt)
+                ? "recycle_pause"
+                : !deps.sweepLight
+                  ? "no_light_pass"
+                  : pausedReviewPass
+                    ? "review_in_flight"
+                    : (owner.lanesInFlight?.() ?? 0) === 0
+                      ? "no_lane"
+                      : undefined;
             if (heldBy) {
               log("daemon.sweep_light.held", { phase: owner.phase, detail: stopped ?? lightHalt, reason: heldBy });
               continue;

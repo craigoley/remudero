@@ -22,10 +22,13 @@
     - src/lib/instance-inbox-contract.ts
     - src/lib/ledger-path.ts
     - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - docs/cli-reference.md
     - src/run-task.ts
     - test/inbox/inbox-feedback-response-causal-link.test.ts
     - test/an-instance-reframes-only-its-current-proposal.test.ts
     - test/inbox-thread-view.test.ts
+    - test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=feb9a487f7353c77
@@ -111,6 +114,18 @@
     receipts and same-committed-tree instrumented diff coverage, naming the SHA; helper-only mocks,
     test-title greps and a fabricated mutant result are not evidence.
   note: |
+    Generated companion qualification adds only docs/cli-reference.md and
+    packages/api-client/src/schema.d.ts, regenerated from the already-qualified CLI and OpenAPI
+    sources. Retain the complete command reference and contract, including other owners' changes;
+    do not hand-edit generated artifacts or waive drift checks. The ordinary author gate on
+    private implementation 0319f285820dd6aa477637fa64a76cdf9f7f2c40 refused these missing outputs.
+    Include the existing action/outcome thread regression to preserve its action, filing, refusal,
+    ordering and replay assertions while using verified captured input and adopted-completion
+    evidence for its redraft positive control. Add an explicit legacy control: chronological
+    inbox.drafted alone must not claim that it consumed feedback. This is the existing acceptance
+    contract, not permission to delete a failing assertion or to retrofit historical identity.
+    Reservation, risk, behavioral proofs, runtime settings and every review/CI gate are unchanged.
+
     Cached correspondence qualification adds only src/lib/inbox-thread-view.ts, the existing
     src/lib/inbox-view.ts producer and test/inbox-thread-view.test.ts caller suite. The cached view currently rebuilds an item with
     only proposal id, summary, plain text and lane, dropping the source scope and feedback history

@@ -62,6 +62,12 @@
       "grepHint": "0007. Run each build in a child process that outlives the daemon, and restart the daemon only for its own code"
     },
     {
+      "path": "docs/adr/0008-the-daemon-main-runs-from-the-bundle.md",
+      "title": "0008. Start the daemon's own main from the precompiled bundle, keeping source maps on through a linked map",
+      "summary": "Status: Accepted",
+      "grepHint": "0008. Start the daemon's own main from the precompiled bundle, keeping source maps on through a linked map"
+    },
+    {
       "path": "docs/adr/README.md",
       "title": "Architecture Decision Records",
       "summary": "MASTER-PLAN §5 TIER 3: ADR discipline for IRREVERSIBLE calls. A short",
@@ -408,6 +414,12 @@
       "title": "fleet-heartbeat-watch.yml forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
       "grepHint": "fleet-heartbeat-watch.yml forensics"
+    },
+    {
+      "path": "docs/forensics/followup-w1-t7898-pr-repairs.md",
+      "title": "W1-T7898 follow-up: actual repairs for PRs 10578, 10628 and 10671",
+      "summary": "The three PRs had different repairs; the inspected `Analyze (actions)` reds were cancelled jobs,",
+      "grepHint": "W1-T7898 follow-up: actual repairs for PRs 10578, 10628 and 10671"
     },
     {
       "path": "docs/forensics/fs-race-safe.md",
