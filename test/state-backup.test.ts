@@ -219,6 +219,31 @@ function seedEngine(state: string, target: string): void {
   symlinkSync(target, join(state, dependencyRel));
 }
 
+test("a state backup refuses reserved engine metadata in live state without publishing", () => {
+  const state = seedStateDir();
+  const backups = tmpDir("rmd-engine-backups-");
+  const target = "/missing-worker/node_modules";
+  seedEngine(state, target);
+  const manifestPath = join(state, manifestRel);
+  const liveMetadata = '{"live":"must not be overwritten"}\n';
+  writeFileSync(manifestPath, liveMetadata);
+
+  assert.throws(
+    () => snapshotState(state, backups),
+    (err: unknown) => err instanceof StateBackupError && err.cause instanceof Error &&
+      err.cause.message === `engine dependency reconstruction: reserved archive metadata exists in live state: ${manifestRel}`,
+  );
+  assert.deepEqual(readdirSync(backups), [], "refusal must clean up staging and publish no archive");
+  assert.equal(readFileSync(manifestPath, "utf8"), liveMetadata);
+  assert.equal(readlinkSync(join(state, dependencyRel)), target);
+
+  rmSync(manifestPath);
+  const snapshot = snapshotState(state, backups);
+  assert.deepEqual(readdirSync(backups), [basename(snapshot.archiveDir)]);
+  assert.equal(readlinkSync(join(snapshot.archiveDir, dependencyRel)), target);
+  assert.equal(existsSync(manifestPath), false);
+});
+
 test("a state backup restores engine dependency links without following their targets", () => {
   const state = seedStateDir();
   const backups = tmpDir("rmd-engine-backups-");
