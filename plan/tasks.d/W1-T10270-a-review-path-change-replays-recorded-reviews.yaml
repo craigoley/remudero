@@ -9,6 +9,11 @@
   band_meaning: span
   budget_usd: 25.00
   priority: 1
+  # refusal-amendment (W1-T10270, run DAEMON-1792613880153@72d261d4ef3c112a7efe528d1a0b740e767df809, 2026-10-21T22:13:33.527Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The required authentic sample cannot be generated without retained production ledger evidence.
+  # refusal-amendment (W1-T10270, run DAEMON-1792613880153@72d261d4ef3c112a7efe528d1a0b740e767df809, 2026-10-21T22:13:33.527Z): the worker refused criterion 2 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Recorded real-review replay cannot be verified while that sample is absent.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   origin: "operator session 2026-10-20: reviewer outage after #12954 — 'let's solve root causes, not work around them'"
