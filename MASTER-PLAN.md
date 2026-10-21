@@ -5755,7 +5755,9 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    W2-T1.
 13. **A doc that DESCRIBES a mechanism is never proof the mechanism EXISTS.** Acceptance proofs must be
    OBSERVABLE SYSTEM STATE — `gh api` output, a status object, a grep of the call site, a passing test —
-   never a file that talks about it. PR #12 shipped `docs/review-gate.md`, passed CI, reported
+   never a file that talks about it. For a task whose deliverable is wiring,
+   wiring is not proved by a passing test; evidence of the production call site is required.
+   PR #12 shipped `docs/review-gate.md`, passed CI, reported
    `verdict=merged`, and did none of its job (protection unchanged, no status ever posted). [PR #12/#13]
 14. **Splitting a task can ORPHAN its call site — when you split, name the integration point explicitly
    as one side's deliverable.** T1C built the reviewer and T1D was to enforce it, but NEITHER owned
