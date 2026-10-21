@@ -5,6 +5,7 @@ import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { isUngrantableInstrumentPath } from "#src/lib/proof-amendment.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -126,3 +127,51 @@ test("PR 13223: the instrument predicate is the amendment validator's own refusa
   }
 });
 
+const HEAD = "7071b9da9155d3062fd4636097edeab50be8cf16";
+const ISSUE = "https://github.com/acme/remudero/issues/13319";
+const escalated = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  task_id: TASK, step: "fix.scope_amendment", pr_number: PR, head_sha: HEAD,
+  outcome: "instrument-escalated", paths: [docs, instrument], issue_url: ISSUE, ...extra,
+});
+const view = (extra: Partial<OpenPrView> = {}): OpenPrView => ({
+  prNumber: PR, prUrl: `https://github.com/acme/remudero/pull/${PR}`, taskId: TASK, headSha: HEAD,
+  checksState: "red", reviewState: "pending", unmetCriteria: [], priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
+  autoMergeArmed: false, lastActivityAt: new Date().toISOString(), redRequiredChecks: ["comment-load-ratchet"],
+  ciFailures: [{ name: "comment-load-ratchet", logTail: signature }], ...extra,
+});
+function sweep(initial: Record<string, unknown>[]) {
+  const rows = [...initial];
+  const calls = { judges: 0, fixes: 0, escalations: 0, arms: 0 };
+  const deps: SweepDeps = {
+    ledgerPath: "/unused/instrument-scope-hold", runId: "instrument-scope-hold", now: () => Date.now(),
+    readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); },
+    fixProgressJudge: async () => { calls.judges++; return { verdict: "change-approach", approach: "fixture approach", reason: "fixture asks for another round" }; },
+    dispatchFix: () => { calls.fixes++; }, escalate: () => { calls.escalations++; },
+    arm: () => { calls.arms++; }, close: () => {},
+  };
+  return { rows, calls, deps };
+}
+
+test("PR 13223: a delivered instrument scope question holds a filed PR at its head with no judge or fix round", async () => {
+  for (const pass of [runSweep, runSweepLightPass]) {
+    const f = sweep([escalated()]);
+    await pass([view()], f.deps, DEFAULT_SWEEP_POLICY);
+    await pass([view()], f.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(f.calls, { judges: 0, fixes: 0, escalations: 0, arms: 0 });
+    const disposed = f.rows.filter((r) => r.step === "sweep.disposed");
+    assert.ok(disposed.length >= 2, "positive control: both passes disposed the real PR");
+    assert.ok(disposed.every((r) => r.acted === false));
+    assert.ok(disposed.some((r) => String(r.stand_down_reason).includes(`instrument scope decision awaits resolution at this head — ${ISSUE}`)));
+  }
+});
+
+test("PR 13223: an instrument hold releases on a new head, another PR or an undelivered question", async () => {
+  for (const [row, pr] of [[escalated(), view({ headSha: "a-new-head" })], [escalated(), view({ prNumber: PR + 1 })],
+    [escalated({ outcome: "instrument-escalation-failed" }), view()]] as const) {
+    const f = sweep([row]);
+    await runSweep([pr], f.deps, DEFAULT_SWEEP_POLICY);
+    const disposed = f.rows.filter((r) => r.step === "sweep.disposed");
+    assert.ok(disposed.length >= 1, "positive control: the pass disposed the PR");
+    assert.ok(!disposed.some((r) => String(r.stand_down_reason).includes("instrument scope decision")), JSON.stringify(row));
+  }
+});
