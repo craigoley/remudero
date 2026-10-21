@@ -16,12 +16,12 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { dropUnmappableSourceMaps } from "../setup/tmp-hygiene.js";
+import { pathToFileURL } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { dropUnmappableSourceMaps } from "#test/setup/tmp-hygiene.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TSX = import.meta.resolve("tsx");
 const SETUP = join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts");
 const MERGER = join(REPO_ROOT, "scripts", "coverage-merge-ratchet.mjs");
