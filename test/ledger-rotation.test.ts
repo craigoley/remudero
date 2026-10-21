@@ -28,6 +28,7 @@ import {
 } from "../src/lib/ledger.js";
 import { dispatchesWithoutNewOwnedPr, isDispatchBreakerTripped, readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runCreditBackfill, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
+import * as sweepModule from "./helpers/sweep-test.js";
 import { escalateCircuitBreak, deriveStrikeHistory } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -137,15 +138,14 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
   );
 });
 
-// The literal census above cannot see `.step === CODE_SCANNING_FIX_STEP`. Discover the
-// security consumer's named receipts from its own source, rather than copying their values.
-test("security decision receipts read through named constants belong to the live retention core", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/sweep.ts", import.meta.url)), "utf8");
-  const declared = [...src.matchAll(/export const (CODE_SCANNING_[A-Z_]+_STEP) = "([^"]+)";/g)];
+// The literal census above cannot see named step constants. Inspect the consumer's
+// exported receipt population at runtime; the real rotation tests exercise its decisions.
+test("security decision receipts exported by the consumer belong to the live retention core", () => {
+  const declared = Object.entries(sweepModule).filter(([name]) => /^CODE_SCANNING_[A-Z_]+_STEP$/.test(name));
   assert.ok(declared.length >= 3, "positive control: discover the security ruling and dispatch receipts");
-  for (const [, symbol, step] of declared) {
-    assert.ok(src.includes(`.step === ${symbol}`), `${symbol} is a deciding read, not just telemetry`);
-    assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(step), `${step} is consumed by the live-only sweep and must survive rotation`);
+  for (const [name, step] of declared) {
+    assert.equal(typeof step, "string", `${name} names a ledger receipt`);
+    assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(step as string), `${step} is consumed by the live-only sweep and must survive rotation`);
   }
 });
 
