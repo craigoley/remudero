@@ -5,14 +5,39 @@
  * for #11677) — far past the 40-suite ceiling — so a real source diff read `unavailable` and a new module's
  * uncovered error arms were learned from CI's coverage-ratchet a fix round later. The suites most likely to cover
  * a diff are its OWN test files plus the DIRECT importers of its changed src files; those run first.
+ *
+ * W1-T5309 — ONE HUB FILE MUST NOT BLIND THE WHOLE DIFF. src/run-task.ts alone has ~930 direct-importer suites, so a
+ * diff touching it put the union over the ceiling and the precheck read `unavailable` on 31 of 46 source diffs
+ * (2026-10-20/21) — while 20 of 28 heads CI then blocked had every blocked line in a file with at most 40. The narrow
+ * pass is therefore chosen PER FILE (judgeCoverage), and a gap counts only in a file whose suites all ran.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildAffectedSuitesGraph } from "./affected-suites.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
-const SRC_FILE = /^src\/.*\.ts$/;
+/** W1-T5309 — the source files CI's diff-coverage gate judges (scripts/diff-coverage.mjs `changedSourceFiles`):
+ *  src/ TypeScript, and src/ or scripts/ ESM. The push precheck reads the same predicate, so an .mjs change is
+ *  judged here exactly as CI judges it. */
+export const COVERAGE_SOURCE_FILE = /^(?:src\/.*\.ts|(?:src|scripts)\/.*\.mjs)$/;
+const SRC_FILE = COVERAGE_SOURCE_FILE;
 const TEST_FILE = /^test\/.*\.test\.ts$/;
+
+/** W1-T5309 — what a narrow listing is made of: the diff's own test files, and each changed source file's
+ *  direct-importer suites. Kept beside the listing (never in it), so a caller that only reads the suites is unchanged. */
+export interface NarrowGroups {
+  own: readonly string[];
+  importers: ReadonlyMap<string, readonly string[]>;
+}
+
+const NARROW_GROUPS = new WeakMap<readonly string[], NarrowGroups>();
+
+/** The narrow listing {@link coverageNarrowSuites} returns: the union of `groups`, sorted, carrying its groups. */
+export function narrowListing(groups: NarrowGroups): string[] {
+  const suites = [...new Set([...groups.own, ...[...groups.importers.values()].flat()])].sort();
+  NARROW_GROUPS.set(suites, groups);
+  return suites;
+}
 
 /** What one scoped `diff-coverage-local.mjs` run came back with. */
 export type CoverageRun = { status: number | null; output: string; timedOut: boolean; spawnError?: string };
@@ -40,8 +65,50 @@ export async function coverageNarrowSuites(wt: string, changed: string[]): Promi
     files.set(f, readFileSync(join(wt, f), "utf8"));
   }
   const { directImports } = buildAffectedSuitesGraph(files, srcChanged);
-  const importers = [...files.keys()].filter((f) => srcChanged.some((s) => directImports.get(f)?.has(s)));
-  return [...new Set([...own, ...importers])].sort();
+  const importers = new Map(srcChanged.map((s) => [s, [...files.keys()].filter((f) => directImports.get(f)?.has(s)).sort()]));
+  return narrowListing({ own, importers });
+}
+
+/** The suites one narrow run spawns, and the changed source files whose every direct-importer suite is among them. */
+interface NarrowRun {
+  suites: string[];
+  /** Undefined: the whole listing runs, so every changed file is measured (the pre-W1-T5309 pass). */
+  measured?: ReadonlySet<string>;
+}
+
+/**
+ * W1-T5309 — the narrow run within `ceiling`. A listing that fits runs whole, as before. One over it, with known
+ * groups, runs the own tests plus the importer groups of as many changed files as fit, smallest first; each other
+ * changed file adds ONE of its importers (when none is already in), so the report still carries its SF record. A
+ * file whose group did not fit is not measured, and its lines are never a gap. Undefined: nothing can run.
+ */
+function narrowRun(narrow: readonly string[], ceiling: number): NarrowRun | undefined {
+  if (narrow.length === 0) return undefined;
+  if (narrow.length <= ceiling) return { suites: [...narrow] };
+  const groups = NARROW_GROUPS.get(narrow);
+  if (groups === undefined) return undefined;
+  const files = [...groups.importers.keys()].sort((a, b) => groups.importers.get(a)!.length - groups.importers.get(b)!.length || a.localeCompare(b));
+  for (let k = files.length; k > 0; k--) {
+    const measured = new Set(files.slice(0, k));
+    const suites = new Set([...groups.own, ...files.slice(0, k).flatMap((f) => groups.importers.get(f)!)]);
+    for (const f of files.slice(k)) {
+      const own = groups.importers.get(f)!;
+      if (own.length > 0 && !own.some((s) => suites.has(s))) suites.add(own[0]!);
+    }
+    if (suites.size <= ceiling) return { suites: [...suites].sort(), measured };
+  }
+  return undefined;
+}
+
+/** The refusal text with only the listed lines of `measured` files kept; undefined when none is left. */
+function measuredGap(text: string, measured: ReadonlySet<string> | undefined): string | undefined {
+  if (measured === undefined) return text;
+  const lines = text.split("\n");
+  const kept = lines.filter((line) => {
+    const listed = /^\s+[-!] (\S+?):\d+/.exec(line);
+    return listed === null || measured.has(listed[1]!);
+  });
+  return kept.some((line) => /^\s+[-!] /.test(line)) ? kept.join("\n") : undefined;
 }
 
 /** Everything {@link judgeCoverage} reads or spawns, so a test drives each arm without an instrumented suite. */
@@ -75,13 +142,18 @@ const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300
  */
 export async function judgeCoverage(j: CoverageJudgement): Promise<CoverageVerdict> {
   let narrowGap: string | undefined;
-  const skippedNarrow = j.narrow.length > j.ceiling ? `; ${j.narrow.length} own and direct-importer suite(s) were not measured (over preflight's scoped ceiling of ${j.ceiling})` : "";
+  const run = narrowRun(j.narrow, j.ceiling);
+  const ran = run?.suites ?? [];
+  const unmeasured = run?.measured === undefined ? 0 : [...NARROW_GROUPS.get(j.narrow)!.importers.keys()].filter((f) => !run.measured!.has(f)).length;
+  const skippedNarrow = run === undefined && j.narrow.length > j.ceiling
+    ? `; ${j.narrow.length} own and direct-importer suite(s) were not measured (over preflight's scoped ceiling of ${j.ceiling})`
+    : unmeasured > 0 ? `; ${unmeasured} changed source file(s) had too many direct-importer suites to measure (over preflight's scoped ceiling of ${j.ceiling})` : "";
   const unavailable = (reason: string): Extract<CoverageVerdict, { outcome: "unavailable" }> => ({ outcome: "unavailable", reason: `${reason}${skippedNarrow}` });
-  if (j.narrow.length > 0 && j.narrow.length <= j.ceiling) {
-    const { r } = await j.bounded(j.narrow);
+  if (run !== undefined) {
+    const { r } = await j.bounded(ran);
     if (!r.timedOut && r.spawnError === undefined) {
-      if (r.status === 0) return { outcome: "covered", reason: `${j.narrow.length} own and direct-importer suite(s) cover every added src line`, suites: j.narrow.length };
-      if (j.isUncovered(r.output)) narrowGap = j.refusalText(r.output);
+      if (r.status === 0) return { outcome: "covered", reason: `${ran.length} own and direct-importer suite(s) cover every added src line`, suites: ran.length };
+      if (j.isUncovered(r.output)) narrowGap = measuredGap(j.refusalText(r.output), run.measured);
     }
   }
   const advisory = async (why: string): Promise<CoverageVerdict | undefined> => {
@@ -92,7 +164,7 @@ export async function judgeCoverage(j: CoverageJudgement): Promise<CoverageVerdi
     } catch (e) {
       head = `unreadable: ${reasonOf(e)}`;
     }
-    return { outcome: "uncovered-narrow", reason: `${j.narrow.length} own and direct-importer suite(s) leave added src lines uncovered; ${why}`, text: narrowGap, suites: j.narrow.length, head };
+    return { outcome: "uncovered-narrow", reason: `${ran.length} own and direct-importer suite(s) leave added src lines uncovered; ${why}`, text: narrowGap, suites: ran.length, head };
   };
   const { selection } = j;
   if (selection.fullRun) {
@@ -102,7 +174,7 @@ export async function judgeCoverage(j: CoverageJudgement): Promise<CoverageVerdi
   if (selection.suites.length === 0) return unavailable("no suite reaches the changed src files");
   for (const suites of j.passes) {
     // A pass the narrow run already contained would repeat a run that left a gap: the verdict stands.
-    if (narrowGap !== undefined && suites.every((f) => j.narrow.includes(f))) return { outcome: "uncovered", text: narrowGap, suites: j.narrow.length };
+    if (narrowGap !== undefined && run?.measured === undefined && suites.every((f) => ran.includes(f))) return { outcome: "uncovered", text: narrowGap, suites: ran.length };
     if (suites.length > j.ceiling) {
       const tooWide = `${suites.length} suite(s) are too wide to precheck quickly (over preflight's scoped ceiling of ${j.ceiling})`;
       return (await advisory(tooWide)) ?? unavailable(`${tooWide}${j.narrowUnreadable}`);

@@ -5344,14 +5344,16 @@ export interface CiFailure {
    *  causes). Present ONLY when the tail is empty and a cause was observed, absent whenever a tail
    *  was captured — so `logUnavailable !== undefined` never fires on a real tail. */
   logUnavailable?: CiLogUnavailableCause;
-  /** WHICH source filled {@link logTail}. `"annotations"` is the fallback, reached only when the
-   *  log read came back empty or failed, so a readable log can never be displaced by it. Absent
+  /** WHICH source filled {@link logTail}. `"annotations"` is the fallback when the log is unreadable
+   *  or names no failing test or step. Annotations printed by passing tests are excluded. Absent
    *  exactly when {@link logUnavailable} is present — the two are complements. */
   tailSource?: CiTailSource;
-  /** WHAT the annotation fallback did, when reached; absent entirely when the log answered. Kept
+  /** WHAT the annotation read found, independently of which source supplies the excerpt. Kept
    *  separate from {@link logUnavailable} so a fallback can never take back the cause W1-T2291
    *  named. */
   annotationFallback?: CiAnnotationFallback;
+  /** Annotations observed in passing TAP output remain auditable but cannot supply failure evidence. */
+  annotations?: Array<{ message: string; from_passing_test: boolean }>;
 }
 
 export const ARTIFACT_FINALIZE_INTERMEDIARY_403 = "artifact-finalize-intermediary-403" as const;
@@ -19622,18 +19624,21 @@ export async function runSweep(
                 }
               }
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
-              const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment");
-              const closedAmendment = scopeAmendment && ledgerLines.some(row => row.step === PR_TERMINAL_STEP &&
-                row.state === "closed" && Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
-              if (closedAmendment && deps.fixProgressJudge) {
+              const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment" &&
+                row.head_sha === pr.headSha && (row.pr_number === undefined || Number(row.pr_number) === pr.prNumber));
+              const amendmentTerminal = scopeAmendment && ledgerLines.findLast(row => row.step === PR_TERMINAL_STEP &&
+                Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
+              const closedAmendment = amendmentTerminal?.state === "closed";
+              if (scopeAmendment && closedAmendment && deps.fixProgressJudge) {
                 progressParkedReason = `amendment-closed: scope amendment ${scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number} closed without merging`;
                 const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                   row.head_sha === pr.headSha && row.stand_down_reason === progressParkedReason);
                 if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
                 if (!await askProgress()) break;
               }
-              if (refusedSameRed?.scopeAmendment && !closedAmendment) {
-                const reason = `fix report requests a scope amendment: ${refusedSameRed.scopeAmendment}`;
+              if (scopeAmendment && ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
+                  !["merged", "closed"].includes(String(amendmentTerminal?.state))) {
+                const reason = `fix report requests a scope amendment: ${refusedSameRed?.scopeAmendment ?? scopeAmendment.paths}`;
                 const alreadyEscalated = ledgerLines.some((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
                   line.head_sha === pr.headSha && JSON.stringify(line.scope_amendment_red_checks) === JSON.stringify(redCheckNames(pr)));
@@ -19645,6 +19650,16 @@ export async function runSweep(
                 standDownReason = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
                   line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.scope_amendment_red_checks !== undefined)) ?? reason;
                 break;
+              }
+              if (scopeAmendment?.outcome === "refused") {
+                progressParkedReason = `scope-amendment-refused: ${scopeAmendment.reason}: ${scopeAmendment.detail}`;
+              }
+              if (scopeAmendment?.outcome === "refused" && scopeAmendment.reason === "path-not-changed") {
+                const paths = Array.isArray(scopeAmendment.paths) ? scopeAmendment.paths.join(", ") : scopeAmendment.detail;
+                const constraint = `Scope amendment refused (path-not-changed): ${scopeAmendment.detail}; ` +
+                  `make the edit to ${paths} and leave it saved and uncommitted, then report NEEDS_SCOPE`;
+                pr.pendingAnswer = { ...pr.pendingAnswer,
+                  constraint: [pr.pendingAnswer?.constraint, constraint].filter(Boolean).join("\n\n") };
               }
               // PR-13039: the fix rung stands down at a head whose round handed off NEEDS_DESIGN; the hold starts on
               // the contract that round worked on, so an amendment that answers it takes main into the branch.
