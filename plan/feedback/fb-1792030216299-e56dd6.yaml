@@ -17,8 +17,23 @@ attachments: []
 origin: issue
 status: proposed
 reply_to: evidence-coverage-feedback-summary-cost
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/13271
+summary:
+  headline: Trace missing feedback receipt fields and restore shared attribution
+  what_happened: "Seven `feedback-summary` terminal receipts lack `costUsd`, and
+    this lane also has the `servedModel` gap tracked as #11067. The proposed
+    task traces both gaps and exempts only calls confirmed to have failed
+    without a cost receipt."
+  decision: Approve one task covering both receipt fields and limiting exemptions
+    to confirmed failures.
+  options:
+    - label: Approve
+      consequence: File one task to trace the seven receipts and restore both fields
+        in the shared wrapper.
+      intent: approve
+    - label: Reframe
+      consequence: Narrow the task or clarify its scope before it is filed.
+      intent: reframe
 expansion: null
 submission_key: issue#11149:comment:6143571958
 thread_id: null
