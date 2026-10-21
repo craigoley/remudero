@@ -939,7 +939,7 @@ test("lifecycle auth, pacing, unknown errors and longer Retry-After waits retain
 
 test("a lifecycle retry reaches the real default REST reader and gh executable before publishing once", async () => {
   const dir = tmpDir();
-  const shim = ghShim([{ when: "api " + REST_PATH, stderr: "gh: Service Unavailable (HTTP 503)", exit: 1 }]);
+  const shim = ghShim([{ when: "api " + REST_PATH, stderr: "gh: HTTP 503", exit: 1 }]);
   const oldPath = process.env.PATH;
   const oldCache = process.env.RMD_GH_CACHE_HOME;
   process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
