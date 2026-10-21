@@ -1,37 +1,36 @@
 - id: W1-T10282
-  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — conflict:merge conflict (mergeState dirty) cost 4.44 PR-hours"
+  title: A conflict repair measures its pending main merge and escalates an exact-head design handoff
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
-  risk: low
+  verify: auto
+  risk: high
   priority: 1.33
   status: queued
   attempts: 0
   author_class: machine
-  origin: "flow-blocker:conflict:merge conflict (mergeState dirty)"
+  origin: flow-blocker:conflict:merge conflict (mergeState dirty)
   files:
+    - src/run-task.ts
     - src/lib/sweep.ts
-    - test/sweep/flow-conflict-merge-conflict-mergestate-dirty.test.ts
+    - test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts
+    - test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts
   acceptance:
-    - claim: "conflict:merge conflict (mergeState dirty) is cleared by its owner without manual intervention"
-      proof: "grep: test(\"W1-T10282: flow-conflict-merge-conflict-mergestate-dirty clears without a person\" in test/sweep/flow-conflict-merge-conflict-mergestate-dirty.test.ts"
-  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
-  rationale: |
-    conflict:merge conflict (mergeState dirty) cost 4.44 PR-hours; owner conflict-rebase
-    Owner conflict-rebase failed to clear eligible episodes.
-    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
-    - PR #13121: 4.28 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on src/lib/proof-amendment.ts (ours -14, theirs -5), src/run-task.ts (ours -7, theirs -111) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — mergeability unread this pass; inherited last known "dirty" observed 2026-10-20T19:20:55.682Z for this exact head 10b5d54 (W1-T4470) — NOT DISPATCHED this pass: restart latched: a fix round would outlast the time left in the restart's drain
-    - PR #10614: 0.23 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on package.json (ours -1, theirs -1), scripts/typecheck.mjs (ours -0, theirs -0), src/lib/review.ts (ours -0, theirs -0), src/lib/test-slot.ts (ours -6, theirs -5) — dispatching the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head
-    - PR #11676: 0.16 PR-hours — merge conflict (mergeState dirty) — head is not this PR task's rmd-owned run branch — not dispatched — files: plan/tasks.d/W1-T9440-fix-config-mask-handling-in-src-lib-review-ts.yaml (ours -0, theirs -1), plan/tasks.d/W1-T9441-add-production-path-support-to-config-schema.yaml (ours -0, theirs -1) — escalating
-    - PR #9216: 0.09 PR-hours — merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on src/lib/retro-closure.ts (ours -11, theirs -11), src/lib/retro.ts (ours -25, theirs -19), src/run-task.ts (ours -61, theirs -2), test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts (ours -2, theirs -2), test/retro-closure-per-attempt-never-searches-history.test.ts (ours -0, theirs -0), test/retro-shipped-wiring.test.ts (ours -2, theirs -2), test/retro-trigger-corpus.test.ts (ours -2, theirs -2), test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts (ours -8, theirs -8) — dispatching the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head
-    - PR #11956: 0.03 PR-hours — merge conflict (mergeState dirty) — no valid conflicting-file evidence was captured — not dispatched — files: none captured — escalating — mergeability unread this pass; inherited last known "dirty" observed 2026-10-15T19:33:16.154Z for this exact head 15d62a6 (W1-T4470)
-    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+    - claim: a pending main merge is measured against the prospective merged base while branch-owned census growth remains visible
+      proof: "unit test: a pending main merge gives the census its prospective merged base without hiding branch edits"
+    - claim: an exact-head terminal design handoff escalates once before another fix admission while live workers and newer heads keep their ordinary route
+      proof: "unit test: the sweep escalates an exact-head design handoff before admitting another fix"
+  note: "Operator approved the measured specification and release on 2026-10-21, pin 43cabffc. Preserve the high-risk band and all ordinary author, hosted, security, native-review and merge gates; no host change, capacity override or queued-branch push."
+  rationale: "OBSERVED 2026-10-20/21. #13121 at 10b5d544 repeatedly reports conflict dispatch, then stands down at rung.needs_design on its 17:54Z same-head handoff. The original snapshot worktree is retired; its worker report alone was not treated as a proof. An owned real-Git replay on main 0c4dc060 independently reproduced the pending-main census baseline mismatch: one native regression failed at the prospective-base assertion, with no skipped/cancelled tests. The two-line prototype passes all 11 snapshot/async controls. Current writeFixCensusSnapshotSteps ignores MERGE_HEAD, and runFixRung reuses any same-task/head fix.needs_design before spawning. The sweep currently charges a repair admission for that terminal result. #13039 is a distinct capacity-wait control; #13173 is a completed normal-repair control. No shared fleet-wide cause is asserted. All six open head trees were read and their snapshot/design-cache code matched main. This replaces the old hours-based diagnosis with a bounded, measured repair; the prior high-risk escalation remains intact until this exact amendment is explicitly released."
+  band_meaning: span
+  budget_usd: 5
+  design: Reuse the existing host Git snapshot path and Git merge-base against the prospective parents of a prepared merge; preserve ordinary no-merge behavior and branch-owned changes. Do not commit the merge early, change a bound, replace a census, or exclude a path. Project a valid exact-task/PR/head terminal NEEDS_DESIGN handoff into the existing deduplicated escalation route before fix capacity is charged. Preserve live-claim/in-flight priority; other-head, other-task, malformed and unresolved evidence must not authorize a write or invent a successful repair. An escalation is an actionable human decision, never a green check. Keep the native rung stand-down and all CI, security, semantic review, cost, ownership and merge gates. Do not automatically reinterpret a worker design request as authority to change a specification. The existing manual takeover rule applies only after an observed exhausted/escalated disposition and no live owner.
+  falsifier: "Remove only the prospective-base calculation: the owned pending-main regression must fail while its ordinary unmerged and branch-growth controls remain. Remove only design-handoff projection: the real sweep regression must attempt fix admission instead of the expected exact-head escalation. Restore each fix and rerun. Include live-worker and newer-head controls."
   risk_ruling:
     verdict: "high"
-    action: escalate
-    confidence: 0.91
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The rationale claims conflict-rebase failed to clear eligible episodes, but its largest cited episode was withheld because a restart was draining; other episodes were dispatched or escalated for branch ownership or missing evidence. These examples do not establish the claimed owner failure.; on the change's description/files alone, no diff was read — The acceptance requires automatic clearance, while the record does not specify which eligibility condition or owner behavior needs repair. The supplied gates explicitly require HIGH when the finding cannot be verified from what is shown."
-    judged_at: "2026-10-20T22:42:05.606Z"
-    pin: "d22e32d1ed228b7fc997e0c9b6f6035db7e7fa62024563d3e6b2a99c16aa458b"
+      - "Actual operator reply: Approve the measured specification and release. Authority is limited to measured specification pin 43cabffc42ec777ccb15b3d837c4279271567475e5886cf1ddb291423eb9acfa: prospective pending-merge census base and pre-admission exact-head terminal design escalation. High-risk $5 four-file scope, normal author/CI/security/native-review/merge gates retained. No host change, capacity override, manual merge or queued-branch push."
+    judged_at: "2026-10-21T02:41:27.205567+00:00"
+    pin: "43cabffc42ec777ccb15b3d837c4279271567475e5886cf1ddb291423eb9acfa"
