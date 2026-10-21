@@ -55,13 +55,13 @@
     test-place to confirm its inbox/ placement from the final imports before implementation.
   acceptance:
     - claim: "Add an executable integration regression asserting actual served-model identity and the assignment join through the production Inbox receipt path"
-      proof: 'grep: ^test("W1-T10272: an Inbox response retains its actual served model through the production receipt path" in test/inbox/inbox-responder-served-model.test.ts'
+      proof: 'grep: test("W1-T10272: an Inbox response retains its actual served model through the production receipt path" in test/inbox/inbox-responder-served-model.test.ts'
     - claim: "Add an executable integration regression asserting named provider unreportability is retained without inventing observed identity"
-      proof: 'grep: ^test("W1-T10272: an Inbox response preserves named unreportability without inventing model identity" in test/inbox/inbox-responder-served-model.test.ts'
+      proof: 'grep: test("W1-T10272: an Inbox response preserves named unreportability without inventing model identity" in test/inbox/inbox-responder-served-model.test.ts'
     - claim: "Add an executable integration regression asserting failed results retain their own model evidence and failed attempt"
-      proof: 'grep: ^test("W1-T10272: a failed Inbox result retains its own served-model evidence and failed attempt" in test/inbox/inbox-responder-served-model.test.ts'
+      proof: 'grep: test("W1-T10272: a failed Inbox result retains its own served-model evidence and failed attempt" in test/inbox/inbox-responder-served-model.test.ts'
     - claim: "Add an executable integration regression asserting a thrown worker leaves one joined failed attempt and no guessed model"
-      proof: 'grep: ^test("W1-T10272: an Inbox worker that throws after selection leaves one joined failure rather than a guessed model" in test/inbox/inbox-responder-served-model.test.ts'
+      proof: 'grep: test("W1-T10272: an Inbox worker that throws after selection leaves one joined failure rather than a guessed model" in test/inbox/inbox-responder-served-model.test.ts'
   falsifier: |
     Supply a worker response naming a model different from the request and a separate response
     with only the provider's recognized unreportable reason. Dropping either value, echoing the
