@@ -13,6 +13,7 @@ import {
   lastPostedReviewStatusFromLedger,
   postReviewStatus,
   postReviewStatusGuarded,
+  postReviewPending,
   POST_REVIEW_STATUS_MAX_ATTEMPTS,
   reviewEvidenceStrength,
   reviewInputDigest,
@@ -24,6 +25,7 @@ import { type GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { ghLiveStateByNumber } from "../src/run-task.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 /**
  * W1-T228 — "the review status channel is last-write-wins across
@@ -853,4 +855,167 @@ test("W1-T473 acceptance 1 — two PRs sharing the SAME task+head key can never 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test("a transient lifecycle read retries inside the status lock and publishes once", async () => {
+  const dir = tmpDir();
+  let reads = 0, posts = 0;
+  try {
+    const result = await postReviewStatusGuarded({
+      owner: "o", repo: "r", sha: "sha1", state: "success", taskId: "lifecycle-retry",
+      evidence: "executed", ledgerPath: join(dir, "ledger.ndjson"), runId: "retry-read",
+      fetchLifecycle: () => {
+        assert.ok(existsSync(join(dir, "review-status-locks", "lifecycle-retry.lock")));
+        if (++reads < 3) throw ghHttpError("gh: Service Unavailable (HTTP 503)");
+        return NOT_MERGED;
+      },
+      post: () => { posts++; },
+    });
+    assert.equal(result.posted, true);
+    assert.equal(reads, 3);
+    assert.equal(posts, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an exhausted lifecycle read releases the lock without publishing a verdict", async () => {
+  const dir = tmpDir();
+  let reads = 0, posts = 0;
+  const opts = {
+    owner: "o", repo: "r", sha: "sha1", state: "success" as const, taskId: "lifecycle-exhausted",
+    evidence: "executed" as const, ledgerPath: join(dir, "ledger.ndjson"), runId: "exhausted-read",
+    fetchLifecycle: (): PrLifecycleState => { reads++; throw ghHttpError("gh: Service Unavailable (HTTP 503)"); },
+    post: () => { posts++; },
+  };
+  try {
+    await assert.rejects(postReviewStatusGuarded(opts), /503/);
+    assert.equal(reads, POST_REVIEW_STATUS_MAX_ATTEMPTS);
+    assert.equal(posts, 0);
+    assert.equal(existsSync(join(dir, "review-status-locks", "lifecycle-exhausted.lock")), false);
+    assert.equal((await postReviewStatusGuarded({ ...opts, fetchLifecycle: () => NOT_MERGED })).posted, true);
+    assert.equal(posts, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a lifecycle retry uses the fresh response and never publishes after closure or a body edit", async () => {
+  const dir = tmpDir();
+  try {
+    for (const [id, lifecycle] of [["closed", CLOSED], ["body", { ...NOT_MERGED,
+      reviewInputDigest: reviewInputDigest("sha1", "changed") }]] as const) {
+      let reads = 0, posts = 0;
+      const result = await postReviewStatusGuarded({
+        owner: "o", repo: "r", sha: "sha1", state: "success", taskId: id, evidence: "executed",
+        ledgerPath: join(dir, "ledger.ndjson"), runId: id, prUrl: PR_URL,
+        reviewInputDigest: reviewInputDigest("sha1", "original"),
+        fetchLifecycle: () => { if (++reads === 1) throw ghHttpError("gh: Service Unavailable (HTTP 503)"); return lifecycle; },
+        post: () => { posts++; },
+      });
+      assert.equal(result.posted, false);
+      assert.equal(reads, 2);
+      assert.equal(posts, 0);
+      assert.match(result.reason ?? "", id === "closed" ? /closed/i : /input|body|subject/i);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("lifecycle auth, pacing, unknown errors and longer Retry-After waits retain their recovery owner", async () => {
+  const dir = tmpDir();
+  try {
+    for (const text of ["gh: Not Found (HTTP 404)", "gh: Forbidden (HTTP 403)",
+      "gh: secondary rate limit exceeded", "unknown read failure", "gh: Service Unavailable (HTTP 503) retry-after: 60"]) {
+      let reads = 0, posts = 0;
+      await assert.rejects(postReviewStatusGuarded({
+        owner: "o", repo: "r", sha: "sha1", state: "success", taskId: "lifecycle-hold", evidence: "executed",
+        ledgerPath: join(dir, "ledger.ndjson"), runId: "held-read",
+        fetchLifecycle: (): PrLifecycleState => { reads++; throw ghHttpError(text); },
+        post: () => { posts++; },
+      }));
+      assert.equal(reads, 1, text);
+      assert.equal(posts, 0, text);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("a lifecycle retry reaches the real default REST reader and gh executable before publishing once", async () => {
+  const dir = tmpDir();
+  const shim = ghShim([{ when: "api " + REST_PATH, stderr: "gh: Service Unavailable (HTTP 503)", exit: 1 }]);
+  const oldPath = process.env.PATH;
+  const oldCache = process.env.RMD_GH_CACHE_HOME;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  process.env.RMD_GH_CACHE_HOME = join(dir, "gh-cache");
+  let posts = 0;
+  try {
+    const result = await postReviewStatusGuarded({
+      owner: "craigoley", repo: "remudero", sha: "sha1", state: "success", taskId: "default-lifecycle-retry",
+      evidence: "executed", ledgerPath: join(dir, "ledger.ndjson"), runId: "default-reader",
+      prUrl: PR_URL, reviewInputDigest: reviewInputDigest("sha1", "reviewed body"),
+      fetchLifecycle: () => {
+        if (shim.calls().length > 0) shim.addRoute({ when: "api " + REST_PATH, stdout: JSON.stringify({
+          number: 1900, state: "open", merged: false, head: { sha: "sha1" }, body: "reviewed body", base: { ref: "main" },
+        }) });
+        // No injected API fetch/executor: this crosses fetchPrLifecycle -> ghJson -> actual PATH executable.
+        return fetchPrLifecycle(PR_URL);
+      },
+      post: () => { posts++; },
+    });
+    assert.equal(result.posted, true);
+    assert.equal(posts, 1);
+    assert.deepEqual(shim.calls(), ["api " + REST_PATH + " -i", "api " + REST_PATH + " -i"]);
+    assert.equal(existsSync(join(dir, "review-status-locks", "default-lifecycle-retry.lock")), false);
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    if (oldCache === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = oldCache;
+    rmSync(shim.dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a pending-entry lifecycle retry publishes once through the guarded fresh read", async () => {
+  const dir = tmpDir();
+  let reads = 0, posts = 0, statusReads = 0;
+  try {
+    const result = await postReviewPending({
+      owner: "o", repo: "r", sha: "sha1", taskId: "pending-lifecycle-retry", runId: "pending-retry",
+      ledgerPath: join(dir, "ledger.ndjson"), prUrl: PR_URL,
+      reviewInputDigest: reviewInputDigest("sha1", "reviewed body"),
+      fetchLifecycle: () => {
+        if (++reads === 1) throw ghHttpError("gh: Service Unavailable (HTTP 503)");
+        return { ...NOT_MERGED, reviewInputDigest: reviewInputDigest("sha1", "reviewed body") };
+      },
+      fetchStatus: () => { statusReads++; return { statuses: [] }; },
+      post: () => { posts++; },
+    });
+    assert.equal(result.posted, true);
+    assert.equal(reads, 3, "retry at entry is followed by the independent guarded publication read");
+    assert.equal(statusReads, 1);
+    assert.equal(posts, 1);
+    assert.equal(readLedgerLines(join(dir, "ledger.ndjson")).filter(row => row.step === "review.pending_posted").length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a pending-entry lifecycle retry retains closure and last-moment input freshness guards", async () => {
+  const dir = tmpDir();
+  try {
+    for (const variant of ["closed-at-entry", "body-changed-before-post"] as const) {
+      let reads = 0, posts = 0, statusReads = 0;
+      const result = await postReviewPending({
+        owner: "o", repo: "r", sha: "sha1", taskId: variant, runId: variant,
+        ledgerPath: join(dir, "ledger.ndjson"), prUrl: PR_URL,
+        reviewInputDigest: reviewInputDigest("sha1", "reviewed body"),
+        fetchLifecycle: () => {
+          if (++reads === 1) throw ghHttpError("gh: Service Unavailable (HTTP 503)");
+          if (variant === "closed-at-entry") return CLOSED;
+          return { ...NOT_MERGED, reviewInputDigest: reviewInputDigest("sha1", reads === 2 ? "reviewed body" : "changed body") };
+        },
+        fetchStatus: () => { statusReads++; return { statuses: [] }; },
+        post: () => { posts++; },
+      });
+      assert.equal(result.posted, false, variant);
+      assert.equal(posts, 0, variant);
+      assert.equal(reads, variant === "closed-at-entry" ? 2 : 3);
+      assert.equal(statusReads, variant === "closed-at-entry" ? 0 : 1);
+      assert.match(result.reason ?? "", variant === "closed-at-entry" ? /closed/ : /input|body|subject/i);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
