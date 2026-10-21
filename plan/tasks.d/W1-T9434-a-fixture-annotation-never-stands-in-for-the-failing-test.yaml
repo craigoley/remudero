@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 PR-queue review: why #11559 (W1-T3956) round 1 fixed the wrong file"
   plan_refs: [W1-T8038, W1-T76, W1-T1227, W1-T3956]
   files: [src/run-task.ts, test/a-fixture-annotation-never-stands-in-for-the-failing-test.test.ts, "src/lib/sweep.ts", "src/lib/tick-read-worker.ts"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
