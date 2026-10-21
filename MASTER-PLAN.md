@@ -6099,6 +6099,10 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
 
 ## Banked queue
 
+- W1-T9156 reserves space for forthcoming tasks tied to followup W1-T3187-1790474289117,
+  ratified via `rmd approve` on 2026-09-27: locate the current product console's escalation
+  renderer and disposition state. The original daemon console was retired; this reservation
+  carries the research forward without assuming the replacement console has the same defect.
 - ratification-candidate: W1-T5071 — proof-debt:W1-T5071, 2026-10-14 proposal (W1-T9485); matching candidate recorded in plan/tasks.yaml.
 - Grill-me protocol as in-harness interactive intake (`rmd chat`) — post-WS-4.
 - Agent Teams as an optional worker sub-mode for parallel exploration inside one task.

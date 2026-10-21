@@ -12611,8 +12611,25 @@ export async function runFixRung(opts: {
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
     if (priorDesign) {
       const reason = String(priorDesign.reason);
-      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design" });
-      return { outcome: "needs_design", review, strikes, retriggers, reason };
+      const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
+        row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
+      let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
+      let deliveryError: { error: string } | undefined;
+      if (!issueUrl) try {
+        issueUrl = (await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+          headSha: priorHeadSha, cause: "ci", contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
+          summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
+          detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
+            `at this head without a round. The worker's diagnosis:\n\n${reason}`,
+          options: [{ label: "repair-cause", detail: "repair what the diagnosis names; a new head resumes the fix lane" },
+            { label: "hand-fix", detail: "push a fix to this PR by hand; a new head resumes the fix lane" }],
+          recommendation: "repair-cause", consequence: "this PR stays red and unmerged at this head" },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge })) || undefined;
+      } catch (error) {
+        deliveryError = { error: String(error) };
+      }
+      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design", issue_url: issueUrl, ...deliveryError });
+      return { outcome: "needs_design", review, strikes, retriggers, reason, issueUrl };
     }
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     // W1-T2328: the ci-log evidence THIS round's dispatch (below) is about to target, snapshotted
@@ -12915,7 +12932,8 @@ export async function runFixRung(opts: {
         standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` };
     }
 
-    const censusCheck = await checkFixCensusSnapshotAsync(opts.worktreePath, censusSnapshotPath, deps.log);
+    const censusCheck = await checkFixCensusSnapshotAsync(opts.worktreePath, await censusSnapshotForCheck(opts.worktreePath,
+      censusSnapshotPath, currentMergeConflict !== undefined, deps.writeFixCensusSnapshot, deps.log), deps.log);
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
@@ -13209,6 +13227,7 @@ export async function runFixRung(opts: {
       round_id: roundId,
       ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
       fix_outcome: fixOutcome?.kind ?? "unstated",
+      ...(harnessCommitRefused && fixOutcome?.kind === "FIXED" ? { fix_outcome: "NOT_LANDED", worker_fix_outcome: "FIXED" } : {}),
       ...fixClaimFields,
       head_sha: priorHeadSha,
       pushed_head_sha: pushedHeadSha,
@@ -16343,6 +16362,15 @@ export function fixCensusAppliesToRepo(
   return false;
 }
 
+export async function censusSnapshotForCheck(
+  root: string, path: string | undefined, merging: boolean,
+  write: ((root: string, log: (step: string, extra?: Record<string, unknown>) => void) => string | undefined | Promise<string | undefined>) | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  if (path === undefined || !merging || write === undefined) return path;
+  return (await write(root, log)) ?? path;
+}
+
 export function writeFixCensusSnapshot(root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit: typeof hostWorktreeGit = hostWorktreeGit): string | undefined {
   return runStepsSync(writeFixCensusSnapshotSteps(root, log, runGit));
 }
@@ -16359,12 +16387,14 @@ function* writeFixCensusSnapshotSteps(
   try {
     const headSha = (yield* step(() => runGit(root, ["rev-parse", "HEAD"]))).trim();
     const mainSha = (yield* step(() => runGit(root, ["rev-parse", "origin/main"]))).trim();
-    const mergeBase = (yield* step(() => runGit(root, ["merge-base", headSha, mainSha]))).trim();
+    const mergeHeadPath = resolve(root, (yield* step(() => runGit(root, ["rev-parse", "--git-path", "MERGE_HEAD"]))).trim());
+    const mergingMain = existsSync(mergeHeadPath) && readFileSync(mergeHeadPath, "utf8").split("\n")[0]!.trim() === mainSha;
+    const mergeBase = mergingMain ? mainSha : (yield* step(() => runGit(root, ["merge-base", headSha, mainSha]))).trim();
     const censusPath = (p: string) =>
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
     function* paths(args: string[]): Steps<string[]> {
-      return (yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p));
+      return [...new Set((yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p)))];
     }
     const headPaths = yield* paths(["ls-files"]);
     const basePaths = yield* paths(["ls-tree", "-r", "--name-only", mergeBase]);
@@ -16397,7 +16427,8 @@ function* writeFixCensusSnapshotSteps(
     if (lstatSync(join(root, "state")).isSymbolicLink()) throw new Error("census state directory is a symlink");
     const path = join(mkdtempSync(join(root, "state", "rmd-census-")), "snapshot.json");
     writeFileSync(path, JSON.stringify(snapshot), { flag: "wx", mode: 0o444 });
-    log("fix.census_snapshot", { outcome: "available", path, head_sha: headSha, main_sha: mainSha, merge_base: mergeBase });
+    log("fix.census_snapshot", { outcome: "available", path, head_sha: headSha, main_sha: mainSha, merge_base: mergeBase,
+      ...(mergingMain ? { merge_head: mainSha } : {}) });
     return path;
   } catch (error) {
     log("fix.census_snapshot", { outcome: "unavailable", reason: String(error) });
