@@ -26,6 +26,16 @@
     - test/the-image-drift-watchdog-watches-the-worker-sdk.test.ts
     - test/baked-supervisor-inputs.test.ts
     - test/a-busy-primary-reaches-its-image-recycle.test.ts
+    - test/an-image-rebuilt-for-serve-supervisor-source-recycles-only-serve.test.ts
+    - test/image-drift-recycles-itself.test.ts
+  amendment: |
+    2026-10-22 operator approval: add exactly the two existing caller-test companions named above.
+    Repair their Git input fixtures to supply valid unchanged manifests and honest dependency history,
+    and add only package.json and packages/**/package.json to the strict expected workflow path inventory.
+    Preserve all original assertions, expected commit identities, UNKNOWN semantics, role/auth controls,
+    acceptance criteria, falsifiers, budgets, production settings and gate limits.
+    The active native fix worker retains ownership; this authorizes no competing push or takeover,
+    new executable production path, manual deployment, scanner exclusion or gate relaxation.
   rationale: |
     OBSERVED at captured main c8a55054a4275c3e4c7e2308e47e947460d4be70:
     #13398 changes root lockfile Hono4.13.7 to4.13.11. The exact shipped ACR guard
@@ -126,7 +136,7 @@
     action: proceed
     confidence: 1
     reasons:
-      - "released by the operator with rmd approve"
-      - "Craig Oley explicitly approved this exact 11-existing-file scope and a plan-only author NOT RUN/full-CI route on 2026-10-21; no production action or new hosted-author attempt"
-    judged_at: "2026-10-21T20:27:52.059Z"
-    pin: "87e2905eed0a5845c33aac9c1eecc7c20c2624916c6e6d595669298748873bea"
+      - "Craig Oley explicitly approved exactly the two additional existing caller-test companions in the 2026-10-22 stuck-PR recovery chat; the prior eleven-file implementation scope and its safeguards remain intact."
+      - "Preserve every original assertion, UNKNOWN behavior, expected commit identity, acceptance criterion, falsifier, budget, production setting and gate limit; the native fix worker retains ownership."
+    judged_at: "2026-10-22T02:19:43.958Z"
+    pin: "f28a6d4f72b7638ea7feb1163b0064894af7cedfd5250fe0594a02c803e14d71"
