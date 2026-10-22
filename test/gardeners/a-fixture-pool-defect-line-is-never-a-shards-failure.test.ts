@@ -12,8 +12,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ciFailureSignature } from "../../src/lib/ci-friction-gardener.js";
-import { deterministicTimeoutSignature } from "../../src/lib/sweep.js";
+import { ciFailureSignature } from "#src/lib/ci-friction-gardener.js";
+import { deterministicTimeoutSignature } from "#src/lib/sweep.js";
 
 const stamp = (i: number) => `2026-10-19T10:${String(10 + Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.1234567Z `;
 
