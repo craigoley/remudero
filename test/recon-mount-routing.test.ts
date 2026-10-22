@@ -19,7 +19,7 @@ import { RECON_MAX_TURNS, resolveRunMounts } from "../src/run-task.js";
 // Same class as the `#781 architect:` row CLAUDE.md records: a mounts.yaml row that looks
 // configured and has no reader.
 
-const SRC = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+const SRC = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
 const REPO_ROOT = new URL("..", import.meta.url).pathname;
 
 /**

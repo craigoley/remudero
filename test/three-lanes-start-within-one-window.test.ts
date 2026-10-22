@@ -89,7 +89,7 @@ test("a builder returning distinct instances is still collapsed to one per key â
 
 test("THE WIRING: the daemon's runOne hands every lane the memoised factory", () => {
   const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-  const src = readFileSync(join(srcDir, "cli", "commands", "daemon.ts"), "utf8") + "\n" + readFileSync(join(srcDir, "run-task.ts"), "utf8");
+  const src = readFileSync(join(srcDir, "cli", "commands", "daemon.ts"), "utf8") + "\n" + readFileSync(join(srcDir, "cli", "commands", "run-task-verb.ts"), "utf8");
 
   // The lane factory exists and is memoised through the helper above â€” not rebuilt per lane.
   assert.match(
@@ -110,7 +110,7 @@ test("THE WIRING: the daemon's runOne hands every lane the memoised factory", ()
 });
 
 test("the fallback is unchanged: absent githubFor, runTask still builds its own gateway", () => {
-  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "run-task.ts"), "utf8");
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   assert.match(
     src,
     /\?\? createDaemonGatewayFactory\(config\.root, log\)\(owner, task\.repo\);/,

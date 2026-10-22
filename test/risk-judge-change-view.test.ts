@@ -207,10 +207,17 @@ test("W1-T1031: an unavailable change view still fails closed to escalate", asyn
 
 // ── (6) the call site actually supplies the change view ───────────────────
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 test("W1-T1031: run-task.ts's risk-judge call site supplies the change view, sourced fresh right before the real judge runs", () => {
-  assert.match(runTaskSrc, /export function changeView\(/, "the REST-sourced reader must be defined in run-task.ts");
+  const reads: string[][] = [];
+  const view = changeView("https://github.com/owner/repo/pull/42", (args) => {
+    reads.push(args);
+    return [{ filename: "src/wiring-probe.ts", additions: 7, deletions: 3 }];
+  });
+  assert.deepEqual(reads, [["api", "repos/owner/repo/pulls/42/files?per_page=100"]]);
+  assert.deepEqual(view, { files: [{ path: "src/wiring-probe.ts", additions: 7, deletions: 3 }], truncated: false },
+    "the original entrypoint still exports the real REST-sourced reader after extraction");
 
   const mountIdx = runTaskSrc.indexOf("const riskJudgeMount = resolveRiskJudgeMount(");
   assert.ok(mountIdx >= 0);

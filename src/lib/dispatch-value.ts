@@ -4,7 +4,7 @@
  */
 import { createHash } from "node:crypto";
 import { deriveTaskClass } from "./task-class.js";
-import { streakRefusal } from "./non-worker-verdict.js";
+import { DEFAULT_LIVENESS_BOUND_MS, provenOrphanRunIds, streakRefusal } from "./non-worker-verdict.js";
 
 /** Keeps the pooled prior strictly inside (0, 1) so a zero-merge fleet still yields a proper Beta. */
 const PRIOR_RATE_EPSILON = 1e-3;
@@ -621,12 +621,15 @@ function costOfDelayContext(
   }
   const ages = new Map<number, { valid: number; total: number }>();
   const counts = new Map<string, number>();
+  // W1-T8166: a run the host killed before it wrote anything is evidence about the host, not the task — the
+  // breaker's and the lifetime sensor's own rule, so the stride agrees with them.
+  const orphans = provenOrphanRunIds(rows, nowMs, DEFAULT_LIVENESS_BOUND_MS);
   for (const [runId, start] of [...starts].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     // A run no worker tried (restart yield, claim race, infra refusal, failed harness checkpoint) spends no
     // stride: the breaker's own set, {@link streakRefusal}. MEASURED 2026-10-11: W1-T7742's 7 starts were all
     // non-worker, so its pass was 8/score and every fresh priority-1 task outranked it.
     const verdict = lastVerdicts.get(runId);
-    if (!verdict || streakRefusal(verdict.row) === undefined) counts.set(start.id, (counts.get(start.id) ?? 0) + 1);
+    if ((!verdict || streakRefusal(verdict.row) === undefined) && !orphans.has(runId)) counts.set(start.id, (counts.get(start.id) ?? 0) + 1);
     const filedAt = snapshot.filedAtByTaskId.get(start.id);
     const outcome = outcomes.get(runId);
     if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > start.at || !outcome || outcome.at < start.at) continue;

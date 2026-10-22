@@ -22,6 +22,8 @@ import { gitPushRunBranch } from "../src/lib/git-push.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
+const entrypointSrc = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
+const runTaskBodySrc = readFileSync(join(REPO_ROOT, "src/cli/commands/run-task-verb.ts"), "utf8");
 
 function makeRepoWithCommit(message: string): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-trailer-commit-"));
@@ -101,11 +103,12 @@ test("W1-T1012: an implementation run commits the task trailer before the pr ope
   // THE ORDERING: the amend must be wired in BEFORE `ghPrCreateFillCommand` is ever built at
   // both non-filing call sites — read straight from the source rather than re-asserted, so a
   // future reorder that moves the amend AFTER PR creation fails this test too.
-  const src = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
-  const trailerCallSites = [...src.matchAll(/appendTaskTrailerToCommit\(worktreePath,\s*(\w+)\)/g)];
+  const src = entrypointSrc;
+  const trailerCallSites = [entrypointSrc, runTaskBodySrc].flatMap((source) =>
+    [...source.matchAll(/appendTaskTrailerToCommit\(worktreePath,\s*(\w+)\)/g)].map((call) => ({ source, call })));
   assert.equal(trailerCallSites.length, 2, "exactly the implement and retro call sites append the commit trailer");
-  for (const call of trailerCallSites) {
-    const afterCall = src.slice(call.index ?? 0, (call.index ?? 0) + 2000);
+  for (const { source, call } of trailerCallSites) {
+    const afterCall = source.slice(call.index ?? 0, (call.index ?? 0) + 2000);
     const nextPrCreate = afterCall.search(/ghPrCreateFillCommand(?:Async)?\(worktreePath/);
     assert.ok(nextPrCreate > 0, "a `ghPrCreateFillCommand` build must follow the trailer append, not precede it");
   }
@@ -150,7 +153,7 @@ test("W1-T1012: a plan filing run commits no task trailer", () => {
   // `lastCommitSubject(worktreePath)` — the structural marker that keeps them out of
   // `appendTaskTrailerToCommit`'s path. Read straight from source: neither filing call site's
   // preceding region ever calls the trailer-append.
-  const src = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
+  const src = entrypointSrc;
   // W1-T3489 widened this builder with an optional `bodyOverride`, so the plan-filing site now
   // reads `..., commitMessage.split("\n")[0], planPrBody)`. The STRUCTURAL MARKER this test is
   // about is the title argument — `commitMessage.split("\n")[0]` instead of

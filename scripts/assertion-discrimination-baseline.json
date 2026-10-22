@@ -3,7 +3,7 @@
   "exemptions": [
     {
       "testFile": "test/blocked-illformed-does-not-halt-drain.test.ts",
-      "target": "src/run-task.ts",
+      "target": "src/cli/commands/run-task-verb.ts",
       "literal": "BEFORE the inflight lock is even taken",
       "reason": "The test's own comment says it explicitly: 'Read from source, since no unit test drives the real refusal path' -- it deliberately pins that the doc-comment above the refusal still says the refusal precedes the lock, not that the refusal itself runs first (nothing exercises that path here)."
     },

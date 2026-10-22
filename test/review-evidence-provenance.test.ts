@@ -27,7 +27,7 @@ import { bodyContradictsDiff, judgeCriterion, judgeReview } from "../src/lib/rev
 // flag flipped, so each test is its own falsifier: the fixture content alone does not explain
 // the difference in verdict — only the provenance flag does.
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 // Mirrors the #2395 fixture named in the shard's own rationale: a one-file diff touching
 // `src/lib/proof-grammar.ts`.

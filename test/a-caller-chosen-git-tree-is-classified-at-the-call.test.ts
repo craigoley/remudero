@@ -58,7 +58,7 @@ const RECORDS: readonly CallerRecord[] = [
     tree: "WORKTREE: async reads take the worker worktree from coveragePrecheck and the daemon checkout from the CI judge; synchronous reads and the remaining callers take repo or harness roots", decision: "leaf",
   },
   {
-    file: "src/lib/containment.ts", helper: "defaultExecutor", via: ["probeContainment"], callers: ["src/run-task.ts"],
+    file: "src/lib/containment.ts", helper: "defaultExecutor", via: ["probeContainment"], callers: ["src/cli/commands/run-task-verb.ts", "src/run-task.ts"],
     tree: "CHECKOUT: defaultExecutor git-inits the <root>/tmp/containment-probe-<token>/cwd it mkdirs itself", decision: "CHECKOUT",
   },
   {
@@ -74,7 +74,7 @@ const RECORDS: readonly CallerRecord[] = [
   },
   {
     file: "src/lib/paired-trial.ts", helper: "gitProbe", via: ["sealedPairedAttemptDispatcher", "probeSealedIsolation"],
-    callers: ["src/lib/skill-eval-command.ts", "src/run-task.ts"],
+    callers: ["src/cli/commands/run-task-verb.ts", "src/lib/skill-eval-command.ts", "src/run-task.ts"],
     tree: "WORKTREE: the sealed attempt tree a worker just ran in (and the fleet clone it was cut from; both callers pass <root>/repos/<repo>)",
     decision: "leaf",
   },

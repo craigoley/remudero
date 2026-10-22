@@ -8,7 +8,7 @@ import test from "node:test";
 // on any change of their inputs, keyed by `probeVerdictKey`; W1-T5411 fixed the module headers.
 // src/run-task.ts's two preflight comment blocks kept saying "Once per run, empirically confirm".
 
-const RUN_TASK = join(import.meta.dirname, "..", "src", "run-task.ts");
+const RUN_TASK = join(import.meta.dirname, "..", "src", "cli", "commands", "run-task-verb.ts");
 const HEADINGS = ["CONTAINMENT PREFLIGHT", "Isolation PREFLIGHT"] as const;
 
 /** The `//` comment block whose first line carries `heading`, its lines joined so a wrapped phrase matches. */

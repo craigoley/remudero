@@ -27,6 +27,9 @@
     - test/census-precheck-counts-the-house-layout-ratchet.test.ts
     - docs/base-ref-contract.md
     - test/the-run-task-verb-lives-in-its-own-module.test.ts
+    - test/spend-observability-fields.test.ts
+    - test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts
+    - test/three-retries-in-three-seconds-against-a-lockout.test.ts
     - test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts
     - test/a-stale-gate-cannot-publish-a-verdict.test.ts
     - test/adhoc-lane-reap.test.ts
@@ -75,6 +78,13 @@
   priority: 1
   attempts: 0
   amendment: |
+    2026-10-22 explicit operator approval: add only the three source-reader companions above.
+    Preserve all 122 original assertion calls byte-for-byte. Read both physical owners in
+    spend-observability-fields and two-rungs-in-one-tick-cannot-collide-on-one-branch-name;
+    change only their source-text reader ceilings from 3 to 4 and 1 to 2 respectively.
+    Retarget three-retries-in-three-seconds-against-a-lockout to the extracted owner;
+    its reader ceiling remains 1. No other reader allowance, scanner, gate, acceptance
+    criterion or falsifier changes are authorized by this additional bounded ruling.
     2026-10-22 operator approval: relocate the existing documentation-assertion baseline key only.
     In scripts/assertion-discrimination-baseline.json, retarget the one existing entry for
     test/blocked-illformed-does-not-halt-drain.test.ts and literal "BEFORE the inflight lock is even taken"

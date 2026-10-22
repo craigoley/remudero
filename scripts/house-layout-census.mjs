@@ -37,3 +37,25 @@ export function houseLiteralCounts(contents) {
   }
   return counts;
 }
+
+// W1-T9332 structural split exception; application requires an explicit operator ruling.
+// The physical-file scanner above is unchanged. Only this pair and these observed tokens qualify.
+const RUN_TASK_LAYOUT_SPLIT = { old: "src/run-task.ts", moved: "src/cli/commands/run-task-verb.ts" };
+const RUN_TASK_LAYOUT_SPLIT_LITERALS = ["plan/tasks.d", "MASTER-PLAN.md", ".remudero/", "learnings/"];
+
+/** One physical duplicate per conserved token; readers supply complete merge-base/head maps.
+ * An unreadable base entry must remain present (with a non-string value), never look absent. */
+export function qualifiedRunTaskLayoutSplit(base, current) {
+  const oldBase = base.get(RUN_TASK_LAYOUT_SPLIT.old);
+  if (typeof oldBase !== "string" || base.has(RUN_TASK_LAYOUT_SPLIT.moved)) return {};
+  const oldNow = current.get(RUN_TASK_LAYOUT_SPLIT.old);
+  const movedNow = current.get(RUN_TASK_LAYOUT_SPLIT.moved);
+  if (typeof oldNow !== "string" || typeof movedNow !== "string") return {};
+  const relief = {};
+  for (const literal of RUN_TASK_LAYOUT_SPLIT_LITERALS) {
+    if (!oldBase.includes(literal) || !oldNow.includes(literal) || !movedNow.includes(literal)) continue;
+    const occurrences = (text) => text.split(literal).length - 1;
+    if (occurrences(oldNow) + occurrences(movedNow) <= occurrences(oldBase)) relief[literal] = 1;
+  }
+  return relief;
+}

@@ -420,13 +420,18 @@
     "newDate": 1
   },
   "src/run-task.ts": {
-    "legacy": 21,
-    "dateNow": 49,
-    "newDate": 37
+    "legacy": 20,
+    "dateNow": 48,
+    "newDate": 32
   },
   "src/spike.ts": {
     "legacy": 0,
     "dateNow": 1,
     "newDate": 1
+  },
+  "src/cli/commands/run-task-verb.ts": {
+    "legacy": 1,
+    "dateNow": 1,
+    "newDate": 5
   }
 }
