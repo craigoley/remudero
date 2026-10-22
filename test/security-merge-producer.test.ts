@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import {mkdtempSync,readFileSync,writeFileSync,rmSync,renameSync} from 'node:fs';
+import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname,join} from 'node:path';
 import {test} from 'node:test';
 import {parse} from 'yaml';
 import {ghShim} from './helpers/gh-shim.js';
+import {ghStubPath} from './helpers/gh-stub.js';
 // @ts-expect-error — trusted metadata producer is plain ESM outside tsconfig roots.
 import {runSecurityMergeProducer,createSecurityMetadataReader} from '../scripts/security-merge-producer.mjs';
 const head='a'.repeat(40),base='b'.repeat(40);
@@ -124,15 +125,16 @@ test('security producer CLI recovers a truncated association read and publishes 
   {when:'/files?',stdout:JSON.stringify([{filename:'docs/a.md'}])},
   {when:'GET',stdout:JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1})}]);
  t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
- const answer=join(shim.dir,'gh-answer');renameSync(join(shim.dir,'gh'),answer);
- writeFileSync(join(shim.dir,'gh'),`#!/usr/bin/env node
+ const answer=join(shim.dir,'gh');
+ const wrapper=ghStubPath(`#!/usr/bin/env node
 const fs=require('node:fs'),{spawnSync}=require('node:child_process');
 const args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(args)+'\\n');
 if(!fs.existsSync(${JSON.stringify(marker)})){fs.writeFileSync(${JSON.stringify(marker)},'failed');process.stderr.write('unexpected end of JSON input\\n');process.exit(1);}
 const child=spawnSync(${JSON.stringify(answer)},args,{encoding:'utf8'});process.stdout.write(child.stdout||'');process.stderr.write(child.stderr||'');process.exit(child.status??1);
-`,{mode:0o755});
+`);
+ t.after(()=>rmSync(dirname(wrapper),{recursive:true,force:true}));
  const child=spawnSync(process.execPath,[new URL('../scripts/security-merge-producer.mjs',import.meta.url).pathname],{
-  encoding:'utf8',timeout:15000,env:{...process.env,PATH:shim.dir+':'+process.env.PATH,GH_TOKEN:'',
+  encoding:'utf8',timeout:15000,env:{...process.env,PATH:wrapper+':'+process.env.PATH,GH_TOKEN:'',
    GITHUB_EVENT_PATH:eventPath,GITHUB_EVENT_NAME:'workflow_run',GITHUB_RUN_ID:'1'}});
  assert.equal(child.status,0,child.stderr||child.stdout);
  const result=JSON.parse(child.stdout).results[0];assert.equal(result.headSha,head);
