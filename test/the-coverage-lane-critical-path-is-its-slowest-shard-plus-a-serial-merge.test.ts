@@ -57,8 +57,18 @@ test("coverage staging generates directly into the upload corpus without a dupli
     const coverage = join(root, "coverage"), raw = join(coverage, "raw"), artifact = join(root, "coverage-artifact");
     mkdirSync(raw, { recursive: true });
     const argv = pathToFileURL(join(REPO_ROOT, "scripts/lib/argv.mjs")).href;
-    execFileSync(process.execPath, ["--input-type=module", "-e", `import {parseArgv} from ${JSON.stringify(argv)}; parseArgv(['--owned','yes'],{owned:{type:'string'}});`],
-      { cwd: REPO_ROOT, env: coverageEnv(raw), stdio: "pipe" });
+    const suite = "test/stage-probe.test.ts";
+    mkdirSync(join(root, "test"));
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
+    writeFileSync(join(root, suite), `import {test} from 'node:test'; import assert from 'node:assert/strict'; import {parseArgv} from ${JSON.stringify(argv)}; test('the real staging probe executes', () => { assert.equal(parseArgv(['--owned','yes'],{owned:{type:'string'}}).values.owned, 'yes'); });\n`);
+    const output = execFileSync(process.execPath, ["--test", "--test-reporter=tap", "--import",
+      pathToFileURL(join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs")).href, suite],
+      { cwd: root, env: coverageEnv(raw), encoding: "utf8", stdio: "pipe" });
+    assert.match(output, /^# tests 1$/m);
+    assert.match(output, /^# pass 1$/m);
+    assert.match(output, /^# fail 0$/m);
+    writeFileSync(join(root, "coverage-test-files.txt"), suite + "\n");
+    writeFileSync(join(root, "coverage-test-exit.txt"), "0\n");
     const reports = readdirSync(raw).filter(name => /^coverage-\d+-\d{13}-\d+\.json$/.test(name));
     assert(reports.length > 0, "real V8 corpus positive control");
     const inputHashes = reports.map(name => createHash("sha256").update(readFileSync(join(raw, name))).digest("hex"));
@@ -71,7 +81,9 @@ test("coverage staging generates directly into the upload corpus without a dupli
     assert(stage, "execute the shipped staging step, not a fixture reconstruction");
     const body = stage.replaceAll("${{ steps.classify.outputs.class }}", "SOURCE")
       .replaceAll("coverage-artifact", artifact).replaceAll("coverage/", `${coverage}/`)
-      .replaceAll("coverage-selection.txt", join(root, "coverage-selection.txt"));
+      .replaceAll("coverage-selection.txt", join(root, "coverage-selection.txt"))
+      .replaceAll("coverage-test-files.txt", join(root, "coverage-test-files.txt"))
+      .replaceAll("coverage-test-exit.txt", join(root, "coverage-test-exit.txt"));
     execFileSync("bash", ["--noprofile", "--norc", "-e", "-c", body], { cwd: REPO_ROOT, env: { ...process.env, GITHUB_EVENT_NAME: "pull_request" }, stdio: "pipe" });
     assert.equal(existsSync(join(coverage, "premapped")), false, "no intermediate duplicate payload may be retained");
     const staged = join(artifact, "raw"), pieces = readdirSync(staged);
@@ -80,6 +92,8 @@ test("coverage staging generates directly into the upload corpus without a dupli
     assert.equal(mergedLcov(join(root, "staged.info"), staged), reference, "all SF/FN/FNDA/BRDA/DA records remain byte-identical");
     assert.equal(readFileSync(join(artifact, "lcov.info"), "utf8"), reference);
     assert.equal(readFileSync(join(artifact, "selection"), "utf8").trim(), "all");
+    assert.equal(readFileSync(join(artifact, "suites"), "utf8"), suite + "\n");
+    assert.equal(readFileSync(join(artifact, "test-exit"), "utf8"), "0\n");
     assert.deepEqual(reports.map(name => createHash("sha256").update(readFileSync(join(raw, name))).digest("hex")), inputHashes, "raw diagnostic evidence remains untouched");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

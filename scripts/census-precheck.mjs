@@ -1088,6 +1088,12 @@ export function worktreeCreationTrigger({ changed, readHead, readBase }) {
 
 /** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
 export const PRECHECK_TRIGGERED_SUITES = [
+  { testFile: "test/ci/gates/no-draft-census-startup.test.ts", script: "census:no-draft-startup",
+    trigger: ({ changed }) => changed.some((p) => ["test/ci/gates/no-draft-census-startup.test.ts",
+      "test/no-draft-pull-request-ever-sits-on-the-board.test.ts", "scripts/no-draft-pull-request-census.mjs",
+      "scripts/census-precheck.mjs", "src/lib/tmp.ts", "package.json", "package-lock.json", ".nvmrc"].includes(p) ||
+      p.startsWith("test/helpers/") || p.startsWith("test/setup/")),
+    remedy: "keep the no-draft census independent of the command dispatcher" },
   { testFile: "test/ledger-rotation.test.ts", script: "census:ledger-rotation", trigger: stepTrigger,
     remedy: "register DECISION_RELEVANT_LEDGER_STEPS in src/lib/ledger.ts" },
   { testFile: "test/a-union-read-of-an-unretained-step-is-refused.test.ts", script: "census:unretained-step", trigger: stepTrigger,

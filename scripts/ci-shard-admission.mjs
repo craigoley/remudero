@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import { classifyCoverage, parseChangedFiles } from './diff-class.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 
-export function requiresSetup(files, { event, shard, live }) {
-  return event !== 'pull_request' || !/^[2-8]$/.test(String(shard)) || live !== '0' ||
+export function requiresSetup(files, { event, shard }) {
+  return event !== 'pull_request' || !/^[2-8]$/.test(String(shard)) ||
     !Array.isArray(files) || files.length === 0 ||
     !files.every((file) => typeof file === 'string' && file.length > 0) ||
     classifyCoverage(files).class !== 'SOURCE';
@@ -18,7 +18,7 @@ export function main(argv, env = process.env) {
   let files;
   try { files = parseChangedFiles(readFileSync(values['changed-files'], 'utf8')); }
   catch (error) { console.error(`CI admission: unreadable diff; keeping setup (${error.message})`); }
-  const setup = requiresSetup(files, { event: env.GITHUB_EVENT_NAME, shard: values.shard, live: env.RMD_AFFECTED_SUITE_LIVE });
+  const setup = requiresSetup(files, { event: env.GITHUB_EVENT_NAME, shard: values.shard });
   console.error(`CI admission: setup=${setup}; ${setup ? 'real work or uncertainty' : 'coverage owns source tests; no duplicate shard work'}`);
   console.log(setup ? 'true' : 'false');
   return 0;

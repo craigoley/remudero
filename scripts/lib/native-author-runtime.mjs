@@ -1,3 +1,4 @@
+import { resourceOnlyNodeOptions } from '../../src/lib/node-test-environment.ts';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
@@ -16,7 +17,15 @@ export const digest = (bytes) => createHash('sha256').update(bytes).digest('hex'
 /** Native timing evidence has no authority to certify tests or change the admitted pool. */
 export function runtimeBindings(root, head, env = process.env) {
   if (!/^[a-f0-9]{40}$/.test(head)) throw new Error('runtime profile: unresolved source head');
-  if (env.NODE_OPTIONS?.trim()) throw new Error('runtime profile: NODE_OPTIONS instrumentation is not modelled');
+  // Heap bounds are resource policy, and their exact spelling/order is bound below.
+  // Every other option remains unmodelled; never reinterpret a loader or coverage flag.
+  try {
+    const retained = resourceOnlyNodeOptions(env.NODE_OPTIONS);
+    if (env.NODE_OPTIONS !== undefined && retained === undefined)
+      throw new Error('unmodelled native option');
+  } catch (cause) {
+    throw new Error('runtime profile: NODE_OPTIONS instrumentation or unknown resource option is not modelled', { cause });
+  }
   if (sourceHead(root) !== head || execFileSync('git', ['status', '--porcelain'],
     { cwd: root, encoding: 'utf8', timeout: 10_000 }).trim()) {
     throw new Error('runtime profile: source/runtime/corpus binding mismatch; committed inputs changed');
@@ -29,7 +38,7 @@ export function runtimeBindings(root, head, env = process.env) {
     'scripts/test-tier-manifest.json'].map((file) => [file, digest(readFileSync(join(root, file)))]));
   const corpusSha256 = digest(files.map((file) => `${file}:${digest(readFileSync(join(root, file)))}`).join('\n'));
   const tsx = JSON.parse(readFileSync(join(root, 'node_modules/tsx/package.json'), 'utf8')).version;
-  const environmentSha256 = digest(JSON.stringify(Object.fromEntries(['TZ', 'LANG', 'LC_ALL', 'NODE_ENV']
+  const environmentSha256 = digest(JSON.stringify(Object.fromEntries(['TZ', 'LANG', 'LC_ALL', 'NODE_ENV', 'NODE_OPTIONS', 'GOMAXPROCS', 'UV_THREADPOOL_SIZE']
     .map((key) => [key, env[key] ?? null]))));
   return { head, inputTree, platform: process.platform, arch: process.arch, node: process.version,
     host: hostname(), kernel: release(), cores: availableParallelism(), cpuModel: cpus()[0]?.model ?? 'unavailable',

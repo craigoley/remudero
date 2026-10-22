@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { listRuleSuites } from "../src/lib/ci-parity.ts";
 import { isMainModule } from "./lib/argv.mjs";
+import { authorRuleTestEnvironment, beginOwnedRuleResults } from "./lib/author-rule-owner.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -15,9 +16,14 @@ export function ruleSuites(repoRoot = root) {
  *  run's last line names every failed suite (W1-T7848): the sweep's base-reproduction probe reads it. */
 export function runRuleSuites(repoRoot = root, run = spawnSync) {
   const suites = ruleSuites(repoRoot);
+  const owner = run === spawnSync ? beginOwnedRuleResults(repoRoot, suites) : undefined;
   const failed = [];
   for (const suite of suites) {
     console.log(`rule-checks: ${suite}`);
+    if (owner) {
+      if (owner.run(suite) !== 0) failed.push(suite);
+      continue;
+    }
     const result = run(process.execPath, [
       "--test",
       "--import",
@@ -25,7 +31,7 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
       "--import",
       "./test/setup/tmp-hygiene.ts",
       suite,
-    ], { cwd: repoRoot, stdio: "inherit" });
+    ], { cwd: repoRoot, stdio: "inherit", env: authorRuleTestEnvironment(process.env) });
     if (result.error) {
       console.error(`rule-checks: ${suite}: ${result.error.message}`);
       failed.push(suite);
@@ -34,8 +40,10 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
       failed.push(suite);
     }
   }
-  if (failed.length === 0) return 0;
-  console.error(`rule-checks: failed suites: ${failed.join(" ")}`);
+  const complete = owner ? owner.finish() === 0 : true;
+  if (failed.length === 0 && complete) return 0;
+  if (failed.length > 0) console.error(`rule-checks: failed suites: ${failed.join(" ")}`);
+  else console.error("rule-checks: owner completion unavailable");
   return 1;
 }
 

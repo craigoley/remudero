@@ -10,6 +10,24 @@ import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 import { renderCanaryReport } from "../src/lib/model-canary-report.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 
+test("ordinary workspace sampling observes Next and Turbo generated caches without traversing borrowed roots", (t) => {
+  const { dir } = ownedFixtureDir(t, "frontend-cache-observation");
+  for (const name of [".next/cache", ".turbo"]) {
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(join(dir, name, "generated"), Buffer.alloc(64 * 1024));
+  }
+  const sample = sampleWorkspaceUsage(dir, { maxMs: 1000 });
+  const files = [".next/cache/generated", ".turbo/generated"].reduce((sum, name) => sum + statSync(join(dir, name)).blocks * 512, 0);
+  assert.equal(sample.completeness, "complete");
+  assert.ok(sample.generatedPathBytes! >= files && files > 0, "actual allocated cache files were observed");
+  const outside = ownedFixtureDir(t, "borrowed-frontend-cache").dir;
+  mkdirSync(join(outside, "cache")); writeFileSync(join(outside, "cache", "keep"), "borrowed");
+  rmSync(join(dir, ".next"), { recursive: true }); symlinkSync(outside, join(dir, ".next"));
+  const borrowed = sampleWorkspaceUsage(dir, { roots: [".next/cache"], maxMs: 1000 });
+  assert.equal(borrowed.completeness, "unknown"); assert.equal(borrowed.generatedPathBytes, null);
+  assert.equal(readFileSync(join(outside, "cache", "keep"), "utf8"), "borrowed");
+});
+
 test("workspace measurements distinguish a proven empty root from missing or budget-incomplete evidence", (t) => {
   const { dir } = ownedFixtureDir(t, "workspace-observation");
   const empty = sampleWorkspaceUsage(dir);

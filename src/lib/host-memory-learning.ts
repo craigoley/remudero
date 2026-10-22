@@ -51,6 +51,8 @@ import {
 } from "./host-memory-ledger.js";
 import { isTestRunnerArgv } from "./test-file-admission.js";
 import { TEST_FILE_PEAK_BYTES, type TestFileSize } from "./test-slot.js";
+import { readBoundedFileTail as readFileTail } from "./bounded-file-tail.js";
+export { readFileTail };
 
 // ── the learning rule (pure) ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -221,14 +223,7 @@ function instanceFile(opts: PeakStoreOptions): string {
   return join(storeDir(opts), `${name}.ndjson`);
 }
 
-/** The last `maxBytes` of a file, starting at a whole line. A store file is compacted near PEAK_COMPACT_BYTES, so the
- *  whole-file read this slices is bounded by it. */
-export function readFileTail(path: string, maxBytes: number): string {
-  const buf = readFileSync(path);
-  if (buf.length <= maxBytes) return buf.toString("utf8");
-  const text = buf.subarray(buf.length - maxBytes).toString("utf8");
-  return text.slice(text.indexOf("\n") + 1);
-}
+// The bounded reader never relies on compaction succeeding before it is safe to read.
 
 function parseSamples(text: string): PeakSample[] {
   const out: PeakSample[] = [];

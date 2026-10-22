@@ -94,3 +94,27 @@ test('native runtime profile rereads real closed evidence and rejects stale, cor
   const broken = makeRuntimeFixture(true); t.after(() => broken.cleanup());
   assert.throws(() => calibrateAuthorRuntime({ root: broken.dir }), /failed or incomplete/);
 });
+
+
+test('native runtime profiles bind actual resource caps and refuse all unmodelled options', async t => {
+  const {makeRuntimeFixture} = await import('./helpers/native-runtime-fixture.js');
+  const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+  const head = f.git('rev-parse', 'HEAD');
+  const env = {NODE_OPTIONS: '--max-old-space-size=1024', GOMAXPROCS: '2', UV_THREADPOOL_SIZE: '1'};
+  const observed = runtime.runtimeBindings(f.dir, head, env);
+  assert.equal(observed.instrumentation, 'none');
+  assert.equal(runtime.runtimeBindings(f.dir, head, {...env}).environmentSha256, observed.environmentSha256);
+  for (const NODE_OPTIONS of ['--max-old-space-size=512', '--max-old-space-size 1024',
+    '--max_old_space_size=1024 --max_semi_space_size=1', '--max-old-space-size=512 --max-old-space-size=1024']) {
+    const changed = runtime.runtimeBindings(f.dir, head, {...env, NODE_OPTIONS});
+    assert.notEqual(changed.environmentSha256, observed.environmentSha256,
+      'any resource input change needs its own timing provenance, including ordering and syntax');
+  }
+  for (const change of [{GOMAXPROCS: '1'}, {UV_THREADPOOL_SIZE: '2'}, {NODE_OPTIONS: ''}])
+    assert.notEqual(runtime.runtimeBindings(f.dir, head, {...env, ...change}).environmentSha256, observed.environmentSha256);
+  for (const NODE_OPTIONS of ['--experimental-test-coverage', '--import=tsx', '--require hook.cjs',
+    '--max-old-space-size=1024 --inspect', '--max-old-space-size', '--max-old-space-size=0',
+    '--max-old-space-size=-1', '--max-old-space-size=1.5', '--max-old-space-size=9007199254740992',
+    '--max-old-space-size="1024"', '--max-old-space-size=1024--max-semi-space-size=1'])
+    assert.throws(() => runtime.runtimeBindings(f.dir, head, {...env, NODE_OPTIONS}), /not modelled/);
+});

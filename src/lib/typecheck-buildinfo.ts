@@ -13,10 +13,11 @@
  * `./node_modules/...` names nothing and the first check runs cold. Tree files keep their tree-relative path; anything
  * outside the tree (its `node_modules` and git directory included) keeps its absolute location.
  *
- * A SEED CAN ONLY COST TIME, NEVER CHANGE A RESULT: tsc discards any cached entry whose hash, options or version differ.
- * Node builtins only, so it loads directly under Node's type stripping.
+ * TypeScript 7.0.2 misses some global-declaration invalidations (upstream #4664). That version starts cold, including
+ * its own previous cache, until a compiler correction is qualified. Cache placement, rebasing and complete-project
+ * selection stay intact. Node builtins only; scripts/check.mjs loads this through native type stripping.
  */
-import { existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** The buildinfo's file name inside a checkout's git directory. */
@@ -180,7 +181,14 @@ export function installedTypescriptVersion(root: string): string | undefined {
   }
 }
 
-export type SeedOutcome = "kept" | "seeded" | "published" | "no-seed" | "mismatch" | "unwritable";
+export type SeedOutcome = "kept" | "seeded" | "published" | "no-seed" | "mismatch" | "unwritable" | "cold-compiler-version";
+
+/** Delete only this check's cache when the installed compiler has a reproduced invalidation defect. */
+export function invalidateUnsafeCompilerCache(buildInfo: string, tsVersion: string | undefined): boolean {
+  if (tsVersion !== "7.0.2") return false;
+  rmSync(buildInfo, { force: true });
+  return true;
+}
 
 export function hasUsableTypecheckBuildInfo(buildInfo: string | undefined, tsVersion: string | undefined): boolean {
   if (buildInfo === undefined || tsVersion === undefined || !existsSync(buildInfo)) return false;
@@ -228,6 +236,7 @@ export function seedBuildInfo(
   to: { root: string; buildInfo: string },
   tsVersion: string | undefined,
 ): SeedOutcome {
+  if (invalidateUnsafeCompilerCache(to.buildInfo, tsVersion)) return "cold-compiler-version";
   if (existsSync(to.buildInfo)) return "kept";
   const outcome = publishBuildInfo(from, to, tsVersion);
   return outcome === "published" ? "seeded" : outcome;
@@ -269,6 +278,7 @@ export function refreshCanonicalSeed(root: string): SeedOutcome {
  * The canonical checkout's own check needs no seed: its buildinfo IS the seed.
  */
 export function seedFromCanonical(root: string, buildInfo: string): SeedOutcome {
+  if (invalidateUnsafeCompilerCache(buildInfo, installedTypescriptVersion(root))) return "cold-compiler-version";
   const canonical = canonicalBuildInfo(root);
   if (canonical === undefined || resolve(canonical.buildInfo) === resolve(buildInfo)) return "no-seed";
   return seedBuildInfo(canonical, { root, buildInfo }, installedTypescriptVersion(root));

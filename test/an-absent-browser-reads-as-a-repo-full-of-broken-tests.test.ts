@@ -150,7 +150,7 @@ function browserLaunchingSuites(): string[] {
 /** W1-T1027's falsifier. Its whole purpose is to prove `npx playwright install chromium` produced a
  *  working browser, so an absent browser IS its finding — skipping it would delete the only thing
  *  it checks. The one file that must NOT be wired. */
-const THE_FALSIFIER = "test/workflow-playwright-install.test.ts";
+const THE_FALSIFIER = "test/infra/workflow-playwright-runtime.test.ts";
 
 test("every browser-launching suite EXCEPT W1-T1027's falsifier routes its tests through the absence-aware wrapper", () => {
   const suites = browserLaunchingSuites();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -79,7 +79,7 @@ fi`);
   executable(join(state, "daemon-install", "deploy", "install-host-units.sh"),
     'echo "units $*" >> "$FIXTURE/calls"');
   const env = {
-    ...process.env, FIXTURE: root, PATH: `${bin}:${process.env.PATH ?? ""}`,
+    ...process.env, FIXTURE: root, FIXTURE_NODE: process.execPath, PATH: `${bin}:${process.env.PATH ?? ""}`,
     RMD_INSTANCE_REGISTRY: registry,
     RMD_STATE_DIR: state, RMD_UNIT_DIR: join(root, "units"), RMD_BIN_DIR: join(root, "installed-bin"),
     RMD_LAUNCHER_PATH: launcher, RMD_REVIVAL_LOG: join(root, "revivals"),
@@ -107,7 +107,7 @@ fi`);
     assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
     return Number(result.stdout.trim());
   };
-  return { state, snapshot, ledger, put, advance, tick, installEdgeHeal, installTuner, statMtime };
+  return { state, snapshot, ledger, put, advance, tick, installEdgeHeal, installTuner, statMtime, bin, executable };
 }
 
 test("the core watchdog tunes serve on full and unchanged ticks through the existing controller", t => {
@@ -190,6 +190,35 @@ test("W1-T6361: an unchanged tick skips the checkout walk", (t) => {
     assert.ok(calls.some((line) => line.startsWith(`docker inspect daemon-${instance} `)));
     assert.match(readFileSync(h.snapshot, "utf8"), /\|PROGRESSING\|[0-9]+\|1\n$/);
   }
+});
+
+test("an unreadable or invalid ledger mtime cannot seed a healthy watchdog fast path", (t) => {
+  for (const body of ["exit 1", "printf 'invalid-mtime\\n'", "exit 0"]) {
+    const h = host(t);
+    h.executable(join(h.bin, "stat"), body);
+    h.advance();
+    fullTick(h.tick());
+    assert.equal(existsSync(h.snapshot), false);
+    h.advance();
+    fullTick(h.tick());
+    assert.equal(existsSync(h.snapshot), false);
+  }
+});
+
+test("the watchdog ledger mtime fallback saves a snapshot after GNU stat refuses", (t) => {
+  const h = host(t);
+  h.executable(join(h.bin, "stat"), `
+case "\${1-} \${2-}" in
+  '-c %Y') exit 1 ;;
+  '-f %m') exec "$FIXTURE_NODE" -e 'const fs = require("node:fs"); process.stdout.write(String(Math.floor(fs.statSync(process.argv[1]).mtimeMs / 1000)));' "\${3-}" ;;
+  *) exit 1 ;;
+esac`);
+  h.advance();
+  fullTick(h.tick());
+  assert.ok(existsSync(h.snapshot));
+  h.advance();
+  assert.equal(h.tick().filter(line => line.startsWith("rmd ")).length, 0);
+  assert.match(readFileSync(h.snapshot, "utf8"), /\|PROGRESSING\|[0-9]+\|1\n$/);
 });
 
 test("an unchanged core tick still heals the edge without checkout or node work", (t) => {

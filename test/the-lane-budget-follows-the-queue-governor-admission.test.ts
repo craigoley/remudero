@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -140,6 +141,16 @@ test("the daemon wiring exposes the queue governor's admitting reading", async (
   };
   const oldHome = process.env.HOME;
   process.env.HOME = home;
+  const originalRead = fs.readFileSync;
+  let pressureReads = 0;
+  fs.readFileSync = ((path: unknown, ...args: unknown[]) => {
+    if (path !== "/proc/meminfo") return (originalRead as (...a: unknown[]) => unknown)(path, ...args);
+    pressureReads++;
+    const text = "MemTotal: 10000000 kB\nMemAvailable: 6000000 kB\n";
+    const opt = args[0] as { encoding?: string } | string | undefined;
+    return typeof opt === "string" || opt?.encoding ? text : Buffer.from(text);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
   try {
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
@@ -155,11 +166,14 @@ test("the daemon wiring exposes the queue governor's admitting reading", async (
     assert.ok(captured?.readQueueAdmission, "the daemon is handed the admission reader");
     assert.equal(captured.readQueueAdmission(), undefined, "no admission before the governor is consulted");
     assert.equal(captured.checkQueueGovernor!(), undefined, "one fleet PR is admitted");
+    assert.ok(pressureReads > 0, "the actual daemon governor consumes the controlled healthy memory reader");
     const admission = captured.readQueueAdmission();
     assert.ok(admission, "the admitting reading is readable after the consultation");
     assert.equal(admission.observedOpenCount, 1);
     assert.equal(admission.tier, "under_limit");
   } finally {
+    fs.readFileSync = originalRead;
+    syncBuiltinESMExports();
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });

@@ -213,6 +213,8 @@ test("W1-T7809: an over-capacity receipt never records the affected tests as pas
   const names = receipt.steps.map((s: { name: string }) => s.name);
   assert.ok(!names.includes("affected-tests"), "no step claims the selected affected tests passed");
   assert.ok(names.includes("affected-tests-subset"));
+  const subset = receipt.steps.find((s: { name: string }) => s.name === "affected-tests-subset");
+  assert.equal(subset.testSummary.tests, 1, "the real native child executes only the admitted physical suite");
 
   // Nothing fits at all: no test step at all, and no green verdict.
   const none = fixture({ manifest: { "test/leaf.test.ts": huge, "test/other.test.ts": huge } });

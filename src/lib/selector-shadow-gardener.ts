@@ -120,6 +120,7 @@ export interface SelectorShadowReport {
   runsComplete: number;
   runsSkipped: number;
   runsIncomplete: number;
+  narrowed: number;
   /** Failures in a coverage job that still concluded `success`: its retry passed, so no selector
    *  could have hidden a regression there. Counted, never scored as a selection verdict. */
   recovered: number;
@@ -314,7 +315,23 @@ const FLAKE_NO_NAME = "(no test name parsed from output)";
 function isSelectorShadowEvidenceLine(line: string): boolean {
   return line.includes("AFFECTED-SUITES-SHADOW: ") || line.startsWith(SELECTOR_SHADOW_JOB_MARK) ||
     (line.includes("W1-T2428 fast-lane: class=") && line.includes("skipping Test with coverage")) ||
+    /^(?:\S+Z )?COVERAGE-SELECTION:/.test(line) ||
     FLAKE_RETRY_FILES.test(line) || FLAKE_RETRY_RECOVERED.test(line) || FLAKE_RETRY_HEADLINE.test(line);
+}
+
+/** Any narrowed shard excludes the whole run; explicit modes must name all eight owners once. */
+function coverageExecutionSelection(log: string): "all" | "narrow" | "incomplete" {
+  const modes = new Map<number, string>();
+  for (const line of log.split(/\r?\n/)) {
+    const marker = /^(?:coverage-shard \(([1-8])\/8\)\t)?(?:\S+Z )?COVERAGE-SELECTION:(.*)$/.exec(line);
+    if (!marker) continue;
+    const shard = Number(marker[1]);
+    if (!shard || modes.has(shard) || ![" all", " narrow"].includes(marker[2]!)) return "incomplete";
+    modes.set(shard, marker[2]!.slice(1));
+  }
+  if (modes.size === 0) return "all";
+  if (modes.size !== SELECTOR_SHADOW_SHARDS) return "incomplete";
+  return [...modes.values()].includes("narrow") ? "narrow" : "all";
 }
 
 interface ShardEvidence {
@@ -446,9 +463,9 @@ export function readSelectorShadowRuns(
   }));
 }
 
-/** Version 3 keeps each coverage job's conclusion and its retry lines; a version-2 entry lacks
- *  them, so it would still count retry-recovered flakes as misses and is read again. */
-export const SELECTOR_SHADOW_READER_VERSION = 3;
+/** Version 4 also retains the executed coverage selection. Earlier cached logs lack that
+ *  evidence and must be read again before they can establish an all-suite observation. */
+export const SELECTOR_SHADOW_READER_VERSION = 4;
 
 /** Reading many run logs must yield the daemon event loop between bounded GitHub calls. */
 export async function readSelectorShadowRunsAsync(
@@ -612,11 +629,13 @@ export interface SelectorShadowObservation {
   recovered: number;
 }
 
-type SelectorShadowReading = { kind: "skipped" | "incomplete" } | { kind: "complete"; observation: SelectorShadowObservation };
+type SelectorShadowReading = { kind: "skipped" | "incomplete" | "narrowed" } | { kind: "complete"; observation: SelectorShadowObservation };
 
 /** Only complete eight-shard runs are observations. An absent narrow decision cannot inflate its evidence. */
 function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObservation["source"] = "live"): SelectorShadowReading {
   if (explicitlySkippedRun(run.log)) return { kind: "skipped" };
+  const executionSelection = coverageExecutionSelection(run.log);
+  if (executionSelection === "incomplete") return { kind: "incomplete" };
   const records = parseSelectorShadowLines(run.log);
   if (records.length !== SELECTOR_SHADOW_SHARDS) return { kind: "incomplete" };
   const impact = records[0]!;
@@ -624,6 +643,7 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
       record.impactDistance !== impact.impactDistance)) {
     throw new Error("selector shadow: inconsistent impact evidence across shards");
   }
+  if (executionSelection === "narrow") return { kind: "narrowed" };
   const jobs = shardEvidence(run.log);
   const shards = run.log.split(/\r?\n/).filter((line) => line.includes("AFFECTED-SUITES-SHADOW: "))
     .map((line) => Number(/^coverage-shard \(([1-8])\/8\)/.exec(line)?.[1]));
@@ -750,7 +770,8 @@ function selectorShadowWindowReport(readings: readonly SelectorShadowReading[], 
   const fold = foldSelectorShadowObservations(readings.flatMap((r) => r.kind === "complete" ? [r.observation] : []), fullSuiteSize);
   const runsSkipped = readings.filter((r) => r.kind === "skipped").length;
   const runsIncomplete = readings.filter((r) => r.kind === "incomplete").length;
-  return { runsRequested: readings.length, runsSkipped, runsIncomplete, fullSuiteSize, ...fold, ...selectorShadowVerdict(fold, runsIncomplete) };
+  const narrowed = readings.filter((r) => r.kind === "narrowed").length;
+  return { runsRequested: readings.length, runsSkipped, runsIncomplete, narrowed, fullSuiteSize, ...fold, ...selectorShadowVerdict(fold, runsIncomplete) };
 }
 
 /** The report over one window of runs; only complete eight-shard runs count. */
@@ -1032,7 +1053,7 @@ export interface SelectorShadowSourceReport {
 
 /** The report a pass ledgers: the whole store folded, with the live window and each source beside it. */
 export interface SelectorShadowAccumulatedReport extends SelectorShadowReport {
-  window: Pick<SelectorShadowReport, "runsRequested" | "runsComplete" | "runsSkipped" | "runsIncomplete" | "verdict">;
+  window: Pick<SelectorShadowReport, "runsRequested" | "runsComplete" | "runsSkipped" | "runsIncomplete" | "narrowed" | "verdict">;
   observations: { live: number; replay: number; appended: number; unreadable: number };
   live: SelectorShadowSourceReport;
   replay: SelectorShadowSourceReport;
@@ -1079,9 +1100,9 @@ async function accumulateSelectorShadow(
   const live = source("live");
   const replayed = source("replay");
   return {
-    runsRequested: window.runsRequested, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete,
+    runsRequested: window.runsRequested, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete, narrowed: window.narrowed,
     fullSuiteSize: window.fullSuiteSize, ...fold, ...selectorShadowVerdict(fold),
-    window: { runsRequested: window.runsRequested, runsComplete: window.runsComplete, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete, verdict: window.verdict },
+    window: { runsRequested: window.runsRequested, runsComplete: window.runsComplete, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete, narrowed: window.narrowed, verdict: window.verdict },
     observations: { live: live.runs, replay: replayed.runs, appended, unreadable: stored.unreadable },
     live, replay: replayed,
     ...(replayPass === undefined ? {} : { replayPass }),

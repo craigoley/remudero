@@ -78,7 +78,8 @@ export type PostableReviewState = ReviewState;
  *  commits, provider choice and model sampling. Bumped to v2 (W1-T3580) because W1-T3564 changed proof-execution
  *  semantics (the closed console suite registry) without advancing this revision, so a v1 terminal cached before
  *  that change stayed an exact cache hit and replayed instead of executing the newly routable proofs. */
-export const REVIEW_ENGINE_REVISION = "promised-followups-snapshot-v3";
+// Old skip/pending verdicts cannot certify the new execution semantics.
+export const REVIEW_ENGINE_REVISION = "promised-followups-named-execution-v4";
 /** Changes both exact-head identities when the proof loader's verdict semantics change. */
 const PROOF_LOAD_REVISION = "cannot-load-v1";
 
@@ -1881,8 +1882,7 @@ export function proofCheckoutGitDirs(cwd: string): { common?: string; worktree?:
   return existsSync(worktree) ? { common, worktree } : {};
 }
 
-/** Where a checkout's `node_modules` really lives when it is a link to a shared install, plus every top-level package
- *  link out of that install (npm workspaces link `node_modules/@scope/pkg` to the install's own `packages/`). */
+/** Dependency aliases, the shared install and external workspace roots required by a proof. */
 export function proofLinkedModuleRoots(cwd: string): string[] {
   let target: string;
   try {
@@ -1909,7 +1909,7 @@ export function proofLinkedModuleRoots(cwd: string): string[] {
     }
   };
   scan(target, 0);
-  return roots;
+  return [...new Set(roots)];
 }
 
 /** Each link BETWEEN a checkout's `node_modules` and the install it finally resolves to. A worker worktree links to an
@@ -1927,6 +1927,7 @@ function intermediateModuleLinks(start: string, target: string, checkout: string
     } catch (error) {
       break; // an unreadable hop: the chain realpathSync resolved stops here, and the final target is mounted anyway
     }
+    if (realpathSync(next) !== target) throw new ProofSandboxUnavailableError("dependency symlink target changed during inspection");
     if (seen.has(next) || isWithin(next, target)) break;
     seen.add(next);
     if (!isWithin(next, checkout)) hops.push(next);
@@ -2069,7 +2070,6 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   for (const path of PROOF_SANDBOX_ETC) if (existsSync(path)) binds.push({ path, writable: false });
   const browsers = realpathIfPresent(playwrightCacheRoot(env, "linux", env.HOME ?? home));
   if (browsers !== undefined) binds.push({ path: browsers, writable: false });
-  for (const path of proofLinkedModuleRoots(cwd)) binds.push({ path, writable: false });
   const found = proofCheckoutGitDirs(cwd);
   const git = {
     common: found.common === undefined ? undefined : realpathSync(found.common),
@@ -2079,6 +2079,11 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   if (git.worktree !== undefined && !isWithin(git.worktree, cwd)) binds.push({ path: git.worktree, writable: true });
   binds.push({ path: cwd, writable: true });
   if (home !== cwd) binds.push({ path: home, writable: true });
+  for (const path of proofLinkedModuleRoots(cwd)) {
+    if (!runtime.some((root) => isWithin(path, root)) && !binds.some((bind) => isWithin(path, bind.path))) {
+      binds.push({ path, writable: false });
+    }
+  }
   // Shallower first, so a deeper bind (the worktree gitdir inside its common dir) lands on top of its parent.
   binds.sort((a, b) => a.path.split(pathSep).length - b.path.split(pathSep).length);
   // bwrap mounts binds nodev, so a /dev/null bound over a file reads as EACCES: right for the App key, fatal
@@ -3552,6 +3557,8 @@ export function nameFilteredOutcome(stdout: string, stderr = ""): ProofResult {
   for (const line of stdout.split("\n")) {
     const m = TAP_RESULT_LINE_RE.exec(line);
     if (!m) continue;
+    // Native TAP escapes title hashes; directives prove no qualifying execution.
+    if (/(?<!\\)#\s*(?:SKIP|TODO)\b/i.test(m[2])) continue;
     if (isFileWrapperResultName(m[2])) {
       wrappers++;
       if (m[1] === "not ok") failedWrappers++;
@@ -8854,6 +8861,11 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
   "^scripts/ci-shard-admission\\.mjs$",
+  "^scripts/compile-project\\.mjs$",
+  "^scripts/typecheck\\.mjs$",
+  "^src/lib/compiler-budget\\.ts$",
+  "^src/lib/typecheck-run\\.ts$",
+  "^scripts/coverage-floor\\.mjs$",
   // 2026-10-10: the flake screen fails ci-shard 1 when a test file the PR adds fails one rerun.
   "^scripts/flake-screen\\.mjs$",
   "^scripts/expiring-fixture-census\\.mjs$",

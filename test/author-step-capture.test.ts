@@ -9,6 +9,7 @@ import { gitRepo } from './helpers/git-repo.js';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts/lib/author-step-capture.mjs');
 const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {}) as {
+  AUTHOR_REQUEST_LIMIT_BYTES: number;
   captureStepSync: (file: string, args: string[], options: Record<string, unknown>) => {
     status: number | null; signal: string | null; error?: Error; stdout: string; stderr: string; outputComplete: boolean;
   };
@@ -85,6 +86,29 @@ test('author step capture transports a large file list without packing it into o
   assert.equal(result.status, 7, 'real child verdict, not the transport exit, must survive');
   assert.match(result.stdout, /large argv native witness/);
   assert.equal(JSON.parse(readFileSync(f.resultPath, 'utf8')).status, 7);
+});
+
+test('an oversized capture request refuses before opening logs or starting native work', async () => {
+  assert.equal(mod.AUTHOR_REQUEST_LIMIT_BYTES, 8 * 1024 * 1024);
+  const f = fixture(), witness = join(f.root, 'native-started');
+  const child = spawn(process.execPath, [SCRIPT], { cwd: ROOT, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stderr = '', inputError: NodeJS.ErrnoException | undefined;
+  child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  child.stdout.resume();
+  child.stdin.on('error', error => { inputError = error; });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  child.stdin.end(JSON.stringify({ ...f, cwd: ROOT, file: process.execPath,
+    args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(witness)},'started')`],
+    maxBytes: 1024, runtimeMs: 1000, padding: 'x'.repeat(mod.AUTHOR_REQUEST_LIMIT_BYTES),
+  }));
+  const result = await closed;
+  assert.equal(result.code, 1); assert.equal(result.signal, null);
+  assert.match(stderr, /capture request exceeds its input byte bound/);
+  assert.ok(inputError === undefined || inputError.code === 'EPIPE');
+  for (const path of [witness, f.stdoutPath, f.stderrPath, f.resultPath])
+    assert.equal(existsSync(path), false, 'oversized protocol input cannot authorize any native side effect');
 });
 
 test('author step capture bounds total stored output without certifying a truncated success', () => {

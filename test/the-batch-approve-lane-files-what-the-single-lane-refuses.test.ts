@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -112,6 +112,7 @@ interface Drive {
   ledger: Array<Record<string, unknown>>;
   /** The shim's raw call log: one `$*` per call, a multi-line body spilling across lines. */
   rawCalls: string;
+  fixturePushGates: string[];
 }
 
 /** A GET route's JSON, safe inside the shim's double-quoted `echo`: newline, backtick and `$` as JSON escapes. */
@@ -155,6 +156,31 @@ async function drive(opts: {
   execFileSync("git", ["-C", checkoutDir, "config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name]);
   execFileSync("git", ["-C", checkoutDir, "config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email]);
 
+  // This body/filing fixture runs a private gate against only its own bare origin. Full harness
+  // gates have their separate real sandbox controls and cannot run against this miniature plan.
+  const fixtureHooks = join(root, "fixture-hooks");
+  const gateLog = join(root, "fixture-push-gates.jsonl");
+  mkdirSync(fixtureHooks);
+  const fixtureGate = join(fixtureHooks, "pre-push");
+  writeFileSync(fixtureGate, `#!${process.execPath}\n
+const { appendFileSync, readFileSync } = require('node:fs');
+const { execFileSync } = require('node:child_process');
+const assert = require('node:assert/strict');
+assert.equal(process.argv[2], 'origin');
+assert.equal(process.argv[3], ${JSON.stringify(origin.dir)});
+assert.equal(execFileSync('git', ['--git-dir', ${JSON.stringify(origin.dir)}, 'rev-parse', '--is-bare-repository'], { encoding: 'utf8' }).trim(), 'true');
+const input = readFileSync(0, 'utf8').trim();
+assert.ok(input.startsWith('refs/heads/run-APPROVE-'));
+appendFileSync(${JSON.stringify(gateLog)}, JSON.stringify({ origin: process.argv[3], input }) + '\\n');
+`);
+  chmodSync(fixtureGate, 0o755);
+  const alien = spawnSync(fixtureGate, ["origin", "https://github.com/fixture/unrelated"], {
+    encoding: "utf8", input: "refs/heads/run-APPROVE-fixture 0 refs/heads/run-APPROVE-fixture 0\n",
+  });
+  assert.equal(alien.error, undefined, "the negative control executes the actual private fixture gate");
+  assert.notEqual(alien.status, 0, "the fixture gate refuses any origin outside its own bare repository");
+  assert.equal(existsSync(gateLog), false, "a refused origin leaves no successful gate record");
+
   const config = { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT };
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify(config));
@@ -171,22 +197,27 @@ async function drive(opts: {
   const shim = ghShim(opts.routes, { kind: "t4706-gh" });
   const savedHome = process.env.HOME;
   const savedPath = process.env.PATH;
+  const savedHooks = process.env.RMD_HARNESS_HOOKS_DIR;
   let error: unknown;
   try {
     process.env.HOME = home;
     process.env.PATH = `${shim.dir}:${savedPath}`;
+    process.env.RMD_HARNESS_HOOKS_DIR = fixtureHooks;
     await withLiveWritesAllowed(() => approveCommand(opts.ids, { config: config as never }));
   } catch (e) {
     error = e;
   } finally {
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;
+    if (savedHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR;
+    else process.env.RMD_HARNESS_HOOKS_DIR = savedHooks;
   }
   const ledger = readFileSync(ledgerFile, "utf8")
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l) as Record<string, unknown>);
-  return { origin, root, error, ledger, rawCalls: readFileSync(join(shim.dir, "calls.log"), "utf8") };
+  const fixturePushGates = existsSync(gateLog) ? readFileSync(gateLog, "utf8").trim().split("\n") : [];
+  return { origin, root, error, ledger, rawCalls: readFileSync(join(shim.dir, "calls.log"), "utf8"), fixturePushGates };
 }
 
 /** Every body a write call carried, in order. A body is one argv value that may span lines, so the
@@ -250,6 +281,8 @@ test("a valid batch's PR lists only the files it wrote — MASTER-PLAN.md only w
     assert.equal(d.error, undefined, `the batch must not throw; steps=${steps}`);
     const [branch] = runBranches(d.origin);
     assert.ok(branch, `one batch branch is pushed; steps=${steps}`);
+    assert.equal(d.fixturePushGates.length, 1, "the default push ran the private origin-checking fixture gate");
+    assert.equal(JSON.parse(d.fixturePushGates[0]).origin, d.origin.dir);
     const diff = d.origin.git("diff", "--name-only", `main...${branch}`).split("\n").filter(Boolean);
     assert.equal(diff.filter((p) => p.startsWith("plan/tasks.d/")).length, 2, `one shard per member; diff=${JSON.stringify(diff)}`);
     assert.equal(diff.includes("MASTER-PLAN.md"), withBullet, "the stamp touches MASTER-PLAN.md only where it has a bullet");

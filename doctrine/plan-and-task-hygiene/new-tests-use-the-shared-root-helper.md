@@ -7,3 +7,8 @@
   Caller-relative fixture assets remain fixture assets; this rule concerns the repository root.
 
 Run `test/every-test-finds-the-repo-root-through-one-helper.test.ts` alongside the new test before its first push. Keep existing tests within the task's declared scope; this instruction adds no task companions.
+
+A source-presence assertion belongs inside the real named test before a new implementation is
+imported. Use `existsSync(join(REPO_ROOT, "src/lib/example.ts"))`; do not reconstruct the root
+with `import.meta.url`, `import.meta.dirname`, or `__dirname`. An unexecuted loader error stays
+unknown in a head/base proof; it is not a passing or failing behavior test.

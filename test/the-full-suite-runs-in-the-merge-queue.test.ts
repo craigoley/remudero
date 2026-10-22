@@ -1,20 +1,14 @@
 /**
  * W1-T4406 — the full suite runs in the merge queue, not on every push.
  *
- * ci.yml gained a THIRD trigger, `merge_group` (GitHub's merge-queue event, W1-T4405 made
- * auto-merge queue-aware): `coverage-ratchet` (the instrumented full suite) and `test-slow` now
- * run their real work on the queue's own commit — the exact tree about to land — alongside the
- * pre-existing `pull_request`/`push` behavior, unchanged and separately covered by
- * test/push-ci-on-main.test.ts, test/workflow-single-suite-run.test.ts and
- * test/the-slow-tier-runs-on-main.test.ts.
+ * ci.yml registers required contexts on `merge_group`, the queue's own combination commit.
+ * The accepted W1-T5940 selection checks its combined diff and every member, retaining a full
+ * integration fallback. Member PRs retain their instrumented coverage owner. Push and PR
+ * behavior are also covered by test/push-ci-on-main.test.ts, workflow-single-suite-run.test.ts
+ * and the-slow-tier-runs-on-main.test.ts.
  *
- * A pull request runs the SELECTED suites through a flag this task also builds: `ci`'s Test step
- * can now run the live W1-T4404 selector (src/lib/affected-suites.ts) instead of deferring a
- * SOURCE diff to coverage-ratchet's full run. The switch is ONE FLAG
- * (`RMD_AFFECTED_SUITE_LIVE`, this workflow's own top-level env), default "0" per design note (iv)
- * — every pull_request behavior the tests above already pin stays byte-for-byte unchanged until
- * the W1-T4404 shadow record earns the flip. Both arms of that flag are driven here, through the
- * REAL step body, so a later default flip is a one-line change with no new test to write.
+ * W1-T5930 keeps SOURCE PR test ownership in coverage for either live-selection flag.
+ * W1-T5940 selects the combined group in CI, with a full fallback, and skips duplicate PR coverage.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -96,30 +90,36 @@ function runStep(run: string, env: Record<string, string>, nodeStub: string = DE
   return { status: r.status, calls: read("node-calls.log"), out: r.stdout + r.stderr, dir };
 }
 
-// ── the merge group runs the full instrumented suite ─────────────────────────────────────────
+// ── the merge group retains assurance without duplicating PR coverage ───────────────────────
 
-test("W1-T4406: the merge group runs the full instrumented suite", () => {
+test("W1-T4406/W1-T5940: the merge group retains required contexts without duplicating PR coverage", () => {
   assert.ok("merge_group" in doc.on, "ci.yml must declare a merge_group trigger");
   assert.equal(doc.on.merge_group, null, "merge_group must carry no types/path filter — INVARIANT 2");
 
-  // coverage-ratchet's real work now fires for merge_group ALONGSIDE pull_request — never instead
-  // of it, so every pull_request-scoped assertion elsewhere in the tree keeps holding.
+  // Keep both registered event arms, and run the actual classifier before deciding whether
+  // this group reaches coverage. Forcing SOURCE here would bypass the accepted skip policy.
   const coverageRun = findStep("coverage-ratchet", "Test with coverage").run!;
   assert.match(coverageRun, /"\$\{GITHUB_EVENT_NAME\}" = "pull_request" \]/, "the pull_request arm must survive untouched");
   assert.match(coverageRun, /"\$\{GITHUB_EVENT_NAME\}" = "merge_group" \]/, "merge_group must join it, not replace it");
 
-  const coverageBody = coverageRun.replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ steps.classify.outputs.class }}", "SOURCE");
+  const classify = runStep(findStep("coverage-ratchet", "Determine this diff's coverage class").run!, { GITHUB_EVENT_NAME: "merge_group" });
+  assert.equal(classify.status, 0, classify.out);
+  assert.match(readFileSync(join(classify.dir, "outputs.txt"), "utf8"), /^class=NO_SRC$/m);
+  const coverageBody = coverageRun.replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ steps.classify.outputs.class }}", "NO_SRC");
   const merge = runStep(coverageBody, { GITHUB_EVENT_NAME: "merge_group" });
-  // The stub never produces a real lcov, so the step still fails at its own "no lcov" check —
-  // exactly like test/workflow-single-suite-run.test.ts's identical control for pull_request. A
-  // non-zero exit here still proves the real instrumented runner was REACHED, not skipped.
-  assert.notEqual(merge.status, 0, merge.out);
+  assert.equal(merge.status, 0, merge.out);
+  assert.equal(merge.calls, "", "the real group's classification must skip a duplicate instrumented PR run");
+  const sourcePrBody = coverageRun.replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ steps.classify.outputs.class }}", "SOURCE");
+  const sourcePr = runStep(sourcePrBody, { GITHUB_EVENT_NAME: "pull_request" });
+  // The recording stub reaches the real runner without producing LCOV, so the production
+  // missing-coverage check still refuses. A source PR keeps its complete coverage owner.
+  assert.notEqual(sourcePr.status, 0, sourcePr.out);
   assert.match(
-    merge.calls,
+    sourcePr.calls,
     new RegExp(`scripts\\/test-tier-manifest\\.mjs --select-all --shard 1/${CI_SHARD_COUNT} --base HEAD\\^1`),
-    "a merge_group SOURCE run must select its complete duration-balanced coverage shard, exactly like a pull_request run",
+    "a source PR must select its complete duration-balanced coverage shard",
   );
-  assert.match(merge.calls, /test-with-retry\.mjs --coverage-first-pass/, "a merge_group run must invoke the real instrumented test runner");
+  assert.match(sourcePr.calls, /test-with-retry\.mjs --coverage-first-pass/, "a source PR must invoke the real instrumented test runner");
 
   // The control: an ordinary push still skips it — merge_group joined the guard, it did not
   // become "anything that is not pull_request".
@@ -180,55 +180,26 @@ test("W1-T4406: a pull request runs the selected suites", () => {
   assert.match(off.out, /W1-T3207: coverage-ratchet owns/);
   assert.doesNotMatch(off.calls, /--import tsx -e|--run fast|--run-candidates/, "flag off must reach neither the live selector nor a test runner");
 
-  // Flag ON, selector narrows: the live selection is fed through the SAME candidate-shard
-  // machinery the plan-reading lane already uses, and the old skip never fires.
-  const narrowStub = `#!/usr/bin/env bash
-echo "node $*" >> "$CALL_LOG"
-case "$*" in
-  *--import\\ tsx\\ -e*) printf 'test/x.test.ts\\n' > affected-suites-selected.txt; echo "W1-T4406: live selection for 1 changed file(s) -> 1 suite(s)" ;;
-  *--select-candidates*) cat "$3"; echo "test-tier-manifest: plan-reading shard summary candidate_count=1" >&2 ;;
-  *) echo "# tests 1"; echo "# pass 1"; echo "# fail 0" ;;
-esac
-`;
-  const narrow = runStep(body, { GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "main", RMD_AFFECTED_SUITE_LIVE: "1" }, narrowStub);
-  assert.equal(narrow.status, 0, narrow.out);
-  assert.doesNotMatch(narrow.out, /W1-T3207: coverage-ratchet owns/, "flag on must not take the coverage-owns-it skip");
-  assert.match(narrow.calls, /--import tsx -e/, "flag on must invoke the live W1-T4404 selector");
-  assert.equal(readFileSync(join(narrow.dir, "plan-reading-suites.txt"), "utf8").trim(), "test/x.test.ts", "the selector's own suite list must feed the candidate runner");
-  assert.match(
-    narrow.calls,
-    new RegExp(`test-tier-manifest\\.mjs --run-candidates plan-reading-suites\\.txt --shard 1/${CI_SHARD_COUNT}`),
-    "the selected suite(s) must run through the ci matrix's own shard denominator",
-  );
-
-  // Flag ON, selector says fullRun (a config/lockfile/workflow/helper change): CLASS stays SOURCE
-  // and the ordinary full fast tier runs, exactly as design note (ii) requires.
-  const fullStub = `#!/usr/bin/env bash
-echo "node $*" >> "$CALL_LOG"
-case "$*" in
-  *--import\\ tsx\\ -e*) printf 'full\\n' > affected-suites-selected.txt; echo "W1-T4406: live selection -> FULL" ;;
-  *) echo "# tests 1"; echo "# pass 1"; echo "# fail 0" ;;
-esac
-`;
-  const full = runStep(body, { GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "main", RMD_AFFECTED_SUITE_LIVE: "1" }, fullStub);
-  assert.equal(full.status, 0, full.out);
-  assert.doesNotMatch(full.out, /W1-T3207: coverage-ratchet owns/);
-  assert.match(full.calls, new RegExp(`test-tier-manifest\\.mjs --run fast --shard 1/${CI_SHARD_COUNT}`), "a fullRun verdict must still run the ordinary full fast tier, never a narrowed one");
-  assert.doesNotMatch(full.calls, /--run-candidates/);
+  // W1-T5930: coverage owns both flag arms; CI does not add an uninstrumented floor.
+  const on = runStep(body, { GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "main", RMD_AFFECTED_SUITE_LIVE: "1" });
+  assert.equal(on.status, 0, on.out);
+  assert.match(on.out, /W1-T3207: coverage-ratchet owns/);
+  assert.doesNotMatch(on.calls, /--import tsx -e|--run fast|--run-candidates/);
 
   // The live selector is a real, executable script (not a stub-only fiction): extract it from the
   // step body and run it for real against this very repo, proving it actually reaches
   // src/lib/affected-suites.ts's exported, shared selector (the same one `rmd preflight` uses).
-  const script = /node --import tsx -e '\n([\s\S]*?)\n\s*' changed-files\.txt affected-suites-selected\.txt/.exec(testStep);
+  const script = /node --import tsx -e '\n([\s\S]*?)\n\s*' changed-files\.txt "\$\{RUNNER_TEMP\}\/affected\.diff" coverage-narrow-suites\.txt/.exec(findStep("squash-trailer-gate", "Pin one verified historical coverage floor before any narrowing").run!);
   assert.ok(script, "the live-selection step must invoke node --import tsx -e '<script>' changed-files.txt affected-suites-selected.txt");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4406-real-`));
   writeFileSync(join(dir, "changed.txt"), "docs/comment-standard.md\n");
-  const real = spawnSync(process.execPath, ["--import", "tsx", "-e", script![1]!, join(dir, "changed.txt"), join(dir, "out.txt")], {
+  writeFileSync(join(dir, "diff.txt"), "");
+  const real = spawnSync(process.execPath, ["--import", "tsx", "-e", script![1]!, join(dir, "changed.txt"), join(dir, "diff.txt"), join(dir, "out.txt")], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: { ...process.env, GITHUB_WORKSPACE: REPO_ROOT },
   });
   assert.equal(real.status, 0, real.stdout + real.stderr);
-  assert.match(real.stdout, /W1-T4406: live selection for 1 changed file\(s\)/);
+  assert.match(real.stdout, /W1-T5705: live coverage selection ->/);
   assert.ok(existsSync(join(dir, "out.txt")), "the real selector must write its output file");
 });

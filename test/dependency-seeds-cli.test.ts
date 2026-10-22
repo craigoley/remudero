@@ -1,11 +1,49 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 // @ts-expect-error -- standalone .mjs tool is outside tsconfig and has no declarations.
 import { ownerOnlyHome, seedIsOpen } from "../scripts/dependency-seeds.mjs";
+
+test("dependency CLI explicitly reuses a command-only generation with no registry install", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-seed-cli-reuse-"));
+  const store = join(root, "store"), home = join(root, "home"), donor = join(root, "donor"), first = join(root, "first"), next = join(root, "next");
+  for (const dir of [home, donor, first, next]) {
+    mkdirSync(dir);
+    if (dir === home) continue;
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0", dependencies: { dep: "1.0.0" } }));
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/dep": { version: "1.0.0" } } }));
+  }
+  mkdirSync(join(donor, "node_modules", "dep"), { recursive: true });
+  writeFileSync(join(donor, "node_modules", "dep", "package.json"), '{"name":"dep","version":"1.0.0"}');
+  for (const name of ["user.npmrc", "global.npmrc"]) writeFileSync(join(home, name), "");
+  const env = { ...process.env, HOME: home, RMD_DEPENDENCY_SEED_ROOT: "", npm_config_offline: "true",
+    npm_config_userconfig: join(home, "user.npmrc"), npm_config_globalconfig: join(home, "global.npmrc") };
+  const cli = join(process.cwd(), "scripts", "dependency-seeds.mjs");
+  const run = (...args: string[]) => spawnSync(process.execPath, [cli, "prime", ...args], { env, encoding: "utf8", timeout: 20_000 });
+  try {
+    const initial = run(first, "--source", donor, "--root", store, "--proof");
+    assert.equal(initial.status, 0, initial.stderr);
+    const source = JSON.parse(initial.stdout);
+    writeFileSync(join(next, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0", dependencies: { dep: "1.0.0" }, scripts: { build: "new build command" } }));
+    const reused = run(next, "--reuse-seed", source.seed, "--root", store, "--proof");
+    assert.equal(reused.status, 0, reused.stderr);
+    const result = JSON.parse(reused.stdout);
+    assert.equal(result.reusedFrom, source.key);
+    assert.equal(result.installed, false);
+    assert.notEqual(result.key, source.key);
+  } finally {
+    // The fixture owns both immutable generations; make only this fixture writable for retirement.
+    const makeWritable = (path: string): void => {
+      const s = lstatSync(path); if (s.isSymbolicLink()) return;
+      chmodSync(path, s.mode | 0o700);
+      if (s.isDirectory()) for (const name of readdirSync(path)) makeWritable(join(path, name));
+    };
+    makeWritable(root); rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("dependency seed CLI requires administrator scans and distinguishes no-open-files from unknown", () => {
   assert.throws(() => seedIsOpen("/seed", 501), /administrator/);

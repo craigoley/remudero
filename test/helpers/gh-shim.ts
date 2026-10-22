@@ -17,7 +17,7 @@
  */
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
 
 export interface GhShimRoute {
@@ -27,6 +27,8 @@ export interface GhShimRoute {
   when: string;
   /** stdout to print. Omitted ⇒ no stdout. */
   stdout?: string;
+  /** Read exact stdout bytes from this absolute path, preserving binary archives. */
+  stdoutFile?: string;
   /** stderr to print — e.g. simulating a `gh` failure message. Omitted ⇒ no stderr. */
   stderr?: string;
   /** Print the value of this environment variable the shim process received (plus a newline) —
@@ -88,6 +90,9 @@ function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: stri
   const dir = dirname(callsPath);
   const cases = routes
     .map((r, i) => {
+      if (r.stdoutFile !== undefined && (r.stdout !== undefined || r.stdoutEnv !== undefined || !isAbsolute(r.stdoutFile))) {
+        throw new Error("gh shim stdoutFile needs an absolute path and cannot also specify stdout or stdoutEnv");
+      }
       if (r.delaySeconds !== undefined && (!Number.isFinite(r.delaySeconds) || r.delaySeconds < 0)) {
         throw new Error("gh shim route delay must be a non-negative finite number");
       }
@@ -101,6 +106,7 @@ function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: stri
         r.writes !== undefined ? writeStep(join(dir, `route-${i}.write`), r.writes) : "",
         r.stderr !== undefined ? verbatim(join(dir, `route-${i}.err`), r.stderr, " 1>&2") : "",
         r.stdout !== undefined ? verbatim(join(dir, `route-${i}.out`), r.stdout, "") : "",
+        r.stdoutFile !== undefined ? `cat -- ${shQuote(r.stdoutFile)} || exit $?` : "",
         r.stdoutEnv !== undefined ? `printf '%s\\n' "\${${r.stdoutEnv}}"` : "",
         `exit ${r.exit ?? 0}`,
       ]

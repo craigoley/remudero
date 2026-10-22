@@ -495,6 +495,7 @@ test("W1-T321: drainCommand's WIRED checkQueueGovernor reads the REAL open-PR co
 async function withControlledMeminfo(
   mode: "low" | "healthy" | "unread",
   body: () => Promise<void>,
+  scale = 1,
 ): Promise<number> {
   const original = fs.readFileSync;
   let reads = 0;
@@ -502,7 +503,7 @@ async function withControlledMeminfo(
     if (path !== "/proc/meminfo") return (original as (...a: unknown[]) => unknown)(path, ...args);
     reads += 1;
     if (mode === "unread") throw Object.assign(new Error("controlled meminfo unavailable"), { code: "ENOENT" });
-    const text = `MemTotal: 1000000 kB\nMemAvailable: ${mode === "low" ? 270000 : 600000} kB\n`;
+    const text = `MemTotal: ${1000000 * scale} kB\nMemAvailable: ${(mode === "low" ? 270000 : 600000) * scale} kB\n`;
     const opt = args[0] as { encoding?: string } | string | undefined;
     return typeof opt === "string" || opt?.encoding ? text : Buffer.from(text);
   }) as typeof fs.readFileSync;
@@ -557,6 +558,7 @@ test("queue governor wiring preserves its base limit while host headroom adjusts
 test("W1-T321: drainCommand's WIRED checkQueueGovernor reads the REAL open-PR count — well under wipLimit it reports undefined (proceed), no ledger line", async () => {
   const config = queueGovernorFixtureConfig();
   try {
+    const reads = await withControlledMeminfo("healthy", async () => {
     const ledgerPath = join(config.root, "state", "ledger.ndjson");
     const planPath = planWithOpenPrs(1);
     const deps = await captureDrainDepsWithLiveProjection(config, planPath, OPEN_GITHUB);
@@ -567,6 +569,8 @@ test("W1-T321: drainCommand's WIRED checkQueueGovernor reads the REAL open-PR co
       false,
       "no deferral line when the real wiring did not defer",
     );
+    }, 10);
+    assert.ok(reads > 0, "the wired gate consumes a controlled healthy pressure reading above its floor");
   } finally {
     rmSync(config.root, { recursive: true, force: true });
   }
@@ -797,6 +801,7 @@ test("the wired drain gate ledgers admission above the base limit when its owned
     })),
   };
   try {
+    const reads = await withControlledMeminfo("healthy", async () => {
     mkdirSync(join(root, "state"));
     writeFileSync(planPath, "[]\n");
     let gate: DrainDeps["checkQueueGovernor"];
@@ -845,6 +850,8 @@ test("the wired drain gate ledgers admission above the base limit when its owned
       assert.equal(typeof admitted[0].headroom_error, "string", "an unread headroom names its error");
     }
     assert.ok(Number(admitted[0].wip_limit) <= DEFAULT_SWEEP_POLICY.wipLimit);
+    }, 10);
+    assert.ok(reads > 0, "the wired gate consumes a controlled healthy pressure reading above its floor");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
-import { callerReachableSuites } from '../src/lib/ci-parity.ts';
+import { callerReachableSuites, listRuleSuites } from '../src/lib/ci-parity.ts';
 import { acquireTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
 import { listTestFiles, manifestEntryFor, medianMeasuredDurationMs, mergeDurations, reportManifestFallbacks, weightedDurationMs } from './test-tier-manifest.mjs';
@@ -13,6 +14,7 @@ import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-tes
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
+import { authorRuleTestEnvironment, createAuthorRuleOwner, qualifiedAffectedRules, admittedAffectedRules } from './lib/author-rule-owner.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
@@ -191,9 +193,14 @@ export function censusTimeBoundOnly(result) {
 }
 
 export function authorEnvironment(parent) {
-  const env = { ...parent, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: '' };
+  // The real preflight imports the SDK, which sets this hardening marker on import.
+  // Bind its executing value before recording the owner; never omit it from the hash.
+  const env = { ...parent, NoDefaultCurrentDirectoryInExePath: '1', NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: '' };
+  for (const key of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN',
+    'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_ANTHROPIC_AWS']) delete env[key];
   // Git's repository-local environment overrides cwd, including in test subprocesses.
-  // Keep transport/auth settings, but never certify a foreign HEAD, index or object store.
+  // Keep Git transport/auth settings, but never certify a foreign HEAD, index or object store.
   for (const key of ['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_PREFIX',
     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR',
     'GIT_NAMESPACE', 'GIT_QUARANTINE_PATH', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
@@ -297,6 +304,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   const receipt = { version: 1, assurance: 'author-only', hostedFullSuiteAndCoverage: 'required-pending',
     node: process.version, dryRun: Boolean(values['dry-run']), steps: [], suites: [] };
   let diagnosticsRoot;
+  let fixtureTemporaryEnvironment;
   const deadline = values.deadline === undefined ? undefined : Date.parse(values.deadline);
   const run = (file, args, extra = {}) => spawn(file, args, {
     cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
@@ -307,6 +315,18 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       mkdirSync(join(root, 'coverage'), { recursive: true });
       diagnosticsRoot = mkdtempSync(join(root, 'coverage', 'rmd-author-'));
     }
+  };
+  // Give fixed-name native fixtures an exclusive short root, including Unix IPC fixtures.
+  // Canonicalize once so the recorded rule context equals the real child environment.
+  const temporaryEnvironment = () => {
+    ensureDiagnostics();
+    if (!fixtureTemporaryEnvironment) {
+      const base = process.platform === 'win32' ? tmpdir() : '/tmp';
+      const temp = realpathSync(mkdtempSync(join(base, 'ra')));
+      fixtureTemporaryEnvironment = { TMPDIR: temp, TMP: temp, TEMP: temp };
+      receipt.fixtureTemporaryRoot = relative(root, temp);
+    }
+    return fixtureTemporaryEnvironment;
   };
   const progress = (currentStep) => {
     ensureDiagnostics();
@@ -323,10 +343,10 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
-    if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment } });
+    if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment, ...temporaryEnvironment() } });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
     // W1-T9928: a slotted step's spooler beats the slot while this loop is blocked in spawnSync.
-    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment }, trackParent: true,
+    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment, ...temporaryEnvironment() }, trackParent: true,
       ...logs, resultPath, runtimeMs: runtimeLimitMs, ...(heartbeat ? { heartbeat } : {}) });
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };
@@ -429,6 +449,22 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       receipt.affectedTestsNotRunReason = 'publication identity refused; no selection, dependency, census, heavy slot, static or test phase was started';
       throw new Error(receipt.publicationIdentity.message);
     }
+    // Bind admission to this invocation's fetched base before selecting or running work.
+    const merge = run('git', ['merge-tree', '--write-tree', receipt.baseSha, receipt.headSha]);
+    receipt.mergeCompatibility = { state: 'unknown', head: receipt.headSha, base: receipt.baseSha,
+      exitCode: merge.status, signal: merge.signal ?? null, error: merge.error?.message ?? null,
+      stdout: merge.stdout?.slice(0, 4096) ?? '', stderr: merge.stderr?.slice(0, 4096) ?? '' };
+    if (merge.error || merge.signal || merge.status !== 0) {
+      receipt.mergeCompatibility.state = !merge.error && !merge.signal && merge.status === 1 ? 'conflict' : 'unavailable';
+      throw new Error(`fetched-base merge compatibility ${receipt.mergeCompatibility.state}; author selection and expensive validation were not started`);
+    }
+    const mergedTree = typeof merge.stdout === 'string' ? merge.stdout.trim().split('\n')[0] : '';
+    if (!/^[a-f0-9]{40}$/.test(mergedTree)) {
+      receipt.mergeCompatibility.state = 'unavailable';
+      throw new Error('fetched-base merge compatibility tree is unreadable; author selection and expensive validation were not started');
+    }
+    receipt.mergeCompatibility.state = 'compatible';
+    receipt.mergeCompatibility.tree = mergedTree;
     receipt.changedFiles = git(['diff', '--name-only', '-z', `${receipt.baseSha}...${receipt.headSha}`]).split('\0').filter(Boolean);
     if (receipt.changedFiles.length === 0) throw new Error('empty author diff: nothing to verify');
     const selection = select(receipt.changedFiles, `${receipt.baseSha}...${receipt.headSha}`);
@@ -530,13 +566,27 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (!decision.fits) throw new Error(`runtime deadline does not fit admitted ${decision.workers}-worker pool: need ${decision.requiredMs}ms, have ${decision.availableMs}ms; expensive phase not started`);
           };
           admitRuntime('before-static', undefined, partial ? partial.suites : receipt.suites);
-          const staticCapacity = admitHost('static-preflight');
+          const staticCapacity = admitHost('static-preflight', {refresh: () => slot.refresh()});
+          // Capacity observation may wait; re-price the original deadline before starting work.
+          admitRuntime('before-static', undefined, partial ? partial.suites : receipt.suites);
           if (staticCapacity) (receipt.hostCapacity ??= []).push(staticCapacity);
+          let ruleOwner;
+          if (spawn === spawnSync) {
+            try {
+              ruleOwner = createAuthorRuleOwner({ root, directory: diagnosticsRoot, head: receipt.headSha,
+                rules: listRuleSuites(root), affected: receipt.suites, concurrency: Math.min(4, slot.concurrency),
+                environment: { ...authorEnvironment(process.env), ...slot.childEnvironment, ...temporaryEnvironment() } });
+              receipt.ruleExecution = { state: 'prepared', receipt: relative(root, ruleOwner.file), reusedFiles: [] };
+            } catch (error) {
+              receipt.ruleExecution = { state: 'unavailable', reason: error.message, reusedFiles: [],
+                fallback: 'original rule and affected execution; no cached result qualifies' };
+            }
+          }
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
             '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-          const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, slot.childEnvironment,
-            AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
+          const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file,
+            ruleOwner?.childEnvironment ?? slot.childEnvironment, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
           const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
           report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
           // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
@@ -612,33 +662,51 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             } else if (!notRun) {
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
             admitRuntime('before-tests', 0, ranSuites, executionWorkers);
-            const testCapacity = admitHost('affected-tests');
+            const testCapacity = admitHost('affected-tests', {refresh: () => slot.refresh()});
+            admitRuntime('before-tests', 0, ranSuites, executionWorkers);
             if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
             slot.refresh();
+            const qualified = ruleOwner
+              ? qualifiedAffectedRules(ruleOwner, root, ruleOwner.childEnvironment, receipt.suites)
+              : { remaining: receipt.suites, reused: [], reason: 'rule result owner unavailable' };
+            // The owner proves the original mandatory context. Only the admitted subset is owed here;
+            // a completed rule outside that subset cannot count as its execution or widen its native argv.
+            const selected = admittedAffectedRules(qualified, ranSuites);
+            if (ruleOwner) receipt.ruleExecution = { ...receipt.ruleExecution,
+              state: selected.reused.length ? 'qualified' : 'not-reused', reason: selected.reason,
+              reusedFiles: selected.reused.map((row) => ({ suite: row.suite, nativeCounts: row.nativeCounts,
+                nativeReceipt: relative(root, row.eventFile), nativeSha256: row.eventSha256 })),
+              physicalAffectedSuites: selected.remaining };
             const hasDurationReporter = existsSync(join(root, 'scripts/test-duration-reporter.mjs'));
             const durationArgs = !hasDurationReporter ? [] : ['--test-reporter-destination=stdout',
               `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
               `--test-reporter-destination=${join(diagnosticsRoot, 'durations.json')}`];
-            // Judged (scripts/pure-test-pool.mjs): a suite whose own child exits 0 part-way is reported
-            // `ok` with a whole summary, so the step passes only when every suite reached its own summary.
+            // Judge only the physical subset. Reused rule files retain their separate native owner receipts.
             const judged = prepareJudgedRun();
             const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
-              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), executionWorkers));
-            const tests = runStep(testsName, child.args, child.file, judged.env, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
-            const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
+              '--experimental-test-isolation=process', '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...selected.remaining], judged.args), executionWorkers));
+            const tests = runStep(testsName, child.args, child.file, { ...authorRuleTestEnvironment(ruleOwner?.childEnvironment ?? {}), ...judged.env }, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
+            const judge = closeJudgedRun(judged, selected.remaining, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
             const testsOk = completeTestResult(tests) && judge.verdict.complete;
             report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,
               reported: judge.verdict.reported, unreported: judge.verdict.missing.slice(0, 20), lastStarted: judge.verdict.lastStarted,
               exitSite: judge.verdict.exitSite } });
+            if (selected.reused.length) {
+              // Dependency or environment mutation during the remaining tests invalidates reuse.
+              qualifiedAffectedRules(ruleOwner, root, ruleOwner.childEnvironment, receipt.suites);
+            }
             receipt.runtimeEvidence = { state: 'not-collected', reason: 'duration reporter unavailable in this root' };
             if (hasDurationReporter) {
               if (!testsOk) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };
               else {
                 try {
                   receipt.runtimeEvidence = closedDurationEvidence(root, relative(root, join(diagnosticsRoot, 'durations.json')),
-                    ranSuites, runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
+                    selected.remaining, runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
+                  if (selected.reused.length) receipt.runtimeEvidence = { ...receipt.runtimeEvidence, state: 'partial',
+                    reason: 'same-invocation rule reuse excludes already executed file wrappers',
+                    reusedPhysicalFiles: selected.reused.length, selectedPhysicalFiles: receipt.suites.length };
                 } catch (error) {
                   // Timing is diagnostic, never author assurance or a zero-cost success estimate.
                   receipt.runtimeEvidence = { state: 'unavailable', reason: error.message };
@@ -661,6 +729,10 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const dependencyAfter=authorDependencyProvenance(root);
       receipt.dependencyProvenance.after=dependencyAfter;
       if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfter))throw new Error('installed dependency donor changed during author validation; receipt refused');
+    }
+    if (fixtureTemporaryEnvironment) {
+      rmSync(fixtureTemporaryEnvironment.TMPDIR, { recursive: true, force: true });
+      receipt.fixtureTemporaryCleanup = 'removed';
     }
     // An over-capacity run is never green: its tests were skipped, or only the subset that fits ran.
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'

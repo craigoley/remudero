@@ -32,7 +32,7 @@ test('CI admission skips setup only on the seven idle source PR shards and fails
   }
   for (const event of ['push', 'merge_group', 'workflow_dispatch', '']) assert.equal(requiresSetup(['src/a.ts'], { ...opts, event }), true);
   for (const shard of ['1', '', '0', '9', 'unknown']) assert.equal(requiresSetup(['src/a.ts'], { ...opts, shard }), true);
-  for (const live of ['1', '', 'unknown']) assert.equal(requiresSetup(['src/a.ts'], { ...opts, live }), true);
+  for (const live of ['1', '', 'unknown']) assert.equal(requiresSetup(['src/a.ts'], { ...opts, live }), false);
 });
 
 function runStep(step: Step, setup: string) {

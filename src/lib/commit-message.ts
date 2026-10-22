@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { compilerEnvironment } from "./compiler-budget.js";
 import {
   type OperatorMessageSlot,
 } from "./operator-message.js";
@@ -415,6 +416,7 @@ const PREFLIGHT_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 // stay byte-identical to self-sync.ts's own SELF_SYNC_GUARD_ENV export.
 // Why: docs/forensics/commit-message.md.
 const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
+const AUTHOR_CAPTURE_PARENT_ENV_NAME = "RMD_AUTHOR_CAPTURE_PARENT_PID";
 
 export function defaultPreflightSpawn(
   file: string,
@@ -423,10 +425,14 @@ export function defaultPreflightSpawn(
 ): { status: number | null; stdout: string; stderr: string; error?: string; signal?: string } {
   // Merged OVER `process.env`, never replacing it: a bare `env` would drop PATH, HOME and toolchain pins.
   const env = { ...process.env, ...opts.env };
-  // Unconditionally scrubbed: every child here is a build/test process, never a re-exec of
-  // `rmd` itself, so an inherited `RMD_SELF_SYNC_DONE` has no meaning and once crossed into a
-  // spawned child, turning 45 unrelated tests red. Why: archived in docs/forensics/commit-message.md.
+  // Build/test children never re-exec rmd, so inherited RMD_SELF_SYNC_DONE is meaningless.
+  // Its former leak reddened 45 unrelated tests; see docs/forensics/commit-message.md.
   delete env[SELF_SYNC_GUARD_ENV_NAME];
+  const captureParent = process.env[AUTHOR_CAPTURE_PARENT_ENV_NAME];
+  delete env[AUTHOR_CAPTURE_PARENT_ENV_NAME];
+  // Cancellation follows an actual immediate parent; opts.env cannot invent that ancestry.
+  if (process.ppid > 0 && captureParent === String(process.ppid))
+    env[AUTHOR_CAPTURE_PARENT_ENV_NAME] = String(process.pid);
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,
@@ -532,7 +538,7 @@ export function commitlintStep(
 }
 
 /**
- * Step 2/3 — `tsc -p tsconfig.json --noEmit`, the same invocation CI's `ci` job runs. `npm test`
+ * Step 2/3 — `tsc -p tsconfig.json --noEmit` with the admitted checker policy, as CI's `ci` job runs. `npm test`
  * strips types via `tsx` without checking them, so a green test run is not a compile (PR #477).
  */
 export function typecheckStep(
@@ -550,7 +556,10 @@ export function typecheckStep(
       if (!testSlotExecutionAllowed(slot)) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
     }
     const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
-    const res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot, env: typecheckEnv(process.env) });
+    const parentEnv = typecheckEnv(process.env);
+    const res = spawn(tsc, [...prepared.args, ...tight], {
+      cwd: repoRoot, env: { ...parentEnv, ...compilerEnvironment(parentEnv) },
+    });
     const spawnFailed = spawnFailureDetail("typecheck", res);
     if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };
     const ok = res.status === 0;
@@ -558,8 +567,8 @@ export function typecheckStep(
       name: "typecheck",
       ok,
       detail: ok
-        ? "typecheck: PASS — tsc -p tsconfig.json --noEmit"
-        : `typecheck: FAIL — tsc -p tsconfig.json --noEmit\n${(res.stdout + res.stderr).trim()}`,
+        ? `typecheck: PASS — tsc ${[...prepared.args, ...tight].join(" ")}`
+        : `typecheck: FAIL — tsc ${[...prepared.args, ...tight].join(" ")}\n${(res.stdout + res.stderr).trim()}`,
     };
   } catch (e) {
     return { name: "typecheck", ok: false, detail: `typecheck: FAIL — ${String((e as Error)?.message ?? e)}` };

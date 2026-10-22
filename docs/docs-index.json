@@ -200,6 +200,12 @@
       "grepHint": "Dependency reuse observations"
     },
     {
+      "path": "docs/dependency-seed-command-reuse.md",
+      "title": "Reuse a dependency generation after command edits",
+      "summary": "An edited build command changes the complete dependency generation identity even",
+      "grepHint": "Reuse a dependency generation after command edits"
+    },
+    {
       "path": "docs/deploy-image-forensics.md",
       "title": "Deploy image forensics: the measured record behind `deploy/Dockerfile`",
       "summary": "Every incident, measurement and rejected alternative that `deploy/Dockerfile` used to carry inline,",

@@ -27,6 +27,7 @@ import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { compilerEnvironment } from "../src/lib/compiler-budget.ts";
 
 const targets = process.argv.slice(2).filter((arg) => arg !== "" && arg !== "--").map((arg) => resolve(arg));
 
@@ -55,9 +56,9 @@ if (invalid.length > 0) {
 }
 
 /** Run one command inheriting stdio; return its exit code (127 when the binary is missing). */
-function run(label, file, args) {
+function run(label, file, args, environment = {}) {
   console.log(`\n=== ${label} ===`);
-  const r = spawnSync(file, args, { stdio: "inherit" });
+  const r = spawnSync(file, args, { stdio: "inherit", env: { ...process.env, ...environment } });
   if (r.error) {
     console.error(`check: could not run ${label}: ${r.error.message}`);
     return 127;
@@ -76,9 +77,15 @@ const testCode = run(
 );
 
 // Through `npm run typecheck`'s own wrapper: incremental against this checkout's buildinfo (seeded from the canonical
-// checkout's), and a cold check waits for a host test slot — the same diagnostics as plain tsc (src/lib/typecheck-run.ts).
+// checkout's), bounded compiler resources, and a cold check waits for a host test slot (src/lib/typecheck-run.ts).
 const typecheckScript = resolve(dirname(fileURLToPath(import.meta.url)), "typecheck.mjs");
-const tscCode = run("tsc --noEmit (whole project, as of NOW)", "node", ["--import", "tsx", typecheckScript]);
+let tscCode;
+try {
+  tscCode = run("tsc --noEmit (whole project, as of NOW)", "node", ["--import", "tsx", typecheckScript], compilerEnvironment());
+} catch (error) {
+  console.error(`check: compiler resource settings unavailable: ${error.message}`);
+  tscCode = 1;
+}
 
 console.log(
   [

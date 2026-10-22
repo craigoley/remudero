@@ -1,4 +1,6 @@
 import {spawnSync} from 'node:child_process';
+import {qualifyScopedContext} from './author-context-compatibility.mjs';
+import {pinAuthorScratch, sampleAuthorScratch, authorScratchEvidence} from './author-step-resources.mjs';
 import {existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statfsSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve, sep} from 'node:path';
@@ -86,7 +88,8 @@ function requireAdmission(root, scratch, minimumFreeBytes) {
 export async function runLowFootprintAuthor(argv, {root, publicationIdentity, authorEnvironment, completeTestResult,
   platform = process.platform, command = nativeAuthorCommand, makeScratch = createBoundedAuthorScratch,
   admit = requireAdmission, capture = captureStepSync, acquire = acquireTestSlot} = {}) {
-  let scratch, slot, diagnostics, judged;
+  let scratch, slot, diagnostics, judged, scratchPin, contextChildUnproven = false;
+  const scratchSamples = [];
   const receipt = {version: 1, assurance: 'explicit-scoped-tests-only', fullAuthorValidation: 'not-run',
     hostedFullSuiteAndCoverage: 'required-pending', verdict: 'refused', files: []};
   const started = Date.now();
@@ -125,6 +128,8 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
     mkdirSync(join(root, 'coverage'), {recursive: true});
     diagnostics = mkdtempSync(join(root, 'coverage', 'author-low-footprint-'));
     scratch = makeScratch(options.scratchBytes);
+    scratchPin = pinAuthorScratch(scratch.volume);
+    scratchSamples.push(sampleAuthorScratch(scratchPin));
     receipt.scratch = {writableCapacityBytes: scratch.writableCapacityBytes, imageBytes: scratch.imageBytes};
     for (const dir of ['t', 'h']) mkdirSync(join(scratch.volume, dir));
     const env = {...authorEnvironment(process.env), ...slot.childEnvironment, TMPDIR: join(scratch.volume, 't'),
@@ -138,6 +143,10 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
       'for(const p of process.argv.slice(2)){let denied=false;try{f.writeFileSync(p,"forbidden")}catch(e){denied=e.code==="EPERM"||e.code==="EACCES"}if(!denied)process.exit(2)}';
     command('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, '-e', code, probe, outside, forbidden], {env});
     if (!existsSync(probe) || existsSync(outside) || existsSync(forbidden)) throw new Error('native write containment control failed');
+    receipt.contextCompatibility = qualifyScopedContext({root, files: options.files, volume: scratch.volume, profile, env});
+    contextChildUnproven = receipt.contextCompatibility.childClosure === 'unproven';
+    if (receipt.contextCompatibility.state === 'refused')
+      throw new Error('scoped context incompatible or UNKNOWN; required full suites remain: ' + JSON.stringify(receipt.contextCompatibility));
     receipt.testAdmission = admit(root, tmpdir(), options.minimumFreeBytes);
     judged = prepareJudgedRun({makeDir: () => mkdtempSync(join(scratch.volume, 'j-'))});
     const args = judgedNodeTestArgs(['--test', '--test-reporter=tap', '--test-concurrency=1', '--import', 'tsx',
@@ -149,7 +158,8 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
     const result = closeJudgedRun(judged, options.files, {status: native.status ?? 1, root, role: 'low-footprint'});
     judged = undefined;
     receipt.tests = {status: native.status, signal: native.signal, durationMs: native.durationMs,
-      outputComplete: native.outputComplete, judge: result.verdict, error: native.error?.message};
+      outputComplete: native.outputComplete, judge: result.verdict, error: native.error?.message,
+      resources: native.resources ?? null};
     const noOmissions = ['cancelled', 'skipped', 'todo'].every(key =>
       new RegExp(`^# ${key} 0$`, 'm').test(`${native.stdout ?? ''}\n${native.stderr ?? ''}`));
     if (!completeTestResult(native) || !result.verdict.complete || !noOmissions)
@@ -159,7 +169,8 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
     receipt.verdict = 'scoped-pass';
   } catch (error) { receipt.error = error.message; }
   finally {
-    if (judged) {
+    if (scratchPin) scratchSamples.push(sampleAuthorScratch(scratchPin));
+    if (judged || contextChildUnproven) {
       receipt.verdict = 'refused';
       receipt.cleanup = 'retained-unproven-child-closure';
       receipt.retainedScratch = scratch?.dir;
@@ -167,10 +178,12 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
       try { scratch.release(); receipt.cleanup = 'closed-and-removed'; }
       catch (error) { receipt.verdict = 'refused'; receipt.cleanup = 'retained'; receipt.retainedScratch = scratch.dir; receipt.cleanupError = error.message; }
     }
-    if (!judged) {
+    if (!judged && !contextChildUnproven) {
       try { slot?.release(); }
       catch (error) { receipt.verdict = 'refused'; receipt.slotCleanupError = error.message; }
     }
+    receipt.scratchResources = authorScratchEvidence(scratchSamples, {
+      childClosureProven: !judged && !contextChildUnproven, cleanup: receipt.cleanup ?? 'unknown'});
   }
   receipt.durationMs = Date.now() - started;
   if (diagnostics) writeFileSync(join(diagnostics, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n', {flag: 'wx', mode: 0o600});

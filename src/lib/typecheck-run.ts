@@ -14,18 +14,20 @@
  * TMPDIR: a predictable name in a shared temp dir is CodeQL's js/insecure-temporary-file. With nowhere writable at all,
  * the plain check runs.
  *
- * SAME RESULT AS PLAIN TSC. The diagnostics and the exit code are tsc's own; a buildinfo only changes what is rebuilt,
- * and tsc discards any cached entry whose hash, options or version differ. Extra argv is passed through to tsc.
+ * The diagnostics and exit code remain tsc's own. The shared buildinfo helper refuses the known unsafe native 7.0.2
+ * cache, including its own old entries. Extra argv passes through except attempts to override checker resource bounds.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { compilerEnvironment } from "./compiler-budget.js";
 import {
   canonicalBuildInfo,
   hasUsableTypecheckBuildInfo,
   installedTypescriptVersion,
+  invalidateUnsafeCompilerCache,
   lowMemoryTypecheckArgs,
   prepareWorktreeTypecheck,
   seedBuildInfo,
@@ -43,10 +45,10 @@ export const NPM_TYPECHECK_SLOT_LABEL = "typecheck:npm";
 /** The buildinfo's name in the worktree root when the git dir is not writable. */
 export const WORKTREE_BUILDINFO_NAME = ".rmd-typecheck.tsbuildinfo";
 
-/** Runs tsc with stdio inherited in `env`; returns its exit status (null when it was killed or never started). */
-export type TypecheckRunSpawn = (
-  file: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv,
-) => { status: number | null; error?: Error };
+/** Runs tsc with stdio inherited in `env`; returns its native exit status and signal. */
+export type TypecheckRunSpawn = (file: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv) => {
+  status: number | null; error?: Error; signal?: NodeJS.Signals | null;
+};
 
 export interface TypecheckRunOptions {
   spawn?: TypecheckRunSpawn;
@@ -59,7 +61,7 @@ export interface TypecheckRunOptions {
 
 const inheritSpawn: TypecheckRunSpawn = (file, args, cwd, env) => {
   const r = spawnSync(file, [...args], { cwd, stdio: "inherit", env });
-  return { status: r.status, ...(r.error ? { error: r.error } : {}) };
+  return { status: r.status, signal: r.signal, ...(r.error ? { error: r.error } : {}) };
 };
 
 /** Can this process create a file in `dir`? Probed by writing one: a sandbox's read-only bind still passes access(2). */
@@ -88,6 +90,8 @@ export function prepareTypecheckRun(root: string, canWrite: (dir: string) => boo
   if (own !== undefined && canWrite(dirname(own))) return { ...prepareWorktreeTypecheck(root), where: "git-dir" };
   if (!canWrite(root)) return { args: typecheckArgs(undefined), seed: "no-seed", where: "plain" };
   const buildInfo = join(root, WORKTREE_BUILDINFO_NAME);
+  if (invalidateUnsafeCompilerCache(buildInfo, installedTypescriptVersion(root)))
+    return { args: typecheckArgs(buildInfo), buildInfo, seed: "cold-compiler-version", where: "worktree" };
   const from = own !== undefined && existsSync(own) ? { root, buildInfo: own } : canonicalBuildInfo(root);
   const seed = from === undefined ? (existsSync(buildInfo) ? "kept" : "no-seed")
     : seedBuildInfo(from, { root, buildInfo }, installedTypescriptVersion(root));
@@ -96,9 +100,22 @@ export function prepareTypecheckRun(root: string, canWrite: (dir: string) => boo
 
 /** Run the incremental full typecheck of the checkout at `root`, taking a slot only when it would run cold. */
 export function runTypecheck(root: string, extraArgs: readonly string[] = [], opts: TypecheckRunOptions = {}): number {
+  const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
+  if (extraArgs.some((arg) => arg === "--checkers" || arg.startsWith("--checkers="))) {
+    log("typecheck: checker resource overrides are not supported");
+    return 2;
+  }
+  let env: NodeJS.ProcessEnv;
+  try {
+    const parentEnv = typecheckEnv(process.env);
+    env = { ...parentEnv, ...compilerEnvironment(parentEnv) };
+  }
+  catch (error) {
+    log(`typecheck: compiler resource settings unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
   const prepared = prepareTypecheckRun(root, opts.canWrite);
   const cold = !hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(root));
-  const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
   let slot: TestSlotLease | undefined;
   try {
     if (cold) {
@@ -114,14 +131,12 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
     const headroom = (opts.testSlot?.memoryHeadroom ?? readMemoryHeadroom)();
     const tight = lowMemoryTypecheckArgs(headroom, cold ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
     if (tight.length > 0) log(JSON.stringify({ step: "typecheck.low_memory", headroomMiB: Math.round(headroom! / 1024 ** 2), args: tight }));
-    const res = (opts.spawn ?? inheritSpawn)(
-      join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, typecheckEnv(process.env),
-    );
+    const res = (opts.spawn ?? inheritSpawn)(join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, env);
     if (res.error) {
       log(`typecheck: could not run tsc: ${res.error.message}`);
       return 127;
     }
-    return res.status ?? 1;
+    return res.signal || !Number.isInteger(res.status) || res.status === null || res.status < 0 ? 1 : res.status;
   } finally {
     slot?.release();
   }

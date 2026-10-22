@@ -1,8 +1,9 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
+import { buildPreflightSummary, FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
 
 // ── W1-T373: `rmd preflight --fast` — the deterministic npm-script gates, nothing else ──────
@@ -263,4 +264,47 @@ test("runPreflightFast: a script that IS defined and genuinely fails is reported
   assert.equal(claimsStep.ok, false);
   assert.match(claimsStep.detail, /claims: FAIL/);
   assert.doesNotMatch(claimsStep.detail, /SCRIPT MISSING/);
+});
+
+
+test("preflight step timings retain real successful, failed and thrown child costs without inventing unmeasured durations", () => {
+  const child = "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25);console.log('timing-fixture');process.exit(Number(process.argv[1]));";
+  const seen: string[] = [];
+  const spawn: PreflightSpawn = (_file, args) => {
+    const script = args.at(-1)!;
+    seen.push(script);
+    const options = { encoding: "utf8" as const, env: {} };
+    if (script === "thrown") {
+      execFileSync(process.execPath, ["-e", child, "9"], options);
+      throw new Error("the real nonzero child must throw before reaching here");
+    }
+    const result = spawnSync(process.execPath, ["-e", child, script === "failed" ? "7" : "0"], options);
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+  };
+  const result = runPreflightFast(REPO_ROOT, {
+    spawn,
+    packageJsonText: JSON.stringify({ scripts: { passed: "fixture", failed: "fixture", thrown: "fixture" } }),
+    steps: [
+      { job: "timed-pass", script: "passed", reason: "same-class", retainSuccessOutput: true },
+      { job: "timed-fail", script: "failed", reason: "same-class" },
+      { job: "timed-throw", script: "thrown", reason: "same-class" },
+    ],
+  });
+  assert.deepEqual(seen, ["passed", "failed", "thrown"], "a failed or thrown child cannot remove a later result");
+  assert.deepEqual(result.steps.map((step) => step.ok), [true, false, false]);
+  assert.match(result.steps[2]!.detail, /toolchain unavailable/);
+  for (const step of result.steps) {
+    assert.ok(typeof step.durationMs === "number" && Number.isFinite(step.durationMs) && step.durationMs >= 20,
+      `${step.name} retains actual elapsed child wall time even when its verdict fails`);
+  }
+  assert.equal(result.steps[0]!.successOutput?.text, "timing-fixture");
+  assert.equal(result.steps[1]!.successOutput, undefined, "timing adds no failed stdout retention");
+  const legacy = { name: "unmeasured-legacy", ok: true, detail: "legacy" };
+  const summary = buildPreflightSummary({ steps: [...result.steps, legacy], finishedAt: "fixture", durationMs: 0,
+    headSha: "fixture", args: ["--fast"] });
+  const saved = JSON.parse(JSON.stringify(summary));
+  assert.equal(saved.failed, 2, "timing cannot alter the required failure gate");
+  assert.deepEqual(saved.steps.slice(0, 3).map((step: { durationMs: number }) => step.durationMs),
+    result.steps.map((step) => step.durationMs), "the actual durable JSON preserves every measured cost");
+  assert.equal("durationMs" in saved.steps[3], false, "unmeasured legacy or excluded steps remain absent, never zero");
 });

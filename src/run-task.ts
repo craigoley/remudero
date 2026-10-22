@@ -1,3 +1,4 @@
+import { withoutNodeTestContext as withoutNodeTestContextEnv } from "./lib/node-test-environment.js";
 import {
   runTask as runTaskFromModule,
   runTaskBody as runTaskBodyFromModule,
@@ -25055,33 +25056,7 @@ export function renderFastGateScriptList(steps: readonly { readonly script: stri
 // so this stays a SEPARATE, additive mechanism that predicts a CI job by name on every failure
 // (design iii) rather than a silent extra entry in a table this task does not own.
 
-/**
- * MEASURED (W1-T4108, same trap W1-T2478 named in lib/ci-parity.ts's own private
- * `withoutNodeTestContext`, not exported and so re-stated here rather than imported): a real
- * `rmd preflight` run with no injected spawn is itself sometimes invoked FROM INSIDE a `node
- * --test` process (test/preflight-summary-containment.test.ts's own "a real preflight with no
- * injected spawn" acceptance does exactly this). `node --test`'s recursion guard reads
- * `NODE_TEST_CONTEXT`/`NODE_OPTIONS` from the CHILD's inherited environment, and
- * `defaultPreflightSpawn` passes `process.env` through untouched — so a `node --test` CHILD this
- * function spawns (the two census entries below, and scripts/diff-coverage-local.mjs's OWN nested
- * `node --test` call) silently misbehaves rather than running its file, hanging this task's own
- * acceptance test past a five-minute bound instead of completing in seconds. Deleted here, in
- * THIS process, immediately before the spawn and restored immediately after — never left cleared,
- * which would instead break every OTHER site in this same process still expecting it present. */
-function withoutNodeTestContextEnv<T>(fn: () => T): T {
-  const savedContext = process.env.NODE_TEST_CONTEXT;
-  const savedOptions = process.env.NODE_OPTIONS;
-  delete process.env.NODE_TEST_CONTEXT;
-  delete process.env.NODE_OPTIONS;
-  try {
-    return fn();
-  } finally {
-    if (savedContext !== undefined) process.env.NODE_TEST_CONTEXT = savedContext;
-    else delete process.env.NODE_TEST_CONTEXT;
-    if (savedOptions !== undefined) process.env.NODE_OPTIONS = savedOptions;
-    else delete process.env.NODE_OPTIONS;
-  }
-}
+// Use the shared recursion guard so local CI children retain declared heap policy.
 
 /** One local, GitHub-free CI check `rmd preflight` did not run before W1-T4108: `console-parity`
  *  (ci.yml's "commitlint" job, "Console-parity ratchet" step — no lib/ci-parity.ts entry existed

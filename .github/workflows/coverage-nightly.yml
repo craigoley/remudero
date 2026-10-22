@@ -84,6 +84,9 @@ jobs:
             echo "::error::coverage-nightly: shard ${{ matrix.shard }}/8 selected no test files."
             exit 1
           fi
+          mkdir -p coverage-artifact
+          cp coverage-test-files.txt coverage-artifact/suites
+          echo all > coverage-artifact/selection
           mapfile -t COVERAGE_TEST_FILES < coverage-test-files.txt
           mkdir -p coverage/raw coverage-artifact/raw
           set +e
@@ -177,6 +180,8 @@ jobs:
             writeFileSync("coverage-nightly-artifact/coverage-nightly-summary.json", JSON.stringify(summary, null, 2) + "\n");
             console.log(JSON.stringify(summary));
           '
+      - name: Record complete source, runtime and full-suite provenance
+        run: node scripts/coverage-floor.mjs record coverage-nightly-artifact coverage/lcov.info
       - name: Upload the merged lcov and the summary
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -184,6 +189,7 @@ jobs:
           path: |
             coverage-nightly-artifact/lcov.info
             coverage-nightly-artifact/coverage-nightly-summary.json
+            coverage-nightly-artifact/coverage-floor.json
           retention-days: 14
           if-no-files-found: error
       # W1-T6107: the test impact map ci.yml's coverage shards hand their shadow selector, built from the

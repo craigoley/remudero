@@ -133,7 +133,7 @@ if (BROWSER_SKIP !== undefined) announce(BROWSER_SKIP);
  * emitted once per process by the module body above — replacing 173 errors with 173 lines would
  * not be an improvement.
  *
- * NOT FOR test/workflow-playwright-install.test.ts. That file is W1-T1027's falsifier: it exists to
+ * NOT FOR test/infra/workflow-playwright-runtime.test.ts. That file is W1-T1027's falsifier: it exists to
  * prove `npx playwright install chromium` produced a working browser, so an absent browser IS its
  * finding and skipping it would delete the only thing it checks. The exclusion is enforced by
  * {@link test/an-absent-browser-reads-as-a-repo-full-of-broken-tests.test.ts}, not left to memory.

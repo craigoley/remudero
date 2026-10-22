@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { join } from "node:path";
 
 // -- W1-T98: TS-strict proven ACTIVE by a planted probe (MASTER-PLAN §5 TIER 2, quality gate 4/4) --
 //
@@ -26,8 +26,6 @@ import { dirname, join } from "node:path";
 // the flag explicitly as `--strict false`; merely omitting `--strict` would not falsify anything
 // on this compiler version and the second test below would be vacuous.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
 const TSC_BIN = join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
 const PROBE_FILE = join(REPO_ROOT, "scripts", "strict-probe.ts");
 
@@ -59,7 +57,16 @@ test("strict-probe: the real tsconfig.json declares strict: true, and ci.yml's t
   assert.equal(tsconfig.compilerOptions.strict, true);
 
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  assert.match(ciYml, /npx tsc -p tsconfig\.json --noEmit/, "ci.yml's ci job must run the project typecheck against the real tsconfig.json");
+  assert.match(ciYml, /^          npm run typecheck$/m, "CI must invoke the actual project compiler entrypoint");
+  const scripts = JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8")).scripts;
+  assert.equal(scripts.typecheck, "node --import tsx scripts/typecheck.mjs");
+  const entrypoint = await readFile(join(REPO_ROOT, "scripts", "typecheck.mjs"), "utf8");
+  assert.match(entrypoint, /import \{ runTypecheck \} from "\.\.\/src\/lib\/typecheck-run\.ts"/);
+  assert.match(entrypoint, /process\.exit\(runTypecheck\(process\.cwd\(\)/);
+  const { prepareTypecheckRun } = await import("#src/lib/typecheck-run.js");
+  assert.deepEqual(prepareTypecheckRun(REPO_ROOT, () => false).args, ["-p", "tsconfig.json", "--noEmit"],
+    "the actual shared preparer must retain the entire strict project even without a writable cache");
+
 });
 
 test("strict-probe: tsconfig.json's include globs never reach scripts/**, so this permanently-broken probe never joins the real build", async () => {

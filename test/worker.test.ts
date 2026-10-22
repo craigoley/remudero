@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -960,6 +960,11 @@ function e2eSpawnWorkerArgs(dir: string, extra: Record<string, unknown> = {}) {
     permissionMode: "bypassPermissions" as const,
     settingsFile,
     prompt: "end-to-end containment fixture",
+    // Keep real reservation/recording with a synthetic measurement in a private store.
+    memoryReservationDependencies: {
+      ledger: { location: () => ({ dir: join(dir, "memory"), scope: "local" as const }) },
+      learning: { sampler: { track: () => {}, sampleNow: () => {}, size: () => 0, finish: () => 123 } },
+    },
     config: { claudeBin: "/unused", root: dir },
     claudeExecutable: {
       cache: createClaudeExecutableCache(),
@@ -1006,7 +1011,7 @@ async function awaitPidGone(pid: number, timeoutMs = 5_000): Promise<void> {
   }
 }
 
-test("spawnWorker (end-to-end, SUCCESS path): the process group spawned via options.spawnClaudeCodeProcess is torn down after a normal resolve", async () => {
+test("spawnWorker (end-to-end, SUCCESS path): the process group spawned via options.spawnClaudeCodeProcess is torn down after a normal resolve with isolated fixture learning", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-e2e-success-"));
   let capturedPid: number | undefined;
   const result = await spawnWorker({
@@ -1024,6 +1029,12 @@ test("spawnWorker (end-to-end, SUCCESS path): the process group spawned via opti
   } as Parameters<typeof spawnWorker>[0]);
 
   assert.equal(result.text, "done", "the fake success envelope reached the caller normally");
+  const estimates = join(dir, "memory", "estimates");
+  const samples = readdirSync(estimates).filter(name => name.endsWith(".ndjson"))
+    .flatMap(name => readFileSync(join(estimates, name), "utf8").trim().split("\n").filter(Boolean)
+      .map(line => JSON.parse(line) as { c?: string; p?: number }));
+  assert.ok(samples.some(row => row.c === "unclassified" && row.p === 123),
+    "the real fallback reservation recorded the fixture peak in its private store");
   assert.ok(capturedPid, "spawnClaudeCodeProcess was invoked and a real pid captured");
   await awaitPidGone(capturedPid!); // let the SIGKILL land — polled, not guessed
   assert.equal(isPidAlive(capturedPid!), false, "the group spawned by THIS spawnWorker call must be torn down on resolve");

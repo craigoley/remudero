@@ -1,3 +1,5 @@
+import { withoutNodeTestContext } from "./node-test-environment.js";
+import { performance } from "node:perf_hooks";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -343,6 +345,8 @@ export interface CiParityStepResult {
   staticTiming?: StaticCheckTiming;
   /** W1-T2862: bounded stdout, kept only where a fast step opts in; a truncated payload is never complete. */
   successOutput?: { text: string; truncated: boolean };
+  /** Measured wall time for this wrapped step, including failure; absent means unmeasured. */
+  durationMs?: number;
 }
 
 /** BACKSTOP: the durable summary must not grow with an unbounded child stdout stream. */
@@ -519,6 +523,7 @@ function toolchainFailure(name: string, e: unknown): CiParityStepResult {
  *  never aborting the run, never reading as a pass. `fn`'s `detail` is prefixed with `name:`; a
  *  trigger leaf's `matched` rides through untouched. */
 function runStep(name: string, fn: () => CiParityLeafResult): CiParityStepResult & { matched?: boolean } {
+  const startedAt = performance.now();
   try {
     const r = fn();
     return {
@@ -527,9 +532,10 @@ function runStep(name: string, fn: () => CiParityLeafResult): CiParityStepResult
       detail: `${name}: ${r.detail}`,
       matched: r.matched,
       ...(r.successOutput ? { successOutput: r.successOutput } : {}),
+      durationMs: performance.now() - startedAt,
     };
   } catch (e) {
-    return { ...toolchainFailure(name, e), matched: false };
+    return { ...toolchainFailure(name, e), matched: false, durationMs: performance.now() - startedAt };
   }
 }
 
@@ -3263,30 +3269,7 @@ export interface PreflightFastResult {
   ok: boolean;
 }
 
-/**
- * Runs `fn` with `NODE_TEST_CONTEXT` and `NODE_OPTIONS` removed from `process.env`, then restores
- * them — the isolation test/reapable-prefix.test.ts establishes for a spawned `node --test` CHILD,
- * applied here to a GRANDCHILD (`npm run --silent census:*` spawns its own).
- *
- * TRAP, MEASURED (W1-T2478): `node --test`'s recursion guard reads that variable from its
- * inherited environment, and `defaultPreflightSpawn` passes `process.env` through untouched. Set,
- * a nested run skips every file and exits 0 HAVING ASSERTED NOTHING — the #3304 shape again.
- * Why: docs/forensics/ci-parity.md (W1-T2478).
- */
-function withoutNodeTestContext<T>(fn: () => T): T {
-  const savedContext = process.env.NODE_TEST_CONTEXT;
-  const savedOptions = process.env.NODE_OPTIONS;
-  delete process.env.NODE_TEST_CONTEXT;
-  delete process.env.NODE_OPTIONS;
-  try {
-    return fn();
-  } finally {
-    if (savedContext !== undefined) process.env.NODE_TEST_CONTEXT = savedContext;
-    else delete process.env.NODE_TEST_CONTEXT;
-    if (savedOptions !== undefined) process.env.NODE_OPTIONS = savedOptions;
-    else delete process.env.NODE_OPTIONS;
-  }
-}
+// Native context isolation retains verified heap policy; see node-test-environment.ts.
 
 /**
  * W1-T6435 — the census-precheck leaf: the SAME command hooks/pre-push runs for the branch's own

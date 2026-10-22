@@ -6,7 +6,7 @@
 // the rest drive the daemon side against a fake child process, one branch at a time.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -85,6 +85,10 @@ function fixture(label: string, overrides: Partial<SpawnRunChildPorts> = {}): Fi
   };
   const ports: SpawnRunChildPorts = {
     mainSha: async () => SHA, engine: { isCurrent: () => true }, reserve: async () => handle, pollMs: 20,
+    reservationDependencies: {
+      ledger: { location: () => ({ dir: join(root, "memory"), scope: "local" }) },
+      store: { location: () => ({ dir: join(root, "memory"), scope: "local" }) },
+    },
     abort: { pollMs: 20 }, ...overrides,
   };
   return { root, state, rows, reservation, input, ports };
@@ -494,14 +498,25 @@ const throwingRelease = (): LearnedReservation => ({
   releaseOccupancy: () => { throw new Error("ledger is read-only"); },
 } as unknown as LearnedReservation);
 
-test("W1-T9085: the default reservation opens a real learned reservation, named in the spec, and releases it at settle", async () => {
+test("W1-T9085: the default reservation opens a real learned reservation, named in the spec, and releases it at settle inside its private fixture memory store", async () => {
   const child = new FakeChild();
   child.pid = process.pid; // a live pid, so the real reservation can bind its root
-  const { launched } = await fakeStart("default-reserve", { reserve: undefined, spawn: () => child as never });
+  const { fx, launched } = await fakeStart("default-reserve", { reserve: undefined, spawn: () => child as never });
   const spec = readSpec(launched.dir);
   assert.ok(spec.ok && spec.value.reservationId.length > 0, "the spec names the reservation the real default opened");
   writeStatus(launched.dir, status(launched.runId, "done", { result: RESULT }));
   assert.deepEqual(await launched.settled, RESULT);
+  const isolated = join(fx.root, "memory");
+  assert.ok(existsSync(isolated), "the real default used the fixture's memory ledger rather than the shared host ledger");
+  if (process.platform === "linux") {
+    const estimates = join(isolated, "estimates");
+    assert.ok(existsSync(estimates), "the real default created a private learning store");
+    const samples = readdirSync(estimates).filter(name => name.endsWith(".ndjson"))
+      .flatMap(name => readFileSync(join(estimates, name), "utf8").trim().split("\n").filter(Boolean)
+        .map(line => JSON.parse(line) as { c?: string; p?: number }));
+    assert.ok(samples.some(row => row.c === "implement" && typeof row.p === "number" && row.p > 0),
+      "the real sampled fixture measurement remains inspectable in its private store");
+  }
 });
 
 test("W1-T9085: a failing reservation release never hides why the child could not start", async () => {

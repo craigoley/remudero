@@ -959,7 +959,9 @@ watchdog_unchanged_tick() {
   case "$WATCHDOG_INSTALL" in ''|*[!0-9a-f]*) return 1 ;; esac
   if ! WATCHDOG_CONTAINER="$(docker inspect "$container" --format '{{.Id}} {{.State.Status}} {{.RestartCount}} {{.State.StartedAt}}' 2>/dev/null)"; then return 1; fi
   case "$WATCHDOG_CONTAINER" in *' running '*) : ;; *) return 1 ;; esac
-  WATCHDOG_LEDGER_MTIME="$(stat -c '%Y' "$STATE_DIR/state/ledger.ndjson" 2>/dev/null || true)"
+  if WATCHDOG_LEDGER_MTIME="$(stat -c '%Y' "$STATE_DIR/state/ledger.ndjson" 2>/dev/null)"; then :
+  elif WATCHDOG_LEDGER_MTIME="$(stat -f '%m' "$STATE_DIR/state/ledger.ndjson" 2>/dev/null)"; then :
+  else WATCHDOG_LEDGER_MTIME=""; fi
   case "$WATCHDOG_LEDGER_MTIME" in ''|*[!0-9]*) WATCHDOG_LEDGER_MTIME="" ;; esac
   WATCHDOG_PROBE_OK=1
   record="$(cat "$WATCHDOG_SNAPSHOT" 2>/dev/null)" || return 1

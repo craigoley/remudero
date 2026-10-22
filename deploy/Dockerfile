@@ -111,11 +111,11 @@ RUN chmod 0444 /etc/codex/requirements.toml \
 # rather than degrades. procps and lsof back the process sweeps: without them
 # `defaultListCandidates`, `probeIdle` and `defaultGetProcessStartTime` each catch, return empty,
 # and report a healthy-looking result. jq belongs to .github/workflows/ci-gate.yml, which three
-# ci-gate suites extract and run verbatim. Verified in-layer for the same reason REQ 7 is: a
-# missing sandbox binary should fail the build here, not a worker later.
+# ci-gate suites extract and run verbatim; zip/unzip back the coverage-floor archive fixtures.
+# Verified in-layer like REQ 7: missing binaries fail the build here, not a worker later.
 # Why: docs/deploy-image-forensics.md, "RUN apt-get install … procps lsof jq — REQ 8".
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bubblewrap socat procps lsof jq python3 \
+      bubblewrap socat procps lsof jq python3 zip unzip \
  && rm -rf /var/lib/apt/lists/* \
  && bwrap --version \
  && socat -V >/dev/null \
@@ -123,7 +123,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && pgrep --version >/dev/null \
  && lsof -v >/dev/null 2>&1 \
  && jq --version >/dev/null \
- && python3 -I -c "import argparse, contextlib, hashlib, json, os, pathlib, plistlib, pwd, re, shutil, stat, subprocess, sys, tempfile, time, uuid; assert sys.version_info >= (3, 9); print(sys.version)"
+ && python3 -I -c "import argparse, contextlib, hashlib, json, os, pathlib, plistlib, pwd, re, shutil, stat, subprocess, sys, tempfile, time, uuid; assert sys.version_info >= (3, 9); print(sys.version)" \
+ && zip -v >/dev/null \
+ && unzip -v >/dev/null
 # The checks above use `>/dev/null` rather than `| head -1`: `A && B | C` parses as `A && (B | C)`
 # and a pipeline's status is its last stage, so a piped check passes for a missing binary.
 

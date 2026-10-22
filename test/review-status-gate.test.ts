@@ -174,20 +174,22 @@ test("acquireReviewStatusLock: a lock held by a LIVE holder is WAITED ON, not re
   try {
     const lockPath = join(dir, "task.lock");
     const first = await acquireReviewStatusLock(lockPath, { info: { pid: 999999 }, isPidAlive: () => true });
-    let secondAcquired = false;
-    const secondPromise = acquireReviewStatusLock(lockPath, { retryMs: 10, timeoutMs: 2000, isPidAlive: () => true }).then(
-      (h) => {
-        secondAcquired = true;
-        return h;
+    let liveProbes = 0;
+    let yielded = false;
+    // Release at the second real retry, rather than racing a second timer against
+    // the lock deadline when a loaded coverage worker is descheduled.
+    const second = await acquireReviewStatusLock(lockPath, {
+      retryMs: 1, isPidAlive: () => {
+        assert.equal(existsSync(lockPath), true, "the first holder still owns the lock at each probe");
+        if (++liveProbes === 1) queueMicrotask(() => { yielded = true; });
+        if (liveProbes === 2) {
+          assert.equal(yielded, true, "waiting must yield to the lock holder instead of spinning");
+          first.release();
+        }
+        return true;
       },
-    );
-    // Give the retry loop a couple of cycles to prove it is genuinely waiting,
-    // not throwing synchronously.
-    await new Promise((r) => setTimeout(r, 60));
-    assert.equal(secondAcquired, false, "must still be waiting while the first holder is live");
-    first.release();
-    const second = await secondPromise;
-    assert.equal(secondAcquired, true, "acquires once the holder releases");
+    });
+    assert.equal(liveProbes, 2, "a live holder must cause an actual wait and retry before acquisition");
     second.release();
   } finally {
     rmSync(dir, { recursive: true, force: true });

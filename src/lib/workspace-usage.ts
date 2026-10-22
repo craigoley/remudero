@@ -35,7 +35,7 @@ export function pinWorkspaceScratchRoot(path: string): WorkspaceScratchRoot {
       (process.getuid && st.uid !== process.getuid())) throw new Error("scratch root is not a private owned directory");
   return { path: canonical, dev: st.dev, ino: st.ino, uid: st.uid };
 }
-export const GENERATED_WORKSPACE_ROOTS = ["coverage", "dist", ".cache", "test-results", "playwright-report", "node_modules/.cache"] as const;
+export const GENERATED_WORKSPACE_ROOTS = ["coverage", "dist", ".cache", ".next/cache", ".turbo", "test-results", "playwright-report", "node_modules/.cache"] as const;
 
 function dependencyMethod(root: string): WorkspaceUsageSample["dependencyMethod"] {
   try {

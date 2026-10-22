@@ -104,6 +104,7 @@ test("W1-T5692: triggered suite registrations expose executable scripts and leav
     assert.ok(!ciOnly.includes(member.testFile));
   }
   assert.deepEqual(precheck.PRECHECK_TRIGGERED_SUITES.map((member: { testFile: string }) => member.testFile), [
+    "test/ci/gates/no-draft-census-startup.test.ts",
     ...STEPS, ENV, ERROR,
     "test/cycle-ratchet.test.ts",
     "test/source-size-baseline-is-enforced.test.ts",

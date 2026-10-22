@@ -36,7 +36,17 @@ function census(t: TestContext, repo: ReturnType<typeof declaringBranch>) {
   const lines: string[] = [];
   t.mock.method(console, "error", (...args: unknown[]) => lines.push(args.join(" ")));
   t.mock.method(console, "log", (...args: unknown[]) => lines.push(args.join(" ")));
-  const status = main(["--root", repo.dir, "--base", "main"], { admitted: () => [] });
+  const childRuns: string[][] = [];
+  const status = main(["--root", repo.dir, "--base", "main"], {
+    admitted: () => [],
+    // This miniature Git tree has no startup suite; its real runner has separate controls.
+    runSuites: ({ root, files }: { root: string; files: string[] }) => {
+      assert.equal(root, repo.dir);
+      childRuns.push(files);
+      return [];
+    },
+  });
+  assert.deepEqual(childRuns, [["test/ci/gates/no-draft-census-startup.test.ts"]]);
   return { status, lines };
 }
 

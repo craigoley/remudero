@@ -59,14 +59,46 @@ export function requireMacAuthorCapacity(root, stage, readAdmission = readMacAut
   return {stage, ...admission};
 }
 
+/** Wait only for a not-yet-started phase in this invocation. No check is retried,
+ * capacity threshold changed, foreign process controlled or new lease acquired. */
+export const MAC_AUTHOR_PHASE_WAIT_MS = 120_000;
+const pauseAdmission = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+export function waitForMacAuthorCapacity(root, stage, readAdmission = readMacAuthorAdmission,
+  {waitBoundMs = MAC_AUTHOR_PHASE_WAIT_MS, pollMs = 2000, now = () => performance.now(),
+    pause = pauseAdmission, refresh = () => {}} = {}) {
+  if (!Number.isSafeInteger(waitBoundMs) || waitBoundMs < 0 || waitBoundMs > MAC_AUTHOR_PHASE_WAIT_MS ||
+      !Number.isSafeInteger(pollMs) || pollMs < 1 || pollMs > 2000)
+    throw new TypeError('invalid bounded author phase admission wait');
+  const started = now();
+  if (!Number.isFinite(started)) throw new TypeError('invalid monotonic admission clock');
+  const observations = [];
+  let previous = started;
+  // The probe count is bounded even if an injected clock or pause never advances.
+  const maxReads = Math.ceil(waitBoundMs / pollMs) + 1;
+  for (let read = 0; read < maxReads; read++) {
+    const admission = readAdmission(root), at = now();
+    if (!Number.isFinite(at) || at < previous) throw new TypeError('invalid monotonic admission clock');
+    previous = at;
+    const waitedMs = at - started;
+    const result = {stage, ...admission, waitBoundMs, waitedMs, observations: [...observations]};
+    if (admission.state === 'admitted' || admission.state === 'not-applicable') return result;
+    observations.push({waitedMs, state: admission.state, reasons: admission.reasons ?? []});
+    if (waitedMs >= waitBoundMs || read + 1 === maxReads)
+      throw new MacAuthorCapacityRefusal(stage, {...admission, waitBoundMs, waitedMs, observations});
+    refresh();
+    pause(Math.min(pollMs, waitBoundMs - waitedMs));
+  }
+}
+
 /** The CLI boundary is guarded; direct main() fixtures remain explicit algorithm tests.
  * --help/--dry-run are read-only and never acquire a slot or start static/test work. */
 export function guardedAuthorEntry(argv, {root, readAdmission = readMacAuthorAdmission,
-  runAuthor, reportRefusal = reportMacAuthorRefusal} = {}) {
+  runAuthor, reportRefusal = reportMacAuthorRefusal, phaseWaitMs = MAC_AUTHOR_PHASE_WAIT_MS} = {}) {
   if (argv.some(arg => ['--help', '-h', '--dry-run'].includes(arg))) return runAuthor(argv);
   const admission = readAdmission(root);
   if (admission.state === 'admitted' || admission.state === 'not-applicable')
-    return runAuthor(argv, {admitHost: stage => requireMacAuthorCapacity(root, stage, readAdmission)});
+    return runAuthor(argv, {admitHost: (stage, options) => waitForMacAuthorCapacity(root, stage, readAdmission,
+      {waitBoundMs: phaseWaitMs, refresh: options?.refresh})});
   reportRefusal(root, admission);
   return 3;
 }

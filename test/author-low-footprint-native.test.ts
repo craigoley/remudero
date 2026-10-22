@@ -1,3 +1,4 @@
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import assert from 'node:assert/strict';
 import {existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -5,16 +6,22 @@ import {join} from 'node:path';
 import {test} from 'node:test';
 
 const subject = '#scripts/lib/author-low-footprint.mjs';
-const {createBoundedAuthorScratch, lowFootprintSandbox, nativeAuthorCommand} = await import(subject) as {
+type LowFootprintModule = {
   createBoundedAuthorScratch: (bytes: number, options?: object) => {
     dir: string; volume: string; writableCapacityBytes: number; release: () => void;
   };
   lowFootprintSandbox: (path: string) => string;
   nativeAuthorCommand: (file: string, args: string[], options?: object) => string;
 };
+async function requiredLowFootprint(): Promise<LowFootprintModule> {
+  assert.ok(existsSync(join(REPO_ROOT, 'scripts/lib/author-step-resources.mjs')),
+    'this source tree must contain the low-footprint native resource dependency');
+  return await import(subject) as LowFootprintModule;
+}
 
 test('native low-footprint volume enforces capacity and its sandbox refuses escaped writes and installs',
-  {skip: process.platform !== 'darwin'}, t => {
+  {skip: process.platform !== 'darwin'}, async t => {
+    const {createBoundedAuthorScratch, lowFootprintSandbox, nativeAuthorCommand} = await requiredLowFootprint();
     const parent = mkdtempSync(join(tmpdir(), 'rmd-lf-native-'));
     let scratch: ReturnType<typeof createBoundedAuthorScratch> | undefined;
     t.after(() => {
@@ -39,8 +46,9 @@ test('native low-footprint volume enforces capacity and its sandbox refuses esca
     assert.equal(existsSync(dir), false);
   });
 
-test('native low-footprint command runs the exact committed files and reports scoped assurance',
+test('native low-footprint command runs the exact committed files and reports scoped assurance and private resource boundaries',
   {skip: process.platform !== 'darwin'}, async t => {
+    await requiredLowFootprint();
     const {makeRuntimeFixture} = await import('#test/helpers/native-runtime-fixture.js');
     const f = makeRuntimeFixture(); t.after(() => f.cleanup());
     const authorPath = '#scripts/preflight-author.mjs';
@@ -59,11 +67,18 @@ test('native low-footprint command runs the exact committed files and reports sc
     assert.deepEqual(receipt.files, ['test/a.test.ts']);
     assert.equal(receipt.tests.judge.complete, true);
     assert.equal(receipt.cleanup, 'closed-and-removed');
+    assert.equal(receipt.scratchResources.volumeAttribution, 'separate-filesystem-root');
+    assert.equal(receipt.scratchResources.childClosureProven, true);
+    assert.equal(typeof receipt.scratchResources.retainedVolumeUsedBytesAtChildClosure, 'number');
+    assert.equal(receipt.scratchResources.physicalReclaimedBytes, null);
+    assert.equal(receipt.tests.resources.workloadPeakBytes, null);
+    assert.ok(receipt.tests.resources.observerMaxRSSBytes > 0);
     assert.equal(existsSync(join(f.dir, 'coverage/preflight-author.json')), false);
   });
 
 test('native low-footprint command refuses failing and ghost suites without fallback',
   {skip: process.platform !== 'darwin'}, async t => {
+    await requiredLowFootprint();
     const {makeRuntimeFixture} = await import('#test/helpers/native-runtime-fixture.js');
     const f = makeRuntimeFixture(true); t.after(() => f.cleanup());
     const authorPath = '#scripts/preflight-author.mjs';

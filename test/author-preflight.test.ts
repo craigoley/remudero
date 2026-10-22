@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { getPriority } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -131,6 +131,71 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
   assert.deepEqual(receipt.gitHistory, { state: 'complete' });
+});
+
+test('author preflight refuses a real freshly fetched main conflict before selecting or running work', () => {
+  const f = fixture();
+  const base = f.git('rev-parse', 'main');
+  const head = f.git('rev-parse', 'HEAD');
+  f.git('checkout', 'main');
+  writeFileSync(join(f.root, 'src/leaf.ts'), 'export const value = 3;\n');
+  f.git('add', '.'); f.git('commit', '-m', 'fix: main advanced after earlier admission');
+  const movedBase = f.git('rev-parse', 'HEAD');
+  f.git('checkout', 'run-unfiled-author-fixture');
+  let selections = 0;
+  const select = () => { selections++; return { fullRun: false, suites: ['test/leaf.test.ts'] }; };
+  assert.equal(mod.main([], { root: f.root, select }), 1);
+  const refused = f.receipt();
+  assert.equal(refused.verdict, 'refused');
+  assert.equal(refused.baseSha, movedBase, 'admission uses this invocation\'s actual fetch');
+  assert.equal(refused.mergeCompatibility.state, 'conflict');
+  assert.equal(refused.mergeCompatibility.exitCode, 1);
+  assert.match(refused.mergeCompatibility.stdout, /CONFLICT.*src\/leaf\.ts/);
+  assert.equal(selections, 0);
+  assert.deepEqual(refused.steps, []);
+  assert.deepEqual(refused.suites, []);
+  assert.equal(refused.testSlot, undefined);
+  assert.equal(f.git('rev-parse', 'HEAD'), head);
+  assert.equal(f.git('status', '--porcelain'), '');
+  f.git('update-ref', 'refs/heads/main', base);
+  assert.equal(mod.main([], { root: f.root, select }), 0,
+    'positive control: a genuinely compatible restored base reaches real native work');
+  const positive = f.receipt();
+  assert.equal(positive.verdict, 'passed');
+  assert.equal(positive.mergeCompatibility.state, 'compatible');
+  assert.match(positive.mergeCompatibility.tree, /^[a-f0-9]{40}$/);
+  assert.equal(selections, 1);
+  assert.deepEqual(positive.steps.map((step: { ok: boolean }) => step.ok), [true, true, true]);
+  assert.equal(f.git('rev-parse', 'HEAD'), head);
+  assert.equal(f.git('status', '--porcelain'), '');
+});
+
+test('author preflight preserves merge tool failures and unreadable trees before expensive work', () => {
+  const plausibleTree = 'a'.repeat(40) + '\n';
+  for (const failure of [
+    { status: 128, stdout: plausibleTree, stderr: 'fixture missing object', signal: null },
+    { status: null, stdout: plausibleTree, stderr: '', signal: 'SIGTERM' },
+    { status: null, stdout: plausibleTree, stderr: '', signal: null, error: new Error('fixture merge tool unavailable') },
+    { status: 0, stdout: 'not-a-tree\n', stderr: '', signal: null },
+  ]) {
+    const f = fixture();
+    let selected = false;
+    const spawn = ((file: string, args: string[], opts: Parameters<typeof spawnSync>[2]) =>
+      file === 'git' && args[0] === 'merge-tree'
+        ? { ...failure, pid: 0, output: [] }
+        : spawnSync(file, args, opts)) as typeof spawnSync;
+    assert.equal(mod.main([], { root: f.root, spawn, select: () => { selected = true; return {}; } }), 1);
+    const refused = f.receipt();
+    assert.equal(refused.verdict, 'refused');
+    assert.equal(refused.mergeCompatibility.state, 'unavailable');
+    assert.equal(refused.mergeCompatibility.exitCode, failure.status);
+    assert.equal(refused.mergeCompatibility.signal, failure.signal);
+    assert.equal(refused.mergeCompatibility.error, failure.error?.message ?? null);
+    assert.equal(selected, false);
+    assert.deepEqual(refused.steps, []);
+    assert.equal(refused.testSlot, undefined);
+    assert.match(refused.error, /fetched-base merge compatibility/);
+  }
 });
 
 test('author static preflight lowers real descendant priority and records the actual wrapper', () => {
@@ -408,6 +473,30 @@ test('author preflight preserves native history read failures and signals before
     assert.deepEqual(f.receipt().gitHistory, { state: 'unknown' });
     assert.match(f.receipt().error, /git rev-parse --is-shallow-repository failed/);
     assert.deepEqual(f.receipt().steps, []);
+  }
+});
+
+test('author validation strips inherited provider authentication before real static and test subprocesses', () => {
+  const f = fixture();
+  const keys = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN',
+    'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_ANTHROPIC_AWS'];
+  const saved = keys.map(key => [key, process.env[key]] as const);
+  const check = `import assert from 'node:assert/strict'; for (const key of ${JSON.stringify(keys)}) assert.equal(process.env[key], undefined, key);`;
+  writeFileSync(join(f.root, 'src/run-task.ts'), check);
+  writeFileSync(join(f.root, 'test/leaf.test.ts'), `import { test } from 'node:test'; test('isolated provider environment', () => { ${check.replace("import assert from 'node:assert/strict'; ", '')} }); import assert from 'node:assert/strict';`);
+  f.git('add', '.'); f.git('commit', '-m', 'test: require isolated provider environment');
+  try {
+    for (const key of keys) process.env[key] = 'fixture-auth-not-live';
+    assert.equal(mod.main([], { root: f.root, select: () => ({ fullRun: false, reasons: [], suites: ['test/leaf.test.ts'] }) }), 0);
+    assert.deepEqual(f.receipt().steps.map((step: { ok: boolean }) => step.ok), [true, true, true]);
+    for (const key of keys) assert.equal(process.env[key], 'fixture-auth-not-live', 'the caller retains its environment');
+    const env = mod.authorEnvironment({ GH_TOKEN: 'fixture-git-transport', ANTHROPIC_API_KEY: 'fixture-auth-not-live' });
+    assert.equal(env.GH_TOKEN, 'fixture-git-transport', 'Git fetch transport remains available');
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
   }
 });
 
@@ -736,4 +825,141 @@ test('preflight-author runs the narrow selection and its receipt records both th
   assert.equal(f.receipt().selection, 'full-fallback');
   assert.deepEqual([f.receipt().floorSize, f.receipt().narrowSize], [null, null]);
   assert.equal(f.receipt().suites.length, 4);
+});
+
+
+test('author native phases share an exclusive canonical temporary root and preserve the prior fixed-name ledger', () => {
+  const f = fixture();
+  const parentTemp = join(f.root, 'prior-temp');
+  mkdirSync(parentTemp);
+  const parentLedger = join(parentTemp, 'unused-ledger.ndjson');
+  writeFileSync(parentLedger, 'prior-owner-receipt\n', { mode: 0o444 });
+  const probe = (phase: string) => `
+    import assert from 'node:assert/strict';
+    import { spawnSync } from 'node:child_process';
+    import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { createServer, createConnection } from 'node:net';
+    writeFileSync(join(tmpdir(), 'unused-ledger.ndjson'), 'owned-${phase}\\n');
+    assert.equal(process.env.TMP, tmpdir());
+    assert.equal(process.env.TEMP, tmpdir());
+    assert.notEqual(tmpdir(), ${JSON.stringify(parentTemp)});
+    const nested = mkdtempSync(join(tmpdir(), 'rmd-5-'));
+    const state = join(nested, 'st');
+    const nestedRepo = join(nested, 'repo');
+    mkdirSync(state); mkdirSync(nestedRepo);
+    try {
+      // Census itself runs without a TS loader. Exercise the real constructor through
+      // the same installed loader used by the native static and affected phases.
+      const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval',
+        'import { coverageScratchDir } from ' + ${JSON.stringify(JSON.stringify(pathToFileURL(join(ROOT, 'src/lib/ci-parity.ts')).href))} + '; console.log(JSON.stringify(coverageScratchDir(process.argv[1])));', nestedRepo],
+        {encoding:'utf8', env:{...process.env, TMPDIR:state, TMP:state, TEMP:state}});
+      assert.equal(child.status, 0, child.stderr);
+      const coverage = JSON.parse(child.stdout);
+      assert.ok(coverage.startsWith(state + '/'), 'nested coverage remains in its owned fixture volume');
+      assert.ok(coverage.length <= 60, 'native nested coverage must fit the existing 60-character scratch bound');
+    } finally {
+      rmSync(nested, {recursive:true,force:true});
+    }
+    const record = (connected) => writeFileSync('coverage/temporary-${phase}.json', JSON.stringify({tmp:tmpdir(), mode:statSync(tmpdir()).mode & 0o777, connected}));
+    if (process.platform === 'win32') record(null);
+    else {
+      const ipc = mkdtempSync(join(tmpdir(), 'rmd-ready-'));
+      const socket = join(ipc, 'gen.sock');
+      const server = createServer();
+      server.listen(socket, () => {
+        const client = createConnection(socket);
+        client.on('connect', () => {client.destroy(); server.close(() => {rmSync(ipc, {recursive:true,force:true}); record(true);});});
+      });
+    }
+  `;
+  writeFileSync(join(f.root, 'scripts/census-precheck.mjs'), probe('census'));
+  writeFileSync(join(f.root, 'src/run-task.ts'), probe('static'));
+  writeFileSync(join(f.root, 'test/leaf.test.ts'), `import { test } from 'node:test'; ${probe('affected')} test('real temporary path', () => {});`);
+  f.git('add', '.'); f.git('commit', '-m', 'test: real phases require an owned temporary root');
+  const previous = process.env.TMPDIR;
+  try {
+    process.env.TMPDIR = parentTemp;
+    assert.equal(mod.main([], { root: f.root, select: () => ({fullRun:false, reasons:[], suites:['test/leaf.test.ts']}) }), 0);
+    const first = f.receipt();
+    assert.equal(first.verdict, 'passed');
+    const roots = ['census', 'static', 'affected'].map(phase => JSON.parse(readFileSync(join(f.root, `coverage/temporary-${phase}.json`), 'utf8')).tmp);
+    assert.equal(new Set(roots).size, 1);
+    assert.equal(roots[0], join(f.root, first.fixtureTemporaryRoot));
+    for (const phase of ['census', 'static', 'affected']) {
+      const observed = JSON.parse(readFileSync(join(f.root, `coverage/temporary-${phase}.json`), 'utf8'));
+      assert.equal(observed.mode, 0o700);
+      if (process.platform !== 'win32') assert.equal(observed.connected, true, 'real Unix fixture path remains usable');
+    }
+    assert.equal(first.fixtureTemporaryCleanup, 'removed');
+    assert.equal(existsSync(roots[0]), false, 'the owned temporary root is removed after native phases close');
+    assert.equal(readFileSync(parentLedger, 'utf8'), 'prior-owner-receipt\n');
+    assert.equal(process.env.TMPDIR, parentTemp, 'the caller keeps its configured root');
+    assert.equal(mod.main([], { root: f.root, select: () => ({fullRun:false, reasons:[], suites:['test/leaf.test.ts']}) }), 0);
+    assert.notEqual(f.receipt().fixtureTemporaryRoot, first.fixtureTemporaryRoot, 'distinct invocations cannot share fixed fixture names');
+    assert.equal(readFileSync(parentLedger, 'utf8'), 'prior-owner-receipt\n');
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+  }
+});
+
+
+test('author refuses a real temporary-root cleanup failure after successful native phases', () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'scripts/census-precheck.mjs'), `
+    import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'; import { join } from 'node:path'; import { tmpdir } from 'node:os';
+    const blocked = join(tmpdir(), 'blocked-cleanup');
+    mkdirSync(blocked, {mode:0o700});
+    writeFileSync(join(blocked, 'retained-receipt'), 'owned cleanup blocker\\n');
+    chmodSync(blocked, 0);
+    console.log('census completed');
+  `);
+  f.git('add', '.'); f.git('commit', '-m', 'test: preserve actual cleanup refusal');
+  let temporary: string | undefined;
+  try {
+    assert.equal(mod.main([], {root:f.root, select:() => ({fullRun:false,reasons:[],suites:['test/leaf.test.ts']})}), 1);
+    const row = f.receipt();
+    temporary = resolve(f.root, row.fixtureTemporaryRoot);
+    assert.deepEqual(row.steps.map((s: {ok:boolean}) => s.ok), [true,true,true]);
+    assert.equal(row.verdict, 'refused');
+    assert.match(row.error, /EACCES|EPERM|ENOTEMPTY/);
+    assert.ok(row.error.includes(temporary), 'the actual cleanup refusal identifies its owned root');
+    assert.equal(row.fixtureTemporaryCleanup, undefined, 'cleanup refusal cannot report removed');
+  } finally {
+    if (!temporary) {
+      const row = f.receipt();
+      if (typeof row.fixtureTemporaryRoot === 'string') temporary = resolve(f.root, row.fixtureTemporaryRoot);
+    }
+    if (temporary && existsSync(temporary)) {
+      const blocked = join(temporary, 'blocked-cleanup');
+      if (existsSync(blocked)) chmodSync(blocked, 0o700);
+      rmSync(temporary, {recursive:true,force:true});
+    }
+  }
+});
+
+
+test('workflow install configuration is verified without an installed browser', () => {
+  const f = gitRepo({ kind: 'workflow-browserless' });
+  try {
+    const title = 'W1-T1027: every playwright-carrying job exists and has exactly one install step';
+    const suite = 'test/workflow-playwright-install.test.ts';
+    assert.ok(existsSync(join(ROOT, suite)), 'the real physical workflow suite must exist');
+    const result = spawnSync(process.execPath, [
+      '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', '--test',
+      '--test-reporter=tap', '--test-reporter-destination=stdout',
+      '--test-name-pattern', '^' + title + '$', suite,
+    ], { cwd: ROOT, encoding: 'utf8', timeout: 30_000, env: {
+      ...process.env, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: undefined,
+      PLAYWRIGHT_BROWSERS_PATH: join(f.dir, 'deliberately-uninstalled-browser'),
+    } });
+    const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+    assert.equal(result.status, 0, output);
+    assert.ok(output.includes('# Subtest: ' + title), 'a wrapper or ghost file cannot qualify this control');
+    assert.match(output, /^# tests 1$/m);
+    assert.match(output, /^# pass 1$/m);
+    assert.match(output, /^# fail 0$/m);
+    assert.match(output, /^# skipped 0$/m);
+  } finally { f.cleanup(); }
 });

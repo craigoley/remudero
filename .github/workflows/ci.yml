@@ -75,8 +75,10 @@ concurrency:
 jobs:
   squash-trailer-gate:
     name: squash-trailer-gate
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -87,9 +89,44 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - name: Install (clean, from lockfile)
+        if: github.event_name == 'pull_request'
         run: npm ci
       - name: Refuse trailer credit added by any branch commit
-        run: node --import tsx scripts/acceptance-author-gate.mjs --commit-trailer-only
+        run: |
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || exit 0
+          node --import tsx scripts/acceptance-author-gate.mjs --commit-trailer-only
+      - name: Pin one verified historical coverage floor before any narrowing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/coverage-floor.mjs select coverage-floor-pin
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$(node scripts/coverage-floor.mjs mode coverage-floor-pin)" = "eligible" ]; then
+            git diff --name-only HEAD^1...HEAD > changed-files.txt
+            git diff -U0 HEAD^1...HEAD > "${RUNNER_TEMP}/affected.diff" 2>/dev/null || : > "${RUNNER_TEMP}/affected.diff"
+            node --import tsx -e '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const root = process.env.GITHUB_WORKSPACE || process.cwd();
+              const [changedPath, diffPath, outPath] = process.argv.slice(1);
+              const changed = readFileSync(changedPath, "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
+              const mod = await import(root + "/src/lib/affected-suites.ts");
+              const { callerReachableSuites } = await import(root + "/src/lib/ci-parity.ts");
+              const { defaultPreflightSpawn } = await import(root + "/src/lib/commit-message.ts");
+              const symbols = () => mod.changedSymbols(readFileSync(diffPath, "utf8"), (p) => readFileSync(root + "/" + p, "utf8"));
+              const sel = mod.affectedSelectionOrFull(changed, () => mod.readAffectedSuitesInput(root, changed,
+                { symbolSuites: callerReachableSuites(symbols(), root, defaultPreflightSpawn).suites }));
+              const narrow = sel.fullRun ? [] : sel.narrow ?? [];
+              writeFileSync(outPath, narrow.length === 0 ? "full\n" : narrow.join("\n") + "\n");
+              console.log("W1-T5705: live coverage selection -> " + (narrow.length === 0 ? "FULL: " + (sel.reasons[0] ?? "no narrow set") : narrow.length + " narrow suite(s)"));
+            ' changed-files.txt "${RUNNER_TEMP}/affected.diff" coverage-narrow-suites.txt || echo "full" > coverage-narrow-suites.txt
+            node scripts/coverage-floor.mjs finalize coverage-floor-pin coverage-narrow-suites.txt
+          fi
+      - name: Upload the single workflow admission decision
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-floor-pin-${{ github.run_attempt }}
+          path: coverage-floor-pin
+          retention-days: 1
+          if-no-files-found: error
 
   ci:
     name: ci-shard (${{ matrix.shard }}/8)
@@ -218,7 +255,7 @@ jobs:
             echo "CI sharding: typecheck runs once on shard 1; shard ${{ matrix.shard }} skips the duplicate invocation."
             exit 0
           fi
-          npx tsc -p tsconfig.json --noEmit
+          npm run typecheck
       - name: Determine this diff's fast-lane class (W1-T2428 — the `ci` half)
         # A deliberate second copy of the `coverage-ratchet` job's classify step, never a shared
         # output: `needs:` would chain two parallel jobs and cost more than the skip saves.
@@ -354,35 +391,11 @@ jobs:
             cp merge-group-suites.txt affected-suites-selected.txt
             CLASS="AFFECTED"
           fi
-          # W1-T4406: ONE FLAG (this workflow's own top-level env; default "0"). Until the W1-T4404
-          # shadow record earns the flip, this block never fires and a pull_request SOURCE diff
-          # takes the unchanged W1-T3207 skip below, byte-for-byte. Flipped to "1", it runs the
-          # live W1-T4404 selector (src/lib/affected-suites.ts — the SAME pure function `rmd
-          # preflight` shares) instead of deferring to coverage-ratchet, which is the mechanism
-          # that actually moves the run off every PR push. A fullRun verdict (a config, lockfile,
-          # workflow or test-helper change the selector does not model) leaves CLASS untouched, so
-          # it falls through to the ordinary full fast tier below, unmodified.
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
-            node --import tsx -e '
-              import { readFileSync, writeFileSync } from "node:fs";
-              const root = process.env.GITHUB_WORKSPACE || process.cwd();
-              const changed = readFileSync(process.argv[1], "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
-              const mod = await import(root + "/src/lib/affected-suites.ts");
-              const sel = mod.affectedSelectionOrFull(changed, () => mod.readAffectedSuitesInput(root, changed));
-              writeFileSync(process.argv[2], sel.fullRun ? "full\n" : sel.suites.map((s) => s + "\n").join(""));
-              console.log("W1-T4406: live selection for " + changed.length + " changed file(s) -> " + (sel.fullRun ? "FULL: " + sel.reasons[0] : sel.suites.length + " suite(s)"));
-            ' changed-files.txt affected-suites-selected.txt || echo "full" > affected-suites-selected.txt
-            if [ "$(head -n 1 affected-suites-selected.txt 2>/dev/null || true)" != "full" ]; then
-              CLASS="AFFECTED"
-            fi
-          fi
           if [ "$CLASS" != "SOURCE" ]; then
             COUNT=0
             if [ "$CLASS" = "TEST_ONLY" ]; then
               SUITES="$(tail -n +2 test-only-run.txt)"
             elif [ "$CLASS" = "AFFECTED" ]; then
-              # W1-T4406: the live selector's own suite list, run through the exact same
-              # duration-balanced candidate-shard machinery the plan-reading lane below uses.
               SUITES="$(cat affected-suites-selected.txt 2>/dev/null || true)"
             else
               SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt)" || SUITES=""
@@ -422,9 +435,9 @@ jobs:
           # names the tokens; this comment must not, because a comment inside a run body IS part of
           # the body the census reads.) It was briefly written as two adjacent string literals to
           # dodge the census by text, which is what prompted narrowing the rule instead.
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" != "1" ]; then
-            echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on PR source diffs."
-            echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented full-suite run for this PR." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ]; then
+            echo "W1-T3207: coverage-ratchet owns the single instrumented test run; ci skips the quieter second harness on PR source diffs."
+            echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented test run for this PR." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "$CLASS" = "SOURCE" ]; then
@@ -1623,7 +1636,7 @@ jobs:
     # same band as `ci`, for its own reason and at its own number. PR #9943's shard 1 reached the
     # former 39m ceiling during Test with coverage (37m36s in that step, after setup) before the
     # suite completed. Give the measured long tail 49m; with the 20m aggregator, ci-gate's 75m
-    # WAIT_CAP_SECONDS leaves six minutes of scheduling room. FALSIFIER:
+    # WAIT_CAP_SECONDS leaves five minutes after the 1m ledger dependency. FALSIFIER:
     # test/workflow-job-timeouts.test.ts enforces that full dependency path and the margin.
     timeout-minutes: 49
     steps:
@@ -1763,6 +1776,22 @@ jobs:
           done
           rm -f "$MAP_DIR/test-impact-map.json"
           echo "W1-T6107: no coverage-nightly impact map could be fetched; the shadow selector records no impact arm."
+      # This wait and download are INSIDE the unchanged 49m shard budget. The independent
+      # 10m producer overlaps checkout/install/browser setup; it is not a serial needs edge.
+      - name: Await the current attempt's immutable coverage pin within the shard budget
+        id: coverage-pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RMD_COVERAGE_RUN_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          PIN_ID="$(node scripts/coverage-floor.mjs wait-pin)"
+          echo "artifact_id=${PIN_ID}" >> "$GITHUB_OUTPUT"
+      - name: Download the single pinned coverage admission decision
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.coverage-pin.outputs.artifact_id }}
+          path: coverage-floor-pin
+          digest-mismatch: error
       - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
         # W1-T220 defect 1: a `spec` reporter to stdout runs alongside the `lcov` reporter pair.
         # With `--test-reporter=lcov` alone, a failing run's CI log carried zero test output — just
@@ -1825,32 +1854,13 @@ jobs:
           # carries a YAML conditional, so a failing shard makes the stable aggregator refuse.
           SELECTION="all"
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
-            git diff -U0 HEAD^1...HEAD > "${RUNNER_TEMP}/affected.diff" 2>/dev/null || : > "${RUNNER_TEMP}/affected.diff"
-            node --import tsx -e '
-              import { readFileSync, writeFileSync } from "node:fs";
-              const root = process.env.GITHUB_WORKSPACE || process.cwd();
-              const [changedPath, diffPath, outPath] = process.argv.slice(1);
-              const changed = readFileSync(changedPath, "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
-              const mod = await import(root + "/src/lib/affected-suites.ts");
-              const { callerReachableSuites } = await import(root + "/src/lib/ci-parity.ts");
-              const { defaultPreflightSpawn } = await import(root + "/src/lib/commit-message.ts");
-              const symbols = () => mod.changedSymbols(readFileSync(diffPath, "utf8"), (p) => readFileSync(root + "/" + p, "utf8"));
-              const sel = mod.affectedSelectionOrFull(changed, () => mod.readAffectedSuitesInput(root, changed,
-                { symbolSuites: callerReachableSuites(symbols(), root, defaultPreflightSpawn).suites }));
-              const narrow = sel.fullRun ? [] : sel.narrow ?? [];
-              writeFileSync(outPath, narrow.length === 0 ? "full\n" : narrow.join("\n") + "\n");
-              console.log("W1-T5705: live coverage selection -> " + (narrow.length === 0 ? "FULL: " + (sel.reasons[0] ?? "no narrow set") : narrow.length + " narrow suite(s)"));
-            ' changed-files.txt "${RUNNER_TEMP}/affected.diff" coverage-narrow-suites.txt || echo "full" > coverage-narrow-suites.txt
-            if [ "$(head -n 1 coverage-narrow-suites.txt 2>/dev/null || true)" != "full" ] \
-              && node scripts/test-tier-manifest.mjs --select-candidates coverage-narrow-suites.txt --shard ${{ matrix.shard }}/8 --base HEAD^1 \
-                > coverage-test-files.txt 2> coverage-shard-selection.log && grep -q . coverage-test-files.txt; then
-              SELECTION="narrow"
-            else
-              cat coverage-shard-selection.log 2>/dev/null || true
-              echo "W1-T5705: no usable narrow selection for this shard; running its full --select-all shard."
+            SELECTION="$(node scripts/coverage-floor.mjs mode coverage-floor-pin)"
+            if [ "$SELECTION" = "narrow" ]; then
+              node scripts/coverage-floor.mjs shard coverage-floor-pin ${{ matrix.shard }} > coverage-test-files.txt
             fi
           fi
           echo "$SELECTION" > coverage-selection.txt
+          echo "COVERAGE-SELECTION: $SELECTION"
           # W1-T5923: weigh the split on this lane's own instrumented durations.
           if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
             --instrumented-manifest scripts/test-tier-coverage-manifest.json --snapshot coverage/ledger-snapshot.manifest \
@@ -1881,6 +1891,7 @@ jobs:
             2>&1 | tee "${RUNNER_TEMP}/coverage-test-output.log"
           TEST_EXIT="${PIPESTATUS[0]}"
           set -e
+          printf '%s\n' "$TEST_EXIT" > coverage-test-exit.txt
           FLAKE_RETRY_DIR="${RUNNER_TEMP}/flake-retry"
           mkdir -p "$FLAKE_RETRY_DIR"
           grep -E '^FLAKE-RETRY' "${RUNNER_TEMP}/coverage-test-output.log" > "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log"
@@ -1927,6 +1938,8 @@ jobs:
             mkdir -p coverage-artifact/raw
             node --expose-internals scripts/coverage-merge-ratchet.mjs --premap-output coverage-artifact/raw coverage/raw
             cp coverage/lcov.info coverage-artifact/lcov.info
+            cp coverage-test-files.txt coverage-artifact/suites
+            cp coverage-test-exit.txt coverage-artifact/test-exit
           else
             echo "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/skipped
           fi
@@ -2080,6 +2093,11 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Download the single pinned coverage admission decision
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-floor-pin-${{ github.run_attempt }}
+          path: coverage-floor-pin
       - name: Download coverage shards
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -2210,27 +2228,18 @@ jobs:
             echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet** (no src/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          if grep -qsx narrow coverage-shards/coverage-shard-*/selection; then
-            LCOV=""
-            { gh run list --workflow coverage-nightly.yml --branch main --status completed --limit 5 --json databaseId,createdAt \
-                --jq '.[] | "\(.createdAt) \(.databaseId) coverage-nightly"' || true
-              gh run list --workflow ci.yml --event merge_group --status completed --limit 5 --json databaseId,createdAt \
-                --jq '.[] | "\(.createdAt) \(.databaseId) coverage-merged"' || true; } | sort -r > floor-runs.txt
-            while read -r _ RUN ARTIFACT; do
-              if gh run download "$RUN" -n "$ARTIFACT" -D "floor-${RUN}" && [ -s "floor-${RUN}/lcov.info" ]; then
-                LCOV="floor-${RUN}/lcov.info"
-                echo "W1-T5705: this PR ran a narrowed selection; the absolute floor is read from ${ARTIFACT} run ${RUN}."
-                break
-              fi
-            done < floor-runs.txt
-            if [ -z "$LCOV" ]; then
-              echo "::error::W1-T5705: a narrowed selection found no nightly or merge-group lcov to read the absolute floor from; refusing."
-              exit 1
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
+            node scripts/coverage-floor.mjs verify-shards coverage-floor-pin coverage-shards
+            if [ "$(node scripts/coverage-floor.mjs mode coverage-floor-pin)" = "narrow" ]; then
+              node scripts/coverage-ratchet.mjs --lcov coverage-floor-pin/lcov.info --baseline scripts/coverage-baseline.json
+              exit 0
             fi
-            node scripts/coverage-ratchet.mjs --lcov "$LCOV" --baseline scripts/coverage-baseline.json
-            exit 0
           fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -s coverage/lcov.info ]; then
+            mkdir -p coverage-merged-artifact
+            node scripts/coverage-floor.mjs produce coverage-merged-artifact coverage/lcov.info
+          fi
       - name: Stage the merged lcov for the coverage-merged artifact # W1-T2662, for W1-T2661's reader
         run: |
           mkdir -p coverage-merged-artifact

@@ -8,7 +8,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { afterEach, test } from "node:test";
 
 // A NAMESPACE import, deliberately: at the merge base the W1-T6124 exports do not exist, and a named
@@ -190,6 +194,84 @@ test("proofCheckoutGitDirs and proofLinkedModuleRoots read each checkout shape",
   symlinkSync(join(real, "engine", "node_modules"), join(linked, "node_modules"), "dir");
   assert.deepEqual(proofLinkedModuleRoots(linked), [join(real, "install"), join(real, "engine", "node_modules")],
     "a link to a link mounts the middle hop, or the checkout's own link dangles in the sandbox");
+});
+
+test("proof module aliases expose the same read-only install while their parent checkout stays hidden", () => {
+  const root = makeTempDir("proof-module-alias");
+  const parent = join(root, "parent");
+  const cwd = join(root, "proof");
+  const home = join(root, "home");
+  for (const path of [parent, cwd, home]) mkdirSync(path);
+  const install = realpathSync(join(REPO_ROOT, "node_modules"));
+  const alias = join(parent, "node_modules");
+  symlinkSync(install, alias);
+  symlinkSync(alias, join(cwd, "node_modules"));
+  const roots = proofLinkedModuleRoots(cwd);
+  assert.ok(roots.includes(install)); assert.ok(roots.includes(alias));
+  assert.ok(!roots.includes(parent));
+  const argv = proofSandboxArgv({ cwd, home, env: { HOME: parent } });
+  assert.ok(argv.some((value, i) => value === "--ro-bind" && argv[i + 1] === alias && argv[i + 2] === alias));
+  assert.ok(!argv.some((value, i) => ["--bind", "--ro-bind"].includes(value) && argv[i + 1] === parent));
+  assert.ok(!argv.some((value, i) => value === "--ro-bind" && argv[i + 2] === join(cwd, "node_modules")));
+});
+
+test("proof module aliases already inside a visible bind are retained without mounting over a symlink", () => {
+  const root = makeTempDir("proof-visible-module-alias");
+  const cwd = join(root, "proof");
+  const home = join(root, "home");
+  for (const path of [cwd, home]) mkdirSync(path);
+  const install = realpathSync(join(REPO_ROOT, "node_modules"));
+  const alias = join(home, "node_modules");
+  symlinkSync(install, alias); symlinkSync(alias, join(cwd, "node_modules"));
+  const argv = proofSandboxArgv({ cwd, home, env: { HOME: home } });
+  assert.ok(argv.some((value, i) => value === "--bind" && argv[i + 2] === home));
+  assert.ok(!argv.some((value, i) => value === "--ro-bind" && argv[i + 2] === alias));
+});
+
+test("proof module aliases refuse an actual symlink target changed during inspection", () => {
+  const root = makeTempDir("proof-changing-module-alias");
+  const cwd = join(root, "proof");
+  const install = join(root, "install");
+  const other = join(root, "other-install");
+  const parent = join(root, "parent");
+  for (const path of [cwd, install, other, parent]) mkdirSync(path);
+  const alias = join(parent, "node_modules");
+  symlinkSync(install, alias); symlinkSync(alias, join(cwd, "node_modules"));
+  const original = fs.readlinkSync;
+  try {
+    fs.readlinkSync = ((path: fs.PathLike) => {
+      const target = original(path);
+      if (path === join(cwd, "node_modules")) { fs.unlinkSync(alias); symlinkSync(other, alias); }
+      return target;
+    }) as typeof fs.readlinkSync;
+    syncBuiltinESMExports();
+    assert.throws(() => proofLinkedModuleRoots(cwd), /dependency symlink target changed during inspection/);
+  } finally {
+    fs.readlinkSync = original;
+    syncBuiltinESMExports();
+  }
+});
+
+test("on Linux with bwrap, an indirect module alias loads tsx without exposing or writing its parent", async (t) => {
+  const status = probeProofSandbox();
+  if (status.mode !== "bwrap") { t.skip(`bwrap sandbox unavailable here: ${status.reason}`); return; }
+  const root = makeTempDir("proof-linux-module-alias");
+  const parent = join(root, "parent");
+  const cwd = join(root, "proof");
+  for (const path of [parent, cwd]) mkdirSync(path);
+  const install = realpathSync(join(REPO_ROOT, "node_modules"));
+  const alias = join(parent, "node_modules");
+  symlinkSync(install, alias); symlinkSync(alias, join(cwd, "node_modules"));
+  writeFileSync(join(parent, "marker"), "synthetic private parent");
+  writeFileSync(join(cwd, "package.json"), '{"type":"module"}');
+  const probe = `import { existsSync, writeFileSync } from 'node:fs';
+    let write; try { writeFileSync(${JSON.stringify(join(alias, ".rmd-alias-write"))}, 'x'); write = 'allowed'; } catch (error) { write = error.code; }
+    console.log(JSON.stringify({ loaded: true, parentVisible: existsSync(${JSON.stringify(join(parent, "marker"))}), write }));`;
+  setProofSandboxForTests(status);
+  for (const spawn of [defaultProofSpawner, defaultAsyncProofSpawner]) {
+    const result = JSON.parse(await spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], cwd, 30_000));
+    assert.deepEqual(result, { loaded: true, parentVisible: false, write: "EROFS" });
+  }
 });
 
 test("a sandbox that cannot start reads as not_executable, never a pass or a failure", async () => {

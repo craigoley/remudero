@@ -245,7 +245,7 @@ test("W1-T2769: checkCliFreshness in a spawned child still REFUSES a diverged ch
     // earlier check, never reaching the fake `git` dep this test constructs at all — masking the
     // one path this test exists to prove, only when run in CI. Clearing both here isolates the
     // guard-var behavior under test from that unrelated, already-correct short-circuit.
-    const r = defaultPreflightSpawn("npx", ["tsx", "-e", childScript], {
+    const r = defaultPreflightSpawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childScript], {
       cwd: REPO_ROOT,
       env: { ...process.env, CI: "", GITHUB_ACTIONS: "" },
     });

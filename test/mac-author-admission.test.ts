@@ -8,14 +8,18 @@ type Admission = {state: string; minimumFreeBytes: number; workspaceFreeBytes: n
 type AdmissionOptions = {platform?: string; scratch?: string; statfs?: Function; spawn?: Function};
 type AuthorEntryOptions = {root: string; readAdmission: () => {state: string};
   runAuthor: (argv: string[], deps: {admitHost: (stage: string) => unknown}) => number;
-  reportRefusal?: () => void};
+  reportRefusal?: () => void; phaseWaitMs?: number};
 const admissionModule = '#scripts/lib/mac-author-admission.mjs';
 const {guardedAuthorEntry, MAC_AUTHOR_FREE_RESERVE_BYTES, MacAuthorCapacityRefusal,
-  macPressureState, readMacAuthorAdmission} = await import(admissionModule) as {
+  macPressureState, readMacAuthorAdmission, waitForMacAuthorCapacity, MAC_AUTHOR_PHASE_WAIT_MS} = await import(admissionModule) as {
   MAC_AUTHOR_FREE_RESERVE_BYTES: number;
+  MAC_AUTHOR_PHASE_WAIT_MS: number;
+  waitForMacAuthorCapacity: (root: string, stage: string, reader?: () => {state: string; reasons?: string[]},
+    options?: {waitBoundMs?: number; pollMs?: number; now?: () => number; pause?: (ms: number) => void; refresh?: () => void}) =>
+    {state: string; waitedMs: number; observations: unknown[]};
   macPressureState: (text: string) => string;
   readMacAuthorAdmission: (root: string, options?: AdmissionOptions) => Admission;
-  MacAuthorCapacityRefusal: new (stage: string, admission: {state: string; pressure?: string}) => Error & {stage: string};
+  MacAuthorCapacityRefusal: new (stage: string, admission: {state: string; pressure?: string}) => Error & {stage: string; admission: {state: string; pressure?: string; waitedMs?: number; reasons?: string[]}};
   guardedAuthorEntry: (argv: string[], options: AuthorEntryOptions) => number;
 };
 
@@ -88,7 +92,7 @@ test('non-Mac author admission leaves existing Linux and hosted policies unchang
 
 test('Mac admission is freshly checked after slot waiting and before a later heavy phase', () => {
   let reads = 0;
-  assert.throws(() => guardedAuthorEntry([], {root: '/w',
+  assert.throws(() => guardedAuthorEntry([], {root: '/w', phaseWaitMs: 0,
     readAdmission: () => ++reads === 1 ? {state: 'admitted'} : {state: 'not-run', reasons: ['changed']},
     runAuthor: (_argv: string[], deps: {admitHost: (stage: string) => unknown}) => {
       deps.admitHost('static-preflight'); return 0;
@@ -131,4 +135,109 @@ test('Mac capacity default seam really reads the native volume and pressure with
   const pressure = spawnSync('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], {encoding: 'utf8', timeout: 2000});
   assert.equal(pressure.status, 0); assert.notEqual(macPressureState(pressure.stdout), 'unknown');
   assert.ok(['normal', 'warning', 'critical'].includes(result.pressure), 'native readings are known, not assumed unchanged across two probes');
+});
+
+
+test('an in-flight author waits for real later admission without starting a refused phase', () => {
+  let clock = 0, refreshes = 0, reads = 0, started = 0;
+  const actual = waitForMacAuthorCapacity('/w', 'static-preflight', () => {
+    assert.equal(started, 0);
+    return ++reads < 3 ? {state: 'not-run', reasons: ['pressure:warning']} : {state: 'admitted'};
+  }, {waitBoundMs: 20, pollMs: 5, now: () => clock, pause: ms => {clock += ms;}, refresh: () => {refreshes++;}});
+  started++;
+  assert.equal(actual.state, 'admitted'); assert.equal(actual.waitedMs, 10);
+  assert.equal(actual.observations.length, 2); assert.equal(refreshes, 2); assert.equal(reads, 3);
+});
+
+test('phase admission wait remains finite and preserves the last refusal without author work', () => {
+  let clock = 0, reads = 0;
+  assert.throws(() => waitForMacAuthorCapacity('/w', 'static-preflight', () => {
+    reads++; return {state: 'not-run', reasons: ['pressure:unknown']};
+  }, {waitBoundMs: 9, pollMs: 5, now: () => clock, pause: ms => {clock += ms;}}), error => {
+    assert.ok(error instanceof MacAuthorCapacityRefusal);
+    assert.equal(error.stage, 'static-preflight');
+    const detail = error.admission;
+    assert.equal(detail.waitedMs, 9); assert.deepEqual(detail.reasons, ['pressure:unknown']);
+    return true;
+  });
+  assert.equal(reads, 3); assert.equal(clock, 9);
+  let frozenReads = 0;
+  assert.throws(() => waitForMacAuthorCapacity('/w', 'affected-tests', () => {
+    frozenReads++; return {state: 'not-run'};
+  }, {waitBoundMs: 2, pollMs: 1, now: () => 0, pause: () => {}}), MacAuthorCapacityRefusal);
+  assert.equal(frozenReads, 3, 'a broken clock/pause cannot create an unbounded observer');
+});
+
+test('the CLI reuses only its live invocation and actual phase lease while waiting', () => {
+  let reads = 0, refreshes = 0, phases = 0;
+  const result = guardedAuthorEntry([], {root: '/w', phaseWaitMs: 100,
+    readAdmission: () => ++reads === 2 ? {state: 'not-run', reasons: ['pressure:warning']} : {state: 'admitted'},
+    runAuthor: (_argv, deps) => {
+      const capacity = (deps.admitHost as (stage: string, options: {refresh: () => void}) => {state: string})(
+        'static-preflight', {refresh: () => {refreshes++;}});
+      assert.equal(capacity.state, 'admitted'); phases++; return 17;
+    }});
+  assert.equal(result, 17); assert.equal(phases, 1); assert.equal(refreshes, 1); assert.equal(reads, 3);
+});
+
+test('phase wait refuses invalid clocks, invalid bounds and lost lease refreshes', () => {
+  assert.equal(MAC_AUTHOR_PHASE_WAIT_MS, 120_000);
+  const refused = () => ({state: 'not-run'});
+  for (const waitBoundMs of [-1, NaN, Infinity, 120_001, 0.5])
+    assert.throws(() => waitForMacAuthorCapacity('/w', 'static-preflight', refused, {waitBoundMs}), TypeError);
+  for (const pollMs of [0, -1, 2001, NaN, 0.5])
+    assert.throws(() => waitForMacAuthorCapacity('/w', 'static-preflight', refused, {pollMs}), TypeError);
+  assert.throws(() => waitForMacAuthorCapacity('/w', 'static-preflight', refused, {now: () => NaN}), TypeError);
+  let clockReads = 0;
+  assert.throws(() => waitForMacAuthorCapacity('/w', 'static-preflight', refused,
+    {now: () => clockReads++ ? -1 : 0}), TypeError);
+  assert.throws(() => waitForMacAuthorCapacity('/w', 'static-preflight', refused,
+    {refresh: () => {throw new Error('lost actual lease');}, pause: () => assert.fail('must not wait after losing ownership')}),
+    /lost actual lease/);
+});
+
+test('the default synchronous phase pause really waits and then admits a fresh observation', () => {
+  let reads = 0;
+  const before = performance.now();
+  const result = waitForMacAuthorCapacity('/w', 'static-preflight', () =>
+    ++reads === 1 ? {state: 'not-run', reasons: ['pressure:warning']} : {state: 'admitted'},
+    {waitBoundMs: 100, pollMs: 1});
+  assert.equal(reads, 2); assert.ok(performance.now() - before >= 1);
+  assert.ok(result.waitedMs >= 1); assert.equal(result.state, 'admitted');
+});
+
+
+test('capacity waiting spends the original deadline before either actual heavy phase starts', async t => {
+  const {makeRuntimeFixture} = await import('#test/helpers/native-runtime-fixture.js');
+  const authorModule = '#scripts/preflight-author.mjs', calibrationModule = '#scripts/calibrate-author-runtime.mjs';
+  const {main} = await import(authorModule) as {main: (argv: string[], options: {root: string;
+    select: () => {fullRun: boolean; suites: string[]; reasons: string[]};
+    admitHost: (stage: string) => {stage: string; state: string}}) => number};
+  const {calibrateAuthorRuntime} = await import(calibrationModule) as {
+    calibrateAuthorRuntime: (options: {root: string}) => {path: string}};
+  for (const stage of ['static-preflight', 'affected-tests']) {
+    const fixture = makeRuntimeFixture(); t.after(() => fixture.cleanup());
+    const profile = calibrateAuthorRuntime({root: fixture.dir});
+    const deadline = Date.now() + 30 * 60_000;
+    let restoreClock: (() => void) | undefined;
+    let status = -1;
+    try {
+      status = main(['--deadline', new Date(deadline).toISOString(), '--runtime-profile', profile.path],
+        {root: fixture.dir,
+          select: () => ({fullRun: false, suites: ['test/a.test.ts', 'test/b.test.ts'], reasons: ['physical deadline fixture']}),
+          admitHost: current => {
+            if (current === stage) {
+              const clock = t.mock.method(Date, 'now', () => deadline + 1);
+              restoreClock = () => clock.mock.restore();
+            }
+            return {stage: current, state: 'admitted'};
+          }});
+    } finally { restoreClock?.(); }
+    const receipt = JSON.parse(readFileSync(join(fixture.dir, 'coverage/preflight-author.json'), 'utf8'));
+    assert.equal(status, 1); assert.equal(receipt.verdict, 'refused');
+    assert.equal(receipt.runtimeAdmission.fits, false); assert.equal(receipt.runtimeAdmission.deadline, deadline);
+    assert.equal(receipt.runtimeAdmission.stage, stage === 'static-preflight' ? 'before-static' : 'before-tests');
+    assert.equal(existsSync(join(fixture.dir, 'coverage/static-started')), stage === 'affected-tests');
+    assert.equal(receipt.steps.some((step: {name: string}) => step.name.startsWith('affected-tests')), false);
+  }
 });

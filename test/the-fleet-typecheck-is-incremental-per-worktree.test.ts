@@ -19,6 +19,9 @@ import {
   canonicalBuildInfo,
   gitDirOf,
   prepareWorktreeTypecheck,
+  publishBuildInfo,
+  invalidateUnsafeCompilerCache,
+  worktreeBuildInfoPath,
   rebaseBuildInfo,
   seedBuildInfo,
   TYPECHECK_BUILDINFO_NAME,
@@ -58,7 +61,7 @@ function fleetLayout(): { canonical: string; wt: string; root: string } {
 function realSpawn(seen: string[][]): PreflightSpawn {
   return (file, args, options) => {
     seen.push([...args]);
-    const r = spawnSync(file, [...args], { cwd: options?.cwd, encoding: "utf8" });
+    const r = spawnSync(file, [...args], { cwd: options?.cwd, encoding: "utf8", env: { ...process.env, ...options?.env } });
     return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   };
 }
@@ -83,8 +86,8 @@ test("a worktree's first typecheck is seeded from the canonical checkout's build
   const canonical = canonicalBuildInfo(fx.wt)!;
   assert.equal(canonical.root, fx.canonical);
   assert.ok(existsSync(canonical.buildInfo));
-  const prepared = prepareWorktreeTypecheck(fx.wt);
-  assert.equal(prepared.seed, "seeded");
+  const prepared = { buildInfo: worktreeBuildInfoPath(fx.wt)! };
+  assert.equal(publishBuildInfo(canonical, { root: fx.wt, buildInfo: prepared.buildInfo }, TS_VERSION), "published");
   // The worktree sits deeper than the canonical checkout, so a verbatim copy's `./node_modules/...` would name nothing.
   const info = JSON.parse(readFileSync(prepared.buildInfo!, "utf8")) as { fileNames: string[] };
   const located = info.fileNames.filter((p) => p.startsWith("./") || p.startsWith("../"));
@@ -92,7 +95,8 @@ test("a worktree's first typecheck is seeded from the canonical checkout's build
   const dangling = located.filter((p) => !existsSync(resolve(dirname(prepared.buildInfo!), p)));
   assert.deepEqual(dangling, [], "every recorded file resolves from the worktree's buildinfo");
   assert.ok(located.some((p) => resolve(dirname(prepared.buildInfo!), p) === join(fx.wt, "b.ts")), "tree files map to the worktree's own copy");
-  assert.equal(prepareWorktreeTypecheck(fx.wt).seed, "kept", "a worktree's own buildinfo is never overwritten by the seed");
+  assert.equal(seedBuildInfo(canonical, { root: fx.wt, buildInfo: prepared.buildInfo }, "fixture-compatible"), "kept", "compatible compilers keep the worktree cache");
+  assert.equal(prepareWorktreeTypecheck(fx.wt).seed, TS_VERSION === "7.0.2" ? "cold-compiler-version" : "kept");
 });
 
 test("a seeded incremental typecheck still fails on a type error a dependent file picks up, with the same diagnostics as a cold check", () => {
@@ -114,14 +118,14 @@ test("a seed for another TypeScript version or an unparseable seed is not writte
   const from = { root: join(dir, "canon"), buildInfo: join(dir, "canon.tsbuildinfo") };
   const to = { root: join(dir, "a", "b", "wt"), buildInfo: join(dir, "wt.tsbuildinfo") };
   writeFileSync(from.buildInfo, JSON.stringify({ version: "0.0.1-fixture", fileNames: ["./canon/x.ts"] }));
-  assert.equal(seedBuildInfo(from, to, TS_VERSION), "mismatch");
+  assert.equal(seedBuildInfo(from, to, "fixture-compatible"), "mismatch");
   writeFileSync(from.buildInfo, "{ not json");
-  assert.equal(seedBuildInfo(from, to, TS_VERSION), "mismatch");
+  assert.equal(seedBuildInfo(from, to, "fixture-compatible"), "mismatch");
   assert.equal(existsSync(to.buildInfo), false);
-  assert.equal(seedBuildInfo({ ...from, buildInfo: join(dir, "absent") }, to, TS_VERSION), "no-seed");
-  assert.equal(seedBuildInfo(from, { ...to, buildInfo: join(dir, "no-such-dir", "wt.tsbuildinfo") }, TS_VERSION), "mismatch");
-  writeFileSync(from.buildInfo, JSON.stringify({ version: TS_VERSION, fileNames: [] }));
-  assert.equal(seedBuildInfo(from, { ...to, buildInfo: join(dir, "no-such-dir", "wt.tsbuildinfo") }, TS_VERSION), "unwritable");
+  assert.equal(seedBuildInfo({ ...from, buildInfo: join(dir, "absent") }, to, "fixture-compatible"), "no-seed");
+  assert.equal(seedBuildInfo(from, { ...to, buildInfo: join(dir, "no-such-dir", "wt.tsbuildinfo") }, "fixture-compatible"), "mismatch");
+  writeFileSync(from.buildInfo, JSON.stringify({ version: "fixture-compatible", fileNames: [] }));
+  assert.equal(seedBuildInfo(from, { ...to, buildInfo: join(dir, "no-such-dir", "wt.tsbuildinfo") }, "fixture-compatible"), "unwritable");
 });
 
 test("rebasing keeps a tree file tree-relative, an outside file at its absolute place, and a bundled lib by name", () => {
@@ -165,7 +169,7 @@ test("the open-weight typecheck keeps its buildinfo in the worker's home, never 
   const home = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}incr-home-`)));
   const argv = openWeightIncrementalTypecheck(OPENWEIGHT_CHECKS["typecheck"]!, fx.wt, home);
   assert.deepEqual(argv, [...OPENWEIGHT_CHECKS["typecheck"]!, "--incremental", "--tsBuildInfoFile", join(home, TYPECHECK_BUILDINFO_NAME)]);
-  assert.ok(existsSync(join(home, TYPECHECK_BUILDINFO_NAME)), "seeded from the canonical checkout");
+  assert.equal(existsSync(join(home, TYPECHECK_BUILDINFO_NAME)), TS_VERSION !== "7.0.2", "the known unsafe compiler gets no canonical seed");
   assert.ok(!argv.some((a) => a.startsWith(fx.wt + sep)), "nothing the check writes lands in the worktree's diff");
 });
 
@@ -204,5 +208,69 @@ test("the merge probe's check runs incremental against a buildinfo in its own sc
   assert.ok(!seen[0]![at + 1]!.startsWith(managed + sep) && !seen[0]![at + 1]!.startsWith(wt + sep), "the compiler writes only to scratch");
   const seed = join(managed, ".git", TYPECHECK_BUILDINFO_NAME);
   assert.ok(existsSync(seed), "the probe's check is published as the canonical seed");
-  assert.equal(prepareWorktreeTypecheck(wt).seed, "seeded", "and a worktree's first check starts from it");
+  assert.equal(prepareWorktreeTypecheck(wt).seed, TS_VERSION === "7.0.2" ? "cold-compiler-version" : "seeded", "only a compatible compiler starts from the published seed");
+});
+
+
+test("the native typecheck cache preserves cold diagnostics after global-declaration transitions", () => {
+  for (const mode of ["global-only", "dependency-and-global"] as const) {
+    const repo = gitRepo({ kind: `global-cache-${mode}` });
+    const root = realpathSync(repo.dir);
+    const modules = join(root, "node_modules");
+    mkdirSync(join(modules, ".bin"), { recursive: true });
+    symlinkSync(join(REPO_ROOT, "node_modules", ".bin", "tsc"), join(modules, ".bin", "tsc"));
+    symlinkSync(join(REPO_ROOT, "node_modules", "typescript"), join(modules, "typescript"));
+    for (const name of ["dep-a", "dep-b"]) {
+      mkdirSync(join(modules, name));
+      writeFileSync(join(modules, name, "package.json"), JSON.stringify({ name, version: "1.0.0", types: "index.d.ts" }));
+    }
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "esnext", moduleResolution: "bundler", strict: true, types: [], skipLibCheck: true, noEmit: true },
+      include: ["*.ts"],
+    }));
+    const a = join(modules, "dep-a", "index.d.ts");
+    const b = join(modules, "dep-b", "index.d.ts");
+    writeFileSync(a, 'export type Kind = "a" | "b";');
+    writeFileSync(b, 'declare global { interface DepBGlobal { marker: string; } } export {};');
+    writeFileSync(join(root, "middle.ts"), 'export type { Kind } from "dep-a";');
+    writeFileSync(join(root, "consumer.ts"), 'import type { Kind } from "./middle"; export function describe(kind: Kind): string { switch (kind) { case "a": return "first"; case "b": return "second"; } }');
+    writeFileSync(join(root, "env.ts"), 'import "dep-b";');
+    writeFileSync(join(root, "global-consumer.ts"), 'const globalObject: DepBGlobal = { marker: "ok" }; export {globalObject};');
+    assert.equal(typecheckStep(root, realSpawn([])).ok, true, mode);
+    assert.ok(existsSync(worktreeBuildInfoPath(root)!));
+    if (mode === "dependency-and-global") writeFileSync(a, 'export type Kind = "a" | "b" | "c";');
+    writeFileSync(b, 'declare global { interface DepBGlobal { marker: string; extra: number; } } export {};');
+    const warm = spawnSync(join(modules, ".bin", "tsc"), ["-p", "tsconfig.json", "--noEmit", "--checkers", "1", "--incremental", "--tsBuildInfoFile", worktreeBuildInfoPath(root)!], {
+      cwd: root, encoding: "utf8", env: { ...process.env, GOMAXPROCS: "2", GOMEMLIMIT: "512MiB" },
+    });
+    if (TS_VERSION === "7.0.2" && mode === "global-only") {
+      assert.equal(warm.status, 0, `${mode}: positive witness must reach the reproduced unsafe cache`);
+      assert.deepEqual(errors(warm.stdout + warm.stderr), [], mode);
+    }
+    const guarded = typecheckStep(root, realSpawn([]));
+    const cold = spawnSync(join(modules, ".bin", "tsc"), ["-p", "tsconfig.json", "--noEmit", "--checkers", "1"], {
+      cwd: root, encoding: "utf8", env: { ...process.env, GOMAXPROCS: "2", GOMEMLIMIT: "512MiB" },
+    });
+    assert.notEqual(cold.status, 0, `cold positive control must see ${mode}`);
+    assert.ok(errors(cold.stdout + cold.stderr).length > 0);
+    assert.equal(guarded.ok, false, `${mode}: ${guarded.detail}`);
+    assert.deepEqual(errors(guarded.detail), errors(cold.stdout + cold.stderr), mode);
+    assert.deepEqual(errors(typecheckStep(root, realSpawn([])).detail), errors(cold.stdout + cold.stderr), `${mode}: own existing cache`);
+  }
+});
+
+test("unsafe compiler cache invalidation preserves seeds and compatible targets and refuses an undeletable target", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}unsafe-cache-`)));
+  const from = { root: dir, buildInfo: join(dir, "source.tsbuildinfo") };
+  const to = { root: dir, buildInfo: join(dir, "target.tsbuildinfo") };
+  writeFileSync(from.buildInfo, "source seed stays intact");
+  writeFileSync(to.buildInfo, "old target");
+  assert.equal(invalidateUnsafeCompilerCache(to.buildInfo, "fixture-compatible"), false);
+  assert.equal(invalidateUnsafeCompilerCache(to.buildInfo, undefined), false);
+  assert.equal(readFileSync(to.buildInfo, "utf8"), "old target");
+  assert.equal(seedBuildInfo(from, to, "7.0.2"), "cold-compiler-version");
+  assert.equal(existsSync(to.buildInfo), false);
+  assert.equal(readFileSync(from.buildInfo, "utf8"), "source seed stays intact");
+  mkdirSync(to.buildInfo);
+  assert.throws(() => invalidateUnsafeCompilerCache(to.buildInfo, "7.0.2"), /EISDIR|ERR_FS_EISDIR|ENOTEMPTY/);
 });

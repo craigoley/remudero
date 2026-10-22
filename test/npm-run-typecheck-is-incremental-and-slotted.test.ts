@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { TYPECHECK_BUILDINFO_NAME } from "../src/lib/typecheck-buildinfo.js";
 import { acquireTestSlot } from "../src/lib/test-slot.js";
-import { dirIsWritable, NPM_TYPECHECK_SLOT_LABEL, prepareTypecheckRun, runTypecheck, WORKTREE_BUILDINFO_NAME } from "../src/lib/typecheck-run.js";
+import { dirIsWritable, NPM_TYPECHECK_SLOT_LABEL, prepareTypecheckRun, runTypecheck, WORKTREE_BUILDINFO_NAME, type TypecheckRunSpawn } from "../src/lib/typecheck-run.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,7 +74,7 @@ test("npm run typecheck's wrapper passes --incremental and the worktree's own bu
   assert.deepEqual(seen, [["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", join(laneGitDir, TYPECHECK_BUILDINFO_NAME), "--pretty", "false"]]);
 });
 
-test("a cold npm run typecheck takes a host test slot while tsc runs, and a warm one takes none", (t) => {
+test("npm typecheck retains cold admission and only a qualified warm cache bypasses it", (t) => {
   const slots = slotEnv(t);
   const tree = project(t);
   const observed: string[][] = [];
@@ -87,7 +87,8 @@ test("a cold npm run typecheck takes a host test slot while tsc runs, and a warm
   assert.deepEqual(heldLabels(slots), [], "the cold check released its slot");
   assert.ok(existsSync(join(tree.dir, ".git", TYPECHECK_BUILDINFO_NAME)), "the cold check left a buildinfo behind");
   assert.equal(runTypecheck(tree.dir, [], { spawn: realTsc, log: () => {} }), 0);
-  assert.deepEqual(observed, [[NPM_TYPECHECK_SLOT_LABEL], []]);
+  const version = JSON.parse(readFileSync(join(tree.dir, "node_modules", "typescript", "package.json"), "utf8")).version;
+  assert.deepEqual(observed, [[NPM_TYPECHECK_SLOT_LABEL], version === "7.0.2" ? [NPM_TYPECHECK_SLOT_LABEL] : []]);
 });
 
 test("the wrapper reports tsc's own diagnostics and exit code, cold and warm", (t) => {
@@ -160,4 +161,102 @@ test("a slot holder in another pid namespace on the same host is live by its lea
   assert.equal(sameNs.outcome, "acquired", sameNs.note);
   sameNs.release();
   first.release();
+});
+
+/** Real default process spawning with a tiny executable witness. Its compatible-cache metadata tests admission only;
+ * it is not a real native compiler version, cache correctness test, or runtime saving measurement. */
+function compilerWitness(t: TestContext, version: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}npm-resource-witness-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+  mkdirSync(join(dir, "node_modules", "typescript"));
+  writeFileSync(join(dir, "node_modules", "typescript", "package.json"), JSON.stringify({ version }));
+  const compiler = join(dir, "node_modules", ".bin", "tsc");
+  writeFileSync(compiler, `#!${process.execPath}\nconst fs = require('node:fs');
+fs.writeFileSync('actual-compiler.json', JSON.stringify({ args: process.argv.slice(2), cpu: process.env.GOMAXPROCS,
+memory: process.env.GOMEMLIMIT, cacheExists: fs.existsSync('${WORKTREE_BUILDINFO_NAME}'),
+leases: fs.readdirSync(process.env.RMD_TEST_SLOT_DIR).map(n => JSON.parse(fs.readFileSync(require('node:path').join(process.env.RMD_TEST_SLOT_DIR,n),'utf8')).label) }));\n`);
+  chmodSync(compiler, 0o755);
+  return dir;
+}
+
+function memoryWitness(t: TestContext): void {
+  const original = process.constrainedMemory;
+  const saved = [process.env.GOMEMLIMIT, process.env.GOMAXPROCS];
+  process.constrainedMemory = () => 4 * 1024 ** 3;
+  process.env.GOMEMLIMIT = "off";
+  process.env.GOMAXPROCS = "8";
+  t.after(() => {
+    process.constrainedMemory = original;
+    ["GOMEMLIMIT", "GOMAXPROCS"].forEach((key, i) => {
+      if (saved[i] === undefined) delete process.env[key]; else process.env[key] = saved[i];
+    });
+  });
+}
+
+test("the npm wrapper bounds actual default children on cold and compatible warm branches", (t) => {
+  const slots = slotEnv(t);
+  memoryWitness(t);
+  const dir = compilerWitness(t, "fixture-compatible");
+  for (const warm of [false, true]) {
+    if (warm) writeFileSync(join(dir, WORKTREE_BUILDINFO_NAME), JSON.stringify({
+      version: "fixture-compatible", fileNames: ["a.ts"], fileInfos: [{ version: "fixture" }],
+    }));
+    assert.equal(runTypecheck(dir, [], {
+      testSlot: { memoryHeadroom: () => 512 * 1024 ** 2, waitBoundMs: 0 }, log: () => {},
+    }), 0);
+    const observed = JSON.parse(readFileSync(join(dir, "actual-compiler.json"), "utf8"));
+    assert.ok(Number(observed.cpu) >= 1 && Number(observed.cpu) <= 2);
+    assert.equal(observed.memory, `${3 * 1024 ** 3}B`);
+    assert.deepEqual(observed.args, ["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile",
+      join(dir, WORKTREE_BUILDINFO_NAME), "--checkers", "2"]);
+    assert.deepEqual(observed.leases, warm ? [] : [NPM_TYPECHECK_SLOT_LABEL]);
+    assert.deepEqual(heldLabels(slots), []);
+  }
+});
+
+test("the npm worktree fallback invalidates the unsafe native cache before the actual child", (t) => {
+  slotEnv(t);
+  const dir = compilerWitness(t, "7.0.2");
+  writeFileSync(join(dir, WORKTREE_BUILDINFO_NAME), JSON.stringify({
+    version: "7.0.2", fileNames: ["a.ts"], fileInfos: [{ version: "fixture" }],
+  }));
+  assert.equal(runTypecheck(dir, [], { log: () => {} }), 0);
+  const observed = JSON.parse(readFileSync(join(dir, "actual-compiler.json"), "utf8"));
+  assert.equal(observed.cacheExists, false);
+  assert.deepEqual(observed.leases, [NPM_TYPECHECK_SLOT_LABEL]);
+});
+
+test("invalid npm compiler resource settings refuse before slot admission or native spawning", (t) => {
+  slotEnv(t);
+  memoryWitness(t);
+  const dir = compilerWitness(t, "fixture-compatible");
+  const lines: string[] = [];
+  let calls = 0;
+  const opts = { log: (line: string) => lines.push(line), acquireSlot: () => { calls++; throw new Error("unexpected slot"); },
+    spawn: () => { calls++; return { status: 0 }; } };
+  process.env.GOMAXPROCS = "invalid";
+  assert.equal(runTypecheck(dir, [], opts), 1);
+  assert.match(lines.join("\n"), /invalid inherited GOMAXPROCS/);
+  process.env.GOMAXPROCS = "8";
+  process.constrainedMemory = () => { throw "unreadable resource fact"; };
+  assert.equal(runTypecheck(dir, [], opts), 1);
+  assert.match(lines.join("\n"), /unreadable resource fact/);
+  assert.equal(calls, 0);
+  assert.equal(existsSync(join(dir, "actual-compiler.json")), false);
+});
+
+test("npm checker overrides and abnormal native results remain failures and release the cold slot", (t) => {
+  const slots = slotEnv(t);
+  const dir = compilerWitness(t, "fixture-compatible");
+  for (const args of [["--checkers", "8"], ["--checkers=8"]])
+    assert.equal(runTypecheck(dir, args, { log: () => {} }), 2);
+  assert.equal(existsSync(join(dir, "actual-compiler.json")), false);
+  for (const result of [{ status: 7 }, { status: -1 }, { status: null }, { status: 0, signal: "SIGKILL" as const }]) {
+    const spawn: TypecheckRunSpawn = () => result;
+    assert.equal(runTypecheck(dir, [], { spawn, log: () => {} }), result.status === 7 ? 7 : 1);
+    assert.deepEqual(heldLabels(slots), []);
+  }
+  assert.throws(() => runTypecheck(dir, [], { spawn: () => { throw new Error("native seam threw"); }, log: () => {} }), /native seam threw/);
+  assert.deepEqual(heldLabels(slots), []);
 });

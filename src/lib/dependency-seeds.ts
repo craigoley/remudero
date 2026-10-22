@@ -3,7 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { systemClock } from "./clock.js";
 
 export const DEPENDENCY_SEED_MIN_IDLE_MS = 6 * 60 * 60 * 1000;
@@ -16,6 +17,8 @@ export type SeedMethod = "apfs-clone" | "readonly-links" | "private-copy";
 export interface DependencySeedOptions {
   root?: string;
   sourceDir?: string;
+  /** Explicit managed generation reuse when only non-installing root scripts changed. */
+  sourceSeed?: string;
   proof?: boolean;
   platform?: NodeJS.Platform;
   npmVersion?: string;
@@ -24,7 +27,7 @@ export interface DependencySeedOptions {
   runInstall?: (stage: string, args: string[], env: NodeJS.ProcessEnv) => void;
   lockWaitMs?: number;
 }
-export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean };
+export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean; reusedFrom?: string };
 
 export function dependencySeedConfigPath(home = homedir()): string {
   return join(home, ".config", "remudero", "dependency-seeds.json");
@@ -238,12 +241,120 @@ function workspaceLinks(checkout: string, modules: string, workspace = ""): void
   }
 }
 
+/** A clone refusal must never turn a dependency generation into a full byte copy.
+ * The native fd operation keeps source contents outside Python/Node memory and
+ * refuses unsupported filesystems. Directory traversal holds only one directory
+ * listing at a time. Links are reproduced as links, never traversed. */
+export const APFS_DEPENDENCY_CLONE_PROGRAM = String.raw`
+import ctypes, errno, json, os, stat, sys
+
+def signature(value):
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns)
+
+def clone_modules(source, destination):
+    source = os.path.abspath(source)
+    destination = os.path.abspath(destination)
+    if os.path.realpath(source) != source:
+        raise ValueError("dependency clone source traverses a symlink")
+    parent = os.path.dirname(destination)
+    if os.path.realpath(parent) != parent:
+        raise ValueError("dependency clone destination parent traverses a symlink")
+    if os.path.commonpath([source, destination]) == source:
+        raise ValueError("dependency clone destination is inside its source")
+    initial = os.lstat(source)
+    if not stat.S_ISDIR(initial.st_mode):
+        raise ValueError("dependency clone source must be a real directory")
+    if initial.st_dev != os.stat(parent).st_dev:
+        raise OSError(errno.EXDEV, "dependency clone requires the same filesystem")
+    if os.path.lexists(destination):
+        raise FileExistsError(errno.EEXIST, "dependency clone destination occupied")
+    libc = ctypes.CDLL(None, use_errno=True)
+    clone_file = libc.fclonefileat
+    clone_file.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    clone_file.restype = ctypes.c_int
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    directories = flags | os.O_DIRECTORY
+    counts = {"files": 0, "directories": 0, "symlinks": 0, "logicalBytes": 0}
+
+    def visit(src, dst, depth):
+        if depth > 128:
+            raise ValueError("dependency clone directory depth exceeded")
+        before = os.fstat(src)
+        with os.scandir(src) as entries:
+            for entry in entries:
+                name = entry.name
+                if depth == 0 and name in (".cache", ".rmd-dependency-seed.json"):
+                    continue
+                metadata = os.stat(name, dir_fd=src, follow_symlinks=False)
+                if metadata.st_dev != initial.st_dev:
+                    raise OSError(errno.EXDEV, "dependency clone crossed a mount")
+                if stat.S_ISDIR(metadata.st_mode):
+                    child = os.open(name, directories, dir_fd=src)
+                    try:
+                        if signature(os.fstat(child)) != signature(metadata):
+                            raise ValueError("dependency clone source directory changed")
+                        os.mkdir(name, 0o700, dir_fd=dst)
+                        target = os.open(name, directories, dir_fd=dst)
+                        try:
+                            visit(child, target, depth + 1)
+                            os.fchmod(target, stat.S_IMODE(metadata.st_mode))
+                        finally:
+                            os.close(target)
+                        counts["directories"] += 1
+                    finally:
+                        os.close(child)
+                elif stat.S_ISREG(metadata.st_mode):
+                    child = os.open(name, flags, dir_fd=src)
+                    try:
+                        if signature(os.fstat(child)) != signature(metadata):
+                            raise ValueError("dependency clone source file changed")
+                        if clone_file(child, dst, os.fsencode(name), 0) != 0:
+                            code = ctypes.get_errno()
+                            raise OSError(code, "native dependency clone refused")
+                        if signature(os.fstat(child)) != signature(metadata):
+                            raise ValueError("dependency clone source file changed during clone")
+                        counts["files"] += 1
+                        counts["logicalBytes"] += metadata.st_size
+                    finally:
+                        os.close(child)
+                elif stat.S_ISLNK(metadata.st_mode):
+                    link = os.readlink(name, dir_fd=src)
+                    os.symlink(link, name, dir_fd=dst)
+                    if signature(os.stat(name, dir_fd=src, follow_symlinks=False)) != signature(metadata):
+                        raise ValueError("dependency clone source link changed")
+                    counts["symlinks"] += 1
+                else:
+                    raise ValueError("dependency clone refuses special files")
+        if signature(os.fstat(src)) != signature(before):
+            raise ValueError("dependency clone source namespace changed")
+
+    src = os.open(source, directories)
+    try:
+        if signature(os.fstat(src)) != signature(initial):
+            raise ValueError("dependency clone source root changed")
+        os.mkdir(destination, 0o700)
+        dst = os.open(destination, directories)
+        try:
+            visit(src, dst, 0)
+            os.fchmod(dst, stat.S_IMODE(initial.st_mode))
+        finally:
+            os.close(dst)
+    finally:
+        os.close(src)
+    return {"method": "fclonefileat", **counts}
+
+if __name__ == "__main__":
+    print(json.dumps(clone_modules(sys.argv[1], sys.argv[2])))
+`;
+
 function copyModules(source: string, dest: string, clone: boolean): void {
   if (clone) {
     if (statSync(source).dev !== statSync(dirname(dest)).dev) throw new Error("APFS clones require the same filesystem");
-    // Node/libuv's COPYFILE_FICLONE_FORCE returns ENOSYS on Darwin. Apple's cp uses clonefile(2).
-    execFileSync("/bin/cp", ["-cRP", source, dest], { stdio: "pipe", timeout: 120_000 });
-    for (const name of [".cache", CONSUMER_MARKER]) rmSync(join(dest, name), { recursive: true, force: true });
+    // cp -c can silently fall back to a full copy on ENOTSUP. An isolated stdlib
+    // helper calls the force-only native primitive; missing tooling also refuses.
+    execFileSync("python3", ["-I", "-B", "-c", APFS_DEPENDENCY_CLONE_PROGRAM, source, dest],
+      { stdio: "pipe", timeout: 120_000, maxBuffer: 32 * 1024 });
   } else cpSync(source, dest, { recursive: true, verbatimSymlinks: true,
     filter: (path) => ![".cache", CONSUMER_MARKER].includes(path.split(sep).pop()!) });
 }
@@ -303,8 +414,82 @@ function linkPackages(seedModules: string, dest: string): void {
   }
 }
 
+function verifyDonorLinks(source: string, modules: string): void {
+  if (!lstatSync(modules).isDirectory() || realpathSync(modules) !== resolve(modules))
+    throw new Error("dependency seed donor must be a real install");
+  const packages = (JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8")) as { packages?: Record<string, { link?: boolean }> }).packages ?? {};
+  for (const name of readdirSync(modules).filter(name => !name.startsWith("."))) {
+    if (name.startsWith("@") && !lstatSync(join(modules, name)).isDirectory())
+      throw new Error("dependency seed donor contains an external scope link");
+    const entries = name.startsWith("@") ? readdirSync(join(modules, name)).map(pkg => `${name}/${pkg}`) : [name];
+    for (const entry of entries) if (lstatSync(join(modules, entry)).isSymbolicLink() && packages[`node_modules/${entry}`]?.link !== true)
+      throw new Error("dependency seed donor contains an external package link");
+  }
+}
+
+/** Reuse is explicit and never changes the complete target identity. The source
+ * generation must reproduce its own identity under this exact toolchain/env.
+ * Lock, workspace and npm settings are byte-identical; only command scripts
+ * may differ. Lifecycle-bearing roots remain ineligible, including --proof. */
+function seedMetadata(path: string): unknown {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size > 1024 ** 2 || before.uid !== process.getuid?.())
+      throw new Error("dependency source seed metadata is not a bounded owned file");
+    const bytes = Buffer.alloc(before.size + 1);
+    let used = 0;
+    while (used < bytes.length) {
+      const n = readSync(fd, bytes, used, bytes.length - used, used);
+      if (!n) break;
+      used += n;
+    }
+    const after = fstatSync(fd);
+    if (used !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs)
+      throw new Error("dependency source seed metadata changed during read");
+    return JSON.parse(bytes.subarray(0, used).toString());
+  } finally { closeSync(fd); }
+}
+
+function sourceSeedDirectory(source: string): void {
+  ownedDirectory(source);
+  ownedDirectory(dirname(source));
+  if (realpathSync(source) !== source) throw new Error("dependency source seed traverses a symlink");
+  const marker = seedMetadata(join(dirname(source), ROOT_MARKER)) as { version?: number };
+  if (marker.version !== VERSION) throw new Error("dependency source seed store is not managed");
+}
+
+function compatibleSourceSeed(source: string, target: SeedMetadata, opts: DependencySeedOptions): string {
+  sourceSeedDirectory(source);
+  const ready = seedMetadata(join(source, "ready.json")) as SeedMetadata & { reusedFrom?: string };
+  const actual = dependencySeedIdentity(source, opts);
+  const { key: _actualKey, lastUsed: _actualUsed, ...actualIdentity } = actual;
+  const { key: _readyKey, lastUsed: _readyUsed, reusedFrom: _origin, ...readyIdentity } = ready;
+  if (ready.version !== VERSION || ready.key !== basename(source) || actual.key !== ready.key ||
+      !isDeepStrictEqual(actualIdentity, readyIdentity)) throw new Error("dependency source seed identity mismatch");
+  const before = Object.keys(actual.files).sort(), after = Object.keys(target.files).sort();
+  if (!isDeepStrictEqual(before, after)) throw new Error("dependency source seed input set changed");
+  for (const name of after) {
+    if (name !== "package.json" && actual.files[name] !== target.files[name])
+      throw new Error(`dependency source seed input changed: ${name}`);
+  }
+  const sourcePackage = JSON.parse(actual.files["package.json"]) as Manifest;
+  const targetPackage = JSON.parse(target.files["package.json"]) as Manifest;
+  for (const pkg of [sourcePackage, targetPackage]) {
+    if (["preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare", "dependencies"].some(name => Object.hasOwn(pkg.scripts ?? {}, name)))
+      throw new Error("dependency source seed refuses root lifecycle scripts");
+  }
+  const { scripts: _sourceScripts, ...sourceInputs } = sourcePackage;
+  const { scripts: _targetScripts, ...targetInputs } = targetPackage;
+  if (!isDeepStrictEqual(sourceInputs, targetInputs)) throw new Error("dependency source seed package inputs changed");
+  verifyPackages(source, join(source, "node_modules"));
+  return actual.key;
+}
+
 /** Existing installs, including dangling links, are never replaced. Publication fails if a concurrent installer wins. */
 export function materializeDependencySeed(checkout: string, opts: DependencySeedOptions = {}): DependencySeedResult {
+  if (opts.sourceDir && opts.sourceSeed) throw new Error("choose a dependency donor or source seed, not both");
+  if (opts.sourceSeed && !isAbsolute(opts.sourceSeed)) throw new Error("dependency source seed must be absolute");
   checkout = realpathSync(checkout);
   const dest = join(checkout, "node_modules");
   let occupied = false;
@@ -329,6 +514,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   }
   const stage = join(root, `.stage-${randomUUID()}`);
   const targetStage = join(checkout, `.rmd-dependency-stage-${randomUUID()}`);
+  let sourceLock: string | undefined, reusedFrom: string | undefined;
   try {
     if (!existsSync(join(seed, "ready.json"))) {
       mkdirSync(stage, { mode: 0o700 });
@@ -337,24 +523,27 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
         writeFileSync(join(stage, name), content, { mode: 0o600 });
       }
       let donor: string | undefined;
-      if (opts.sourceDir) {
+      if (opts.sourceSeed) {
+        const source = resolve(opts.sourceSeed);
+        sourceSeedDirectory(source);
+        // Nonblocking second lock: never steal a GC/installer lock or deadlock
+        // two reciprocal reuse requests while holding the target generation.
+        const lockPath = `${source}.lock`;
+        mkdirSync(lockPath, { mode: 0o700 });
+        sourceLock = lockPath;
+        reusedFrom = compatibleSourceSeed(source, meta, opts);
+        donor = join(source, "node_modules");
+      } else if (opts.sourceDir) {
         const source = realpathSync(opts.sourceDir);
         const sourceMeta = dependencySeedIdentity(source, opts);
         if (sourceMeta.key !== meta.key) throw new Error("dependency seed donor inputs do not match checkout");
         const pkg = JSON.parse(meta.files["package.json"]) as Manifest;
         if (["preinstall", "install", "postinstall", "prepare"].some(name => pkg.scripts?.[name])) throw new Error("dependency seed donor has root lifecycle scripts");
         donor = join(source, "node_modules");
-        if (!lstatSync(donor).isDirectory()) throw new Error("dependency seed donor must be a real install");
         verifyPackages(source, donor);
-        const lockPackages = (JSON.parse(meta.files["package-lock.json"]) as { packages?: Record<string, { link?: boolean }> }).packages ?? {};
-        for (const name of readdirSync(donor).filter(name => !name.startsWith("."))) {
-          const entries = name.startsWith("@") ? readdirSync(join(donor, name)).map(pkg => `${name}/${pkg}`) : [name];
-          for (const entry of entries) if (lstatSync(join(donor, entry)).isSymbolicLink() && lockPackages[`node_modules/${entry}`]?.link !== true) {
-            throw new Error("dependency seed donor contains an external package link");
-          }
-        }
       }
       if (donor) {
+        verifyDonorLinks(dirname(donor), donor);
         copyModules(donor, join(stage, "node_modules"), meta.platform === "darwin");
         for (const name of Object.keys(meta.files).filter(name => name.endsWith(`${sep}package.json`))) {
           const local = join(dirname(donor), dirname(name), "node_modules");
@@ -376,7 +565,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
         if (existsSync(local)) setWritable(local, false);
       }
       mkdirSync(join(stage, "consumers"), { mode: 0o700 });
-      writeJsonAtomic(join(stage, "ready.json"), meta);
+      writeJsonAtomic(join(stage, "ready.json"), reusedFrom ? { ...meta, reusedFrom } : meta);
       renameSync(stage, seed);
     }
     ownedDirectory(seed);
@@ -406,9 +595,10 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     writeJsonAtomic(join(seed, "ready.json"), { ...ready, lastUsed: opts.now ?? systemClock.now() });
     if (existsSync(dest)) throw new Error("dependency destination was occupied during provisioning");
     renameSync(targetStage, dest);
-    return { status: "materialized", key: meta.key, seed, method, installed };
+    return { status: "materialized", key: meta.key, seed, method, installed, ...(reusedFrom ? { reusedFrom } : {}) };
   } finally {
     for (const path of [stage, targetStage]) if (existsSync(path)) { setWritable(path, true); rmSync(path, { recursive: true, force: true }); }
+    if (sourceLock) rmSync(sourceLock, { recursive: true });
     rmSync(lock, { recursive: true });
   }
 }

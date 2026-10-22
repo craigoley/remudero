@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, dependencySeedIdentity, DEPENDENCY_SEED_MIN_IDLE_MS, legacyHostNamespace, materializeDependencySeed, sweepDependencySeeds } from "../src/lib/dependency-seeds.js";
+import { APFS_DEPENDENCY_CLONE_PROGRAM, configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, dependencySeedIdentity, DEPENDENCY_SEED_MIN_IDLE_MS, legacyHostNamespace, materializeDependencySeed, sweepDependencySeeds } from "../src/lib/dependency-seeds.js";
 
 function writable(path: string): void {
   const s = lstatSync(path);
@@ -31,6 +31,218 @@ function fixture(body: (root: string, donor: string, checkout: string) => void):
   finally { writable(root); rmSync(root, { recursive: true, force: true }); }
 }
 const identityOptions = { npmVersion: "11.19.0", env: {}, platform: "linux" as const };
+
+function reuseFixture(body: (store: string, seed: string, checkout: string, key: string) => void,
+  platform: NodeJS.Platform = "linux"): void {
+  fixture((root, donor, first) => {
+    const store = join(root, "seeds");
+    const initial = materializeDependencySeed(first, { ...identityOptions, platform, proof: true, root: store, sourceDir: donor });
+    assert.equal(initial.status, "materialized");
+    if (initial.status !== "materialized") throw new Error("source generation not materialized");
+    const next = join(root, "next"); mkdirSync(next);
+    const pkg = JSON.parse(readFileSync(join(first, "package.json"), "utf8"));
+    writeFileSync(join(next, "package.json"), JSON.stringify({ ...pkg, scripts: { build: "node new-build.mjs" } }));
+    writeFileSync(join(next, "package-lock.json"), readFileSync(join(first, "package-lock.json")));
+    body(store, initial.seed, next, initial.key);
+  });
+}
+
+test("a command-only package edit reuses a managed generation under its new complete identity without installing", () => reuseFixture((store, seed, checkout, key) => {
+  const ready = readFileSync(join(seed, "ready.json"));
+  let installs = 0;
+  const opts = { ...identityOptions, proof: true, root: store, sourceSeed: seed,
+    runInstall: () => { installs++; throw new Error("an explicit source seed never installs"); } };
+  const result = materializeDependencySeed(checkout, opts);
+  assert.equal(result.status, "materialized");
+  if (result.status !== "materialized") throw new Error("new generation missing");
+  assert.notEqual(result.key, key);
+  assert.equal(result.key, dependencySeedIdentity(checkout, opts).key);
+  assert.equal(result.reusedFrom, key);
+  assert.equal(result.installed, false);
+  assert.equal(JSON.parse(readFileSync(join(result.seed, "ready.json"), "utf8")).reusedFrom, key);
+  assert.deepEqual(materializeDependencySeed(checkout, opts), { status: "present" });
+  writeFileSync(join(checkout, "node_modules", "dep", "index.js"), "consumer changed\n");
+  assert.equal(readFileSync(join(seed, "node_modules", "dep", "index.js"), "utf8"), "module.exports = 1;\n");
+  assert.deepEqual(readFileSync(join(seed, "ready.json")), ready);
+  assert.equal(installs, 0);
+  assert.equal(existsSync(seed + ".lock"), false);
+}));
+
+test("actual APFS command-only generation reuse keeps independent payload inodes", { skip: process.platform !== "darwin" }, () => reuseFixture((store, seed, checkout) => {
+  const result = materializeDependencySeed(checkout, { ...identityOptions, platform: "darwin", proof: true,
+    root: store, sourceSeed: seed, runInstall: () => { throw new Error("no install"); } });
+  assert.equal(result.status, "materialized");
+  if (result.status !== "materialized") throw new Error("new clone missing");
+  assert.equal(result.method, "apfs-clone");
+  const source = join(seed, "node_modules", "dep", "index.js"), local = join(checkout, "node_modules", "dep", "index.js");
+  assert.notEqual(statSync(source).ino, statSync(local).ino);
+  writeFileSync(local, "private clone changed\n");
+  assert.equal(readFileSync(source, "utf8"), "module.exports = 1;\n");
+}, "darwin"));
+
+test("managed generation reuse refuses changed install inputs and lifecycle roots without fallback", () => {
+  const edits = [
+    (dir: string) => writeFileSync(join(dir, "package-lock.json"), '{"lockfileVersion":3,"packages":{}}'),
+    (dir: string) => writeFileSync(join(dir, ".npmrc"), "omit=dev\n"),
+    (dir: string) => {
+      const path = join(dir, "package.json"), pkg = JSON.parse(readFileSync(path, "utf8"));
+      writeFileSync(path, JSON.stringify({ ...pkg, dependencies: { dep: "2.0.0" } }));
+    },
+    (dir: string) => {
+      const path = join(dir, "package.json"), pkg = JSON.parse(readFileSync(path, "utf8"));
+      writeFileSync(path, JSON.stringify({ ...pkg, scripts: { prepublish: "", build: "new" } }));
+    },
+  ];
+  for (const edit of edits) reuseFixture((store, seed, checkout) => {
+    edit(checkout);
+    let installs = 0;
+    assert.throws(() => materializeDependencySeed(checkout, { ...identityOptions, proof: true,
+      root: store, sourceSeed: seed, runInstall: () => { installs++; } }), /source seed (input|package|refuses)/);
+    assert.equal(installs, 0);
+    assert.equal(existsSync(join(checkout, "node_modules")), false);
+    assert.equal(existsSync(seed + ".lock"), false);
+  });
+});
+
+test("managed generation reuse preserves runtime npm and proof identity", () => {
+  for (const changed of [{ npmVersion: "different" }, { proof: false }, { platform: "darwin" as const },
+    { env: { npm_config_omit: "dev" } }]) reuseFixture((store, seed, checkout) => {
+    assert.throws(() => materializeDependencySeed(checkout, { ...identityOptions, proof: true,
+      root: store, sourceSeed: seed, ...changed, runInstall: () => { throw new Error("unexpected install"); } }), /source seed identity mismatch/);
+    assert.equal(existsSync(join(checkout, "node_modules")), false);
+  });
+});
+
+test("managed generation reuse refuses corrupt bounded metadata and releases only its own locks", () => {
+  const mutations = [
+    (seed: string) => writeFileSync(join(seed, "ready.json"), "x".repeat(1024 ** 2 + 1)),
+    (seed: string) => {
+      const p = join(seed, "ready.json"), ready = JSON.parse(readFileSync(p, "utf8"));
+      writeFileSync(p, JSON.stringify({ ...ready, node: "corrupt-runtime" }));
+    },
+    (seed: string) => writeFileSync(join(seed, "ready.json"), "not-json"),
+    (seed: string) => {
+      const p = join(seed, "ready.json"); rmSync(p); symlinkSync(join(seed, "package.json"), p);
+    },
+    (seed: string) => writeFileSync(join(dirname(seed), ".rmd-dependency-seed-root.json"), '{"version":99}'),
+  ];
+  for (const mutate of mutations) reuseFixture((store, seed, checkout) => {
+    mutate(seed);
+    assert.throws(() => materializeDependencySeed(checkout, { ...identityOptions, proof: true,
+      root: store, sourceSeed: seed, runInstall: () => { throw new Error("no fallback"); } }));
+    assert.equal(existsSync(join(checkout, "node_modules")), false);
+    assert.equal(existsSync(seed + ".lock"), false);
+  });
+  reuseFixture((store, seed, checkout) => {
+    mkdirSync(seed + ".lock"); writeFileSync(join(seed + ".lock", "owner"), "other builder");
+    assert.throws(() => materializeDependencySeed(checkout, { ...identityOptions, proof: true,
+      root: store, sourceSeed: seed, lockWaitMs: 0 }), /EEXIST/);
+    assert.equal(readFileSync(join(seed + ".lock", "owner"), "utf8"), "other builder");
+    assert.equal(existsSync(join(checkout, "node_modules")), false);
+  });
+});
+
+test("managed generation reuse refuses borrowed payloads ambiguous donors and relative source paths", () => {
+  for (const kind of ["payload", "scope", "package", "alias", "both", "relative"] as const) reuseFixture((store, seed, checkout) => {
+    let source = seed;
+    if (["payload", "scope", "package"].includes(kind)) writable(join(seed, "node_modules"));
+    if (kind === "payload") {
+      const p = join(seed, "node_modules"); rmSync(p, { recursive: true, force: true }); symlinkSync(join(dirname(store), "donor", "node_modules"), p);
+    } else if (kind === "scope") symlinkSync(join(dirname(store), "donor"), join(seed, "node_modules", "@borrowed"));
+    else if (kind === "package") symlinkSync(join(dirname(store), "donor", "node_modules", "dep"), join(seed, "node_modules", "borrowed"));
+    else if (kind === "alias") { source = join(dirname(store), "seed-alias"); symlinkSync(seed, source); }
+    else if (kind === "relative") source = "relative-seed";
+    assert.throws(() => materializeDependencySeed(checkout, { ...identityOptions, proof: true,
+      root: store, sourceSeed: source, ...(kind === "both" ? { sourceDir: dirname(checkout) } : {}),
+      runInstall: () => { throw new Error("no fallback"); } }));
+    assert.equal(existsSync(join(checkout, "node_modules")), false);
+    assert.equal(existsSync(seed + ".lock"), false);
+  });
+});
+
+const cloneDefinitions = APFS_DEPENDENCY_CLONE_PROGRAM.split('\nif __name__ == "__main__":')[0];
+
+test("an unsupported native dependency clone refuses without copying package bytes", () => fixture((root, donor) => {
+  const script = cloneDefinitions + String.raw`
+class Unsupported:
+    def __call__(self, *args):
+        ctypes.set_errno(errno.ENOTSUP)
+        return -1
+class Library:
+    fclonefileat = Unsupported()
+ctypes.CDLL = lambda *args, **kwargs: Library()
+def forbidden_list(*args, **kwargs):
+    raise AssertionError("directory enumeration must remain streaming")
+os.listdir = forbidden_list
+try:
+    clone_modules(sys.argv[1], sys.argv[2])
+except OSError as error:
+    assert error.errno == errno.ENOTSUP
+    assert not os.path.exists(os.path.join(sys.argv[2], "dep", "index.js"))
+else:
+    raise AssertionError("unsupported clone silently copied bytes")
+`;
+  execFileSync("python3", ["-I", "-B", "-c", script, join(donor, "node_modules"), join(root, "refused")],
+    { timeout: 10_000, stdio: "pipe" });
+  assert.equal(readFileSync(join(donor, "node_modules", "dep", "index.js"), "utf8"), "module.exports = 1;\n");
+}));
+
+test("real dependency provisioning propagates a force-clone helper failure without publishing or falling back", () => fixture((root, donor, checkout) => {
+  const tools = join(root, "tools"), marker = join(root, "clone-refusal"); mkdirSync(tools);
+  writeFileSync(join(tools, "python3"), `#!/bin/sh\nprintf 'refused' > '${marker}'\necho native-clone-refused >&2\nexit 69\n`, { mode: 0o700 });
+  const previous = process.env.PATH;
+  try {
+    process.env.PATH = `${tools}:${previous ?? "/usr/bin:/bin"}`;
+    assert.throws(() => materializeDependencySeed(checkout, {
+      ...identityOptions, platform: "darwin", root: join(root, "seeds"), sourceDir: donor,
+    }), /native-clone-refused/);
+    assert.equal(readFileSync(marker, "utf8"), "refused");
+    assert.equal(existsSync(join(checkout, "node_modules")), false);
+    assert.deepEqual(readdirSync(join(root, "seeds")).filter(name => !name.startsWith(".")), []);
+    assert.equal(readFileSync(join(donor, "node_modules", "dep", "index.js"), "utf8"), "module.exports = 1;\n");
+  } finally {
+    if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous;
+  }
+}));
+
+test("the native dependency clone preserves occupied destinations before opening its native library", () => fixture((root, donor) => {
+  const target = join(root, "occupied"); mkdirSync(target);
+  writeFileSync(join(target, "keep"), "existing");
+  const script = cloneDefinitions + String.raw`
+def forbidden(*args, **kwargs):
+    raise AssertionError("native primitive opened before destination guard")
+ctypes.CDLL = forbidden
+try:
+    clone_modules(sys.argv[1], sys.argv[2])
+except FileExistsError:
+    assert open(os.path.join(sys.argv[2], "keep")).read() == "existing"
+else:
+    raise AssertionError("occupied destination accepted")
+`;
+  execFileSync("python3", ["-I", "-B", "-c", script, join(donor, "node_modules"), target],
+    { timeout: 10_000, stdio: "pipe" });
+  assert.equal(readFileSync(join(target, "keep"), "utf8"), "existing");
+}));
+
+test("the native dependency clone reproduces symlinks without reading their targets", () => fixture((root) => {
+  const source = join(root, "links"); mkdirSync(source);
+  symlinkSync(join(root, "absent-private-content"), join(source, "external"));
+  const script = cloneDefinitions + String.raw`
+class Forbidden:
+    def __call__(self, *args):
+        raise AssertionError("symlink target was opened as package bytes")
+class Library:
+    fclonefileat = Forbidden()
+ctypes.CDLL = lambda *args, **kwargs: Library()
+result = clone_modules(sys.argv[1], sys.argv[2])
+assert result["symlinks"] == 1 and result["files"] == 0
+assert os.readlink(os.path.join(sys.argv[1], "external")) == os.readlink(os.path.join(sys.argv[2], "external"))
+assert not os.path.exists(os.readlink(os.path.join(sys.argv[2], "external")))
+`;
+  const target = join(root, "cloned-links");
+  execFileSync("python3", ["-I", "-B", "-c", script, source, target], { timeout: 10_000, stdio: "pipe" });
+  assert.ok(lstatSync(join(target, "external")).isSymbolicLink());
+}));
 
 test("dependency seed identity separates workspace manifests, toolchains and proof policy", () => fixture((root, donor, checkout) => {
   const first = dependencySeedIdentity(checkout, identityOptions).key;

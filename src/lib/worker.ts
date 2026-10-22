@@ -1124,6 +1124,8 @@ export interface SpawnWorkerArgs {
   workerClass?: WorkerClass;
   /** Test seam for the counterfactual host-memory verdict (W1-T7094). Omitted: the process-installed sink and real reads. */
   memoryShadow?: Partial<AdmissionPorts>;
+  /** Isolate real fallback reservation I/O in fixtures; absent retains host defaults. */
+  memoryReservationDependencies?: Pick<WorkerOccupancyReservation, "ledger" | "learning">;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -2502,7 +2504,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   const memoryReservation = childReservationId ? undefined :
     (admission && "reservation" in admission ? admission.reservation : undefined) ??
-      openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
+      openOccupancyReservation({ ...args.memoryReservationDependencies, workerClass: workerClassOf(args), root: args.config?.root });
   const boundContainment = memoryReservation ? reservationBoundContainment(args.containment, memoryReservation) : args.containment ?? {};
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY

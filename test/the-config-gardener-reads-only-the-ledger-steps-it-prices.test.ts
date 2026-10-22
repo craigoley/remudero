@@ -137,10 +137,11 @@ test("every step in CONFIG_GARDEN_LEDGER_STEPS changes the inventory when its ro
   const whole = await gardener.configInventory(f.garden, sources(rows));
   assert.deepEqual(await gardener.configInventory(f.garden, sources(rows.filter((r) => steps().includes(String(r.step))))), whole, "rows outside the set are inert");
   assert.ok(steps().length > 30, "positive control: the set is populated");
-  const inert = (await Promise.all(steps().map(async (step) => {
+  const inert: string[] = [];
+  for (const step of steps()) {
     const without = await gardener.configInventory(f.garden, sources(rows.filter((r) => r.step !== step)));
-    return JSON.stringify(without) === JSON.stringify(whole) ? step : undefined;
-  }))).filter((step): step is string => step !== undefined);
+    if (JSON.stringify(without) === JSON.stringify(whole)) inert.push(step);
+  }
   assert.deepEqual(inert, [], "a step whose rows change nothing is either missing from the fixture or not read");
 });
 

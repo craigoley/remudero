@@ -17,7 +17,8 @@
 // test/check-proof-base.test.ts) already uses.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildProofEnv, defaultProofSpawner, PROOF_ENV_ALLOWLIST } from "../src/lib/review.js";
+import { realpathSync } from "node:fs";
+import { buildProofEnv, defaultProofSpawner, PROOF_ENV_ALLOWLIST, proofSandboxStatus } from "../src/lib/review.js";
 
 /** Run the REAL `defaultProofSpawner` with a tiny node one-liner that dumps its own
  *  `process.env` back out as JSON, and parse the result. */
@@ -59,7 +60,23 @@ function withCanary<T>(value: string | undefined, fn: () => T): T {
 }
 
 test("a Darwin CoreFoundation env injection is isolated from the proof allowlist", () => {
-  const childEnv = withCanary("2", () => spawnAndReadEnv());
+  const parentPwd = process.env.PWD;
+  const spoofedPwd = "/operator-only-PWD-canary";
+  let childEnv: Record<string, string | undefined>;
+  try {
+    process.env.PWD = spoofedPwd;
+    assert.equal(buildProofEnv(process.env).PWD, undefined, "PWD never enters the declared parent allowlist");
+    childEnv = withCanary("2", () => spawnAndReadEnv());
+  } finally {
+    if (parentPwd === undefined) delete process.env.PWD;
+    else process.env.PWD = parentPwd;
+  }
+  // Bubblewrap derives PWD after --chdir; prove its value, without forwarding parent authority.
+  const sandboxPwd = process.platform === "linux" && proofSandboxStatus().mode === "bwrap";
+  if (sandboxPwd) {
+    assert.equal(childEnv.PWD, realpathSync(process.cwd()), "sandbox PWD must be the actual proof cwd");
+    assert.notEqual(childEnv.PWD, spoofedPwd, "parent PWD cannot survive the sandbox");
+  }
   assert.equal(
     childEnv[CANARY_VAR],
     undefined,
@@ -69,12 +86,13 @@ test("a Darwin CoreFoundation env injection is isolated from the proof allowlist
   // Not a one-var spot check: NOTHING outside the declared allowlist survives, however this
   // process's own env happens to be shaped when the suite runs.
   const leaked = Object.keys(childEnv).filter(
-    (k) => !(PROOF_ENV_ALLOWLIST as readonly string[]).includes(k) && !PLATFORM_INJECTED_ENV.has(k),
+    (k) => !(PROOF_ENV_ALLOWLIST as readonly string[]).includes(k) && !PLATFORM_INJECTED_ENV.has(k)
+      && !(sandboxPwd && k === "PWD"),
   );
   assert.deepEqual(
     leaked,
     [],
-    "every child env key must be allowlisted, except the one measured CoreFoundation injection on macOS",
+    "child keys are allowlisted, or the measured Darwin artifact and proven sandbox-derived Linux PWD",
   );
   if (process.platform === "darwin") {
     assert.equal(

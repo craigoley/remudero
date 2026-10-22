@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,6 +27,21 @@ import type { Config } from "../src/lib/config.js";
 // throttle, and while the trailing hour had 11 merges against 8 opens (the queue was DRAINING). A
 // bare count cannot tell a draining queue from a growing one, and cannot tell the fleet's own WIP
 // from an operator's. This suite proves the fix: ADMIT BY OWNERSHIP AND FLOW.
+
+async function withQueueMemory(body: () => Promise<void>, availableKib = 6000000): Promise<number> {
+  const original = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = ((path: unknown, ...args: unknown[]) => {
+    if (path !== "/proc/meminfo") return (original as (...a: unknown[]) => unknown)(path, ...args);
+    reads++;
+    const text = `MemTotal: 10000000 kB\nMemAvailable: ${availableKib} kB\n`;
+    const opt = args[0] as { encoding?: string } | string | undefined;
+    return typeof opt === "string" || opt?.encoding ? text : Buffer.from(text);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+  try { await body(); } finally { fs.readFileSync = original; syncBuiltinESMExports(); }
+  return reads;
+}
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-queue-governor-flow-")), "ledger.ndjson");
@@ -240,6 +256,7 @@ async function captureDrainDepsWithLiveProjection(config: Config, planPath: stri
 test("W1-T4465: drainCommand's WIRED checkQueueGovernor admits dispatch when the excess over wipLimit is run-unfiled-* PRs the fleet did not author", async () => {
   const config = queueGovernorFixtureConfig();
   try {
+    const reads = await withQueueMemory(async () => {
     const planPath = onePlanWithOpenPr();
     const github = boardWithMostlyForeignOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     const deps = await captureDrainDepsWithLiveProjection(config, planPath, github);
@@ -249,6 +266,8 @@ test("W1-T4465: drainCommand's WIRED checkQueueGovernor admits dispatch when the
       undefined,
       "the board is at/over wipLimit in TOTAL, but only 2 of those PRs are fleet-owned — the real wiring must NOT defer",
     );
+    }, 6000000);
+    assert.ok(reads > 0, "the actual ownership governor consumes its controlled healthy memory input");
   } finally {
     rmSync(config.root, { recursive: true, force: true });
   }
@@ -270,6 +289,7 @@ test("W1-T4465: daemonCommand's WIRED checkQueueGovernor also admits by ownershi
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
+    const reads = await withQueueMemory(async () => {
     const planPath = onePlanWithOpenPr();
     const github = boardWithMostlyForeignOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     let captured: DaemonDeps | undefined;
@@ -286,6 +306,8 @@ test("W1-T4465: daemonCommand's WIRED checkQueueGovernor also admits by ownershi
     assert.ok(captured);
     const result = captured!.checkQueueGovernor!();
     assert.equal(result, undefined, "the daemon's real wiring must also admit — only 2 of the board's PRs are fleet-owned");
+    }, 6000000);
+    assert.ok(reads > 0, "the actual ownership governor consumes its controlled healthy memory input");
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;

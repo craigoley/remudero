@@ -508,6 +508,8 @@ export interface SpawnRunChildPorts {
   spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number }) => ChildProcess;
   /** Admission and the reservation, in the daemon, before the spawn. The default is {@link reserveRunChild}. */
   reserve?: (entryKind: RunChildEntryKind, runId: string, admission: { signal: AbortSignal; sinceMs?: number }) => Promise<LearnedReservation>;
+  /** Isolate real-default reservation/learning I/O in integration fixtures; absent keeps the host defaults. */
+  reservationDependencies?: Parameters<typeof reserveRunChild>[1];
   /** W1-T10001: the fleet STOP/PAUSE hold, read again once the reservation admits and before the spawn. Default: the local flag files under `input.root`. */
   workerAdmissionHold?: () => { control: "STOP" | "PAUSE"; detail: string } | undefined;
   probe?: RunChildProbe;
@@ -615,6 +617,7 @@ async function reserveWhilePending(
     input.onPending?.({ runId, abort: () => { pending.abort(); return settled; } });
     const reservation = await (ports.reserve ?? ((kind, id, admission) => reserveRunChild(
       { lane: input.lane ?? "implement", root: input.root, runId: id, taskId: input.taskId, entryKind: kind, ...admission },
+      ports.reservationDependencies,
     )))(entryKind, runId, { signal, ...(carried === undefined ? {} : { sinceMs }) });
     if (!signal.aborted) return { held: reservation };
     reservation.releaseOccupancy();

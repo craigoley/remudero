@@ -3,9 +3,11 @@ import { closeSync, existsSync, fsyncSync, linkSync, openSync, readFileSync, unl
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { isMainModule } from './argv.mjs';
+import { sampleAuthorResources, authorResourceEvidence } from './author-step-resources.mjs';
 
 const SCRIPT = fileURLToPath(import.meta.url);
 export const AUTHOR_OUTPUT_LIMIT_BYTES = 100 * 1024 * 1024;
+export const AUTHOR_REQUEST_LIMIT_BYTES = 8 * 1024 * 1024;
 export const AUTHOR_STEP_RUNTIME_MS = 4 * 60 * 60 * 1000;
 export const AUTHOR_CAPTURE_PARENT_ENV = 'RMD_AUTHOR_CAPTURE_PARENT_PID';
 const GROUP_SHUTDOWN_GRACE_MS = 2000;
@@ -57,6 +59,7 @@ export function captureStepSync(file, args, { cwd, env = process.env, stdoutPath
     stdout: existsSync(stdoutPath) ? readFileSync(stdoutPath, 'utf8') : '',
     stderr: outcome.error && transport.stderr ? stepStderr + transport.stderr : stepStderr,
     outputComplete: outcome.outputComplete,
+    resources: outcome.resources ?? null,
   };
 }
 
@@ -80,6 +83,7 @@ async function spool(config) {
   // Publish the protected reservation before spawning: the author may exit as soon as its child starts.
   // This subprocess's event loop stays live while the author blocks in spawnSync.
   const heartbeat = slotModule?.startTestSlotHeartbeat(config.heartbeat, (row) => record(err, Buffer.from(`${JSON.stringify(row)}\n`)));
+  const resourceBefore = sampleAuthorResources();
   const childEnv = { ...process.env };
   delete childEnv[AUTHOR_CAPTURE_PARENT_ENV];
   if (config.trackParent) childEnv[AUTHOR_CAPTURE_PARENT_ENV] = String(process.pid);
@@ -167,13 +171,26 @@ async function spool(config) {
     signal: native.signal, spawnCloseCode: spawnFailed ? native.status : null, error: error ?? null,
     ...(config.trackParent ? { parentTracking: { ownerPid: config.parentPid, helperPid: process.pid,
       childPid: child.pid ?? null, ownerLost: parentLost } } : {}),
-    outputComplete: !error && !native.signal, storedBytes, observedBytes }) + '\n', { mode: 0o600, flag: 'wx', flush: true });
+    outputComplete: !error && !native.signal, storedBytes, observedBytes,
+    resources: authorResourceEvidence(resourceBefore, sampleAuthorResources(), {storedBytes, observedBytes}) }) + '\n', { mode: 0o600, flag: 'wx', flush: true });
   // Publish complete JSON atomically and exclusively; a reader never sees a half-written result.
   linkSync(config.resultPath + '.pending', config.resultPath);
   unlinkSync(config.resultPath + '.pending');
 }
 
+async function readCaptureRequest() {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > AUTHOR_REQUEST_LIMIT_BYTES) throw new Error('capture request exceeds its input byte bound');
+    chunks.push(bytes);
+  }
+  return JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+}
+
 if (isMainModule(import.meta.url)) {
-  try { await spool(JSON.parse(readFileSync(0, 'utf8'))); }
+  try { await spool(await readCaptureRequest()); }
   catch (error) { console.error(`author capture failed: ${error.message}`); process.exitCode = 1; }
 }

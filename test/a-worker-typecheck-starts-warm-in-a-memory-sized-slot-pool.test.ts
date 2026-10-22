@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { typecheckStep, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { acquireTestSlot, readMemoryHeadroom } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { refreshCanonicalSeed, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES } from "../src/lib/typecheck-buildinfo.js";
+import { installedTypescriptVersion, refreshCanonicalSeed, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES } from "../src/lib/typecheck-buildinfo.js";
 import { NPM_TYPECHECK_SLOT_LABEL, runTypecheck, WORKTREE_BUILDINFO_NAME } from "../src/lib/typecheck-run.js";
 import { worktreeAdd } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -54,10 +54,10 @@ const heldRecords = (dir: string): Array<{ label: string; memoryBytes?: number }
   readdirSync(dir).filter((name) => name.startsWith("slot-")).map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")));
 
 /** The real compiler, recording each argv. */
-function realTsc(seen: string[][] = []): (file: string, args: readonly string[], cwd: string) => { status: number | null } {
-  return (file, args, cwd) => {
+function realTsc(seen: string[][] = []): (file: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv) => { status: number | null } {
+  return (file, args, cwd, env) => {
     seen.push([...args]);
-    return { status: spawnSync(file, [...args], { cwd, encoding: "utf8" }).status };
+    return { status: spawnSync(file, [...args], { cwd, env, encoding: "utf8" }).status };
   };
 }
 
@@ -105,7 +105,7 @@ function fleetHost(t: TestContext): { root: string; install: string; managed: st
   return { root, install, managed };
 }
 
-test("cutting a worktree from the managed clone publishes the install root's typecheck seed, so a sandboxed worker's first check runs warm and takes no slot", (t) => {
+test("cutting a worktree publishes the seed while an unsafe native compiler still starts cold in its slot", (t) => {
   const slots = slotPool(t);
   const host = fleetHost(t);
   // The install root's own check writes the only buildinfo on the host, as the sweep's merge probe does on the fleet.
@@ -125,14 +125,59 @@ test("cutting a worktree from the managed clone publishes the install root's typ
   const canWrite = (dir: string) => realpathSync(dir) === realpathSync(wt);
   const lines: string[] = [];
   const seen: string[][] = [];
+  const unsafeCompiler = installedTypescriptVersion(REPO_ROOT) === "7.0.2";
+  let acquired = 0;
   const code = runTypecheck(wt, [], {
     spawn: realTsc(seen), canWrite, testSlot: ROOMY, log: (line) => lines.push(line),
-    acquireSlot: () => assert.fail("a warm first check must not wait for a slot"),
+    acquireSlot: (label) => {
+      assert.equal(unsafeCompiler, true, "a safe warm first check must not wait for a slot");
+      acquired++;
+      return acquireTestSlot(label, { ...ROOMY, dir: slots, memoryBytes: TYPECHECK_COLD_PEAK_BYTES, log: () => {} });
+    },
   });
   assert.equal(code, 0, lines.join("\n"));
-  assert.deepEqual(lines, [], "no typecheck.cold line: the first check started warm");
+  assert.equal(acquired, unsafeCompiler ? 1 : 0);
+  if (unsafeCompiler) assert.match(lines.join("\n"), /"seed":"cold-compiler-version".*"slot":"acquired"/);
+  else assert.deepEqual(lines, [], "a safe compiler starts warm without a cold slot");
   assert.deepEqual(seen, [["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", join(wt, WORKTREE_BUILDINFO_NAME)]]);
   assert.ok(!existsSync(join(wtGitDir, TYPECHECK_BUILDINFO_NAME)), "nothing was written into the read-only git dir");
+  assert.deepEqual(heldRecords(slots), []);
+});
+
+test("a safe compiler fixture transfers the install seed through the real managed-worktree path without a cold slot", (t) => {
+  const slots = slotPool(t);
+  const host = fleetHost(t);
+  // This child is a cache-contract fixture, not a claim about native compiler diagnostics.
+  // The real installed native compiler above retains its independently tested unsafe-version guard.
+  rmSync(join(host.install, "node_modules", "typescript"));
+  mkdirSync(join(host.install, "node_modules", "typescript"));
+  writeFileSync(join(host.install, "node_modules", "typescript", "package.json"), JSON.stringify({ version: "7.0.99-fixture" }));
+  const compiler = join(host.install, "node_modules", ".bin", "tsc");
+  rmSync(compiler);
+  writeFileSync(compiler, `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const at = args.indexOf("--tsBuildInfoFile");
+if (at < 0 || args.includes("--checkers") || !["1", "2"].includes(process.env.GOMAXPROCS)) process.exit(2);
+const file = args[at + 1];
+fs.writeFileSync(file, JSON.stringify({version:"7.0.99-fixture",fileNames:[path.relative(path.dirname(file),path.resolve("a.ts"))],fileInfos:["fixture-hash"]}));
+`, { mode: 0o755 });
+  assert.equal(runTypecheck(host.install, [], { testSlot: ROOMY, log: () => {} }), 0);
+  const wt = join(host.root, "worktrees", "safe-lane");
+  worktreeAdd(host.managed, wt, "run-safe-lane", "origin/main", { log: () => {}, warn: () => {} });
+  assert.ok(existsSync(join(host.managed, ".git", TYPECHECK_BUILDINFO_NAME)));
+  const lines: string[] = [];
+  const code = runTypecheck(wt, [], {
+    canWrite: (dir) => realpathSync(dir) === realpathSync(wt),
+    testSlot: ROOMY,
+    log: (line) => lines.push(line),
+    acquireSlot: () => assert.fail("the safe fixture seed must avoid a cold slot"),
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(lines, []);
+  const own = JSON.parse(readFileSync(join(wt, WORKTREE_BUILDINFO_NAME), "utf8"));
+  assert.equal(own.version, "7.0.99-fixture");
   assert.deepEqual(heldRecords(slots), []);
 });
 
@@ -235,7 +280,7 @@ test("rmd preflight's typecheck in a sandbox whose git dir is read-only keeps it
   const seen: string[][] = [];
   const spawn: PreflightSpawn = (file, args, options) => {
     seen.push([...args]);
-    const r = spawnSync(file, [...args], { cwd: options?.cwd, encoding: "utf8" });
+    const r = spawnSync(file, [...args], { cwd: options?.cwd, env: { ...process.env, ...options?.env }, encoding: "utf8" });
     return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   };
   const step = typecheckStep(project.lane, spawn, { ...ROOMY, dir: slots, log: () => {} }, canWrite);
