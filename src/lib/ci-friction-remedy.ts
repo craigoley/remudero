@@ -341,6 +341,9 @@ export function ownerSearchTerms(key: string, details: readonly string[]): strin
 export function locateCiFrictionOwner(key: string, details: readonly string[], search: OwnerSearch): CiFrictionOwner | undefined {
   if (key.startsWith("hand_fix:")) {
     const file = key.slice("hand_fix:".length);
+    // The locator never files a remedy that edits itself: a task owning this file is built by the
+    // machinery it would change, so the cause goes to a person instead.
+    if (file === "src/lib/ci-friction-remedy.ts") return undefined;
     return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)
       ? { files: [file], why: [`${file}: repaired by hand in multiple distinct merged PRs`] } : undefined;
   }
