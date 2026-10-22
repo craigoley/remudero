@@ -640,7 +640,6 @@ export interface PreflightResult {
 export interface PreflightDeps {
   range?: PreflightRange;
   spawn?: PreflightSpawn;
-  /** Optional data-only diagnostics; direct API callers remain quiet by default. */
   onPhase?: PreflightPhaseReporter;
 }
 
