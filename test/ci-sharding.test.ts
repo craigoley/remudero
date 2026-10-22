@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -11,10 +11,11 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workflow = parse(readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')) as {
   jobs: Record<string, {
     name?: string;
+    outputs?: Record<string, string>;
     needs?: string[];
     if?: string;
     strategy?: { 'fail-fast'?: boolean; matrix?: { shard?: number[] } };
-    steps?: Array<{ name?: string; uses?: string; run?: string; with?: Record<string, unknown> }>;
+    steps?: Array<{ id?: string; name?: string; uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, unknown> }>;
   }>;
 };
 
@@ -43,7 +44,7 @@ test('ci sharding: every declared shard runs through the retry harness and colla
 
   const required = workflow.jobs['ci-required'];
   assert.equal(required.name, 'ci');
-  assert.deepEqual(required.needs, ['ci']);
+  assert.deepEqual(required.needs, ['ci', 'commitlint']);
   assert.equal(required.if, '${{ always() }}');
   assert.match(runBodies('ci-required'), /SHARD_RESULT.*success/s);
   assert.match(runBodies('ci-required'), /exit 1/);
@@ -179,4 +180,40 @@ test('shard aggregators are the only always() jobs and no step can disappear con
       assert.equal((step as { if?: string }).if, undefined, `${jobId}/${step.name ?? step.uses} must use fail-closed shell flow, not a step if:`);
     }
   }
+});
+
+
+test('required ci refuses incomplete gate publication even when every test shard succeeds', () => {
+  const job = workflow.jobs['ci-required'];
+  const step = job.steps?.find(step => step.run?.includes('case "$SHARD_RESULT"'));
+  assert.ok(step?.run);
+  assert.deepEqual(job.needs, ['ci', 'commitlint']);
+  const producer = workflow.jobs.commitlint;
+  const reporter = producer.steps?.find(step => step.run?.includes('report()'));
+  assert.equal(reporter?.id, 'report-gates');
+  assert.equal(producer.outputs?.gate_report_outcome, '${{ steps.report-gates.outcome }}');
+  assert.equal(step.env?.GATE_REPORT_OUTCOME, '${{ needs.commitlint.outputs.gate_report_outcome }}');
+  assert.equal(step.env?.GATE_REPORT_REQUIRED, '${{ ' + producer.if + ' }}');
+  for (const producer of ['success', 'failure', 'cancelled', 'skipped', 'unknown', '', undefined]) {
+    const env: NodeJS.ProcessEnv = { ...process.env, SHARD_RESULT: 'success', GATE_REPORT_REQUIRED: 'true' };
+    delete env.GATE_REPORT_OUTCOME;
+    if (producer !== undefined) env.GATE_REPORT_OUTCOME = producer;
+    const result: SpawnSyncReturns<string> = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', step.run], { env, encoding: 'utf8' });
+    assert.equal(result.status, producer === 'success' ? 0 : 1, `${producer}: ${result.stdout}${result.stderr}`);
+    if (producer === 'success') assert.equal(result.stdout, 'ci: all eight test shards succeeded.\n');
+    else assert.match(result.stdout, /gate result publication is unavailable: light-gates/);
+  }
+  const noProducer: SpawnSyncReturns<string> = spawnSync('bash', ['-c', step.run], {
+    env: { ...process.env, SHARD_RESULT: 'success', GATE_REPORT_REQUIRED: 'false', GATE_REPORT_OUTCOME: '' }, encoding: 'utf8',
+  });
+  assert.equal(noProducer.status, 0, 'push events keep the existing contract with no consolidated producer');
+  const unknownRequirement: SpawnSyncReturns<string> = spawnSync('bash', ['-c', step.run], {
+    env: { ...process.env, SHARD_RESULT: 'success', GATE_REPORT_REQUIRED: '', GATE_REPORT_OUTCOME: 'success' }, encoding: 'utf8',
+  });
+  assert.equal(unknownRequirement.status, 1);
+  const failed: SpawnSyncReturns<string> = spawnSync('bash', ['-c', step.run], {
+    env: { ...process.env, SHARD_RESULT: 'failure', GATE_REPORT_REQUIRED: 'true', GATE_REPORT_OUTCOME: 'success' }, encoding: 'utf8',
+  });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stdout, /test shard FAILED/);
 });
