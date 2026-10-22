@@ -6,10 +6,11 @@ import { executeCanary, type CanaryPin, type CanaryExecutionPorts } from "./mode
 import { canaryTrialBlockId, type CanaryTrialBlock } from "./model-canary-metrics.js";
 import type { CanaryRetentionContract } from "./model-canary-retention.js";
 import type { CanaryContextContract } from "./model-canary-context.js";
+import type { CanaryCodingContract } from "./model-canary-coding.js";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 export interface CanarySlot { id: string; caseId: string; pin: CanaryPin; aaLabel: "A" | "B" | null;
-  retention?: CanaryRetentionContract; context?: CanaryContextContract }
+  retention?: CanaryRetentionContract; context?: CanaryContextContract; coding?: CanaryCodingContract }
 
 /** Same case for every arm; seed interleaves arm order instead of batching one model first. */
 export function buildCanarySchedule(day: string, seed: string, cases: readonly CanaryCase[], pins: readonly CanaryPin[], aa = false) {
@@ -45,6 +46,12 @@ export interface CanarySchedulePorts {
   terminal(slot: CanarySlot, outcome: Awaited<ReturnType<typeof executeCanary>>): Promise<void>;
 }
 
+/** Shared production-first admission; reuse the same policy for coding execution. */
+export function canarySlotEligible(slot: CanarySlot, e: Awaited<ReturnType<CanarySchedulePorts["eligibility"]>>): boolean {
+  return e.sourceAdopted === true && e.adapterQualified === true && e.productionBusy === false && e.squeeze === false
+    && (slot.pin.billing === "subscription" ? e.spareSubscription === true : e.experimentalCashAllowed === true && e.premium === false);
+}
+
 export async function executeCanarySchedule(plan: ReturnType<typeof buildCanarySchedule>, cases: readonly CanaryCase[], ports: CanarySchedulePorts) {
   if (plan.suiteHash !== canarySuiteDigest(cases) || plan.digest !== digest(JSON.stringify(plan.slots)))
     throw new Error("canary-schedule-changed");
@@ -56,8 +63,7 @@ export async function executeCanarySchedule(plan: ReturnType<typeof buildCanaryS
       aaLabel: slot.aaLabel,
       blockId: canaryTrialBlockId(plan.day, plan.suiteHash, slot.caseId, plan.digest, plannedSlotIds) };
     const e = await ports.eligibility(slot);
-    if (!e.sourceAdopted || !e.adapterQualified || e.productionBusy || e.squeeze
-      || (slot.pin.billing === "subscription" ? !e.spareSubscription : !e.experimentalCashAllowed || e.premium))
+    if (!canarySlotEligible(slot, e))
       return { state: "deferred" as const, completed, skipped, nextSlot: slot.id };
     const item = cases.find(c => c.id === slot.caseId);
     if (!item || slot.pin.suiteHash !== plan.suiteHash) throw new Error("canary-schedule-slot-invalid");

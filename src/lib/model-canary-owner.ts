@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import type { CanarySlot, CanarySchedulePorts } from "./model-canary-schedule.js";
 import { retentionSlotTurnBound, retentionTerminalMatches } from "./model-canary-retention-schedule.js";
 import { contextSlotCallBound, contextTerminalMatches } from "./model-canary-context-schedule.js";
+import { codingSlotCase, isCodingCase, validateCodingCheckpoint, type CodingCheckpoint } from "./model-canary-coding-checkpoint.js";
+import { codingScheduledTrial } from "./model-canary-coding-schedule.js";
 
 type Outcome = Parameters<CanarySchedulePorts["terminal"]>[1];
 const MAX_SLOTS = 100_000;
@@ -19,9 +21,11 @@ function binding(slot: CanarySlot): string {
     throw new Error("canary-owner-slot-invalid");
   retentionSlotTurnBound(slot);
   contextSlotCallBound(slot);
+  codingScheduledTrial(slot);
   const ordinary = [slot.caseId, slot.pin.model, slot.pin.route, slot.pin.effort,
     slot.pin.suiteHash, slot.pin.billing, slot.aaLabel];
-  return JSON.stringify(slot.context !== undefined ? [...ordinary, slot.context]
+  return JSON.stringify(slot.coding !== undefined ? [...ordinary, slot.coding]
+    : slot.context !== undefined ? [...ordinary, slot.context]
     : slot.retention === undefined ? ordinary : [...ordinary, slot.retention]);
 }
 
@@ -72,7 +76,18 @@ export class CanarySlotOwner {
     throw new Error("canary-owner-busy-or-capacity");
   }
 
+  /** Read the same durable row; a started or unreadable slot is never credited as terminal. */
+  phase(slot: CanarySlot): "unclaimed" | "started" | "terminal" {
+    const identity = binding(slot);
+    const row = this.db.prepare("SELECT binding,phase FROM canary_slots_v1 WHERE id=?").get(slot.id);
+    if (!row) return "unclaimed";
+    if (row.binding !== identity) throw new Error("canary-owner-slot-identity-conflict");
+    if (row.phase !== "started" && row.phase !== "terminal") throw new Error("canary-owner-phase-invalid");
+    return row.phase;
+  }
+
   terminal(slot: CanarySlot, outcome: Outcome): void {
+    if (isCodingCase(slot.caseId)) throw new Error("coding-owner-terminal-requires-cleanup");
     const identity = binding(slot), run = outcome.run;
     if (run.caseId !== slot.caseId || run.suiteHash !== slot.pin.suiteHash || run.model !== slot.pin.model
       || run.route !== slot.pin.route || run.effort !== slot.pin.effort
@@ -85,8 +100,47 @@ export class CanarySlotOwner {
     const receipt = JSON.stringify({ slot, run, grade: outcome.grade, state: outcome.state, reason: outcome.reason });
     if (Buffer.byteLength(receipt, "utf8") > MAX_RECEIPT_BYTES) throw new Error("canary-owner-receipt-bound");
     const changed = this.db.prepare(`UPDATE canary_slots_v1 SET phase='terminal',receipt=?
-      WHERE id=? AND binding=? AND owner=? AND phase='started'`).run(receipt, slot.id, identity, this.owner);
+      WHERE id=? AND binding=? AND owner=? AND phase='started' AND receipt IS NULL`).run(receipt, slot.id, identity, this.owner);
     if (changed.changes !== 1) throw new Error("canary-owner-terminal-not-owned");
+  }
+
+  /** Same durable row/store as every other canary; failed journaling retains ownership. */
+  codingCheckpoint(slot: CanarySlot, checkpoint: CodingCheckpoint): void {
+    codingSlotCase(slot);
+    const identity = binding(slot), row = this.db.prepare(`SELECT receipt FROM canary_slots_v1
+      WHERE id=? AND binding=? AND owner=? AND phase='started'`).get(slot.id, identity, this.owner);
+    if (!row) throw new Error("coding-owner-checkpoint-not-owned");
+    const prior = row.receipt === null ? null : JSON.parse(String(row.receipt));
+    if (prior && prior.kind !== "canary-coding-lifecycle-v1") throw new Error("coding-owner-checkpoint-kind-invalid");
+    validateCodingCheckpoint(checkpoint, prior?.checkpoint ?? null);
+    const receipt = JSON.stringify({ kind: "canary-coding-lifecycle-v1", slot, checkpoint });
+    if (Buffer.byteLength(receipt) > MAX_RECEIPT_BYTES) throw new Error("coding-owner-checkpoint-bound");
+    const changed = this.db.prepare(`UPDATE canary_slots_v1 SET receipt=?
+      WHERE id=? AND binding=? AND owner=? AND phase='started' AND receipt IS ?`).run(receipt, slot.id, identity, this.owner, row.receipt);
+    if (changed.changes !== 1) throw new Error("coding-owner-checkpoint-conflict");
+  }
+
+  /** Only a positively cleaned execution can free this row. Behavior samples stay
+   * explicitly unqualified, with no invented provider usage, CanaryRun or efficacy. */
+  codingTerminal(slot: CanarySlot, outcome: { state: "complete" | "refused" | "unavailable"; passed: boolean | null;
+    reason: string; cleanup?: "confirmed" | "unknown"; executorQualified: false; resourceEvidence: null }): void {
+    codingSlotCase(slot);
+    const identity = binding(slot), row = this.db.prepare(`SELECT receipt FROM canary_slots_v1
+      WHERE id=? AND binding=? AND owner=? AND phase='started'`).get(slot.id, identity, this.owner);
+    if (!row || row.receipt === null) throw new Error("coding-owner-terminal-not-owned-or-checkpointed");
+    const prior = JSON.parse(String(row.receipt));
+    if (prior.kind !== "canary-coding-lifecycle-v1" || prior.checkpoint?.phase !== "cleanup-confirmed"
+      || outcome.cleanup !== "confirmed" || outcome.executorQualified !== false || outcome.resourceEvidence !== null
+      || !["complete", "refused", "unavailable"].includes(outcome.state)
+      || (outcome.state === "complete" ? typeof outcome.passed !== "boolean" : outcome.passed !== null)
+      || typeof outcome.reason !== "string" || outcome.reason.length > 512)
+      throw new Error("coding-owner-terminal-unproven");
+    const receipt = JSON.stringify({ ...prior, outcome: { state: outcome.state, passed: outcome.passed, reason: outcome.reason,
+      cleanup: "confirmed", executorQualified: false, resourceEvidence: null, scope: "unregistered-mechanics-only" } });
+    if (Buffer.byteLength(receipt) > MAX_RECEIPT_BYTES) throw new Error("coding-owner-terminal-bound");
+    const changed = this.db.prepare(`UPDATE canary_slots_v1 SET phase='terminal',receipt=?
+      WHERE id=? AND binding=? AND owner=? AND phase='started' AND receipt IS ?`).run(receipt, slot.id, identity, this.owner, row.receipt);
+    if (changed.changes !== 1) throw new Error("coding-owner-terminal-conflict");
   }
 
   close(): void { this.db.close(); }

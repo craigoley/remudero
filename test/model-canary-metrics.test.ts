@@ -76,3 +76,31 @@ test("canary stream timing preserves unknown TTFT and refuses an invalid monoton
   assert.equal(canaryPassInterval(0, 0), null);
   assert.ok(canaryPassInterval(60, 60)![0] < 1);
 });
+
+
+test("descriptive attempt resources retain ungraded unpriced failures and measured zero without inventing missing totals", () => {
+  const a = run("ungraded", null); a.attempts[0]!.usageRatedUsd = null;
+  a.attempts[0]!.firstTextMs = 0; a.attempts[0]!.cacheReadTokens = 0;
+  a.attempts.push({ ...attempt("failed", null), terminal: "error", durationMs: null, outputTokens: null, servedModel: null });
+  const g = projectCanaryRuns([a]).groups[0]!, m = g.attemptMeasurements;
+  assert.deepEqual(m.durationMs, { sampleUnit: "attempt", observed: 1, missing: 1, p50: 20, p95: null, observedTotal: 20, total: null, overflow: false });
+  assert.equal(m.firstTextMs.p50, 0); assert.equal(m.cacheReadTokens.observedTotal, 0);
+  assert.equal(m.outputTokens.total, null); assert.equal(m.outputTokens.p50, 10);
+  assert.equal(g.failedAttempts, 1); assert.equal(g.observed, 0); assert.equal(g.passRate, null);
+  assert.equal(g.apiEstimate.totalUsd, null); assert.equal(g.identityComparable, false); assert.equal(g.invoiceUsd, null);
+  const empty = run("no-attempt", null); empty.attempts = [];
+  const zero = projectCanaryRuns([empty]).groups[0]!.attemptMeasurements.inputTokens;
+  assert.equal(zero.observed, 0); assert.equal(zero.missing, 0); assert.equal(zero.p50, null);
+  assert.equal(zero.total, null); assert.equal(zero.observedTotal, null);
+});
+
+test("descriptive resource tails require twenty measured attempts and overflow cannot become a finite total", () => {
+  const rows = Array.from({ length: 20 }, (_, i) => { const r = run("tail-" + i, null); r.attempts[0]!.durationMs = i; return r; });
+  assert.equal(projectCanaryRuns(rows.slice(0, 19)).groups[0]!.attemptMeasurements.durationMs.p95, null);
+  const g = projectCanaryRuns([...rows, structuredClone(rows[0]!)]).groups[0]!;
+  assert.equal(g.attemptMeasurements.durationMs.observed, 20); assert.equal(g.attemptMeasurements.durationMs.p95, 18);
+  assert.equal(g.attemptMeasurements.durationMs.total, 190);
+  rows[0]!.attempts[0]!.durationMs = Number.MAX_VALUE; rows[1]!.attempts[0]!.durationMs = Number.MAX_VALUE;
+  const overflow = projectCanaryRuns(rows).groups[0]!.attemptMeasurements.durationMs;
+  assert.equal(overflow.overflow, true); assert.equal(overflow.total, null); assert.equal(overflow.observedTotal, null);
+});

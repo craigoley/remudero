@@ -17,6 +17,10 @@ export interface CanaryRequest {
   maxOutputBytes: number;
   /** Native message roles, for the weekly retention protocol; never concatenate this into tool authority. */
   conversation?: readonly { role: "system" | "user" | "assistant"; content: string }[];
+  /** Harness authority; an adapter must never derive this from the prompt. */
+  toolPolicy?: CanaryCase["tools"];
+  /** Native SDK handlers use the SAME real executor and trace as external tool calls. */
+  invokeTool?: (name: string, args: unknown) => CanaryToolEvent;
 }
 /** Production admission must reserve the existing allowance BEFORE transport, on every call. */
 export interface CanaryExecutionPorts {
@@ -26,7 +30,7 @@ export interface CanaryExecutionPorts {
   monotonicMs(): number;
 }
 
-async function untilAbort<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+export async function untilAbort<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
   if (signal.aborted) throw new Error("canary-wall-bound");
   let onAbort: () => void = () => {};
   const expiry = new Promise<never>((_resolve, reject) => {
@@ -60,19 +64,34 @@ export async function executeCanary(item: CanaryCase, pin: CanaryPin, ports: Can
         inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null,
         usageRatedUsd: null, billing: pin.billing, servedModel: null, terminal: "error" };
       run.attempts.push(pending);
-      const response = await untilAbort(abort.signal, () => ports.request({ prompt: item.prompt, pin, history,
-        signal: abort.signal, maxOutputBytes: limits.maxOutputBytes }));
+      let invoked = 0;
+      const invokeTool = (name: string, args: unknown): CanaryToolEvent => {
+        const event = ++invoked <= 2 ? tool(name, args)
+          : { name, args: null, result: { error: "tool-call-bound" }, denied: true };
+        // Retain one known bound violation; a burst cannot grow the trace without limit.
+        if (invoked <= 3) trace.push(event);
+        return event;
+      };
+      let requestActive = true;
+      let response: CanaryResponse;
+      try {
+        response = await untilAbort(abort.signal, () => ports.request({ prompt: item.prompt, pin, history,
+          signal: abort.signal, maxOutputBytes: limits.maxOutputBytes, toolPolicy: item.tools,
+          invokeTool: (name, args) => requestActive && !abort.signal.aborted ? invokeTool(name, args)
+            : { name, args: null, result: { error: "tool-capability-closed" }, denied: true } }));
+      } finally { requestActive = false; }
       Object.assign(pending, response.resources);
       if (pending.durationMs === null) {
         const observed = ports.monotonicMs() - requestStarted;
         pending.durationMs = Number.isFinite(observed) && observed >= 0 ? observed : null;
       }
       if (Buffer.byteLength(response.text, "utf8") > limits.maxOutputBytes || response.toolCalls.length > 2) { reason = "output-bound"; run.verified = false; break; }
+      if (trace.some(event => event.denied)) { reason = "tool-or-authority-violation"; run.verified = false; break; }
       if (response.resources.terminal !== "complete") { reason = response.resources.terminal; break; }
       if (response.toolCalls.length === 0) {
         grade = gradeCanary(item, response.text, trace); run.verified = grade.passed; reason = grade.reason; break;
       }
-      const results = response.toolCalls.map(call => tool(call.name, call.args)); trace.push(...results);
+      const results = response.toolCalls.map(call => invokeTool(call.name, call.args));
       history.push({ response: response.text, toolResults: results });
       if (results.some(t => t.denied)) { reason = "tool-or-authority-violation"; run.verified = false; break; }
     }
@@ -85,6 +104,7 @@ export async function executeCanary(item: CanaryCase, pin: CanaryPin, ports: Can
   } finally { clearTimeout(timer); }
   const elapsed = ports.monotonicMs() - started;
   run.totalDurationMs = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : null;
+  run.outcomeReason = reason;
   run.outcomeReason = reason;
   // Refusals are part of availability coverage too, with zero provider attempts.
   await ports.save(run, grade);

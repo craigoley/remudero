@@ -167,6 +167,23 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
           totalUsd: calls.length && known.length === calls.length ? measured : null,
           perCorrectTaskUsd: calls.length && known.length === calls.length && observed === rows.length && correct > 0 ? measured / correct : null };
       };
+      // Descriptive attempt resources include failures/retries and require no
+      // grade or price. Their denominator is attempts, not independent cases.
+      const measurement = (key: "durationMs" | "firstTextMs" | "generationMs" | "inputTokens" | "outputTokens"
+        | "cacheReadTokens" | "cacheWriteTokens" | "reasoningTokens") => {
+        const values = attempts.flatMap(attempt => attempt[key] === null ? [] : [attempt[key]]);
+        const sum = values.reduce((total, value) => total + value, 0);
+        const overflow = !Number.isFinite(sum);
+        return { sampleUnit: "attempt" as const, observed: values.length, missing: attempts.length - values.length,
+          p50: quantile(values, .5), p95: values.length >= 20 ? quantile(values, .95) : null,
+          observedTotal: values.length && !overflow ? sum : null,
+          total: attempts.length && values.length === attempts.length && !overflow ? sum : null, overflow };
+      };
+      const attemptMeasurements = {
+        durationMs: measurement("durationMs"), firstTextMs: measurement("firstTextMs"), generationMs: measurement("generationMs"),
+        inputTokens: measurement("inputTokens"), outputTokens: measurement("outputTokens"), cacheReadTokens: measurement("cacheReadTokens"),
+        cacheWriteTokens: measurement("cacheWriteTokens"), reasoningTokens: measurement("reasoningTokens"),
+      };
       const row = rows[0]!;
       return { suiteHash: row.suiteHash, model: row.model, route: row.route, effort: row.effort, family: row.family,
         tasks: rows.length, distinctCases: new Set(rows.map(r => r.caseId)).size, attempts: attempts.length,
@@ -180,6 +197,7 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
         servedIdentityKnown: attempts.filter(a => a.servedModel !== null).length,
         servedMismatch: attempts.filter(a => a.servedModel !== null && a.servedModel !== row.model).length,
         identityComparable: attempts.length > 0 && attempts.every(a => a.servedModel === row.model),
+        attemptMeasurements,
         failedAttempts: attempts.filter(a => a.terminal !== "complete").length,
         apiEstimate: cost("api"), subscriptionNotional: cost("subscription"), invoiceUsd: null };
     }) };

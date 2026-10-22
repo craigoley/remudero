@@ -1,0 +1,14 @@
+{
+  "version": "native-resource-fixture-contract-v1",
+  "scope": "synthetic raw wire and future per-user-turn resource expectations; no model result or consumer qualification",
+  "scenarios": [
+    {"mode":"usage-missing","startUsage":null,"finalUsage":null,"expected":{"inputTokens":null,"outputTokens":null,"cacheReadTokens":null,"cacheWriteTokens":null,"servedModel":"synthetic-model","terminal":"complete"}},
+    {"mode":"usage-cache","startUsage":{"input_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":1,"output_tokens":0},"finalUsage":{"input_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":1,"output_tokens":3},"expected":{"inputTokens":2,"outputTokens":3,"cacheReadTokens":3,"cacheWriteTokens":1,"servedModel":"synthetic-model","terminal":"complete"}},
+    {"mode":"usage-conflict","startUsage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0},"finalUsage":{"input_tokens":9,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3},"expected":{"inputTokens":null,"invalidCounters":["inputTokens"],"terminal":"complete"}},
+    {"mode":"usage-missing-cache","startUsage":{"input_tokens":2,"output_tokens":0},"finalUsage":{"input_tokens":2,"output_tokens":3},"expected":{"inputTokens":2,"outputTokens":3,"cacheReadTokens":null,"cacheWriteTokens":null,"terminal":"complete"}},
+    {"mode":"usage-mixed-model","startUsage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0},"finalUsage":{"input_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3},"secondaryModel":"different-synthetic-model","expected":{"servedModel":null,"generationMs":null,"terminal":"error","failure":"mixed-model-identity"}},
+    {"mode":"usage-partial","startUsage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0},"finalUsage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3},"omitMessageStop":true,"expected":{"terminal":"error","failure":"native-terminal-unproven"}},
+    {"mode":"usage-reset","startUsage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0},"finalUsage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3},"reset":true,"expected":{"terminal":"error","failure":"context-reset"}},
+    {"mode":"usage-child-scope","startUsage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0},"finalUsage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3},"parentToolUseId":"synthetic-child-scope","expected":{"servedModel":null,"terminal":"error","failure":"stream-scope-unproven"}}
+  ]
+}
