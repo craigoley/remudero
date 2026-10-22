@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 test("W1-T10141: config.gardener_failed no longer recurs", async (t) => {
-  const repo = resolve(import.meta.dirname, "../..");
+  const repo = REPO_ROOT;
   const root = mkdtempSync(join(tmpdir(), "rmd-config-bundle-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const path of ["src", "scripts", "packages/api-client/src", ".remudero", "package.json", "tsconfig.json"]) {
