@@ -46,3 +46,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The supplied evidence establishes one failing round and its cost, but provides no root-cause diagnosis or specified corrective mechanism for the proposed daemon change.; on the change's description/files alone, no diff was read — Acceptance checks for a test-title string with grep; that proof alone cannot verify the claimed prevention or self-healing of the failing round. The gates explicitly require escalation when the finding cannot be verified from what is shown."
+    judged_at: "2026-10-22T17:52:40.530Z"
+    pin: "1aee22f05057273ff0ab02c9aa82acaa4a7c56775012e00a564e8b9bf0eaba6c"
