@@ -2405,6 +2405,13 @@ export interface components {
       authUrl: string | null;
       expiresAt: string;
       reason?: string;
+      /** W1-T10380: a redacted label for the account a completed Claude login now runs the fleet on. Never a token, an email in full, or a credential path. */
+      accountLabel?: string;
+    };
+    ProviderAuthCodeRequest: {
+      sessionId: string;
+      /** The authorization code the provider's page showed, pasted once. Never logged and never echoed in a projection. */
+      code: string;
     };
     ProviderAuthStartRequest: {
       provider: "claude" | "codex";
@@ -5689,6 +5696,16 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+    patch: {
+      responses: {
+          "200": ProviderAuthProjection;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
         };
     };
   };
