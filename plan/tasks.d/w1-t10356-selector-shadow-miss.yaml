@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,14 @@
       proof: "grep: test/baked-supervisor-inputs\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/baked-supervisor-inputs.test.ts for each recorded edge"
       proof: "grep: test/baked-supervisor-inputs\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files are a selector source file (src/lib/affected-suites.ts) and its shadow test; neither is a secret, credential, auth, deploy, merge-policy or review-policy surface according to the description."
+      - "The task adds a selector edge and a regression test, and nothing in the description indicates data deletion, irreversible action, or an operator-only decision."
+      - "The family track record (18 merged, 0 declined) is clean, and the gates state shows nothing concerning. Both declared files exist at the base, and the acceptance criteria are grep-verifiable."
+      - "The PR still passes CI and review, and the shadow selector only widens test selection, so it is a well-trodden, reversible change."
+    judged_at: "2026-10-22T03:31:46.727Z"
+    pin: "208b0e96eba3d87356423c9b2d8a72164799ac3575b057f412cff23964bcf458"

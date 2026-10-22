@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: blast-radius
   priority: 1.18
@@ -98,3 +98,11 @@
     still signs "pool defect: test/the-leaker.test.ts leaks into test/the-victim.test.ts"), and
     test/a-deterministic-shard-timeout-is-not-re-queued.test.ts "W1-T8040: the signature names a pool defect
     and a runner failure before the ceiling".
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.221Z"
+    pin: "b3ecb6ec4cc46269bdbd4a478a71a416387c2dc59f775bd632a7ff0978fa5040"

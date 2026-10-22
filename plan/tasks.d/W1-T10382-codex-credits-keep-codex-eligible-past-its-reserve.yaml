@@ -1,0 +1,70 @@
+- id: W1-T10382
+  title: "CODEX CREDITS KEEP CODEX ELIGIBLE PAST ITS RESERVE — the Codex rate-limit bucket carries `credits` (has_credits true, unlimited false, balance 63581.78 in a 2026-10-21T22:06Z rollout) but `CodexRateLimitBucket` (src/lib/worker-provider.ts) has no `credits` field and nothing in src/ reads it, so with the weekly window at 95% against a 5% reserve Codex was ruled ineligible and the work fell to the $-capped cash lane while 60k+ prepaid credits sat unused"
+  repo: remudero
+  depends_on: [W1-T10383]  # both change providerEligibility; the honest-reason fix lands first
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # routing spends prepaid credits; never touches rateLimitResetCredits
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-10-22 (P0): \"I also have a ton of Codex credits (60k+) that need to be used. Can you just leverage those too?\""
+  plan_refs: [W1-T3692, W1-T3718, W1-T2573, W1-T10383]
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - test/worker/spawn/codex-credits-keep-codex-eligible-past-its-reserve.test.ts
+  status: queued
+  priority: 1  # operator ruling 2026-10-22: P0
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: use the Codex credits. A Codex account with credits stays eligible after its plan
+    windows pass the reserve, ahead of the cash lane. Manual rate-limit reset grants (`rateLimitResetCredits`) are a
+    different thing and stay read-only: never consumed.
+    OBSERVED: ~/.codex/sessions/2026/10/21/rollout-2026-10-21T22-06-03-*.jsonl, newest `rate_limits` reads `limit_id
+    codex`, `primary.used_percent 95.0`, `window_minutes 10080`,
+    `credits {"has_credits":true,"unlimited":false,"balance":"63581.7845140000"}`, `plan_type pro`. REPORTED by the
+    operator session: the app-server `rateLimits` bucket carries the same block. Its camelCase spelling is
+    INFERRED, and the builder confirms it from the app-server's own protocol schema before writing the parser.
+    READ at origin/main 32887fe4d (symbols, not lines):
+    - `CodexRateLimitBucket` declares limitId, limitName, primary, secondary, rateLimitReachedType and
+      spendControlReached. There is no credits field. `grep -rn has_credits src/` is empty.
+    - `capacityFromBucket` builds windows only. `providerEligibility` admits a provider only when every window is
+      under `100 - reservePercent`, so 95% against a 5% reserve is not admitted.
+    - `selectCodexModel` returns `readable:false, exhausted:true` when every mapped model is below the reserve
+      (W1-T10383 makes that reason honest).
+    - The cash fallbacks in `spawnWorker` (src/lib/worker.ts: `cash-fallback`, `cash-sonnet-fallback`,
+      `cash-opus-fallback`) run when no subscription is eligible.
+    NOT COVERED ELSEWHERE: swept origin/main 32887fe4d plan/tasks.d and all 18 open PR heads' plan trees for
+    has_credits, "credits lane" and "Codex credits": no shard.
+  design: |
+    1. PARSE. `CodexRateLimitBucket` gains `credits`, with hasCredits, unlimited and balance in the app-server's
+       spelling. `capacityFromBucket` carries a parsed `credits` onto the capacity: balance is a finite non-negative
+       decimal parsed from the string, and anything else is unreadable. Absent or unreadable credits leave
+       today's behaviour.
+    2. ADMIT AS A CREDITS LANE. Codex windows at or over the reserve stay eligible ONLY when `unlimited === true`, or
+       when `hasCredits === true` and the balance is above 0. Under `spendControlReached === true`, or under a
+       `rateLimitReachedType` the credits cannot carry, it stays ineligible. The verdict says so:
+       `providerEligibility` returns eligible with lane `codex-credits`. Subscription headroom still wins the
+       auction. A credits-lane Codex ranks ahead of every cash fallback, so a spawn falls to cash only when
+       neither a subscription nor credits can carry it.
+    3. RECORD IT. The worker.assignment `considered[]` entry for Codex carries lane `codex-credits` and the
+       balance as read. The selected spawn's routing rule names the credits lane. A reader can count credit-lane
+       spawns and the balance trend from the ledger alone.
+    4. NEVER `rateLimitResetCredits`: `parseResetCredits` and its no-consume contract are unchanged. No new config key,
+       threshold or env var. A balance floor other than 0 would be an operator decision, and none is set.
+    5. Tests (new file, titles verbatim as in the proofs): 95% weekly with credits is eligible as the credits lane
+       and is chosen over cash. Without credits, with balance "0", with an unreadable balance or with
+       spendControlReached, it stays ineligible. Subscription headroom outranks credits. The assignment row carries
+       the lane and the balance. rateLimitResetCredits is never consumed.
+  acceptance:
+    - claim: "a Codex account past its reserve with a positive credit balance is eligible as the credits lane ahead of cash"
+      proof: "unit test: W1-T10382: codex past its reserve with credits is routed as the credits lane before cash"
+    - claim: "no credits, a zero or unreadable balance, or a reached spend control keeps Codex ineligible"
+      proof: "unit test: W1-T10382: codex without spendable credits stays ineligible past its reserve"
+    - claim: "the assignment records the credits lane and balance, and reset credits are never consumed"
+      proof: "unit test: W1-T10382: a credits-lane assignment records its lane and balance"
+  falsifier: |
+    Remove the credits admission from providerEligibility, and the 95%-with-credits fixture is ineligible again and
+    falls to cash.
+  note: |
+    Reservation refs/rmd-id/W1-T10382 is held by filing branch file-1022-fleet-routing.

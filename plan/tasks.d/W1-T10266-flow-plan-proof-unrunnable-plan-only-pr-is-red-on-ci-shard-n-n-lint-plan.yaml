@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.34
   status: queued
@@ -24,10 +24,10 @@
     - PR #13008: 3.14 PR-hours — plan-only PR is red on ci-shard (2/8), lint-plan — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.88
+    verdict: "operator"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The rationale says this blocker requires a plan repair because the code-fix lane cannot stage outside a plan filing; the declared files instead name pr-blocker.ts and a new test, without identifying the repair mechanism.; on the change's description/files alone, no diff was read — Acceptance requires clearance without manual intervention, but its sole proof checks for test-title text. The supplied evidence does not verify that automated clearance preserves the stated plan-filing restriction."
-    judged_at: "2026-10-20T16:33:52.096Z"
-    pin: "a6250c47fd076707b897391a0274e9280c0d2a78dfa5220b0a267d23fd776217"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.224Z"
+    pin: "9f6c0a04ad6b95531b556519443d8809b0d17cbd98590b33ac74fb1afe1ff5c1"

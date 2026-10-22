@@ -147,3 +147,10 @@ test("outOfDeclaredScopeFiles: empty/undefined declared scope yields no out-of-s
   assert.deepEqual(outOfDeclaredScopeFiles(["src/foo.ts"], undefined), []);
   assert.deepEqual(outOfDeclaredScopeFiles(["src/foo.ts"], []), []);
 });
+
+test("the default fix prompt carries validated canonical task design and amendment verbatim", () => {
+  const design = "Keep the existing caller behavior exactly.", amendment = "Approved precise repair: preserve this ruling verbatim.";
+  const prompt = renderFixPrompt({ task: { ...TASK, design, amendment }, round: 1, branch: "run-W1-T2607X-1", evidence: EVIDENCE });
+  assert.ok(prompt.includes(design), "the canonical design must reach the actual default prompt");
+  assert.ok(prompt.includes(amendment), "the canonical amendment must reach the actual default prompt");
+});
