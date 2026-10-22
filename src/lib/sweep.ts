@@ -14964,7 +14964,7 @@ export function fixSeedRead(
   pr: Pick<OpenPrView, "prNumber" | "headSha" | "taskId">,
   runId: string,
 ): FixSeedRead | undefined {
-  const taskId = fixLedgerTaskIdFor(pr);
+  const taskId = fixLedgerTaskIdFor(pr) ?? reviewLedgerKeyFor(undefined, pr.prNumber);
   const disposed = (line: Record<string, unknown>) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber;
   const seedAt = lines.findLastIndex((line) => disposed(line) && line.acted === true && line.head_sha === pr.headSha &&
     (line.disposition === "blocked-fixable" || line.disposition === "conflicted") && typeof line.progress_escalated_key !== "string");
@@ -14974,6 +14974,10 @@ export function fixSeedRead(
   let from = seedAt;
   while (from > 0 && !disposed(lines[from - 1])) from -= 1;
   const window = lines.slice(from);
+  // Taskless gardener repairs write PR-number identities. Require this seed's own
+  // exact-head dispatch before reading that identity; absent evidence stays unknown.
+  if (pr.taskId === undefined && !window.some(line => line.step === "fix.dispatch" &&
+      line.task_id === taskId && line.head_sha === pr.headSha)) return undefined;
   const rung = (line: Record<string, unknown>) => line.task_id === taskId && String(line.step).startsWith("fix.");
   if (!window.some(rung)) {
     // An earlier run's detached dispatch died with its process; this run's is owned by the in-process claim.
