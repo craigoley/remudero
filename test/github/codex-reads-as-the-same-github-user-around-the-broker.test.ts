@@ -4,7 +4,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { ghBrokerDir } from "#src/lib/gh-read-broker-client.js";
+import { ghBrokerDir, ghReadBrokerLive } from "#src/lib/gh-read-broker-client.js";
+import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
+import { main } from "#src/run-task.js";
 import {
   brokerGhReadAs, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, GhReadBroker, GhSharedPace, isGhPaceLogin, serveGhReadBroker,
   summariseGhBrokerLog,
@@ -431,4 +433,61 @@ test("W1-T10302: the default client read sends the client to the broker and retu
   assert.equal(bare.exitCode, 0);
   const log = summariseGhBrokerLog(dir, 0) as { by_client: Record<string, number> };
   assert.deepEqual(log.by_client, { codex: 1, claude: 1 }, "the named client reached the log; an unnamed background read is a Claude session's");
+});
+
+class ProcessExitCalled extends Error {
+  constructor(public code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+test("W1-T10302: rmd gh-broker serve, status and stop run through the CLI's own wiring", { timeout: 120_000 }, async (t) => {
+  const cache = tmp(t, "cli-cache");
+  const written: string[] = [];
+  t.mock.method(process, "exit", ((code?: number): never => { throw new ProcessExitCalled(code); }) as typeof process.exit);
+  t.mock.method(process.stdout, "write", (chunk: string, encodingOrDone?: unknown, done?: unknown) => {
+    written.push(String(chunk));
+    const callback = typeof encodingOrDone === "function" ? encodingOrDone : done;
+    if (typeof callback === "function") (callback as () => void)();
+    return true;
+  });
+  const saved = { argv: process.argv, cache: process.env.RMD_GH_CACHE_HOME, token: process.env.GH_TOKEN, guard: process.env[SELF_SYNC_GUARD_ENV] };
+  t.after(() => {
+    process.argv = saved.argv;
+    for (const [name, value] of [["RMD_GH_CACHE_HOME", saved.cache], ["GH_TOKEN", saved.token], [SELF_SYNC_GUARD_ENV, saved.guard]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  process.env.RMD_GH_CACHE_HOME = cache;
+  process.env.GH_TOKEN = "not-a-real-token"; // main() mints nothing when a token is present
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
+
+  const run = (sub: string[]): Promise<unknown> => {
+    process.argv = [process.execPath, "rmd", "gh-broker", ...sub];
+    return main().then(() => undefined, (e: unknown) => e); // main() ends in process.exit, which this test turns into a throw
+  };
+
+  // serve: the CLI hands the verb its server factory, which builds a real broker over this account's directory.
+  const serving = run(["serve"]);
+  await until(() => ghReadBrokerLive({ RMD_GH_CACHE_HOME: cache }) !== undefined, "the CLI-started broker's heartbeat");
+
+  // status: the CLI hands the verb the per-login helper, whose view is appended to the broker's own status.
+  const statusExit = await run(["status", "--since", "1d"]);
+  assert.ok(statusExit instanceof ProcessExitCalled && statusExit.code === 0, String(statusExit));
+  const printed = written.join("");
+  const start = printed.indexOf("{");
+  const shown = JSON.parse(printed.slice(start, printed.lastIndexOf("}") + 1)) as {
+    login_status: { login: string | null; accounts: string[]; by_account: Record<string, { requests_by_client: Record<string, number> }> };
+  };
+  assert.equal(shown.login_status.login, null, "no read has named the login yet");
+  assert.equal(shown.login_status.accounts.length, 1);
+  assert.deepEqual(Object.values(shown.login_status.by_account)[0].requests_by_client, {});
+
+  // stop: the broker closes, so the serve invocation returns exit 0.
+  const stopExit = await run(["stop"]);
+  assert.ok(stopExit instanceof ProcessExitCalled && stopExit.code === 0, String(stopExit));
+  const servedExit = await serving;
+  assert.ok(servedExit instanceof ProcessExitCalled && servedExit.code === 0, String(servedExit));
+  assert.match(written.join(""), /gh-broker: serving .*broker\.sock/);
 });
