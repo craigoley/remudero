@@ -114,7 +114,7 @@ import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbo
 import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
-import { currentVerifyHumanRulings } from "./verify-human-judge.js";
+import { currentVerifyHumanRulings, currentDeclineState, declineLapse, observedStateOfProposalSummary } from "./verify-human-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
 import { readRecommendationStore, recommendationFor, recommendationStorePath, type RecommendationStore, type ServedRecommendation } from "./inbox-recommendation.js";
@@ -1802,6 +1802,8 @@ export interface InboxReadyItem extends InboxSender {
   recommendation?: ServedRecommendation;
   stampLine?: string;
   draftedTasks: InboxDraftedTask[];
+  /** W1-T10077: set when an operator's decline lapsed because the state it was given on changed; says what changed. */
+  reopenedBecause?: string;
 }
 
 /** One proposal currently mid-draft (W1-T193): an Architect worker is running for it right now.
@@ -1850,6 +1852,8 @@ export interface InboxNotReadyItem extends InboxSender {
   /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
   recommendation?: ServedRecommendation;
   reasons: PredicateFailure[];
+  /** W1-T10077: set when an operator's decline lapsed because the state it was given on changed; says what changed. */
+  reopenedBecause?: string;
   state?: "not_ready" | "deferred_with_trigger";
   trigger?: InboxClassification["trigger"];
   resolution?: { method: "POST"; path: "/v1/inbox/reframe"; fields: { proposalId: string } };
@@ -2013,7 +2017,28 @@ function prepareInboxPass(
   const fragmentMemo = inboxClassifyState(deps).fragments;
   beginFragmentPass(fragmentMemo);
 
+  // W1-T10077: the newest receipt per proposal, built once and only when a verify-human decline is looked at.
+  let newestReceipts: Map<string, VerdictReceipt> | undefined;
+  const newestReceiptOf = (proposalId: string): VerdictReceipt | undefined => {
+    if (newestReceipts === undefined) {
+      newestReceipts = new Map();
+      for (const r of mergeVerdictReceipts(verdictReceipts, ledgerLines.flatMap((row) => verdictReceiptOf(row) ?? []))) newestReceipts.set(r.task_id, r);
+    }
+    return newestReceipts.get(proposalId);
+  };
   const classifyOne = (proposal: Proposal): InboxClassification => {
+    const classified = classifyWith(proposal, verdicts.isDeclined);
+    const declinedTask = classified.state === "declined" ? /^verify-human:([A-Za-z0-9-]+)$/.exec(proposal.id)?.[1] : undefined;
+    const receipt = declinedTask ? newestReceiptOf(proposal.id) : undefined;
+    const task = declinedTask ? plan.byId.get(declinedTask) : undefined;
+    if (!receipt || receipt.step !== "panel.proposal_declined" || !task) return classified;
+    const deps = task.depends_on ?? [];
+    const depsAllMerged = deps.every((d) => { const t = plan.byId.get(d); return t !== undefined && isMerged(t); });
+    const lapse = declineLapse(receipt, currentDeclineState(receipt.observed_state, depsAllMerged), deps);
+    // Classified as it would have been before the decline, with the reason it came back.
+    return lapse ? { ...classifyWith(proposal, () => undefined), reopenedBecause: lapse.because } as InboxClassification : classified;
+  };
+  const classifyWith = (proposal: Proposal, isDeclined: (id: string) => string | undefined): InboxClassification => {
     const classification = classifyProposal(proposal, drafts[proposal.id], {
       retirement: p => lifecycle.state !== "absent" && (!lifecycleScope || lifecycleThreads?.status !== "ok")
         ? { unknown: "owned lifecycle or current operator thread evidence unavailable" }
@@ -2026,7 +2051,7 @@ function prepareInboxPass(
       // Every OTHER registry id: one shared set behind a view that excludes this proposal.
       openProposalIds: { has: (id) => id !== proposal.id && allIds.has(id) },
       isRatified: verdicts.isRatified,
-      isDeclined: verdicts.isDeclined,
+      isDeclined,
       // A release moves a task into the fleet only if the plan itself allows dispatch. A held
       // task can carry an old machine release row, but that row must not hide its human ask.
       isReleasedHumanTask: (taskId) => plan.byId.get(taskId)?.dispatch_hold !== true &&
@@ -2550,6 +2575,10 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     return recommendation ? { recommendation } : {};
   };
 
+  const reopened = (c: InboxClassification): { reopenedBecause?: string } => {
+    const why = (c as InboxClassification & { reopenedBecause?: unknown }).reopenedBecause;
+    return typeof why === "string" ? { reopenedBecause: why } : {};
+  };
   const allReady: InboxReadyItem[] = [];
   const allDrafting: InboxDraftingItem[] = [];
   const allNotReady: InboxNotReadyItem[] = [];
@@ -2565,6 +2594,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         summary: proposal.summary,
         plain: servedPlain(proposal, "ready"),
         ...recommended(proposal, "ready"),
+        ...reopened(classification),
         stampLine: classification.draft?.stampLine,
         draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
       });
@@ -2583,6 +2613,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
       allNotReady.push({
+        ...reopened(classification),
         ...(classification.retirement ? { retirement: classification.retirement } : {}),
         ...(classification.needsTriageReason ? { needsTriageReason: classification.needsTriageReason } : {}),
         ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "notReady"), ...recommended(proposal, "notReady"), reasons: classification.reasons,
@@ -3576,7 +3607,9 @@ function proposalVerdictResponse(
   };
   const origin = actor.origin;
   const outcome = applyProposalVerdict(kind, input, found, (step, id, reason) => {
-    const row = appendPanelLedger(deps.ledgerPath, step, id, origin, { reason });
+    // W1-T10077: a decline of a verify-human proposal records the state it was given on, so a material change can re-open it.
+    const observedState = step === "panel.proposal_declined" ? observedStateOfProposalSummary(proposals.find((p) => p.id === id)?.summary ?? "") : undefined;
+    const row = appendPanelLedger(deps.ledgerPath, step, id, origin, { reason, ...(observedState ? { observed_state: observedState } : {}) });
     // W1-T9252: the operator's action also lands on the item's thread; a store fault never fails the verb.
     recordRowThreadEvents({ ...row, task_id: id, origin, reason }, [{ id }], { threadStorePath: inboxThreadStorePath(deps.inboxRoot) }, deps.logProjection);
   });
