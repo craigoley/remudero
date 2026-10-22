@@ -26,6 +26,16 @@
     - test/the-image-drift-watchdog-watches-the-worker-sdk.test.ts
     - test/baked-supervisor-inputs.test.ts
     - test/a-busy-primary-reaches-its-image-recycle.test.ts
+    - test/an-image-rebuilt-for-serve-supervisor-source-recycles-only-serve.test.ts
+    - test/image-drift-recycles-itself.test.ts
+  amendment: |
+    2026-10-22 operator approval: add exactly the two existing caller-test companions named above.
+    Repair their Git input fixtures to supply valid unchanged manifests and honest dependency history,
+    and add only package.json and packages/**/package.json to the strict expected workflow path inventory.
+    Preserve all original assertions, expected commit identities, UNKNOWN semantics, role/auth controls,
+    acceptance criteria, falsifiers, budgets, production settings and gate limits.
+    The active native fix worker retains ownership; this authorizes no competing push or takeover,
+    new executable production path, manual deployment, scanner exclusion or gate relaxation.
   rationale: |
     OBSERVED at captured main c8a55054a4275c3e4c7e2308e47e947460d4be70:
     #13398 changes root lockfile Hono4.13.7 to4.13.11. The exact shipped ACR guard

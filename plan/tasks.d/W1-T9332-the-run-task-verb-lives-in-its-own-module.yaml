@@ -17,6 +17,7 @@
     - src/lib/authority.ts
     - scripts/comment-load-baseline.json
     - scripts/source-text-assertion-baseline.json
+    - scripts/assertion-discrimination-baseline.json
     - scripts/bound-kind-baseline.json
     - scripts/clock-signature-baseline.json
     - scripts/house-layout-census.mjs
@@ -74,6 +75,13 @@
   priority: 1
   attempts: 0
   amendment: |
+    2026-10-22 operator approval: relocate the existing documentation-assertion baseline key only.
+    In scripts/assertion-discrimination-baseline.json, retarget the one existing entry for
+    test/blocked-illformed-does-not-halt-drain.test.ts and literal "BEFORE the inflight lock is even taken"
+    from src/run-task.ts to src/cli/commands/run-task-verb.ts. Preserve that entry's full reason and
+    every other key and value; the existing 12-entry population remains unchanged.
+    Do not add or remove exemptions, change an assertion, or alter gate implementation or limits.
+    This separately approved relocation-only ruling adds only that baseline companion path.
     W1-T9332 amended 2026-10-20 by coordinator brief file1020c item 8: src/run-task.ts sits at its comment-load ceiling.
     No acceptance, file or design change; this records a second reason the split is due, and one constraint on it.
     OBSERVED at origin/main faefe0655: `countCommentLines` (scripts/comment-load-ratchet.mjs) read 16,500 comment lines
