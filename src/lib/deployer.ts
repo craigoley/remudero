@@ -998,22 +998,6 @@ export function newestPlaywrightVersionChangeSha(
   );
 }
 
-/**
- * W1-T5367 — the newest `origin/main` commit that moved EITHER lockfile image input acr-build.yml's
- * guard builds on: the playwright-core pin (W1-T4061) or the worker SDK's version+integrity
- * (W1-T5018). The generalised sibling of {@link newestPlaywrightVersionChangeSha}, so the sha
- * `newestBakedSha` names is the sha that workflow tagged when an SDK-only bump built an image.
- */
-export function newestLockfileImageInputSha(
-  runGit: (args: readonly string[]) => string,
-): string | undefined {
-  return newestLockfileChangeSha(runGit, (before, after) =>
-    before === undefined
-      ? extractPlaywrightCoreVersion(after) !== undefined || typeof extractWorkerSdkPin(after) === "string"
-      : playwrightCoreVersionChanged(before, after) || workerSdkChanged(before, after),
-  );
-}
-
 /** The newest-first walk over {@link ROOT_LOCKFILE_PATH}'s history both readings above share:
  *  returns the first commit whose (parent, own) lockfile pair `moved` accepts. `before` is
  *  undefined for the commit that first added the file. */
