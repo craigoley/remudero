@@ -746,3 +746,13 @@ test("a mid-loop cash cap preserves real unpublished edits through the default c
   assert.equal(readFileSync(path, "utf8"), "partial worker result");
   assert.match(repo.git("worktree", "list", "--porcelain"), /partial/);
 });
+
+
+test("classifyFailure: a bare gh HTTP 503 is transient without a server-error phrase", () => {
+  for (const text of ["gh: HTTP 500", "gh: HTTP 502", "gh: HTTP 503", "gh: HTTP 504", "HTTP/2 503"]) {
+    assert.equal(classifyFailure({ text }), "transient", text);
+  }
+  for (const text of ["gh: HTTP 403", "gh: HTTP 404", "gh: HTTP 422", "503 tests failed", "HTTP 5030"]) {
+    assert.equal(classifyFailure({ text }), "strike", text);
+  }
+});

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -203,4 +203,243 @@ test("acceptance 3d: a restore that fails for an unforeseen reason is wrapped as
   const goodTarget = join(tmpDir("rmd-state-backup-restore-"), "state");
   restoreState(snapshot.archiveDir, goodTarget);
   assert.ok(existsSync(join(goodTarget, STATE_BACKUP_LEDGER_RELPATH)));
+});
+
+const engineHash = "a".repeat(64);
+const engineRel = `engines/${engineHash}`;
+const dependencyRel = `${engineRel}/node_modules`;
+const manifestRel = "state-backup-engine-links.json";
+
+function seedEngine(state: string, target: string): void {
+  const engine = join(state, engineRel);
+  mkdirSync(engine, { recursive: true });
+  writeFileSync(join(engine, "engine.json"), JSON.stringify({ sha: "b".repeat(40), sourceHash: engineHash, builtAt: 123 }));
+  writeFileSync(join(engine, "package.json"), '{"name":"engine","version":"1.0.0"}');
+  writeFileSync(join(engine, "package-lock.json"), '{"lockfileVersion":3,"packages":{}}');
+  symlinkSync(target, join(state, dependencyRel));
+}
+
+test("a state backup refuses reserved engine metadata in live state without publishing", () => {
+  const state = seedStateDir();
+  const backups = tmpDir("rmd-engine-backups-");
+  const target = "/missing-worker/node_modules";
+  seedEngine(state, target);
+  const manifestPath = join(state, manifestRel);
+  const liveMetadata = '{"live":"must not be overwritten"}\n';
+  writeFileSync(manifestPath, liveMetadata);
+
+  assert.throws(
+    () => snapshotState(state, backups),
+    (err: unknown) => err instanceof StateBackupError && err.cause instanceof Error &&
+      err.cause.message === `engine dependency reconstruction: reserved archive metadata exists in live state: ${manifestRel}`,
+  );
+  assert.deepEqual(readdirSync(backups), [], "refusal must clean up staging and publish no archive");
+  assert.equal(readFileSync(manifestPath, "utf8"), liveMetadata);
+  assert.equal(readlinkSync(join(state, dependencyRel)), target);
+
+  rmSync(manifestPath);
+  const snapshot = snapshotState(state, backups);
+  assert.deepEqual(readdirSync(backups), [basename(snapshot.archiveDir)]);
+  assert.equal(readlinkSync(join(snapshot.archiveDir, dependencyRel)), target);
+  assert.equal(existsSync(manifestPath), false);
+});
+
+test("a state backup restores engine dependency links without following their targets", () => {
+  const state = seedStateDir();
+  const backups = tmpDir("rmd-engine-backups-");
+  const target = "../../../missing-worker/node_modules";
+  seedEngine(state, target);
+  const snapshot = snapshotState(state, backups);
+  assert.equal(readlinkSync(join(snapshot.archiveDir, dependencyRel)), target);
+  assert.ok(snapshot.entries.includes(dependencyRel));
+  assert.equal(existsSync(join(state, manifestRel)), false, "metadata belongs only in the archive");
+  const manifest = JSON.parse(readFileSync(join(snapshot.archiveDir, manifestRel), "utf8"));
+  assert.equal(manifest.version, 1);
+  assert.equal(manifest.status, "requires-engine-dependency-reconstruction");
+  assert.equal(manifest.links[0].path, dependencyRel);
+  assert.equal(manifest.links[0].target, target);
+  assert.equal(manifest.links[0].sourceHash, engineHash);
+  assert.equal(manifest.links[0].revision, "b".repeat(40));
+  assert.ok(manifest.links[0].identities["package.json"]);
+  assert.ok(manifest.links[0].identities["package-lock.json"]);
+  const restored = tmpDir("rmd-engine-restore-");
+  const restoredState = restoreState(snapshot.archiveDir, restored);
+  assert.ok(lstatSync(join(restored, dependencyRel)).isSymbolicLink());
+  assert.equal(readlinkSync(join(restored, dependencyRel)), target);
+  assert.equal(existsSync(join(restored, manifestRel)), false);
+  assert.deepEqual(restoredState.reconstructionRequired, [dependencyRel]);
+  const nextSnapshot = snapshotState(restored, tmpDir("rmd-engine-backups-"));
+  assert.equal(readlinkSync(join(nextSnapshot.archiveDir, dependencyRel)), target);
+  for (const rel of ["ledger.ndjson", "inbox-proposals.json", "worker-keychain-password"]) {
+    assert.deepEqual(readFileSync(join(restored, rel)), readFileSync(join(state, rel)));
+  }
+  rmSync(join(restored, dependencyRel));
+  symlinkSync("/old-dangling-install", join(restored, dependencyRel));
+  restoreState(snapshot.archiveDir, restored);
+  assert.equal(readlinkSync(join(restored, dependencyRel)), target);
+});
+
+test("engine dependency references do not excuse missing irreplaceable state", () => {
+  const state = seedStateDir();
+  const external = tmpDir("rmd-engine-install-");
+  writeFileSync(join(external, "sentinel"), "external dependency payload", { mode: 0o640 });
+  const sentinelMode = statSync(join(external, "sentinel")).mode & 0o777;
+  seedEngine(state, external);
+  for (const rel of ["node_modules/critical", "engines/not-a-hash/node_modules/critical"]) {
+    mkdirSync(dirname(join(state, rel)), { recursive: true });
+    writeFileSync(join(state, rel), "irreplaceable");
+  }
+  const otherHash = "c".repeat(64);
+  const realModules = `engines/${otherHash}/node_modules/critical`;
+  mkdirSync(dirname(join(state, realModules)), { recursive: true });
+  writeFileSync(join(state, realModules), "real directory");
+  symlinkSync(external, join(state, "external-content"));
+  symlinkSync("ledger.ndjson", join(state, "ledger-alias"));
+  const backups = tmpDir("rmd-engine-backups-");
+  const snapshot = snapshotState(state, backups);
+  assert.equal(snapshot.entries.some((rel) => rel.startsWith(`${dependencyRel}/`)), false);
+  assert.equal(readlinkSync(join(snapshot.archiveDir, dependencyRel)), external);
+  assert.equal(readFileSync(join(snapshot.archiveDir, "external-content/sentinel"), "utf8"), "external dependency payload");
+  assert.deepEqual(readFileSync(join(snapshot.archiveDir, "ledger-alias")), readFileSync(join(state, "ledger.ndjson")));
+  for (const rel of ["node_modules/critical", "engines/not-a-hash/node_modules/critical", realModules]) {
+    assert.equal(readFileSync(join(snapshot.archiveDir, rel), "utf8"), readFileSync(join(state, rel), "utf8"));
+  }
+  const restored = tmpDir("rmd-engine-restore-");
+  restoreState(snapshot.archiveDir, restored);
+  assert.equal(readlinkSync(join(restored, dependencyRel)), external);
+  assert.equal(readFileSync(join(external, "sentinel"), "utf8"), "external dependency payload");
+  assert.equal(statSync(join(external, "sentinel")).mode & 0o777, sentinelMode);
+  symlinkSync("missing-register", join(state, "critical-register"));
+  const failedBackups = tmpDir("rmd-engine-backups-");
+  assert.throws(() => snapshotState(state, failedBackups), StateBackupError);
+  assert.deepEqual(readdirSync(failedBackups), []);
+  rmSync(join(state, "critical-register"));
+  assert.throws(() => snapshotState(state, failedBackups, { copy: copierSkipping("inbox-proposals.json") }), /missing inbox-proposals.json/);
+  assert.deepEqual(readdirSync(failedBackups), []);
+});
+
+test("invalid engine dependency reconstruction evidence refuses before restore writes", () => {
+  const state = seedStateDir();
+  seedEngine(state, "/missing-worker/node_modules");
+  const backups = tmpDir("rmd-engine-backups-");
+  const engineRecord = join(state, engineRel, "engine.json");
+  const originalRecord = readFileSync(engineRecord);
+  for (const bad of [null, "{", '{}', JSON.stringify({ sha: "not-a-revision", sourceHash: engineHash, builtAt: 123 }),
+    JSON.stringify({ sha: "b".repeat(40), sourceHash: "wrong", builtAt: 123 }),
+    JSON.stringify({ sha: "b".repeat(40), sourceHash: engineHash, builtAt: "yesterday" })]) {
+    if (bad === null) rmSync(engineRecord);
+    else writeFileSync(engineRecord, bad);
+    assert.throws(() => snapshotState(state, backups), /engine dependency reconstruction/);
+    assert.deepEqual(readdirSync(backups), []);
+    writeFileSync(engineRecord, originalRecord);
+  }
+  // Evidence is read through one no-follow descriptor (CodeQL js/file-system-race): a linked engine.json, even one
+  // naming a valid copy, and a directory where a pin file belongs are refused, never followed or read.
+  const recordCopy = join(tmpDir("rmd-engine-record-"), "engine.json");
+  writeFileSync(recordCopy, originalRecord);
+  rmSync(engineRecord);
+  symlinkSync(recordCopy, engineRecord);
+  assert.throws(() => snapshotState(state, backups), /engine dependency reconstruction/);
+  assert.deepEqual(readdirSync(backups), []);
+  rmSync(engineRecord);
+  writeFileSync(engineRecord, originalRecord);
+  const pinDir = join(state, engineRel, "yarn.lock");
+  mkdirSync(pinDir);
+  assert.throws(() => snapshotState(state, backups), /expected regular reconstruction evidence/);
+  assert.deepEqual(readdirSync(backups), []);
+  rmSync(pinDir, { recursive: true });
+  assert.throws(() => snapshotState(state, backups, { copy: (src, dst, paths) => {
+    copierSkipping(null)(src, dst, paths);
+    rmSync(join(dst, dependencyRel));
+    symlinkSync("/substituted", join(dst, dependencyRel));
+  } }), /engine dependency reconstruction/);
+  assert.deepEqual(readdirSync(backups), []);
+  const packageLock = join(state, engineRel, "package-lock.json");
+  const sourceLock = readFileSync(packageLock);
+  for (const bad of ["", "{", "[]", "{}"] ) {
+    writeFileSync(packageLock, bad);
+    assert.throws(() => snapshotState(state, backups), /engine dependency reconstruction/);
+    assert.deepEqual(readdirSync(backups), []);
+  }
+  writeFileSync(packageLock, sourceLock);
+  for (const change of [
+    (dst: string) => writeFileSync(join(dst, manifestRel), "{}"),
+    (dst: string) => rmSync(join(dst, dependencyRel)),
+  ]) {
+    assert.throws(() => snapshotState(state, backups, { copy: (src, dst, paths) => {
+      copierSkipping(null)(src, dst, paths);
+      change(dst);
+    } }), /engine dependency reconstruction/);
+    assert.deepEqual(readdirSync(backups), []);
+  }
+  const snapshot = snapshotState(state, backups);
+  const manifestPath = join(snapshot.archiveDir, manifestRel);
+  const originalManifest = readFileSync(manifestPath, "utf8");
+  const target = tmpDir("rmd-engine-restore-");
+  writeFileSync(join(target, "keep"), "untouched");
+  const refuses = (reason = /engine dependency reconstruction/) => {
+    assert.throws(() => restoreState(snapshot.archiveDir, target), reason);
+    assert.deepEqual(readdirSync(target), ["keep"]);
+    assert.equal(readFileSync(join(target, "keep"), "utf8"), "untouched");
+  };
+  for (const mutate of [
+    (m: any) => { m.version = 99; },
+    (m: any) => { m.links[0].path = "../escape/node_modules"; },
+    (m: any) => { m.links[0].sourceHash = "d".repeat(64); },
+    (m: any) => { m.links[0].revision = "e".repeat(40); },
+    (m: any) => { m.links[0].target = "/substituted"; },
+    (m: any) => { m.links[0].identities["package-lock.json"] = "f".repeat(64); },
+    (m: any) => { m.criticalState = []; },
+    (m: any) => { m.links.push(m.links[0]); },
+    (m: any) => { m.links = []; },
+  ]) {
+    const manifest = JSON.parse(originalManifest);
+    mutate(manifest);
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    refuses();
+  }
+  writeFileSync(manifestPath, "{");
+  refuses();
+  rmSync(manifestPath);
+  refuses(/missing manifest/);
+  mkdirSync(manifestPath);
+  refuses(/non-regular manifest/);
+  rmSync(manifestPath, { recursive: true });
+  writeFileSync(manifestPath, originalManifest);
+  const lockPath = join(snapshot.archiveDir, engineRel, "package-lock.json");
+  const lock = readFileSync(lockPath);
+  writeFileSync(lockPath, '{"lockfileVersion":3,"packages":{"changed":{}}}');
+  refuses();
+  writeFileSync(lockPath, lock);
+  const redirectTarget = tmpDir("rmd-engine-redirect-");
+  const unsafeTarget = tmpDir("rmd-engine-unsafe-restore-");
+  symlinkSync(redirectTarget, join(unsafeTarget, "engines"));
+  assert.throws(() => restoreState(snapshot.archiveDir, unsafeTarget), /unsafe restore destination/);
+  assert.deepEqual(readdirSync(unsafeTarget), ["engines"]);
+  assert.deepEqual(readdirSync(redirectTarget), []);
+  rmSync(join(unsafeTarget, "engines"));
+  mkdirSync(join(unsafeTarget, dependencyRel), { recursive: true });
+  writeFileSync(join(unsafeTarget, dependencyRel, "keep"), "occupied install");
+  assert.throws(() => restoreState(snapshot.archiveDir, unsafeTarget), /unsafe restore destination/);
+  assert.equal(existsSync(join(unsafeTarget, "ledger.ndjson")), false);
+  assert.equal(readFileSync(join(unsafeTarget, dependencyRel, "keep"), "utf8"), "occupied install");
+  rmSync(join(snapshot.archiveDir, "inbox-proposals.json"));
+  refuses();
+  assert.ok(existsSync(snapshot.archiveDir), "refusal must retain the archive");
+});
+
+test("a state backup refuses a directory link cycle without publishing", () => {
+  const state = seedStateDir();
+  mkdirSync(join(state, "nested"));
+  symlinkSync("..", join(state, "nested", "back"));
+  const backups = tmpDir("rmd-cycle-backups-");
+  assert.throws(() => snapshotState(state, backups), /directory link cycle/);
+  assert.deepEqual(readdirSync(backups), []);
+  const target = tmpDir("rmd-cycle-restore-");
+  assert.throws(() => restoreState(state, target), /directory link cycle/);
+  assert.deepEqual(readdirSync(target), []);
+  rmSync(join(state, "nested", "back"));
+  symlinkSync("self", join(state, "self"));
+  assert.throws(() => snapshotState(state, backups), /directory link cycle/);
+  assert.deepEqual(readdirSync(backups), []);
 });

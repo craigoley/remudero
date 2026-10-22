@@ -265,6 +265,8 @@ export async function daemonCommand(
      * the full and light paths without reading this source file as text. */
     buildSweepHook?: DaemonSweepHookBuilder;
     buildSweepLightHook?: DaemonSweepLightHookBuilder;
+    /** Composition seam: observe the cache-only triage input without starting a read worker. */
+    buildAutoTriageHooks?: DaemonCommandHost["buildAutoTriageDaemonHooks"];
     /** Injectable mutable boot routine. Tests use it to prove an already-held fleet does not
      * enter daemonBoot's sweeps or keychain work. */
     daemonBoot?: typeof daemonBoot;
@@ -1160,7 +1162,11 @@ export async function daemonCommand(
   // it reads THIS repo's plan/feedback and writes THIS repo's plan, never a drained target's.
   // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
   // exactly how #1066 merged: consumer wired, producer never.
-  const autoTriageHooks = target.isSelf ? buildAutoTriageDaemonHooks({ config }) : undefined;
+  const autoTriageHooks = target.isSelf ? (deps.buildAutoTriageHooks ?? buildAutoTriageDaemonHooks)({ config, repairSnapshot: () => {
+    const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log });
+    if (!generation || generation.facts.openPrError) return undefined;
+    return { owner: target.owner, repo: target.repo, asOfMs: generation.publishedAtMs, prs: generation.facts.openPrViews };
+  } }) : undefined;
   // W1-T1040: the GitHub-side posture drift check. SELF-TARGET ONLY, same reason retro/auto-triage
   // are — the baseline (state/github-posture.json) lives under THIS process's `config.root`, never
   // a drained target's, so wiring it for a non-self target would either read the wrong repo's

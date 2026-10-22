@@ -277,7 +277,7 @@ function readsAsValidMetadata(path: string, valid: (raw: unknown) => boolean, re
  * `auxiliary` only when they read as valid under their producer shape; anything else `ledger.*` stays
  * `unclassified`. Callers that pass no `readFileSync` cannot validate, so metadata stays unclassified for them.
  */
-function listedLedgerFiles(
+export function listedLedgerFiles(
   stateDir: string,
   fsDeps: Pick<LedgerGrepFsDeps, "readdirSync"> & Partial<Pick<LedgerGrepFsDeps, "readFileSync">>,
   onUnreadDirectory?: (path: string, error: unknown) => void,

@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { refreshInstallationToken, type RefreshOptions } from "./github-app.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -10594,6 +10594,21 @@ export function fetchPrLifecycle(
   };
 }
 
+/** Retry only the fresh read; every successful response still faces the existing publication guards. */
+async function readReviewLifecycle(fetch: PostReviewStatusGuardedOpts["fetchLifecycle"]): Promise<PrLifecycleState> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return fetch();
+    } catch (error) {
+      const waitMs = POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (attempt - 1);
+      // Pacing and longer server-requested waits retain their existing outer recovery owner.
+      if (classifyFailure({ text: ghErrorText(error) }) !== "transient" || classifyGhLimitFailure(error) !== undefined ||
+          attempt >= POST_REVIEW_STATUS_MAX_ATTEMPTS || (defaultGhRetryAfterSeconds(error) ?? 0) * 1000 > waitMs) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+}
+
 // ── W1-T2419: the PR-review channel is append-only, unlike the status row above ────────────────
 // The `remudero-review` commit status is last-write-wins, so a repeat write is cheap and this task leaves it
 // untouched. A formal PR review APPENDS (#3140 accumulated TEN byte-identical failure comments on one unmoved head,
@@ -11053,7 +11068,7 @@ export async function postReviewStatusGuarded(
       opts.prUrl !== undefined && opts.reviewInputDigest !== undefined
         ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl, opts.sha, opts.reviewInputDigest)
         : lastPostedReviewStatusFromLedger(lines, opts.taskId);
-    const lifecycle = opts.fetchLifecycle();
+    const lifecycle = await readReviewLifecycle(opts.fetchLifecycle);
     const priorDecision = opts.prUrl !== undefined && opts.reviewDecisionDigest !== undefined
       ? lastReviewDecisionTerminal(lines, opts.taskId, opts.prUrl, opts.reviewDecisionDigest)
       : undefined;
@@ -11295,7 +11310,7 @@ export interface PostReviewPendingResult {
  * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
  * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
-  const lifecycle = opts.fetchLifecycle();
+  const lifecycle = await readReviewLifecycle(opts.fetchLifecycle);
   if (lifecycle.merged || lifecycle.closed) {
     const closed = lifecycle.merged ? "merged" : "closed";
     const reason = `pr_${closed}`;

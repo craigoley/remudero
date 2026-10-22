@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // Namespace reads, never named imports: at a base without this task the suite must still LOAD and
@@ -17,6 +17,7 @@ import { ghShim } from "./helpers/gh-shim.js";
 import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readLedgerUnionBounded } from "../src/lib/status.js";
 
 // W1-T5633 — GitHub's `CodeQL` results check failed on #9034 ("1 new alert including 1 high") and the PR
 // merged 31 minutes later: ci-gate never waits on that check and nothing in the sweep read it. A head
@@ -540,3 +541,262 @@ for (const ruling of ["fix", "false_positive"] as const) {
     }
   });
 }
+
+const OLD_SCANNER_RUN = "DAEMON-scanner-before-recycle";
+function scannerIntent(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { step: sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP, pr_number: N, head_sha: HEAD,
+    task_id: `W1-T${N}`, run_id: OLD_SCANNER_RUN, phase: "preparing", dispatched: false, ...over };
+}
+function cleanScannerBoot(): Record<string, unknown>[] {
+  return [
+    { step: "run_child.adoption_pass", run_id: "SWEEP-5633", live: 0, adopted: 0, unreadable: 0, misidentified: 0 },
+    { step: "daemon.boot", run_id: "SWEEP-5633" },
+  ];
+}
+function scannerRung(step: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { step, task_id: `W1-T${N}`, run_id: OLD_SCANNER_RUN, head_sha: HEAD, ...over };
+}
+
+test("scanner preparation holds live or unknown ownership and never claims an accounted rung before it runs", async () => {
+  const variants = [
+    [scannerIntent()],
+    [scannerIntent({ run_id: "SWEEP-5633" }), ...cleanScannerBoot()],
+    [scannerIntent({ run_id: undefined }), ...cleanScannerBoot()],
+    [scannerIntent({ task_id: undefined }), ...cleanScannerBoot()],
+    [scannerIntent({ phase: "unknown" }), ...cleanScannerBoot()],
+    [scannerIntent({ dispatched: "true" }), ...cleanScannerBoot()],
+    [scannerIntent(), cleanScannerBoot()[1]!],
+  ];
+  for (const prior of variants) {
+    const h = harness(undefined);
+    try {
+      h.lines.push(...prior);
+      assert.equal(sweepModule.codeScanningHeadSettled(h.lines, N, HEAD), true);
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.equal(h.fixes.length, 0);
+      assert.equal(h.armed.length, 0);
+    } finally { rmSync(h.dir, { recursive: true, force: true }); }
+  }
+  const h = harness(undefined);
+  try {
+    await sweepModule.runSweep([pr()], h.deps);
+    const receipt = rows(h, sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP).at(-1);
+    assert.equal(receipt?.phase, "preparing");
+    assert.equal(receipt?.dispatched, false, "selection is an intent, not a spent-rung acknowledgment");
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("an interrupted scanner preparation re-enters ordinary repair only after explicit empty current boot adoption", async () => {
+  const h = harness(undefined);
+  try {
+    h.lines.push(scannerIntent(), ...cleanScannerBoot());
+    assert.equal(sweepModule.codeScanningHeadSettled(h.lines, N, HEAD), false, "the default hydration predicate re-reads the actual alerts");
+    await sweepModule.runSweep([pr()], h.deps);
+    assert.equal(h.fixes.length, 1);
+    assert.equal(h.armed.length, 0);
+    assert.match(String(rows(h, sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP).at(-1)?.reason), /clean boot/);
+    assert.match(String(rows(h, "sweep.disposed").at(-1)?.reason), /clean boot/);
+    assert.equal(rows(h, "sweep.disposed").at(-1)?.code_scanning_fix_preparing, true);
+    assert.equal(rows(h, "sweep.disposed").at(-1)?.code_scanning_fix_dispatched, undefined);
+    await sweepModule.runSweep([pr()], h.deps);
+    assert.equal(h.fixes.length, 1, "the replacement preparation is now owned by this run");
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("scanner preparation preserves adopted uncertain malformed and later native ownership", async () => {
+  const variants: Record<string, unknown>[][] = [];
+  for (const key of ["live", "adopted", "unreadable", "misidentified"]) {
+    for (const value of [1, undefined, "0", -1]) {
+      const boot = cleanScannerBoot();
+      variants.push([scannerIntent(), { ...boot[0], [key]: value }, boot[1]!]);
+    }
+  }
+  for (const step of ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"]) {
+    variants.push([scannerIntent(), ...cleanScannerBoot(), scannerRung(step, { run_id: "surviving-child" })]);
+  }
+  variants.push([scannerIntent(), ...cleanScannerBoot(), scannerRung("fix.base_refresh_checked", { run_id: "SWEEP-5633" })]);
+  variants.push([scannerIntent(), ...cleanScannerBoot(), scannerRung("fix.progress_judged", { run_id: "SWEEP-5633" })]);
+  variants.push([scannerIntent(), ...cleanScannerBoot(), { step: "sweep.fix.prepare_timing", pr_number: N, head_sha: HEAD, run_id: "SWEEP-5633" }]);
+  for (const prior of variants) {
+    const h = harness(undefined);
+    try {
+      h.lines.push(...prior);
+      assert.equal(sweepModule.codeScanningHeadSettled(h.lines, N, HEAD), true, JSON.stringify(prior));
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.equal(h.fixes.length, 0);
+      assert.equal(h.armed.length, 0);
+    } finally { rmSync(h.dir, { recursive: true, force: true }); }
+  }
+  const h = harness(undefined, { runId: "not-the-latest-boot" });
+  try {
+    h.lines.push(scannerIntent(), ...cleanScannerBoot());
+    assert.equal(sweepModule.codeScanningHeadSettled(h.lines, N, HEAD), false, "a conservative reader may request bounded hydration");
+    await sweepModule.runSweep([pr()], h.deps);
+    assert.equal(h.fixes.length, 0, "the action requires its actual current run's boot proof");
+    assert.equal(h.armed.length, 0);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("scanner spent-rung acknowledgment binds task head and owner and never calls a body-only result a source fix", async () => {
+  const variants = [
+    [scannerIntent(), scannerRung("fix.dispatch", { mode: "ci-log" })],
+    [scannerIntent(), scannerRung("fix.dispatch", { head_sha: "another-head" }), scannerRung("fix.done", { head_sha: "another-head", subtype: "success" })],
+    [scannerIntent(), scannerRung("fix.dispatch", { task_id: "another-task" }), scannerRung("fix.done", { task_id: "another-task", subtype: "success" })],
+    [scannerIntent(), scannerRung("fix.dispatch", { run_id: "another-owner" }), scannerRung("fix.done", { run_id: "another-owner", subtype: "success" })],
+    [scannerIntent(), scannerRung("fix.dispatch", { mode: "body-repair" })],
+    [scannerIntent(), scannerRung("fix.dispatch", { mode: {} }), scannerRung("fix.done", { subtype: "success" })],
+    [scannerIntent(), scannerRung("fix.dispatch"), scannerRung("fix.done", { subtype: "success" })],
+    [scannerIntent(), scannerRung("fix.dispatch", { mode: "ci-log" }), scannerRung("fix.done", { subtype: "success" }),
+      scannerRung("fix.progress_judged", { verdict: "fix" })],
+  ];
+  for (const prior of variants) {
+    assert.equal(sweepModule.codeScanningHeadSettled(prior, N, HEAD), true, "no matching terminal acknowledgment releases ownership");
+  }
+  for (const mode of ["ci-log", "body-repair"]) {
+    const h = harness(undefined);
+    try {
+      h.lines.push(scannerIntent(), scannerRung("fix.dispatch", { mode }), scannerRung("fix.done", { subtype: "success" }));
+      assert.equal(sweepModule.codeScanningHeadSettled(h.lines, N, HEAD), false);
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.equal(h.fixes.length, 1, `${mode}: unchanged-head terminal is not a repair of the open source alert`);
+      assert.equal(h.armed.length, 0);
+    } finally { rmSync(h.dir, { recursive: true, force: true }); }
+  }
+});
+
+test("scanner retry preserves ordinary admission and repeated pre-worker failure backstops", async () => {
+  for (const over of [
+    { workerAdmissionHold: () => "fleet STOP" },
+    { claimFixAdmission: () => ({ admitted: false as const, reason: "no capacity" }) },
+  ]) {
+    const h = harness(undefined, over);
+    try {
+      h.lines.push(scannerIntent(), ...cleanScannerBoot());
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.equal(h.fixes.length, 0);
+      assert.equal(h.armed.length, 0);
+      assert.equal(rows(h, sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP).length, 1, "decline adds no replacement intent");
+    } finally { rmSync(h.dir, { recursive: true, force: true }); }
+  }
+  for (const step of ["sweep.fix.dispatch_failed", "sweep.fix.checkout_claim_declined"]) {
+    const h = harness(undefined);
+    try {
+      for (let i = 0; i < 3; i++) h.lines.push(scannerIntent(), scannerRung(step, {
+        pr_number: N, reason: "registered_worktree_owner", owner_recovery_reason: "unknown", error: "pre-worker failure" }));
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.equal(h.fixes.length, 0, "ordinary existing backstop refuses another attempt");
+      assert.equal(h.escalated.length, 1);
+      assert.equal(h.armed.length, 0);
+    } finally { rmSync(h.dir, { recursive: true, force: true }); }
+  }
+});
+
+test("scanner interrupted-preparation proof survives real rotation and the retained-history reader", async () => {
+  const h = harness(undefined);
+  try {
+    const prior = [{ step: "review.posted", task_id: `W1-T${N}`, pr_url: pr().prUrl,
+      head_sha: HEAD, state: "success", capped: false, plan_only: false }, scannerIntent(),
+      { step: "sweep.fix.prepare_timing", pr_number: N, head_sha: HEAD, run_id: "DAEMON-second-owner", stage: "head-lookup" },
+      ...cleanScannerBoot()].map((row, i) => ({
+      ...row, ts: new Date(Date.now() - 1000 + i).toISOString() }));
+    const text = prior.map(row => JSON.stringify(row)).join("\n") + "\n";
+    writeFileSync(h.deps.ledgerPath, text + JSON.stringify({ step: "ci.polling", padding: "x".repeat(text.length * 4) }) + "\n");
+    assert.equal(rotateLedger(h.deps.ledgerPath, { ceilingBytes: text.length * 2 }).rotated, true);
+    const retained = readFileSync(h.deps.ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.ok(retained.some(row => row.step === "sweep.fix.prepare_timing" && row.run_id === "DAEMON-second-owner"),
+      "default rotation preserves the latest preparation owner for the live deciding reader");
+    const actual = [...readLedgerUnionBounded(h.deps.ledgerPath)].sort((a, b) =>
+      Date.parse(String(a.ts)) - Date.parse(String(b.ts)));
+    assert.ok(actual.some(row => row.step === sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP), "real history reader found the actual rotated intent");
+    h.lines.push(...actual);
+    assert.equal(sweepModule.codeScanningHeadSettled(h.lines, N, HEAD), false);
+    await sweepModule.runSweep([pr()], h.deps);
+    assert.equal(h.fixes.length, 1, JSON.stringify(rows(h, "sweep.disposed").at(-1)));
+    assert.equal(h.armed.length, 0);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+
+test("a newer empty boot ends the latest scanner preparation while post-boot and unknown owners hold", async () => {
+  const engagement = scannerRung("fix.base_refresh_checked", { run_id: "DAEMON-second-owner" });
+  const controls = [
+    { prior: [scannerIntent(), engagement, ...cleanScannerBoot()], admitted: true },
+    { prior: [scannerIntent(), scannerRung("fix.stood_down", { run_id: "DAEMON-second-owner", outcome: "handed_off" }),
+      ...cleanScannerBoot()], admitted: false },
+    { prior: [scannerIntent(), ...cleanScannerBoot(), engagement], admitted: false },
+    { prior: [scannerIntent(), { ...engagement, run_id: undefined }, ...cleanScannerBoot()], admitted: false },
+    { prior: [scannerIntent(), { ...engagement, run_id: "SWEEP-5633" }, ...cleanScannerBoot()], admitted: false },
+    { prior: [scannerIntent(), scannerRung("fix.dispatch", { mode: "ci-log" }),
+      scannerRung("fix.done", { subtype: "success" }), ...cleanScannerBoot(), engagement], admitted: false },
+  ];
+  for (const { prior, admitted } of controls) {
+    const h = harness(undefined);
+    try {
+      h.lines.push(...prior);
+      assert.equal(sweepModule.codeScanningHeadSettled(h.lines, N, HEAD), !admitted);
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.equal(h.fixes.length, admitted ? 1 : 0);
+      assert.equal(h.armed.length, 0);
+    } finally { rmSync(h.dir, { recursive: true, force: true }); }
+  }
+});
+
+test("scanner retry preserves an ordinary checkout refusal without recording a spent dispatch", async () => {
+  const h = harness(undefined, { dispatchFix: () => ({ claimDeclined: true, ownerRecoveryReason: "process_cwd_probe_unreadable" }) });
+  try {
+    h.lines.push(scannerIntent(), ...cleanScannerBoot());
+    await sweepModule.runSweep([pr()], h.deps);
+    const disposed = rows(h, "sweep.disposed").at(-1);
+    assert.equal(disposed?.acted, false);
+    assert.equal(disposed?.spent, false);
+    assert.match(String(disposed?.stand_down_reason), /checkout claim.*process_cwd_probe_unreadable/);
+    assert.equal(rows(h, "fix.dispatch").length, 0);
+    assert.equal(h.armed.length, 0);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("scanner orphan recovery retains exact-head evidence and the ordinary fresh strike ceiling", async () => {
+  const wrongHead = harness(undefined);
+  try {
+    wrongHead.lines.push(scannerIntent(), ...cleanScannerBoot());
+    await sweepModule.runSweep([pr({ codeqlHeadAlerts: { headSha: "another-head", alerts: [ALERT] } })], wrongHead.deps);
+    assert.equal(wrongHead.fixes.length, 0, "another head's alert cannot drive this recovery");
+    assert.equal(wrongHead.armed.length, 0);
+    assert.equal(sweepModule.codeScanningHeadSettled(wrongHead.lines, N, "another-head"), false,
+      "the original head's ownership does not settle a changed head");
+  } finally { rmSync(wrongHead.dir, { recursive: true, force: true }); }
+  const capped = harness(undefined);
+  try {
+    for (let i = 0; i <= sweepModule.DEFAULT_SWEEP_POLICY.strikeCap; i++) {
+      capped.lines.push(scannerRung("fix.dispatch", { mode: "ci-log", verdict_regime: "executed", strike: i + 1 }));
+    }
+    capped.lines.push(scannerIntent(), ...cleanScannerBoot());
+    await sweepModule.runSweep([pr()], capped.deps);
+    assert.equal(capped.fixes.length, 0, "boot recovery never resets the ordinary freshly read strike budget");
+    assert.match(String(rows(capped, "sweep.disposed").at(-1)?.stand_down_reason), /strikes exhausted/);
+    assert.equal(capped.armed.length, 0);
+  } finally { rmSync(capped.dir, { recursive: true, force: true }); }
+});
+
+test("concurrent scanner orphan recovery admits at most one ordinary fix claim", async () => {
+  let release: (() => void) | undefined;
+  const first = harness(undefined, { dispatchFix: () => new Promise<void>(resolve => { release = resolve; }) });
+  const second = harness(undefined);
+  first.lines.push(scannerIntent(), ...cleanScannerBoot());
+  second.lines.push(scannerIntent(), ...cleanScannerBoot());
+  let inFlight: Promise<unknown> | undefined;
+  try {
+    inFlight = sweepModule.runSweep([pr()], first.deps);
+    for (let i = 0; i < 50 && release === undefined; i++) await settleTurns();
+    assert.ok(release, "the first recovery owns the ordinary fix key");
+    await sweepModule.runSweep([pr()], second.deps);
+    assert.equal(second.fixes.length, 0);
+    assert.match(String(rows(second, "sweep.disposed").at(-1)?.stand_down_reason), /duplicate fix-dispatch key/);
+    assert.equal(second.armed.length, 0);
+  } finally {
+    release?.();
+    await inFlight;
+    rmSync(first.dir, { recursive: true, force: true });
+    rmSync(second.dir, { recursive: true, force: true });
+  }
+});
