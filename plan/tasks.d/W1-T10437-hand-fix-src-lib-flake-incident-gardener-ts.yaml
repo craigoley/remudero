@@ -1,0 +1,35 @@
+- id: W1-T10437
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — hand_fix:src/lib/flake-incident-gardener.ts cost 9.4 PR minute(s) across 5 round(s) on 5 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.59
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:hand_fix:src/lib/flake-incident-gardener.ts"
+  files:
+    - src/lib/flake-incident-gardener.ts
+    - test/gardeners/hand-fix-src-lib-flake-incident-gardener-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on hand_fix:src/lib/flake-incident-gardener.ts"
+      proof: "grep: test(\"W1-T10437: hand_fix:src/lib/flake-incident-gardener.ts is prevented, not retried\" in test/gardeners/hand-fix-src-lib-flake-incident-gardener-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:src/lib/flake-incident-gardener.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: hand_fix:src/lib/flake-incident-gardener.ts cost 9.4 PR minute(s) across 5 red run(s) within the measured window on 5 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/flake-incident-gardener.ts: repaired by hand in multiple distinct merged PRs
+
+    RECENT ROUNDS (newest first):
+    - PR #11724 at 2026-10-14T16:49:42Z: hand fix PR #11724: src/lib/flake-incident-gardener.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+    - PR #10718 at 2026-10-10T18:47:33Z: hand fix PR #10718: src/lib/flake-incident-gardener.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+    - PR #10703 at 2026-10-10T18:01:12Z: hand fix PR #10703: src/lib/flake-incident-gardener.ts, src/lib/machine-filing-judge.ts, src/lib/plan-pr-emitter.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+    - PR #10475 at 2026-10-09T21:34:17Z: hand fix PR #10475: src/lib/flake-incident-gardener.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+    - PR #10343 at 2026-10-09T13:22:27Z: hand fix PR #10343: src/lib/flake-incident-gardener.ts; minutes are the pass median proxy (5.899016666666666), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
