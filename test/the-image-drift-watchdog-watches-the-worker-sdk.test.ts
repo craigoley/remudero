@@ -26,6 +26,7 @@ interface LockSpec {
 
 function lockfile(spec: LockSpec): string {
   return JSON.stringify({
+    lockfileVersion: 3,
     packages: {
       "": { name: "remudero" },
       "node_modules/left-pad": { version: spec.leftPad ?? "1.0.0" },
@@ -132,6 +133,9 @@ function fixtureExec(opts: { mainLock?: string; lockfileUnreadable?: boolean; ba
       if (opts.bakedUnreadable) throw new Error("git: bad revision");
       return "0\n"; // no IMAGE_BAKED_PATHS commit since the image
     }
+    if (args[0] === "rev-list" && args.includes("--parents")) {
+      const sha=String(args.at(-1)); return [sha,PARENT[sha]].filter(Boolean).join(" ");
+    }
     if (args[0] === "rev-list" && args[1] === "--count") {
       const sha = String(args[2]).replace(/\.\.origin\/main$/, "");
       return `${DISTANCE[sha]}\n`;
@@ -140,6 +144,7 @@ function fixtureExec(opts: { mainLock?: string; lockfileUnreadable?: boolean; ba
     if (args[0] === "log") return Object.keys(HISTORY).join("\n") + "\n";
     if (args[0] === "show") {
       if (opts.lockfileUnreadable) throw new Error("git: unreadable blob");
+      if (String(args[1]).endsWith(":package.json")) return "{}";
       const [ref] = String(args[1]).split(":");
       if (ref === "origin/main") return opts.mainLock ?? HISTORY[SHA.sdkBump]!;
       if (ref?.endsWith("^")) {
@@ -181,9 +186,8 @@ test("W1-T5367: a worker-SDK-only lockfile change is image drift and names that 
   );
 });
 
-test("W1-T5367: unrelated lockfile churn since the image is no drift", () => {
-  // origin/main's lockfile differs from the image's only in left-pad.
-  const deps = fixtureDeps(fixtureExec({ mainLock: HISTORY[SHA.unrelated]! }));
+test("W1-T5367: formatting-only lockfile churn since the image is no drift", () => {
+  const deps = fixtureDeps(fixtureExec({ mainLock: JSON.stringify(JSON.parse(HISTORY[SHA.playwright]!),null,2) }));
   assert.equal(deps.imageBakedCommitsBehind?.(), 0);
 });
 
@@ -192,7 +196,7 @@ test("W1-T5367: an unreadable lockfile side stays unknown rather than zero", () 
   assert.equal(deps.imageBakedCommitsBehind?.(), undefined, "every signal unreadable is UNKNOWN, never zero");
   // One known signal is never swallowed by the others going unreadable.
   const bakedKnown = fixtureDeps(fixtureExec({ lockfileUnreadable: true }));
-  assert.equal(bakedKnown.imageBakedCommitsBehind?.(), 0);
+  assert.equal(bakedKnown.imageBakedCommitsBehind?.(), undefined, "a baked-path zero cannot certify unknown dependency inputs");
   // An unparseable origin/main lockfile is unknown for the SDK reading too — the walk still answers.
   assert.equal(deployer.workerSdkCommitsBehind?.(SHA.playwright, (args) => (args[1]?.startsWith("origin/main") ? "{" : HISTORY[SHA.playwright]!)), undefined);
 });
