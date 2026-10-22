@@ -1155,7 +1155,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
-import { GhReadBroker, ghBrokerCommand, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
+import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
@@ -53445,15 +53445,15 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "gh",
-    syntax: "rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>",
+    syntax: "rmd gh [--class interactive|agent|background] [--client claude|codex|agent] [--fresh] -- <gh args>",
     summary: "Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.",
-    detail: "W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Reads only: a write (the one write rule, ghArgvIsWrite) or any auth call is refused with exit 2 and never run; run it as a plain gh call, where hooks/deny-floor.sh judges it. With no live broker a read runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.",
+    detail: "W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Reads only: a write (the one write rule, ghArgvIsWrite) or any auth call is refused with exit 2 and never run; run it as a plain gh call, where hooks/deny-floor.sh judges it. With no live broker a read runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --client names the reader (claude, codex or agent) in the broker's request log (W1-T10302); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.",
   },
   {
     name: "gh-broker",
     syntax: "rmd gh-broker serve | status [--since <dur>] | stop",
     summary: "Serve, inspect or stop the per-account GitHub read broker (Mac only; installed by deploy/mac).",
-    detail: "W1-T10279: serve listens on <cache>/remudero/gh-broker/broker.sock (directory 0700, this uid only) and rewrites a heartbeat file every interval it advertises there; hooks/deny-floor.sh reads it to route raw gh reads to rmd gh. status prints queue depth by class, each limiter's gap, hold and primary spread, and counts of hit-fresh, coalesced, revalidated-304, upstream-200 and refused; --since <n>s|m|h|d summarises the request log (reads, upstream calls, share served without upstream, longest interactive wait). stop ends the server. deploy/mac/install-gh-read-broker.sh installs the launchd agent that keeps serve running; nothing on Azure changes.",
+    detail: "W1-T10279: serve listens on <cache>/remudero/gh-broker/broker.sock (directory 0700, this uid only) and rewrites a heartbeat file every interval it advertises there; hooks/deny-floor.sh reads it to route raw gh reads to rmd gh. status prints queue depth by class, each limiter's gap, hold and primary spread, and counts of hit-fresh, coalesced, revalidated-304, upstream-200 and refused; --since <n>s|m|h|d summarises the request log (reads, upstream calls, share served without upstream, longest interactive wait). status also prints login_status (W1-T10302): per GitHub login, requests by client, upstream calls and refusals by limiter, with the Mac account whose broker saw each; accounts reading as one login share a pacer through /Users/Shared/remudero/gh-pace/<login>/ and fall back to a per-account pacer when it is unusable. stop ends the server. deploy/mac/install-gh-read-broker.sh installs the launchd agent that keeps serve running and joins that directory; nothing on Azure changes.",
   },
   {
     name: "inspect",
@@ -54637,7 +54637,13 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["inspect", (rest) => readOnlyInspectionCommand(rest)],
   ["gh", async (rest) => await ghCommand(rest)],
-  ["gh-broker", async (rest) => await ghBrokerCommand(rest, async (dir) => await serveGhReadBroker({ dir, broker: new GhReadBroker(dir) }))],
+  ["gh-broker", async (rest) => await ghBrokerCommand(
+    rest,
+    async (dir) => await serveGhReadBroker({ dir, broker: new GhReadBroker(dir) }),
+    process.env,
+    undefined,
+    (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
+  )],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
