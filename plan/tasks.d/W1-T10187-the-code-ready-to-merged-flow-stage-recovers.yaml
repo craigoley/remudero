@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10187 — Recovered: ready_to_merged:light p50 is 0.3
+  # min against a 3.7 min baseline in the 10-21 flow report (regressed=false).
   attempts: 0
   author_class: machine
   origin: "flow-regression:code:ready_to_merged:light"

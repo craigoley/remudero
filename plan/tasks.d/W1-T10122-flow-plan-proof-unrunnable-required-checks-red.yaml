@@ -5,8 +5,11 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.32
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10122 — The 'required checks red' blocker last fired
+  # 10-18 16:47 (130 sweep rows, all on 1 PR) and the flow-remedy ladder marks own-red:required checks red
+  # 'retired'. Already machine-released on 10-19; retire so it does not build.
   attempts: 0
   author_class: machine
   origin: "flow-blocker:plan-proof-unrunnable:required checks red"

@@ -34,6 +34,10 @@ import { isValidRetainedStepsMetadata, rotationStampIso } from "./ledger-union.j
 import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV, readGardenerOrigin } from "./worker-containment.js";
+import {
+  assertStateRestorePaths, isEngineDependencyLinkPath, preserveEngineDependencyLinks,
+  restoreEngineDependencyLinks, validateEngineDependencyLinks, ENGINE_LINK_MANIFEST,
+} from "./state-backup-engine-links.js";
 
 /** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
  *  `host` are stamped at write time. Every worker and brain-plane call spreads the same telemetry
@@ -709,6 +713,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.review_host_gap_rereview", // W1-T7850: same demand release for a refused POST, not completed review work.
   "sweep.fix.checkout_claim_declined",
   "sweep.fix.dispatch_failed",
+  "sweep.fix.prepare_timing", // The scanner fold reads the latest preparation owner across rotation.
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
@@ -816,6 +821,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
   // idempotence AND the staleness clock; dropping it makes a review stalled for hours read as fresh.
   "review.pending_posted",
+  // PR-13355: the stalled-stage backstop (sweep.ts) reads it; a review refusing at a head is no live owner.
+  "review.semantic_setup_refused",
   // W1-T1017: W1-T322's ships-unwired advisory floor line. The deciding reader is not code — it is
   // the operator adjudicating W1-T323's advisory-versus-blocking flip against this exact corpus.
   // Why: rotation was dropping 95%+ of these rows (W1-T1017; docs/forensics/ledger.md).
@@ -2260,7 +2267,7 @@ export const STATE_BACKUP_EXCLUDED_RELPATHS: ReadonlySet<string> = new Set(["sta
 export interface StateBackupSnapshot {
   /** Absolute path to the finished, verified snapshot directory. */
   archiveDir: string;
-  /** Relative paths of every file the snapshot copied, sorted, relative to `state/`. */
+  /** Sorted paths of copied files, archive metadata and preserved links, relative to `state/`. */
   entries: string[];
   /** W1-T5545: rotations hard-linked to the last snapshot, files removed mid-copy, torn bytes cut. */
   linked: string[];
@@ -2285,19 +2292,36 @@ export function isLedgerArchiveRelPath(rel: string): boolean {
   return /^ledger\.\d{4}-\d{2}-\d{2}T[^/]*\.ndjson(\.gz)?$/.test(rel);
 }
 
-/** Every FILE under `root`, sorted, minus `excluded` — ONE walk for staging, verify and restore. Types
+/** Files and preserved engine links under `root`, sorted, minus `excluded`, for staging and restore. Types
  *  come from readdir, so a temp file renamed away mid-walk cannot fail it (W1-T5545). */
 function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set()): string[] {
   const out: string[] = [];
+  const ancestors = new Set<string>();
   const walk = (relDir: string): void => {
     const absDir = relDir ? join(root, relDir) : root;
+    const identity = realpathSync(absDir);
+    if (ancestors.has(identity)) throw new StateBackupError(`state backup: directory link cycle at ${absDir}`);
+    ancestors.add(identity);
     for (const d of readdirSync(absDir, { withFileTypes: true })) {
       const rel = relDir ? join(relDir, d.name) : d.name;
       if (excluded.has(rel)) continue;
-      const kind = d.isSymbolicLink() ? statSync(join(absDir, d.name)) : d;
+      if (d.isSymbolicLink() && isEngineDependencyLinkPath(rel)) {
+        out.push(rel);
+        continue;
+      }
+      let kind;
+      try {
+        kind = d.isSymbolicLink() ? statSync(join(absDir, d.name)) : d;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+          throw new StateBackupError(`state backup: directory link cycle at ${rel}`, { cause: error });
+        }
+        throw error;
+      }
       if (kind.isDirectory()) walk(rel);
       else if (kind.isFile()) out.push(rel);
     }
+    ancestors.delete(identity);
   };
   walk("");
   return out.sort();
@@ -2434,7 +2458,9 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
     const copy = opts.copy ?? liveStateCopier(newestStateBackup(backupsRoot), opts, report);
     tmpDir = mkdtempSync(join(backupsRoot, ".state-backup-tmp-"));
     const sourceEntries = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS);
-    copy(stateDir, tmpDir, liveCopyOrder(sourceEntries));
+    const engineLinks = preserveEngineDependencyLinks(stateDir, tmpDir, sourceEntries);
+    const linkPaths = new Set(engineLinks?.links.map((link) => link.path));
+    copy(stateDir, tmpDir, liveCopyOrder(sourceEntries.filter((rel) => !linkPaths.has(rel))));
     for (let pass = 1; ; pass++) {
       const have = new Set([...listStateFiles(tmpDir), ...report.vanished]);
       const late = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS).filter((rel) => isLedgerArchiveRelPath(rel) && !have.has(rel));
@@ -2448,6 +2474,7 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
     }
 
     const staged = listStateFiles(tmpDir);
+    validateEngineDependencyLinks(tmpDir, staged, engineLinks);
     if (staged.length === 0) {
       throw new StateBackupError(`state backup: snapshot of ${stateDir} would be an empty archive — refusing to publish it`);
     }
@@ -2478,18 +2505,24 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
 /** Restores every file under a snapshot directory into `targetStateDir` byte-for-byte, permission
  *  bits preserved best-effort. THE RESTORE IS A VERB, NOT A RUNBOOK PARAGRAPH (design note iii):
  *  this is the one command an operator runs mid-incident. Refuses — throwing
- *  {@link StateBackupError} — an absent or empty archive rather than no-op'ing over a live dir. */
-export function restoreState(archiveDir: string, targetStateDir: string): void {
+ *  {@link StateBackupError} — an absent or empty archive rather than no-op'ing over a live dir.
+ *  Engine links are returned as requiring dependency reconstruction; no install is attempted. */
+export function restoreState(archiveDir: string, targetStateDir: string): { reconstructionRequired: string[] } {
   try {
     if (!existsSync(archiveDir)) {
       throw new StateBackupError(`state backup: restore source does not exist: ${archiveDir}`);
     }
     const entries = listStateFiles(archiveDir);
+    const engineLinks = validateEngineDependencyLinks(archiveDir, entries);
     if (entries.length === 0) {
       throw new StateBackupError(`state backup: refusing to restore from an empty archive: ${archiveDir}`);
     }
+    assertStateRestorePaths(targetStateDir, entries, engineLinks);
+    const linkPaths = new Set(engineLinks?.links.map((link) => link.path));
     mkdirSync(targetStateDir, { recursive: true });
-    copyStateFiles(archiveDir, targetStateDir, entries);
+    copyStateFiles(archiveDir, targetStateDir, entries.filter((rel) => !linkPaths.has(rel) && rel !== ENGINE_LINK_MANIFEST));
+    restoreEngineDependencyLinks(targetStateDir, engineLinks);
+    return { reconstructionRequired: [...linkPaths] };
   } catch (err) {
     if (err instanceof StateBackupError) throw err;
     throw new StateBackupError(

@@ -29,11 +29,15 @@ them and their ancestors. Install `dependency-seed-guard.sh` beside deployed jan
 The installers copy the guard before the janitor. No emergency mode reduces the six-hour floor.
 
 `remudero-dependencies sweep` is a dry run. Generation collection also requires six idle hours,
-no recorded checkout reference, no installer/collector lock, and an administrator's successful
-open-file scan. Missing or unreadable evidence keeps the generation. `--apply` is explicit.
+no recorded checkout reference, no installer/collector lock, and a successful open-file scan by
+an administrator, or on macOS by the owner when the store is inside a home no other account can
+enter (mode and ACL). Missing or unreadable evidence keeps the generation. `--apply` is explicit;
+the Mac janitor passes it on every apply pass.
 Consumer records bind the mount namespace too: a host collector must not mistake
-a container's invisible checkout paths for deleted checkouts. Foreign namespaces
-and older records without namespace evidence are retained for operator review.
+a container's invisible checkout paths for deleted checkouts. Foreign namespaces are retained
+for operator review, and so are older records without namespace evidence, except on macOS for
+a checkout under `/Users`, `/private`, `/var/folders` or `/tmp`: the host owns those paths and
+a bind mount keeps them, so the host reads the checkout's marker directly.
 Busy locks are never stolen by age. Interrupted locks require operator investigation.
 
 Roll out new worktrees on craigoley, then craigoleyagent, then Azure. Validate independent file

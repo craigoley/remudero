@@ -1,0 +1,57 @@
+- id: W1-T10335
+  title: "A BOT'S COMMENT ON AN ESCALATION IS LEDGERED AS IGNORED ONCE, NOT ON EVERY PASS — `readEscalationAnswers` writes an `escalation_answer.ignored` row (reason `bot`) for every fleet-bot comment on every open needs-question issue on every pass; from 2026-10-17T22:36Z to 2026-10-21T10:28Z that was 7,460 rows (3.46 MB) for 147 distinct comments, one comment re-ignored 193 times"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # one concern, how often a bot comment's ignore row is written; which comments are accepted or refused is unchanged
+  band_meaning: span
+  origin: "coordinator brief f1021b item 4 (2026-10-21), from the #13008 builder's ledger read (191 rows re-ignoring the bot's own comments on #13008's escalations; logs-8864/s13008-*, RESUME-1019 10-21 ~01:30Z)"
+  plan_refs: [W1-T4676, W1-T6407, W1-T8511, W1-T9564]
+  files:
+    - src/lib/escalation-answers.ts
+    - test/inbox/a-bot-comment-on-an-escalation-is-ignored-once.test.ts
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger on host remudero (rmd-state2, read-only; rotations from 2026-10-17T22:33Z plus the live file,
+    newest row 2026-10-21T10:31Z; rows deduplicated by ts, origin and pass):
+    - 7,460 `escalation_answer.ignored` rows, every one reason `bot`, author remudero-fleet[bot], over 38 issues and 147
+      distinct comment origins. Per comment: median 44 rows, max 193 (issue#12258 comments 6222056823 and 6232378073,
+      issue#11350 comment 6176018185, once per pass across 193 passes). 7,313 rows repeat an origin already ledgered.
+      By day: 899 (10-18), 478 (10-19), 3,094 (10-20), 2,965 (10-21 to 10:28Z).
+    - #13008's escalations (#13015, #13058) alone carried 389 such rows over 7 comments.
+    READ at origin/main 16f4c28fc (symbols, not lines):
+    - `readEscalationAnswers` (src/lib/escalation-answers.ts) skips an origin only when it is in
+      `recordedQuestionStoreOrigins` (an ACCEPTED answer); any refused comment, including `operatorRefusal`'s `bot`,
+      is ledgered again on every pass with a fresh `pass_id`.
+    - The only reader of these rows is the refusal alarm (`observeRefusal`, W1-T6407), which returns early for a bot
+      author and counts PASSES only for `not-owner` and `not-configured-operator`. So a repeated bot row is read by no
+      decision, while the repeated human rows ARE the alarm's evidence and must stay per pass.
+    NOT COVERED ELSEWHERE: W1-T6407 (merged) built the alarm; W1-T9564 (merged) names the step only as a snapshot read.
+    Swept origin/main plan/tasks.d and every open PR head's plan tree for escalation_answer.ignored and
+    readEscalationAnswers: no shard dedupes it.
+  design: |
+    1. A comment refused with reason `bot` is ledgered once per origin (`issue#N:comment:ID`). The pass skips an origin
+       already ledgered as ignored-bot, using the history the pass already reads (`openLedgerUnion` over
+       `escalation_answer.ignored` when the gateway reads refusal issues) or a bounded in-process set of origins when it
+       does not; never a second ledger read and never a GitHub request.
+    2. `not-owner` and `not-configured-operator` rows keep today's once-per-pass shape, because the refusal alarm counts
+       their passes.
+    3. The pass's `ignored` count still counts every refused comment it saw, so callers' totals do not change.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/inbox/a-bot-comment-on-an-escalation-is-ignored-once.test.ts"
+    - claim: "a bot comment seen on three passes is ledgered as ignored once"
+      proof: "grep: W1-T10335: a bot comment seen on three passes is ledgered once in test/inbox/a-bot-comment-on-an-escalation-is-ignored-once.test.ts"
+    - claim: "a non-operator human comment is still ledgered on every pass, so the refusal alarm still counts its passes"
+      proof: "grep: W1-T10335: a non-operator comment is still ledgered on every pass in test/inbox/a-bot-comment-on-an-escalation-is-ignored-once.test.ts"
+  falsifier: |
+    Remove the once-per-origin skip and the three-pass fixture writes three bot rows again. Apply it to every refusal
+    reason and the non-operator test reds (the alarm would lose its pass count).
+  note: |
+    EFFECT, measured after merge from the core ledger: `escalation_answer.ignored` rows with reason `bot` per distinct
+    origin. Healthy shape: one per daemon process at most, against today's median 44.

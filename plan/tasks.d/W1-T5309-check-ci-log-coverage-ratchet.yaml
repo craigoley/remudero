@@ -1,53 +1,107 @@
 - id: W1-T5309
-  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-ratchet cost 1407.5 PR minute(s) across 458 round(s) on 292 pull request(s)"
+  title: "THE PUSH COVERAGE PRECHECK IS BLIND TO 77% OF PUSHES AND REFUSES NOTHING — one hub file in a diff (src/run-task.ts has ~930 direct-importer suites) puts the whole narrow pass over its ceiling, and the advisory it does produce never reaches the worker, so CI's coverage-ratchet finds the uncovered lines a fix round later"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
-  risk: low
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the implement push acts on the coverage precheck's own narrow verdict; spans the narrow pass, its push site and their test
+  band_meaning: span
   priority: 1
-  # refusal-amendment (W1-T5309, run W1-T5309-1792008247994, 2026-10-14T20:35:11.758Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
-  #   worker evidence: Fix-round dispatch and the worker coverage precheck live in src/run-task.ts; ci-parity.ts supplies optional preflight engines and remedy metadata, without a hook that prevents coverage-ratchet fix-round dispatch.
-  #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
-  author_class: machine
   origin: "ci-friction:check:ci-log:coverage-ratchet"
+  plan_refs: [W1-T4797, W1-T9483, W1-T9653, W1-T4810, W1-T4656, W1-T10269]
   files:
-    - src/lib/ci-parity.ts
-    - test/check-ci-log-coverage-ratchet.test.ts
-  acceptance:
-    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-ratchet"
-      proof: "grep: test(\"W1-T5309: check:ci-log:coverage-ratchet is prevented, not retried\" in test/check-ci-log-coverage-ratchet.test.ts"
-  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-ratchet's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+    - src/lib/coverage-narrow.ts
+    - src/run-task.ts
+    - test/ci/coverage/the-coverage-precheck-sees-past-a-hub-file.test.ts
+  note: "Rewritten 2026-10-21 by operator-approved hand-build recon (it replaces the gardener's rung-1 draft, whose declared src/lib/ci-parity.ts could not change dispatch — the 2026-10-14 worker refusal). The ci-friction gardener still owns the measurement: after the build merges it compares check:ci-log:coverage-ratchet's share of all fix rounds in equal windows before and after. Edit src/run-task.ts only after W1-T10269 (which also declares it) has merged."
   rationale: |
-    MEASURED by the ci-friction gardener: check:ci-log:coverage-ratchet cost 1407.5 PR minute(s) (seven-day half-life) across 458 fix round(s) on 292 pull request(s).
+    MEASURED 2026-10-21, read-only (core ledger archives 2026-10-07..10-21 plus the live file, deduplicated;
+    gardener state ci-friction-gardener.json; origin/main 03e4f4ac7).
 
-    WHERE IT COMES FROM:
-    - src/lib/ci-parity.ts: names "coverage-ratchet" (23 line(s))
-    - src/run-task.ts: names "coverage-ratchet" (14 line(s))
+    THE CAUSE IS LIVE, AND SMALLER THAN THE ORIGINAL FILING.
+    - The gardener's last pass (2026-10-21T10:05Z, seven-day half-life) prices it at 226.9 PR-minutes as
+      check:ci-log:coverage-ratchet plus 140.9 as check:ci-log:coverage-ratchet:diff-coverage-blocked-…
+      (the same cause, split by signature since W1-T9056). The original 1407.5 has decayed.
+    - fix.dispatch rows naming coverage-ratchet: 70 in 10-08..10-14 (65 diff-coverage BLOCKED, 18% of
+      ci-log rounds, 176 worker-minutes); 18 in 10-15..10-21 (15 BLOCKED, 7.8%, 150 worker-minutes). Newest:
+      #13031, #13081, #13173 (10-20) and #12975 (10-19). They are real coverage defects (added lines with zero
+      covering tests), not flakes: 2 of the 18 were timeouts and 1 had no signature.
 
-    RECENT ROUNDS (newest first):
-    - PR #8711 at 2026-10-02T18:23:44.920Z: ci-log round — coverage-ratchet; coverage-shard (1/8)
-    - PR #7857 at 2026-09-29T15:22:06.738Z: ci-log round
-    - PR #7855 at 2026-09-29T14:38:47.929Z: ci-log round
-    - PR #7851 at 2026-09-29T14:19:29.975Z: ci-log round
-    - PR #7816 at 2026-09-29T13:36:01.027Z: ci-log round
+    THE PRECHECK HAS NO VERDICT, AND NEVER REFUSES.
+    - 401 push.coverage_precheck rows, 10-13..10-21: 309 (77%) `unavailable`, 0 `uncovered`, 2
+      `uncovered-narrow`; most `covered` rows read "no changed src file". Zero pushes were refused.
+    - After W1-T9483's narrow pass deployed (10-20/21), 31 of 46 real source diffs read `unavailable`
+      because the NARROW pass itself was over the 40-suite ceiling ("928 own and direct-importer suite(s)",
+      "256 …"). coverageNarrowSuites (src/lib/coverage-narrow.ts) unions the direct importers of EVERY
+      changed src file, so one hub file blinds the whole diff: src/run-task.ts has ~930 direct-importer
+      suites, src/lib/daemon.ts and src/lib/sweep.ts ~230 each.
+    - Per-file import reach cannot replace it: run-task.ts's import cycle makes even small modules reach
+      1,700-3,000 suites (engine-tree.ts, 1 direct importer, reaches 1,719). An authoritative `uncovered`
+      from the import graph is out of reach; the narrow verdict is the signal there is.
 
-    WHAT THE LAST RUNG TRIED: W1-T4810 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:coverage-ratchet in docs/ci-friction-remedies.md).
-    Do something structurally different from it.
+    REPLAY — 28 heads CI blocked on diff-coverage, 10-13..10-20 (all fetched; the repo's own
+    buildAffectedSuitesGraph/selectAffectedSuites run per file at each head): in 20 of 28 (71%) every
+    blocked line sits in a file with at most 40 direct-importer suites (engine-tree.ts 1, inbox-responder.ts
+    8, fleet-lane.ts 15, proof-missing-export.ts 1, host-memory-admission.ts 5, dep-review.ts 6 or 11, …).
+    A narrow pass over those files' own and direct-importer suites would have named CI's exact lines: a
+    suite subset never covers a line no suite covers. The other 8 blocked lines sit in hub files (daemon.ts,
+    run-task.ts, sweep.ts, inbox.ts, deployer.ts).
 
-    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
-    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
-    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
-  risk_ruling:
-    verdict: "low"
-    action: proceed
-    confidence: 0.72
-    reasons:
-      - "The declared files are src/lib/ci-parity.ts and a new test file. The description doesn't show any change to secrets, auth, permissions, merge, deploy, or review policy, and it doesn't show any deletion or irreversible action."
-      - "The task is a machine-filed remedy for a measured CI friction cause. It asks for a structurally different fix from the earlier docs-only attempt, and the PR still has to pass CI and review."
-      - "The acceptance proof is a grep for a named test in the new test file. The evidence says that file is absent at the base, which fits a file the change will create. The proof can be verified from what is shown."
-      - "The family track record is mixed (24 merged, 40 declined, Beta mean 0.61). That calls for some scrutiny but isn't a gates-state concern. No actual change view was supplied, so my confidence is moderate."
-    judged_at: "2026-10-14T18:49:02.548Z"
-    pin: "7ff4c86a035b7c0a9691c84e4e1855c4e3ecc56b70e0105083aa5ea3d723ad16"
+    THE ADVISORY THAT EXISTS IS RIGHT AND IGNORED. coveragePushRefusal (src/run-task.ts) refuses only
+    `uncovered`; `uncovered-narrow` is ledgered and the head pushes. W1-T9483's design said the implement and
+    fix prompts would name its lines; that was never built. The one advisory with a CI outcome so far
+    (10-20 19:24Z, head 7e0608df) flagged src/lib/proof-missing-export.ts:65; CI blocked exactly that line on
+    PR #13173 and a fix round followed at 23:31Z (1 of 1). The other (W1-T10310, gh-read-broker.ts:413) has
+    no CI outcome yet.
+
+    PARITY GAP. The precheck's COVERAGE_SRC_FILE (src/run-task.ts, `^src/.*\.ts$`) and coverage-narrow.ts's
+    SRC_FILE judge only src/**/*.ts. CI's gate (scripts/diff-coverage.mjs changedSourceFiles) also judges
+    src/**/*.mjs and scripts/**/*.mjs, so an .mjs-only diff reads "covered: no changed src file". 4 of the
+    28 blocked heads had their blocked lines in .mjs files (inside mixed diffs); none was .mjs-only.
+
+    WHAT EARLIER RUNGS TRIED: W1-T4810 (a docs paragraph) and W1-T9653 (a docs record of the mechanism).
+    Neither changed a code path.
+  design: |
+    1. coverage-narrow.ts — THE NARROW PASS IS PER FILE. Its suites are the diff's own changed test files plus,
+       for each changed source file whose direct-importer suites fit the existing measured narrow ceiling
+       (PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING — no new number), that file's direct importers, while the union
+       still fits. A hub file over the ceiling adds no importers of its own; when no selected suite loads it,
+       add one direct importer so the report carries its SF record. judgeCoverage counts a gap only in files
+       whose own and direct-importer suites all ran; a gap only in a hub file is `unavailable`, as today. A
+       clean run is still `covered` (a subset that covers every added line is a sound verdict), and only a reach
+       pass can return `uncovered`, exactly as today.
+    2. run-task.ts, at the fallback_push site only — ONE PRE-PR REPAIR, NOT A REFUSAL. When the precheck returns
+       `uncovered-narrow`, the implement push first gets ONE repair attempt through the existing
+       repairCensusRefusedPush, with the narrow lines as its evidence (the same prompt block as a W1-T4797
+       coverage refusal, saying the lines are the narrow pass's finding). After that one attempt the push
+       proceeds as it does today, whatever the attempt did; an unchanged or still-uncovered head is never failed
+       for it. W1-T9483's rule holds: an `uncovered-narrow` result refuses nothing — a repair is attempted once,
+       then CI stays the authority. rung.fix_push stays advisory: it ledgers the result and pushes, as today.
+    3. run-task.ts — COVERAGE_SRC_FILE matches CI's gate predicate: src/**/*.ts, src/**/*.mjs and
+       scripts/**/*.mjs. coverage-narrow.ts's source predicate follows it.
+    No fixed thresholds are added. The repair is bounded by the existing repair rung's own budget and wall-clock
+    bound. Keep the run-task.ts edits to the fallback_push site and COVERAGE_SRC_FILE.
+  acceptance:
+    - claim: "a hub file in the diff no longer blinds the narrow pass to a small module's uncovered lines"
+      proof: 'grep: test("W1-T5309: a hub file in the diff no longer blinds the narrow pass to a small module" in test/ci/coverage/the-coverage-precheck-sees-past-a-hub-file.test.ts'
+    - claim: "an uncovered-narrow implement push gets one pre-PR repair attempt, then pushes"
+      proof: 'grep: test("W1-T5309: an uncovered-narrow implement push gets one pre-PR repair, then pushes" in test/ci/coverage/the-coverage-precheck-sees-past-a-hub-file.test.ts'
+    - claim: "the precheck judges a changed .mjs source file as CI's gate does"
+      proof: 'grep: test("W1-T5309: the precheck judges a changed mjs source file as CI does" in test/ci/coverage/the-coverage-precheck-sees-past-a-hub-file.test.ts'
+  falsifier: |
+    On main, give coveragePrecheck injected ports: changed files src/run-task.ts (950 direct-importer suites)
+    and src/lib/engine-tree.ts (one direct importer), a reach selection of 2,000 suites, and a run that leaves
+    engine-tree.ts:109 uncovered. It returns `unavailable` ("… own and direct-importer suite(s) were not
+    measured") and never runs engine-tree.ts's importer. With the change it runs the own and engine-tree
+    importer suites and returns `uncovered-narrow` naming engine-tree.ts:109. The fallback push then spawns
+    exactly one repair worker and pushes even when the repaired head is still uncovered; on main it pushes
+    with no repair. A changed scripts/foo.mjs alone reads "covered: no changed src file" on main and is
+    measured with the change.
+    GUARDS (present at base, must stay green): an over-ceiling narrow gap still never returns `uncovered`
+    (test/the-coverage-precheck-asks-the-diffs-own-suites-first.test.ts); coveragePushRefusal still refuses
+    only `uncovered`; rung.fix_push still pushes on `uncovered-narrow` without a repair; a narrow run that
+    covers every added line is still `covered`.

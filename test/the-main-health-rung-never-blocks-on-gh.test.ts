@@ -213,7 +213,10 @@ test("W1-T5283: the main health issue gateway lets a timer fire while gh is in f
 });
 
 test("W1-T5283: the ci failure read lets a timer fire while gh is in flight", async (t) => {
-  const gh = slowGh("ci", `check-runs/${JOB}/annotations`, [{ when: `check-runs/${JOB}/annotations`, stdout: TEST_ANNOTATIONS }]);
+  const gh = slowGh("ci", `check-runs/${JOB}/annotations`, [
+    { when: `check-runs/${JOB}/annotations`, stdout: TEST_ANNOTATIONS },
+    { when: `actions/jobs/${JOB}/logs`, stdout: "# Subtest: ci evidence\nnot ok 1 - ci evidence\n  ..." },
+  ]);
   const { gateway, calls } = scriptedGateway({}, "sync");
   const h = rungHarness("ci", "failure", {
     issues: gateway,
@@ -225,7 +228,10 @@ test("W1-T5283: the ci failure read lets a timer fire while gh is in flight", as
     assert.ok(inFlightTicks > 0, "a timer must run while the rung's CI evidence read is in flight");
     assert.ok(!h.logged.some((r) => r.step === "main.health.ci_evidence_unreadable"));
     assert.ok(calls.some((c) => c[0] === "create"), "a non-infrastructure red still escalates");
-    assert.deepEqual(gh.shim.calls(), [`api repos/o/r/check-runs/${JOB}/annotations`], "annotations answered, so no job log read");
+    assert.deepEqual(gh.shim.calls(), [
+      `api repos/o/r/check-runs/${JOB}/annotations`,
+      `api repos/o/r/actions/jobs/${JOB}/logs`,
+    ], "a readable log is checked after annotations before selecting failure evidence");
   } finally {
     h.cleanup();
     gh.restore();

@@ -3063,8 +3063,23 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       capability: openWeight.capability,
     });
     let selectionAssignmentId = cashAssignment(openWeight.model, openWeight.alternatives);
+    const cashController = new AbortController();
+    const relayAbort = (): void => cashController.abort(args.signal?.reason);
+    if (args.signal?.aborted) relayAbort();
+    else args.signal?.addEventListener("abort", relayAbort, { once: true });
+    let cashAbandonment: WorkerAbandonmentEvidence | undefined;
+    const cashWatchdog = args.clockBound ? createWorkerClockBoundWatchdog(args.clockBound) : undefined;
+    let stopCashWatchdog: (() => void) | undefined;
+    const cashObserver: WorkerStreamObserver = (event) => {
+      cashWatchdog?.observer(args.clockBound?.now ? { ...event, tsMs: args.clockBound.now() } : event);
+      args.streamObserver?.(event);
+    };
     try {
       materializeWorkerHome({ workerHome, realHome });
+      stopCashWatchdog = cashWatchdog?.start((evidence) => {
+        cashAbandonment = evidence;
+        cashController.abort();
+      });
       // Cash drafts also walk on a broken fragment contract; each rung retains the adapter's cap gate.
       let firstRung = true;
       let draftContractFailed = false;
@@ -3083,8 +3098,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
             },
           });
+          cashController.signal.throwIfAborted();
           const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
+            signal: cashController.signal, streamObserver: cashObserver,
             resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          cashController.signal.throwIfAborted();
           rung.continuation = execution.receipt;
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
@@ -3125,14 +3143,21 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             : result.openWeightDeploymentAbsent ? "deployment absent" : "refused before transport",
           next: "cash-fallback",
         }));
+        stopCashWatchdog?.();
         return await spawnWorker({
           ...args,
+          signal: cashController.signal,
           cashSonnetEmergency: false,
           routingFallback: { rule: "cash-fallback", capacities: args.routingFallback?.capacities ?? [] },
         });
       }
       return result;
+    } catch (error) {
+      if (cashAbandonment) throw new WorkerAbandonedError(cashAbandonment, error);
+      throw error;
     } finally {
+      stopCashWatchdog?.();
+      args.signal?.removeEventListener("abort", relayAbort);
       reapWorkerHome(workerHomeRoot, workerHome);
     }
   }

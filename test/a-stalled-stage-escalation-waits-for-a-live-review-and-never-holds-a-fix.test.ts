@@ -107,7 +107,33 @@ test("W1-T8167: an awaiting-review stage with no live owner still escalates", as
   assert.equal(other.rows("pr.stuck").length, 1);
 });
 
-const HEAD = "37d03bcaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+test("a review whose setup refuses on every pass at one head escalates at the backstop, naming the refusal", async () => {
+  resetIdleReviewMemo();
+  // #13305 (2026-10-21): each pass re-admitted the review and it refused (head-task-metadata-unavailable) a minute later,
+  // so the newest admission always looked live and the stall was deferred, then misdiagnosed as a long review.
+  const refused = (minutesAgo: number, head = pr.headSha) => ({ ts: ago(minutesAgo), step: "review.semantic_setup_refused",
+    pr_url: pr.prUrl, head_sha: head, reason: "head-task-metadata-unavailable" });
+  const f = fixture(33, [admitted(21), refused(20), admitted(11), refused(10), admitted(0.5)]);
+  await sweep(f);
+  assert.equal(f.rows("pr.stuck.deferred").length, 0, "a refusing review is no live owner");
+  assert.equal(f.rows("pr.stuck").length, 1);
+  assert.equal(f.rows("pr.stuck")[0].diagnosis,
+    "review setup refused at this head on every pass (head-task-metadata-unavailable, 2 refusals)");
+  assert.equal(f.escalations.length, 1);
+  assert.equal(f.escalations[0].cause, "stage-stall");
+  assert.match(f.escalations[0].reason, /DIAGNOSIS: review setup refused at this head on every pass/);
+
+  // A review that started after the refusal is a live owner again; a refusal at another head names nothing here.
+  for (const extra of [[refused(10), { ts: ago(9), step: "review.pending_posted", pr_url: pr.prUrl }], [refused(10, "other")]]) {
+    resetIdleReviewMemo();
+    const live = fixture(33, [...extra, admitted(0.5)]);
+    await sweep(live);
+    assert.equal(live.rows("pr.stuck").length, 0);
+    assert.equal(live.rows("pr.stuck.deferred").length, 1);
+  }
+});
+
+const HEAD ="37d03bcaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 function issueStore(): IssueGateway & { created: Array<{ url: string; title: string; body: string }> } {
   const created: Array<{ url: string; title: string; body: string }> = [];

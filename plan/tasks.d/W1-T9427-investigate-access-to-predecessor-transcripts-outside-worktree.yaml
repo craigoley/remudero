@@ -8,6 +8,11 @@
   risk: high
   band_meaning: blast-radius
   priority: 2
+  # refusal-amendment (W1-T9427, run W1-T9427-1792614580201, 2026-10-21T21:25:05.112Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The recorded grep targets absent `scripts/fetch-transcripts.sh`; behavioral tests prove the approved staging approach.
+  # refusal-amendment (W1-T9427, run W1-T9427-1792614580201, 2026-10-21T21:25:05.112Z): the worker refused criterion 2 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The recorded `importTranscript(` interface is absent; the approved integration uses `withPredecessorTranscriptCopies` in `src/run-task.ts`.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   # backlog gardener: band=2 evidence=c59a07d1180b405a
   attempts: 0

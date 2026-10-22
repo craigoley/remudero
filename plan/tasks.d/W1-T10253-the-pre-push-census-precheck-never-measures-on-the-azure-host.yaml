@@ -6,12 +6,15 @@
   # an observation/decision record: installing a host package is an operator action
   verify: human
   risk: low
-  priority: 2
   origin: "coordinator brief file1020 item 4 (2026-10-20); push logs of every hand build in logs-8864"
   plan_refs: [W1-T6138, W1-T6120, W1-T7822, W1-T5617, W1-T10042, W1-T10044]
   files:
     - docs/forensics/pre-push-census-sandbox-on-the-azure-host.md
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10253 — Cause is gone: bwrap is now installed on the
+  # Azure host (/usr/bin/bwrap, bubblewrap 0.9.0-1ubuntu0.3), so census-precheck's 'bwrap cannot start' premise no
+  # longer holds.
   attempts: 0
   rationale: |
     OBSERVED 2026-10-20 on the Azure host (Ubuntu 24.04.4 LTS), read-only:
