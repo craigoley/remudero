@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
-import { fixedClock } from "#src/lib/clock.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { OPENWEIGHT_ALLOWANCE_FILENAME, openWeightUsageUsd, openWeightReservationUsd, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { createCapabilityGrant, InMemoryCapabilityGrantStore } from "#src/lib/capability-grant.js";
 import { spawnWorker, WorkerAbandonedError } from "#src/lib/worker.js";
@@ -215,14 +215,18 @@ test("cash caller abort cancels native429 wait and response body without a later
 
 test("cash native request deadline includes body consumption and a shared429 cooldown window", async t => {
   for (const model of cashModels) await t.test(model, async child => {
-    const f = cashFixture(child); let calls = 0;
-    const result = await spawnOpenWeightWorker({ ...f.args, requestTimeoutMs: 35,
+    const f = cashFixture(child); let calls = 0, elapsed = 0;
+    const clock = clockFromMillisFn(() => elapsed);
+    // The clock crosses the request deadline while consuming the body; healthy reservation I/O is not its subject.
+    const result = await spawnOpenWeightWorker({ ...f.args, clock, requestTimeoutMs: 1000,
       fetchImpl: async () => { calls++; const response = cashReply(model);
-        Object.defineProperty(response, "json", { value: () => new Promise(() => {}) }); return response; } }, f.config, { model, effort: "low" });
+        Object.defineProperty(response, "json", { value: async () => { elapsed = 1000; return cashReply(model).json(); } }); return response; } }, f.config, { model, effort: "low" });
     assert.equal(result.isError, true); assert.match(result.stderr, /timed out|timeout/i); assert.equal(calls, 1);
-    const g = cashFixture(child); calls = 0;
-    const second = await spawnOpenWeightWorker({ ...g.args, requestTimeoutMs: 60,
-      fetchImpl: async () => { calls++; return new Response(null, { status: 429, headers: { "retry-after-ms": "35" } }); } }, g.config, { model, effort: "low" });
+    const g = cashFixture(child); calls = 0; elapsed = 0;
+    // Both retries share one clock window. Resetting it on retry admits a third POST and fails the original assertion.
+    const second = await spawnOpenWeightWorker({ ...g.args, clock, requestTimeoutMs: 1000,
+      fetchImpl: async () => { calls++; elapsed = calls === 1 ? 600 : 980;
+        return new Response(null, { status: 429, headers: { "retry-after-ms": "35" } }); } }, g.config, { model, effort: "low" });
     assert.equal(second.isError, true); assert.equal(calls, 2, "second delay cannot restart the original request deadline");
   });
 });
@@ -397,14 +401,16 @@ test("cash default native fetch and timer qualify local TLS429 continuation and 
 
 test("cash worker passes caller cancellation into the actual adapter before the next paid attempt", async t => {
   const f = cashFixture(t), controller = new AbortController(); let calls = 0;
-  const timer = setTimeout(() => controller.abort(Error("round cancelled")), 25);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await assert.rejects(spawnWorker({ cwd: f.dir, permissionMode: "bypassPermissions",
       settingsFile: join(REPO_ROOT, "settings", "worker.json"),
       prompt: "round fixture", model: "sonnet", effort: "low", maxTurns: 4, mountProvider: "cash", cashSqueezed: true,
       config: f.config, signal: controller.signal,
       providerRouting: { spawnOpenWeight: (args, config, selection) => spawnOpenWeightWorker({ ...args, env: f.args.env,
-        requestTimeoutMs: 160, fetchImpl: async () => { calls++;
+        clock: fixedClock(0), requestTimeoutMs: 1000, fetchImpl: async () => { calls++;
+          // Observe the first POST before cancelling its actual retry wait; outer setup cannot consume the fixture's timer.
+          if (calls === 1) timer = setTimeout(() => controller.abort(Error("round cancelled")), 25);
           return new Response(null, { status: 429, headers: { "retry-after-ms": "90" } }); } }, config, selection) },
     }), /round cancelled/);
     await new Promise(resolve => setTimeout(resolve, 180));
