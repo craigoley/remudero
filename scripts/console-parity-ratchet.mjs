@@ -79,6 +79,7 @@ function reasons(names, reason) {
  *  entry present here but ABSENT from {@link BASELINE_PATH} is a verb added to this table without
  *  recording it, and is refused for that reason alone, never for the reason text's content. */
 export const CLI_ONLY = {
+  "review-replay": "Refreshes a checked-in sample in the caller's local git checkout from its complete retained ledger and seeded reviewer-health projection; the remote console cannot write that checkout.",
   ...reasons(
     [
       "run-task",
