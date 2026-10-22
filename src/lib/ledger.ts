@@ -694,6 +694,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
   "sweep.base_fixed.refresh", // baseRedHistoryFromLedger and refreshRecordsFromLedger read prior refreshes.
+  "sweep.contract_amended.refresh", // A failed narrative-adoption attempt remains a decision input after rotation.
   "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
   "sweep.base_red.refresh_admission", // W1-T9595: the light pass replays its held heads; pacing reads its cohort.
   "sweep.ratchet_judge.decided", // W1-T9962: the armed re-judge's once-per-(head, main tip) memo reads it back.
