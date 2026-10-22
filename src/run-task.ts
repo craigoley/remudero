@@ -2400,6 +2400,7 @@ export function buildSweepEffects(
   | "fixProgressJudge"
   | "arm"
   | "close"
+  | "withDependencyCloseFence"
   | "dispatchFix"
   | "escalate"
   | "fixOwnerReclaimableAtHold"

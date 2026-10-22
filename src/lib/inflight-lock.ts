@@ -64,6 +64,8 @@ export function readInflightLock(inflightDir: string, taskId: string): InflightL
 }
 
 export interface AcquireInflightOpts {
+  /** Refuse any existing inode without reading or reclaiming it; default keeps normal recovery. */
+  reclaim?: false;
   run_id: string;
   /** Override recorded identity (tests). pid/host/startedAt default to this process. */
   info?: Partial<Omit<InflightLockInfo, "run_id">>;
@@ -119,7 +121,7 @@ export function acquireInflightLock(
       closeSync(fd);
       break;
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || opts.reclaim === false) throw e;
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseInflightLockInfo,
         isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),

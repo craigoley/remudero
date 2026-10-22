@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, readFileSync, symlinkSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -284,4 +285,26 @@ test("sweepStaleInflightLocks: mixed dir — foreign-host, same-host live, and s
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test("strict inflight acquisition refuses existing garbage, dead, symlink and FIFO inodes without reading, reaping or altering them", () => {
+  const dir = tmp();
+  try {
+    const garbage = inflightLockPath(dir, "garbage"), dead = inflightLockPath(dir, "dead"), symlink = inflightLockPath(dir, "symlink"), fifo = inflightLockPath(dir, "fifo");
+    writeFileSync(garbage, "malformed"); writeFileSync(dead, JSON.stringify({ pid: -99, run_id: "dead", host: hostname() }));
+    symlinkSync("absent-target", symlink); execFileSync("mkfifo", [fifo]);
+    for (const key of ["garbage", "dead", "symlink"]) {
+      const path = inflightLockPath(dir, key), before = lstatSync(path);
+      assert.throws(() => acquireInflightLock(dir, key, { run_id: "strict", reclaim: false, isPidAlive: () => assert.fail("strict mode must not inspect liveness") }), { code: "EEXIST" });
+      assert.equal(lstatSync(path).ino, before.ino);
+    }
+    assert.equal(readFileSync(garbage, "utf8"), "malformed"); assert.equal(lstatSync(symlink).isSymbolicLink(), true);
+    // INFRASTRUCTURE BACKSTOP: a regression that reads a FIFO blocks only this owned child.
+    const script = `import { acquireInflightLock } from ${JSON.stringify(new URL("../src/lib/inflight-lock.ts", import.meta.url).href)}; try { acquireInflightLock(${JSON.stringify(dir)}, "fifo", { run_id: "strict", reclaim:false }); process.exitCode=2; } catch(e) { if(e.code!=="EEXIST") throw e; }`;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 5000 });
+    assert.equal(child.error, undefined); assert.equal(child.status, 0, child.stderr); assert.equal(lstatSync(fifo).isFIFO(), true);
+    const own = acquireInflightLock(dir, "free", { run_id: "strict", reclaim: false });
+    assert.equal(readInflightLock(dir, "free")?.run_id, "strict"); own.release(); assert.equal(existsSync(inflightLockPath(dir, "free")), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
