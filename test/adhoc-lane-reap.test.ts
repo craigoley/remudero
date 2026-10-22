@@ -236,7 +236,7 @@ test("W1-T2847 (wiring): runTaskBody CALLS runAdhocLaneReapRung — beside the w
   // THE #339/W1-T281 SHAPE, GUARDED. The call site is introduced by a comment block that names
   // `runWorktreeReapRung` and quotes the shard, so a naive source grep would pass on wiring that
   // was never built. Strip every `//` line first, then look for the CALL with its open paren.
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const src = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   const code = src
     .split("\n")
     .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*") && !l.trim().startsWith("/*"))
@@ -362,7 +362,7 @@ test("W1-T2962: a lane with a live upstream branch survives a registration-drive
 });
 
 test("W1-T2847 (wiring): the run-task call site supplies repoDir, so the report has a producer rather than being an exported orphan", () => {
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const src = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   const code = src
     .split("\n")
     .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*") && !l.trim().startsWith("/*"))

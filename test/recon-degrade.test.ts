@@ -20,7 +20,7 @@ import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/iso
 // runTask() dispatch path all the way to a real implement spawn, never a unit test of the
 // retry/degrade logic in isolation. ──────────────────────────────────────────────────────
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 function result(over: Partial<WorkerResult>): WorkerResult {
   return {

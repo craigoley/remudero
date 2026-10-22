@@ -190,7 +190,7 @@ test("runTask returns blocked_illformed with costUsd 0, before any lock or spawn
   // happen AFTER a worktree or a spawn, "nothing was spent" would silently stop being true and this
   // verdict would no longer deserve its exemption. Read from source, since no unit test drives the
   // real refusal path.
-  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const src = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
   assert.match(
     src,
     /costUsd: 0, verdict: "blocked_illformed"/,
@@ -201,4 +201,10 @@ test("runTask returns blocked_illformed with costUsd 0, before any lock or spawn
     /BEFORE the inflight lock is even taken/,
     "and must still be documented as preceding the lock, worktree and spawn",
   );
+  // The documentation literal above can be satisfied by a comment alone, so ORDER is pinned on
+  // code tokens only: the refusal's return must sit textually BEFORE the lock acquisition call.
+  const refusalAt = src.indexOf('costUsd: 0, verdict: "blocked_illformed"');
+  const lockAt = src.indexOf("acquireInflightLock(inflightDir, taskId");
+  assert.ok(refusalAt > 0 && lockAt > 0, "both the refusal return and the lock acquisition must exist");
+  assert.ok(refusalAt < lockAt, "the illformed refusal must be returned before the inflight lock is acquired");
 });

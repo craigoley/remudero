@@ -14,7 +14,7 @@ import type { spawnWorker } from "../src/lib/worker.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // ── §5C Layer A pre-dispatch guard is WIRED into the run path (W1-T20c) ───────
@@ -349,11 +349,20 @@ test("impl-AK: the pre-dispatch gate passes ONE options object to both lint call
 
 // ── the CI half is wired too ───────────────────────────────────────────────────
 
-test("rmd lint-plan is wired into the CLI dispatch", () => {
+test("rmd lint-plan is wired into the CLI dispatch", async () => {
   // W1-T2893: main() resolves "lint-plan" against src/cli/registry.ts's HANDLERS map
   // (dispatchCommand) rather than its own `cmd === "lint-plan"` branch.
   assert.ok(HANDLERS.has("lint-plan"), "HANDLERS must have a 'lint-plan' entry for dispatchCommand to resolve");
-  assert.match(runTaskSrc, /lintPlanCommand/);
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (message?: unknown) => { errors.push(String(message)); };
+  try {
+    assert.equal(await HANDLERS.get("lint-plan")!(["--wiring-probe-invalid-flag"]), 2);
+    assert.match(errors.join("\n"), /lint-plan/);
+    assert.match(errors.join("\n"), /--wiring-probe-invalid-flag/);
+  } finally {
+    console.error = originalError;
+  }
 });
 
 // ── W1-T497: `proofNameResolutionViolations` (task-linter.ts, W1-T488) is WIRED at the

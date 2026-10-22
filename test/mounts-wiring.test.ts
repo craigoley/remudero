@@ -20,30 +20,31 @@ const OFFLINE_GITHUB: GitHub = {
 };
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskVerbSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 // ── The DEFECT is gone / the FIX is present (the W1-T6 root cause) ──────────
 
 test("the spawn path INVOKES resolveMount — mounts owns the run's knobs (not a hardcoded literal)", () => {
-  assert.match(runTaskSrc, /resolveMount\(/, "run-task.ts must call resolveMount on the spawn path");
-  assert.match(runTaskSrc, /loadMounts\(mountsPath\(repoRoot\)\)/, "the mount is loaded from the committed repo table");
+  assert.match(runTaskVerbSrc, /resolveMount\(/, "run-task.ts must call resolveMount on the spawn path");
+  assert.match(runTaskVerbSrc, /loadMounts\(mountsPath\(repoRoot\)\)/, "the mount is loaded from the committed repo table");
 });
 
 test("W1-T3095: run-task calls the explorer through the seamed resolver", () => {
-  assert.match(runTaskSrc, /resolveMountExplorationDispatch\s+as\s+exploreMount/, "runTask must import the seamed resolver as its exploration call");
-  assert.match(runTaskSrc, /\bexploreMount\(/, "runTask must call the explorer on the dispatch path");
-  assert.doesNotMatch(runTaskSrc, /exploration\.kind === "explore"/, "the explore branch belongs in lib, not in runTask");
-  assert.doesNotMatch(runTaskSrc, /mount\.exploration\.error/, "the failure arm belongs in lib, not in runTask");
-  assert.match(runTaskSrc, /mount-headroom-sweep\.mjs/, "runTask owns the real sweep source");
-  assert.match(runTaskSrc, /loadMountsTable: \(\) => loadMounts\(mountsPath\(repoRoot\)\)/, "runTask owns the real mounts source");
+  assert.match(runTaskVerbSrc, /resolveMountExplorationDispatch\s+as\s+exploreMount/, "runTask must import the seamed resolver as its exploration call");
+  assert.match(runTaskVerbSrc, /\bexploreMount\(/, "runTask must call the explorer on the dispatch path");
+  assert.doesNotMatch(runTaskVerbSrc, /exploration\.kind === "explore"/, "the explore branch belongs in lib, not in runTask");
+  assert.doesNotMatch(runTaskVerbSrc, /mount\.exploration\.error/, "the failure arm belongs in lib, not in runTask");
+  assert.match(runTaskVerbSrc, /mount-headroom-sweep\.mjs/, "runTask owns the real sweep source");
+  assert.match(runTaskVerbSrc, /loadMountsTable: \(\) => loadMounts\(mountsPath\(repoRoot\)\)/, "runTask owns the real mounts source");
 });
 
 test("the literal `maxTurns: 60` is GONE from run-task.ts (the hardcoded implement ceiling)", () => {
-  assert.doesNotMatch(runTaskSrc, /maxTurns:\s*60\b/, "the hardcoded maxTurns: 60 must be replaced by the mount");
+  assert.doesNotMatch(runTaskVerbSrc, /maxTurns:\s*60\b/, "the hardcoded maxTurns: 60 must be replaced by the mount");
   // the implement + resume spawns now take max_turns/model/effort FROM the mount.
-  assert.match(runTaskSrc, /maxTurns:\s*\w*[Mm]ount\.maxTurns/);
-  assert.match(runTaskSrc, /model:\s*\w*[Mm]ount\.model/);
-  assert.match(runTaskSrc, /effort:\s*\w*[Mm]ount\.effort/);
+  assert.match(runTaskVerbSrc, /maxTurns:\s*\w*[Mm]ount\.maxTurns/);
+  assert.match(runTaskVerbSrc, /model:\s*\w*[Mm]ount\.model/);
+  assert.match(runTaskVerbSrc, /effort:\s*\w*[Mm]ount\.effort/);
 });
 
 // ── An implement task resolves its budget FROM the real mounts.yaml table ───
@@ -89,7 +90,7 @@ test("resolveMount('reviewer'|'fix'|'diagnose', risk) each resolve a real mount 
 
 test("the reviewer spawn path reads its mount from resolveMount(..., 'reviewer', ...), not a hardcoded literal", () => {
   assert.doesNotMatch(runTaskSrc, /maxTurns:\s*12\b/, "the hardcoded reviewer maxTurns: 12 must be gone");
-  assert.match(runTaskSrc, /resolveMount\(mountsTable,\s*"reviewer",\s*task\.risk\)/, "the reviewer mount must resolve from the (task_type='reviewer' × risk) table");
+  assert.match(runTaskVerbSrc, /resolveMount\(mountsTable,\s*"reviewer",\s*task\.risk\)/, "the reviewer mount must resolve from the (task_type='reviewer' × risk) table");
   assert.match(runTaskSrc, /maxTurns:\s*args\.reviewerMount\.maxTurns/);
   assert.match(runTaskSrc, /model:\s*args\.reviewerMount\.model/);
   assert.match(runTaskSrc, /effort:\s*args\.reviewerMount\.effort/);
@@ -139,24 +140,24 @@ test("the retro Architect's turn budget, resolved from the real mounts.yaml, is 
 // ── W1-T167: the class axis is WIRED into the spawn path, and a class miss ledgers LOUD ─
 
 test("the spawn path derives the task's class and resolves its mount THROUGH resolveMountForClass, not the class-blind resolveMount", () => {
-  assert.match(runTaskSrc, /import \{ deriveTaskClass, implementRouteClass \} from "\.\/lib\/task-class\.js";/);
-  assert.match(runTaskSrc, /const taskClass = deriveTaskClass\(task\)/);
+  assert.match(runTaskVerbSrc, /import \{ deriveTaskClass, implementRouteClass \} from "\.\.\/\.\.\/lib\/task-class\.js";/);
+  assert.match(runTaskVerbSrc, /const taskClass = deriveTaskClass\(task\)/);
   // Ruling 2026-09-24: the implement route sends high-risk work without a declared danger band to the mid tier.
-  assert.match(runTaskSrc, /resolveMountForClass\(mountsTable, task\.type, task\.risk, implementRouteClass\(task, taskClass\)\)/);
+  assert.match(runTaskVerbSrc, /resolveMountForClass\(mountsTable, task\.type, task\.risk, implementRouteClass\(task, taskClass\)\)/);
 });
 
 test("a class-miss fallback ledgers a LOUD `mount.class_fallback` line naming the unmatched class — never silent", () => {
-  assert.match(runTaskSrc, /log\("mount\.class_fallback"/);
-  const idx = runTaskSrc.indexOf('log("mount.class_fallback"');
-  const block = runTaskSrc.slice(idx, idx + 300);
+  assert.match(runTaskVerbSrc, /log\("mount\.class_fallback"/);
+  const idx = runTaskVerbSrc.indexOf('log("mount.class_fallback"');
+  const block = runTaskVerbSrc.slice(idx, idx + 300);
   assert.match(block, /requested_class:\s*taskClass/);
   assert.match(block, /resolved_class:\s*mountResolution\.resolvedClass/);
 });
 
 test("run.start ledgers task_class + mount_class (W1-T167) — the retro's per-class calibration reads these", () => {
-  const idx = runTaskSrc.indexOf('log("run.start"');
+  const idx = runTaskVerbSrc.indexOf('log("run.start"');
   assert.ok(idx >= 0);
-  const block = runTaskSrc.slice(idx, idx + 700);
+  const block = runTaskVerbSrc.slice(idx, idx + 700);
   assert.match(block, /task_class:\s*taskClass/);
   assert.match(block, /mount_class:\s*mountClass/);
 });
