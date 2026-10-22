@@ -6,6 +6,7 @@ import {readSharedGitPolicy,readSharedWorkspaceCapacity,borrowedWorkspaceWorker,
 import {pathToFileURL} from 'node:url';
 import {main} from '#scripts/shared-workspace.mjs';
 import {resolveTestSlotDir,testSlotProcessFacts} from '#src/lib/test-slot.js';
+import {inspectSharedGitAuthorMigration,applySharedGitAuthorMigration} from '#scripts/lib/shared-git-author-migration.mjs';
 function fixture(t:TestContext){
   const home=realpathSync(mkdtempSync(join(homedir(),'.rmd-shared-git-fixture-'))),parent=join(home,'workspaces'),seed=join(home,'origin'),pool=join(home,'pool'),root=join(home,'dependencies'),configDir=join(home,'.config/remudero'),config=join(configDir,'git-storage.json');
   for(const p of[parent,seed,root,configDir])mkdirSync(p,{recursive:true,mode:0o700});
@@ -116,4 +117,41 @@ test('a lost inherited worker is rechecked before the next Git phase, without wo
   const f=fixture(t);let checks=0;
   const r=await createSharedWorkspace('unfiled',{...f.options,borrowWorker:async()=>({admitted:true,verify(){if(++checks===2)throw Error('fixture inherited worker released');}})});
   assert.equal(r.state,'NOT_RUN');assert.equal(checks,2);assert.match(r.reason!,/worker released/);assert.equal(r.path,undefined);
+});
+function bareMigrationFixture(t:TestContext){
+  const f=fixture(t),bare=join(f.home,'bare'),a=join(f.parent,'a'),b=join(f.parent,'b');
+  f.git(f.home,'clone','-q','--bare',f.seed,bare);f.git(bare,'worktree','add','-qb','fixture-a',a,'main');f.git(bare,'worktree','add','-qb','fixture-b',b,'main');
+  const worker=async()=>({admitted:true,verify(){}});
+  return{...f,bare,a,b,worker,config:join(bare,'config')};
+}
+test('shared Git author migration preserves the bare pool, both linked trees, refs and unpublished files',async t=>{
+  const f=bareMigrationFixture(t);writeFileSync(join(f.a,'unpublished.txt'),'keep me');
+  const before=readFileSync(f.config),refs=f.git(f.bare,'show-ref'),status=f.git(f.a,'status','--porcelain');
+  const plan=inspectSharedGitAuthorMigration(f.bare);assert.equal(plan.worktreeCount,3);assert.deepEqual(readFileSync(f.config),before);assert.equal(existsSync(join(f.bare,'config.worktree')),false);
+  const result=await applySharedGitAuthorMigration(f.bare,plan.planSha256,{confirmIdle:true,borrowWorker:f.worker});
+  assert.equal(result.state,'APPLIED_MAIN_BARE_PRESERVED',result.reason);assert.deepEqual(readFileSync(result.backup),before);
+  assert.equal(f.git(f.bare,'rev-parse','--is-bare-repository'),'true');
+  for(const path of[f.a,f.b]){assert.equal(f.git(path,'rev-parse','--is-inside-work-tree'),'true');assert.equal(f.git(path,'rev-parse','--is-bare-repository'),'false');assert.equal(f.git(path,'config','--local','--get','extensions.worktreeConfig'),'true');}
+  assert.equal(f.git(f.a,'status','--porcelain'),status);assert.equal(f.git(f.bare,'show-ref'),refs);assert.equal(readFileSync(join(f.a,'unpublished.txt'),'utf8'),'keep me');
+  const common=f.git(f.bare,'config','--local','--list');assert.doesNotMatch(common,/core.bare=|core.worktree=/);assert.equal(existsSync(join(f.bare,'config.lock')),false);assert.equal(existsSync(join(f.bare,'config.worktree.lock')),false);
+});
+test('shared Git author migration requires explicit idleness, a genuine worker and an unchanged plan',async t=>{
+  const f=bareMigrationFixture(t),before=readFileSync(f.config),plan=inspectSharedGitAuthorMigration(f.bare);
+  await assert.rejects(applySharedGitAuthorMigration(f.bare,plan.planSha256),/idle/);
+  await assert.rejects(applySharedGitAuthorMigration(f.bare,plan.planSha256,{confirmIdle:true,borrowWorker:async()=>({admitted:false})}),/genuine/);
+  f.git(f.bare,'config','gc.auto','0');await assert.rejects(applySharedGitAuthorMigration(f.bare,plan.planSha256,{confirmIdle:true,borrowWorker:f.worker}),/plan changed/);
+  assert.equal(existsSync(join(f.bare,'config.worktree')),false);assert.notDeepEqual(readFileSync(f.config),before);
+});
+test('shared Git author migration refuses includes, existing worktree config, foreign locks and non-bare stores',t=>{
+  const f=bareMigrationFixture(t),before=readFileSync(f.config);
+  for(const [key,value]of[['include.path','/unreadable/not-read'],['core.worktree',''],['extensions.worktreeConfig','true']]){f.git(f.bare,'config',key!,value!);assert.throws(()=>inspectSharedGitAuthorMigration(f.bare),/unsupported/);writeFileSync(f.config,before);}
+  for(const path of[join(f.bare,'config.lock'),join(f.bare,'config.worktree'),join(f.bare,'worktrees','a','config.worktree')]){writeFileSync(path,'foreign');assert.throws(()=>inspectSharedGitAuthorMigration(f.bare));assert.equal(readFileSync(path,'utf8'),'foreign');rmSync(path);}
+  assert.throws(()=>inspectSharedGitAuthorMigration(join(f.pool,'.git')),/unsupported/);
+});
+test('shared Git author migration retains an interrupted main staging file without enabling shared bare semantics',async t=>{
+  const f=bareMigrationFixture(t),plan=inspectSharedGitAuthorMigration(f.bare);let calls=0;
+  const result=await applySharedGitAuthorMigration(f.bare,plan.planSha256,{confirmIdle:true,borrowWorker:async()=>({admitted:true,verify(){if(++calls===3)throw Error('fixture lost worker before common publish');}})});
+  assert.equal(result.state,'STAGED_MAIN_CONFIG_RETAINED');assert.equal(f.git(f.bare,'config','--local','--get','core.bare'),'true');
+  assert.equal(f.git(f.a,'rev-parse','--is-inside-work-tree'),'true');assert.equal(existsSync(join(f.bare,'config.worktree')),true);assert.equal(existsSync(join(f.bare,'config.lock')),false);
+  assert.throws(()=>inspectSharedGitAuthorMigration(f.bare),/existing/);
 });
