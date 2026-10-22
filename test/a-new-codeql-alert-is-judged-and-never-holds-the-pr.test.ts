@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // Namespace reads, never named imports: at a base without this task the suite must still LOAD and
@@ -655,11 +655,16 @@ test("scanner interrupted-preparation proof survives real rotation and the retai
   const h = harness(undefined);
   try {
     const prior = [{ step: "review.posted", task_id: `W1-T${N}`, pr_url: pr().prUrl,
-      head_sha: HEAD, state: "success", capped: false, plan_only: false }, scannerIntent(), ...cleanScannerBoot()].map((row, i) => ({
+      head_sha: HEAD, state: "success", capped: false, plan_only: false }, scannerIntent(),
+      { step: "sweep.fix.prepare_timing", pr_number: N, head_sha: HEAD, run_id: "DAEMON-second-owner", stage: "head-lookup" },
+      ...cleanScannerBoot()].map((row, i) => ({
       ...row, ts: new Date(Date.now() - 1000 + i).toISOString() }));
     const text = prior.map(row => JSON.stringify(row)).join("\n") + "\n";
     writeFileSync(h.deps.ledgerPath, text + JSON.stringify({ step: "ci.polling", padding: "x".repeat(text.length * 4) }) + "\n");
     assert.equal(rotateLedger(h.deps.ledgerPath, { ceilingBytes: text.length * 2 }).rotated, true);
+    const retained = readFileSync(h.deps.ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.ok(retained.some(row => row.step === "sweep.fix.prepare_timing" && row.run_id === "DAEMON-second-owner"),
+      "default rotation preserves the latest preparation owner for the live deciding reader");
     const actual = [...readLedgerUnionBounded(h.deps.ledgerPath)].sort((a, b) =>
       Date.parse(String(a.ts)) - Date.parse(String(b.ts)));
     assert.ok(actual.some(row => row.step === sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP), "real history reader found the actual rotated intent");
