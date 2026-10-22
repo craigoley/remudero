@@ -67,7 +67,7 @@
   amendment: |
     2026-10-22 explicit operator approval in the stuck-PR recovery chat: add only
     test/new-work-is-ordered-by-cost-of-delay.test.ts as an existing fixture companion.
-    Its duplicate-start and unfinished-work fixtures must carry their own implement.resumed
+    Its duplicate-start and unfinished-work fixtures must carry their own worker-activity
     evidence; stale lone starts are intentionally proven orphans. Preserve all 66 original
     assertion calls byte-for-byte, and preserve the orphan, young-run, unknown and breaker-parity controls.
     No acceptance, falsifier, limit, baseline or gate changes are authorized by this ruling.
