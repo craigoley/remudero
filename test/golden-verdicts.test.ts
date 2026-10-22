@@ -202,6 +202,12 @@ test("GOLDEN — HEALTHY CONTROL: a correct PR with no planted violation arms �
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — COVERAGE REPORTER AND STACKED PR LESSONS: both CI learning proofs execute and arm", () => {
+  const { verdict, golden } = judgeCase("ci-coverage-reporter-stacked-pr-lessons");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — KNOWLEDGE REPAIR: retargeting an existing operator-impact learning arms, and the coverage items do not mistake an edit for an addition", () => {
   const { verdict, golden } = judgeCase("knowledge-repair");
   assert.equal(golden.violation, "none");
