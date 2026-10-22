@@ -94,6 +94,12 @@
     on a multiple leaves none, and trimming a stale comment block in the moved region before recording fixes that.
     A moved comment block over `MAX_ADDED_BLOCK_LINES` (25) counts as ADDED in the new module; keep the move verbatim and
     let diff-coverage's relocation exemption and the ratchet's own report show it, never raise a limit.
+    ADDITIONAL OPERATOR COMMENT RULING, LIMITED TO THE THREE REVIEWED BLOCKS:
+    In src/cli/commands/run-task-verb.ts only, permit the reviewed prose condensation of the blocks headed
+    "W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG", "W1-T185 (Gap 1, criteria 2-3)", and
+    "ARM (W1-T125, DEFERRED BY W1-T975)": 43 to 23, 30 to 20, and 30 to 17 lines respectively.
+    Preserve their headings and operative caveats. Code tokens, AST, behavior, assertions, falsifiers and
+    MAX_ADDED_BLOCK_LINES remain unchanged. This does not authorize another comment edit or a limit raise.
   rationale: |
     MEASURED on origin/main bbab8894f, 2026-10-13. src/run-task.ts is 57,478 lines. Of 329 open tasks (no
     `Remudero-Task:` trailer on main, and a shard status that is not merged, retired, done or blocked), 105 declare it

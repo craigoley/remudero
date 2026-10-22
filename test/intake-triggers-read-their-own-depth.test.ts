@@ -104,8 +104,9 @@ test("acceptance 2 — run-task.ts's autoTriageCheck wires BOTH readers off repo
   const end = src.indexOf("export function buildRetroDaemonHooks(");
   assert.ok(start > 0 && end > start, "both anchors must be found, or this test proves nothing");
   const fn = src.slice(start, end);
-  assert.match(fn, /candidates: newFeedbackIdsOldestFirst\(repoRoot\)/, "the count reader must read off repoRoot");
-  assert.match(fn, /oldestCandidateAgeMs: oldestFeedbackAgeMs\(repoRoot, now\)/, "the age reader must read off the SAME repoRoot");
+  assert.match(fn, /const feedbackRoot = opts\.feedbackRoot \?\? repoRoot;/, "the explicit fixture root defaults to repoRoot");
+  assert.match(fn, /candidates: newFeedbackIdsOldestFirst\(feedbackRoot\)/, "the count reader must read off that root");
+  assert.match(fn, /oldestCandidateAgeMs: oldestFeedbackAgeMs\(feedbackRoot, now\)/, "the age reader must read off the SAME root");
   assert.doesNotMatch(fn, /newFeedbackIdsOldestFirst\(config\.root\)/, "must never read the reservoir off config.root");
   assert.doesNotMatch(fn, /oldestFeedbackAgeMs\(config\.root/, "same rule for the age reader");
 });

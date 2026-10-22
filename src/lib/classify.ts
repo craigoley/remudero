@@ -55,7 +55,7 @@ export interface FailureSignal {
 // assertion or compiler diagnostic — those are always a STRIKE).
 const TRANSIENT_TEXT_PATTERNS: RegExp[] = [
   /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i,
-  /HTTP\/[\d.]+\s*5\d\d|(?:^|[^0-9])5\d\d\s+(?:Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)/i,
+  /\bHTTP(?:\/[\d.]+)?\s*5\d\d\b|(?:^|[^0-9])5\d\d\s+(?:Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)/i,
   /gateway timeout|bad gateway|service unavailable|internal server error/i,
   /rate limit exceeded|secondary rate limit|abuse detection mechanism/i, // gh API backpressure
   /runner has received a shutdown signal|lost communication with the server|no space left on device/i,

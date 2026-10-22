@@ -19,6 +19,8 @@ import {
   dependabotOwnRedSignal,
   dependabotReviewArgs,
   depReviewOwnRedSubmissionKey,
+  prioritizeDepReviewRepairs,
+  type DepReviewRepairSnapshot,
   reconcileDependabotOwnRed,
   renderDepReviewOwnRedFeedback,
   type DependabotOwnRedSignal,
@@ -37,6 +39,60 @@ const MAIN = "32cfb064f".padEnd(40, "0");
 const SDK_TITLE = "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.293 to 0.3.296";
 const CLI_TITLE = "build(deps): bump @anthropic-ai/claude-code from 2.1.293 to 2.1.296 in /deploy";
 const RED_CHECK = "coverage-shard (4/8)";
+
+test("an exact-head aged dependency repair precedes 63 older incidents without changing admission", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-dep-priority-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, "dep-review-holds", "craigoley", "remudero");
+  mkdirSync(dir, { recursive: true });
+  const id = "fb-dep-review-0216c34510eeb042";
+  const candidates = [...Array.from({ length: 63 }, (_, i) => `incident-${i}`), id];
+  const bumps = [{ dependency: "sdk", fromVersion: "1.0.0", toVersion: "1.0.1" }];
+  const proposal = { feedbackId: id, prNumbers: [13350], bumps: ["sdk@1.0.1"] };
+  const record = { feedbackId: id, headSha: MAIN, bumps, redChecks: ["ci"], firstSeenMs: NOW - 7200000, lastSeenMs: NOW };
+  const registry = (value: unknown) => writeFileSync(join(dir, "own-red-proposals.json"), JSON.stringify(value));
+  const state = (value: unknown) => writeFileSync(join(dir, "PR13350.json"), JSON.stringify(value));
+  registry({ proposals: [proposal] }); state({ ownRed: record });
+  const snapshot: DepReviewRepairSnapshot = { owner: "craigoley", repo: "remudero", asOfMs: NOW, prs: [{
+    prNumber: 13350, headSha: MAIN, headRefName: "dependabot/npm_and_yarn/sdk", checksState: "red",
+    createdAt: new Date(NOW - 7200000).toISOString(),
+  }] };
+  const rows: string[] = [];
+  const ordered = await prioritizeDepReviewRepairs(candidates, root, snapshot, NOW, step => rows.push(step));
+  assert.deepEqual(ordered, [id, ...candidates.slice(0, 63)]);
+  assert.deepEqual(candidates.slice(-1), [id], "the existing FIFO input is not mutated");
+  assert.deepEqual(rows, ["auto_triage.repair_priority"]);
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, root, { ...snapshot,
+    prs: [...snapshot.prs, { ...snapshot.prs[0], prNumber: 13354 }] }, NOW), ordered,
+    "an unrelated red PR without repair state cannot starve a positively verified repair");
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates.slice(0, 63), root, snapshot, NOW), candidates.slice(0, 63),
+    "a repair absent from the eligible set is never reintroduced");
+  for (const changed of [undefined, { ...snapshot, asOfMs: NOW - 300001 }, { ...snapshot, asOfMs: NOW + 1 },
+    { ...snapshot, prs: [] }, { ...snapshot, owner: "../other" }, { ...snapshot, asOfMs: Number.NaN },
+    ...["green", "pending", "none"].map(checksState => ({ ...snapshot, prs: [{ ...snapshot.prs[0], checksState }] })),
+    { ...snapshot, prs: [{ ...snapshot.prs[0], createdAt: new Date(NOW - 3599999).toISOString() }] },
+    { ...snapshot, prs: [{ ...snapshot.prs[0], createdAt: "unknown" }] },
+    { ...snapshot, prs: [{ ...snapshot.prs[0], headSha: "different" }] },
+    { ...snapshot, prs: [{ ...snapshot.prs[0], headRefName: "run-unfiled-1" }] }]) {
+    assert.deepEqual(await prioritizeDepReviewRepairs(candidates, root, changed as DepReviewRepairSnapshot | undefined, NOW), candidates);
+  }
+  for (const changed of [{ ...record, feedbackId: "other" }, { ...record, bumps: [{ ...bumps[0], toVersion: "2.0.0" }] }, null]) {
+    state({ ownRed: changed });
+    assert.deepEqual(await prioritizeDepReviewRepairs(candidates, root, snapshot, NOW), candidates);
+  }
+  state({ ownRed: record });
+  for (const changed of [{ proposals: [{ ...proposal, prNumbers: [1] }] }, { proposals: [{ ...proposal, feedbackId: "other" }] },
+    { proposals: [{ ...proposal, bumps: [] }] }, { proposals: null }, null]) {
+    registry(changed);
+    assert.deepEqual(await prioritizeDepReviewRepairs(candidates, root, snapshot, NOW), candidates);
+  }
+  registry({ proposals: [proposal] });
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, root, snapshot, NOW, () => { throw new Error("telemetry unavailable"); }), ordered);
+  writeFileSync(join(dir, "own-red-proposals.json"), "{broken");
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, root, snapshot, NOW, () => { throw new Error("telemetry unavailable"); }), candidates);
+  rmSync(join(dir, "own-red-proposals.json"));
+  assert.deepEqual(await prioritizeDepReviewRepairs(candidates, root, snapshot, NOW), candidates);
+});
 
 interface FixturePr { number: number; title: string; head: string; red: boolean }
 

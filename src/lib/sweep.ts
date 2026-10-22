@@ -2,7 +2,7 @@ import type { DependencyMainIdentity } from "./dependency-main-identity.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, unfiledScopeStandDown,
+import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
   type FixProgressWitness,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
@@ -14325,9 +14325,64 @@ export function codeScanningHeadSettled(
   prNumber: number,
   headSha: string,
 ): boolean {
-  return lines.some((line) =>
-    (line.step === CODE_SCANNING_FALSE_POSITIVE_STEP || line.step === CODE_SCANNING_FIX_DISPATCH_STEP) &&
+  return lines.some(line => line.step === CODE_SCANNING_FALSE_POSITIVE_STEP &&
+    line.pr_number === prNumber && line.head_sha === headSha) ||
+    codeScanningDispatchRead(lines, prNumber, headSha).kind === "held";
+}
+
+type CodeScanningDispatchRead = { kind: "none" | "held" } | { kind: "retry"; reason: string };
+
+/** Preparation holds until its rung ends or a later current boot with preceding numeric-zero adoption ends its latest owner; unknown counts, another boot or later adopted/uncertain children hold. An older terminal cannot release a newer preparation. fix.dispatch accounts post-spawn work, not worker-start. */
+function codeScanningDispatchRead(
+  lines: ReadonlyArray<Record<string, unknown>>, prNumber: number, headSha: string, currentRunId?: string,
+): CodeScanningDispatchRead {
+  const at = lines.findLastIndex(line => line.step === CODE_SCANNING_FIX_DISPATCH_STEP &&
     line.pr_number === prNumber && line.head_sha === headSha);
+  if (at < 0) return { kind: "none" };
+  const intent = lines[at];
+  const taskId = typeof intent.task_id === "string" ? fixLedgerTaskIdFor({ taskId: intent.task_id, prNumber }) : undefined;
+  const ownerRunId = typeof intent.run_id === "string" && intent.run_id !== "" ? intent.run_id : undefined;
+  if (intent.escalated === true || !taskId || !ownerRunId ||
+      (intent.phase !== undefined && intent.phase !== "preparing") ||
+      (intent.dispatched !== undefined && typeof intent.dispatched !== "boolean")) return { kind: "held" };
+  const after = lines.slice(at + 1);
+  const latestEngagementAt = lines.findLastIndex((line, index) => index > at &&
+    ((line.task_id === taskId && (line.head_sha === undefined || line.head_sha === headSha) && String(line.step).startsWith("fix.")) ||
+      (line.pr_number === prNumber && line.head_sha === headSha &&
+        (line.step === "sweep.fix.prepare_timing" || isOwnerClaimDecline(line) || isDetachedFixDispatchFailure(line)))));
+  const effectiveAt = latestEngagementAt >= 0 ? latestEngagementAt : at;
+  const effectiveOwner = lines[effectiveAt].run_id;
+  if (typeof effectiveOwner !== "string" || effectiveOwner === "") return { kind: "held" };
+  if (lines[effectiveAt].step === "fix.stood_down" && lines[effectiveAt].outcome === "handed_off") return { kind: "held" };
+  if (isOwnerClaimDecline(lines[effectiveAt]) || isDetachedFixDispatchFailure(lines[effectiveAt])) {
+    return { kind: "retry", reason: "the latest code-scanning preparation ended before an accounted fix rung" };
+  }
+  const boot = lines.findLast(line => line.step === "daemon.boot");
+  const activeRunId = currentRunId ?? (typeof boot?.run_id === "string" ? boot.run_id : undefined);
+  const endedAtBoot = activeRunId !== undefined && activeRunId !== "" &&
+    continuationEndedAtEmptyBoot(lines, effectiveAt, effectiveOwner, taskId, activeRunId);
+  if (effectiveOwner !== ownerRunId) return endedAtBoot
+    ? { kind: "retry", reason: "the latest code-scanning continuation ended at a clean boot" }
+    : { kind: "held" };
+  const own = (line: Record<string, unknown>) => line.run_id === ownerRunId && line.task_id === taskId;
+  const exactHead = (line: Record<string, unknown>) => line.head_sha === headSha;
+  const accountedAt = after.findLastIndex(line => own(line) && exactHead(line) && line.step === "fix.dispatch" &&
+    typeof line.mode === "string" && line.mode !== "");
+  if (accountedAt >= 0) {
+    const rung = after.filter(line => own(line) && (line.head_sha === undefined || exactHead(line)));
+    const lastRungStep = rung.at(-1)?.step;
+    const terminal = ["fix.done", "fix.commit_refused", "fix.review", "fix.stood_down", "fix.ci_not_green"].includes(String(lastRungStep));
+    const unchangedSuccess = after.slice(accountedAt + 1).some(line => own(line) && exactHead(line) &&
+      line.step === "fix.done" && line.subtype === "success" &&
+      (line.pushed_head_sha === undefined || line.pushed_head_sha === headSha));
+    if (terminal && (unchangedSuccess || fixRungStalledWithoutNewHead(rung, taskId))) {
+      return { kind: "retry", reason: "the earlier code-scanning fix ended without a new head" };
+    }
+  }
+  if (endedAtBoot) {
+    return { kind: "retry", reason: "the latest code-scanning continuation ended at a clean boot" };
+  }
+  return { kind: "held" };
 }
 
 /** W1-T5633/W1-T10066 — one alert's worker-facing log tail: `intro` says why the alert is shown, the rest is the
@@ -14397,22 +14452,19 @@ async function codeScanningGateForHead(
 ): Promise<CodeScanningGate> {
   const mine = (line: Record<string, unknown>) => line.pr_number === pr.prNumber && line.head_sha === pr.headSha;
   if (lines.some((line) => line.step === CODE_SCANNING_FALSE_POSITIVE_STEP && mine(line))) return { kind: "proceed" };
+  const dispatch = codeScanningDispatchRead(lines, pr.prNumber, pr.headSha, deps.runId);
   const observed = pr.codeqlHeadAlerts;
   if (observed === undefined || observed.headSha !== pr.headSha) {
-    return lines.some((line) => line.step === CODE_SCANNING_FIX_DISPATCH_STEP && mine(line))
+    return dispatch.kind !== "none"
       ? { kind: "hold", reason: "a code-scanning fix was already dispatched for this head — awaiting its outcome" }
       : { kind: "proceed" };
   }
   const alerts = observed.alerts;
   const head = pr.headSha.slice(0, 7);
-  const dispatchedAt = lines.findLastIndex((line) => line.step === CODE_SCANNING_FIX_DISPATCH_STEP && mine(line));
-  if (dispatchedAt >= 0) {
-    const pending = !lines.slice(dispatchedAt + 1).some((line) => line.step === "fix.dispatch" && line.task_id === fixLedgerTaskIdFor(pr));
-    if (pending || !fixRungStalledWithoutNewHead([...lines], fixLedgerTaskIdFor(pr))) {
-      return { kind: "hold", reason: `a code-scanning fix was already dispatched for head ${head} — awaiting its outcome` };
-    }
-    return { kind: "fix", reason: "the earlier code-scanning fix ended without a new head", alerts };
+  if (dispatch.kind === "held") {
+    return { kind: "hold", reason: `a code-scanning fix was already dispatched for head ${head} — awaiting its outcome` };
   }
+  if (dispatch.kind === "retry") return { kind: "fix", reason: dispatch.reason, alerts };
   const priorFix = lines.findLast((line) => line.step === CODE_SCANNING_FIX_STEP && mine(line));
   if (priorFix !== undefined) return { kind: "fix", reason: String(priorFix.reason ?? "ruled a fix"), alerts };
   const key = `code-scanning:${pr.prNumber}@${pr.headSha}`;
@@ -14663,7 +14715,7 @@ function priorActionsFromLedger(
         // SHA-KEYED, exactly like `fixed` below. Keyed by PR number alone this set had no expiry:
         // one `acted:true` line — including one recorded for an arm that never happened — deduped
         // that PR forever. A new head must re-earn the attempt.
-        if (line.arm_outcome !== "arm-error-ignored" && line.code_scanning_fix_dispatched !== true) {
+        if (line.arm_outcome !== "arm-error-ignored" && line.code_scanning_fix_dispatched !== true && line.code_scanning_fix_preparing !== true) {
           armed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
@@ -14840,6 +14892,18 @@ export interface FixSeed { ts?: string; runId?: string }
 /** `orphaned`: the earlier run no longer owns a continuation; ordinary checkout/worker claims still gate redispatch. */
 export type FixSeedRead = { kind: "live" | "ended" | "orphaned"; seed: FixSeed; orphanReason?: "owner-run-ended" };
 
+function continuationEndedAtEmptyBoot(
+  lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
+): boolean {
+  const bootAt = lines.findLastIndex(line => line.step === "daemon.boot");
+  const adoption = lines.slice(from + 1, bootAt).findLast(line =>
+    line.step === "run_child.adoption_pass" && line.run_id === runId);
+  return ownerRunId !== runId && bootAt > from && lines[bootAt].run_id === runId &&
+    adoption !== undefined && ["live", "adopted", "unreadable", "misidentified"].every(key => adoption[key] === 0) &&
+    !lines.slice(bootAt + 1).some(line => line.task_id === taskId &&
+      ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"].includes(String(line.step)));
+}
+
 /** W1-T9999 — WHICH RUNG SPEAKS FOR THIS HEAD'S FIX SEED, and is it still live? The seed is the newest acted
  *  `sweep.disposed` blocked-fixable/conflicted row at the head. Its rung is the task's `fix.*` rows after the PR's
  *  previous `sweep.disposed` row, since a synchronous dispatch writes its rung before the seed, so an earlier rung
@@ -14872,14 +14936,9 @@ export function fixSeedRead(
   // Re-enter the ordinary owner/checkout claim, never clear it here: a surviving worker,
   // dirty unpublished tree or unreadable process census must still refuse there. Require
   // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
-  const bootAt = lines.findLastIndex((line) => line.step === "daemon.boot");
-  const adoption = lines.slice(seedAt + 1, bootAt).findLast((line) =>
-    line.step === "run_child.adoption_pass" && line.run_id === runId);
-  if (handoffAt < 0 && seed.runId !== undefined && seed.runId !== runId && bootAt > seedAt && lines[bootAt].run_id === runId &&
-      adoption !== undefined && ["live", "adopted", "unreadable", "misidentified"].every((key) => adoption[key] === 0) &&
-      window.filter((line) => rung(line) && line.step === "fix.dispatch").every((line) => line.run_id === seed.runId) &&
-      !lines.slice(bootAt + 1).some((line) => line.task_id === taskId &&
-        ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"].includes(String(line.step)))) {
+  if (handoffAt < 0 && seed.runId !== undefined &&
+      continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
+      window.filter((line) => rung(line) && line.step === "fix.dispatch").every((line) => line.run_id === seed.runId)) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
@@ -16706,7 +16765,7 @@ export async function runSweep(
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
     for (const pr of openPrs) {
-      const scopeHold = isFixCandidate(pr) ? unfiledScopeStandDown(ledgerLines, pr) : undefined;
+      const scopeHold = isFixCandidate(pr) ? scopeEscalationStandDown(ledgerLines, pr)?.reason : undefined;
       if (scopeHold) {
         judgedUnavailable.set(pr.prNumber, scopeHold);
         next.push({ ...pr, progressContinue: { reason: scopeHold, unavailable: true } });
@@ -17934,9 +17993,11 @@ export async function runSweep(
     const notDispatched = repairArm && !acted && !deps.dryRun
       ? dispatchHold?.reason ?? standDownReason ?? actionError ?? "no dispatch was attempted"
       : undefined;
+    const scannerPreparationReason = extraDisposedFields?.code_scanning_fix_preparing === true &&
+      typeof extraDisposedFields.code_scanning_fix_reason === "string" ? extraDisposedFields.code_scanning_fix_reason : undefined;
     const shownReason = mergeHold !== undefined
       ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
-      : securityText ? securityText : notDispatched !== undefined
+      : securityText ? securityText : scannerPreparationReason !== undefined ? scannerPreparationReason : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
         : reason;
     if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
@@ -19297,6 +19358,13 @@ export async function runSweep(
                   standDownReason = reason;
                   break;
                 }
+                const retryHold = await holdRepeatedFixClaimDecline(pr, armLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
+                if (retryHold !== undefined) {
+                  acted = false;
+                  standDownReason = retryHold.reason;
+                  extraDisposedFields = retryHold.fields;
+                  break;
+                }
                 const hold = workerAdmissionHoldReason(deps);
                 if (hold) {
                   acted = false;
@@ -19317,9 +19385,9 @@ export async function runSweep(
                   break;
                 }
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
-                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: true, reason: codeScanning.reason,
+                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, phase: "preparing", reason: codeScanning.reason,
                   alert_numbers: codeScanning.alerts.map((a) => a.alertNumber) });
-                extraDisposedFields = { code_scanning_fix_dispatched: true };
+                extraDisposedFields = { code_scanning_fix_preparing: true, code_scanning_fix_reason: codeScanning.reason };
                 const fixEvidence = { unmetCriteria: [], ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
                 if (deps.detachFixWait) {
                   detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim);
@@ -19327,6 +19395,8 @@ export async function runSweep(
                 }
                 const fixOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
                 if (fixOutcome !== undefined) spent = dispatchFixSpent(fixOutcome);
+                const declinedReason = fixClaimDeclinedReason(fixOutcome);
+                if (declinedReason) [acted, standDownReason] = [false, declinedReason];
                 break;
               }
               // W1-T5403: a handed-off head never met the in-run risk judge — judge it once here.
@@ -19468,8 +19538,19 @@ export async function runSweep(
                 standDownReason = amended ?? "task contract changed during design-handoff observation — no fix admitted";
                 break;
               }
-              const scopeHold = unfiledScopeStandDown(ledgerLines, pr);
-              if (scopeHold) { acted = false; spent = false; standDownReason = scopeHold; break; }
+              const scopeHold = scopeEscalationStandDown(ledgerLines, pr);
+              if (scopeHold?.kind === "unfiled") { acted = false; spent = false; standDownReason = scopeHold.reason; break; }
+              // #13317: the operator's answer (an amended contract) takes main in once, releasing an instrument/workflow hold.
+              if (scopeHold) {
+                acted = false;
+                spent = false;
+                extraDisposedFields = { ...extraDisposedFields, operator_scope_hold: scopeHold.kind };
+                standDownReason = await refreshAmendedContract([
+                  ...(scopeHold.contractRevision !== undefined ? [{ progress_contract_revision: scopeHold.contractRevision }] : []),
+                  ...ledgerLines.filter((line) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                    line.head_sha === pr.headSha && line.operator_scope_hold === scopeHold.kind)]) ?? scopeHold.reason;
+                break;
+              }
               const preflightEscalation = preflightEscalations.get(pr.prNumber);
               if (preflightEscalation !== undefined) {
                 const reason = preflightEscalation.alreadyDelivered
