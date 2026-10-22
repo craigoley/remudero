@@ -7101,12 +7101,15 @@ const rollupState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.statu
 export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => {
   const required = [...(requiredCheckNames ?? [])];
   const red = qualityGate(rollup, required).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown");
-  if (red.length > 0 || !required.includes("ci")) return red;
+  if (red.length > 0) return red;
   const latest = dedupeRollupByLatestAttempt(rollup ?? []);
-  const parent = latest.find((c) => (c.name ?? c.context) === "ci");
-  if (parent && REQUIRED_CHECK_OK.has(rollupState(parent))) return red;
-  const family = CI_MATRIX_AGGREGATORS.find((entry) => entry.aggregator === "ci");
-  return latest.flatMap((c) => c.name !== undefined && family?.constituent.test(c.name) && rollupState(c) === "FAILURE" ? [c.name] : []);
+  const families = CI_MATRIX_AGGREGATORS.filter((entry) =>
+    (entry.aggregator === "ci" || entry.aggregator === "coverage-ratchet") && required.includes(entry.aggregator) &&
+    !latest.some((c) => (c.name ?? c.context) === entry.aggregator && REQUIRED_CHECK_OK.has(rollupState(c))));
+  return latest.flatMap((c) => {
+    const name = c.name;
+    return name !== undefined && families.some((entry) => entry.constituent.test(name)) && rollupState(c) === "FAILURE" ? [name] : [];
+  });
 }; // W1-T2504
 
 /** W1-T10067: the required checks {@link redQualityGateNames} reads that have not concluded on this head —
