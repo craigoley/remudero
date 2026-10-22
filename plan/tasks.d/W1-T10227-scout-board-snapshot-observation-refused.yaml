@@ -12,6 +12,8 @@
   origin: "scout:board_snapshot.observation_refused"
   files:
     - test/gardeners/scout-board-snapshot-observation-refused.test.ts
+    - src/lib/board-snapshot-cache.ts
+    - test/board-snapshot-cache.test.ts
   acceptance:
     - claim: "board_snapshot.observation_refused stops recurring: its cause is fixed rather than its rows hidden"
       proof: "grep: test(\"W1-T10227: board_snapshot.observation_refused no longer recurs\" in test/gardeners/scout-board-snapshot-observation-refused.test.ts"
@@ -28,3 +30,9 @@
       - "released by the operator with rmd approve"
     judged_at: "2026-10-22T03:29:10.222Z"
     pin: "6c3e28a3def1118a72ca73e05172a1b78bf4bf2bbe74bcf9010c0902b863d5e4"
+  amendment: |
+    2026-10-22 explicit operator approval in the stuck-PR recovery chat: add exactly
+    src/lib/board-snapshot-cache.ts and test/board-snapshot-cache.test.ts as companions.
+    Retire stale observation metadata only after successful snapshot publication.
+    Preserve failed-publication metadata, foreign-metadata identity refusals and their assertions.
+    Keep the original regression, acceptance criteria, falsifiers, budgets and gates unchanged.
