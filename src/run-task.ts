@@ -11281,7 +11281,8 @@ async function spawnFixWorkerBounded(
   // fires only for a caller (test or otherwise) that supplies no `deps.spawnWallClockBoundMs`.
   const boundMs = deps.spawnWallClockBoundMs ?? DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS;
   const startedAt = Date.now();
-  const spawnPromise = deps.spawn(args);
+  const spawnStop = new AbortController();
+  const spawnPromise = deps.spawn({ ...args, signal: AbortSignal.any([spawnStop.signal, ...(args.signal ? [args.signal] : [])]) });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bound = new Promise<"abandoned">((resolve) => {
     timer = setTimeout(() => resolve("abandoned"), boundMs);
@@ -11319,6 +11320,8 @@ async function spawnFixWorkerBounded(
           strike_spent: false,
         });
       }
+      // Cancel this call's pending admission before reclaiming any child that already started.
+      spawnStop.abort();
       try {
         await deps.reclaimWorker?.({ runId: ctx.runId, taskId: ctx.taskId, elapsedMs });
       } catch (e) {
