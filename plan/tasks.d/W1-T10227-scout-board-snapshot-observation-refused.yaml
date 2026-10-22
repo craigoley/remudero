@@ -27,9 +27,9 @@
     action: proceed
     confidence: 1
     reasons:
-      - "released by the operator with rmd approve"
-    judged_at: "2026-10-22T03:29:10.222Z"
-    pin: "6c3e28a3def1118a72ca73e05172a1b78bf4bf2bbe74bcf9010c0902b863d5e4"
+      - "released by the operator with rmd approve; exact two-companion repair scope separately approved 2026-10-22"
+    judged_at: "2026-10-22T11:00:52.621Z"
+    pin: "f19c9b139b1b7dd1f87429b182f79f9fbcc506b58878058cf50f5821143045ec"
   amendment: |
     2026-10-22 explicit operator approval in the stuck-PR recovery chat: add exactly
     src/lib/board-snapshot-cache.ts and test/board-snapshot-cache.test.ts as companions.
