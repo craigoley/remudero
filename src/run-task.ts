@@ -552,6 +552,7 @@ import {
   escalationContractRevision,
   findDuplicateEscalation,
   taskContractRevision,
+  taskSemanticRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
   presenceMode,
@@ -11597,7 +11598,7 @@ export async function runFixRung(opts: {
   runId: string;
   /** `files` (W1-T322) — see runReview's own `task` doc; every real caller already passes the
    *  full plan `Task`, so this widens for free. */
-  task: { id: string; title: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
+  task: { id: string; title: string; acceptance?: AcceptanceCriterion[]; files?: string[]; design?: string; amendment?: string; narrativeUnavailable?: true };
   prUrl: string;
   branch: string;
   worktreePath: string;
@@ -12014,6 +12015,7 @@ export async function runFixRung(opts: {
   // into both the pre-strike probe's key and the false-block producer below, so the two can never
   // disagree about "current".
   const currentContractRevision = taskContractRevision(opts.task);
+  const currentSemanticRevision = taskSemanticRevision(opts.task);
   let progressReviewInputDigest = opts.progressReviewInputDigest;
   const admitFixTests = !(opts.task.files?.length && opts.task.files.every(isInPlanScope));
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
@@ -14332,6 +14334,7 @@ export async function runFixRung(opts: {
       if (evidence.proofDiscrimination) amendProofs(evidence.proofDiscrimination);
       const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
       deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, contract_revision: currentContractRevision,
+        ...(currentSemanticRevision === undefined ? {} : { task_semantic_revision: currentSemanticRevision }),
         ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
       logFixDone();
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
