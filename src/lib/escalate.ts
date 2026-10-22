@@ -827,7 +827,7 @@ export function prReferentFromIssueText(text: string | undefined): number | unde
   return Number.isSafeInteger(n) && n > 0 ? n : undefined;
 }
 
-/** GitHub refuses issue titles above 256 characters; UTF-16 bounding is conservative for astral text. */
+/** Conservative title bound from the observed createIssue refusal; UTF-16 also bounds astral text safely. */
 const GITHUB_ISSUE_TITLE_LIMIT = 256;
 function unboundedEscalationTitle(e: Pick<Escalation, "class" | "taskId" | "summary">): string {
   return `[${e.class}] ${e.taskId}: ${e.summary}`;
