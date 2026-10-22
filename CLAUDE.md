@@ -68,6 +68,10 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** → doctrine/plan-and-task-hygiene/name-the-session-branch.md
 - **A new test goes in the `test/<folder>/` that `rmd test-place` computes from its imports — never directly
   under `test/`.** → doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md
+- **New test code imports repository modules through `#src/*`, `#scripts/*` and `#test/*`, never a
+  location-relative specifier.** → doctrine/plan-and-task-hygiene/new-test-imports-use-package-aliases.md
+- **New tests compute the repository root with `REPO_ROOT` or `repoRoot()` from
+  `#test/helpers/repo-root.js`, never from their own location.** → doctrine/plan-and-task-hygiene/new-tests-use-the-shared-root-helper.md
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names** → doctrine/plan-and-task-hygiene/confirm-the-frontier.md
 - **A contested reservation is never deleted and an unfiled one is never free — the

@@ -13,6 +13,9 @@
     - src/lib/worker-provider.ts
     - src/lib/provider-routing-policy.ts
     - test/worker/spawn/a-codex-below-its-reserve-is-not-logged-unreadable.test.ts
+  # refusal-amendment (W1-T10383, run W1-T10383-1792641636921, 2026-10-22T10:29:07.689Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T10383: a filed proof already passes at the merge base, so branch run-W1-T10383-1792641636921 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1.5  # cheap, and W1-T10382 waits on it
   attempts: 0
