@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.37
   status: queued
@@ -45,10 +45,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.94
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The supplied rounds show mixed test failures and hand-fix file lists; they do not establish a shared flaky mechanism in the named resolver test.; on the change's description/files alone, no diff was read — The filing specifies no concrete cause or prevention mechanism, and its sole acceptance proof greps for a test title rather than executing behavioral verification. The proposed remedy's finding cannot be verified from what is shown, meeting the explicit escalation condition."
-    judged_at: "2026-10-20T09:57:51.870Z"
-    pin: "fb71aef25053f16b1d1efdd816e1c5d4a5a2d909e64d0eb13c448131d74a20e0"
+      - "The declared files are src/lib/plan.ts and a new test file under test/plan/. Both are ordinary source and test paths. Nothing in the description or files touches secrets, credentials, auth, permissions, merge/deploy/review policy, or data deletion."
+      - "The task is a machine-filed flaky-test remedy from the ci-friction gardener. The acceptance criterion is a grep proof for a named test in the new test file, which can be verified automatically. It requires no operator decision such as priority, budget or policy."
+      - "The family track record (39 merged, 58 declined, Beta mean 0.66) is mixed but not alarming. Any PR still passes CI and review. The evidence shows the gardener measures the result after merge and reopens the cause if the share does not fall."
+      - "One caution is that the cited recent failures name different tests (e.g., the ledger-step test and W1-T9864 tests), so the remedy may not address the root cause. That is an effectiveness concern rather than a danger. The plan.ts edit is a shared library file, but it has been hand-fixed before in the cited PRs."
+    judged_at: "2026-10-22T03:33:45.815Z"
+    pin: "2f6e7cb275035b186e9298825032e2664325bffd739e864b7d98232df2a667ec"

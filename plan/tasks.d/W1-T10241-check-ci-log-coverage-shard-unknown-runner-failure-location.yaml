@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.34
   status: queued
@@ -47,10 +47,10 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.91
+    verdict: "operator"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The cited round combines a located semantic-review assertion failure with an unknown runner failure location; the record supplies no diagnosis connecting that unknown location to the proposed config.ts remedy.; on the change's description/files alone, no diff was read — The acceptance proof checks for test-title text, which cannot verify that the failure is prevented or self-healed without a fix round. The finding is therefore not verifiable from the supplied evidence, meeting the stated escalation condition."
-    judged_at: "2026-10-20T07:58:14.794Z"
-    pin: "54a1077c5e95e542d1e3c0565c1792c959e375f30c1eacf51cd71d794356a5d7"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.224Z"
+    pin: "72cbc32b13cf19f4c9e3cd982a13bff8e452a8e202b65045010e84719cf7b475"

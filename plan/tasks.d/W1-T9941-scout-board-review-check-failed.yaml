@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.2
   status: queued
@@ -21,10 +21,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.96
+    verdict: "operator"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The record supplies recurrence counts but no underlying failure details or diagnosed cause; it explicitly leaves locating the emitter and identifying the cause to implementation. The proposed finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — Acceptance requires fixing the cause, but the sole declared file is a new test file and the sole proof greps for a test title; that proof does not establish execution or cessation of recurrence."
-    judged_at: "2026-10-16T23:11:19.336Z"
-    pin: "6fb23c698d988fbb213c7a50919a836dac4c1773cf40dc1054b9511f40b2adcf"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:31:39.860Z"
+    pin: "7c696221387b08dfe37c69a4120d77cc280a4022c01e68e6ee5aa4be87fd6b17"
