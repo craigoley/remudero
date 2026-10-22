@@ -79,6 +79,29 @@ test("non-bot, incomplete, duplicate, mixed-scope and unsupported nested manifes
   }
 });
 
+test("nested workflow manifest path is walked through each directory tree before its blob is compared", () => {
+  const WF = ".github/workflows/ci.yml", GH_TREE = "1".repeat(40), WF_TREE = "2".repeat(40), FILE = "3".repeat(40);
+  const setup = (parentType: string) => {
+    const f = fixture();
+    f.metadata.changed_files = 1;
+    f.responses.set("repos/o/r/pulls/13446/files?per_page=100", [{ filename: WF, status: "modified", sha: FILE }]);
+    f.observations.set(13446, { state: "complete", cache: "miss", paths: [WF] });
+    const treeOf = (sha: string, tree: Array<{ path: string; mode: string; type: string; sha: string }>) => ({ sha, truncated: false, tree });
+    f.responses.set(`repos/o/r/git/trees/${HEAD_TREE}`, treeOf(HEAD_TREE, [{ path: ".github", mode: "040000", type: parentType, sha: GH_TREE }]));
+    f.responses.set(`repos/o/r/git/trees/${MAIN_TREE}`, treeOf(MAIN_TREE, [{ path: ".github", mode: "040000", type: parentType, sha: GH_TREE }]));
+    f.responses.set(`repos/o/r/git/trees/${GH_TREE}`, treeOf(GH_TREE, [{ path: "workflows", mode: "040000", type: "tree", sha: WF_TREE }]));
+    f.responses.set(`repos/o/r/git/trees/${WF_TREE}`, treeOf(WF_TREE, [{ path: "ci.yml", mode: "100644", type: "blob", sha: FILE }]));
+    return f;
+  };
+  const ok = setup("tree"), proof = ok.observe();
+  assert.equal(proof?.state, "identical");
+  if (proof?.state === "identical") assert.deepEqual(proof.files, [{ path: WF, mode: "100644", blob: FILE }]);
+  assert.ok(ok.calls.includes(`repos/o/r/git/trees/${GH_TREE}`)); assert.ok(ok.calls.includes(`repos/o/r/git/trees/${WF_TREE}`));
+  const bad = setup("blob").observe();
+  assert.equal(bad?.state, "unavailable");
+  if (bad?.state === "unavailable") assert.match(bad.reason, /non-directory parent/);
+});
+
 test("moved main invalidates immutable identity cache; failed reads are never cached as facts", () => {
   const f = fixture(); assert.equal(f.observe()?.state, "identical");
   f.responses.set("repos/o/r/commits/main", { sha: "2".repeat(40) });
