@@ -26,7 +26,7 @@ import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/iso
 // test/recon-degrade.test.ts's own real-git fixture but kept across calls instead of thrown away
 // after one. ──────────────────────────────────────────────────────────────────────────────────
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 function result(over: Partial<WorkerResult>): WorkerResult {
   return {

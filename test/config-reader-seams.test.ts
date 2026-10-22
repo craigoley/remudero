@@ -391,6 +391,7 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   const files = [...new Set(readers.map((r) => r.file))].sort();
   assert.deepEqual(files, [
     "src/cli/commands/daemon.ts",
+    "src/cli/commands/run-task-verb.ts",
     "src/lib/account-usage.ts",
     "src/lib/check-proof.ts",
     "src/lib/launchd.ts",

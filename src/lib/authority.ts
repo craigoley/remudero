@@ -135,6 +135,17 @@ export interface AuthorityRow {
  * `module`. The baseline is empty: every write measured at this task's own HEAD is entered below.
  */
 export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
+  {
+    id: "restore-checkpoint-branch",
+    action: "recreate an absent source branch at its persisted checkpoint head",
+    module: "src/cli/commands/run-task-verb.ts",
+    symbol: "restoreBoundaryCheckpoint",
+    boundary: "git-push",
+    gate: "always",
+    ledgerSteps: ["implement.checkpoint_branch_recreated"],
+    verb: "rmd run-task (restart-boundary recovery)",
+    note: "No assertLiveWriteAllowed guard wraps this existing write. It requires remote absence and an exact fetched checkpoint head; an empty-ref force-with-lease prevents overwriting a concurrent branch recreation.",
+  },
   // ── src/lib/arm-auto-merge.ts (W1-T2887: moved from src/run-task.ts, which still imports and
   // re-exports every symbol below so every verb/call site is unchanged) ───────────────────────
   {

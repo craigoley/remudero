@@ -20,10 +20,10 @@ import { test } from "node:test";
  * right order.
  */
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 test("run-task.ts imports the risk judge module and resolves its mount from the committed mounts.yaml (W1-T5), not a hardcoded literal", () => {
-  assert.match(runTaskSrc, /from "\.\/lib\/risk-judge\.js"/);
+  assert.match(runTaskSrc, /from "\.\.\/\.\.\/lib\/risk-judge\.js"/);
   assert.match(runTaskSrc, /resolveRiskJudgeMount\(loadMounts\(mountsPath\(repoRoot\)\)\)/);
 });
 

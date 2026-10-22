@@ -55,6 +55,7 @@ function dumpOf(commits: Array<{ sha: string; ts: string; subject: string; files
 }
 
 const SRC = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+const RUN_TASK_SRC = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
 const LIB_SRC = readFileSync(new URL("../src/lib/verdict-calibration.ts", import.meta.url), "utf8");
 
 // ── (i) mineVerdictRows: a head-less row is COUNTED, not silently dropped ──────────────────────
@@ -297,9 +298,9 @@ test("SITE dep-review and SITE sweep put the head sha they ALREADY HOLD (view.he
 });
 
 test("SITE run-task's deferred at-verdict arm (the LARGEST dropped population) puts head_sha on its row — review.headSha was already in scope, simply not put on the row", () => {
-  const at = SRC.indexOf('log("automerge.armed", {\n      at: "verdict",');
+  const at = RUN_TASK_SRC.indexOf('log("automerge.armed", {\n      at: "verdict",');
   assert.ok(at > 0, "the at-verdict emitter is gone or reshaped — this test is stale");
-  const site = SRC.slice(at, at + 250);
+  const site = RUN_TASK_SRC.slice(at, at + 250);
   assert.match(site, /head_sha: review\.headSha,/);
 });
 

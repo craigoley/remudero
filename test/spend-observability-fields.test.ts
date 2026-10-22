@@ -68,7 +68,8 @@ import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/work
 // injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
 const FAKE_PR_BODY = "Implements the task.\n\nRemudero-Task: fixture";
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8") + "\n" +
+  readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 const JUDGE_MOUNT: Mount = { model: "haiku", effort: "low", maxTurns: 40, contextBudget: 40000 };
 const FIX_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
