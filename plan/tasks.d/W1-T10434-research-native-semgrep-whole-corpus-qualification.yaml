@@ -1,0 +1,49 @@
+- id: W1-T10434
+  title: Research an exact-head native Semgrep whole-corpus qualification and sanitized inventory contract
+  repo: remudero
+  type: recon
+  verify: auto
+  depends_on: []
+  plan_refs: [W1-T9979]
+  priority: 99
+  risk: low
+  budget_usd: 4
+  status: queued
+  attempts: 0
+  author_class: human
+  origin: "operator archive disposition 2026-10-22; docket C02 and scanner portion of P02"
+  files: [docs/forensics/native-semgrep-corpus-qualification.md]
+  rationale: |
+    Native CE runtime compatibility, advisory Scan green, baseline scanning and whole-corpus
+    qualification are distinct. Current source-runtime and engine controls do not establish complete
+    repository coverage. This is a low-priority research/specification task, not another scanner repair
+    or authority to run a native corpus workload. Recheck the maintained runtime lock/version before
+    relying on the earlier 1.181.0 observation; do not downgrade MCP, waive pip check, rewrite provenance
+    or redistribute a proprietary image. Preserve the advisory findings policy and exact-head runtime
+    compatibility requirement.
+    Official CLI docs distinguish scan from ci, explain verbose parse diagnostics and identify experimental
+    target-list formats as unstable: https://docs.semgrep.dev/cli-reference
+    Read ignore semantics and JSON/SARIF fields as well: https://docs.semgrep.dev/ignoring-files-folders-code
+    Main and every open PR head's plan tree were swept against d0a612ff on 2026-10-22; W1-T9979 repairs
+    runtime compatibility, whereas this task specifies the still-unproven corpus denominator and evidence.
+  design: |
+    Inventory current workflow, runtime/source hashes, interpreter/platform, locked dependency checks,
+    rule/config digests, baseline behavior, exclusions and sanitized inventory producers by source symbol.
+    Define same-head default and verbose corpus modes, an expected tracked scannable-file denominator,
+    accounted scanned/skipped/parse-error sets, rule-language applicability, timeout/partial failure
+    classification and bounded retained evidence. Do not treat unstable --x-* output as a durable API
+    without a version-specific parser and positive/removal controls. Measure only the corpus actually seen.
+    Require exact-head/runtime/rules/arguments/platform bindings; missing or unreadable final inventory
+    remains UNKNOWN. Store counts, safe relative identities/digests and reasons, not secrets, source
+    findings payloads or credential data. Propose a bounded retention policy with closed-run ownership.
+    Define positive, excluded-file, parse-error, malformed/truncated inventory, mismatched-head and
+    missing-summary controls, plus explicit approval/capacity/runtime/worker/closure requirements for
+    any later native run. No SDK/model call, scan execution, ignore addition, gate change, publication,
+    infrastructure, live configuration change or pilot activation is authorized here.
+  acceptance:
+    - claim: The report separates scanner/runtime success, PR-baseline scanning and whole-corpus qualification
+      proof: "grep: Whole-corpus denominator and applicability in docs/forensics/native-semgrep-corpus-qualification.md"
+    - claim: The report specifies privacy-preserving complete or UNKNOWN inventory receipts with exact-head provenance
+      proof: "grep: Sanitized exact-head inventory contract in docs/forensics/native-semgrep-corpus-qualification.md"
+    - claim: The report names research, source symbols, positive/removal controls and a separate bounded native execution decision
+      proof: "grep: Separate native qualification approval in docs/forensics/native-semgrep-corpus-qualification.md"

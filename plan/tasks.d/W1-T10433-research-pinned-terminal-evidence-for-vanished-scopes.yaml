@@ -1,0 +1,46 @@
+- id: W1-T10433
+  title: Research a default-off pinned terminal-evidence contract for vanished dedicated run scopes
+  repo: remudero
+  type: recon
+  verify: auto
+  depends_on: []
+  plan_refs: [W1-T10251, W1-T9928]
+  priority: 99
+  risk: low
+  budget_usd: 4
+  status: queued
+  attempts: 0
+  author_class: human
+  origin: "operator archive disposition 2026-10-22; docket P03/P03a/P06; contract ruling: require pinned terminal evidence"
+  files: [docs/forensics/pinned-terminal-scope-contract.md]
+  rationale: |
+    Research and specification only, explicitly low priority. Current W1-T10251 intentionally accepts
+    dedicated-scope disappearance; the operator selected a DIFFERENT default-off qualification contract,
+    not a live change. A dead PID, an empty immediate cgroup.procs, or ENOENT alone must not be upgraded
+    into proof of whole-run closure. Source merging, narrow fixture controls and native execution are
+    separate claims. This task neither changes test-slot reclamation nor consumes an execution grant.
+    The Linux cgroup-v2 reference documents recursive cgroup.events populated and that moving a parent
+    does not migrate existing descendants: https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html
+    Infer only with proven complete containment; disappearance does not itself attest the run's identity.
+    Main and all five open PR head plan trees were swept against main at d0a612ff on 2026-10-22;
+    no newly added overlapping subject appeared. W1-T10251's existing absence contract is not duplicated.
+  design: |
+    Produce a research-backed specification with exact current source symbols and an adoption decision
+    explicitly deferred to separate operator review. Bind terminal evidence to nonce, owner PID/start,
+    UID, host boot identity, namespaces, dedicated scope identity, collector revision and original lease.
+    Require positive populated-to-quiescent observation covering descendants and attested containment;
+    specify collector durability, crash/partial-write behavior, freshness and replay rejection.
+    Live work evidence wins over a claimed terminal receipt. Missing/unreadable/mismatched receipt,
+    incomplete containment, reused paths/identities or contradictory observations remain UNKNOWN.
+    Avoid circular settlement: closure proof, then separately authorized exact-owner release, then
+    original-record read-back. Already released is not a prerequisite for proving closure.
+    Include positive and removal controls, stale/wrong-head/wrong-nonce/live-descendant falsifiers,
+    and explicit NOT_RUN for unavailable native capacity/permissions. No native run, lease mutation,
+    policy activation, process signals, infrastructure or new-build hold is authorized by this task.
+  acceptance:
+    - claim: The report specifies pinned identity, descendant containment, durable receipts and explicit UNKNOWN cases
+      proof: "grep: Pinned terminal evidence contract in docs/forensics/pinned-terminal-scope-contract.md"
+    - claim: The report separates closure evidence from later owner-authorized lease settlement and keeps adoption default-off
+      proof: "grep: Closure precedes separately authorized release in docs/forensics/pinned-terminal-scope-contract.md"
+    - claim: The report names source evidence, primary research, discriminating controls and the separate native-approval boundary
+      proof: "grep: Research and falsifier matrix in docs/forensics/pinned-terminal-scope-contract.md"
