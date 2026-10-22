@@ -333,6 +333,21 @@ test("invalid engine dependency reconstruction evidence refuses before restore w
     assert.deepEqual(readdirSync(backups), []);
     writeFileSync(engineRecord, originalRecord);
   }
+  // Evidence is read through one no-follow descriptor (CodeQL js/file-system-race): a linked engine.json, even one
+  // naming a valid copy, and a directory where a pin file belongs are refused, never followed or read.
+  const recordCopy = join(tmpDir("rmd-engine-record-"), "engine.json");
+  writeFileSync(recordCopy, originalRecord);
+  rmSync(engineRecord);
+  symlinkSync(recordCopy, engineRecord);
+  assert.throws(() => snapshotState(state, backups), /engine dependency reconstruction/);
+  assert.deepEqual(readdirSync(backups), []);
+  rmSync(engineRecord);
+  writeFileSync(engineRecord, originalRecord);
+  const pinDir = join(state, engineRel, "yarn.lock");
+  mkdirSync(pinDir);
+  assert.throws(() => snapshotState(state, backups), /expected regular reconstruction evidence/);
+  assert.deepEqual(readdirSync(backups), []);
+  rmSync(pinDir, { recursive: true });
   assert.throws(() => snapshotState(state, backups, { copy: (src, dst, paths) => {
     copierSkipping(null)(src, dst, paths);
     rmSync(join(dst, dependencyRel));

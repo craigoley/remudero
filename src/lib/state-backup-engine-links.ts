@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -33,6 +35,24 @@ export function isEngineDependencyLinkPath(rel: string): boolean {
   return LINK_PATH.test(rel);
 }
 
+/** One descriptor answers both "is it a regular file?" and "what are its bytes?", so no path is checked and then
+ *  re-opened (CodeQL js/file-system-race). O_NOFOLLOW refuses a link (ELOOP, thrown), O_NONBLOCK keeps a FIFO from
+ *  hanging the open. Absent is `undefined`; a directory or other non-regular file is `"non-regular"`. */
+function readRegular(file: string): Buffer | "non-regular" | undefined {
+  let fd: number;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    return fstatSync(fd).isFile() ? readFileSync(fd) : "non-regular";
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function objectJson(bytes: Buffer, path: string): Record<string, unknown> {
   const value = JSON.parse(bytes.toString("utf8"));
   if (!value || typeof value !== "object" || Array.isArray(value)) refuse(`invalid JSON object at ${path}`);
@@ -50,23 +70,25 @@ function linkEvidence(root: string, path: string): EngineDependencyLink {
   const link = join(root, path);
   if (!lstatSync(link).isSymbolicLink()) refuse(`expected a symbolic link at ${path}`);
   const identities: Record<string, string> = {};
-  const evidence = (name: string): Buffer => {
+  const evidence = (name: string): Buffer | undefined => {
     const file = join(root, engine, name);
-    if (!lstatSync(file).isFile()) refuse(`expected regular reconstruction evidence at ${file}`);
-    const bytes = readFileSync(file);
+    const bytes = readRegular(file);
+    if (bytes === undefined) return undefined;
+    if (bytes === "non-regular") refuse(`expected regular reconstruction evidence at ${file}`);
     if (bytes.length === 0) refuse(`empty reconstruction evidence at ${file}`);
     identities[name] = createHash("sha256").update(bytes).digest("hex");
     return bytes;
   };
-  const record = objectJson(evidence("engine.json"), `${engine}/engine.json`);
+  const engineRecord = evidence("engine.json") ?? refuse(`missing reconstruction evidence at ${engine}/engine.json`);
+  const record = objectJson(engineRecord, `${engine}/engine.json`);
   if (typeof record.sha !== "string" || !REVISION.test(record.sha) || record.sourceHash !== sourceHash ||
       typeof record.builtAt !== "number" || !Number.isFinite(record.builtAt) ||
       (record.nodeModulesTarget !== undefined && typeof record.nodeModulesTarget !== "string")) {
     refuse(`invalid engine.json revision or identity at ${engine}`);
   }
   for (const name of PIN_FILES) {
-    if (!lstatSync(join(root, engine, name), { throwIfNoEntry: false })) continue;
     const bytes = evidence(name);
+    if (bytes === undefined) continue;
     if (name.endsWith(".json")) {
       const pin = objectJson(bytes, `${engine}/${name}`);
       if (name !== "package.json" && (!Number.isInteger(pin.lockfileVersion) || Number(pin.lockfileVersion) < 1)) {
@@ -102,14 +124,13 @@ export function preserveEngineDependencyLinks(root: string, staged: string, entr
 /** Validate disk evidence before publication or any restore destination write. */
 export function validateEngineDependencyLinks(root: string, entries: readonly string[], expected?: EngineLinkManifest): EngineLinkManifest | undefined {
   const paths = entries.filter((rel) => isEngineDependencyLinkPath(rel) && lstatSync(join(root, rel)).isSymbolicLink());
-  const manifestFile = join(root, ENGINE_LINK_MANIFEST);
-  const manifestStat = lstatSync(manifestFile, { throwIfNoEntry: false });
-  if (!manifestStat && paths.length === 0 && !expected) return undefined;
+  const manifestBytes = readRegular(join(root, ENGINE_LINK_MANIFEST));
+  if (manifestBytes === undefined && paths.length === 0 && !expected) return undefined;
   try {
-    if (!manifestStat) refuse("missing manifest");
-    if (!manifestStat.isFile()) refuse("non-regular manifest");
+    if (manifestBytes === undefined) refuse("missing manifest");
+    if (manifestBytes === "non-regular") refuse("non-regular manifest");
     if (paths.length === 0) refuse("manifest has no engine dependency links");
-    const raw = objectJson(readFileSync(manifestFile), ENGINE_LINK_MANIFEST);
+    const raw = objectJson(manifestBytes, ENGINE_LINK_MANIFEST);
     if (!Array.isArray(raw.criticalState) || raw.criticalState.some((rel) => !CRITICAL_STATE.includes(rel)) ||
         new Set(raw.criticalState).size !== raw.criticalState.length) {
       refuse("invalid critical-state identities");
