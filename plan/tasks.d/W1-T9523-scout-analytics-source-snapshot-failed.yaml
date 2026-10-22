@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: span
   priority: 4
@@ -69,3 +69,11 @@
     proofs, governed review and hosted CI. New source paths require a separate amendment.
     Source merge, qualified loaded adoption, natural fresh cached API and signed-in Agent
     behavior are separate acceptance stages; no deployment or forced refresh is authorized.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:31:39.860Z"
+    pin: "c01da9b1075fcce9d2f8a575b28b5ee70af9ee41a78d4e169295f6ac473f25ed"

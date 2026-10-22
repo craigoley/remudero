@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -22,3 +22,11 @@
     Last 24 h: n 64, p50 9.8, p90 64.9 min.
     Slowest PRs: #13138 (118.8 min), #13144 (106.5 min), #13146 (105.2 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.226Z"
+    pin: "e4b8eb5a21147a89a9d5aeae91798f9a09fcbfd18189cafaacd0b1486305a4ff"

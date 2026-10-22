@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -21,10 +21,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "low"
-    action: escalate
-    confidence: 0.6
+    verdict: "operator"
+    action: proceed
+    confidence: 1
     reasons:
-      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared files list contains only a single new test file (test/gardeners/scout-board-snapshot-observation-refused.test.ts), which does not touch secrets, auth, deploy, merge policy, or deletion according to the description.; on the change's description/files alone, no diff was read — The filed task is an implement task that asks for fixing the cause of a recurring ledger symptom; nothing in the description requires an operator-only decision or an irreversible action.; on the change's description/files alone, no diff was read — Weaknesses are noted: the rows name no file, so the code location is unknown and the actual fix scope could grow beyond the declared file. The scout family has 0 merged and 1 declined (Beta mean 0.33). These are worth flagging, but the PR still passes CI and review, and the escalation rule's criteria are not met.; on the change's description/files alone, no diff was read — The acceptance is a grep for a test name, which is a weak check. This is a quality concern for the review stage, not an escalation criterion under the stated rule."
-    judged_at: "2026-10-20T05:32:57.855Z"
-    pin: "8ec01bc07aa37510be7db2a2a05e4cf7a93c53349573bf36fc62e8ffcf6e97dd"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.222Z"
+    pin: "6c3e28a3def1118a72ca73e05172a1b78bf4bf2bbe74bcf9010c0902b863d5e4"
