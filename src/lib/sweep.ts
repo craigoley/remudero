@@ -6634,9 +6634,8 @@ export interface OpenPrView {
   taskExistsOnMain?: boolean;
   /** Task ids whose plan records this PR added. Used only to refuse missing-trailer self-credit. */
   introducedTaskIds?: readonly string[];
-  /** This PR's changed paths, when already observed by the gateway. */
+  /** Observed PR paths; dependencyMainIdentity separately binds whole-path Git blob/mode identity to exact head and pinned main. */
   changedFiles?: readonly string[];
-  /** Whole changed-path Git blob/mode identity, separately bound to exact head and pinned main. */
   dependencyMainIdentity?: DependencyMainIdentity;
   /** The branch-derived task's declared files, when already observed from its main-plan record. */
   taskDeclaredFiles?: readonly string[];
@@ -13302,9 +13301,8 @@ export interface SweepDeps {
    *  where {@link extractRefusal} found a refusal, so an ordinary `no_pr` never reaches this and
    *  keeps its retry path. Called once per full pass; omitted, the sweep never looks. */
   draftRefusalAmendments?: (candidates: readonly RefusalCandidate[]) => Promise<readonly RefusalAmendmentResult[]>;
-  /** Close a superseded/abandoned PR with a stated reason. */
+  /** Close superseded/abandoned PRs with a reason; the dependency fence alone holds the existing branch mutex through fresh reads and close. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
-  /** Only the already-landed dependency route claims the existing branch mutex through its fresh reads and close. */
   withDependencyCloseFence?: (pr: OpenPrView, close: () => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same

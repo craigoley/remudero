@@ -4,6 +4,7 @@ import { existsSync, lstatSync, readFileSync, symlinkSync, mkdtempSync, rmSync, 
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   acquireInflightLock,
   InflightLockError,
@@ -301,7 +302,7 @@ test("strict inflight acquisition refuses existing garbage, dead, symlink and FI
     }
     assert.equal(readFileSync(garbage, "utf8"), "malformed"); assert.equal(lstatSync(symlink).isSymbolicLink(), true);
     // INFRASTRUCTURE BACKSTOP: a regression that reads a FIFO blocks only this owned child.
-    const script = `import { acquireInflightLock } from ${JSON.stringify(new URL("../src/lib/inflight-lock.ts", import.meta.url).href)}; try { acquireInflightLock(${JSON.stringify(dir)}, "fifo", { run_id: "strict", reclaim:false }); process.exitCode=2; } catch(e) { if(e.code!=="EEXIST") throw e; }`;
+    const script = `import { acquireInflightLock } from ${JSON.stringify(join(REPO_ROOT, "src/lib/inflight-lock.ts"))}; try { acquireInflightLock(${JSON.stringify(dir)}, "fifo", { run_id: "strict", reclaim:false }); process.exitCode=2; } catch(e) { if(e.code!=="EEXIST") throw e; }`;
     const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 5000 });
     assert.equal(child.error, undefined); assert.equal(child.status, 0, child.stderr); assert.equal(lstatSync(fifo).isFIFO(), true);
     const own = acquireInflightLock(dir, "free", { run_id: "strict", reclaim: false });

@@ -64,10 +64,9 @@ export function readInflightLock(inflightDir: string, taskId: string): InflightL
 }
 
 export interface AcquireInflightOpts {
-  /** Refuse any existing inode without reading or reclaiming it; default keeps normal recovery. */
+  /** reclaim:false refuses any existing inode without read/reclaim; info overrides identity (tests), with pid/host/startedAt defaulting to this process. */
   reclaim?: false;
   run_id: string;
-  /** Override recorded identity (tests). pid/host/startedAt default to this process. */
   info?: Partial<Omit<InflightLockInfo, "run_id">>;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
   isPidAlive?: (pid: number) => boolean;
