@@ -13748,3 +13748,5 @@
 # (plan/tasks.d/W1-T3764-*.yaml) is already `retirement: closed`; #6029 made the control accept
 # /^(?:hooks\/pre-push:)?1:#!\/bin\/sh$/m and test/a-proof-can-name-an-extensionless-file.test.ts
 # passes (6/6) on main. Nothing left to change; W1-T5973 (scope update) is therefore moot.
+# W1-T5973 disposition: W1-T3764's scope per #6029 is unchanged — files: stays the one test file,
+# its single criterion stays as written, and its proof passes on main, so the record needs no edit.
