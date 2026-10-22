@@ -119,13 +119,15 @@ export function priorBlockersFromLedger(lines: readonly Record<string, unknown>[
 }
 
 export function blockerFields(blocker: PrBlocker, prior: PriorBlocker | undefined, now: number,
-  planRepairCapable = false, cause?: string) {
+  _planRepairCapable = false, cause?: string) {
   const continues = prior?.blocker === blocker && prior.since !== undefined;
   const since = continues ? prior.since! : fixedClock(now).iso();
   const source = continues ? prior.sinceSource : prior?.since === undefined ? "first-seen" : undefined;
   return {
     blocker,
-    blocker_owner: blocker === "plan-proof-unrunnable" && !planRepairCapable ? "NONE" : PR_BLOCKER_OWNERS[blocker],
+    // W1-T10226: an incapable plan-proof blocker still names its plan-repair owner — owner NONE made the
+    // flow gardener count it as unowned, so a plan-only PR red on lint-plan sat with nobody accountable.
+    blocker_owner: PR_BLOCKER_OWNERS[blocker],
     blocker_since: since,
     blocker_age_ms: Math.max(0, now - Date.parse(since)),
     ...(source ? { blocker_since_source: source } : {}),
