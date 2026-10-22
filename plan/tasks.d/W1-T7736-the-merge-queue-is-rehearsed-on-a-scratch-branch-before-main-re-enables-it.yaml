@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   # writes a repository ruleset, scratch branches and replay PRs on the live repo; the operator owns the queue decision
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 12.00
   risk: high  # Rule 19: one concern — a rehearsal harness that must never touch main's rules
@@ -103,10 +103,10 @@
     from a failing group and finds the ruleset still present in the fake. Omit the selection field: the report
     test finds no `affected`/`full` entry for a group.
   risk_ruling:
-    verdict: "high"
-    action: escalate
+    verdict: "operator"
+    action: proceed
     confidence: 1
     reasons:
-      - "deterministic backstop: it declares scripts/merge-queue-canary.mjs, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-10T19:18:07.740Z"
-    pin: "b204e22218e4fb9e804f4665b5c6d7b0db1a2e85af6d2f94ada17d879a159e18"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:31:39.860Z"
+    pin: "d5bf791c8293a31a5d2ae1048d10f995cfb684d2611629e8d931a0dbed5056e1"

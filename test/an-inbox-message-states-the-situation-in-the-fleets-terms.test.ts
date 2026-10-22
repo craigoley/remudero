@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -144,6 +144,122 @@ test("W1-T8926: a message stored under the previous contract is written again", 
     const stored = readPlainStore(path)[proposal.id]!;
     assert.equal(stored.sourceFingerprint, plainSourceFingerprint(proposal));
     assert.equal(plainInboxMessage(proposal, { [proposal.id]: stored }), stored);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const openAge = {
+  id: "board-review:stale:#13008",
+  summary: "board-review: #13008 has sat open 10.3h, past the 8h depth threshold",
+};
+
+test("W1-T10365: open PR age is not a review deadline", async () => {
+  for (const hours of ["0", "0.0", "10.3", "27.5"]) {
+    const item = { ...openAge, summary: `board-review: #13008 has sat open ${hours}h, past the 8h depth threshold` };
+    const message = plainTemplate(item);
+    assert.equal(message.headline, "A proposed change is still open");
+    assert.match(message.whatHappened, new RegExp(`open for ${hours.replace(".", "\\.")} hours`));
+    assert.match(message.whatWeNeed, /age alone does not establish a human decision/);
+    assert.doesNotMatch(message.headline, /waiting for review|overdue|deadline/i);
+    assert.deepEqual(message.options.map((option) => option.intent), ["reply", "keep"], "wording grants no new action intent");
+    assert.equal(checkPlainMessage(message, item).ok, true);
+    assert.deepEqual(await writePlainMessage(item), message, "the real no-writer path stays factual");
+  }
+  for (const age of ["", "NaN", "Infinity", "-1", "1.2.3", "9".repeat(310)]) {
+    const item = { ...openAge, summary: `board-review: #13008 has sat open ${age}h, past the 8h depth threshold` };
+    const message = plainTemplate(item);
+    assert.match(message.whatHappened, /age is unavailable/);
+    assert.doesNotMatch(message.whatHappened, /open for 0 hours|NaN|Infinity/);
+    assert.equal(checkPlainMessage(message, item).ok, true);
+  }
+  assert.match(plainTemplate({ ...openAge, summary: "" }).whatHappened, /age is unavailable/);
+  const namespaced = { ...openAge, id: "craigoley/remudero/board-review:stale:#13008" };
+  assert.equal(plainTemplate(namespaced).headline, "A proposed change is still open");
+});
+
+test("W1-T10365: cached age-only cards cannot invent a human review", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}open-age-cache-`));
+  try {
+    const factual = plainTemplate(openAge);
+    for (const wrong of [
+      { headline: "A board review has remained open beyond its time limit" },
+      { whatHappened: "The proposed change has been waiting for review for 10.3 hours." },
+      { whatWeNeed: "Finish the overdue human review." },
+      { ifNothingHappens: "The human review deadline will be missed." },
+      { whatHappened: "The proposed change has been open for 100 hours." },
+      { options: [{ ...factual.options[0]!, consequence: "Finish the overdue review." }, factual.options[1]!] },
+    ]) {
+      const cached: PlainInboxMessage = { ...factual, ...wrong, source: "writer", sourceFingerprint: plainSourceFingerprint(openAge) };
+      const path = plainStorePath(dir);
+      writeFileSync(path, JSON.stringify({ [openAge.id]: cached }));
+      const bytes = readFileSync(path);
+      const store = readPlainStore(path), before = JSON.stringify(store);
+      assert.equal(checkPlainMessage(cached, openAge).ok, false, JSON.stringify(wrong));
+      assert.deepEqual(plainInboxMessage(openAge, store), factual);
+      assert.deepEqual(readFileSync(path), bytes, "reading the bad cache never rewrites history");
+      assert.equal(JSON.stringify(store), before);
+    }
+    const truthful: PlainInboxMessage = { ...factual, source: "writer", sourceFingerprint: plainSourceFingerprint(openAge) };
+    assert.equal(checkPlainMessage(truthful, openAge).ok, true, "positive control: source-faithful cached card remains readable");
+    assert.equal(plainInboxMessage(openAge, { [openAge.id]: truthful }), truthful);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T10365: explicit review escalations retain their questions", async () => {
+  for (const ask of ["The merge permission needs a decision", "The change has sat open 10.3h; the merge permission still needs a decision"]) {
+    const item = { id: "board-review:escalation:#13008", summary: `board-review: #13008 — unhandled escalation: "${ask}"` };
+    const message = plainTemplate(item);
+    assert.match(message.whatHappened, /merge permission.*needs a decision/);
+    assert.equal(message.headline, "A proposed change has an unanswered decision");
+    assert.equal(checkPlainMessage(message, item).ok, true);
+    let attempts = 0;
+    const answer = await writePlainMessage(item, { summarize: () => { attempts += 1; return card({ ...message, source: "writer" }); } });
+    assert.equal(attempts, 1, "explicit asks keep their existing writer path");
+    assert.equal(answer.source, "writer");
+    assert.equal(answer.whatHappened, message.whatHappened);
+  }
+  const conflicting = { ...openAge, summary: 'board-review: #13008 — unhandled escalation: "The merge permission needs a decision"' };
+  assert.match(plainTemplate(conflicting).whatHappened, /merge permission needs a decision/, "an explicit ask is not suppressed by an age id");
+  const reframed = { ...openAge, summary: "The operator asks whether this change may merge." };
+  assert.doesNotMatch(plainTemplate(reframed).headline, /still open/, "an age id does not turn an edited question into age-only information");
+  let reframedCalls = 0;
+  const reframedMessage = plainTemplate(reframed);
+  assert.equal((await writePlainMessage(reframed, { summarize: () => { reframedCalls += 1; return card(reframedMessage); } })).source, "writer");
+  assert.equal(reframedCalls, 1, "non-producer wording keeps the existing writer path");
+  for (const item of [
+    { id: "board-review:escalation:#13008", summary: "board-review: #13008 carries an unhandled escalation whose ask could not be read" },
+    { id: "board-review:future:#13008", summary: "The source is not understood" },
+    { id: "new-kind:13008", summary: "The source is not understood" },
+  ]) {
+    const message = plainTemplate(item);
+    assert.doesNotMatch(message.headline, /still open/);
+    let attempts = 0;
+    assert.deepEqual(await writePlainMessage(item, { summarize: () => { attempts += 1; throw new Error("writer unavailable"); } }), message);
+    assert.equal(attempts, 2, "other kinds and unreadable asks keep their existing bounded retry");
+  }
+});
+
+test("W1-T10365: age-only cache maintenance adds no model calls", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}open-age-backfill-`));
+  try {
+    const cached = { ...plainTemplate(openAge), headline: "A board review is overdue", sourceFingerprint: plainSourceFingerprint(openAge) };
+    const path = plainStorePath(dir);
+    writeFileSync(path, JSON.stringify({ [openAge.id]: cached }));
+    let calls = 0;
+    const deps = { stateDir: dir, readProposals: () => [openAge], summarize: () => { calls += 1; return card(clean); } };
+    const written = await backfillPlainMessages(deps, 1);
+    assert.equal(calls, 0, "rejecting a misleading current cache must not add provider work through the existing backfill");
+    assert.equal(written, 1);
+    assert.equal(await backfillPlainMessages(deps, 1), 0, "the ordinary bounded maintenance converges");
+    const stored = readPlainStore(path)[openAge.id]!;
+    assert.equal(stored.sourceFingerprint, plainSourceFingerprint(openAge), "no global fingerprint bump");
+    assert.equal(stored.source, "template");
+    assert.equal(stored.headline, "A proposed change is still open");
+    await writePlainMessage(openAge, { summarize: deps.summarize });
+    assert.equal(calls, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

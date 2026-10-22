@@ -15,6 +15,8 @@ import {
   type GhUpstreamExec, type GhUpstreamResult,
 } from "#src/lib/gh-read-broker.js";
 import { ghExec, ghJson, ghJsonAsync, ghLinesAsync, ghTextAsync } from "#src/lib/github-transport.js";
+import { buildSweepEffects } from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -573,4 +575,93 @@ test("W1-T10279: the broker refuses what it cannot read, evicts to its disk shar
   writeFileSync(join(logDir, "requests-2026-10-20.ndjson"), '{"ts":"2026-10-20T00:00:00.000Z","outcome":"hit-fresh","class":"agent"}\n{"ts":"2026-10-20T00:0');
   const summary = summariseGhBrokerLog(join(logDir, ".."), 0);
   assert.deepEqual([summary.reads, summary.upstream_calls, summary.served_without_upstream_share], [1, 0, 1]);
+});
+
+
+test("dependency close default transport revalidates cached matching lifecycle and main before closing", async (t) => {
+  const head = "c".repeat(40), main = "a".repeat(40), movedSha = "2".repeat(40);
+  const saved = { cache: process.env.RMD_GH_CACHE_HOME, path: process.env.PATH };
+  try {
+    for (const change of ["head", "main"] as const) {
+      // Unix-domain socket paths are short on macOS; this is an owned, removed fixture root.
+      const root = mkdtempSync("/tmp/rmd-gbf-"), cache = join(root, "cache");
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!, clock = virtualClock();
+      const upstream: string[][] = []; let moved = false;
+      const lifecycle = () => ({ state: "open", merged: false, draft: false, head: { sha: moved && change === "head" ? movedSha : head, ref: "dependabot/npm/sdk" },
+        base: { ref: "main", sha: moved && change === "main" ? movedSha : main }, user: { login: "dependabot[bot]" }, changed_files: 2 });
+      const broker = new GhReadBroker(dir, async args => {
+        if (args[1] === "user") return ok("octo\n");
+        upstream.push(args);
+        const body = args.some(arg => arg === "repos/o/r/commits/main") ? { sha: moved && change === "main" ? movedSha : main } : lifecycle();
+        return http("200 OK", ["Cache-Control: private, max-age=60", `ETag: "${moved ? "new" : "old"}-${change}"`], JSON.stringify(body));
+      }, clockFromMillisFn(clock.now), clock.sleep, () => 1e12);
+      broker.pacer("core").gapMs = 0;
+      const server = await serveGhReadBroker({ dir, broker });
+      const shim = ghShim([{ when: "", stdout: "FALSIFIER: direct gh ran\n" }]);
+      process.env.RMD_GH_CACHE_HOME = cache; process.env.PATH = `${shim.dir}:${saved.path ?? ""}`;
+      try {
+        const mainArgs = ["api", "repos/o/r/commits/main"], prArgs = ["api", "repos/o/r/pulls/13446"];
+        assert.deepEqual(await ghJsonAsync(mainArgs), { sha: main }); assert.equal((await ghJsonAsync(prArgs) as { head: { sha: string } }).head.sha, head);
+        moved = true;
+        assert.deepEqual(await ghJsonAsync(mainArgs), { sha: main });
+        assert.equal((await ghJsonAsync(prArgs) as { head: { sha: string } }).head.sha, head);
+        assert.equal(upstream.length, 2, "ordinary default reads retain cached matching old state within max-age");
+        const pr: OpenPrView = { prNumber: 13446, prUrl: "https://github.com/o/r/pull/13446", headSha: head, headRefName: "dependabot/npm/sdk",
+          reviewState: "success", checksState: "red", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: true, lastActivityAt: new Date().toISOString(),
+          dependencyMainIdentity: { state: "identical", headSha: head, mainSha: main, files: ["package.json", "package-lock.json"].map(path => ({ path, mode: "100644", blob: "f".repeat(40) })) } };
+        let closes = 0;
+        const effects = buildSweepEffects({ owner: "o", repo: "r", config: { root } as never, repoRoot: root,
+          ledgerPath: join(root, "state", "ledger.ndjson"), runId: `fresh-${change}`, plan: { tasks: [], byId: new Map() }, policy: DEFAULT_SWEEP_POLICY, log: () => {}, ghRunImpl: () => { closes++; } });
+        const result = await effects.withDependencyCloseFence!(pr, async () => { await effects.close(pr, "identity"); });
+        assert.equal(result.closed, false, `cached matching ${change} cannot authorize closure after upstream moves`);
+        assert.equal(closes, 0); assert.equal(upstream.length, 4, "both act-time reads revalidate despite fresh cache entries");
+        assert.ok(upstream.slice(2).every(args => args.some(arg => arg.startsWith("If-None-Match:"))), "normal broker conditional revalidation, no bypass");
+        assert.equal(shim.calls().length, 0);
+      } finally { await server.close(); rmSync(shim.dir, { recursive: true, force: true }); }
+    }
+  } finally {
+    if (saved.cache === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = saved.cache;
+    process.env.PATH = saved.path;
+  }
+});
+
+test("a fresh default JSON read cannot join an ordinary in-flight broker read", async (t) => {
+  const cache = mkdtempSync("/tmp/rmd-gbs-");
+  t.after(() => rmSync(cache, { recursive: true, force: true }));
+  const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
+  mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "heartbeat"), "60\n");
+  const clients = new Set<import("node:net").Socket>(); let ordinaryClient: import("node:net").Socket | undefined;
+  const reply = (conn: import("node:net").Socket, value: string) => conn.end(JSON.stringify({ type: "result", stdout: JSON.stringify({ value }), stderr: "", exitCode: 0, outcome: "upstream-200" }) + "\n");
+  const server = createServer(conn => {
+    clients.add(conn); conn.on("close", () => clients.delete(conn)); let body = "";
+    conn.on("data", bytes => {
+      body += bytes.toString(); if (!body.includes("\n")) return;
+      const request = JSON.parse(body.trim());
+      if (request.fresh === true) reply(conn, "fresh"); else ordinaryClient = conn;
+    });
+  });
+  await new Promise<void>(resolve => server.listen(join(dir, "broker.sock"), resolve));
+  const saved = { cache: process.env.RMD_GH_CACHE_HOME, path: process.env.PATH };
+  const shim = ghShim([{ when: "", stdout: "FALSIFIER: direct gh ran\n" }]);
+  process.env.RMD_GH_CACHE_HOME = cache; process.env.PATH = `${shim.dir}:${saved.path ?? ""}`;
+  let backstop: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const args = ["api", "repos/o/r/pulls/811"];
+    const ordinary = ghJsonAsync(args);
+    await until(() => ordinaryClient !== undefined, "ordinary default broker request");
+    const fresh = ghJsonAsync(args, undefined, undefined, { fresh: true });
+    // INFRASTRUCTURE BACKSTOP: a coalescing regression releases only this owned withheld reply.
+    backstop = setTimeout(() => { if (ordinaryClient) reply(ordinaryClient, "ordinary"); }, 5_000);
+    assert.deepEqual(await fresh, { value: "fresh" });
+    clearTimeout(backstop); backstop = undefined;
+    reply(ordinaryClient!, "ordinary"); assert.deepEqual(await ordinary, { value: "ordinary" });
+    assert.equal(shim.calls().length, 0);
+  } finally {
+    if (backstop) clearTimeout(backstop);
+    for (const conn of clients) conn.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    if (saved.cache === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = saved.cache;
+    process.env.PATH = saved.path; rmSync(shim.dir, { recursive: true, force: true });
+  }
 });

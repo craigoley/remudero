@@ -1,0 +1,65 @@
+- id: W1-T10384
+  title: "A SONNET RUN STOPPED BY THE FOUNDRY CLAUDE CAP CONTINUES ON THE LUNA LADDER, AND THE REFUSAL NAMES THE CAP THAT BOUND — on 2026-10-22 ten squeezed cash runs (nine review.reviewer, one triage) ended `cash_allowance_exhausted` at \"would exceed the $10.00 dailyCapUsd\" while the configured squeezed cap was $25; the $10 is `FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed`, the Foundry-Claude sub-cap, and W1-T4785's Luna fallback re-enters only for a refusal before any money moved, so a run that billed one request and was refused on the next ended the review instead of moving to Luna"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: worker.ts routes, worker-provider.ts names the cap; one concern, no cap value changes
+  band_meaning: span
+  origin: "operator ruling 2026-10-22, item 5 (mount-affinity cash work charged against the normal cap while both subscriptions are exhausted); premise corrected by the evidence below"
+  plan_refs: [W1-T4785, W1-T3692, W1-T10040, W1-T10385, W1-T5451]
+  files:
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - test/worker/spawn/a-sonnet-run-stopped-by-the-foundry-claude-cap-continues-on-the-luna-ladder.test.ts
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: squeezed cash work must not be refused by a cap meant for routine work.
+    PREMISE CORRECTED (OBSERVED, core ledger 10-21T08:49Z..10-22T01:20Z, read-only): the squeezed ceiling IS
+    applied.
+    - The refused review on PR-13481 (00:46:15Z) has a worker.assignment rule of `cash-sonnet-fallback` and a
+      selectionPath of `mount-affinity`. `spawnWorker` (src/lib/worker.ts) sets `cashSqueezed: true` on that
+      fallback.
+    - 28 refusals on 10-21 read "would exceed the $25.00 dailyCapUsd", which is the squeezed fleet cap.
+    - All ten 10-22 refusals read $10.00, every one on `claude-sonnet-5-5`. `cashAllowanceLimits`
+      (src/lib/worker-provider.ts) adds a second limit for a Foundry Claude deployment:
+      `FOUNDRY_CLAUDE_DAILY_CAP_USD = { normal: 5, squeezed: 10 }`. Its committed figure counts Foundry Claude
+      reservations only ($6.49 rising to $9.88 across the ten rows).
+    - `OpenWeightAllowanceExhaustedError` prints "dailyCapUsd" for either limit. The message names the wrong cap,
+      and that is what produced the premise.
+    WHY THE REVIEW ENDED: each refused run had already billed (total_cost_usd $0.009 to $0.75, 1 to 7 requests), so
+    `sonnetRefusedBeforeTransport` is false. The W1-T4785 re-entry to `cash-fallback`, the Luna ladder, never ran.
+    PR-13481's run shows a single worker.assignment, then review.reviewer `cash_allowance_exhausted`, then
+    review.semantic_incomplete `required-semantic-cash_allowance_exhausted`. It is one of the ten
+    refusals listed above. Over the same window, billed cash review rows cost a median $0.128 (38 rows; p90 $0.88).
+    NOT COVERED ELSEWHERE: W1-T10040 (merged) routes cash fallback past an exhausted fleet allowance and is about the
+    fleet cap, not the Foundry sub-cap's mid-run refusal. W1-T5451 (queued) is about max_tokens on the Foundry path.
+    W1-T10385 (this filing) is about the reservation size. Swept origin/main 32887fe4d plan/tasks.d and all 18
+    open PR heads' plan trees for FOUNDRY_CLAUDE_DAILY_CAP_USD, cashSqueezed and cash_allowance_exhausted: no
+    other shard.
+  design: |
+    1. NAME THE CAP. `OpenWeightAllowanceExhaustedError` carries which limit refused: `fleet` (dailyCapUsd, normal or
+       squeezed) or `foundry-claude` (`FOUNDRY_CLAUDE_DAILY_CAP_USD`, normal or squeezed). Its message names that
+       limit and that posture, never "dailyCapUsd" for the sub-cap. The review/worker rows already quote the message.
+    2. CONTINUE ON LUNA. A `cashSonnetEmergency` run refused by the `foundry-claude` limit re-enters the same
+       `cash-fallback` spawn W1-T4785 uses, whether or not an earlier request billed. The billed amount is already
+       settled against the allowance and is not charged again. A refusal by the `fleet` limit does not re-enter: no
+       cash path has room. The re-entry happens once per spawn.
+    3. No cap value changes, and no new config key, threshold or env var.
+    4. Tests (new file, titles verbatim as in the proofs): a Sonnet run that billed one request and is then refused
+       by the Foundry Claude limit re-enters cash-fallback once. A fleet-limit refusal does not re-enter. The
+       refusal message names `foundry-claude` and the squeezed posture.
+  acceptance:
+    - claim: "a squeezed Sonnet run refused mid-run by the Foundry Claude limit continues once on the cash-fallback ladder"
+      proof: "unit test: W1-T10384: a sonnet run stopped by the foundry claude cap continues on the luna ladder"
+    - claim: "a refusal by the fleet cap does not re-enter cash"
+      proof: "unit test: W1-T10384: a fleet cap refusal does not re-enter cash"
+    - claim: "the refusal names the limit that bound and its posture"
+      proof: "unit test: W1-T10384: the allowance refusal names the foundry claude cap"
+  falsifier: |
+    Keep the before-transport-only re-entry, and the billed-then-refused fixture ends the run with no second spawn.
+  note: |
+    Reservation refs/rmd-id/W1-T10384 is held by filing branch file-1022-fleet-routing.

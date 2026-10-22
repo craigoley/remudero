@@ -29,10 +29,10 @@
     - test/an-instance-reframes-only-its-current-proposal.test.ts
     - test/inbox-thread-view.test.ts
     - test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts
-  priority: 2
+  priority: 3
   status: queued
-  # backlog gardener: band=2 evidence=feb9a487f7353c77
-  # backlog gardener: placed=2026-10-20T22:55:06.900Z
+  # backlog gardener: band=3 evidence=ab374897457de40c
+  # backlog gardener: placed=2026-10-22T04:22:07.100Z
   attempts: 0
   rationale: |
     Grounded against CLAUDE.md, MASTER-PLAN.md, both task surfaces, LEARNINGS.md and DECISIONS.md.

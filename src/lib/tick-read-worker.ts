@@ -1,3 +1,4 @@
+import { hydrateDependencyMainIdentitiesSteps } from "./dependency-main-identity.js";
 /**
  * lib/tick-read-worker.ts — W1-T9722: the daemon's read-plane worker starts here, not from src/run-task.ts.
  *
@@ -635,6 +636,7 @@ export interface RawOpenPr {
   updatedAt: string;
   body: string;
   autoMergeRequest: unknown;
+  contributionOrigin?: OpenPrRest["contributionOrigin"];
   statusCheckRollup?: RollupCheck[];
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
@@ -2043,6 +2045,7 @@ function openPrPlanIdentity(path: string): { kind: "readable"; identity: string 
 
 interface OpenPrViewReads {
   read: GhApiFetcher;
+  dependencyIdentityRead?: GhApiFetcher;
   openPrRows: () => unknown;
   ciFailures: (owner: string, repo: string, rollup: RollupCheck[] | undefined) => CiFailure[] | Promise<CiFailure[]>;
   requiredContexts: (owner: string, repo: string) => RequiredContextsRead | Promise<RequiredContextsRead>;
@@ -2149,6 +2152,7 @@ export function* openPrViewSteps(
   // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
   // without it enter the bounded REST hydrator; complete reads are cached by exact head.
   const emitterPlanFilings = new Map(raw.map((pr) => [pr.number, isPlanOnlyFilingPr(ledger, pr.url)]));
+  const planFilingFileCache = deps.planFilingFileCache ?? createPlanFilingFileCache();
   const planFilingFiles = yield* hydratePlanFilingFilesSteps(
     owner,
     repo,
@@ -2158,8 +2162,11 @@ export function* openPrViewSteps(
         number: pr.number, headRefOid: pr.headRefOid, nominated: resolveOpenPrTaskId(pr, false) === undefined,
       })),
     fetch,
-    deps.planFilingFileCache ?? createPlanFilingFileCache(),
+    planFilingFileCache,
     { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
+  );
+  const dependencyMainIdentities = yield* hydrateDependencyMainIdentitiesSteps(
+    owner, repo, raw, planFilingFiles, io.dependencyIdentityRead ?? fetch, planFilingFileCache,
   );
   const planFilingClassifications = new Map<number, PlanFilingClassification>();
   for (const pr of raw) {
@@ -2493,6 +2500,7 @@ export function* openPrViewSteps(
       taskExistsOnMain: taskId === undefined ? undefined : taskRecord !== undefined,
       introducedTaskIds: observedFiles === undefined ? undefined : introducedTaskIdsFromPlanPaths(observedFiles),
       changedFiles: observedFiles,
+      dependencyMainIdentity: dependencyMainIdentities.get(pr.number),
       taskDeclaredFiles: taskRecord?.files,
       // W1-T528: the operator's hold, straight off the SAME list row the enumeration already
       // fetched — no extra request, because `draft` rides on GitHub's `pull-request-simple`
@@ -2635,9 +2643,11 @@ export function buildOpenPrViewsAsync(
     readRequiredContextsAsync?: (owner: string, repo: string) => Promise<RequiredContextsRead>;
   } = {},
 ): Promise<ClassifiedOpenPrView[]> {
-  const read: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  const transport: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  const read = transport;
   return runStepsAsync(openPrViewSteps(owner, repo, ledgerPath, deps, {
     read,
+    dependencyIdentityRead: (args, onRateLimit) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => transport(args, onRateLimit)),
     openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, read, deps.pacer),
     ciFailures: deps.fetchCiFailureEvidence ?? deps.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync,
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,
