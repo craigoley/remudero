@@ -7058,14 +7058,16 @@ export function checksPendingSinceFromRollup(
  *  verdict rather than a bad one, so the job can be re-queued instead of a worker dispatched. */
 export interface CancelledRequiredCheck {
   name: string;
+  /** Failed posted gates whose exact head/run/attempt/job and own cancelled outcome bind to this producer. */
+  explainedFailures?: readonly { name: string; checkRunId: number }[];
   /** GitHub Actions job id, parsed by the real gateway from the rollup's URL or external id — the
    *  re-queue target is the JOB (design iv), never the workflow run. `undefined` when none could
    *  be read, and the real `requeueCheck` wiring then degrades to a named no-op. */
   jobId?: string;
   /** W1-T2431 — GitHub's OWN `run_attempt`, read off the SAME rollup {@link jobId} is parsed from:
    *  no new gateway, no new credential. A SURFACE the fleet does not write, so it counts an
-   *  operator's own re-run too. No producer sets it today — a WIDENING of the `true` case, never a
-   *  replacement that could narrow it. */
+   *  operator's own re-run too. An exact posted-gate cancellation link supplies its producer's
+   *  attempt; otherwise absent, preserving the ledger-derived retry bound. */
   runAttempt?: number;
 }
 
@@ -9387,7 +9389,7 @@ export const PLAN_REPAIR_STEP = "sweep.plan_repair";
  *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it.
  *  Exported so a fixture drives its refusing arm directly (W1-T2317's negative-reachability ratchet). */
 export const MACHINE_LANE_HEAD_RE = new RegExp(
-  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout)-garden-\\d+" +
+  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay)-garden-\\d+" +
     "|(?:feedback|decisions|plan-reconcile|ci-learning)-landing(?:-[a-z0-9-]+)?" +
     "|run-(?:TRIAGE|APPROVE)-.+|run-RETRO(?:-.+)?)$",
 );
@@ -9415,7 +9417,7 @@ export interface PlanRepairFacts {
   gardenRecordRefusal?: string;
 }
 
-const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout)-garden-\d+$/;
+const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay)-garden-\d+$/;
 
 function gardenRecordRefusalCandidate(pr: OpenPrView): boolean {
   const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)]
@@ -16471,6 +16473,14 @@ export function createFullPreludeTimer(
   return timer;
 }
 
+/** W1-T7736 — the head-ref prefix scripts/merge-queue-canary.mjs gives every replayed PR head. A replay PR
+ *  targets the rehearsal's scratch branch, never main, and the harness owns its whole life. */
+export const MERGE_QUEUE_REPLAY_HEAD_PREFIX = "mq-canary-replay/";
+
+export function isMergeQueueReplayPr(pr: Pick<OpenPrView, "headRefName">): boolean {
+  return pr.headRefName?.startsWith(MERGE_QUEUE_REPLAY_HEAD_PREFIX) === true;
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   sweepDeps: SweepDeps,
@@ -16505,6 +16515,9 @@ export async function runSweep(
   const now = deps.now ? deps.now() : Date.now();
   const repairDemandMark = repairMemoryDemandMark(); // W1-T9706: what this pass did not refuse again, it clears at its end.
   const log = deps.log ?? (() => {});
+  // W1-T7736: the sweep never disposes, reviews, fixes or refreshes a merge-queue rehearsal's replay PR.
+  for (const pr of openPrs.filter(isMergeQueueReplayPr)) log("sweep.replay_pr_excluded", { pr_number: pr.prNumber, head_ref: pr.headRefName });
+  openPrs = openPrs.filter((pr) => !isMergeQueueReplayPr(pr));
   const mergeBaseKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
   const judgmentPool = sweepJudgmentPool(deps);
   const mergeBases = strikeLadderMergeBases.get(deps.ledgerPath) ?? new Map<string, string>();
@@ -18524,6 +18537,12 @@ export async function runSweep(
         ...pr.cancelledRequiredChecks!.map(c => c.name),
       ], rollup));
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
+      const freshByName = new Map(dedupeRollupByLatestAttempt(rollup ?? []).map(c => [c.name ?? c.context, c]));
+      const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
+        .filter(alias => {
+          const latest = freshByName.get(alias.name);
+          return !latest || !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest));
+        }).map(alias => alias.name));
       const deterministicTimeouts = new Set<string>();
       const outcomes: string[] = [];
       let escalated = false;
@@ -18543,6 +18562,17 @@ export async function runSweep(
           continue;
         }
         if (deferred !== undefined) continue;
+        if (check.explainedFailures?.length) {
+          const producer = freshByName.get(check.name);
+          if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
+              (producer.status ?? "").toUpperCase() !== "COMPLETED" || checkJobId(producer) !== check.jobId || !check.explainedFailures.every(alias => {
+                const latest = freshByName.get(alias.name);
+                return latest !== undefined && latest.checkRunId === alias.checkRunId && rollupState(latest) === "FAILURE";
+              })) {
+            outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
+            continue;
+          }
+        }
         if (decision.requeue) {
           const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), rollup);
           if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
@@ -18562,7 +18592,10 @@ export async function runSweep(
       }
       // Only ci and ci-gate downstream of this cancelled shard are explained by cancellation.
       const genuine = [...fresh].filter(name => deterministicTimeouts.has(name) ||
-        (!cancelled.some(c => c.name === name) && name !== "ci-gate" &&
+        (!explained.has(name) && !cancelled.some(c => c.name === name &&
+          !(c.explainedFailures?.length && dedupeRollupByLatestAttempt(rollup ?? []).some(latest =>
+            (latest.name ?? latest.context) === name && REQUIRED_CHECK_FAIL.has(rollupState(latest)) &&
+            rollupState(latest) !== "CANCELLED"))) && name !== "ci-gate" &&
           !(name === "ci" && pr.cancelledRequiredChecks!.some(c => /^ci-shard \(\d+\/\d+\)$/.test(c.name)))));
       if (genuine.length === 0) {
         infrastructureBlockerByPr.set(pr.prNumber, escalated ? "escalated" : "awaiting-ci");

@@ -827,6 +827,23 @@ export function prReferentFromIssueText(text: string | undefined): number | unde
   return Number.isSafeInteger(n) && n > 0 ? n : undefined;
 }
 
+/** Conservative title bound from the observed createIssue refusal; UTF-16 also bounds astral text safely. */
+const GITHUB_ISSUE_TITLE_LIMIT = 256;
+function unboundedEscalationTitle(e: Pick<Escalation, "class" | "taskId" | "summary">): string {
+  return `[${e.class}] ${e.taskId}: ${e.summary}`;
+}
+
+export function escalationIssueTitle(e: Pick<Escalation, "class" | "taskId" | "summary">): string {
+  const title = unboundedEscalationTitle(e);
+  if (title.length <= GITHUB_ISSUE_TITLE_LIMIT) return title;
+  return title.replace(/[\r\n\u2028\u2029]/g, " ").slice(0, GITHUB_ISSUE_TITLE_LIMIT - 1).replace(/[\uD800-\uDBFF]$/, "") + "…";
+}
+
+function fullEscalationSummaryLine(e: Pick<Escalation, "summary">): string {
+  const text = JSON.stringify(e.summary).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
+  return `**Full summary (JSON):** ${text}`;
+}
+
 /**
  * Render the issue body: context, the options, and the recommendation called out.
  *
@@ -855,6 +872,7 @@ export function renderIssueBody(e: Escalation): string {
     // like Head/Cause above — omitted entirely (never a blank/placeholder line) when the caller
     // didn't set it, so a producer this task did not migrate renders byte-identical to before.
     e.contractRevision ? `**Contract:** ${e.contractRevision}` : undefined,
+    ...(escalationIssueTitle(e) !== unboundedEscalationTitle(e) ? [fullEscalationSummaryLine(e)] : []),
     "",
     ...(decisionSummary
       ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`, ""]
@@ -1064,12 +1082,39 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
   return wanted === undefined || candidate === undefined || wanted === candidate;
 }
 
-function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefined): boolean {
-  return title === `[${e.class}] ${e.taskId}: ${e.summary}`;
+function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefined, body: string): boolean {
+  const raw = unboundedEscalationTitle(e);
+  if (title === raw) return true;
+  return title !== raw && title === escalationIssueTitle(e) && body.split("\n").find(line => line.startsWith("**Full summary (JSON):** ")) === fullEscalationSummaryLine(e);
 }
 
-function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined): boolean {
-  if (e.headDedup === "independent") return titleCarriesSameSummary(e, title);
+/** Only the producer's header may replace a clipped title when reading its PR referent. */
+function candidatePrRef(title: string | undefined, body: string): string | undefined {
+  const header = body.split("\n\n", 1)[0]!;
+  const line = header.split("\n").find(row => row.startsWith("**Full summary (JSON):** "));
+  if (line) {
+    let summary: unknown;
+    try {
+      summary = JSON.parse(line.slice("**Full summary (JSON):** ".length));
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      summary = undefined;
+    }
+    const taskId = TASK_LINE_RE.exec(header)?.[1];
+    const issueClass = CLASS_LINE_RE.exec(header)?.[1];
+    if (typeof summary === "string" && taskId && issueClass) {
+      const key = { summary, taskId, class: issueClass as EscalationClass };
+      if (title !== unboundedEscalationTitle(key) && title === escalationIssueTitle(key)
+          && line === fullEscalationSummaryLine(key)) return extractPrRef(`${summary}\n${body}`);
+    }
+  }
+  // A clipped numeric token is not an identity when its full producer metadata is unavailable.
+  if (/(?:\/pull\/|\bPR\s*#?\s*)\d+…$/i.test(title ?? "")) return undefined;
+  return extractPrRef(`${title ?? ""}\n${body}`);
+}
+
+function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined, body: string): boolean {
+  if (e.headDedup === "independent") return titleCarriesSameSummary(e, title, body);
   return matchesOptionalDimension(e.headSha, candidate);
 }
 
@@ -1110,7 +1155,6 @@ function normalizeCandidateBody(body: string): string {
  *  `listOpen` returned, so a change to the matching rule can never drift between the two callers. */
 function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): OpenIssue | undefined {
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
-  const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
   return open.find((issue) => {
     const body = normalizeCandidateBody(issue.body ?? "");
     if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) return false;
@@ -1118,9 +1162,9 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
       // W1-T195: the composite key. taskId + PR are REQUIRED matches. headSha/cause veto only when
       // both sides carry a value and disagree, so a caller setting neither keeps today's dedup while
       // the two rungs that set both get their own issue on a new push or a different cause.
-      if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
+      if (candidatePrRef(issue.title, body) !== prRef) return false;
       const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
-      if (matchesHeadDimension(e, candidateHead, issue.title) === false) return false;
+      if (matchesHeadDimension(e, candidateHead, issue.title, body) === false) return false;
       if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
       // W1-T3579: the 4th dimension — permissive exactly like cause/head above, so an
       // un-migrated producer or a legacy issue (neither side carrying a recorded contract) keeps
@@ -1143,7 +1187,7 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
     if (e.cause !== undefined || candidateCause !== undefined) {
       return matchesOptionalDimension(e.cause, candidateCause);
     }
-    return (issue.title ?? "") === title;
+    return titleCarriesSameSummary(e, issue.title, body);
   });
 }
 
@@ -1263,7 +1307,7 @@ function* closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIss
   for (const issue of open) {
     const body = normalizeCandidateBody(issue.body ?? "");
     if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) continue;
-    if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) continue;
+    if (candidatePrRef(issue.title, body) !== prRef) continue;
     const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
     if (!candidateHead || candidateHead === e.headSha) continue;
     const comment =
@@ -1315,7 +1359,7 @@ function* createEscalationIssue(
     messageCheck?: OperatorMessageCheckResult;
   },
 ): Steps<string> {
-  const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
+  const title = escalationIssueTitle(e);
   yield* step(() => deps.issues.ensureLabel?.(opts.queueLabel));
   const wanted = [CLASS_LABEL[e.class], ASK_TYPE_LABEL[classifyAsk(e)]];
   const labels: string[] = [opts.queueLabel];

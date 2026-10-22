@@ -70,6 +70,7 @@ export const REGISTERED_GARDEN_NAMES = [
   // W1-T8864: every open issue re-checked against current evidence, shadow-first.
   "issue-revalidation",
   "inbox",
+  "review-replay",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];

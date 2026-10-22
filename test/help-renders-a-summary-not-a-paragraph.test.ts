@@ -151,7 +151,7 @@ const BASELINE_COMMAND_NAMES = [
   "read-model",
   "reframe",
   "risk-judge-eval",
-  "rule", "relay", "release", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
+  "rule", "relay", "release", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "review-replay", "routing-ab", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "skill-eval", "status", "stop", "sweep", "sync", "test-place", "trace", "triage", "triage-outcomes", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
@@ -188,6 +188,7 @@ const BASELINE_COMMAND_NAMES = [
 // W1-T3083: `pr-checks` — a PR head's deduped check-run and commit-status rollup, exit code is the answer — joins the registry.
 // `skill-eval` — a staged skill draft attempted with and without it on held-out merged tasks — joins the registry.
 // `inspect` — explicit, allowlisted state reads before CLI housekeeping — joins the registry.
+// W1-T10270: `review-replay` refreshes the checked-in sample from retained real review inputs.
 // W1-T10079: `reply`, `archive`, `snooze` and `keep` — the console's inbox verbs from one verb table — join the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
