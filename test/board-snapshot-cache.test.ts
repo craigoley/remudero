@@ -319,6 +319,44 @@ function realIo(overrides: Partial<BoardSnapshotIo> = {}): BoardSnapshotIo {
   };
 }
 
+test("replaced snapshot observation cleanup preserves failed writes and refuses cleanup failures", () => {
+  const dir = root();
+  const T0 = Date.parse("2026-10-01T00:00:00.000Z");
+  const MIN = 60_000;
+  try {
+    const rows = [closed(1)];
+    assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0) }).commitClosed(rows), true);
+    assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 10 * MIN) }).commitClosed(rows), true);
+    const sidecar = boardObservationPath(dir, "o", "r");
+    const before = readFileSync(sidecar, "utf8");
+    const failed = createBoardSnapshotCache(dir, "o", "r", {
+      clock: fixedClock(T0 + 20 * MIN),
+      io: realIo({ rename: () => { throw new Error("replace refused"); } }),
+    });
+    assert.equal(failed.commitClosed([closed(1), closed(2)]), false);
+    assert.equal(readFileSync(sidecar, "utf8"), before, "failed publication preserves the last valid observation");
+    const events: Array<{ event: string; reason: unknown }> = [];
+    const cleanupFailed = createBoardSnapshotCache(dir, "o", "r", {
+      clock: fixedClock(T0 + 20 * MIN),
+      io: realIo({ unlink: (path) => {
+        if (path === sidecar) throw new Error("unlink refused");
+        fs.unlinkSync(path);
+      } }),
+    });
+    assert.equal(cleanupFailed.commitClosed([closed(1), closed(2)]), true);
+    assert.equal(readFileSync(sidecar, "utf8"), before);
+    const restarted = createBoardSnapshotCache(dir, "o", "r", {
+      clock: fixedClock(T0 + 30 * MIN), log: (event, extra) => events.push({ event, reason: extra?.reason }),
+    });
+    assert.equal(restarted.rows!().closed?.size, 2, "published data remains available");
+    assert.equal(restarted.rows!().closedObservedAt, new Date(T0 + 20 * MIN).toISOString());
+    assert.deepEqual(events.filter((row) => row.event === "board_snapshot.observation_refused"),
+      [{ event: "board_snapshot.observation_refused", reason: "foreign_snapshot" }], "cleanup failure does not hide the identity refusal");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a failed atomic replace preserves both the in-process and crash-recovery last-good seed", () => {
   const dir = root();
   try {
@@ -598,6 +636,9 @@ test("W1-T8912: PR observation identity refuses foreign replaced and torn metada
     assert.equal(reader(dir, "o", "r").closedObservedAt, at(T0 + 10 * MIN));
     const stale = createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 20 * MIN) });
     assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 5 * MIN) }).commitClosed([closed(1), closed(2)]), true);
+    assert.equal(fs.existsSync(sidecar), false, "successful publication retired the stale sidecar");
+    // A delayed writer can restore the superseded certificate after publication.
+    writeFileSync(sidecar, JSON.stringify(valid));
     assert.deepEqual([observed(dir).at, observed(dir).refusal], [at(T0 + 5 * MIN), "foreign_snapshot"]);
     assert.equal(reader(dir, "o", "r").closedObservedAt, at(T0 + 5 * MIN), "a warm reader sees the replacement between reads");
     assert.equal(stale.commitClosed(rows), true, "the stale writer's rows still match what it alone holds");
