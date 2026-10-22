@@ -93,6 +93,8 @@ on:
       - src/lib/state-backup-engine-links.ts
       - src/lib/worker-containment.ts
       - package-lock.json
+      - package.json
+      - packages/**/package.json
   workflow_dispatch:
     inputs:
       registry:
@@ -185,35 +187,35 @@ jobs:
               if printf '%s\n' "${CHANGED}" | grep -qxF "${p}"; then OTHER_BAKED=true; fi
             done
             if [ "${OTHER_BAKED}" = "false" ]; then
-              if printf '%s\n' "${CHANGED}" | grep -qxF "package-lock.json"; then
-                LOCK_DIR="$(mktemp -d)"
-                git show "${BEFORE_SHA}:package-lock.json" > "${LOCK_DIR}/old-lock.json" 2>/dev/null || echo '{}' > "${LOCK_DIR}/old-lock.json"
-                git show "${AFTER_SHA}:package-lock.json" > "${LOCK_DIR}/new-lock.json" 2>/dev/null || echo '{}' > "${LOCK_DIR}/new-lock.json"
+              if printf '%s\n' "${CHANGED}" | grep -E '^(package(-lock)?\.json|packages/.+/package\.json)$' >/dev/null; then
                 BUILD="$(node -e '
-                  const fs = require("fs");
-                  const read = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; } };
-                  const version = (doc) => doc.packages && doc.packages["node_modules/playwright-core"]
-                    ? doc.packages["node_modules/playwright-core"].version
-                    : undefined;
-                  const sdk = (doc) => doc.packages && doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"]
-                    ? JSON.stringify([doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"].version, doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"].integrity])
-                    : undefined;
-                  const loader = (doc) => JSON.stringify([
-                    "node_modules/tsx", "node_modules/esbuild", "node_modules/@esbuild/linux-x64",
-                  ].map((key) => doc.packages && doc.packages[key]
-                    ? [doc.packages[key].version, doc.packages[key].integrity,
-                      doc.packages[key].dependencies, doc.packages[key].optionalDependencies]
-                    : null));
-                  const oldDoc = read(process.argv[1]);
-                  const newDoc = read(process.argv[2]);
-                  const oldVersion = version(oldDoc);
-                  const newVersion = version(newDoc);
-                  const playwrightMoved = oldVersion === undefined || newVersion === undefined || oldVersion !== newVersion;
-                  const sdkMoved = sdk(oldDoc) !== sdk(newDoc);
-                  const loaderMoved = loader(oldDoc) !== loader(newDoc);
-                  console.log(playwrightMoved || sdkMoved || loaderMoved ? "true" : "false");
-                ' "${LOCK_DIR}/old-lock.json" "${LOCK_DIR}/new-lock.json")"
-                rm -rf "${LOCK_DIR}"
+                  const {execFileSync} = require("node:child_process");
+                  // W1-T10366: npm ci --omit=dev OR full npm ci; include both possible closures.
+                  // Playwright, SDK and loader pins are entries in this complete lock contract.
+                  const fingerprint = (ref) => {
+                    try {
+                      const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+                      const read = path => JSON.parse(execFileSync("git", ["show", `${ref}:${path}`], {encoding:"utf8", stdio:["ignore","pipe","ignore"]}));
+                      const lock = read("package-lock.json");
+                      if (!object(lock) || (lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3) || !object(lock.packages) || !object(lock.packages[""])) return undefined;
+                      const manifests = new Set(["package.json"]);
+                      for (const [path,entry] of Object.entries(lock.packages)) {
+                        if (!object(entry)) return undefined;
+                        if (path && entry.link !== true && typeof entry.version !== "string") return undefined;
+                        if (entry.link === true) {
+                          if (typeof entry.resolved !== "string" || !/^[\w@./-]+$/.test(entry.resolved) || entry.resolved.startsWith("/") || entry.resolved.split("/").some(part => part === "..") || !object(lock.packages[entry.resolved])) return undefined;
+                          manifests.add(`${entry.resolved}/package.json`);
+                        }
+                      }
+                      const inputs = {"package-lock.json":lock};
+                      for (const path of [...manifests].sort()) { const manifest=read(path); if (!object(manifest)) return undefined; inputs[path]=manifest; }
+                      const canonical = value => Array.isArray(value) ? value.map(canonical) : object(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key,canonical(value[key])])) : value;
+                      return JSON.stringify(canonical(inputs));
+                    } catch { return undefined; }
+                  };
+                  const before=fingerprint(process.env.BEFORE_SHA), after=fingerprint(process.env.AFTER_SHA);
+                  console.log(before === undefined || after === undefined || before !== after ? "true" : "false");
+                ')"
               else
                 # The push filter fired but this push touched none of the watched paths at all —
                 # should not happen given the `paths:` filter above, but skip rather than guess.
