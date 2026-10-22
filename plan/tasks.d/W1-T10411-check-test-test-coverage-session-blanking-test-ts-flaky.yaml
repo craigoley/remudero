@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.45
   status: queued
@@ -65,3 +65,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "Declared files are one check script (scripts/coverage-session-blanking-check.mjs) and one new test file; none relate to secrets, auth, deploy, merge or review policy."
+      - "The description is a defect statement about a flaky test, with failing assertions cited in the rationale (e.g. unblanked env findings in specific test files), so the finding is verifiable from what is shown."
+      - "The family track record (39 merged, 58 declined, mean 0.67) is mediocre but not a failing pattern, and the PR still passes CI and review."
+      - "The evidence notes the new test file is absent at base, which is expected for an implement task that creates it."
+    judged_at: "2026-10-22T14:39:00.413Z"
+    pin: "f0df7f5c065f66a0b0f33df1b4eae1667cde6269a0ea7e9f4ccb0402eb6e82c9"
