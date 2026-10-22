@@ -1105,6 +1105,7 @@ import {
   applyAutomateVerdict,
   awaitingRelease,
   releaseEscalatedKeys,
+  observedStateOfProposalSummary,
   type ShardUnderJudgement,
   type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
@@ -32980,11 +32981,12 @@ export async function defaultVerifyHumanCadenceResult(
     const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
     const ledgerPath = ledgerPathFor(config);
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
+    const judgedRows = rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows);
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const result = await verifyHumanCadence({
       shards: withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME }),
-      priorVerdicts: priorVerifyHumanVerdicts(rows),
-      priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
+      priorVerdicts: priorVerifyHumanVerdicts(judgedRows),
+      priorAgeBandKeys: priorVerifyHumanAgeBandKeys(judgedRows),
       judge: shadowedVerifyHumanJudge({
         mounts: loadMounts(mountsPath(repoRoot)),
         config,
@@ -48799,7 +48801,7 @@ export async function routeAdaptiveLifetimePressure(
     });
   const result = await routeVerifyHumanBacklog(shards, {
     judge: async (shard) => rulings.get(observedStateKey(shard)) ?? judge(shard),
-    priorVerdicts: priorVerifyHumanVerdicts(rows),
+    priorVerdicts: priorVerifyHumanVerdicts(rowsWithArchivedVerifyHumanVerdicts(deps.ledgerPath, rows)),
     maxJudged: tasks.length,
     stageProposal: (proposal) =>
       void stageInboxProposalOnce(join(deps.config.root, "state", "inbox-proposals.json"), proposal),
@@ -48912,6 +48914,16 @@ export async function routeVerifyHumanBacklog(
     result.backlog.push(shard.id);
   }
   return result;
+}
+
+/**
+ * W1-T10077: the live ledger's rows with every archived `verify_human.judged` row ahead of them, so a settled shard
+ * whose row rotated out of the carry-capped live file is not judged again. The live rows come last and win a key.
+ * An archive that cannot be read whole contributes what it did read: a missing row only ever costs one more judge call.
+ */
+export function rowsWithArchivedVerifyHumanVerdicts(ledgerPath: string, live: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const archived = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [VERIFY_HUMAN_JUDGED_STEP] });
+  return [...archived.rows, ...live];
 }
 
 /** Verdicts already on the ledger, keyed by the observed state they were taken against —
@@ -49091,7 +49103,7 @@ export async function verifyHumanSweepCommand(
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
   const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
-  const priorVerdicts = priorVerifyHumanVerdicts(rows);
+  const priorVerdicts = priorVerifyHumanVerdicts(rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows));
 
   if (dryRun) {
     const due = shardsNeedingJudgement(shards, priorVerdicts);
@@ -49572,15 +49584,19 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = resolveOwnerRepo();
+  const summaries = new Map<string, string>();
   return proposalVerdictCommand(
     kind,
     rest,
     (id) => {
       const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
+      if (proposal) summaries.set(id, proposal.summary);
       return { exists: proposal !== undefined, classification };
     },
     (step, id, reason) => {
-      const row = appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason });
+      // W1-T10077: a decline of a verify-human proposal records the state it was given on.
+      const observedState = step === "panel.proposal_declined" ? observedStateOfProposalSummary(summaries.get(id) ?? "") : undefined;
+      const row = appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason, ...(observedState ? { observed_state: observedState } : {}) });
       // W1-T9252: the action also lands on the item's thread; a store fault never fails the verb.
       recordRowThreadEvents({ ...row, task_id: id, origin: "rmd-cli", reason }, [{ id }], { threadStorePath: inboxThreadStorePath(config.root) },
         (failed, extra) => console.error(`rmd ${row.step}: ${failed} ${JSON.stringify(extra)}`));
