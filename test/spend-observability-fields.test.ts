@@ -68,10 +68,8 @@ import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/work
 // injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
 const FAKE_PR_BODY = "Implements the task.\n\nRemudero-Task: fixture";
 
-// One read call site for both owners: runTask/runTaskBody (W1-T9332) live in the verb module.
-const readSrcText = (rel: string) => readFileSync(fileURLToPath(new URL(`../src/${rel}`, import.meta.url)), "utf8");
-const runTaskSrc = readSrcText("run-task.ts");
-const runTaskVerbSrc = readSrcText("cli/commands/run-task-verb.ts");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8") + "\n" +
+  readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 const JUDGE_MOUNT: Mount = { model: "haiku", effort: "low", maxTurns: 40, contextBudget: 40000 };
 const FIX_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
@@ -621,9 +619,9 @@ test("W1-T2383 (rank 5): a SECOND dispatch of the same task at the same plan_sha
 });
 
 test("W1-T2383 (rank 5, Q3): recon.reused/absent/invalidated logging adds no timer — the branch that decides them runs synchronously before any spawn", () => {
-  const from = runTaskVerbSrc.indexOf('log("recon.reused"');
-  const to = runTaskVerbSrc.indexOf('log("recon.absent"', from);
+  const from = runTaskSrc.indexOf('log("recon.reused"');
+  const to = runTaskSrc.indexOf('log("recon.absent"', from);
   assert.ok(from > 0 && to > from);
-  const region = runTaskVerbSrc.slice(from - 400, to + 200);
+  const region = runTaskSrc.slice(from - 400, to + 200);
   assert.equal(/setTimeout|setInterval/.test(region), false, "the reuse/absent/invalidated decision itself never paces or sleeps");
 });

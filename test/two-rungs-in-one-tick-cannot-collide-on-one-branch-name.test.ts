@@ -134,10 +134,8 @@ test("acceptance (1,5): two rungs minted in the SAME millisecond get DISTINCT wo
 });
 
 test("acceptance (2): retro/triage/plan each carry the per-rung component (nextLaneEpochMs) — regression guard against reintroducing bare Date.now() at any ONE of those three sites", () => {
-  // One read call site for both owners (W1-T9332 moved runTask — the task lane — into its own module).
-  const readSrc = (...rel: string[]) => readFileSync(join(repoRoot, "src", ...rel), "utf8");
-  const src = readSrc("run-task.ts");
-  const verbSrc = readSrc("cli", "commands", "run-task-verb.ts");
+  const src = readFileSync(join(repoRoot, "src", "run-task.ts"), "utf8") + "\n" +
+    readFileSync(join(repoRoot, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   // The retro lane has no other per-instance id, so its whole fix IS this line.
   const retroMints = src.match(/const runId = `RETRO-\$\{[^}]*\}`;/g) ?? [];
   assert.equal(retroMints.length, 1, `expected exactly one retro runId mint, found ${retroMints.length}`);
@@ -145,14 +143,10 @@ test("acceptance (2): retro/triage/plan each carry the per-rung component (nextL
 
   // Triage (`TRIAGE-<feedbackId>`) and plan (`PLAN-<mode>`) both build their runId as
   // `${taskId}-${...}` — textually IDENTICAL to the task lane's OWN runId mint (acceptance 3,
-  // below) except for what fills the epoch slot. There must be exactly THREE such sites across
-  // the two owners (task in run-task-verb.ts; triage, plan in run-task.ts): two on nextLaneEpochMs(),
-  // one deliberately still on bare Date.now() — see acceptance (3) for why the task lane is the
-  // one exception.
-  const taskShapedMints = [
-    ...(src.match(/const runId = `\$\{taskId\}-\$\{[^}]*\}`;/g) ?? []),
-    ...(verbSrc.match(/const runId = `\$\{taskId\}-\$\{[^}]*\}`;/g) ?? []),
-  ];
+  // below) except for what fills the epoch slot. There must be exactly THREE such sites in the
+  // whole file (task, triage, plan): two on nextLaneEpochMs(), one deliberately still on bare
+  // Date.now() — see acceptance (3) for why the task lane is the one exception.
+  const taskShapedMints = src.match(/const runId = `\$\{taskId\}-\$\{[^}]*\}`;/g) ?? [];
   assert.equal(
     taskShapedMints.length,
     3,

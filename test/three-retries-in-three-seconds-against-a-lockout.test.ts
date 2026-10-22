@@ -37,12 +37,11 @@ function recorder() {
 }
 
 test("the production retry driver is given a backoff and no longer retries with zero delay", () => {
-  // The call lives in runTaskBody, which W1-T9332 moved out of src/run-task.ts into its own module.
   const src = readFileSync(join(import.meta.dirname, "..", "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   assert.match(
     src,
     /runDiagnoseThenRetry\(\{[\s\S]{0,400}?sleep: \(ms\) => new Promise\(\(resolve\) => setTimeout\(resolve, ms\)\)/,
-    "run-task-verb.ts's runDiagnoseThenRetry call must supply a real `sleep` — its absence WAS the defect",
+    "run-task.ts's runDiagnoseThenRetry call must supply a real `sleep` — its absence WAS the defect",
   );
 });
 
