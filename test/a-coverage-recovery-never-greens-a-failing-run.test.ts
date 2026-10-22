@@ -27,7 +27,7 @@ function workspace(t: TestContext) {
 
 // A suite whose first test runs a "nested node --test" that prints its own bare summary, then truncates a
 // child report; `failing` adds a real failure after it.
-function nestedSummaryFixture(t: TestContext, nested: string, failing: boolean) {
+function nestedSummaryFixture(t: TestContext, nested: string, failing: boolean, skipped = false) {
   const dir = workspace(t);
   writeFileSync(join(dir, "fixture.test.mjs"), `
 import assert from "node:assert/strict";
@@ -41,6 +41,7 @@ test("a census that runs its own nested node --test", () => {
   if (process.env.NODE_V8_COVERAGE) writeFileSync(join(process.env.NODE_V8_COVERAGE, ${JSON.stringify(truncated)}), ${JSON.stringify(partialReport)});
 });
 if (${JSON.stringify(failing)}) test("W1-T5935: the rotation census", () => assert.fail("a real failure"));
+if (${JSON.stringify(skipped)}) test("a platform-specific fixture", { skip: true }, () => {});
 `);
   return dir;
 }
@@ -108,4 +109,48 @@ test("W1-T8585: an all-pass run with a truncated report still recovers", (t) => 
   assert.equal(existsSync(join(dir, "raw", truncated)), false);
   assert.equal(existsSync(join(dir, "raw-unparseable", truncated)), true);
   assert.match(readFileSync(join(dir, "lcov.info"), "utf8"), /^FNDA:1,covered$/m);
+});
+
+test("a passing coverage run with a counted skip recovers its truncated report and retains measured source", (t) => {
+  const dir = nestedSummaryFixture(t, "", false, true);
+  const result = runSuite(dir);
+  assert.match(result.output, /^# tests 2$/m);
+  assert.match(result.output, /^# pass 1$/m);
+  assert.match(result.output, /^# skipped 1$/m);
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, RECOVERED);
+  assert.equal(existsSync(join(dir, "raw-unparseable", truncated)), true);
+  const lcov = readFileSync(join(dir, "lcov.info"), "utf8");
+  assert.match(lcov, /^SF:source\.mjs$/m);
+  assert.match(lcov, /^FNDA:1,covered$/m);
+});
+
+test("a counted skip never lets a nested passing summary hide a real coverage-run failure", (t) => {
+  const dir = nestedSummaryFixture(t, "# tests 2\n# pass 2\n# fail 0\n# cancelled 0\n", true, true);
+  const result = runSuite(dir);
+  assert.match(result.output, /^# tests 3$/m);
+  assert.match(result.output, /^# fail 1$/m);
+  assert.match(result.output, /^# skipped 1$/m);
+  assert.notEqual(result.code, 0, result.output);
+  assert.doesNotMatch(result.output, RECOVERED);
+  assert.equal(existsSync(join(dir, "raw-unparseable")), false);
+});
+
+test("a coverage run with no passing tests or an unresolved todo never recovers a truncated report", (t) => {
+  for (const kind of ["skip", "todo"]) {
+    const dir = workspace(t);
+    writeFileSync(join(dir, "fixture.test.mjs"), `
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+await import("./source.mjs");
+writeFileSync(join(process.env.NODE_V8_COVERAGE, ${JSON.stringify(truncated)}), ${JSON.stringify(partialReport)});
+test("unexecuted fixture", { ${kind}: true }, () => {});
+`);
+    const result = runSuite(dir);
+    assert.match(result.output, /^# pass 0$/m);
+    assert.notEqual(result.code, 0, result.output);
+    assert.doesNotMatch(result.output, RECOVERED);
+    assert.equal(existsSync(join(dir, "raw-unparseable")), false);
+  }
 });
