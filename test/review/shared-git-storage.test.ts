@@ -3,7 +3,7 @@ import {spawnSync} from 'node:child_process';
 import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,renameSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
 import {homedir,hostname} from 'node:os';import{dirname,join,resolve}from'node:path';import test,{type TestContext}from'node:test';
 import {readSharedGitPolicy,readSharedWorkspaceCapacity,borrowedWorkspaceWorker,createSharedWorkspace} from '#scripts/lib/shared-workspace.mjs';
-import {fileURLToPath,pathToFileURL} from 'node:url';
+import {pathToFileURL} from 'node:url';
 import {main} from '#scripts/shared-workspace.mjs';
 import {resolveTestSlotDir,testSlotProcessFacts} from '#src/lib/test-slot.js';
 import {writeMutantModule} from '#test/helpers/mutant-module.js';
