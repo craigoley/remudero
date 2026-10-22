@@ -347,8 +347,8 @@ function isNodeTestRun(cmd, args) {
 
 async function runOnce(cmd, args, env = process.env) {
   if (!isNodeTestRun(cmd, args)) return runChild(cmd, args, env);
-  const judged = prepareJudgedRun();
   const files = testFilesInArgv(args, process.cwd());
+  const judged = prepareJudgedRun({ files, root: process.cwd() });
   const first = await runChild(cmd, judgedNodeTestArgs(args, judged.args), { ...env, ...judged.env });
   const lines = [];
   const { status, verdict } = closeJudgedRun(judged, files, {
