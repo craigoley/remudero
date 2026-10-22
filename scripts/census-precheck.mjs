@@ -1153,6 +1153,8 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
   { testFile: "test/rules/scout-config-gardener-failed.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.some((p) => [
       "src/run-task.ts", "src/lib/config-gardener.ts", "scripts/build-child-entries.mjs",
+      "src/lib/child-entry-argv.ts", "scripts/mount-headroom-sweep.mjs",
+      "package.json", "package-lock.json", "tsconfig.json",
       "test/rules/scout-config-gardener-failed.test.ts",
     ].includes(p)),
     remedy: "load the config garden and bundled measurement worker with the TypeScript loader" },
