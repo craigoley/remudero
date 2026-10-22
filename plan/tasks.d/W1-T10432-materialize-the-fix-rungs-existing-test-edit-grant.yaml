@@ -81,3 +81,11 @@
     child; after the fix, it reaches the next worker. Delete the production fix and rerun:
     the new caller regression must fail, then pass when restored. Negative controls must
     retain plan-only, unrelated src/, sibling-directory, traversal and absent-scope refusals.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.99
+    reasons:
+      - "high-risk verdict at confidence 0.99 — on the change's description/files alone, no diff was read — The filed note explicitly parks this task for an operator decision and requires approval of the exact bounded repair before publishing or activating it; no such approval is shown.; on the change's description/files alone, no diff was read — The acceptance criteria bound the proposed remedy to the existing test-edit grant and preserve scope refusals, but the record expressly states that filing does not approve or activate the scope change."
+    judged_at: "2026-10-22T20:17:15.507Z"
+    pin: "5a2e55777a5b36dd55ec9f2a3430da9e835a5b83ce307ad490be3a791aafacc8"
