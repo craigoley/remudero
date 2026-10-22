@@ -4,7 +4,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { ghBrokerDir } from "#src/lib/gh-read-broker-client.js";
+import { ghBrokerDir, GH_BROKER_SOCKET } from "#src/lib/gh-read-broker-client.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "#src/lib/short-path-root.js";
 import {
   brokerGhReadAs, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, GhReadBroker, GhSharedPace, isGhPaceLogin, serveGhReadBroker,
   summariseGhBrokerLog,
@@ -22,11 +23,25 @@ const HOOK = join(REPO_ROOT, "hooks/deny-floor.sh");
 const INSTALLER = join(REPO_ROOT, "deploy/mac/install-gh-read-broker.sh");
 const LOGIN = "octo";
 
-function tmp(t: TestContext, tag: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `rmd-codex-${tag}-`));
+function tmp(t: TestContext, tag: string, base = tmpdir()): string {
+  const prefix = `rmd-codex-${tag}-`;
+  const root = shortPathWhenTooLong(join(base, prefix), short => join(short, prefix),
+    path => Buffer.byteLength(join(ghBrokerDir({ RMD_GH_CACHE_HOME: `${path}XXXXXX` })!, GH_BROKER_SOCKET)) <= MAX_UNIX_SOCKET_PATH_BYTES,
+    existsSync);
+  const dir = mkdtempSync(root);
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+test("the broker fixture keeps its complete socket path within the platform limit under a long temporary root", (t) => {
+  const deep = join(tmp(t, "long-base"), "x".repeat(MAX_UNIX_SOCKET_PATH_BYTES));
+  mkdirSync(deep);
+  assert.ok(Buffer.byteLength(join(ghBrokerDir({ RMD_GH_CACHE_HOME: deep })!, GH_BROKER_SOCKET)) > MAX_UNIX_SOCKET_PATH_BYTES,
+    "the control really exceeds the platform socket limit");
+  const dir = tmp(t, "cli-cache", deep);
+  assert.ok(Buffer.byteLength(join(ghBrokerDir({ RMD_GH_CACHE_HOME: dir })!, GH_BROKER_SOCKET)) <= MAX_UNIX_SOCKET_PATH_BYTES,
+    "the full socket suffix and mkdtemp randomness must fit before a broker starts");
+});
 
 function virtualClock(start = 1_800_000_000_000) {
   let now = start;
