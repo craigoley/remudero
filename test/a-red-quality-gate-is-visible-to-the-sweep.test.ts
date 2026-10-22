@@ -325,7 +325,7 @@ test("early CI shard repair excludes absence verdicts, optional families and unr
     assert.deepEqual(redQualityGateNames([{ ...failed, conclusion }], CI_GATE_REQUIRED), [], String(conclusion));
   }
   for (const required of [undefined, [], ["commitlint"]]) assert.deepEqual(redQualityGateNames([failed], required), []);
-  for (const name of ["coverage-shard (5/8)", "test-slow-shard (1/2)", "optional-scanner", "ci-shard (bad)", "ci-shard (5/8) extra"]) {
+  for (const name of ["coverage-shard (bad)", "test-slow-shard (1/2)", "optional-scanner", "ci-shard (bad)", "ci-shard (5/8) extra"]) {
     assert.deepEqual(redQualityGateNames([{ ...failed, name }], CI_GATE_REQUIRED), [], name);
   }
   assert.deepEqual(redQualityGateNames([{ context: failed.name, state: "FAILURE" }], CI_GATE_REQUIRED), [], "a synthetic commit status is not a matrix job");
@@ -335,4 +335,53 @@ test("early CI shard repair excludes absence verdicts, optional families and unr
 test("early CI shard repair accepts a one-shot required-contract iterable", () => {
   function* required() { yield "ci"; }
   assert.deepEqual(redQualityGateNames([rollupCheck({ name: "ci-shard (5/8)", conclusion: "FAILURE" })], required()), ["ci-shard (5/8)"]);
+});
+
+test("a terminal coverage shard failure reaches repair before its required parent finishes", () => {
+  const rollup = [
+    rollupCheck({ name: "ci-gate", status: "in_progress", conclusion: undefined }),
+    rollupCheck({ name: "ci", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "coverage-shard (1/8)", status: "in_progress", conclusion: undefined }),
+    rollupCheck({ name: "coverage-shard (6/8)", conclusion: "FAILURE" }),
+  ];
+  const before = JSON.stringify(rollup);
+  for (const parent of [[], [rollupCheck({ name: "coverage-ratchet", status: "in_progress", conclusion: undefined })]]) {
+    for (const required of [["coverage-ratchet"], CI_GATE_REQUIRED]) {
+      const input = [...rollup, ...parent];
+      const checksState = checksStateFromRollup(input, BRANCH_PROTECTION_REQUIRED);
+      const redRequiredChecks = redQualityGateNames(input, required);
+      assert.equal(checksState, "pending", "merge eligibility still waits for the required aggregate");
+      assert.deepEqual(redRequiredChecks, ["coverage-shard (6/8)"]);
+      assert.deepEqual(earlyRedEvidenceRollup(input, redRequiredChecks).map(c => c.name), ["coverage-shard (6/8)"]);
+      const disposition = deriveDisposition(basePr({ checksState, redRequiredChecks }), DEFAULT_SWEEP_POLICY, NOW);
+      assert.equal(disposition.disposition, "blocked-fixable");
+      assert.match(disposition.reason, /coverage-shard \(6\/8\)/);
+    }
+  }
+  assert.equal(JSON.stringify(rollup), before);
+});
+
+test("early coverage shard repair preserves its contract, parent and latest-attempt controls", () => {
+  const failed = rollupCheck({ name: "coverage-shard (6/8)", conclusion: "FAILURE" });
+  for (const conclusion of ["SUCCESS", "NEUTRAL", "SKIPPED"]) {
+    assert.deepEqual(redQualityGateNames([failed, rollupCheck({ name: "coverage-ratchet", conclusion })], CI_GATE_REQUIRED), []);
+  }
+  for (const conclusion of ["", "SUCCESS"]) {
+    const retry = rollupCheck({ name: failed.name, conclusion, status: conclusion ? "completed" : "in_progress", startedAt: "2026-08-30T13:51:00Z" });
+    for (const input of [[retry, failed], [failed, retry]]) {
+      assert.deepEqual(redQualityGateNames(input, CI_GATE_REQUIRED), [], "the newest retry wins in either input order");
+    }
+  }
+  for (const required of [undefined, [], ["ci"], ["commitlint"]]) {
+    assert.deepEqual(redQualityGateNames([failed], required), [], "the coverage parent must be required");
+  }
+  for (const conclusion of [undefined, "", "SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED", "TIMED_OUT", "ERROR", "ACTION_REQUIRED", "STALE"]) {
+    assert.deepEqual(redQualityGateNames([{ ...failed, conclusion }], CI_GATE_REQUIRED), [], String(conclusion));
+  }
+  assert.deepEqual(redQualityGateNames([{ context: failed.name, state: "FAILURE" }], CI_GATE_REQUIRED), [], "a synthetic status is not a matrix job");
+  assert.deepEqual(redQualityGateNames([failed, rollupCheck({ name: "lint-plan", conclusion: "FAILURE" })], CI_GATE_REQUIRED), ["lint-plan"]);
+  assert.deepEqual(redQualityGateNames([failed, rollupCheck({ name: "coverage-ratchet", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "ci-shard (5/8)", conclusion: "FAILURE" })], CI_GATE_REQUIRED), ["ci-shard (5/8)"], "a successful coverage parent does not hide a failed CI family");
+  function* required() { yield "coverage-ratchet"; }
+  assert.deepEqual(redQualityGateNames([failed], required()), ["coverage-shard (6/8)"]);
 });
