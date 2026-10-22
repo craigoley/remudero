@@ -6,7 +6,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=6d9d561e892c7b85
+  # backlog gardener: placed=2026-10-22T15:48:40.920Z
   attempts: 0
   files:
     - src/lib/measurement-cadence.ts
