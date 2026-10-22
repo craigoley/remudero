@@ -70,7 +70,7 @@ import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapp
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, setGhReadActorResolver, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
@@ -15177,12 +15177,13 @@ export function buildProofAmendmentWritePorts(
     assertLiveWriteAllowedFn?: typeof assertLiveWriteAllowed;
   } = {},
 ): ProofAmendmentWritePorts {
+  const scope = params.amendmentKind === "scope_amendment";
   const {
     findShardFn = findTaskShard,
     worktreeAddFn = worktreeAdd,
     worktreeRemoveFn = worktreeRemove,
     writeFileFn = (absPath: string, text: string) => writeFileSync(absPath, text),
-    gitPushFn = (wp: string, branch: string, expectedHeadSha: string) => gitPushRunBranch(wp, { stdio: "ignore", expectedHeadSha }),
+    gitPushFn = (wp: string, branch: string, expectedHeadSha: string) => gitPushRunBranch(wp, { stdio: "ignore", expectedHeadSha, ...(scope ? { destination: branch } : {}) }),
     ghJsonFn = ghJson,
     probeExistingPlanPrFn = probeExistingPlanPr,
     createPlanPrRestFn = createPlanPrRest,
@@ -15191,12 +15192,12 @@ export function buildProofAmendmentWritePorts(
     assertLiveWriteAllowedFn = assertLiveWriteAllowed,
   } = io;
   const { taskId, worktreePath, config, owner, repo, prNumber, ledgerLinesNow, log, gitOps } = params;
-  const scope = params.amendmentKind === "scope_amendment";
   return {
     repoDir: worktreePath,
     findShard: findShardFn,
     worktreeAdd: (repoDir, wp, branch) => {
-      worktreeAddFn(repoDir, wp, branch, "origin/main", { log });
+      const localBranch = scope ? `${branch}-attempt-${randomUUID()}` : branch;
+      worktreeAddFn(repoDir, wp, localBranch, "origin/main", { log });
     },
     worktreeRemove: (repoDir, wp) => worktreeRemoveFn(repoDir, wp),
     writeFile: writeFileFn,
