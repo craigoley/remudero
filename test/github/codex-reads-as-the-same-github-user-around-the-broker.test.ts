@@ -460,7 +460,7 @@ test("W1-T10302: the registered `rmd gh-broker` handler serves, reports the logi
     return (realWrite as (...args: unknown[]) => boolean).call(process.stdout, chunk, ...rest);
   }) as typeof process.stdout.write;
 
-  const serving = handler(["serve"]);
+  const serving = Promise.resolve(handler(["serve"]));
   // A serve that fails to start is reported by the assertions below, not as an unhandled rejection.
   serving.catch(() => undefined);
   const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
