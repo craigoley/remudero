@@ -3,13 +3,13 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { fixedClock } from "#src/lib/clock.js";
 import type { GardenCheckout, GardenerDeps } from "#src/lib/gardener.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { scoutGardenSpec, scoutShard } from "#src/lib/scout-gardener.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const symptom = { step: "inbox.draft_error", older: 2, newer: 3, total: 5, files: [] };
 
@@ -34,7 +34,7 @@ test("scout writer discovery finishes after nested templates and ignores later c
     catch (error) { refusal = String(error); }
     process.stdout.write(JSON.stringify({ ...result, refusal }));`;
   const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", program], {
-    cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", timeout: 10_000,
+    cwd: REPO_ROOT, encoding: "utf8", timeout: 10_000,
   });
   assert.ifError(child.error);
   assert.equal(child.status, 0, child.stderr);
