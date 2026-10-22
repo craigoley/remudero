@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 import * as amendments from "../src/lib/proof-amendment.js";
 import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import { runFixRung } from "./helpers/run-task-test.js";
+import { buildProofAmendmentGitOps, buildProofAmendmentWritePorts, runFixRung } from "./helpers/run-task-test.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { fixRoundTally } from "../src/lib/sweep.js";
 import { ENTANGLEMENT_EXEMPT_INSTRUMENTS } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
@@ -118,9 +119,10 @@ test("scope amendment production ports commit only the shard and resume from led
   repo.git("config", "user.name", "scope fixture");
   repo.git("config", "user.email", "fixture@example.invalid");
   let merged = false;
+  let amendmentLocalBranch = "";
   delete opts.deps.scopeAmendmentWritePorts;
   opts.deps.scopeAmendmentPortsIo = {
-    worktreeAddFn: (_repo, wp, branch) => { repo.addWorktree(wp, branch, "origin/main"); },
+    worktreeAddFn: (_repo, wp, branch) => { amendmentLocalBranch = branch; repo.addWorktree(wp, branch, "origin/main"); },
     worktreeRemoveFn: (_repo, wp) => { repo.git("worktree", "remove", "--force", wp); },
     writeFileFn: (path, text) => { p.deps.writeFile(path, text); writeFileSync(path, text); },
     gitPushFn: p.deps.gitPush, probeExistingPlanPrFn: () => undefined,
@@ -129,8 +131,8 @@ test("scope amendment production ports commit only the shard and resume from led
     ghExecFn: (() => { p.updates.push(headSha); return Buffer.from(""); }) as unknown as NonNullable<NonNullable<typeof opts.deps.scopeAmendmentPortsIo>["ghExecFn"]>,
   };
   assert.equal((await runFixRung(opts)).strikes, 0);
-  assert.deepEqual(repo.git("diff", "--name-only", "origin/main", `scope-amendment/${taskId}-42`).split("\n"), [shardPath]);
-  assert.deepEqual(parse(repo.git("show", `scope-amendment/${taskId}-42:${shardPath}`))[0].files, ["src/existing.ts", "src/new.ts"]);
+  assert.deepEqual(repo.git("diff", "--name-only", "origin/main", amendmentLocalBranch).split("\n"), [shardPath]);
+  assert.deepEqual(parse(repo.git("show", `${amendmentLocalBranch}:${shardPath}`))[0].files, ["src/existing.ts", "src/new.ts"]);
   assert.equal(readFileSync(join(repo.dir, shardPath), "utf8"), shard);
   await runFixRung(opts);
   assert.equal(p.prs.length, 1);
@@ -254,4 +256,99 @@ test("scope amendments deduplicate a path set and preserve block files and other
   assert.equal(amendments.requestScopeAmendment(request(), { ...probed.deps,
     probeExisting: () => ({ prUrl: "existing", prNumber: 99 }) }).kind, "resumed");
   assert.deepEqual(probed.writes, []);
+});
+
+
+test("a scope amendment retries after shard drift without reusing or deleting any existing local branch", t => {
+  const repo = gitRepo({ scope: t, kind: "scope-attempt-collision" });
+  const remote = gitRepo({ scope: t, kind: "scope-attempt-origin", bare: true });
+  repo.git("config", "user.name", "scope attempt fixture");
+  repo.git("config", "user.email", "scope-attempt@example.invalid");
+  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, shardPath), shard);
+  repo.git("add", "."); repo.git("commit", "-qm", "test: original observed scope");
+  const oldHead = repo.git("rev-parse", "HEAD");
+  writeFileSync(join(repo.dir, shardPath), "# protected main advanced\n" + shard);
+  repo.git("add", "."); repo.git("commit", "-qm", "test: current protected main scope");
+  const mainHead = repo.git("rev-parse", "HEAD"), stable = `scope-amendment/${taskId}-42`;
+  repo.addRemote("origin", remote.dir);
+  repo.git("push", "origin", "HEAD:refs/heads/main");
+  repo.git("update-ref", "refs/remotes/origin/main", mainHead);
+  repo.git("branch", stable, mainHead);
+  repo.git("checkout", "--detach", oldHead);
+  const rows: Record<string, unknown>[] = [], attempts: string[] = [], creations: string[] = [];
+  const ports = buildProofAmendmentWritePorts({ taskId, prNumber: 42, owner: "fixture", repo: "fixture",
+    worktreePath: repo.dir, config: { root: repo.dir } as Config, amendmentKind: "scope_amendment",
+    ledgerLinesNow: rows, log: (step, extra) => {
+      rows.push({ step, ...extra });
+      if (step === "worktree.add" && typeof extra?.branch === "string") attempts.push(extra.branch);
+    }, gitOps: buildProofAmendmentGitOps(),
+  }, {
+    worktreeRemoveFn: (_repo, wp) => { repo.git("worktree", "remove", "--force", wp); },
+    probeExistingPlanPrFn: (_read, _owner, _repo, branch) => { assert.equal(branch, stable); return undefined; },
+    isPrMergedNowFn: () => false,
+    createPlanPrRestFn: (_read, _owner, _repo, options) => {
+      assert.equal(options.head, stable); creations.push(options.head);
+      return { prUrl: "https://github.com/fixture/fixture/pull/99", prNumber: 99 };
+    }, assertLiveWriteAllowedFn: () => {},
+  });
+  const first = amendments.requestScopeAmendment(request(), ports);
+  assert.equal(first.kind, "refused");
+  if (first.kind === "refused") assert.equal(first.reason, "shard-drifted");
+  assert.equal(repo.git("rev-parse", stable), mainHead, "preserve the legacy amendment branch");
+  assert.equal(repo.git("rev-parse", attempts[0]!), mainHead, "preserve the refused attempt's branch");
+  assert.equal(existsSync(ports.worktreePathFor(taskId, 42)), false, "ordinary finally removes only the owned worktree");
+  repo.git("checkout", "--detach", mainHead);
+  // Only the real default push boundary is enabled, against the asserted private bare origin.
+  assert.equal(repo.git("remote", "get-url", "origin"), remote.dir);
+  const second = withLiveWritesAllowed(() => amendments.requestScopeAmendment(request(), ports));
+  assert.equal(second.kind, "created");
+  assert.equal(attempts.length, 2);
+  assert.notEqual(attempts[0], attempts[1]);
+  for (const name of attempts) assert.match(name, new RegExp(`^scope-amendment/${taskId}-42-attempt-[0-9a-f-]{36}$`));
+  assert.deepEqual(creations, [stable]);
+  assert.equal(repo.git("rev-parse", stable), mainHead);
+  assert.equal(repo.git("rev-parse", attempts[0]!), mainHead);
+  const pushed = remote.git("rev-parse", `refs/heads/${stable}`);
+  assert.equal(pushed, repo.git("rev-parse", attempts[1]!));
+  assert.deepEqual(parse(remote.git("show", `${pushed}:${shardPath}`))[0].files, ["src/existing.ts", "src/new.ts"]);
+  assert.equal(amendments.requestScopeAmendment(request(), ports).kind, "resumed");
+  assert.equal(attempts.length, 2, "existing identity resumes without creating another local attempt");
+  withLiveWritesAllowed(() => assert.throws(() => amendments.requestScopeAmendment(request(["src/another.ts"]), ports)));
+  assert.equal(remote.git("rev-parse", `refs/heads/${stable}`), pushed,
+    "a divergent remote identity is preserved by the default ordinary fast-forward push");
+  assert.deepEqual(creations, [stable], "a rejected push creates no second PR");
+  assert.equal(repo.git("rev-parse", stable), mainHead);
+  assert.equal(repo.git("rev-parse", attempts[0]!), mainHead);
+});
+
+test("scope amendment attempt selection preserves a foreign occupied worktree and reuses the stable open PR", t => {
+  const repo = gitRepo({ scope: t, kind: "scope-attempt-occupied" });
+  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true }); writeFileSync(join(repo.dir, shardPath), shard);
+  repo.git("add", "."); repo.git("commit", "-qm", "test: scope fixture");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  let existing = false, adds = 0;
+  const stable = `scope-amendment/${taskId}-42`;
+  const ports = buildProofAmendmentWritePorts({ taskId, prNumber: 42, owner: "fixture", repo: "fixture",
+    worktreePath: repo.dir, config: { root: repo.dir } as Config, amendmentKind: "scope_amendment",
+    ledgerLinesNow: [], log: () => {}, gitOps: buildProofAmendmentGitOps(),
+  }, {
+    worktreeAddFn: (_repo, wp, name) => { adds++; repo.addWorktree(wp, name, "origin/main"); },
+    worktreeRemoveFn: () => assert.fail("never remove a worktree this attempt did not create"),
+    gitPushFn: () => assert.fail("an occupied worktree cannot publish"),
+    probeExistingPlanPrFn: (_read, _owner, _repo, name) => {
+      assert.equal(name, stable);
+      return existing ? { prUrl: "https://github.com/fixture/fixture/pull/99", prNumber: 99 } : undefined;
+    }, createPlanPrRestFn: () => assert.fail("no new PR"), assertLiveWriteAllowedFn: () => {},
+  });
+  const path = ports.worktreePathFor(taskId, 42), foreign = repo.addWorktree(path, "foreign-owner", "origin/main");
+  writeFileSync(join(path, "unpublished.txt"), "foreign work must survive\n");
+  const before = foreign.git("rev-parse", "HEAD");
+  assert.throws(() => amendments.requestScopeAmendment(request(), ports));
+  assert.equal(foreign.git("branch", "--show-current"), "foreign-owner");
+  assert.equal(foreign.git("rev-parse", "HEAD"), before);
+  assert.equal(readFileSync(join(path, "unpublished.txt"), "utf8"), "foreign work must survive\n");
+  existing = true;
+  assert.equal(amendments.requestScopeAmendment(request(), ports).kind, "resumed");
+  assert.equal(adds, 1, "the stable existing PR is reused before another worktree attempt");
 });

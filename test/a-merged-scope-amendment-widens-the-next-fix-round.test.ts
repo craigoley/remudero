@@ -91,7 +91,7 @@ test("a merged scope amendment reaches the PR head through a branch update, and 
       scopeAmendmentPortsIo: {
         worktreeAddFn: (_repo, wp, name) => { repo.addWorktree(wp, name, "origin/main"); },
         worktreeRemoveFn: (_repo, wp) => { repo.git("worktree", "remove", "--force", wp); },
-        gitPushFn: (_wp, name, sha) => { pushes.push(`${name}@${sha}`); },
+        gitPushFn: (_wp, name, sha) => { pushes.push(`${name}@${sha}`); repo.git("update-ref", `refs/remotes/origin/${name}`, sha); },
         probeExistingPlanPrFn: () => undefined,
         createPlanPrRestFn: () => ({ prUrl: "https://github.com/acme/repo/pull/99", prNumber: 99 }) as ReturnType<NonNullable<NonNullable<ReturnType<typeof opts>["deps"]["scopeAmendmentPortsIo"]>["createPlanPrRestFn"]>>,
         isPrMergedNowFn: () => merged,
@@ -115,12 +115,12 @@ test("a merged scope amendment reaches the PR head through a branch update, and 
   const first = await runFixRung(opts(firstHead));
   assert.equal(first.outcome, "stood_down", first.reason);
   assert.equal(rows.findLast((r) => r.step === "fix.scope_amendment" && r.outcome !== undefined)?.outcome, "created");
-  assert.deepEqual(parse(repo.git("show", `${amendmentBranch}:${shardPath}`))[0].files, ["src/existing.ts", "src/new.ts"]);
+  assert.deepEqual(parse(repo.git("show", `refs/remotes/origin/${amendmentBranch}:${shardPath}`))[0].files, ["src/existing.ts", "src/new.ts"]);
   assert.equal(repo.git("rev-parse", "HEAD"), firstHead, "nothing was committed to the PR");
   rmSync(join(repo.dir, "src/new.ts"));
 
   // The amendment merges. The next round at the SAME head asks GitHub to update the branch and spends no worker.
-  repo.git("update-ref", "refs/remotes/origin/main", amendmentBranch);
+  repo.git("update-ref", "refs/remotes/origin/main", `refs/remotes/origin/${amendmentBranch}`);
   merged = true;
   const second = await runFixRung(opts(firstHead));
   assert.equal(second.reason, "awaiting scope amendment branch update");
