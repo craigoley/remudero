@@ -52,7 +52,8 @@ export function streakRefusal(line: Record<string, unknown>): string | undefined
     (line.verdict === "no_pr" && typeof line.reason === "string" && HARNESS_CHECKPOINT_NO_PR_REASONS.has(line.reason) ? line.reason : undefined);
 }
 
-/** The liveness bound (W1-T179, 30 minutes): a dispatched run with no newer ledger line is no longer trusted as running. */
+/** The liveness bound (W1-T179, 30 minutes): a dispatched run with no newer ledger line is no longer trusted as running.
+ *  BACKSTOP: it only ages out a run that went silent; the run's own terminal rows remain the primary signal. */
 export const DEFAULT_LIVENESS_BOUND_MS = 30 * 60_000;
 
 /** Rows a monitor writes ABOUT a run, so they are not rows the run itself produced. */
