@@ -50,6 +50,9 @@ export const ROUTE_MATCH = {
   // W1-T8831: console-only triage verbs; they have no CLI twin, so the rows are inert like `note` above until one lands.
   archive: "POST /v1/inbox/archive",
   snooze: "POST /v1/inbox/snooze",
+  // W1-T10079: rmd keep and rmd reply perform the route's own action from the shared INBOX_VERBS table.
+  keep: "POST /v1/inbox/keep",
+  reply: "POST /v1/inbox/thread/reply",
   peek: "GET /v1/peek",
   replay: "GET /v1/replay",
   skill: "GET /v1/skills",

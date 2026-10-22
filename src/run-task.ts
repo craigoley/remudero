@@ -244,7 +244,7 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
+import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { realThreadDecider, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { realRecommendationWriter } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -726,7 +726,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -49406,6 +49406,16 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
+export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
+  const { owner, repo } = deps ? { owner: "", repo: "" } : resolveOwnerRepo();
+  const actions = buildInboxVerbActions(deps ?? {
+    root: repoRoot, inboxRoot: config.root, planPath: join(repoRoot, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+    github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
+    ratify: ratifyCliGateway(repoRoot, join(config.root, "logs")),
+  });
+  return inboxVerbCommand(name, rest, actions);
+}
+
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
@@ -53783,6 +53793,31 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range",
   },
 
+  {
+    name: "reply",
+    syntax: 'rmd reply <threadId> --text "<text>" [--intent-id <id>]',
+    summary: "Reply on an operator inbox thread.",
+    detail: inboxVerbHelp("reply").detail,
+  },
+  {
+    name: "archive",
+    syntax: "rmd archive <proposalId> [--unarchive]",
+    summary: "Set an inbox item aside, or undo its archive.",
+    detail: inboxVerbHelp("archive").detail,
+  },
+  {
+    name: "snooze",
+    syntax: "rmd snooze <proposalId> --until <RFC3339-UTC>|--wake",
+    summary: "Hide an inbox item until a UTC instant, or wake it now.",
+    detail: inboxVerbHelp("snooze").detail,
+  },
+  {
+    name: "keep",
+    syntax: 'rmd keep <proposalId> [--reason "<text>"] [--unkeep]',
+    summary: "Record the current observation as kept, or undo that decision.",
+    detail: inboxVerbHelp("keep").detail,
+  },
+
 ] as const;
 
 // W1-T2334: stated ONCE here, not pasted onto every "READ-ONLY"/"Read-only" line above (that
@@ -54605,6 +54640,10 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await reframeCommand(rest);
     },
   ],
+  ["reply", (rest) => inboxActionCliCommand("reply", rest)],
+  ["archive", (rest) => inboxActionCliCommand("archive", rest)],
+  ["snooze", (rest) => inboxActionCliCommand("snooze", rest)],
+  ["keep", (rest) => inboxActionCliCommand("keep", rest)],
 ]);
 
 /**

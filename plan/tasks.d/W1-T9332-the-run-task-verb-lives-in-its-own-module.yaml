@@ -16,6 +16,14 @@
     - src/cli/commands/run-task-verb.ts
     - src/lib/authority.ts
     - scripts/comment-load-baseline.json
+    - scripts/source-text-assertion-baseline.json
+    - scripts/bound-kind-baseline.json
+    - scripts/clock-signature-baseline.json
+    - scripts/house-layout-census.mjs
+    - scripts/census-precheck.mjs
+    - test/catch-erasure-ratchet.test.ts
+    - test/repo-layout.test.ts
+    - test/census-precheck-counts-the-house-layout-ratchet.test.ts
     - docs/base-ref-contract.md
     - test/the-run-task-verb-lives-in-its-own-module.test.ts
     - test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts
@@ -86,6 +94,12 @@
     on a multiple leaves none, and trimming a stale comment block in the moved region before recording fixes that.
     A moved comment block over `MAX_ADDED_BLOCK_LINES` (25) counts as ADDED in the new module; keep the move verbatim and
     let diff-coverage's relocation exemption and the ratchet's own report show it, never raise a limit.
+    ADDITIONAL OPERATOR COMMENT RULING, LIMITED TO THE THREE REVIEWED BLOCKS:
+    In src/cli/commands/run-task-verb.ts only, permit the reviewed prose condensation of the blocks headed
+    "W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG", "W1-T185 (Gap 1, criteria 2-3)", and
+    "ARM (W1-T125, DEFERRED BY W1-T975)": 43 to 23, 30 to 20, and 30 to 17 lines respectively.
+    Preserve their headings and operative caveats. Code tokens, AST, behavior, assertions, falsifiers and
+    MAX_ADDED_BLOCK_LINES remain unchanged. This does not authorize another comment edit or a limit raise.
   rationale: |
     MEASURED on origin/main bbab8894f, 2026-10-13. src/run-task.ts is 57,478 lines. Of 329 open tasks (no
     `Remudero-Task:` trailer on main, and a shard status that is not merged, retired, done or blocked), 105 declare it
@@ -133,6 +147,28 @@
        house-layout and sync-spawn checks must be satisfied by faithful implementation and existing semantics;
        no threshold, baseline allowance, scanner setting or acceptance proof is relaxed by this amendment.
        A gate requiring a separate relocation-only baseline ruling is escalated with exact per-site evidence.
+       ADDITIONAL OPERATOR RULING APPROVED IN THE 2026-10-21 STUCK-PR RECOVERY CHAT:
+       Permit only these exact physical-reader ceilings in source-text-assertion-baseline.json:
+       mounts-wiring, pr-create-rest-transport, review, risk-judge-description-is-the-defect,
+       review-provider-provenance and fix-spawn-bound-split: 1 to 2 each; verdict-calibration-join-fraction
+       and run-task: 2 to 3 each; recon-gaps-relayed: absent/0 to 2. All are existing test/*.test.ts
+       companions above. Retain every assertion, same-function ordering, whole-file absence check and
+       falsifier. The metered total rises 10 to 20: nine split-owner reads plus recon's already-existing
+       variable-path read becoming explicit. No marker, scanner exclusion or general future growth.
+       Rekey only the existing RECON_MAX_TURNS grandfathered bound to its actual module; transfer four
+       existing bare catches from run-task's 47 to 43 plus 4 in the module, and three existing
+       !parseReport(fullText(impl))?.prUrl conflator entries to their actual module. Populations stay
+       unchanged. Transfer the clock row from legacy/dateNow/newDate 21/49/37 to 20/48/32 plus 1/1/5
+       in the module; global recorded totals remain 97/150/216. No clock or catch behavior changes.
+       For house-layout ONLY, preserve the raw physical-file census and grant one duplicate-file
+       adjustment for each of plan/tasks.d, MASTER-PLAN.md, .remudero/ and learnings/ ONLY when the
+       merge base has the original src/run-task.ts owner and has no extracted module, both current
+       owners contain the token, and their combined occurrence count does not exceed the base's
+       original owner. No third file, extra occurrence, future token or missing base qualifies.
+       The shared qualifier must govern both the test and modeled pre-push gate, visibly report the
+       adjustment, and retain the six refusal/acceptance fixtures plus real pre-push agreement test.
+       These eight additional companion paths implement only this ruling; all other gates, original
+       acceptance criteria and falsifiers remain unchanged. Comment budgets still may not grow.
     5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is
        acceptable. Never shrink it by importing run-task.ts.
     Tests go in the new file test/the-run-task-verb-lives-in-its-own-module.test.ts, with `test(` titles exactly as in the proofs below. They read the two source
