@@ -713,6 +713,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.review_host_gap_rereview", // W1-T7850: same demand release for a refused POST, not completed review work.
   "sweep.fix.checkout_claim_declined",
   "sweep.fix.dispatch_failed",
+  "sweep.fix.prepare_timing", // The scanner fold reads the latest preparation owner across rotation.
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
