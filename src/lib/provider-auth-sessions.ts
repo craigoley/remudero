@@ -6,7 +6,7 @@
  * intentionally small boundary between the console gateway and provider-specific auth flows.
  */
 
-import { accessSync, constants as fsConstants } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync, rmSync } from "node:fs";
 import { spawn as spawnProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { readBoundedRawBody, RawBodyTooLargeError, type Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
+import { createClaudeFleetLoginStagingDir, replaceClaudeFleetCredential, type ClaudeFleetCredentialReplacement } from "./worker-home.js";
 
 export const PROVIDER_AUTH_VERSION = "provider-auth-v1" as const;
 export const PROVIDER_AUTH_TTL_MS = 10 * 60 * 1000;
@@ -22,6 +23,12 @@ const MAX_REASON_LENGTH = 240;
 const MAX_LABEL_LENGTH = 160;
 const MAX_AUTH_URL_LENGTH = 2_048;
 const CODEX_AUTH_HOSTS = new Set(["auth.openai.com", "chatgpt.com"]);
+/** W1-T10380: the hosts the pinned Claude CLI's `auth login` prints its authorize URL on (fixture in the test). */
+export const CLAUDE_AUTH_HOSTS = new Set(["claude.com", "claude.ai", "platform.claude.com", "console.anthropic.com"]);
+/** PRIMARY CONTROL: the longest pasted code the CLI is ever handed; anything longer is refused unread. */
+export const MAX_CLAUDE_CODE_LENGTH = 1_024;
+const MAX_CLAUDE_OUTPUT_LENGTH = 64 * 1024;
+const CLAUDE_CODE_WAIT_MS = 20_000;
 
 export type ProviderAuthProvider = "claude" | "codex";
 export type ProviderAuthState = "unavailable" | "unsupported" | "awaiting_browser" | "complete" | "failed" | "expired" | "cancelled";
@@ -34,6 +41,8 @@ export type ProviderAuthProfile = {
   credentialHome?: string;
   /** Server-only executable override. Never appears in a projection. */
   codexBin?: string;
+  /** Server-only Claude CLI override. Never appears in a projection. */
+  claudeBin?: string;
 };
 
 export type ProviderAuthProjection = {
@@ -46,6 +55,8 @@ export type ProviderAuthProjection = {
   authUrl: string | null;
   expiresAt: string;
   reason?: string;
+  /** W1-T10380: a redacted label for the account a completed Claude login now runs the fleet on. */
+  accountLabel?: string;
 };
 
 export type ProviderAuthInput = {
@@ -68,7 +79,18 @@ export type ProviderAuthSessionDeps = {
   spawn?: (command: string, args: string[], options: { env: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] }) => ProviderAuthChild;
   resolveCodexBin?: (profile: ProviderAuthProfile) => string | null;
   validateEffectiveProfile?: (profile: ProviderAuthProfile) => boolean | Promise<boolean>;
+  /** W1-T10380: the HOME whose `.claude/fleet-auth/claude` is the fleet store. Defaults to `homedir()`. */
+  claudeRealHome?: string;
+  /** W1-T10380: the real Claude CLI; may throw when none resolves. Defaults to the profile's or PATH's. */
+  resolveClaudeBin?: (profile: ProviderAuthProfile) => string | null;
+  replaceClaudeStore?: typeof replaceClaudeFleetCredential;
+  codeWaitMs?: number;
 };
+
+/** {@link ProviderAuthSessionStore.submitCode}'s answer; a projection never carries the code. */
+export type ProviderAuthCodeResult =
+  | { outcome: "not_found" }
+  | { outcome: "invalid" | "conflict" | "accepted"; projection: ProviderAuthProjection };
 
 type SessionRecord = {
   projection: ProviderAuthProjection;
@@ -77,6 +99,10 @@ type SessionRecord = {
   child?: ProviderAuthChild;
   loginId?: string;
   buffer: string;
+  /** W1-T10380: the session's private `CLAUDE_CONFIG_DIR`; removed on every terminal path. */
+  stagingDir?: string;
+  codeSubmitted?: boolean;
+  waiters?: Array<() => void>;
 };
 
 function clock(now?: () => number): ProviderAuthClock {
@@ -111,9 +137,13 @@ function profileFromUnknown(value: unknown): ProviderAuthProfile | null {
   const label = boundedText(candidate.label, MAX_LABEL_LENGTH);
   const credentialHome = boundedText(candidate.credentialHome ?? candidate.credential_home, 500);
   const codexBin = boundedText(candidate.codexBin ?? candidate.codex_bin, 500);
+  const claudeBin = boundedText(candidate.claudeBin ?? candidate.claude_bin, 500);
   if (!id || !provider || !label) return null;
   if (provider === "codex" && !credentialHome) return null;
-  return { id, provider, label, ...(credentialHome ? { credentialHome } : {}), ...(codexBin ? { codexBin } : {}) };
+  return {
+    id, provider, label,
+    ...(credentialHome ? { credentialHome } : {}), ...(codexBin ? { codexBin } : {}), ...(claudeBin ? { claudeBin } : {}),
+  };
 }
 
 /** Parse only the server-side profile catalog. Malformed configuration yields no usable profiles. */
@@ -138,12 +168,12 @@ export function readProviderAuthProfiles(env: NodeJS.ProcessEnv = process.env): 
   }
 }
 
-function allowedAuthUrl(value: unknown): string | null {
+function allowedAuthUrl(value: unknown, hosts: ReadonlySet<string> = CODEX_AUTH_HOSTS): string | null {
   const candidate = boundedText(value, MAX_AUTH_URL_LENGTH);
   if (!candidate) return null;
   try {
     const url = new URL(candidate);
-    if (url.protocol !== "https:" || !CODEX_AUTH_HOSTS.has(url.hostname.toLowerCase())) return null;
+    if (url.protocol !== "https:" || !hosts.has(url.hostname.toLowerCase())) return null;
     return url.toString();
   } catch {
     return null;
@@ -183,10 +213,13 @@ function codexEnvironment(profile: ProviderAuthProfile): NodeJS.ProcessEnv {
 }
 
 function defaultCodexBin(profile: ProviderAuthProfile): string | null {
-  const candidate = profile.codexBin;
+  return defaultProviderBin(profile.codexBin, "codex");
+}
+
+function defaultProviderBin(candidate: string | undefined, command: string): string | null {
   const resolved = candidate ?? (() => {
     try {
-      return execFileSync("which", ["codex"], { encoding: "utf8" }).trim();
+      return execFileSync("which", [command], { encoding: "utf8" }).trim();
     } catch {
       return null;
     }
@@ -211,6 +244,52 @@ function finishChild(record: SessionRecord, state: ProviderAuthState, reason?: s
     authUrl: state === "complete" ? null : record.projection.authUrl,
     ...(reason ? { reason: safeReason(reason) } : {}),
   };
+  if (record.stagingDir) {
+    rmSync(record.stagingDir, { recursive: true, force: true });
+    record.stagingDir = undefined;
+  }
+  for (const wake of record.waiters?.splice(0) ?? []) wake();
+}
+
+/** W1-T10380: the Claude CLI's environment — an allowlist, with HOME and CLAUDE_CONFIG_DIR both the
+ *  staging dir, so neither the fleet store nor the host's `~/.claude` is reachable from the login. */
+function claudeLoginEnvironment(stagingDir: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: stagingDir, HOME: stagingDir };
+  for (const key of ["PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME"]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return env;
+}
+
+/** A pasted authorization code: printable ASCII, no whitespace, length-bounded. Never stored. */
+function claudeCode(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const code = value.trim();
+  return code.length > 0 && code.length <= MAX_CLAUDE_CODE_LENGTH && /^[\x21-\x7e]+$/.test(code) ? code : null;
+}
+
+/** The first allowlisted authorize URL in the CLI's output, never any other text it printed. */
+function claudeAuthUrl(text: string): string | null {
+  for (const token of text.match(/https:\/\/[^\s"'<>]+/g) ?? []) {
+    const url = allowedAuthUrl(token, CLAUDE_AUTH_HOSTS);
+    if (url && new URL(url).pathname.includes("/oauth/authorize")) return url;
+  }
+  return null;
+}
+
+/** A redacted label for the account the CLI signed in (`j***@example.com`), from the staged `.claude.json`. */
+function redactedClaudeAccount(stagingDir: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(join(stagingDir, ".claude.json"), "utf8"));
+  } catch {
+    // The label annotates a completed login and never gates it: an absent or unparseable file has none.
+    return undefined;
+  }
+  const email = (parsed as { oauthAccount?: { emailAddress?: unknown } } | null)?.oauthAccount?.emailAddress;
+  if (typeof email !== "string") return undefined;
+  const at = email.lastIndexOf("@");
+  return at > 0 ? `${email[0]}***${email.slice(at)}`.slice(0, MAX_LABEL_LENGTH) : undefined;
 }
 
 function writeRpc(child: ProviderAuthChild, message: Record<string, unknown>): void {
@@ -276,6 +355,8 @@ export class ProviderAuthSessionStore {
   private readonly randomId: () => string;
   private readonly spawn: NonNullable<ProviderAuthSessionDeps["spawn"]>;
   private readonly resolveCodexBin: (profile: ProviderAuthProfile) => string | null;
+  private readonly resolveClaudeBin: (profile: ProviderAuthProfile) => string | null;
+  private readonly claudeRealHome: string;
 
   constructor(private readonly deps: ProviderAuthSessionDeps) {
     this.clock = clock(deps.now);
@@ -283,6 +364,8 @@ export class ProviderAuthSessionStore {
     this.randomId = deps.randomId ?? (() => randomBytes(24).toString("base64url"));
     this.spawn = deps.spawn ?? ((command, args, options) => spawnProcess(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
     this.resolveCodexBin = deps.resolveCodexBin ?? defaultCodexBin;
+    this.resolveClaudeBin = deps.resolveClaudeBin ?? ((profile) => defaultProviderBin(profile.claudeBin, "claude"));
+    this.claudeRealHome = deps.claudeRealHome ?? homedir();
   }
 
   validateEffectiveProfile(profile: ProviderAuthProfile): boolean | Promise<boolean> {
@@ -303,10 +386,7 @@ export class ProviderAuthSessionStore {
     };
     this.sessions.set(sessionId, record);
     if (!profile) return projection(record);
-    if (profile.provider === "claude") {
-      finishChild(record, "unsupported", "Claude browser handoff is not available through a stable machine-facing contract yet.");
-      return projection(record);
-    }
+    if (profile.provider === "claude") return this.startClaude(record, profile);
     if (!profile.credentialHome) {
       finishChild(record, "unavailable", "Codex credential home is not configured on the daemon.");
       return projection(record);
@@ -339,6 +419,95 @@ export class ProviderAuthSessionStore {
       finishChild(record, "unavailable", `Codex app-server could not start: ${error instanceof Error ? error.message : String(error)}`);
       return projection(record);
     }
+  }
+
+  /** W1-T10380: drive the CLI's own `auth login` in a private staging dir; its authorize URL is the projection's. */
+  private startClaude(record: SessionRecord, profile: ProviderAuthProfile): ProviderAuthProjection {
+    let bin: string | null;
+    try {
+      bin = this.resolveClaudeBin(profile);
+    } catch {
+      // The resolver's refusal names searched paths, which never cross into a projection.
+      bin = null;
+    }
+    if (!bin) {
+      finishChild(record, "unavailable", "Claude executable is not available on the daemon.");
+      return projection(record);
+    }
+    try {
+      record.stagingDir = createClaudeFleetLoginStagingDir(this.claudeRealHome);
+      const child = this.spawn(bin, ["auth", "login", "--claudeai"], { env: claudeLoginEnvironment(record.stagingDir), stdio: ["pipe", "pipe", "pipe"] });
+      record.child = child;
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (record.projection.authUrl) return;
+        record.buffer = (record.buffer + chunk.toString("utf8")).slice(-MAX_CLAUDE_OUTPUT_LENGTH);
+        const authUrl = claudeAuthUrl(record.buffer);
+        if (!authUrl || record.projection.state !== "awaiting_browser") return;
+        record.buffer = "";
+        record.projection = { ...record.projection, authUrl };
+      });
+      child.stderr.on("data", () => undefined);
+      child.stdin.on("error", () => finishChild(record, "failed", "The Claude login stopped reading its code."));
+      child.once("error", () => finishChild(record, "failed", "The Claude login process failed."));
+      child.once("exit", (code: number | null) => {
+        record.child = undefined;
+        void this.completeClaude(record, code);
+      });
+    } catch {
+      // A spawn or staging failure ends the session; its message may carry a path, so it stays server-side.
+      finishChild(record, "unavailable", "The Claude login could not start on the daemon.");
+    }
+    return projection(record);
+  }
+
+  private async completeClaude(record: SessionRecord, code: number | null): Promise<void> {
+    if (record.projection.state !== "awaiting_browser") return;
+    if (code !== 0 || !record.codeSubmitted || !record.stagingDir) {
+      finishChild(record, "failed", `The Claude login ended without completing (exit ${code ?? "unknown"}).`);
+      return;
+    }
+    const stagingDir = record.stagingDir;
+    const live = (): boolean => record.projection.state === "awaiting_browser" && this.clock.now() < record.expiresAtMs;
+    let result: ClaudeFleetCredentialReplacement;
+    try {
+      result = await (this.deps.replaceClaudeStore ?? replaceClaudeFleetCredential)({ realHome: this.claudeRealHome, stagingDir, proceed: live });
+    } catch {
+      // The replacement writes by rename under the refresh lock, so a throw left the store's old file in place.
+      result = { kind: "refused", reasonClass: "fleet-store-write-failed" };
+    }
+    if (record.projection.state !== "awaiting_browser") return;
+    if (result.kind !== "replaced") {
+      finishChild(record, live() ? "failed" : "expired", `The Claude login did not produce a usable fleet credential (${result.reasonClass}).`);
+      return;
+    }
+    const accountLabel = redactedClaudeAccount(stagingDir);
+    if (accountLabel) record.projection = { ...record.projection, accountLabel };
+    finishChild(record, "complete");
+  }
+
+  /** W1-T10380: hand the operator's pasted code to the waiting CLI once, then wait (bounded) for the outcome. */
+  async submitCode(sessionId: string, rawCode: unknown): Promise<ProviderAuthCodeResult> {
+    this.expireSessions();
+    const record = this.sessions.get(sessionId);
+    if (!record) return { outcome: "not_found" };
+    const code = claudeCode(rawCode);
+    if (!code) return { outcome: "invalid", projection: projection(record) };
+    const child = record.child;
+    if (record.projection.provider !== "claude" || record.projection.state !== "awaiting_browser" || !record.projection.authUrl || !child || record.codeSubmitted) {
+      return { outcome: "conflict", projection: projection(record) };
+    }
+    record.codeSubmitted = true;
+    const settled = new Promise<void>((wake) => {
+      const timer = setTimeout(wake, this.deps.codeWaitMs ?? CLAUDE_CODE_WAIT_MS);
+      timer.unref?.();
+      (record.waiters ??= []).push(() => {
+        clearTimeout(timer);
+        wake();
+      });
+    });
+    child.stdin.write(`${code}\n`);
+    await settled;
+    return { outcome: "accepted", projection: projection(record) };
   }
 
   read(sessionId: string): ProviderAuthProjection | null {
@@ -390,6 +559,45 @@ function profileIdFromRequest(value: unknown): string | null {
 async function readJsonBody(req: Parameters<Route["handler"]>[0], maxBytes: number): Promise<unknown> {
   const raw = await readBoundedRawBody(req, maxBytes);
   return raw.trim() ? JSON.parse(raw) : {};
+}
+
+/** W1-T10380: `PATCH /v1/provider-auth` takes the pasted Claude code in the BODY with its session id —
+ *  the v0 router matches exact paths only, and a code in a URL would reach logs and `Referer`. */
+export function buildProviderAuthCodeRoutes(store: ProviderAuthSessionStore, maxBodyBytes = 8 * 1024): Route[] {
+  return [
+    {
+      method: "PATCH",
+      path: "/v1/provider-auth",
+      scope: "write",
+      tier: "middle",
+      handler: async (req, res) => {
+        let parsed: unknown;
+        try {
+          parsed = await readJsonBody(req, maxBodyBytes);
+        } catch (error) {
+          sendJson(res, error instanceof RawBodyTooLargeError ? 413 : 400, { error: "invalid_request", detail: "body must be bounded JSON" });
+          return;
+        }
+        const body = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+        const sessionId = providerAuthSessionId(body.sessionId);
+        if (!sessionId) {
+          sendJson(res, 400, { error: "invalid_request", detail: "sessionId is required" });
+          return;
+        }
+        const result = await store.submitCode(sessionId, body.code);
+        if (result.outcome === "not_found") {
+          sendJson(res, 404, { error: "not_found", detail: "provider auth session was not found" });
+          return;
+        }
+        if (result.outcome === "accepted") {
+          sendJson(res, 200, result.projection);
+          return;
+        }
+        const detail = result.outcome === "invalid" ? "code must be the bounded authorization code the provider showed" : "this session is not waiting for a code";
+        sendJson(res, result.outcome === "invalid" ? 400 : 409, { error: result.outcome === "invalid" ? "invalid_request" : "conflict", detail });
+      },
+    },
+  ];
 }
 
 /**

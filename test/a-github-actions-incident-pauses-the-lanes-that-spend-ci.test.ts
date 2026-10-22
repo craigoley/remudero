@@ -435,3 +435,45 @@ test("the hold is bounded: past the BACKSTOP it escalates once and then stops ho
   assert.deepEqual(after.requeued, ["test (3/8)"], "a stuck status read cannot freeze the fleet");
   assert.deepEqual(after.fixed, []);
 });
+
+
+test("a terminal run's pinned job waits for Actions results recovery before its one bounded rerun", async () => {
+  const pinned = cancelledPr({ prNumber: 13592, checksState: "pending", reviewState: "success",
+    ciFailures: [], cancelledRequiredChecks: [], redRequiredChecks: [],
+    workflowRuns: [{ conclusion: "success", jobs: [{ name: "proof-discrimination", id: "119894287931", status: "in_progress" }] }],
+  });
+  const path = ledger("pinned-results");
+  for (let pass = 0; pass < 3; pass++) {
+    const during = harness(path, () => summary("degraded_performance"), T0 + pass * 60_000);
+    await runSweep([pinned], during.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(during.requeued, []);
+    assert.deepEqual(during.fixed, []);
+    assert.deepEqual(during.escalated, []);
+    assert.equal(disposed(path, pinned.prNumber)?.acted, false);
+    assert.match(String(disposed(path, pinned.prNumber)?.stand_down_reason), /terminal run's pinned job/);
+  }
+  assert.equal(rows(path, ACTIONS_INCIDENT_HOLD_STEP).length, 1);
+  assert.deepEqual(rows(path, ACTIONS_INCIDENT_HOLD_STEP)[0].pinned_job,
+    { name: "proof-discrimination", jobId: "119894287931" });
+  assert.equal(rows(path, CHECK_REQUEUE_STEP).length, 0, "the one-shot rerun remains unspent");
+  const blind = harness(path, () => { throw new Error("status unavailable"); }, T0 + 180_000);
+  await runSweep([pinned], blind.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(blind.requeued, [], "unknown does not release an established hold");
+  const after = harness(path, () => summary("operational"), T0 + 240_000);
+  await runSweep([pinned], after.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(after.requeued, ["proof-discrimination"]);
+  assert.deepEqual(after.fixed, []);
+  const again = harness(path, () => summary("operational"), T0 + 300_000);
+  await runSweep([pinned], again.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(again.requeued, [], "no second rerun on unchanged evidence");
+  assert.equal(again.escalated.length, 1);
+
+  const active = { ...pinned, workflowRuns: [{ jobs: pinned.workflowRuns![0].jobs }] };
+  const ordinary = harness(ledger("pinned-active"), () => summary("degraded_performance"), T0);
+  await runSweep([active], ordinary.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(ordinary.statusReads, 0, "a run in flight does not authorize pinned-job recovery");
+  assert.deepEqual(ordinary.requeued, []);
+  const cold = harness(ledger("pinned-cold"), () => { throw new Error("status unavailable"); }, T0);
+  await runSweep([pinned], cold.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(cold.requeued, ["proof-discrimination"], "unknown starts no new hold");
+});

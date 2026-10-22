@@ -172,12 +172,15 @@ esac
     const steps: string[] = [];
     const providerErrors: string[] = [];
     let providerInvoked = false;
-    const verdict = await runReview({
+    let providerInvocations = 0;
+    const reviewArgs: Parameters<typeof runReview>[0] = {
       owner: "o",
       repo: "r",
       prUrl: "https://github.com/o/r/pull/1",
       task: {
         id: "W1-T2593",
+        design: "Preserve all original behavioral assertions.",
+        amendment: "Only the approved companions may change.",
         acceptance: [{ claim: "the deterministic verdict posts", proof: "the deterministic verdict posts" }],
       },
       report: "The deterministic verdict posts.",
@@ -196,8 +199,11 @@ esac
       reviewerMount: { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 120000 },
       // Exercise the orchestration failure boundary without SDK/auth/home setup.
       // Real default worker wiring is qualified separately, not by this fixture.
-      reviewerSpawnWorker: ledgeredNonDispatchSpawn("review", async () => {
+      reviewerSpawnWorker: ledgeredNonDispatchSpawn("review", async (workerArgs) => {
+        assert.ok(workerArgs.prompt.includes("Preserve all original behavioral assertions."));
+        assert.ok(workerArgs.prompt.includes("Only the approved companions may change."));
         providerInvoked = true;
+        providerInvocations++;
         throw new Error("provider unavailable fixture");
       }),
       headCheckoutDir: REPO_ROOT,
@@ -205,7 +211,8 @@ esac
       runId: "REVIEW-PROVIDER-UNAVAILABLE",
       arm: () => { steps.push("arm-effect"); return "armed"; },
       disarm: () => { steps.push("disarm-effect"); return "not-armed"; },
-    });
+    };
+    const verdict = await runReview(reviewArgs);
 
     assert.equal(providerInvoked, true, "the fixture must reach the injected worker boundary: " + providerErrors.join("; "));
     assert.ok(steps.includes("review.reviewer.error"), "the semantic failure must be explicit");
@@ -217,6 +224,93 @@ esac
       assert.ok(!steps.includes("arm-effect") && !steps.includes("disarm-effect"));
     }
     assert.equal(verdict.reviewerOutcome, "spawn_error");
+    if (required) {
+      const changed = await runReview({ ...reviewArgs,
+        task: { ...reviewArgs.task, amendment: String(reviewArgs.task.amendment) + "\nPreserve the original assertions." },
+        runId: "REVIEW-AMENDMENT-CHANGED",
+      });
+      assert.notEqual(changed.reviewDecisionDigest, verdict.reviewDecisionDigest, "the actual decision producer must bind the changed amendment at the same PR head");
+      assert.equal(providerInvocations, 2);
+    }
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+
+test("direct semantic review withholds unreadable task narrative before publication or worker effects", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-event-semantic-provider-"));
+  const bin = mkdtempSync(join(tmpdir(), "rmd-event-semantic-bin-"));
+  const oldPath = process.env.PATH;
+  const diffPath = join(root, "diff.txt");
+  const settingsFile = join(root, "settings.json");
+  try {
+    writeFileSync(diffPath, "diff --git a/src/x.ts b/src/x.ts\n+const semantic = true;\n", "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "api repos/"*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"},"state":"open"}' ;;
+  "pr diff") cat ${JSON.stringify(diffPath)} ;;
+  "pr view") echo '{"state":"OPEN"}' ;;
+  *) echo '{}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${bin}:${oldPath}`;
+
+    const steps: string[] = [];
+    const providerErrors: string[] = [];
+    let providerInvoked = false;
+    const verdict = await runReview({
+      owner: "o",
+      repo: "r",
+      prUrl: "https://github.com/o/r/pull/1",
+      task: {
+        id: "W1-T2593",
+        narrativeUnavailable: true,
+        design: "Preserve all original behavioral assertions.",
+        amendment: "Only the approved companions may change.",
+        acceptance: [{ claim: "the deterministic verdict posts", proof: "the deterministic verdict posts" }],
+      },
+      report: "The deterministic verdict posts.",
+      reviewInputBody: "",
+      settingsFile,
+      config: { root, claudeBin: "/bin/true", enabledProviders: ["claude"] } as Config,
+      budgetUsd: 15,
+      log: (step: string, fields?: Record<string, unknown>) => {
+        steps.push(step);
+        if (step === "review.reviewer.error") providerErrors.push(String(fields?.error ?? "unavailable"));
+      },
+      say: () => {},
+      account: (result) => result,
+      spawnReviewer: true,
+      requireSemanticReview: true,
+      reviewerMount: { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 120000 },
+      // Exercise the orchestration failure boundary without SDK/auth/home setup.
+      // Real default worker wiring is qualified separately, not by this fixture.
+      reviewerSpawnWorker: ledgeredNonDispatchSpawn("review", async (workerArgs) => {
+        assert.ok(workerArgs.prompt.includes("Preserve all original behavioral assertions."));
+        assert.ok(workerArgs.prompt.includes("Only the approved companions may change."));
+        providerInvoked = true;
+        throw new Error("provider unavailable fixture");
+      }),
+      headCheckoutDir: REPO_ROOT,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "REVIEW-PROVIDER-UNAVAILABLE",
+      arm: () => { steps.push("arm-effect"); return "armed"; },
+      disarm: () => { steps.push("disarm-effect"); return "not-armed"; },
+    });
+
+    assert.equal(providerInvoked, false);
+    assert.equal(verdict.verdictWithheld, "head-task-narrative-unavailable");
+    assert.ok(steps.includes("review.reviewer.skipped"));
+    assert.ok(!steps.includes("review.posted") && !steps.includes("arm-effect") && !steps.includes("disarm-effect"));
+
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });

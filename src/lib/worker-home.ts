@@ -8,10 +8,12 @@ import {
   linkSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -29,7 +31,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
 import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS, loadDefaultPolicy } from "./policy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 
 /**
  * The general shell-isolation mechanism (W1-T18, the OSS blocker). Every worker's HOME is redirected
@@ -178,6 +180,107 @@ function healClaudeCredentialStore(realHome: string, store: string, f: ClaudeFle
     f.rmSync(stagedFile, { force: true });
   }
   return prior.reasonClass;
+}
+
+/** W1-T10380: the Claude CLI's OWN refresh lock inside a credential dir (proper-lockfile directory, stale
+ *  after 60 s), read from the pinned CLI's `XYn`. The CLI also takes a legacy `<realpath(dir)>.lock`. */
+export const CLAUDE_REFRESH_LOCK_NAME = ".oauth_refresh.lock";
+const CLAUDE_REFRESH_LOCK_STALE_MS = 60_000;
+
+/** W1-T10380: a fresh 0700 directory BESIDE the fleet store (same filesystem) for one console login's
+ *  `CLAUDE_CONFIG_DIR`. Never the store itself and never `<realHome>/.claude`. */
+export function createClaudeFleetLoginStagingDir(realHome: string): string {
+  const parent = dirname(sharedClaudeCredentialDir(realHome));
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const dir = mkdtempSync(join(parent, ".claude-login-"));
+  chmodSync(dir, 0o700);
+  return dir;
+}
+
+/** What {@link replaceClaudeFleetCredential} did. `refused` left the store's bytes exactly as they were. */
+export type ClaudeFleetCredentialReplacement =
+  | { kind: "replaced"; expiresAtMs?: number }
+  | { kind: "refused"; reasonClass: string };
+
+/** One proper-lockfile-compatible directory lock: `true` when held, `false` while a live peer holds it.
+ *  A holder whose mtime is past the CLI's own stale bound is reclaimed, as the CLI itself would. */
+function tryClaudeRefreshLock(path: string, nowMs: number): boolean {
+  try {
+    mkdirSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(path).mtimeMs;
+  } catch (error) {
+    // The holder released between our mkdir and stat: busy for this attempt, retried by the caller.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (nowMs - mtimeMs < CLAUDE_REFRESH_LOCK_STALE_MS) return false;
+  rmSync(path, { recursive: true, force: true });
+  try {
+    mkdirSync(path);
+    return true;
+  } catch (error) {
+    // A peer reclaimed the same stale holder first: it now holds the lock.
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+/** W1-T10380: replace the fleet store's ONE `.credentials.json` with a console login's staged file.
+ *  The staged bytes must classify `usable`, else the store is never opened for write. The write happens
+ *  under BOTH of the CLI's refresh locks, so a concurrent worker refresh cannot interleave, and lands by
+ *  rename so a reader sees the old file or the new one. The host login (`<realHome>/.claude/.credentials.json`)
+ *  is neither read nor written. `proceed` is re-asked under the lock, so an ended session writes nothing. */
+export async function replaceClaudeFleetCredential(opts: {
+  realHome: string;
+  stagingDir: string;
+  proceed?: () => boolean;
+  clock?: Clock;
+  sleep?: (ms: number) => Promise<void>;
+  lockAttempts?: number;
+}): Promise<ClaudeFleetCredentialReplacement> {
+  let bytes: Buffer | undefined;
+  const verdict = classifyWorkerCredentialFile(() => {
+    bytes = readFileSync(join(opts.stagingDir, ".credentials.json"));
+    return bytes.toString("utf8");
+  });
+  if (verdict.kind !== "usable") return { kind: "refused", reasonClass: verdict.reasonClass };
+  const store = sharedClaudeCredentialDir(opts.realHome);
+  mkdirSync(store, { recursive: true, mode: 0o700 });
+  const locks = [join(store, CLAUDE_REFRESH_LOCK_NAME), `${realpathSync(store)}.lock`];
+  const clock = opts.clock ?? systemClock;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+  const held: string[] = [];
+  const release = (): void => {
+    for (const lock of held.splice(0).reverse()) rmSync(lock, { recursive: true, force: true });
+  };
+  for (let attempt = 0; attempt < (opts.lockAttempts ?? 20) && held.length < locks.length; attempt++) {
+    for (const lock of locks) {
+      if (!tryClaudeRefreshLock(lock, clock.now())) break;
+      held.push(lock);
+    }
+    if (held.length < locks.length) {
+      release();
+      await sleep(500);
+    }
+  }
+  if (held.length < locks.length) return { kind: "refused", reasonClass: "fleet-store-refresh-lock-busy" };
+  const temp = join(store, `.credentials.json.login-${randomUUID()}`);
+  try {
+    if (opts.proceed && !opts.proceed()) return { kind: "refused", reasonClass: "login-session-ended" };
+    writeFileSync(temp, bytes!, { mode: 0o600, flag: "wx" });
+    chmodSync(temp, 0o600);
+    renameSync(temp, join(store, ".credentials.json"));
+  } finally {
+    rmSync(temp, { force: true });
+    release();
+  }
+  return { kind: "replaced", ...(verdict.expiresAtMs === undefined ? {} : { expiresAtMs: verdict.expiresAtMs }) };
 }
 
 /** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
