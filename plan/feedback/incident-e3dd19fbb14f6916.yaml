@@ -1,0 +1,28 @@
+id: incident-e3dd19fbb14f6916
+ts: 2026-10-22T16:47:03.504Z
+raw: >-
+  Incident e3dd19fbb14f: invariant reconcile.ci
+
+  First seen: 2026-10-22T15:53:30.899Z
+
+  Last seen: 2026-10-22T15:53:30.899Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - acr-build.yml run covering main commit db200bbfaae401311d2513955ee5b77b0ef5ca73: gap persists after its repair attempt (db200bbfaae401311d2513955ee5b77b0ef5ca73:acr-build.yml)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e3dd19fbb14f69168a9da0345338aab96ba03168043c242f4a1d92db9e2c4471
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
