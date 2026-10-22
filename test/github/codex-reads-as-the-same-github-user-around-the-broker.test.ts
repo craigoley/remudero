@@ -432,3 +432,35 @@ test("W1-T10302: the default client read sends the client to the broker and retu
   const log = summariseGhBrokerLog(dir, 0) as { by_client: Record<string, number> };
   assert.deepEqual(log.by_client, { codex: 1, claude: 1 }, "the named client reached the log; an unnamed background read is a Claude session's");
 });
+
+test("W1-T10302: the registered `rmd gh-broker` handler serves, reports the login view and stops", async (t) => {
+  const { HANDLERS } = await import("#src/run-task.js");
+  const handler = HANDLERS.get("gh-broker");
+  assert.ok(handler, "gh-broker is a registered command");
+  const cache = tmp(t, "cli-cache");
+  const pace = tmp(t, "cli-pace");
+  const saved = { cache: process.env.RMD_GH_CACHE_HOME, pace: process.env.RMD_GH_PACE_ROOT };
+  process.env.RMD_GH_CACHE_HOME = cache;
+  process.env.RMD_GH_PACE_ROOT = pace;
+  t.after(() => {
+    for (const [key, value] of [["RMD_GH_CACHE_HOME", saved.cache], ["RMD_GH_PACE_ROOT", saved.pace]] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const writes: string[] = [];
+  const realWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => { writes.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  t.after(() => { process.stdout.write = realWrite; });
+
+  const serving = handler(["serve"]);
+  const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
+  await until(() => existsSync(join(dir, "broker.sock")) && existsSync(join(dir, "heartbeat")), "the broker the CLI serves");
+  assert.equal(await handler(["status", "--since", "1d"]), 0);
+  const shown = JSON.parse(writes.join("").slice(writes.join("").indexOf("{"))) as { login_status: { login: unknown; accounts: string[]; by_account: Record<string, unknown> } };
+  assert.ok(Array.isArray(shown.login_status.accounts), "status carries the per-login view from ghBrokerLoginStatus");
+  assert.equal(Object.keys(shown.login_status.by_account).length, 1, "this account's request log is summarised");
+  assert.equal(await handler(["stop"]), 0);
+  assert.equal(await serving, 0, "serve returns once the broker it started has been stopped");
+  assert.match(writes.join(""), /gh-broker: serving .*broker\.sock/);
+});
