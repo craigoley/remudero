@@ -837,7 +837,7 @@ export function imageDependenciesCommitsBehind(
   imageBuildSha: string | undefined,
   runGit: (args: readonly string[]) => string,
 ): number | undefined {
-  if (!imageBuildSha?.trim()) return undefined;
+  if (imageBuildSha === undefined || imageBuildSha.trim() === "") return undefined;
   const before = imageDependencyInputFingerprint(imageBuildSha.trim(), runGit);
   const after = imageDependencyInputFingerprint("origin/main", runGit);
   return before === undefined || after === undefined ? undefined : before === after ? 0 : 1;

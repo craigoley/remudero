@@ -242,6 +242,9 @@ test("image dependency inputs cover the full-install fallback without formatting
 });
 
 test("image dependency uncertainty and newest input identity remain explicit", () => {
+  for (const missingIdentity of [undefined, "", "   "]) {
+    assert.equal(imageDependenciesCommitsBehind(missingIdentity, () => assert.fail("missing image identity must not read Git")), undefined);
+  }
   for (const after of [ { ...dependencyTree(),lock:"{" }, { ...dependencyTree(),lock:undefined },
     { ...dependencyTree(),lock:JSON.stringify({lockfileVersion:3}) }, { ...dependencyTree(),manifest:undefined },
     { ...dependencyTree(),manifest:"null" }, { ...dependencyTree(),lock:JSON.stringify({lockfileVersion:1,dependencies:{}}) } ]) {
