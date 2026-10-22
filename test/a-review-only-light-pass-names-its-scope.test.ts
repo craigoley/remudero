@@ -97,12 +97,15 @@ async function clockScopes(scope?: "pause" | "drain"): Promise<Array<LightPassSc
   const held = new Promise<void>((resolve) => (release = resolve));
   const seen: Array<LightPassScope | undefined> = [];
   const clock = startInterphaseReviewClock({
+    refreshMerged: () => { assert.fail("the review clock never refreshes merged tasks"); },
+    runOne: async () => { assert.fail("the review clock never dispatches tasks"); },
+    sleep: async () => { assert.fail("the review clock uses sleepUntilSweepWake"); },
     sleepUntilSweepWake: () => new Promise((resolve) => (waiter = resolve)),
     sweepLight: async (s) => {
       seen.push(s);
       if (seen.length === 1) await held;
     },
-  } as DaemonDeps, 60_000, () => {}, scope);
+  } satisfies DaemonDeps, 60_000, () => {}, scope);
   const wake = () => { const w = waiter; waiter = undefined; w?.("wake"); };
   try {
     await eventually(() => waiter !== undefined, "the clock never waited");
