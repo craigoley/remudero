@@ -4,6 +4,7 @@ import { hydrateReviewReuseFacts, ownDiffDigestFromCompareFiles } from "../src/l
 import { DEFAULT_RISK } from "../src/lib/plan.js";
 import * as review from "../src/lib/review.js";
 import { parseAcceptanceBlock, reviewContractDigest } from "../src/lib/review.js";
+import { usesUntaskedReviewMetadata } from "../src/lib/tick-read-worker.js";
 
 // The sweep integration proofs live in a-run-unfiled-prs-review-verdict-is-its-own.test.ts.
 const FILES = [{ filename: "src/example.ts", status: "modified", sha: "blob1" }];
@@ -61,4 +62,15 @@ test("an unfiled PR's body acceptance yields the contract digest its review reco
   assert.equal(digest(semantic, false), deterministic, "a filed id never takes the untasked semantic defaults");
   assert.equal(digest(semantic, true, body.replace("change works", "change differs")) === semantic, false);
   assert.equal(digest(semantic, true, "## Summary\nno acceptance"), undefined);
+});
+
+test("a generated lane preserves its semantic review contract when the sweep reads the same body", () => {
+  const body = "## Acceptance\n- the change works | grep: example in src/example.ts\n";
+  for (const id of ["TRIAGE-feedback", "main-repair-ratchet-105b1219ee15"]) {
+    const recordedDigest = reviewContractDigest({ taskId: id, acceptance: parseAcceptanceBlock(body), risk: DEFAULT_RISK, budgetUsd: 15 });
+    const read = (head: string) => review.bodyReviewContractDigest({ reviewLedgerKey: id, body,
+      unfiled: usesUntaskedReviewMetadata(id, head), recordedDigest, semanticRisk: DEFAULT_RISK, semanticBudgetUsd: 15 });
+    assert.equal(read(`run-${id}-1791211800000`), recordedDigest);
+    assert.notEqual(read("codex/foreign"), recordedDigest, "an unrelated branch cannot inherit the generated-lane contract");
+  }
 });

@@ -1,0 +1,31 @@
+- id: W1-T10138
+  title: "THE Analyze (python) GATE REFUSED 1 PULL REQUEST IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:12664:Analyze (python)"
+  ci_learning_prs: [12664]
+  files:
+    - learnings/ci.d/ci-learning-12664-analyze-python.yaml
+  acceptance:
+    - claim: "the lane that trips the Analyze (python) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:12664:Analyze (python) in learnings/ci.d/ci-learning-12664-analyze-python.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:12664:Analyze (python). The Analyze (python) gate went red on #12664 and was repaired; the repair touched test/serves-main-loop-stalls-are-profiled-and-named.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.85
+    reasons:
+      - "The only declared file is a new learnings YAML under learnings/ci.d/, which is a guidance-surface addition and not a secrets, auth, deploy, merge-policy or deletion change."
+      - "The acceptance criterion is a grep for the entry's id in that file, so it can be verified automatically."
+      - "The ci-learning family has a strong record (31 merged, 1 declined, Beta mean 0.94), and the missing file at base is expected for a file being created."
+      - "The \"recommended action: unclear\" note and the \"parked\" label are mild concerns, but the PR still passes CI and review."
+      - "the judge said proceed, but W1-T10138: at verify: auto lint-plan's machine-filing admission refuses it (task W1-T10138 declares file path(s) that exist in neither the checkout nor the base tree: learnings/ci.d/ci-learning-12664-analyze-python.yaml)"
+    judged_at: "2026-10-20T00:44:13.337Z"
+    pin: "24cc1781e23a00c5ec54523661ca749d143a802665bbd8806a96712bb7e8076b"

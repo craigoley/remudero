@@ -10,7 +10,11 @@
   files: [plan/tasks.yaml, plan/tasks.d/*.yaml, test/every-tombstone-names-its-disposition.test.ts]
   origin: followup#W1-T2474-1788101371246
   plan_refs: ["W1-T1287", "W1-T2474", "W1-T2481", "W1-T391", "W1-T324"]
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T2635 — The operator already declined verify-
+  # human:W1-T2635 on 10-13 ('the #3305-era tombstone ruling is stale'), and machine-judge:W1-T2635 was declined
+  # earlier. It touches every plan shard. Only the plan retirement is missing.
   attempts: 0
   rationale: |
     THIS IS THE ACTUAL REMAINING STEP, AND ITS OBJECTIVE IS NOT THE ONE THE FOLLOW-UP STATED. The

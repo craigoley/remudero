@@ -176,15 +176,40 @@ test("W1-T3655: a crossing this diff itself introduces still blocks, even with a
 // the REAL ci.yml, so removing (or event-ungating) the push-lane invocation this task adds is
 // exactly the mutation that turns it red.
 
+type MainCensusJob = { if?: string; needs?: string | string[]; steps?: Array<{ name?: string; run?: string }> };
+function assertMainCensusScheduling(ci: MainCensusJob): void {
+  if (ci.needs === undefined) {
+    assert.equal(ci.if, undefined, "an independent main census matrix must remain unconditional");
+    return;
+  }
+  assert.deepEqual(ci.needs, ["commitlint"], "only the same-run producer may precede the census matrix");
+  assert.equal(ci.if, "${{ always() && !cancelled() }}", "producer failure or skip must not suppress the main census matrix");
+}
+
+test("main census scheduling rejects parent skips and event filters", () => {
+  for (const ci of [
+    { needs: ["commitlint"] },
+    { needs: ["commitlint"], if: "github.event_name == 'pull_request'" },
+    { needs: ["commitlint"], if: "${{ success() }}" },
+    { needs: ["other"], if: "${{ always() && !cancelled() }}" },
+    { if: "${{ always() && !cancelled() }}" },
+  ]) assert.throws(() => assertMainCensusScheduling(ci));
+});
+
+test("main census scheduling admits only the approved cancellation-aware producer dependency", () => {
+  assert.doesNotThrow(() => assertMainCensusScheduling({}));
+  assert.doesNotThrow(() => assertMainCensusScheduling({ needs: ["commitlint"], if: "${{ always() && !cancelled() }}" }));
+});
+
 test("W1-T3655: ci.yml's push-to-main lane actually invokes the census, strictly, behind the push guard", () => {
   const raw = readFileSync(CI_YAML_PATH, "utf8");
   const doc = parseYaml(raw) as {
-    jobs: Record<string, { if?: string; steps?: Array<{ name?: string; run?: string }> }>;
+    jobs: Record<string, MainCensusJob>;
   };
 
   const ci = doc.jobs.ci;
   assert.ok(ci, "ci.yml must still declare the `ci` job");
-  assert.equal(ci!.if, undefined, "the `ci` job must stay ungated -- it is the one job that runs on a push to main (test/push-ci-on-main.test.ts pins this too)");
+  assertMainCensusScheduling(ci!);
 
   const testStep = (ci!.steps ?? []).find((s) => s.name === "Test");
   assert.ok(testStep?.run, "the `ci` job must carry a Test step");

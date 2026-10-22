@@ -226,3 +226,92 @@ test("a refused saved edit is never committed or pushed, and the next fix round 
   assert.ok(prompts[1]!.includes("census-suite: test/the-affected-suite-reach-ratchet.test.ts fails"));
   assert.equal(repo.git("rev-parse", "HEAD"), head);
 });
+
+test("PR-13121: a census snapshot taken mid-merge of origin/main measures from main, not the branch's old base", async () => {
+  const harness = await import(new URL("../src/run-task.ts", import.meta.url).href);
+  const repo = gitRepo({ kind: "census-merge" });
+  const write = (path: string, text: string) => {
+    mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
+    writeFileSync(join(repo.dir, path), text);
+  };
+  write(".gitignore", "state/\n");
+  write("src/shared.ts", "export const shared = 0;\n");
+  repo.git("add", "-A");
+  repo.git("commit", "-qm", "base");
+  const base = repo.git("rev-parse", "HEAD");
+  repo.git("checkout", "-qb", "mainline");
+  write("src/main-only.ts", "export const main = 1;\n");
+  write("src/shared.ts", "export const shared = 1;\n");
+  repo.git("add", "-A");
+  repo.git("commit", "-qm", "main moves on");
+  const main = repo.git("rev-parse", "HEAD");
+  repo.git("update-ref", "refs/remotes/origin/main", main);
+  repo.git("checkout", "-qb", "run-branch", base);
+  write("src/own.ts", "export const own = 2;\n");
+  write("src/shared.ts", "export const shared = 2;\n");
+  repo.git("add", "-A");
+  repo.git("commit", "-qm", "branch work");
+  const rows: { step: string; extra: Record<string, unknown> }[] = [];
+  const log = (step: string, extra: Record<string, unknown> = {}) => { rows.push({ step, extra }); };
+  const before = readCensusSnapshot(harness.writeFixCensusSnapshot(repo.dir, log));
+  assert.equal(before.mergeBase, base, "control: with no merge in progress the branch's own merge base is measured");
+  assert.equal(rows.at(-1)!.extra.merge_head, undefined);
+  assert.throws(() => repo.git("merge", "--no-commit", "--no-ff", "origin/main"), "the fixture's merge conflicts on src/shared.ts");
+  const during = readCensusSnapshot(harness.writeFixCensusSnapshot(repo.dir, log));
+  assert.equal(during.mergeBase, main, "a merge of origin/main in progress is measured from the main it merges");
+  assert.ok(during.basePaths.includes("src/main-only.ts") && during.headPaths.includes("src/own.ts"));
+  assert.equal(new Set(during.headPaths).size, during.headPaths.length, "an unmerged path is listed once");
+  assert.equal(rows.at(-1)!.extra.merge_head, main);
+  writeFileSync(join(repo.dir, repo.git("rev-parse", "--git-path", "MERGE_HEAD")), `${base}\n`);
+  const forged = readCensusSnapshot(harness.writeFixCensusSnapshot(repo.dir, log));
+  assert.equal(forged.mergeBase, base, "a MERGE_HEAD that is not origin/main never moves the census base");
+});
+
+test("PR-13121: a merge-conflict round's census check re-snapshots after the merge has started", async () => {
+  const harness = await import(new URL("../src/run-task.ts", import.meta.url).href);
+  const written: string[] = [];
+  const write = async (root: string) => { written.push(root); return "after-merge.json"; };
+  const log = () => {};
+  assert.equal(await harness.censusSnapshotForCheck("/wt", "before-merge.json", true, write, log), "after-merge.json");
+  assert.equal(await harness.censusSnapshotForCheck("/wt", "before-merge.json", false, write, log), "before-merge.json");
+  assert.equal(await harness.censusSnapshotForCheck("/wt", undefined, true, write, log), undefined);
+  assert.equal(await harness.censusSnapshotForCheck("/wt", "before-merge.json", true, undefined, log), "before-merge.json");
+  assert.equal(await harness.censusSnapshotForCheck("/wt", "before-merge.json", true, async () => undefined, log), "before-merge.json");
+  assert.deepEqual(written, ["/wt"]);
+});
+
+test("a pending main merge gives the census its prospective merged base without hiding branch edits", async t => {
+  const harness = await import("#src/run-task.js");
+  const repo = gitRepo({ kind: "pending-main-census", scope: t });
+  mkdirSync(join(repo.dir, "src"), { recursive: true });
+  writeFileSync(join(repo.dir, "src/branch.ts"), "export const own = 0;\n");
+  repo.git("add", "src"); repo.git("commit", "-m", "fixture: shared census base");
+  const base = repo.git("rev-parse", "HEAD");
+  repo.git("checkout", "-b", "repair");
+  writeFileSync(join(repo.dir, "src/branch.ts"), "export const own = Date.now();\n");
+  repo.git("add", "src"); repo.git("commit", "-m", "fixture: branch-owned change");
+  const head = repo.git("rev-parse", "HEAD");
+  repo.git("checkout", "main");
+  mkdirSync(join(repo.dir, "test"), { recursive: true });
+  const inherited = "test/main-added.test.ts";
+  writeFileSync(join(repo.dir, inherited), 'export const inherited = "unchanged main bytes";\n');
+  repo.git("add", "test"); repo.git("commit", "-m", "fixture: main adds census member");
+  const main = repo.git("rev-parse", "HEAD");
+  repo.git("update-ref", "refs/remotes/origin/main", main);
+  repo.git("checkout", "repair");
+  const beforePath = await harness.writeFixCensusSnapshotAsync(repo.dir, () => {});
+  assert.ok(beforePath);
+  assert.equal(readCensusSnapshot(beforePath).mergeBase, base, "control: an unmerged branch retains the ordinary merge base");
+  repo.git("merge", "--no-commit", "--no-ff", "main");
+  assert.equal(repo.git("rev-parse", "HEAD"), head, "the harness has not committed its prepared merge");
+  const path = await harness.writeFixCensusSnapshotAsync(repo.dir, () => {});
+  assert.ok(path);
+  const snapshot = readCensusSnapshot(path);
+  assert.equal(snapshot.mergeBase, main, "a normal pending main merge has main as its prospective merge base");
+  assert.equal(snapshot.baseBlobs[inherited], readFileSync(join(repo.dir, inherited), "utf8"));
+  assert.equal(snapshot.baseBlobs["src/branch.ts"], "export const own = 0;\n");
+  assert.equal(snapshot.headSha, head, "the branch's committed census inputs remain selected as head");
+  assert.ok(snapshot.headPaths.includes("src/branch.ts"));
+  assert.equal(repo.git("diff", "--name-only", snapshot.mergeBase, "--", "src/branch.ts"), "src/branch.ts",
+    "the branch's own newly unsafe census input remains different from the measured base");
+});

@@ -15,6 +15,7 @@ import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, neutralizeFenceMarkers } from ".
 import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
 import type { Task } from "./plan.js";
+import { taskSemanticRevision } from "./escalate.js";
 import { citation } from "./provenance.js";
 import { REFUSAL_REASON_CLASSES, workerProofTitles, type CriterionVerdict } from "./review.js";
 import {
@@ -465,7 +466,7 @@ export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule
  * pre-strike gate would still refuse.
  */
 export function renderFixPrompt(opts: {
-  task: { id: string; title: string; files?: readonly string[] };
+  task: { id: string; title: string; files?: readonly string[]; design?: string; amendment?: string; narrativeUnavailable?: true };
   round: number;
   branch: string;
   evidence: FixEvidence;
@@ -500,7 +501,11 @@ export function renderFixPrompt(opts: {
       ]
     : [];
   // W1-T6434: a preserved dead-owner patch rides the same mode-agnostic slot.
-  const constraintBlock = [...operatorConstraintBlock, ...priorPartialWorkLines(opts.evidence.priorPartialWork)];
+  const constraintBlock = [...operatorConstraintBlock, ...priorPartialWorkLines(opts.evidence.priorPartialWork),
+    ...(taskSemanticRevision(opts.task) === undefined ? [] : [
+      ...(opts.task.design ? ["", "AUTHORITATIVE TASK DESIGN:", opts.task.design] : []),
+      ...(opts.task.amendment ? ["", "AUTHORITATIVE TASK AMENDMENT:", opts.task.amendment] : []),
+    ])];
   if (mode === "plan-gate") {
     return [header, ...constraintBlock,
       `STAGEABLE PLAN PATHS: ${(opts.task.files ?? []).join(", ")}. Edit only these exact paths.`,
@@ -1311,4 +1316,41 @@ export function reviewerUnmetPrevention(
   if ((evidence.review?.unmetCriteria.length ?? 0) > 0) return { dispatch: true };
   if ((evidence.review?.summary ?? "").trim().length > 0) return { dispatch: true };
   return { dispatch: false, reason: "reviewer-unmet evidence is empty: no unmet criterion and no review summary" };
+}
+
+/**
+ * W1-T10103: a `reviewer-unmet` round is also pointless when the unmet criteria (index + reason) are
+ * byte-identical to the previous round's: the last worker changed nothing the reviewer credited, so
+ * another round spends minutes on the same verdict. PURE; `prior` is the previous round's evidence.
+ */
+export function reviewerUnmetRepeatPrevention(
+  evidence: FixEvidence,
+  prior: FixEvidence | undefined,
+): { dispatch: true } | { dispatch: false; reason: string } {
+  if (!prior || deriveFixMode(evidence) !== "reviewer-unmet" || deriveFixMode(prior) !== "reviewer-unmet") {
+    return { dispatch: true };
+  }
+  const key = (e: FixEvidence): string =>
+    JSON.stringify((e.review?.unmetCriteria ?? []).map((c) => [c.criterionIndex ?? null, c.reason]).sort());
+  const now = key(evidence);
+  if (now === "[]" || now !== key(prior)) return { dispatch: true };
+  return { dispatch: false, reason: "reviewer-unmet evidence is unchanged from the previous round" };
+}
+
+/**
+ * W1-T9839: keep only the tsc diagnostics that belong to `file`. A test that compiles itself with
+ * `--ignoreConfig` also type-checks its whole import graph, so a type error a PR introduces in an
+ * unrelated module reddened a shard that never asserted on it (40 fix rounds). The typecheck job
+ * owns those; the test asserts only on its own file.
+ */
+export function ownTscDiagnostics(output: string, file: string): string[] {
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const own = norm(file);
+  return output
+    .split("\n")
+    .filter((line) => /\berror TS\d+:/.test(line))
+    .filter((line) => {
+      const at = norm(line).split("(")[0];
+      return own.endsWith(at) || at.endsWith(own);
+    });
 }

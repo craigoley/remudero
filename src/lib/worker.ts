@@ -1,7 +1,8 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
-import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
-  workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_STRICT, type WorkerMcpExposure, type WorkerMcpIsolation,
+import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, denyMcpSuccessCredit, validateWorkerMcpIsolation,
+  workerMcpExposure, workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
+  type WorkerPluginInventory, type WorkerMcpExposure, type WorkerMcpIsolation,
   type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead, securityMetadataGhArgs } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
@@ -97,10 +98,10 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // W1-T2777: same primitive `ensureInstallFresh` (run-task.ts) uses, shared via the extracted `install-hash` module so both
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
-import { hashInstallInputs } from "./install-hash.js";
+import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import type { ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
@@ -171,7 +172,10 @@ import {
   openWeightDeploymentReady,
   openWeightDeploymentHolds,
   openWeightEstimatedTokens,
+  openWeightReservationUsd,
+  readOpenWeightAllowance,
   spawnCodexWorker,
+  codexReadOnly,
   spawnOpenWeightWorker,
   FOUNDRY_CLAUDE_API_KEY_ENV,
   FOUNDRY_CLAUDE_ENDPOINT_ENV,
@@ -251,6 +255,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  /** Provider-safe continuation disposition; never contains a session id or prompt. */
+  continuation?: WorkerContinuationReceipt;
   notStarted?: "admission-abandoned";
   admissionSinceMs?: number;
   /** Opt-in policy configuration and bounded inventory; not effective permission or execution proof. */
@@ -341,6 +347,7 @@ export interface WorkerResult {
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
+  cashAllowanceResetAt?: string;
   /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
   openWeightDeploymentAbsent?: string;
   /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
@@ -591,10 +598,12 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  continuation?: WorkerContinuationReceipt;
   mcp_isolation?: WorkerMcpIsolationEvidence;
   mcp_boundary?: typeof WORKER_MCP_STRICT;
   mcp_exposure?: WorkerMcpExposure;
   sdk_init_summary: WorkerInitSummary;
+  plugin_inventory: WorkerPluginInventory;
   worker_exit?: WorkerExit["kind"];
   worker_exit_signal?: string;
   worker_exit_code?: number;
@@ -652,6 +661,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.mcpBoundary ? { mcp_boundary: r.mcpBoundary } : {}),
     ...(r.mcpExposure ? { mcp_exposure: r.mcpExposure } : {}),
     sdk_init_summary: r.initSummary ?? unavailableWorkerInitSummary(r.provider !== undefined && r.provider !== "claude"),
+    plugin_inventory: workerPluginInventory(r.initSummary),
     ...(r.exit ? { worker_exit: r.exit.kind } : {}),
     ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
     ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
@@ -669,6 +679,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.credentialHelperUnwired ? { credential_helper_unwired: r.credentialHelperUnwired } : {}),
     ...(r.egressUnenforced ? { egress_unenforced: r.egressUnenforced } : {}),
     ...(r.provider ? { provider: r.provider } : {}),
+    ...(r.continuation ? { continuation: r.continuation } : {}),
     model: r.model,
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
     ...(r.modelHealthState ? { model_health_state: r.modelHealthState } : {}),
@@ -1128,6 +1139,9 @@ export interface SpawnWorkerArgs {
   prompt: string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
   resumeSessionId?: string;
+  /** W1-T10164: identity comes from the prior result, not the requested mount. contextPrompt is
+   * self-contained task/action context for a selected provider that cannot resume that session. */
+  continuation?: { provider?: WorkerProviderId; contextPrompt: string };
   /** Extra env vars merged into the allowlisted child env (never ANTHROPIC_*). */
   env?: Record<string, string>;
   model?: string;
@@ -1176,7 +1190,7 @@ export interface SpawnWorkerArgs {
     /** Test seam for the contained Azure adapter. Production reads the daemon-only API key
      * directly and never places it in a worker environment. */
     spawnOpenWeight?: (
-      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string },
+      args: Omit<SpawnWorkerArgs, "env"> & { workerEnv?: Record<string, string>; workerHome: string; zdotdir?: string },
       config: Config,
       selection: { model: string; effort: string },
     ) => Promise<WorkerResult>;
@@ -1628,6 +1642,27 @@ export function cashFallbackRefusal(
     return `this spawn's tool surface is not implementable by cash (${tools ? tools.join(", ") : "unbounded"})`;
   }
   return undefined;
+}
+
+/** Refuse only when every candidate's first-request lower bound exceeds its observed room. */
+export function cashAllowanceFallbackRefusal(config: Config, prompt: string, deployments: readonly string[], atIso: string): string | undefined {
+  try {
+    if (deployments.length === 0) throw new Error("no eligible cash deployment");
+    const reading = readOpenWeightAllowance(config, { deployments, atIso, squeezed: true });
+    const candidates = reading.deployments.map(row => ({ ...row, wantUsd: openWeightReservationUsd(row.deployment, Buffer.byteLength(prompt, "utf8")) }));
+    if (candidates.some(row => row.remainingUsd >= row.wantUsd)) return undefined;
+    const cheapest = candidates.reduce((a, b) => a.wantUsd <= b.wantUsd ? a : b);
+    return `cash daily allowance exhausted until ${reading.resetAt}: committed $${cheapest.committedUsd.toFixed(6)} of $${cheapest.capUsd.toFixed(2)}, this spawn needs at least $${cheapest.wantUsd.toFixed(6)}`;
+  } catch (error) {
+    const reason = `cash allowance observation unavailable: ${String((error as Error).message).slice(0, 512)}`;
+    return reason;
+  }
+}
+
+function cashSonnetAlternatives(prompt: string): string[] {
+  return openWeightDeploymentReady("gpt-6.1-sol") &&
+    openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8")))
+    ? ["gpt-6.1-sol"] : [];
 }
 
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
@@ -2384,9 +2419,62 @@ export function withWorkerPidReport<A extends unknown[], R extends { pid: number
   };
 }
 
+export interface WorkerContinuationReceipt {
+  mode: "resumed" | "fresh-handoff";
+  reason: "same-provider" | "provider-changed" | "origin-unavailable" | "provider-fresh-only" | "session-unavailable";
+  from?: WorkerProviderId;
+  to: WorkerProviderId;
+}
+
+/** Bounded prior narrative, original task/tool contract unchanged. The final pending action is
+ * added at selection, so callers cannot size one prompt and send another. Read current files. */
+export function workerContinuation(previous: Pick<WorkerResult, "provider" | "text" | "blocks">,
+  taskPrompt: string, cwd: string): NonNullable<SpawnWorkerArgs["continuation"]> {
+  return { provider: previous.provider, contextPrompt: [
+    "Fresh-session handoff: you have no earlier conversation. Read the current workspace before editing.",
+    `Workspace: ${cwd}`, taskPrompt,
+    "Prior report excerpt (context, not proof of current state):",
+    workerTranscript(previous).slice(-REPORT_EXCERPT_CAP),
+  ].join("\n\n") };
+}
+
+/** Resolve only after routing. A session id has a provider namespace; cash never resumes,
+ * and Codex's unchanged adapter predicate decides which sessions retain its sandbox. */
+export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
+  "prompt" | "resumeSessionId" | "continuation" | "tools" | "sandboxIntent">, provider: WorkerProviderId):
+  { prompt: string; resumeSessionId?: string; receipt?: WorkerContinuationReceipt } {
+  if (!args.resumeSessionId && !args.continuation) return { prompt: args.prompt };
+  const from = args.continuation?.provider === undefined ? undefined :
+    canonicalWorkerProviderId(args.continuation.provider) as WorkerProviderId;
+  const to = canonicalWorkerProviderId(provider) as WorkerProviderId;
+  if (args.resumeSessionId && from === to && (to === "claude" || to === "codex" && codexReadOnly(args))) {
+    return { prompt: args.prompt, resumeSessionId: args.resumeSessionId,
+      receipt: { mode: "resumed", reason: "same-provider", from, to } };
+  }
+  const contextPrompt = args.continuation?.contextPrompt;
+  if (contextPrompt === undefined) {
+    throw new Error("continuation requires provider provenance and a self-contained fresh handoff before execution");
+  }
+  if (contextPrompt.trim() === "") throw new Error("continuation fresh handoff must not be blank");
+  return { prompt: `${contextPrompt}\n\nPending action:\n${args.prompt}`,
+    receipt: { mode: "fresh-handoff",
+      reason: !args.resumeSessionId ? "session-unavailable" : from === undefined ? "origin-unavailable"
+        : from !== to ? "provider-changed" : "provider-fresh-only",
+      ...(from === undefined ? {} : { from }), to } };
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   validateWorkerMcpIsolation(args);
-  const executionPrompt = withWorkspaceCleanup(args.prompt);
+  const executions = new Map<WorkerProviderId, ReturnType<typeof workerExecutionForProvider>>();
+  const executionFor = (provider: WorkerProviderId) => {
+    let execution = executions.get(provider);
+    if (!execution) {
+      execution = workerExecutionForProvider(args, provider);
+      execution.prompt = withWorkspaceCleanup(execution.prompt);
+      executions.set(provider, execution);
+    }
+    return execution;
+  };
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
@@ -2617,6 +2705,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
+      const allowanceRefusal = (models: readonly string[]) => cashAllowanceFallbackRefusal(config, executionFor("cash").prompt, models,
+        fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
+      const plainCashModels = () => {
+        const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionFor("cash").prompt, "utf8"),
+          { cashSqueezed: true, modelApprovals: config.modelApprovals,
+            ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}) });
+        return [choice.model, ...choice.alternatives];
+      };
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2625,7 +2721,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         const refusal = (!bothSubscriptionsObserved ? "both subscription capacities were not observed" : undefined) ??
           cashFallbackRefusal(config, divertTools) ??
           (!env[FOUNDRY_CLAUDE_API_KEY_ENV] || !env[FOUNDRY_CLAUDE_ENDPOINT_ENV]
-            ? "Foundry Opus endpoint or daemon key is absent" : undefined);
+            ? "Foundry Opus endpoint or daemon key is absent" : undefined) ??
+          allowanceRefusal(["claude-opus-5-5"]);
         if (refusal === undefined) {
           console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
           return await spawnWorker({
@@ -2638,6 +2735,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           });
         }
         console.error(JSON.stringify({ event: "worker.provider.subscription_only_hold", requested_model: args.model, reason: refusal }));
+        error.message += `; ${refusal}`;
       } else if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
         // The surface the DIVERTED spawn would actually run, which is what eligibility must be
         // judged on -- asking about `tools` here would refuse a lane that declared a perfectly
@@ -2646,8 +2744,26 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         const refusal = cashFallbackRefusal(config, divertTools);
         // W1-T4785: a squeezed BALANCED task tries Foundry Sonnet 5.5 first; Luna stays the fallback.
         const sonnetEnv = args.env ?? process.env;
-        if (refusal === undefined && requestedCapability === "balanced" &&
-            sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV]) {
+        const canTrySonnet = requestedCapability === "balanced" &&
+          !!sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && !!sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV];
+        if (refusal === undefined) {
+          let models: string[];
+          try { models = plainCashModels(); }
+          catch (selectionError) {
+            if (!canTrySonnet) throw selectionError;
+            // A refused plain ladder does not remove the independently eligible Sonnet arm.
+            models = [];
+          }
+          if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionFor("cash").prompt));
+          const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
+          if (held !== undefined) {
+            console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
+            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+            error.message += `; ${held}`;
+            throw error;
+          }
+        }
+        if (refusal === undefined && canTrySonnet) {
           console.error(JSON.stringify({
             event: "worker.provider.cash_sonnet_fallback",
             reason: "no subscription had readable headroom",
@@ -2754,8 +2870,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     if (selection.provider === "codex") {
       const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+      const execution = executionFor("codex");
       const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-        spawnCodex({ ...codexArgs, prompt: executionPrompt, containment: boundContainment }, workerConfig, capacity);
+        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -2784,6 +2901,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         materializeWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
+        result.continuation = execution.receipt;
         result.routedModel = selection.capacity.model ?? result.model;
         result.selectionAssignmentId = selectionAssignmentId;
         if (args.model) result.model = args.model;
@@ -2842,8 +2960,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   if (args.mountProvider === "codex") {
     const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+    const execution = executionFor("codex");
     const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-      spawnCodex({ ...codexArgs, prompt: executionPrompt, containment: boundContainment }, workerConfig, capacity);
+      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2863,6 +2982,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     try {
       materializeWorkerHome({ workerHome, realHome });
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
+      result.continuation = execution.receipt;
       result.selectionAssignmentId = selectionAssignmentId;
       result.routedModel ??= result.model;
       if (args.model) result.model = args.model;
@@ -2876,6 +2996,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw new SubscriptionOnlyRefusedError(args.model!);
     }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    const execution = executionFor("cash");
+    const executionPrompt = execution.prompt;
+    // env means child extras here, but a complete daemon override in the adapter. Keep custody distinct.
+    const { env: workerEnv, ...cashArgs } = args;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
       assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2892,9 +3016,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
       : args.cashSonnetEmergency === true
       ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced",
-        alternatives: openWeightDeploymentReady("gpt-6.1-sol") &&
-          openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(executionPrompt, "utf8")))
-          ? ["gpt-6.1-sol"] : [] }
+        alternatives: cashSonnetAlternatives(executionPrompt) }
       : selectOpenWeightModel(
       capabilities,
       args.model,
@@ -2941,8 +3063,23 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       capability: openWeight.capability,
     });
     let selectionAssignmentId = cashAssignment(openWeight.model, openWeight.alternatives);
+    const cashController = new AbortController();
+    const relayAbort = (): void => cashController.abort(args.signal?.reason);
+    if (args.signal?.aborted) relayAbort();
+    else args.signal?.addEventListener("abort", relayAbort, { once: true });
+    let cashAbandonment: WorkerAbandonmentEvidence | undefined;
+    const cashWatchdog = args.clockBound ? createWorkerClockBoundWatchdog(args.clockBound) : undefined;
+    let stopCashWatchdog: (() => void) | undefined;
+    const cashObserver: WorkerStreamObserver = (event) => {
+      cashWatchdog?.observer(args.clockBound?.now ? { ...event, tsMs: args.clockBound.now() } : event);
+      args.streamObserver?.(event);
+    };
     try {
       materializeWorkerHome({ workerHome, realHome });
+      stopCashWatchdog = cashWatchdog?.start((evidence) => {
+        cashAbandonment = evidence;
+        cashController.abort();
+      });
       // Cash drafts also walk on a broken fragment contract; each rung retains the adapter's cap gate.
       let firstRung = true;
       let draftContractFailed = false;
@@ -2961,7 +3098,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
             },
           });
-          const rung: WorkerResult = await runOpenWeight({ ...args, prompt: executionPrompt, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          cashController.signal.throwIfAborted();
+          const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
+            signal: cashController.signal, streamObserver: cashObserver,
+            resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          cashController.signal.throwIfAborted();
+          rung.continuation = execution.receipt;
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
           if (args.draftRouting) {
@@ -3001,14 +3143,21 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             : result.openWeightDeploymentAbsent ? "deployment absent" : "refused before transport",
           next: "cash-fallback",
         }));
+        stopCashWatchdog?.();
         return await spawnWorker({
           ...args,
+          signal: cashController.signal,
           cashSonnetEmergency: false,
           routingFallback: { rule: "cash-fallback", capacities: args.routingFallback?.capacities ?? [] },
         });
       }
       return result;
+    } catch (error) {
+      if (cashAbandonment) throw new WorkerAbandonedError(cashAbandonment, error);
+      throw error;
     } finally {
+      stopCashWatchdog?.();
+      args.signal?.removeEventListener("abort", relayAbort);
       reapWorkerHome(workerHomeRoot, workerHome);
     }
   }
@@ -3155,7 +3304,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // applyWorkerMcpBoundary below, so no spawn's `disallowedTools` is absent any more (W1-T9489 retires W1-T2591's
     // "unrestricted spawn is byte-identical" note).
     if (args.disallowedTools && args.disallowedTools.length > 0) options.disallowedTools = [...args.disallowedTools];
-    if (args.resumeSessionId) options.resume = args.resumeSessionId;
+    const execution = executionFor("claude");
+    if (execution.resumeSessionId) options.resume = execution.resumeSessionId;
     // Never unnamed: the CLI's own default is Opus with a 1M context (measured 2026-09-22), not the worker tier.
     const routedClaudeModel = claudeHealthRoute?.routedModel ?? args.model ?? workerModel(config);
     assertModelAllowed(routedClaudeModel, config);
@@ -3274,7 +3424,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
       const boundaryServers = applyWorkerMcpBoundary(options);
-      const liveQuery = runQuery({ prompt: executionPrompt, options });
+      const liveQuery = runQuery({ prompt: execution.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
         pidRef,
@@ -3311,20 +3461,17 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         teardownContained,
       );
       result.provider = "claude";
+      result.continuation = execution.receipt;
       if (args.mcpIsolation) {
         result.mcpIsolation = workerMcpIsolationEvidence(result.initSummary, !!args.ruleLookup);
-        // An opted-in run with unknown/leaked inventory must not earn successful worker credit.
-        if (result.mcpIsolation.inventory !== "observed-only") result.isError = true;
+        // An opted-in run with unknown/leaked inventory must not earn successful worker credit (W1-T9573: the subtype too).
+        if (result.mcpIsolation.inventory !== "observed-only") denyMcpSuccessCredit(result, result.mcpIsolation);
       }
       // W1-T9489: the tripwire at the producer. A worker offered anything outside its own server map is ledgered as exposed
       // and earns no success credit: the subtype changes too, because callers grade `{isError, subtype: "success"}` as clean.
       result.mcpBoundary = WORKER_MCP_STRICT;
       const exposure = workerMcpExposure(result.initSummary, boundaryServers);
-      if (exposure?.state === "exposed") {
-        exposure.original_subtype = result.subtype;
-        result.isError = true;
-        result.subtype = "error_mcp_exposure";
-      }
+      if (exposure?.state === "exposed") denyMcpSuccessCredit(result, exposure);
       if (exposure) result.mcpExposure = exposure;
       if (egressUnenforced) result.egressUnenforced = egressUnenforced;
       result.routedModel = routedClaudeModel;
@@ -4696,9 +4843,29 @@ function assertSamePackageInstallInputs(
     });
     return;
   }
-  if (hashInstallInputs(worktreePath) !== hashInstallInputs(sourceDir)) {
+  if (hashInstallInputs(worktreePath) !== linkedInstallInputsHash(source)) {
     throw new WorktreeNodeModulesRefusedError(worktreeName.name, worktreePath, source);
   }
+}
+
+/** The install-input hash `source` was really installed from: the marker `ensureInstallFresh` (run-task.ts) writes inside the
+ *  RESOLVED install, else that install's own package files. Never the linking tree's: an engine tree links the canonical
+ *  install, which a restart re-installs, while its own package files stay at the revision it was cut from — on
+ *  2026-10-17 that refused every implement run for 4 h against engine 649bcb7, an install current since 14:53Z. */
+export function linkedInstallInputsHash(source: string): string {
+  let real = source;
+  try {
+    real = realpathSync(source);
+  } catch (error) {
+    void error; // an unresolvable link is judged where it sits
+  }
+  try {
+    const marker = readFileSync(installHashMarkerPath(dirname(real)), "utf8").trim();
+    if (/^[0-9a-f]{64}$/.test(marker)) return marker;
+  } catch (error) {
+    void error; // no marker: the install's own package files are the record
+  }
+  return hashInstallInputs(dirname(real));
 }
 
 /** Give a fresh worktree a `node_modules`, by SYMLINK — never by installing. INVARIANT: a symlink, never `npm ci`. An install
@@ -4712,6 +4879,8 @@ export function linkWorktreeNodeModules(
   worktreePath: string,
   deps: {
     resolveSource?: (repoDir: string) => string | undefined;
+    /** Pin the selected install outside private intermediate aliases before a worker's deny-read policy applies. */
+    realpath?: (path: string) => string;
     /** Throws when the path is absent. `lstat`, not `stat`, so a BROKEN symlink still counts as taken — linking over either
      * one would write INSIDE the existing target. */
     lstat?: (p: string) => unknown;
@@ -4735,18 +4904,22 @@ export function linkWorktreeNodeModules(
   }
   const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
   if (!source) return "no-source";
+  let physicalSource: string;
   try {
-    (deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir")))(source, dest);
+    // An engine lives under denied state/, even when its own link names a readable install.
+    // Link the resolved install directly; never broaden the worker's access to state or shared dependencies.
+    physicalSource = (deps.realpath ?? realpathSync)(source);
+    (deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir")))(physicalSource, dest);
   } catch {
-    // Symlink failed, so no lockfile compare is meaningful: there is nothing linked to compare against. Preserves the
+    // Resolution or symlink failed, so no lockfile compare is meaningful: nothing was linked. Preserves the
     // pre-W1-T2777 "failed" contract byte-identically.
     return "failed";
   }
   // LOCKFILE COMPARE AT SYMLINK TIME, the right moment: earlier misses that `resolveSource` may point at the install root,
-  // later runs after a worker has already seen "Cannot find module". Compared against `parentOf(source)`, not `repoDir`,
-  // because the hash inputs live beside `node_modules` (W1-T2777).
+  // later runs after a worker has already seen "Cannot find module". Compare against the physical install's parent,
+  // not `repoDir` or an engine alias: the installed hash inputs live beside node_modules (W1-T2777).
   const hashFn = deps.hashInstallInputs ?? ((d: string) => hashInstallInputs(d));
-  const nmSourceDir = dirname(source);
+  const nmSourceDir = dirname(physicalSource);
   let mismatch = false;
   try {
     // Both reads catch failures internally (see hashInstallInputs' contract). A missing file hashes as empty on both sides,
@@ -5642,6 +5815,9 @@ export function worktreeAdd(
     /** W1-T4193: set ONLY by runTaskBody's implement path. Refuses a same-package lockfile mismatch before linking;
      * absent, every caller keeps the warn-and-link baseline byte-identically. */
     refuseSamePackageLockfileMismatch?: boolean;
+    /** Trusted harness install context; a private fixture may supply its own install, never task data. */
+    typecheckInstallRoot?: string;
+    typecheckRename?: (from: string, to: string) => void;
     /** W1-T4260 seams for a CROSS-PACKAGE worktree's own dependency tree, each defaulting to the real thing: the deps root
      * (default `<config.root>/deps`, derived from `repoDir`), the installer (default `npm ci` under
      * {@link DEPS_INSTALL_TIMEOUT_MS}), the atomic rename, and the clock and sleep the lock wait reads. */
@@ -5745,6 +5921,41 @@ function finishWorktreeAdd(repoDir: string, worktreePath: string, deps: Worktree
   // tree's first `npm run typecheck` starts warm. Silent unless a seed existed and could not be written.
   const seed = refreshCanonicalSeed(worktreePath);
   if (seed === "mismatch" || seed === "unwritable") deps.log?.("worktree.typecheck_seed_failed", { worktreePath, outcome: seed });
+  routeFleetTscEntry(repoDir, worktreePath, deps);
+}
+
+/** W1-T9405: only a managed cut may change its linked, fleet-owned install; never an operator/CI donor. */
+function routeFleetTscEntry(repoDir: string, worktreePath: string, deps: WorktreeAddDepsArg): void {
+  const fleetRoot = dirname(dirname(resolve(repoDir)));
+  if (basename(dirname(resolve(repoDir))) !== "repos" || dirname(resolve(worktreePath)) !== join(fleetRoot, "worktrees")) return;
+  const log = deps.log;
+  let temporary: string | undefined;
+  try {
+    const source = join(worktreePath, "node_modules");
+    if (!lstatSync(source).isSymbolicLink()) return;
+    const modules = realpathSync(source), owner = dirname(modules), root = realpathSync(fleetRoot);
+    if (owner !== root && !owner.startsWith(root + sep)) return;
+    const harnessModules = realpathSync(join(deps.typecheckInstallRoot ?? installRootDir(), "node_modules"));
+    if (modules !== harnessModules) { log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "not-harness-install" }); return; }
+    const entry = join(owner, "scripts", "tsc-entry.mjs");
+    if (!existsSync(entry)) { log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "install-entry-absent" }); return; }
+    const bin = join(modules, ".bin", "tsc"), current = realpathSync(bin);
+    if (current === realpathSync(entry)) return;
+    if (current !== realpathSync(join(modules, "typescript", "bin", "tsc"))) {
+      log?.("worktree.typecheck_entry_skipped", { worktreePath, reason: "unexpected-tsc-entry" }); return;
+    }
+    const next = join(modules, ".bin", `.rmd-tsc-${process.pid}-${randomUUID()}`);
+    symlinkSync(entry, next); temporary = next;
+    (deps.typecheckRename ?? renameSync)(next, bin); temporary = undefined;
+    log?.("worktree.typecheck_entry", { worktreePath, entry });
+  } catch (error) {
+    log?.("worktree.typecheck_entry_failed", { worktreePath, error: String(error) });
+  } finally {
+    if (temporary) {
+      try { unlinkSync(temporary); }
+      catch (error) { log?.("worktree.typecheck_entry_failed", { worktreePath, cleanup: true, error: String(error) }); }
+    }
+  }
 }
 
 const execFilePromise = promisify(execFile);
@@ -6389,6 +6600,24 @@ export function pruneStaleRuns(
  * name; this reaper has no such urgency (W1-T378). */
 export const DEFAULT_WORKTREE_REAP_GRACE_MS = loadDefaultPolicy().values.worktreeReapGraceMs;
 
+// One process-local hold serves BOTH reapers. The review-specific sweep must not keep
+// a checkout that this module's general sweep removes before its proofs execute.
+const heldReviewWorktrees = new Set<string>();
+
+/** Protect the exact checkout for the complete review scope, regardless of its age. */
+export function holdReviewWorktree(worktreePath: string): void {
+  heldReviewWorktrees.add(resolve(worktreePath));
+}
+
+/** Called by the existing owned review teardown, not by elapsed time or a reaper. */
+export function releaseReviewWorktree(worktreePath: string): void {
+  heldReviewWorktrees.delete(resolve(worktreePath));
+}
+
+export function reviewWorktreeIsHeld(worktreePath: string): boolean {
+  return heldReviewWorktrees.has(resolve(worktreePath));
+}
+
 /** Directory names never descended into by {@link newestActivityMs} — see its doc. */
 const ACTIVITY_SKIP_DIRS = new Set([".git", "node_modules"]);
 
@@ -6397,6 +6626,8 @@ export const ACTIVITY_WALK_ENTRY_CAP = 20_000;
 
 /** Why {@link reapStaleWorktrees} left an entry alone — the "and why" half of its ledger row. */
 export type WorktreeKeepReason =
+  /** This process still owns the review using this exact checkout. */
+  | "live-review"
   /** A run lock naming a pid that is currently alive. */
   | "live-pid"
   /** Registered on a branch still live upstream (an open, unmerged PR). */
@@ -6781,6 +7012,11 @@ function* worktreeReapPass(
     }
     if (!isDir) continue;
     yield entryPath;
+
+    if (reviewWorktreeIsHeld(entryPath)) {
+      keep(name, "live-review");
+      continue;
+    }
 
     const lockRead = readRunLock(entryPath);
     if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid, lockRead.info)) {

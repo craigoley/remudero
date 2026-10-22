@@ -38,8 +38,8 @@ import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/iso
  *      bullet while a string unit test passes green.
  */
 
-const SRC_PATH = fileURLToPath(new URL("../src/run-task.ts", import.meta.url));
-const SRC = readFileSync(SRC_PATH, "utf8");
+const SRC = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
+const ENTRYPOINT_SRC = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 function result(over: Partial<WorkerResult>): WorkerResult {
   return {
@@ -303,7 +303,7 @@ test("the RECON prompt's fixed instruction text is byte-identical to origin/main
     return src.slice(start, endIdx + endMarker.length);
   };
   assert.equal(
-    fixedInstructionText(SRC),
+    fixedInstructionText(ENTRYPOINT_SRC),
     fixedInstructionText(mainSrc),
     "recon's fixed instruction text must be unchanged, byte for byte",
   );
@@ -344,14 +344,14 @@ test("BEHAVIOURAL: the gap bullet is CITED, so the rendered prompt still passes 
 test("MUTANT: the relay reads couldntVerify, and the label is applied only to those lines", () => {
   const readsGaps = 'nonEmptyLines(parsed?.couldntVerify ?? "")';
   assert.equal(
-    SRC.split(readsGaps).length - 1,
+    [SRC, ENTRYPOINT_SRC].reduce((count, source) => count + source.split(readsGaps).length - 1, 0),
     1,
     "the substitution target must be UNIQUE or the mutant proves nothing",
   );
 
   const labelled = "`- ${RECON_UNVERIFIED_PREFIX}${l} ${citation(`recon#${taskId}`)}`";
   assert.equal(
-    SRC.split(labelled).length - 1,
+    [SRC, ENTRYPOINT_SRC].reduce((count, source) => count + source.split(labelled).length - 1, 0),
     1,
     "the substitution target must be UNIQUE or the mutant proves nothing",
   );
@@ -359,5 +359,5 @@ test("MUTANT: the relay reads couldntVerify, and the label is applied only to th
   // The OBSERVED mapper must NOT carry the label — if it did, the two kinds collapse and the
   // "labelled" assertion above would pass while conveying nothing.
   const plain = "`- ${l} ${citation(`recon#${taskId}`)}`";
-  assert.equal(SRC.split(plain).length - 1, 1, "the OBSERVED mapper must exist, exactly once, unlabelled");
+  assert.equal([SRC, ENTRYPOINT_SRC].reduce((count, source) => count + source.split(plain).length - 1, 0), 1, "the OBSERVED mapper must exist, exactly once, unlabelled");
 });

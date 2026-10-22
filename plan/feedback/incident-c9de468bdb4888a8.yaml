@@ -20,10 +20,29 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#c9de468bdb4888a896276501b97cdafb76dc21ed96dda78f1f9189a68cab8e7d
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/13620
+summary:
+  headline: Selection left three runnable slots idle without recording why
+  what_happened: The core lane reported two incidents in six minutes, with three
+    dispatchable tasks left idle for 29–41 slot-minutes. The hold was labeled
+    “selection_empty:unnamed,” with no setter or suspected merged change, so the
+    cause is unclear.
+  decision: Approve a bounded fix to record the selection refusal reason before
+    proposing any broader repair.
+  options:
+    - label: Approve the targeted fix
+      consequence: Records why selection returned no tasks so operators can identify
+        the hold.
+      intent: approve
+    - label: Keep observing
+      consequence: Leaves the cause unclear while more evidence is collected.
+      intent: keep
+    - label: Reframe as a class-wide issue
+      consequence: Would generalize from two events without evidence of a shared root cause.
+      intent: reframe
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

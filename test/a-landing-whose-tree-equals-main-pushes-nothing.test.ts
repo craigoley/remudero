@@ -91,7 +91,9 @@ test("W1-T9425: a rebuild after a lost lease that equals main pushes nothing", (
   f.root.git("commit", "--quiet", "-m", "chore: advance main");
   f.root.git("push", "--quiet", "origin", "main");
   let attempts = 0;
-  const result = withLiveWritesAllowed(() => landFeedbackStatusContent(f.root.dir, f.path, f.content, {
+  // A revised record, so the push is needed (W1-T9616: an unchanged one is no longer re-pushed when main moves).
+  const revised = f.content.replace("durable record", "durable record, revised");
+  const result = withLiveWritesAllowed(() => landFeedbackStatusContent(f.root.dir, f.path, revised, {
     ...f.opts,
     git: (args, opts) => {
       if (args[0] === "push") {
@@ -142,11 +144,12 @@ test("W1-T9425: an empty local list still lands records carried from a non-main 
   f.root.git("push", "--quiet", "origin", "main");
   const result = withLiveWritesAllowed(() => landFeedbackStatusContent(f.root.dir, path, "already durable\n", f.opts));
   assert.equal(result.landed, true, result.error);
-  assert.equal(result.pushed, true);
+  // W1-T9616: the branch already carries exactly this record, so main moving re-pushes nothing.
+  assert.equal(result.pushed, false);
+  assert.equal(result.unchangedSinceMainMoved, true);
   assert.deepEqual(result.files, []);
+  assert.equal(f.origin.git("rev-parse", LANDING_BRANCH), f.tip);
   assert.equal(f.origin.git("show", `${LANDING_BRANCH}:${f.path}`), f.content.trim());
-  assert.equal(f.origin.git("show", `${LANDING_BRANCH}:${path}`), "already durable");
-  assert.ok(f.calls.find(args => args[0] === "api" && args.includes("PATCH"))?.some(arg => arg.includes(f.path)));
   assert.equal(f.logs.some(row => row.step === "landing.nothing_to_land"), false);
 });
 

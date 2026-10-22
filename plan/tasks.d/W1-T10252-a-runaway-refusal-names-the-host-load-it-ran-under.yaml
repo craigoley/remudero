@@ -1,0 +1,75 @@
+- id: W1-T10252
+  title: "A FAST-GATE RUNAWAY REFUSAL NAMES THE HOST LOAD IT WAS MEASURED UNDER — inside preflight-author on the loaded Azure host the fast gate refused catch-erasure-census as RUNAWAY (5052 ms, re-measure 6383 ms, against no-draft-pr-census re-timed at 1023 ms) though its own result passed: load slows the heavier entry more than the light median reference, and the refusal line says nothing about load, CPU throttling or memory.high, so an author cannot tell a host-load refusal from a real runaway; the verdict rule itself is an operator decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern, what a RUNAWAY refusal reports about its own measuring conditions; the bound, multiple, margin and verdict are unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020 item 3 (2026-10-20); evidence from the census-reader re-measure hand build (logs-8864/reader-remeasure-*, PR #13042)"
+  plan_refs: [W1-T3408, W1-T5676, W1-T5786, W1-T2810, W1-T5680]
+  files:
+    - src/lib/ci-parity.ts
+    - test/ci/parity/a-runaway-refusal-names-the-host-load-it-ran-under.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (logs-8864/reader-remeasure-preflight.log and the run's capture
+    wt-reader-remeasure/coverage/rmd-author-BYUlcn/static-preflight.stdout.log line 18; one preflight-author run at
+    head d75005ef9, base 9ca98e4f5, ending about 2026-10-20T03:32Z, under heavy-run.sh: CPUs 4-7, nice 19, MemoryHigh 4G):
+    - "catch-erasure-census: RUNAWAY — npm run --silent census:catch-erasure took 5052ms then 6383ms on one re-measure,
+      the re-measure over 4502ms (4x the median-cost entry no-draft-pr-census re-timed back to back at 1023ms, floored
+      at 1000ms, plus the margin); its own result would have PASSed."
+    - Static preflight 27 passed, 1 failed (this one), 989 s. The run context line read "load=1.94->2.31 of 8 cpu
+      (LOADED)", i.e. core-normalised 1-minute load of about 16-18 runnable on 8 cores, while the run itself was pinned
+      to 4 CPUs at nice 19.
+    - The same builder's PR body: the diff touched no path the catch-erasure census walks (`rmd census-membership`).
+      INFERRED: a host-load refusal unrelated to the diff; hosted CI measured it on its own runner.
+    READ at origin/main a16d6d95f (symbols, not lines):
+    - src/lib/ci-parity.ts `runPreflightFast` PASS TWO: a crossing entry is re-measured once and refused when the
+      re-measure exceeds `Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, refAgainMs) * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE *
+      FAST_GATE_CENSUS_REMEASURE_MARGIN` (1000, 4, 1.1). W1-T5676 already re-times the median entry back to back.
+    - The block's own comment records the mechanism: "a heavier, spawn-and-I/O-bound entry ... IS sensitive to load"
+      (2026-09-11, PR #5087), which is why W1-T3408 moved the reference from min to median. A light reference re-timed
+      under the same load still slows less than a heavy entry, so the ratio itself grows with load.
+    - The run context (W1-T2810, `isLoadedRun`, `LOADED_RUN_THRESHOLD`) already samples load at the start and end of
+      the whole run; the RUNAWAY detail does not carry any of it, nor anything about the re-measure window.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and the plan trees of every open PR head (2026-10-20 11:40Z)
+    for RUNAWAY, FAST_GATE_CENSUS and catch-erasure-census; W1-T3408, W1-T5676 and W1-T5786 (merged) shaped the bound;
+    PR #13042 (open, hand build) re-measures the census-precheck SOURCE-READER runtime, a different rule.
+  design: |
+    1. Around the crossing entry's re-measure and its reference re-time, sample what the host and the run's own cgroup
+       did: core-normalised loadavg before and after; the run's cgroup v2 cpu.stat `nr_throttled`/`throttled_usec` delta
+       and memory.events `high` delta when readable (named "unavailable" otherwise, never 0). Seams for each read; one
+       test reads the real files.
+    2. The RUNAWAY detail and the RE-MEASURED pass detail both carry those figures and the two ratios
+       (first/median, re-measure/reference) in one clause, so a refusal reads, for example, "... under load 2.1/core,
+       cpu throttled 4.2 s, memory.high +37". The verdict, the bound and every constant are unchanged.
+    3. preflight-author's static summary (coverage/preflight-author-static.json) keeps each crossing as a structured
+       record (entry, first, re-measure, reference, threshold, load, throttle, high, verdict), so a later task can tune
+       from data rather than from this one run.
+    4. OPERATOR DECISION, named and not taken: whether an AUTHOR-side RUNAWAY whose re-measure ran LOADED or throttled
+       is reported as "NOT MEASURED (host load)" instead of FAIL, leaving hosted CI as the judge; or whether the
+       reference becomes the entry's own measured ratio to the median. No multiple, margin, floor or threshold changes
+       in this task.
+    5. TESTS in test/ci/parity/a-runaway-refusal-names-the-host-load-it-ran-under.test.ts (folder from `rmd test-place`;
+       re-run on the real file), `test(` titles verbatim as in the proofs; drive `runPreflightFast` with fake census
+       timings and fake load/cgroup readers.
+  acceptance:
+    - claim: "a RUNAWAY refusal names the load, CPU throttle and memory.high change measured across its re-measure"
+      proof: "unit test: W1-T10252: a runaway refusal names the host load measured across its re-measure"
+    - claim: "an unreadable cgroup file is named unavailable in the refusal, never reported as zero"
+      proof: "unit test: W1-T10252: an unreadable cgroup reading is named unavailable, not zero"
+    - claim: "the verdict is unchanged: a re-measure over the confirmation threshold still refuses, loaded or not"
+      proof: "unit test: W1-T10252: a loaded runaway is still refused"
+      kind: guard
+  falsifier: |
+    At origin/main the RUNAWAY detail is the fixed sentence above with no load, throttle or memory.high clause, so the
+    first two tests fail on their substring checks. Delete the sampling and they fail again. The guard passes on both
+    sides; it fails if the build turns the refusal into a pass.
+  note: |
+    EFFECT, measured after merge: the next author-side RUNAWAY on the Azure host names its load and throttle; the
+    operator can then rule item 4 from the structured records in preflight-author-static.json rather than one log line.

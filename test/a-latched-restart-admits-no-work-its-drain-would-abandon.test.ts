@@ -104,7 +104,7 @@ function latchedLane(t: TestContext, ledger: readonly string[], opts: { fullSwee
         full.push({ latched: stale, hold: gate?.workerAdmissionHold?.(), review: gate?.() ?? true });
       },
     } : {}),
-  } as DaemonDeps, { laneCount: 1, max: 1, sweepWallClockBoundMs: BOUND_MS, sweepRetriggerIntervalMs: minute });
+  } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 1, max: 1, sweepWallClockBoundMs: BOUND_MS, sweepRetriggerIntervalMs: minute });
   const at = (ageMinutes: number) => { nowMs = start + ageMinutes * minute; };
   const tick = async (rounds = 2) => {
     for (let wait = 0; wait < 20 && !laneStarted; wait++) {

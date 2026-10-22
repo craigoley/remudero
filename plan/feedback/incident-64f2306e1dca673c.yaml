@@ -1,0 +1,28 @@
+id: incident-64f2306e1dca673c
+ts: 2026-10-22T17:09:09.990Z
+raw: >-
+  Incident 64f2306e1dca: invariant reconcile.ci
+
+  First seen: 2026-10-22T16:18:07.364Z
+
+  Last seen: 2026-10-22T16:18:07.364Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - codeql.yml run covering main commit 5443f156f59d16655cd8fa74e060ac1f893b6a60: gap persists after its repair attempt (5443f156f59d16655cd8fa74e060ac1f893b6a60:codeql.yml)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#64f2306e1dca673cd64842c596783202caa3b54eaffb4c7cca7247a2ad968e50
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

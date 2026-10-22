@@ -3,10 +3,10 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.04
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:fix_refusal:the-worker-changed-nothing#r2"
@@ -37,3 +37,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.87
+    reasons:
+      - "The plan scopes this to preventing or self-healing a fix-refusal round in the existing task path, with a test named as its acceptance proof."
+      - "The declared files are a source file and a test file; the gates state machine authorship and do not identify a sensitive or policy-changing action."
+      - "No bounded actual-change view is supplied, so the implementation shape cannot be assessed from this record."
+    judged_at: "2026-10-17T23:52:10.770Z"
+    pin: "645f434d931b0f9e034ba9a34e956ef9fc8d12a6ac2dcb9f5b72a1bbe263cde0"

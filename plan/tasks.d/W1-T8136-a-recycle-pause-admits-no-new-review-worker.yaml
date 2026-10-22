@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11: follow-ups from the recycle-stall fix (hand PR #10925)"
   plan_refs: [W1-T5804, W1-T5343, W1-T4429, W1-T4191, W1-T5127, W1-T8088]
   files: [src/lib/daemon.ts, test/a-recycle-pause-admits-no-new-review-worker.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -34,6 +34,10 @@ import { isValidRetainedStepsMetadata, rotationStampIso } from "./ledger-union.j
 import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV, readGardenerOrigin } from "./worker-containment.js";
+import {
+  assertStateRestorePaths, isEngineDependencyLinkPath, preserveEngineDependencyLinks,
+  restoreEngineDependencyLinks, validateEngineDependencyLinks, ENGINE_LINK_MANIFEST,
+} from "./state-backup-engine-links.js";
 
 /** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
  *  `host` are stamped at write time. Every worker and brain-plane call spreads the same telemetry
@@ -576,10 +580,17 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  * docs/forensics/ledger.md#decision_relevant_ledger_steps.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
+  "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
+  "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
+  // The sweep reads these exact-head security decisions from the live ledger after async judgment.
+  // Archiving them re-judges settled alerts or forgets an already admitted repair.
+  "code_scanning.judged_fix",
+  "code_scanning.judged_false_positive",
+  "code_scanning.fix_dispatch",
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
@@ -688,11 +699,15 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
   "sweep.base_fixed.refresh", // baseRedHistoryFromLedger and refreshRecordsFromLedger read prior refreshes.
+  "sweep.contract_amended.refresh", // A failed narrative-adoption attempt remains a decision input after rotation.
   "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
   "sweep.base_red.refresh_admission", // W1-T9595: the light pass replays its held heads; pacing reads its cohort.
+  "sweep.ratchet_judge.decided", // W1-T9962: the armed re-judge's once-per-(head, main tip) memo reads it back.
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
   "sweep.ci_timeout_refresh.escalated",
+  "sweep.own_task_record.refresh", // W1-T9232: the sweep's once-per-PR refresh bound reads it back.
+  "review.reviewer.skipped", // W1-T9232: ownTaskRecordMissingRow reads the cause row for the PR's head.
   "sweep.actions_incident_hold",
   "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
@@ -700,10 +715,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.fold_debt_pull.ingested", // W1-T7853: foldDebtRunIdsFromLedger dedups on it; lost, CI fold debt is pulled and landed again.
   "sweep.fold_debt_pull.dropped", // W1-T7853: the same dedup for a run whose PR closed unmerged or merged at a later head.
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
-  "sweep.capped_host_gap_rereview", // W1-T7837: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
-  "sweep.review_host_gap_rereview", // W1-T7850: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
+  "sweep.capped_host_gap_rereview", // W1-T7837: releases the delivered-review key; demand alone never spends an admitted attempt.
+  "sweep.review_host_gap_rereview", // W1-T7850: same demand release for a refused POST, not completed review work.
   "sweep.fix.checkout_claim_declined",
   "sweep.fix.dispatch_failed",
+  "sweep.fix.prepare_timing", // The scanner fold reads the latest preparation owner across rotation.
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
@@ -799,6 +815,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // archived away, a completed migration reads as `hold` and the rung submits it again.
   "dep-review.migrate.completed",
   "review.posted",
+  // W1-T10221: hostGapRereviewFacts joins library-owned refusals through this unique
+  // per-review carrier. Dropping it makes a completed admitted attempt look unfinished.
+  "review.provider_provenance",
+  "sweep.review_requeued", // W1-T9970: sweep and review read this per-head image request after rotation.
   "review.skipped_stale_reviewer_code", // W1-T3691: preserve the daemon's freshness restart history across boots.
   // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.
   PLAN_ONLY_REVIEW_MARKER_STEP,
@@ -807,6 +827,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
   // idempotence AND the staleness clock; dropping it makes a review stalled for hours read as fresh.
   "review.pending_posted",
+  // PR-13355: the stalled-stage backstop (sweep.ts) reads it; a review refusing at a head is no live owner.
+  "review.semantic_setup_refused",
   // W1-T1017: W1-T322's ships-unwired advisory floor line. The deciding reader is not code — it is
   // the operator adjudicating W1-T323's advisory-versus-blocking flip against this exact corpus.
   // Why: rotation was dropping 95%+ of these rows (W1-T1017; docs/forensics/ledger.md).
@@ -816,6 +838,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // `panel.escalation_marked_handled` stays out: it carries nothing a calibrator could read back.
   RISK_OVERRIDE_RECORDED_STEP,
   "daemon.boot",
+  // fixSeedRead needs both the empty boot census and later ownership/uncertainty:
+  // dropping either side changes whether an old fix can re-enter the checkout claim.
+  "run_child.adoption_pass",
+  "run_child.adopted",
+  "run_child.adoption_unreadable",
+  "run_child.adoption_misidentified",
   // impl-DF: the idle rung's reason tally. A HUMAN reads it to tell "starved of work" from
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",
@@ -2247,7 +2275,7 @@ export const STATE_BACKUP_EXCLUDED_RELPATHS: ReadonlySet<string> = new Set(["sta
 export interface StateBackupSnapshot {
   /** Absolute path to the finished, verified snapshot directory. */
   archiveDir: string;
-  /** Relative paths of every file the snapshot copied, sorted, relative to `state/`. */
+  /** Sorted paths of copied files, archive metadata and preserved links, relative to `state/`. */
   entries: string[];
   /** W1-T5545: rotations hard-linked to the last snapshot, files removed mid-copy, torn bytes cut. */
   linked: string[];
@@ -2272,19 +2300,36 @@ export function isLedgerArchiveRelPath(rel: string): boolean {
   return /^ledger\.\d{4}-\d{2}-\d{2}T[^/]*\.ndjson(\.gz)?$/.test(rel);
 }
 
-/** Every FILE under `root`, sorted, minus `excluded` — ONE walk for staging, verify and restore. Types
+/** Files and preserved engine links under `root`, sorted, minus `excluded`, for staging and restore. Types
  *  come from readdir, so a temp file renamed away mid-walk cannot fail it (W1-T5545). */
 function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set()): string[] {
   const out: string[] = [];
+  const ancestors = new Set<string>();
   const walk = (relDir: string): void => {
     const absDir = relDir ? join(root, relDir) : root;
+    const identity = realpathSync(absDir);
+    if (ancestors.has(identity)) throw new StateBackupError(`state backup: directory link cycle at ${absDir}`);
+    ancestors.add(identity);
     for (const d of readdirSync(absDir, { withFileTypes: true })) {
       const rel = relDir ? join(relDir, d.name) : d.name;
       if (excluded.has(rel)) continue;
-      const kind = d.isSymbolicLink() ? statSync(join(absDir, d.name)) : d;
+      if (d.isSymbolicLink() && isEngineDependencyLinkPath(rel)) {
+        out.push(rel);
+        continue;
+      }
+      let kind;
+      try {
+        kind = d.isSymbolicLink() ? statSync(join(absDir, d.name)) : d;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+          throw new StateBackupError(`state backup: directory link cycle at ${rel}`, { cause: error });
+        }
+        throw error;
+      }
       if (kind.isDirectory()) walk(rel);
       else if (kind.isFile()) out.push(rel);
     }
+    ancestors.delete(identity);
   };
   walk("");
   return out.sort();
@@ -2421,7 +2466,9 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
     const copy = opts.copy ?? liveStateCopier(newestStateBackup(backupsRoot), opts, report);
     tmpDir = mkdtempSync(join(backupsRoot, ".state-backup-tmp-"));
     const sourceEntries = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS);
-    copy(stateDir, tmpDir, liveCopyOrder(sourceEntries));
+    const engineLinks = preserveEngineDependencyLinks(stateDir, tmpDir, sourceEntries);
+    const linkPaths = new Set(engineLinks?.links.map((link) => link.path));
+    copy(stateDir, tmpDir, liveCopyOrder(sourceEntries.filter((rel) => !linkPaths.has(rel))));
     for (let pass = 1; ; pass++) {
       const have = new Set([...listStateFiles(tmpDir), ...report.vanished]);
       const late = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS).filter((rel) => isLedgerArchiveRelPath(rel) && !have.has(rel));
@@ -2435,6 +2482,7 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
     }
 
     const staged = listStateFiles(tmpDir);
+    validateEngineDependencyLinks(tmpDir, staged, engineLinks);
     if (staged.length === 0) {
       throw new StateBackupError(`state backup: snapshot of ${stateDir} would be an empty archive — refusing to publish it`);
     }
@@ -2465,18 +2513,24 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
 /** Restores every file under a snapshot directory into `targetStateDir` byte-for-byte, permission
  *  bits preserved best-effort. THE RESTORE IS A VERB, NOT A RUNBOOK PARAGRAPH (design note iii):
  *  this is the one command an operator runs mid-incident. Refuses — throwing
- *  {@link StateBackupError} — an absent or empty archive rather than no-op'ing over a live dir. */
-export function restoreState(archiveDir: string, targetStateDir: string): void {
+ *  {@link StateBackupError} — an absent or empty archive rather than no-op'ing over a live dir.
+ *  Engine links are returned as requiring dependency reconstruction; no install is attempted. */
+export function restoreState(archiveDir: string, targetStateDir: string): { reconstructionRequired: string[] } {
   try {
     if (!existsSync(archiveDir)) {
       throw new StateBackupError(`state backup: restore source does not exist: ${archiveDir}`);
     }
     const entries = listStateFiles(archiveDir);
+    const engineLinks = validateEngineDependencyLinks(archiveDir, entries);
     if (entries.length === 0) {
       throw new StateBackupError(`state backup: refusing to restore from an empty archive: ${archiveDir}`);
     }
+    assertStateRestorePaths(targetStateDir, entries, engineLinks);
+    const linkPaths = new Set(engineLinks?.links.map((link) => link.path));
     mkdirSync(targetStateDir, { recursive: true });
-    copyStateFiles(archiveDir, targetStateDir, entries);
+    copyStateFiles(archiveDir, targetStateDir, entries.filter((rel) => !linkPaths.has(rel) && rel !== ENGINE_LINK_MANIFEST));
+    restoreEngineDependencyLinks(targetStateDir, engineLinks);
+    return { reconstructionRequired: [...linkPaths] };
   } catch (err) {
     if (err instanceof StateBackupError) throw err;
     throw new StateBackupError(

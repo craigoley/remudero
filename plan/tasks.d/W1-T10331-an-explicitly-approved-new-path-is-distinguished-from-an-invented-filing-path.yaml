@@ -1,0 +1,164 @@
+- id: W1-T10331
+  title: An explicitly approved new path is distinguished from an invented filing path
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved:2026-10-21:separate-four-file-new-path-admission-repair"
+  plan_refs: [W1-T10027, W1-T10041, W1-T8523, W1-T9062, W1-T10258]
+  files: [src/lib/plan.ts, src/lib/task-linter.ts, src/lib/machine-filing.ts, test/ci-friction-remedies-file-admission.test.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, not a permission to bypass the guard: separate unpublished W10313
+    at43c888aadbe684ed1bce92f1090a11ed3d8109ac has a matching recorded human
+    risk approval for USD5/high/span/three exact future paths/four proofs, but
+    its one native JKV3ZZ at actual8f071ede302db75e5b723355f58a89fd8683fcca
+    ended FAILED. Complete census and27static checks passed; lint-plan refused
+    its three new paths through machineFilingAdmissionViolations. All28selected
+    affected suites were NOT RUN. Preserve that exact FAILED receipt, not green
+    because other checks passed. No unchanged retry or hosted job was started.
+
+    The exact real W10313 task supplied as DATA to actual unchanged pinned8f
+    modules and currentee3 modules receives the same refusal. Literal Git-tree
+    reads prove all three future paths absent; nonempty existing-path guard
+    controls admit. The maintained machineShardFilingRefusal also detects it
+    before staging/author work. These are source-function observations, not TAP
+    or native PASS. Later936aa main has identical guard/pin/helper source blobs.
+
+    Current plan.ts distinguishes who CONCLUDED a plan from its commissioner.
+    Do not change author_class to operator, invent a gardener origin, create
+    placeholder source files, or treat origin/verdict/CREATES-looking prose as
+    authority. Existing W10027 lesson paths and W8523 scout/parked shapes are
+    deliberately narrow; neither authorizes new workflow/source paths here.
+    W9062 rejects invented draft paths and keeps CREATES separate from caller
+    proof; this task must preserve those falsifiers, not reverse that policy.
+    W10041's CI-learning call-site and foreign W10258's hosted dependency credit
+    are separate concerns, not copies to implement under this task's identity.
+
+    Fresh preparation at actual0a40b9ca9f8c36819a830a8b9ca8a7c917b35745
+    read all7complete OPEN heads plus13313's advertised variant. Each main/head
+    has three one-hit admission/pin/task controls and a broader476-479subject
+    file population. No captured OPEN head owns an own diff on these four guard
+    paths; unrelated run-task/backup/policy/CI work stays with its owners. All
+    four declared paths exist. Earlier46claim overlap census had own9796 and
+    foreign9050 controls and no declared guard-path overlap; refresh it before
+    build/publication, never infer worker health or release from a zero or age.
+    Actual API source credit confirms11345/W8523,11953/W9307,12500/W9860
+    MERGED with exact trailers AND run-task branches; their saved checkpoints
+    remain untouched. No corresponding new-path authorization was found in the
+    controlled subject corpus. This is no claim unpublished work is globally
+    absent or that an old decorative task status certifies merge.
+  design: |
+    1. Reuse the existing approval/ruling authority boundary, exact task-scope
+       binding and maintained admission predicate. Distinguish an intentional,
+       explicitly authorized new path from an invented missing path. Add no
+       broad source allowlist, special task ID, fake origin, author-class change,
+       placeholder file, gate-disable flag, new reviewer or live release ledger.
+       A recorded verdict string alone is not new-path authority.
+    2. Bind any new-path authorization to the actual canonical task identity and
+       exact declared path set through qualified existing approval provenance.
+       Missing, stale, changed, unreadable or unsupported provenance remains
+       refused/UNKNOWN. A trusted relayer or admitted actor cannot grant it.
+       If that provenance cannot be qualified inside these four files, STOP
+       for a normal scope/authority amendment instead of inventing a grant.
+    3. Admit no path outside the exact authorization and files declaration.
+       Canonical repository-relative paths only: absolute paths, traversal,
+       malformed values, wrong task/repository/scope, path-set substitution and
+       an extra missing path remain refused. Changing load-bearing authority or
+       scope invalidates the decision; preserve existing risk-pin semantics and
+       legacy digest compatibility where the new contract is absent. Do not
+       silently re-sign a drifted record or authorize it from stored trust text.
+    4. Keep machineShardFilingRefusal and the actual lint-plan admission path in
+       agreement using ONE shared decision. Unsupported evidence refuses before
+       staging/publication/native-start effects. Do not maintain independently
+       relaxed copies, turn path-read errors into absence or healthy controls,
+       or replace actual default facts with a permanently injected success.
+    5. Preserve existing CI-friction/scout/flow/lesson/legacy/operator behavior
+       and refusal controls. Do not expand narrow existing origins to unrelated
+       workflow/source paths. CREATES is neither a caller proof nor approval.
+       Authorization of a source path does NOT release dispatch_hold, parked/
+       retired/blocked state, dependency credit or independent owner override.
+       Use assertLintClean in process for dispatch controls, never drain dry-run
+       or another command that writes the live ledger.
+    6. Extend the existing declared test suite; do not invent a new test path.
+       Exercise real temporary Git/filesystem/default precheck and lint paths,
+       qualified healthy and unrelated legacy controls, every new catch/unknown
+       outcome, changed authorization/task/path/bytes and forbidden-effect traps.
+       No real GitHub write/job/closure/worker action is a fixture. Prove the four
+       literal behavioral titles below resolve. Remove actual binding/refusal
+       code and observe the named test failures, restore exact bytes and pass.
+       Commit before mapped coverage and prove every changed source SF exists.
+    7. Before source build AND publication refresh actual main, exact merged
+       trailer OR run-branch credit, active branches, all OPEN head subjects with
+       positive/window controls, maintained package runnableCandidates and an
+       ordinary owned claim. A contested owner is never reclaimed. Run the
+       maintained full filing precheck BEFORE asking for a native author slot.
+       One author run per distinct committed tree; compare every actual new
+       failed test title on THAT run's unchanged pinned base with complete TAP.
+       Capacity, selected-file count, incomplete capture and unknowns are not
+       passes. Keep every failed receipt; no unchanged retry into unexplained
+       green, baseline/scanner/admission waiver, force/admin merge or fresh SHA
+       merely to clear stale CI. Follow stored-body proofs and every normal
+       current-head CI/coverage/security/review/fleet merge gate.
+    8. Keep W10313's approved USD5/high-span/three files/four proofs unchanged.
+       This repair must ACTUALLY merge normally before qualifying W10313's
+       legitimate new integration context. Its original FAILED result remains
+       FAILED. Its separate hosted-route owner hold remains independent; this
+       task cannot clear it or edit the owner's923fe pilot branch. W10280's
+       originala660 plan and ONE unused90minute hosted allowance stay unchanged;
+       never spend it diagnosing this repair or infer another Mac retry.
+    9. This is a governed source-filing validation repair, not live contributor
+       enforcement, private-material publication permission or a production
+       scheduler activation. New runtime observations stay opt-in SHADOW/report
+       only; no default-on live policy or configuration change. If effectful use
+       requires authority beyond the exact approved source-filing contract,
+       preserve the hold and ask. Preserve trusted PR flow, scoped services,
+       independent human owner/admin override and complete public Apache core.
+       No worker stop/restart, schedule, production config/state/settings/infra/
+       credential change, actual external closure or remudero-ops cutover.
+  acceptance:
+    - claim: Only a qualified exact-task and exact-path authorization admits an intentional new path
+      proof: 'unit test: new path admission binds the explicit approval to the exact task and declared paths'
+    - claim: Missing stale unreadable forged-looking or broadened evidence cannot admit an invented path
+      proof: 'unit test: new path admission refuses missing drifted and unsupported authority before staging'
+    - claim: The actual cheap filing precheck and normal plan lint use the same admission decision
+      proof: 'unit test: new path admission agrees between the real filing precheck and plan lint'
+    - claim: Existing allowlisted legacy behavior and independent owner and dispatch holds remain unchanged
+      proof: 'unit test: new path admission preserves legacy proposals and independent owner holds'
+  falsifier: |
+    Keep assertions, actual task/path/provenance inputs and healthy/legacy
+    controls fixed. Removing actual scope/approval binding must admit at least
+    one substituted task/path incorrectly; removing the refusal must reach a
+    forbidden staging/native-start effect; diverging either real caller must
+    fail the parity proof. Restore exact source and observe pass. A setup crash,
+    missing TAP, path ghost, selected count or capacity refusal is not this
+    evidence and cannot waive author/review gates. Test raw authority-looking
+    strings separately from genuinely qualified provenance, and keep all owner/
+    dispatch holds independent on the healthy authorization path.
+  note: |
+    Explicit same-chat operator approval2026-10-21: separate USD5 high/span
+    FOUR-existing-file admission repair through normal gates when ownership
+    permits, then W10313/W10280 only when cleared; SHADOW/owner override/no
+    duplicates/worker stops/schedules. Normal nextTaskIdCommand reserved
+    W1-T10331 exactly once atbbcfa42a85fb9aba310db57a3df26d67a1218be7 for
+    codex/new-path-admission-plan-20261021. Record that genuine source-plan risk
+    approval with the maintained taskRulingPin; no live rmd approve, release
+    ledger write, fabricated judge verdict or hosted owner grant is implied.
+    No implementation before the plan's actual normal filing merge. The four
+    future behavioral proof titles are requirements, NOT tests claimed executed
+    by this plan-only filing. Retain all prior source/native/base/UNKNOWN logs.
+  risk_ruling:
+    verdict: operator
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Explicit same-chat operator approval of this separate USD5 high/span four-file admission repair and its four behavioral proofs, through normal gates only when ownership permits. Source-plan risk authority only: no live release ledger, gate waiver, source build before actual filing merge, hosted owner clearance, new W10280 attempt, worker stop, schedule or production activation."
+    judged_at: "2026-10-21T10:57:00Z"
+    pin: "5bb4f53f86a74be9cb443c9c43aa59be814f5d7072b0df53cfa5fa2c5c6012f0"

@@ -1,147 +1,77 @@
-// A DECIDED RESTART NAMES THE LANES IT WAITS ON. A freshness restart decided mid-dispatch runs only once every
-// in-flight lane settles, and until then the daemon wrote nothing: on 2026-10-10 the core daemon decided a restart at
-// 11:04:55Z, held every freed lane as "stale code", and then logged no freshness row for over an hour while W1-T5866's
-// lane ran on — an operator read it as a restart that would never run. These drive the REAL runDaemon at laneCount 2;
-// only the worker spawn, the freshness reading and the clock are faked.
-
+// test/a-decided-restart-names-the-lanes-it-waits-on.test.ts — W1-T8503, repointed by W1-T9089 (ADR 0007 A.10).
+//
+// A restart decided while lanes run waits on exactly one kind of lane: a run still inside the daemon's own process. A
+// child run is left running for the next boot to adopt, and the exit row names it so the operator can see who carries on.
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setImmediate as drainMicrotasks } from "node:timers/promises";
-import { test } from "node:test";
-import { loadPlan } from "../src/lib/plan.js";
-import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
-import { FRESHNESS_COALESCE_WINDOW_MS } from "../src/lib/deploy-judge.js";
-import type { RunResult } from "../src/run-task.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { after, test } from "node:test";
 
-const POLL_MS = 60_000;
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
-function twoDisjointPlan() {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-restart-wait-"));
-  const f = join(dir, "tasks.yaml");
-  const task = (id: string) =>
-    `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/${id}.ts]\n`;
-  writeFileSync(f, task("A") + task("B"));
-  return loadPlan(f);
-}
-
-const okResult = (id: string): RunResult =>
-  ({ taskId: id, merged: true, verdict: "merged", costUsd: 0, prUrl: `https://x/${id}` }) as unknown as RunResult;
+const scratch: string[] = [];
+after(() => { for (const dir of scratch) rmSync(dir, { recursive: true, force: true }); });
 
 function deferred<T>() {
-  let resolve!: (v: T) => void;
-  const promise = new Promise<T>((r) => { resolve = r; });
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+const result = (id: string): RunResult => ({ taskId: id, runId: id, merged: false, verdict: "no_pr", costUsd: 0 });
 
-type Line = { step: string; extra?: Record<string, unknown> };
-
-const staleOwnCode = {
-  stale: true as const,
-  oldSha: "a".repeat(40),
-  newSha: "b".repeat(40),
-  changes: [{ sha: "b".repeat(40), subject: "fix: x", files: ["src/lib/daemon.ts"] }],
-};
-
-function harness() {
-  const steps: Line[] = [];
+test("W1-T9089: a decided restart waits on the in-process lane and names the child it leaves running", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t9089-names-`));
+  scratch.push(root);
+  const path = join(root, "tasks.yaml");
+  writeFileSync(path, ["A", "B"].map((id) =>
+    `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  verify: auto\n  depends_on: []\n  status: queued\n  files: [src/${id}.ts]\n`).join(""));
+  const rows: Array<Record<string, unknown>> = [];
+  const settles = new Map(["A", "B"].map((id) => [id, deferred<RunResult>()]));
   const started: string[] = [];
-  const release = { A: deferred<RunResult>(), B: deferred<RunResult>() };
-  const bothStarted = deferred<void>();
+  let now = Date.now();
   let stale = false;
-  let nowMs = Date.now();
-  const sleeps: Array<ReturnType<typeof deferred<void>>> = [];
-  const run = runDaemon(
-    twoDisjointPlan(),
-    {
-      refreshMerged: () => () => false,
-      log: (step: string, extra?: Record<string, unknown>) => steps.push({ step, extra }),
-      runOne: (id: string): Promise<RunResult> => {
-        started.push(id);
-        if (started.includes("A") && started.includes("B")) bothStarted.resolve();
-        return id === "A" || id === "B" ? release[id].promise : Promise.resolve(okResult(id));
-      },
-      now: () => new Date(nowMs),
-      sleep: () => {
-        const sleep = deferred<void>();
-        sleeps.push(sleep);
-        return sleep.promise;
-      },
-      checkFreshness: () => (stale ? staleOwnCode : { stale: false }),
-    } as unknown as DaemonDeps,
-    { max: 2, laneCount: 2, pollIntervalMs: POLL_MS },
-  );
-  const tick = async () => {
-    await drainMicrotasks();
-    sleeps.shift()?.resolve();
-    await drainMicrotasks();
-    await drainMicrotasks();
-  };
-  return {
-    steps, release, bothStarted, run, tick,
-    goStale: () => { stale = true; },
-    advanceClock: (ms: number) => { nowMs += ms; },
-    waits: () => steps.filter((l) => l.step === "daemon.freshness_restart_waiting"),
-  };
-}
-
-async function decideRestartWithBothLanesInFlight() {
-  const h = harness();
-  await h.bothStarted.promise;
-  h.goStale();
-  await h.tick(); // the dispatch tick observes the advance and opens the quiet window
-  h.advanceClock(FRESHNESS_COALESCE_WINDOW_MS.value);
-  await h.tick(); // past the window: the dispatch tick decides to restart
-  assert.ok(h.steps.some((l) => l.step === "daemon.freshness_decision" && l.extra?.action === "restart"),
-    "control: the restart was decided while both lanes were in flight");
-  return h;
-}
-
-async function settled(h: ReturnType<typeof harness>, body: () => Promise<void>): Promise<void> {
+  let stop = false;
+  const run = runDaemon(loadPlan(path), {
+    refreshMerged: () => () => false,
+    checkStop: () => stop ? "cleanup" : undefined,
+    checkFreshness: () => stale ? { stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40), installNeeded: false,
+      changes: [{ sha: "b".repeat(40), subject: "fix(daemon): reload the dispatch loop", files: ["src/lib/daemon.ts"] }] } : { stale: false },
+    now: () => new Date(now),
+    sleep: async () => { now += 3_600_000; await delay(1); },
+    runOne: (id, options) => {
+      started.push(id);
+      const settled = settles.get(id)!.promise;
+      // A is a child run; B never reports a child, so it runs inside this process.
+      if (id === "A") {
+        options!.onChild!({ started: true, runId: id, dir: root, pid: process.pid, settled,
+          abort: async () => { throw new Error("a freshness restart never aborts a child"); } });
+      }
+      return settled;
+    },
+    log: (step, extra) => { rows.push({ step, ...extra }); },
+  }, { laneCount: 2, pollIntervalMs: 5 });
   try {
-    await body();
+    for (let i = 0; i < 1000 && started.length < 2; i++) await delay(2);
+    assert.deepEqual([...started].sort(), ["A", "B"], "both lanes started");
+    stale = true;
+    for (let i = 0; i < 1000 && !rows.some((r) => r.step === "daemon.freshness_decision" && r.action === "restart"); i++) await delay(2);
+    assert.equal(rows.some((r) => r.step === "daemon.freshness_decision" && r.action === "restart"), true, "the restart was decided");
+    await delay(60);
+    assert.equal(rows.some((r) => r.step === "daemon.freshness_exit"), false, "the daemon still waits on the in-process lane");
+    settles.get("B")!.resolve(result("B"));
+    const summary = await run;
+    assert.equal(summary.stopReason, "stale");
+    const exit = rows.find((r) => r.step === "daemon.freshness_exit")!;
+    assert.deepEqual(exit.children_left_running, ["A"], "only the child run is left for the next boot");
+    assert.equal(typeof (exit.phases_ms as Record<string, unknown>).lanes, "number", "the wait on the lane is measured");
   } finally {
-    h.release.A.resolve(okResult("A"));
-    h.release.B.resolve(okResult("B"));
-    await Promise.race([h.run.catch(() => undefined), new Promise((r) => setTimeout(r, 2_000))]);
+    stop = true;
+    for (const [id, settle] of settles) settle.resolve(result(id));
+    await run;
   }
-}
-
-test("a decided freshness restart names the in-flight lanes it is still waiting on", async () => {
-  const h = await decideRestartWithBothLanesInFlight();
-  await settled(h, async () => {
-    h.advanceClock(POLL_MS);
-    await h.tick();
-    const first = h.waits()[0];
-    assert.ok(first, "the next dispatch tick records why the decided restart has not run");
-    assert.equal(first.extra?.waiting_on, "in_flight_lanes");
-    assert.deepEqual((first.extra?.lanes as Array<{ task: string }>).map((l) => l.task).sort(), ["A", "B"]);
-    assert.equal(first.extra?.new_sha, staleOwnCode.newSha);
-    assert.equal(first.extra?.waited_ms, POLL_MS);
-
-    h.release.B.resolve(okResult("B")); // B frees its lane: the refill is held, A still runs
-    await drainMicrotasks();
-    h.advanceClock(2 * POLL_MS);
-    await h.tick();
-    const latest = h.waits().at(-1);
-    assert.equal(h.waits().length, 2, "a second row once the wait has doubled");
-    assert.deepEqual((latest?.extra?.lanes as Array<{ task: string }>).map((l) => l.task), ["A"],
-      "the row names only the lane still holding the restart");
-
-    h.release.A.resolve(okResult("A"));
-    assert.equal((await h.run).stopReason, "stale", "the restart runs once the last lane settles");
-  });
-});
-
-test("a decided restart's wait rows back off, one per doubling of the wait", async () => {
-  const h = await decideRestartWithBothLanesInFlight();
-  await settled(h, async () => {
-    for (let i = 0; i < 8; i++) {
-      h.advanceClock(POLL_MS);
-      await h.tick();
-    }
-    // Waits of 1..8 polls report at 1, 2, 4 and 8 polls — four rows over eight ticks, never one a poll.
-    assert.deepEqual(h.waits().map((l) => l.extra?.waited_ms), [1, 2, 4, 8].map((n) => n * POLL_MS));
-  });
 });

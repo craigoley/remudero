@@ -50,6 +50,9 @@ export const ROUTE_MATCH = {
   // W1-T8831: console-only triage verbs; they have no CLI twin, so the rows are inert like `note` above until one lands.
   archive: "POST /v1/inbox/archive",
   snooze: "POST /v1/inbox/snooze",
+  // W1-T10079: rmd keep and rmd reply perform the route's own action from the shared INBOX_VERBS table.
+  keep: "POST /v1/inbox/keep",
+  reply: "POST /v1/inbox/thread/reply",
   peek: "GET /v1/peek",
   replay: "GET /v1/replay",
   skill: "GET /v1/skills",
@@ -79,6 +82,7 @@ function reasons(names, reason) {
  *  entry present here but ABSENT from {@link BASELINE_PATH} is a verb added to this table without
  *  recording it, and is refused for that reason alone, never for the reason text's content. */
 export const CLI_ONLY = {
+  "review-replay": "Refreshes a checked-in sample in the caller's local git checkout from its complete retained ledger and seeded reviewer-health projection; the remote console cannot write that checkout.",
   ...reasons(
     [
       "run-task",
@@ -135,6 +139,9 @@ export const CLI_ONLY = {
       // 2026-10-11: the host watchdog's own alarms, counted and spooled under the host's state dir; the
       // console sees them as the needs-human issue the daemon posts from the spool.
       "host-alert",
+      // W1-T9874: reads the operator checkout's test tree and the committed placement map on the
+      // operator's host; a builder's local query, not a console action.
+      "test-place",
       // W1-T4627: an operator measurement that spawns a sealed grader on the daemon host; not a console action.
       "impossible-canary",
       // A held-out skill eval: spawns sealed paired attempts on the daemon host and writes its proposal registry there;
@@ -203,6 +210,13 @@ export const CLI_ONLY = {
     REASON_LOCAL_PROCESS,
   ),
   ...reasons(["sweep", "fix"], REASON_RUNG_DISPATCH),
+  // W1-T10279: the Mac read broker is an account-local helper on the operator's own machine.
+  gh:
+    "runs one gh read through the operator's own Mac account broker and prints gh's own output; " +
+    "the console reads GitHub through core's transport on Azure, never through a Mac session's broker",
+  "gh-broker":
+    "serves, inspects or stops the per-account read broker on the operator's Mac (installed by " +
+    "deploy/mac); there is no broker on the console's host to start or read",
   serve:
     "bootstraps the console server itself — there is no console route to start the process " +
     "that serves the console's own routes",

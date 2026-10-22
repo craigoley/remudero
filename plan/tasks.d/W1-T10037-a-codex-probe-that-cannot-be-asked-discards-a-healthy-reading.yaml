@@ -13,7 +13,7 @@
   files:
     - src/lib/worker-provider.ts
     - test/a-codex-probe-that-cannot-be-asked-carries-a-recent-reading.test.ts
-  status: queued
+  status: merged
   priority: 1  # while claude's weekly window sits at 95-96% (resets 2026-10-18T05:00Z) every unreadable Codex read becomes a paid cash round, and the cash cap is already exhausted for the day
   attempts: 0
   rationale: |

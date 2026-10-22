@@ -1,0 +1,99 @@
+- id: W1-T10258
+  title: "Hosted plan lint proves a machine filing's merged dependency instead of reading it UNKNOWN"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  risk: high
+  band_meaning: span
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-20: red-PR stall triage (#13008)"
+  plan_refs: [ W1-T9658, W1-T10226 ]
+  files:
+    - .github/workflows/ci.yml
+    - scripts/lib/ci-dependency-evidence.mjs
+    - scripts/lib/ci-dependency-evidence.d.mts
+    - test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts
+    - test/the-census-watches-its-own-base.test.ts
+    - test/the-merge-queue-runs-the-recorded-literal-gates.test.ts
+    - test/fast-lane-classifier.test.ts
+    - test/ci-shard-admission.test.ts
+    - test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts
+    - test/a-shard-that-will-skip-installs-nothing.test.ts
+    - test/a-moving-base-attributes-another-lanes-lines.test.ts
+  rationale: |
+    OBSERVED 2026-10-20. #12894 (merged 00:26Z) made filing lint admit a machine-authored
+    task's depends_on only on verified merge credit (plan.ts machineFilingAdmissionViolations).
+    Hosted CI has no native credit store. The offline lint (ci-shard's ci-parity
+    lint-plan:fast) therefore reads every dependency as "dependency credit unavailable
+    (UNKNOWN)". The light-gates online `lint-plan --base HEAD^1` (ci.yml:1141) cannot project
+    credit in CI either, and reports "online dependency credit projection unavailable or
+    indeterminate" (run-task.ts lintPlanCommand). So any author_class: machine filing whose
+    dependency has already merged is red in CI, though its operator-side lint passes.
+
+    #13008 (W1-T10160, depends_on W1-T9658, which merged as #12334) has been red on both
+    gates since 01:16Z. #13018 (03:28Z) added the consumer: lint-plan-offline.mjs accepts
+    RMD_CI_DEPENDENCY_EVIDENCE through ci-dependency-evidence.mjs, bound to a same-run
+    `commitlint` producer and a digest. Nothing on main produces it: no workflow sets
+    RMD_CI_DEPENDENCY_EVIDENCE, RMD_CI_DEPENDENCY_DIGEST or RMD_CI_DEPENDENCY_PRODUCER_SHA.
+
+    Why the sweep cannot fix it. A plan-only red goes to plan-repair only on a fleet-App author
+    and a machine-lane head (sweep.ts:17805, :18298). #13008 is on cao825's codex/ head, so its
+    owner reads NONE. Even when routed, a plan round could only delete depends_on, which the
+    author has refused. W1-T10226 (filed by the flow gardener) covers the NONE label in
+    pr-blocker.ts, not this cause.
+  design: |
+    Wire the producer that #13018's consumer already expects. Do not add a second evidence
+    path. The protected-base `commitlint` job computes the changed machine tasks' dependency
+    closure (at most the consumer's 32 ids). For each id it finds the MERGED PR named by its
+    trailer or run-<id> head through the job's read-only GITHUB_TOKEN. It writes
+    rmd-ci-dependency-evidence/v1 with the run id, attempt, head, base and producer sha, and
+    exports the digest and producer sha as job outputs. The lint steps receive the artifact
+    in RUNNER_TEMP, read-only. A missing or failed producer stays UNKNOWN and red; there is no
+    fallback and no write to any credit store. The evidence never becomes durable production
+    credit; #13018's tests already guard that. This edits ci.yml, so it waits for the
+    operator's release (verify: human).
+    Two existing workflow fixtures must model the same approved scheduling contract: the
+    main census admits only an independent unconditional matrix or needs:[commitlint] with
+    always() && !cancelled(), while retaining the strict push census invocation. The merge
+    queue fixture models literal == and != comparisons, including absent digest stays false,
+    and continues to reject unsupported expressions. It models GITHUB_ENV writes, pins the
+    new inline lint entrypoint with the same PR/queue base, and explicitly proves an unavailable
+    protected archive exports no invented digest or producer identity. No production gate, required check,
+    census threshold, exclusion or dependency-credit policy is relaxed.
+    The remaining fast-lane, CI-admission, main-ceiling and idle-shard fixtures must admit only the same exact producer dependency and cancellation-aware condition, rejecting missing conditions, event filters, success-only conditions and other dependencies. Existing aggregator, stub, installation, classification and ceiling assertions remain unchanged. The moving-base fixture admits only the exact producer identity env in commitlint after verifying its full SHA, PR first-parent equality and protected archive; all producer diff commands, inline event-base reads and metadata elsewhere remain refused. Original diff-attribution guards and their first-parent population remain enforced.
+  acceptance:
+    - claim: "a machine filing whose dependency merged passes hosted lint with producer evidence"
+      proof: 'grep: test("W1-T10258: hosted plan lint credits a merged dependency from same-run producer evidence" in test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
+    - claim: "absent, foreign or tampered producer evidence stays UNKNOWN and red"
+      proof: 'grep: test("W1-T10258: hosted plan lint keeps a dependency UNKNOWN without valid producer evidence" in test/ci/parity/a-hosted-plan-lint-credits-a-merged-dependency.test.ts'
+    - claim: "the main census keeps exact unconditional scheduling and rejects parent skips or event filters"
+      proof: 'grep: test("main census scheduling rejects parent skips and event filters" in test/the-census-watches-its-own-base.test.ts'
+    - claim: "the merge queue fixture keeps absent evidence false and unsupported syntax rejected"
+      proof: 'grep: test("merge queue expression fixture preserves absent evidence and rejects unsupported syntax" in test/the-merge-queue-runs-the-recorded-literal-gates.test.ts'
+    - claim: the fast-lane fixture admits only the approved producer scheduling exception
+      proof: "unit test: fast-lane classifier preserves the exact producer scheduling exception"
+    - claim: the admission fixture rejects parent-skippable scheduling while retaining setup guards
+      proof: "unit test: CI admission fixture rejects parent-skippable matrix scheduling"
+    - claim: the ceiling fixture keeps required main measurement under the approved producer dependency
+      proof: "unit test: main ceiling fixture rejects skipped matrix scheduling"
+    - claim: the idle-shard fixture permits only exact CI producer scheduling and retains every installation guard and independent slow tier
+      proof: "unit test: idle-shard fixture preserves producer scheduling without weakening installation guards"
+    - claim: the moving-base fixture admits only protected, first-parent-verified producer identity metadata while refusing stale attribution diffs
+      proof: "unit test: moving-base fixture admits only parent-verified producer metadata"
+  falsifier: |
+    Remove the producer step. The first test must report "dependency credit unavailable
+    (UNKNOWN)" for W1-T9658-shaped evidence.
+  risk_ruling:
+    verdict: high
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Operator explicitly approved the measured companion package at exact pin 78ea028ac28c153bdebdde60e8bca329d7f213cc11cd946bbcd19a57f2a24095: Approve both bounded amendments (Recommended)"
+      - Bounded existing-fixture compatibility scope only. Preserve strict negative controls and all ordinary author, hosted, security, native-review and merge gates; no CI-first publication, capacity override, manual merge or host change.
+    judged_at: 2026-10-21T14:20:08.782815+00:00
+    pin: 78ea028ac28c153bdebdde60e8bca329d7f213cc11cd946bbcd19a57f2a24095
+  note: Operator approved the exact measured companion specification on 2026-10-21. Ordinary validation and all hosted, security, native-review and normal merge gates remain required. No failed-head publication, CI-first waiver, capacity override, manual merge or host change.

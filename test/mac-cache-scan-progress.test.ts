@@ -8,6 +8,14 @@ import { test } from "node:test";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const script = resolve("deploy/mac/cache-reclaim.py");
+function checkpointPaths(payload: any): string[] {
+  let previous = "";
+  return payload.records.map(([prefix, suffix]: [number, string]) => {
+    previous = Array.from(previous).slice(0, prefix).join("") + suffix;
+    return previous;
+  });
+}
+
 function fixture(noise = false) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rmd-cache-progress-")));
   const root = join(home, ".codex/work-artifacts");
@@ -88,7 +96,7 @@ test("cache scan progress refuses a forged inventory without using its omitted r
   const f = fixture();
   try {
     f.run(); const state = join(f.stateDir, "inventory.json");
-    const value = JSON.parse(readFileSync(state, "utf8")); value.payload.directories = {};
+    const value = JSON.parse(readFileSync(state, "utf8")); value.payload.records = [];
     writeFileSync(state, JSON.stringify(value));
     const r = f.run(true);
     assert.ok(r.decisions.some((v: any) => v.reason === "progress-state-invalid"));
@@ -172,6 +180,114 @@ test("cache scan progress does not double-charge authenticated names in a warm s
   } finally { rmSync(f.home, { recursive: true, force: true }); }
 });
 
+test("cache scan progress prefix records preserve character prefixes and LRU order and cold-reset legacy scope", () => {
+  const f = fixture();
+  try {
+    f.run(false, 500_000, String.raw`import hmac,hashlib
+home=pathlib.Path(os.environ['CACHE_HOME']);directory_stat=home.stat()
+paths=[home/'unicode-\U0001f9ed-one',home/'unicode-\U0001f9ed-two',home/'a-older',home/'unicode-\U0001f9ed']
+p=ns['DirectoryProgress'](home,ns['Budget']())
+for path in paths: p.remember(path,directory_stat,['child-\U0001f9ed','line\nbreak'])
+expected=dict(p.records);p.save();p.close()
+state=home/'.local/state/remudero/cache-reclaim-progress/inventory.json'
+value=json.loads(state.read_text());records=value['payload']['records']
+assert set(value['payload'])=={'scope','records','candidateCursor'}
+assert records[0][0]==0 and records[1][0]==len(os.path.commonprefix(tuple(map(str,paths[:2]))))
+p=ns['DirectoryProgress'](home,ns['Budget']())
+assert p.records==expected and list(p.records)==list(map(str,paths))
+assert p.lookup(paths[0],directory_stat)==['child-\U0001f9ed','line\nbreak']
+order=list(map(str,paths[1:]+paths[:1]));p.save();p.close()
+p=ns['DirectoryProgress'](home,ns['Budget']());assert list(p.records)==order;p.close()
+value=json.loads(state.read_text());value['payload']={'scope':dict(value['payload']['scope'],version=2),'directories':expected,'recency':list(expected)}
+encoded=ns['DirectoryProgress'].encode(value['payload']);key=(state.parent/'key').read_bytes()
+value['mac']=hmac.new(key,encoded,hashlib.sha256).hexdigest();state.write_bytes(ns['DirectoryProgress'].encode(value))
+p=ns['DirectoryProgress'](home,ns['Budget']());assert p.stats['state']=='reset-scope' and p.records=={};p.close()
+`);
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("cache scan progress rejects authenticated malformed prefixes, duplicate paths and traversal", () => {
+  const f = fixture();
+  try {
+    f.run(false, 500_000, String.raw`import copy,hmac,hashlib
+home=pathlib.Path(os.environ['CACHE_HOME'])
+p=ns['DirectoryProgress'](home,ns['Budget']());p.remember(home,home.stat(),[]);p.save();p.close()
+state=home/'.local/state/remudero/cache-reclaim-progress/inventory.json';original=state.read_bytes()
+baseline=json.loads(original);good=baseline['payload']['records'][0];key=(state.parent/'key').read_bytes()
+bad_records=[{},[[]],[[0,str(home)]],[[True,*good[1:]]],[[-1,*good[1:]]],[[1,*good[1:]]],
+ [[0,False,*good[2:]]],[[0,'relative/path',*good[2:]]],[[0,str(home)+'/../escape',*good[2:]]],
+ [[0,str(home)+'/./alias',*good[2:]]],[[0,str(home)+'//alias',*good[2:]]],[[0,str(home)+'\0bad',*good[2:]]],
+ [good,[len(str(home)),'',*good[2:]]],[good,[len(str(home))+1,'tail',*good[2:]]],
+ [[0,str(home),[True]*8,[]]],[[0,str(home),good[2],['../escape']]],
+ [[0,str(home),good[2],['same','same']]],[[0,str(home),good[2],[False]]]]
+for records in bad_records:
+ value=copy.deepcopy(baseline);value['payload']['records']=records
+ encoded=ns['DirectoryProgress'].encode(value['payload']);value['mac']=hmac.new(key,encoded,hashlib.sha256).hexdigest()
+ state.write_bytes(ns['DirectoryProgress'].encode(value))
+ try: p=ns['DirectoryProgress'](home,ns['Budget']())
+ except ns['Hold'] as error: assert str(error)=='progress-state-invalid',(records,error)
+ else: p.close();raise AssertionError(('accepted malformed records',records))
+state.write_bytes(original)
+`);
+    assert.ok(existsSync(f.cache));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("cache scan progress bounds expanded prefix text on save and authenticated load", () => {
+  const f = fixture();
+  try {
+    f.run(false, 500_000, String.raw`import hmac,hashlib
+g['MAX_PROGRESS_BYTES']=4096
+home=pathlib.Path(os.environ['CACHE_HOME']);base='/'+'a'*1500
+p=ns['DirectoryProgress'](home,ns['Budget']())
+for n in range(40): p.remember(pathlib.Path(base+str(n)),home.stat(),[])
+p.save();assert p.stats['evictedDirectories']>0
+assert sum(map(len,p.records))<=4*g['MAX_PROGRESS_BYTES'];expected=dict(p.records);p.close()
+state=home/'.local/state/remudero/cache-reclaim-progress/inventory.json';original=state.read_bytes()
+p=ns['DirectoryProgress'](home,ns['Budget']());assert p.records==expected;p.close()
+value=json.loads(original);value['payload']['records']=[[0,base,[0]*8,[]]]+[[len(base),str(n),[0]*8,[]] for n in range(40)]
+encoded=ns['DirectoryProgress'].encode(value['payload']);value['mac']=hmac.new((state.parent/'key').read_bytes(),encoded,hashlib.sha256).hexdigest()
+raw=ns['DirectoryProgress'].encode(value);assert len(raw)<=g['MAX_PROGRESS_BYTES'];state.write_bytes(raw)
+try: p=ns['DirectoryProgress'](home,ns['Budget']())
+except ns['Hold'] as error: assert str(error)=='progress-state-invalid',error
+else: p.close();raise AssertionError('accepted amplified prefix text')
+state.write_bytes(original)
+`);
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("cache scan progress converges with long paths under a cap that cannot retain the legacy corpus", () => {
+  const f = fixture();
+  try {
+    const parent = join(f.home, "Developer", `inventory-${"long-project-path-".repeat(8)}`);
+    const directories: string[] = [];
+    for (let n = 0; n < 24; n++) {
+      const dir = join(parent, `namespace-${String(n).padStart(3, "0")}-${"retained-".repeat(7)}`);
+      mkdirSync(dir, { recursive: true }); directories.push(dir);
+      for (let k = 0; k < 80; k++) writeFileSync(join(dir, `report-${k}.json`), "retained evidence\n");
+    }
+    const cap = 12 * 1024, reports: any[] = [];
+    for (let n = 0; n < 12 && existsSync(f.cache); n++) reports.push(f.run(true, 450, `g['MAX_PROGRESS_BYTES']=${cap}\n`));
+    assert.equal(existsSync(f.cache), false, JSON.stringify(reports));
+    assert.ok(reports.length > 1 && reports.some(r => !r.inspection.referencesComplete));
+    assert.ok(reports.every(r => r.entriesInspected <= 450 && r.bytesRead <= 2 * 1024 ** 3));
+    assert.ok(reports.every(r => r.inspection.progress.stateBytes <= cap && r.inspection.progress.evictedDirectories === 0));
+    const value = JSON.parse(readFileSync(join(f.stateDir, "inventory.json"), "utf8"));
+    const paths = checkpointPaths(value.payload);
+    assert.ok(directories.every(p => paths.includes(p)), "the entire long-path corpus fits concurrently");
+    const legacy = { mac: "0".repeat(64), payload: {
+      scope: { ...value.payload.scope, version: 2 },
+      directories: Object.fromEntries(paths.map((path, n) => [path, { identity: value.payload.records[n][2], names: value.payload.records[n][3] }])),
+      recency: paths,
+    } };
+    assert.ok(Buffer.byteLength(JSON.stringify(legacy)) > cap, "the same observations exceed the old format's identical byte cap");
+    assert.equal(reports.at(-1).decisions.find((r: any) => r.path === f.cache).action, "removed");
+    assert.equal(readFileSync(join(f.workspace, "private-unpublished.ts"), "utf8"), "preserve unpublished source\n");
+    assert.equal(readFileSync(join(f.workspace, ".next/receipt.json"), "utf8"), "preserve evidence\n");
+    for (const dir of directories) assert.equal(readFileSync(join(dir, "report-79.json"), "utf8"), "retained evidence\n");
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
 test("cache scan progress evicts stale observations within its byte bound even after incomplete passes", () => {
   const f = fixture();
   try {
@@ -185,7 +301,7 @@ ns['DirectoryProgress'].save=seed_and_save
 `;
     f.run(false, 500_000, seed);
     let value = JSON.parse(readFileSync(join(f.stateDir, "inventory.json"), "utf8"));
-    const previous = Object.keys(value.payload.directories);
+    const previous = checkpointPaths(value.payload);
     assert.ok(previous.length > 0 && previous.length < 50);
     const wide = join(f.root, "wide"); mkdirSync(wide);
     for (let n = 0; n < 100; n++) writeFileSync(join(wide, `entry-${n}`), "retained\n");
@@ -201,10 +317,14 @@ ns['DirectoryProgress'].save=churn_and_save
     assert.ok(r.inspection.progress.evictedDirectories > 0);
     assert.ok(statSync(join(f.stateDir, "inventory.json")).size <= 4096);
     value = JSON.parse(readFileSync(join(f.stateDir, "inventory.json"), "utf8"));
-    assert.ok(Object.keys(value.payload.directories).some(p => p.endsWith("new-49")));
-    assert.ok(previous.every(p => !(p in value.payload.directories)));
-    assert.deepEqual(value.payload.recency, Object.keys(value.payload.directories).sort((a, b) => Number(a.split("new-").at(-1)) - Number(b.split("new-").at(-1))));
-    // Recency survives canonical key sorting on the following authenticated load.
+    const paths = checkpointPaths(value.payload);
+    assert.ok(paths.some(p => p.endsWith("new-49")));
+    assert.ok(previous.every(p => !paths.includes(p)));
+    assert.deepEqual(paths, [...paths].sort((a, b) => Number(a.split("new-").at(-1)) - Number(b.split("new-").at(-1))));
+    assert.equal(value.payload.records[0][0], 0, "eviction rebases the first surviving prefix");
+    assert.equal("recency" in value.payload, false);
+    assert.equal("directories" in value.payload, false);
+    // Array recency survives canonical key sorting on the following load.
     const next = f.run(false, 80, "g['MAX_PROGRESS_BYTES']=4096\n");
     assert.equal(next.inspection.progress.state, "resumed");
     assert.ok(existsSync(f.cache));
@@ -264,4 +384,38 @@ ns['DirectoryProgress'].save=failed_save
       assert.ok(existsSync(f.cache));
     } finally { rmSync(f.home, { recursive: true, force: true }); }
   }
+});
+
+test("cache scan progress rotates candidate inspection without reusing eligibility or starving the tail", () => {
+  const f = fixture();
+  try {
+    const targets = [f.cache];
+    const oversized = join(f.root, "aaa-indivisible/.next/cache/turbopack");
+    mkdirSync(oversized, { recursive: true });
+    for (let k = 0; k < 600; k++) writeFileSync(join(oversized, `cache-${k}.sst`), "generated\n");
+    for (let n = 0; n < 5; n++) {
+      const workspace = join(f.root, `tail-${n}`), target = join(workspace, ".next/cache/turbopack");
+      mkdirSync(target, { recursive: true }); targets.push(target);
+      writeFileSync(join(workspace, "package.json"), '{"private":true}\n');
+      writeFileSync(join(workspace, "unique-source.ts"), "preserve unversioned source\n");
+      for (let k = 0; k < 100; k++) writeFileSync(join(target, `cache-${k}.sst`), "generated\n");
+    }
+    const observed = new Set<string>(), starts = new Set<string>(), reports: any[] = [];
+    for (let n = 0; n < 18 && observed.size < targets.length; n++) {
+      const report = f.run(false, 450); reports.push(report);
+      if (report.inspection.candidateStart) starts.add(report.inspection.candidateStart);
+      for (const row of report.decisions) if (targets.includes(row.path) && row.deferred === false) observed.add(row.path);
+    }
+    assert.equal(observed.size, targets.length, JSON.stringify(reports));
+    assert.ok(starts.size > 1, "a fresh pass must inspect the interrupted tail first");
+    assert.ok(reports.some(r => r.inspection.candidateRotationAfterExhaustion), "an indivisible first target cannot block every sibling");
+    assert.ok(reports.every(r => r.apply === false && r.ageHours === 6 && r.entriesInspected <= 450));
+    assert.ok(reports.some(r => r.inspection.candidateCursor && r.inspection.referencesComplete));
+    for (const target of targets) assert.ok(existsSync(target));
+    assert.ok(existsSync(oversized));
+    for (let n = 0; n < 5; n++) assert.equal(readFileSync(join(f.root, `tail-${n}/unique-source.ts`), "utf8"), "preserve unversioned source\n");
+    const refreshed = f.run(true, 500_000, "", false);
+    assert.ok(refreshed.decisions.filter((r: any) => r.path).every((r: any) => r.reason === "recent-foreign-or-flagged"));
+    for (const target of targets) assert.ok(existsSync(target), "the cursor must not cache an old age verdict");
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
 });

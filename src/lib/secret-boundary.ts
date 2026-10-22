@@ -530,7 +530,7 @@ export async function startDaemonGitCredentialSocket(opts: {
     chmodSync(dirname(socketPath), 0o700);
     handle = opts.mint
       ? await (opts.socketStarter ?? startCredentialHelperSocket)({ socketPath, mint: opts.mint, log: ledgerRow })
-      : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? new URL(import.meta.url));
+      : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? bundledWorkerUrl(import.meta.url));
     chmodSync(socketPath, 0o600);
   } catch (err) {
     ledgerRow(boundaryLedgerRow("github.com", "refuse", "error", `git credential socket did not start: ${String(err)}`));

@@ -11,6 +11,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rea
 import { basename, join } from "node:path";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
+import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import { type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions } from "./engine-tree.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
@@ -18,7 +19,9 @@ import {
 } from "./host-memory-learning.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./policy.js";
-import { decideRunChildMode, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence } from "./run-child-mode.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { pauseDetail, stopDetail } from "./fleet-control.js";
+import { classifyRunChildLoss, decideRunChildMode, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence } from "./run-child-mode.js";
 import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, runDir, writeSpec,
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpecOptions, type RunChildStatus,
@@ -505,6 +508,8 @@ export interface SpawnRunChildPorts {
   spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number }) => ChildProcess;
   /** Admission and the reservation, in the daemon, before the spawn. The default is {@link reserveRunChild}. */
   reserve?: (entryKind: RunChildEntryKind, runId: string, admission: { signal: AbortSignal; sinceMs?: number }) => Promise<LearnedReservation>;
+  /** W1-T10001: the fleet STOP/PAUSE hold, read again once the reservation admits and before the spawn. Default: the local flag files under `input.root`. */
+  workerAdmissionHold?: () => { control: "STOP" | "PAUSE"; detail: string } | undefined;
   probe?: RunChildProbe;
   env?: NodeJS.ProcessEnv;
   clock?: () => number;
@@ -527,6 +532,25 @@ export interface RunChildHandle {
   /** Stop local observation without signalling the child or releasing its reservation. */
   detach?: () => void;
 }
+
+/** W1-T10001: a run child gone with a non-terminal status. `loss` is what {@link classifyRunChildLoss} names from the detail and stderr the `run_child.lost` row carries. */
+export class RunChildLostError extends RmdError {
+  readonly loss: ReturnType<typeof classifyRunChildLoss>;
+  constructor(message: string, loss: ReturnType<typeof classifyRunChildLoss>) {
+    super("child_process", GENERIC_EXIT_CODE, message, { loss });
+    this.name = "RunChildLostError";
+    this.loss = loss;
+  }
+}
+
+/** W1-T10001: the outside kills a lane survives. An OOM kill or a container stop took the child, not the contract; any other loss keeps the crashed-run path. */
+export function runChildOutsideKill(err: unknown): "oom_kill" | "container_stop" | undefined {
+  if (!(err instanceof RunChildLostError)) return undefined;
+  return err.loss === "oom_kill" || err.loss === "container_stop" ? err.loss : undefined;
+}
+
+/** W1-T10001: a reservation admitted under a fleet hold released itself and spawned no child. */
+export const RUN_CHILD_SPAWN_WITHHELD_STEP = "run_child.spawn_withheld";
 
 /** W1-T10000: the wait for admission was abandoned. No claim was taken and no spec written, so nothing may run in-process. */
 export interface RunChildAbandoned {
@@ -631,6 +655,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   let dir: string;
   let launch: EngineChildLaunch;
   let engineSha = "";
+  const nodeArgs = childHeapPolicyArgs();
   try {
     if (listEngines(input.stateRoot).length === 0) return unavailable("no engine tree has been built yet");
     const mainSha = (await (ports.mainSha ?? mainTipSha)(input.repoDir)).trim();
@@ -646,6 +671,20 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     const waited = await reserveWhilePending(input, ports, launch.kind, runId, clock, log);
     if (!("held" in waited)) return waited;
     reservation = waited.held;
+    // W1-T10001: the wait can outlast a PAUSE that began meanwhile; no child starts past it. It takes the abandoned path:
+    // no claim, no run directory, no run.start, no strike, and never in-process under the hold.
+    const hold = (ports.workerAdmissionHold ?? (() => {
+      const stop = stopDetail(input.root);
+      if (stop !== undefined) return { control: "STOP" as const, detail: stop };
+      const pause = pauseDetail(input.root);
+      return pause === undefined ? undefined : { control: "PAUSE" as const, detail: pause };
+    }))();
+    if (hold) {
+      reservation.releaseOccupancy();
+      reservation = undefined;
+      log(RUN_CHILD_SPAWN_WITHHELD_STEP, { task_id: input.taskId, run_id: runId, hold: `fleet ${hold.control} hold: ${hold.detail}` });
+      return { started: false, abandoned: true, reason: "admission-abandoned", runId, waitedMs: 0 };
+    }
     // A held reservation spends any carried wait; a state root that refuses the removal fails the spawn like writeSpec would.
     rmSync(admissionWaitPath(input.stateRoot, input.taskId), { force: true });
     // Only now, with the reservation held: a waiting run leaves no spec-less directory behind (W1-T10000).
@@ -658,7 +697,8 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       reservationId: reservation.id ?? "", options: input.options,
     });
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
-    child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, launch.argv, {
+    // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
+    child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
       cwd: launch.cwd, env: { ...(ports.env ?? process.env) }, stderrFd,
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
@@ -684,6 +724,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   const abort = (): Promise<AbortRunChildOutcome> => abortRunChild(dir, abortPorts);
   log(RUN_CHILD_SPAWNED_STEP, {
     task_id: input.taskId, run_id: runId, child_pid: pid, entry_kind: launch.kind, entry_reason: launch.reason, engine_sha: engineSha,
+    node_args: nodeArgs,
   });
   const onAbort = (): void => {
     abort().catch((error: unknown) => log(RUN_CHILD_ABORT_STEP, { task_id: input.taskId, run_id: runId, error: reasonOf(error) }));
@@ -747,7 +788,7 @@ function awaitRunChild(a: AwaitRunChild): Promise<RunResult> {
         task_id: a.taskId, run_id: a.runId, detail, exit_code: exit?.code ?? null, exit_signal: exit?.signal ?? null,
         stderr_tail: readFileTail(stderrPath),
       });
-      reject(new Error(`run child ${a.runId} lost: ${detail}`));
+      reject(new RunChildLostError(`run child ${a.runId} lost: ${detail}`, classifyRunChildLoss({ detail, stderr_tail: readFileTail(stderrPath) })));
     });
     const settleTerminal = (status: RunChildStatus): void => {
       if (status.state === "done") {
@@ -862,7 +903,9 @@ function settlementReceipt(taskId: string, runId: string, log: Log): NonNullable
   return (outcome) => {
     if (acknowledged) return;
     log("run_child.settled", { task_id: taskId, run_id: runId, outcome: outcome.status,
-      ...(outcome.status === "fulfilled" ? { verdict: outcome.value.verdict } : { reason: reasonOf(outcome.reason) }) });
+      ...(outcome.status === "fulfilled" ? { verdict: outcome.value.verdict } : {
+        reason: reasonOf(outcome.reason), ...(outcome.reason instanceof RunChildLostError ? { loss: outcome.reason.loss } : {}),
+      }) });
     acknowledged = true;
   };
 }

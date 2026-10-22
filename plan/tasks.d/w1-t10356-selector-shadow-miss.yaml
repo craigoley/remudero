@@ -1,0 +1,30 @@
+- id: W1-T10356
+  title: "REPAIR THE SELECTOR EDGE INTO test/baked-supervisor-inputs.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/baked-supervisor-inputs.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 39573110596 for PR #13317 at 71e7cc7bfa2ec1a81c7f7bbb87d66487012ef52b: src/lib/ledger.ts, src/lib/state-backup-engine-links.ts, test/state-backup.test.ts -> test/baked-supervisor-inputs.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/baked-supervisor-inputs.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the narrow selector includes test/baked-supervisor-inputs.test.ts when this edge is exercised"
+      proof: "grep: test/baked-supervisor-inputs\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/baked-supervisor-inputs.test.ts for each recorded edge"
+      proof: "grep: test/baked-supervisor-inputs\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files are a selector source file (src/lib/affected-suites.ts) and its shadow test; neither is a secret, credential, auth, deploy, merge-policy or review-policy surface according to the description."
+      - "The task adds a selector edge and a regression test, and nothing in the description indicates data deletion, irreversible action, or an operator-only decision."
+      - "The family track record (18 merged, 0 declined) is clean, and the gates state shows nothing concerning. Both declared files exist at the base, and the acceptance criteria are grep-verifiable."
+      - "The PR still passes CI and review, and the shadow selector only widens test selection, so it is a well-trodden, reversible change."
+    judged_at: "2026-10-22T03:31:46.727Z"
+    pin: "208b0e96eba3d87356423c9b2d8a72164799ac3575b057f412cff23964bcf458"

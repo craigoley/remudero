@@ -1,0 +1,95 @@
+- id: W1-T10311
+  title: "THE DENY FLOOR'S gh RULES GREP QUOTED TEXT, SO A QUOTED VERB CHANGES THE VERDICT — `gh 'pr' 'comment' 1` is routed as a read, and `gh pr 'merge' 1` in a worker and `gh 'auth' 'logout'` miss the merge and auth refusals; judge every gh rule on the de-quoted argv gh will receive"
+  repo: remudero
+  depends_on: []  # shares hooks/deny-floor.sh with W1-T5670, W1-T9281 and W1-T10302; dispatch-overlap keeps them apart
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern, which words the hook's gh rules read; the rules' verdicts, the floor, the broker and invokes_gh are unchanged
+  band_meaning: span
+  priority: 1  # operator-2026-10-21: a worker can still slip the merge refusal with a quoted verb or an inline -XPUT; #13263 closed the wrapper half
+  status: merged
+  attempts: 0
+  origin: "operator session 2026-10-20: the porcelain-write grep reads `gh 'pr' 'comment' 1 -b x` as a read"
+  plan_refs: [W1-T3275, W1-T10279, W1-T203, W1-T9643, W1-T5670, W1-T9281, W1-T1066]
+  files:
+    - hooks/deny-floor.sh
+    - test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts
+  rationale: |
+    NARROWED 2026-10-21: #13263 fixes the `rmd gh --` wrapper bypass and rule 4's method, so they are out of this task.
+    With it, `rmd gh` refuses a write or any auth call (exit 2), the hook normalises the wrapper once, early, into
+    `gh_norm`, and rules 2, 4, 5 and 10 read it. Rule 4 judges each command's method with `gh_api_is_write`, which
+    catches gh's implicit POST, `-XPOST` and a quoted `'POST'`. #13263 also corrects rule 10's comment to rule 7.
+    What stays here: quoted porcelain verbs in rules 2, 5 and 10, and `--version`/`--help` routing. The reproduction
+    lines #13263 fixed are removed below. #13263 also edits hooks/deny-floor.sh, so build on it once it merges.
+    READ 2026-10-21 at origin/main 0c4dc0601 (after #13248, the one write classifier). REPRODUCED by piping the Bash
+    tool's PreToolUse JSON into `bash hooks/deny-floor.sh`, with RMD_GH_CACHE_HOME at a scratch directory holding a fresh
+    gh-broker/heartbeat (interval 60) so the broker reads as live, and `--confine-file-tools` for the worker lane:
+      - `gh 'pr' 'comment' 1 -b x`                                          exit 2, "routed" (a WRITE refused as a read)
+      - `gh pr comment 1 -b x` (control)                                    exit 0, and `* 1` appended to invalidations
+      - worker `gh pr 'merge' 1 --squash`                                   exit 2, "routed", not the merge refusal
+      - worker `gh pr merge 1 --squash` (control)                           exit 2, "only the orchestrator may merge"
+      - `gh 'auth' 'logout'`                                                exit 2, "routed", not the auth refusal
+      - `gh auth logout` (control)                                          exit 2, "gh auth mutation"
+      - `gh --version`, `gh pr view --help`                                 exit 2, "routed" (local, no GitHub call)
+    WHY, READ on origin/main (symbols, not lines), hooks/deny-floor.sh:
+      - Rules 2 (gh auth mutation) and 5 (the worker merge refusal, W1-T9643) grep `gh_norm` (since #13263) for
+        `gh[[:space:]]+auth…` and `gh(…)*[[:space:]]+pr[[:space:]]+merge`, with the quotes still in it, so a quote
+        between the words misses. Rule 5's `gh api` PUT test also wants `-X PUT` with a space, so `-XPUT` misses.
+      - Rule 10's porcelain write list and the `gh_is_exempt` and invalidation `sed`s grep the same quoted text.
+      - Only the `gh api` write test (`gh_segment_api_is_write`, #13248, and rule 4 since #13263) walks the de-quoted
+        words `hr_tokens` splits.
+    These rules are tripwires, not a boundary (the file header says so), but each was earned by a real incident.
+    SEQUENCED, NOT DUPLICATED. The operator's brief also named heredoc BODIES that mention gh being refused as routed
+    reads (an agent's `python3 - <<'EOF'` and a `git commit -F - <<'EOF'` message, 2026-10-20). Reproduced here too,
+    with the same harness: a python heredoc whose comment says "never call gh api directly" and a commit heredoc naming
+    `gh pr view` are both exit 2 "routed". A python heredoc body holding `time.sleep(1)  # gh pr view 1` under a
+    `while True:` is exit 2 "inline polling loop" (rule 7). That is
+    `invokes_gh`, and it is ALREADY FILED: W1-T5670 (queued, priority 3; three yielded builds, run-W1-T5670-*,
+    2026-10-09..11, no PR) moves `invokes_gh` onto a parser that drops a data heredoc body but keeps one fed to a shell.
+    W1-T9281 (queued, priority 2, depends on W1-T5670) moves it to program position. This task leaves `invokes_gh`
+    and rule 7 alone.
+    OVERLAP SWEEP 2026-10-21: plan/tasks.d on origin/main for `invokes_gh` (W1-T5670, W1-T9281, W1-T9451, W1-T9643)
+    and for heredoc with deny-floor: none quotes or the `rmd gh` wrapper in rules 2, 4, 5 or the porcelain list.
+    W1-T10302 (queued, P1) adds an `RMD_DENY_FLOOR_ONLY=gh-read` mode, not these rules. The 5 open PRs (#13008,
+    #13039, #13121, #13218, #13223) do not touch hooks/deny-floor.sh.
+  design: |
+    No new thresholds: the floor window, the broker routing, the exemptions and every rule's verdict stay as they are.
+    1. ONE gh ARGV PER SEGMENT. From each `hr_tokens` segment of `gh_norm` (the wrapper is already `gh` there, since
+       #13263), take the words after a `gh` or `*/gh` word. The words come de-quoted (hr_tokens already removes
+       quotes), and an inline `-XPUT`/`--method=PUT` is read the way `gh_api_is_write` reads it. A heredoc body word
+       (`\036…`) or a redirection is not argv.
+    2. EVERY gh RULE READS THAT ARGV.
+       - Rule 2: an `auth login|logout|refresh|token|setup-git` argv.
+       - Rule 4: already reads it (#13263); unchanged.
+       - Rule 5 (worker lane only, unchanged): a `pr merge` argv, a `gh api` write to `repos/…/pulls/N/merge`, or a
+         merging GraphQL mutation.
+       - Rule 10: the porcelain write list, the `api rate_limit`/`auth status` exemption, and the invalidation's
+         `<repo|*> <number>`.
+       Each rule keeps its raw-text check too, so nothing it refuses today passes.
+    3. LOCAL gh COMMANDS ARE NOT READS. `gh --version`, `gh version`, `gh help …` and any argv with `--help` make no
+       GitHub call. Rule 10 neither routes nor floors them.
+    4. FAIL OPEN AS TODAY. With no jq the hook has no `cmd` split and these rules keep their raw-text greps. A parse
+       that yields no words changes no verdict.
+    5. LEAVE `invokes_gh` AND RULE 7 ALONE (W1-T5670, W1-T9281).
+    Tests drive the hook as test/gh-read-cadence-floor.test.ts does: RMD_GH_CACHE_HOME at a temp directory with a fresh
+    heartbeat, and `--confine-file-tools` for the worker cases. Each case is paired with today's control. The file goes
+    in test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts, or the folder `rmd test-place` computes.
+  acceptance:
+    - claim: "a quoted porcelain write is a write: not routed, and its invalidation is appended"
+      proof: 'grep: test("W1-T10311: a quoted porcelain verb is judged as gh reads it" in test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts'
+    - claim: "in a worker, a quoted verb or an inline -XPUT reaches the merge refusal, for porcelain and for gh api"
+      proof: 'grep: test("W1-T10311: a quoted verb cannot carry a worker merge" in test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts'
+    - claim: "the auth mutation refusal sees a quoted verb"
+      proof: 'grep: test("W1-T10311: the auth refusal reads the gh argv" in test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts'
+    - claim: "gh --version and gh <cmd> --help are not routed, while a real gh pr view after a heredoc on the same line still is, and the polling loop is still refused"
+      proof: 'grep: test("W1-T10311: a local gh command is not a read, and real reads still route" in test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts"
+  falsifier: |
+    Keep the porcelain grep on quoted text: `gh 'pr' 'comment' 1 -b x` is routed and the first test fails.
+    Keep rule 5 on quoted text: `gh pr 'merge' 1` is routed in a worker and the second test fails.
+    Keep rule 2 on quoted text: `gh 'auth' 'logout'` is routed and the third test fails.
+    Route `--version`: the fourth test fails. Drop the raw-text checks instead of adding the argv ones: the
+    `cat <<'EOF' > /dev/null; gh pr view 1` control or the polling loop is no longer refused and the fourth test fails.

@@ -758,7 +758,8 @@ test("serve upgrade admission preserves unknowns and genuine recovery paths", as
     return f();
   };
   const measured = await readHostPressure({ read, clock: { now: () => now, iso: () => "" } as never, sleep: async (ms) => void (now += ms), sampleMs: 500 });
-  assert.deepEqual(measured, { atMs: 500, memAvailableBytes: 4_049_000 * 1024, swapInPagesPerSec: 100, psiSomeAvg10: 1.5, psiFullAvg10: 0.25, unread: [] });
+  assert.deepEqual(measured, { atMs: 500, memAvailableBytes: 4_049_000 * 1024, swapInPagesPerSec: 100, swapInDiskPagesPerSec: 100,
+    swapInZswapPagesPerSec: 0, swapInZswapBasis: "no zswpin line (zswap not compiled in): 0", psiSomeAvg10: 1.5, psiFullAvg10: 0.25, unread: [] });
   delete files["/proc/pressure/memory"];
   const noPsi = await readHostPressure({ read, clock: { now: () => now, iso: () => "" } as never, sleep: async (ms) => void (now += ms) });
   assert.match(noPsi.unread.join(";"), /\/proc\/pressure\/memory: ENOENT/);
@@ -1142,4 +1143,24 @@ test("unit test: serve peak evidence keeps its generation and unknown state", as
   await rows.supervisor.start();
   await rows.supervisor.requestHandoff();
   assert.match(String(rows.logs.find((l) => l.step === "serve.handoff_admitted")?.extra?.peakBasis), /generation 1 /);
+});
+
+test("a serve upgrade counts swap-in served from zswap: pswpin plus zswpin", async () => {
+  // OPERATOR RULING 2026-10-19 (4): under zswap a swap-in from the compressed pool counts in zswpin, never pswpin.
+  let zswpin = 0;
+  const files: Record<string, () => string> = {
+    "/proc/vmstat": () => `pswpin 100\nzswpin ${(zswpin += 1_000)}\n`,
+    "/proc/meminfo": () => "MemAvailable:    14049000 kB\n",
+    "/proc/pressure/memory": () => "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+  };
+  let now = 0;
+  const reading = await readHostPressure({ read: (path) => files[path]!(), clock: { now: () => now, iso: () => "" } as never,
+    sleep: async (ms) => void (now += ms), sampleMs: 1_000 });
+  assert.equal(reading.swapInPagesPerSec, 1_000, "zero disk swap-in, 1,000 zswap pages in a second");
+  assert.equal(reading.swapInDiskPagesPerSec, 0);
+  assert.equal(reading.swapInZswapPagesPerSec, 1_000);
+  assert.equal(reading.swapInZswapBasis, "zswpin");
+  const verdict = judgeServeUpgradeAdmission({ reading, thresholds: THRESHOLDS, candidatePeakBytes: 1_024 * MIB, peakBasis: "boot peak", nowMs: now });
+  assert.equal(!verdict.admit && verdict.hold, "swap_in");
+  assert.match(!verdict.admit ? verdict.detail : "", /swap-in 1000\.0 pages\/s \(disk 0\.0 \+ zswap 1000\.0, zswpin\) > /);
 });

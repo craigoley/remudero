@@ -1,0 +1,68 @@
+- id: W1-T10387
+  title: "A SCOPE-AMENDMENT RECOVERY REPLAYS THE ASKING ROUND'S EDITS ONTO THE MERGED FILE, NEVER A WHOLE-FILE SNAPSHOT — `restoreScopeAmendmentWork` (src/lib/proof-amendment.ts) writes back each path's full saved bytes after the amendment merge brought main in, so on #13324 (W1-T9434) the 10:05Z 2026-10-21 recovery overwrote src/lib/sweep.ts with a copy from before the branch held #13318 and silently reverted #13318's hunks; the branch carried the revert until a hand fix at 18:14Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # writes into a PR branch's tree; a conflict must stop, never pick a side
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-10-22, item 8: recovery restores per hunk or re-merges main, never a stale whole-file snapshot"
+  plan_refs: [W1-T10043, W1-T9804, W1-T10339, W1-T10388]
+  files:
+    - src/lib/proof-amendment.ts
+    - src/run-task.ts
+    - test/fix-lane/a-scope-recovery-replays-the-rounds-edits-onto-the-merged-file.test.ts
+  status: queued
+  priority: 1.5  # the revert it caused also drove five base refreshes on #13324 (W1-T10388)
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: a recovery must never overwrite a file with a stale whole-file snapshot.
+    READ at origin/main 32887fe4d (symbols, not lines): `saveScopeAmendmentWork` stores each declared path's full
+    bytes and mode (`scopeWorkFiles`) when the round asks for scope. The run-task.ts scope-amendment resume merges
+    the amendment and main locally, then calls `restoreScopeAmendmentWork`, which writes those full bytes back. Any
+    hunk the merge brought into the file since the save is dropped without a conflict.
+    OBSERVED (core ledger, read-only):
+    - `fix.scope_amendment` on PR 13324 at 09:38:41Z: outcome created, recovery_status saved.
+    - At 10:05:41Z: outcome amendment_merged, merge_sha 5cede6166, recovery_status restored, restored_paths
+      [src/lib/sweep.ts, src/lib/tick-read-worker.ts].
+    OBSERVED (git, refs/pull/13324/head fetched 2026-10-22):
+    - #13318 (8b83ad0dc, merged 08:34:09Z) adds the sweep.ts line "PR-13039: the NEEDS_SCOPE and NEEDS_DESIGN holds
+      below".
+    - Head e706d2e8a (08:55Z), the one the round saved from, lacks #13318.
+    - Merge 5cede6166 (10:04:33Z) has #13318 as an ancestor and holds the line.
+    - The next head, 3dca3cda1 (10:30:23Z), and every head through 355244c8e (18:05Z) have #13318 as an ancestor
+      and lack the line.
+    - 9ade61947 (18:14Z, "fix(ci): restore main's #13318 sweep holds...") puts it back. #13318's own test
+      (test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts) is the first failing file named by
+      every base-fixed refresh on that PR (W1-T10388).
+    NOT COVERED ELSEWHERE: W1-T10043 (queued) admits an imported path, and W1-T9804 (blocked) catalogs a baked path.
+    Neither touches how saved work is restored. Swept origin/main 32887fe4d plan/tasks.d and all 18 open PR heads'
+    plan trees for restoreScopeAmendmentWork, saveScopeAmendmentWork and scope-amendment: no other shard.
+  design: |
+    1. SAVE THE EDIT, NOT JUST THE RESULT. The saved record keeps, per path, the bytes at the head the round started
+       from (the BASE, read from git at that head) beside the round's edited bytes. Its identity and digest checks
+       still verify both. A record written before this change, which has no base, is restored by step 3's refusal
+       rule, never by whole-file overwrite.
+    2. REPLAY BY THREE-WAY MERGE. Restore runs `git merge-file` semantics per path: ours is the post-merge file in
+       the worktree, base is the saved base, theirs is the saved edit. A clean merge writes the result. Main's hunks
+       survive and the round's hunks land. A path that was absent at the base and is added by the round is written
+       only when the merged tree also lacks it.
+    3. CONFLICT STOPS, IT NEVER PICKS A SIDE. Any conflicting path, or a legacy record without a base, leaves that
+       file as the merge produced it. Recovery_status reads `conflicted` (or `unavailable`) with the paths, and the
+       round's evidence tells the next round to re-apply its change to those paths. No whole-file overwrite remains
+       on any path.
+    4. Tests (new file, titles verbatim as in the proofs): a saved edit plus a main hunk merged since the save keeps
+       both hunks. An overlapping edit reads `conflicted` and leaves the merged file byte-identical. A legacy
+       record without a base is not written over the merged file.
+  acceptance:
+    - claim: "a recovery keeps the hunks main brought in after the save and applies the round's own"
+      proof: "unit test: W1-T10387: a scope recovery keeps main's hunks and replays the round's edit"
+    - claim: "an overlapping edit is reported conflicted and the merged file is left untouched"
+      proof: "unit test: W1-T10387: a conflicting scope recovery leaves the merged file untouched"
+    - claim: "a legacy whole-file record never overwrites the merged file"
+      proof: "unit test: W1-T10387: a legacy scope record never overwrites the merged file"
+  falsifier: |
+    Restore by writing the saved bytes again, and the main-hunk fixture loses main's line, which reproduces #13324.
+  note: |
+    Reservation refs/rmd-id/W1-T10387 is held by filing branch file-1022-fleet-routing.

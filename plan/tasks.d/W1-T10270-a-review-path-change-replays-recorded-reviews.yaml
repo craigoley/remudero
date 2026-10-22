@@ -1,0 +1,167 @@
+- id: W1-T10270
+  title: "A REVIEW-PATH CHANGE REPLAYS RECORDED REAL REVIEWS BEFORE IT CAN MERGE — CI runs a ledger-refreshed sample of recent review inputs and reviewer outputs through the changed code and requires the same verdict class (posted, withheld, refused); #12954 turned every recorded PASS into withheld and passed CI because its own tests were edited to match"
+  repo: remudero
+  depends_on: [W1-T10269]  # shares src/run-task.ts and src/lib/review.ts; its refresher excludes rows from shas W1-T10269 marks regressed
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern — the review decision is replayed against recorded real inputs in CI
+  band_meaning: span
+  budget_usd: 25.00
+  priority: 1
+  # refusal-amendment (W1-T10270, run DAEMON-1792613880153@72d261d4ef3c112a7efe528d1a0b740e767df809, 2026-10-21T22:13:33.527Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The required authentic sample cannot be generated without retained production ledger evidence.
+  # refusal-amendment (W1-T10270, run DAEMON-1792613880153@72d261d4ef3c112a7efe528d1a0b740e767df809, 2026-10-21T22:13:33.527Z): the worker refused criterion 2 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Recorded real-review replay cannot be verified while that sample is absent.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-20: reviewer outage after #12954 — 'let's solve root causes, not work around them'"
+  plan_refs: [W1-T10269, W1-T2263, W1-T3387, W1-T4469, W1-T3735]
+  files:
+    - src/lib/review-outcome-class.ts
+    - src/lib/review-replay-sample.ts
+    - src/lib/required-semantic-review.ts
+    - src/lib/review.ts
+    - src/lib/garden-registry.ts
+    - src/lib/config-gardener.ts
+    - src/lib/sweep.ts
+    - docs/cli-reference.md
+    - docs/operator-guide.md
+    - scripts/console-parity-ratchet.mjs
+    - scripts/console-parity-baseline.json
+    - src/lib/affected-suites.ts
+    - src/run-task.ts
+    - test/fixtures/review-replay/sample.ndjson
+    - test/review/a-review-path-change-replays-recorded-reviews.test.ts
+    - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
+    - test/help-renders-a-summary-not-a-paragraph.test.ts
+  amendment: |
+    W1-T10270 companion reconciliation (2026-10-21 stuck-PR recovery): include
+    src/lib/config-gardener.ts only to register review.replay_input in the existing
+    CONFIG_GARDEN_LEDGER_STEPS filtered-read vocabulary. The new replay receipt already carries
+    pr_url; the unchanged priced-step census requires that consumer to retain the row.
+    This adds no pricing, spend, budget, governor, trust or write authority. Preserve the
+    census and every existing acceptance criterion and falsifier; do not add an exemption.
+    Prove the real union reader retains this row and still filters unrelated telemetry.
+    Additional W1-T10270 registration companions (2026-10-21, PR #13416 exact
+    6b62f08026ae87250098708f771b7d39c7548075): src/lib/sweep.ts may add only
+    the literal review-replay garden name to MACHINE_LANE_HEAD_RE and
+    GARDEN_PLAN_HEAD_RE, preserving every existing alternative and all author,
+    path, lifecycle and failing-check guards. The existing config-gardener
+    counterfactual suite may add only a review.replay_input pr_url fallback row
+    to its corpus; retain its complete step inventory, assertions and limits.
+    The existing help inventory suite may add the review-replay literal name
+    and its provenance for the already-registered command, without changing
+    help behavior, assertion logic or a stored count.
+    These are companions of the already-required garden registration and
+    replay receipt, not new machine-lane, pricing, dispatch or close authority.
+    Preserve existing command behavior, routes, gates and operating limits.
+    Original acceptance, falsifier, budget and risk are unchanged.
+    Separate operator CLI parity ruling:
+    Permit exactly one reasoned CLI_ONLY entry for the already-filed review-replay refresh verb, which writes
+    a checked-in sample in the caller's local git checkout from its complete ledger and seeded health projection.
+    Add only review-replay to console-parity-baseline.json (93 to 94 recorded names); keep every other row,
+    route mapping, classification predicate and assertion unchanged. This grants no exclusion to another verb
+    and creates no new write authority. Declare the generated CLI reference and operator guide companions.
+    All existing acceptance criteria, falsifiers and behavioral requirements remain unchanged.
+  rationale: |
+    READ on origin/main 04ed915a7 (2026-10-20).
+
+    #12954 PASSED CI AND BROKE EVERY REVIEW. It changed src/run-task.ts (reviewCommand's metadata
+    gate at :23313-23340 and runReview's refusal at :8683) and added
+    src/lib/required-semantic-review.ts. It also edited three review tests
+    (event-driven-semantic-review, an-untasked-pr-silently-skips-the-semantic-reviewer and
+    codex-reviewer-production-wiring) to expect the new behaviour. The suite therefore agreed with
+    the change by construction. Production did not: see W1-T10269's measurements. All 271
+    `review.semantic_incomplete` rows carry reviewer_outcome=success, and 379 setup refusals
+    landed on shards without budget_usd.
+
+    THE EVIDENCE THAT WOULD HAVE CAUGHT IT IS NOT KEPT.
+      - The reviewer's REVIEW_VERDICT lines are parsed (parseReviewerVerdicts, src/lib/review.ts:7225)
+        and then thrown away.
+      - `review.reviewer` rows carry subtype, model and tokens. `review.reviewer.materialized`
+        carries head_sha and node_modules. No row carries the verdict lines.
+      - state/transcripts holds fix and implement transcripts, not reviewer ones.
+    So "replay recent real reviews" needs a recorder first.
+
+    THE DECISION IS SPREAD ACROSS TWO FUNCTIONS. The setup refusal lives in reviewCommand and the
+    semantic refusal in runReview. A replay that drives only one of them misses half of #12954. A
+    replay is only as good as the seam it drives, so the decision has to become one pure function
+    that production calls.
+
+    THE REVIEW-PATH FILE LIST HAS A HOLE. REVIEW_MATERIAL_ADVANCE_PATHS (src/lib/self-sync.ts:865)
+    does not list src/lib/required-semantic-review.ts. A change confined to that module would not
+    count as a review-path change.
+  design: |
+    1. ONE PURE DECISION (src/lib/review-outcome-class.ts, new).
+       - classifyReviewOutcome(input) returns the verdict class: posted, withheld or refused, plus
+         the reason. The input is: plan_only, required-semantic, criteria_count, risk present,
+         budget present, untasked, reviewer_outcome, and the reviewer transcript's verdict lines.
+       - It composes the HEAD's own parseReviewerVerdicts, requiredSemanticRefusal and the
+         head-task-metadata gate. reviewCommand and runReview both call it at their existing
+         decision points, so production cannot decide outside it.
+       - A wiring test asserts the two production call sites route through it.
+    2. THE RECORDER. Every terminal review appends `review.replay_input` with the fields above.
+       - verdict_lines are the transcript's lines matching `REVIEW_VERDICT <n>: <TOKEN>`, verbatim
+         and bounded per criterion, with clauses dropped. They are extracted by a plain line scan,
+         NOT by parseReviewerVerdicts: the recorded evidence must not depend on the code under test.
+       - The row also carries the class it produced, reviewer_code_sha (W1-T10269) and an input
+         digest. It holds no transcript prose and no secrets.
+    3. THE SAMPLE IS DERIVED, NEVER HAND-PICKED (src/lib/review-replay-sample.ts, new).
+       - `rmd review-replay refresh` reads `review.replay_input` rows from the ledger union.
+       - It drops rows from reviewer code shas that a W1-T10269 incident marked regressed, so a bad
+         window cannot become the expected answer. The 10-20 withholds would otherwise be recorded
+         as truth.
+       - It keeps every distinct input shape (deduped by input digest) in the retained window, so
+         there is no count knob.
+       - It writes test/fixtures/review-replay/sample.ndjson with a header naming the window, the
+         generator revision and the classes observed.
+       - It refuses to write a sample that drops a class the window observed.
+       - A garden registered in src/lib/garden-registry.ts runs the refresh. It opens a
+         chore(test) PR when the derived sample differs.
+       - The test rejects a sample whose rows fail the header's digest, which catches a hand edit.
+    4. THE REPLAY GATE (test/review/a-review-path-change-replays-recorded-reviews.test.ts).
+       - Every sample row is fed through the HEAD's classifyReviewOutcome. Its class must equal
+         the recorded class. On a mismatch, the test names the row's PR, its recorded class, the
+         head's class and the reason.
+       - The test fails on an empty sample, and on one missing a class its header says was
+         observed. It never passes while comparing nothing.
+       - selectAffectedSuites (src/lib/affected-suites.ts) maps the review path to this suite. The
+         review path is REVIEW_MATERIAL_ADVANCE_PATHS plus the src/lib modules the review-path
+         units import, transitively. So a change to any of them, including
+         required-semantic-review.ts, always runs it.
+    5. BOOTSTRAP. The implementation PR seeds the sample with the refresher from rows the ledger
+       already has.
+       - The setup-gate inputs are reconstructable now from review.reviewer.skipped,
+         review.reviewer.untasked_defaults and review.posted. Shards without budget_usd were
+         reviewed and posted on 10-16..10-19.
+       - Rows whose verdict lines were never recorded are marked `verdict_lines: unrecorded`. They
+         are replayed only through the setup gate.
+       - The garden's first refresh after deploy adds recorded semantic rows. Until then, the test
+         prints which classes are covered by recorded verdict lines.
+    Tests use `test(` titles exactly as in the proofs below and no real reviewer spawn.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/review/a-review-path-change-replays-recorded-reviews.test.ts"
+    - claim: "every sample row replays to its recorded class through the head's single decision seam"
+      proof: 'grep: test("W1-T10270: every recorded review replays to its recorded verdict class" in test/review/a-review-path-change-replays-recorded-reviews.test.ts'
+    - claim: "the #12954 decision fails the replay: a recorded all-PASS posted row comes back withheld, and a posted row without budget_usd comes back refused"
+      proof: 'grep: test("W1-T10270: the 12954 decision turns recorded PASS reviews into withheld and fails the replay" in test/review/a-review-path-change-replays-recorded-reviews.test.ts'
+    - claim: "an empty sample, a sample missing an observed class, or a hand-edited row is red"
+      proof: 'grep: test("W1-T10270: an empty, incomplete or hand-edited sample fails the replay" in test/review/a-review-path-change-replays-recorded-reviews.test.ts'
+    - claim: "the refresher derives the sample from ledger rows, keeps every distinct input shape, and drops rows from regressed reviewer shas"
+      proof: 'grep: test("W1-T10270: the sample is refreshed from the ledger and excludes regressed reviewer shas" in test/review/a-review-path-change-replays-recorded-reviews.test.ts'
+    - claim: "reviewCommand and runReview decide through classifyReviewOutcome, and a change to required-semantic-review.ts selects the replay suite"
+      proof: 'grep: test("W1-T10270: production review decisions route through the replayed seam" in test/review/a-review-path-change-replays-recorded-reviews.test.ts'
+    - claim: "run-task.ts decides reviews through classifyReviewOutcome"
+      proof: 'grep: classifyReviewOutcome( in src/run-task.ts'
+    - claim: "the review-replay refresh verb in run-task.ts calls the sample refresher"
+      proof: 'grep: refreshReviewReplaySample( in src/run-task.ts'
+  falsifier: |
+    Restore #12954's required-semantic-review.ts and its run-task.ts gate with `git show
+    8b37a0a1b:<path>`. The second test must go red on the bootstrap sample's posted rows without
+    budget_usd, and on any recorded all-PASS row. Leave the metadata gate inline in reviewCommand
+    instead of in classifyReviewOutcome. The replay then cannot see the setup refusal, and the
+    routing test fails. Let the refresher keep rows from a regressed sha. The 10-20 withholds then
+    become the expected class, and the refresher test fails.

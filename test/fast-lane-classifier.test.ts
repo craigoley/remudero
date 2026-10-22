@@ -365,12 +365,22 @@ const W1_T4399_SUPERSEDED_STUB_JOB_IDS = new Set([
   "baseline-monotonic",
 ]);
 
+function assertProducerAwareCiScheduling(job: { if?: string | boolean; needs?: string | string[] }): void {
+  if (job.needs === undefined) {
+    assert.equal(job.if, undefined, "an independent required matrix remains unconditional");
+    return;
+  }
+  assert.deepEqual(job.needs, ["commitlint"], "only the same-run producer may precede the required matrix");
+  assert.equal(job.if, "${{ always() && !cancelled() }}", "producer failure or skip cannot suppress the required matrix");
+}
+
 test("acceptance 6: job-level conditions are only PR guards, stable-name aggregators, or a W1-T4399 superseded stub", async () => {
   const { readFile } = await import("node:fs/promises");
   const { parse: parseYaml } = await import("yaml");
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string | boolean }> };
+  const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string | boolean; needs?: string | string[] }> };
   for (const [jobId, job] of Object.entries(doc.jobs)) {
+    if (jobId === "ci") { assertProducerAwareCiScheduling(job); continue; }
     if (job.if === undefined) continue;
     if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "test-slow" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must run even when a shard fails`);
@@ -470,7 +480,9 @@ test("CLI: --list-plan-reading-suites prints one path per line, sorted, all unde
   const lines = result.stdout.trim().split("\n").filter(Boolean);
   assert.ok(lines.length > 10, `expected a substantial plan-reading set, got ${lines.length}`);
   for (const line of lines) {
-    assert.match(line, /^test\/[^/]+\.test\.ts$/);
+    // suiteFiles() walks test/ recursively, so a plan-reading suite under test/ci/<group>/ is listed too.
+    assert.match(line, /^test\/(?:[^/]+\/)*[^/]+\.test\.ts$/);
+    assert.ok(!line.startsWith("test/fixtures/"), `fixtures are never enumerated as suites: ${line}`);
   }
   const sorted = [...lines].sort();
   assert.deepEqual(lines, sorted, "the list must be sorted, not enumeration order");
@@ -972,4 +984,16 @@ test("W1-T3512 acceptance 4: a SOURCE diff still runs every source-only gate —
     assert.equal(step.if, undefined, `'${stepId}' must carry no if: naming the class — every diff, SOURCE included, reaches its real command unconditionally`);
     assert.doesNotMatch(step.run ?? "", /steps\.classify\.outputs\.class/, `'${stepId}' must carry no fast-lane class check anywhere in its run script`);
   }
+});
+
+test("fast-lane classifier preserves the exact producer scheduling exception", () => {
+  for (const job of [
+    { needs: ["commitlint"] },
+    { needs: ["commitlint"], if: "github.event_name == 'pull_request'" },
+    { needs: ["commitlint"], if: "${{ success() }}" },
+    { needs: ["other"], if: "${{ always() && !cancelled() }}" },
+    { if: "${{ always() && !cancelled() }}" },
+  ]) assert.throws(() => assertProducerAwareCiScheduling(job));
+  assert.doesNotThrow(() => assertProducerAwareCiScheduling({}));
+  assert.doesNotThrow(() => assertProducerAwareCiScheduling({ needs: ["commitlint"], if: "${{ always() && !cancelled() }}" }));
 });

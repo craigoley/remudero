@@ -1,0 +1,80 @@
+- id: W1-T10094
+  title: An incomplete census capture survives its producing process exit
+  repo: remudero
+  depends_on: [W1-T9919]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator followthrough 2026-10-17: preserve actual author-validation diagnostics without retrying an unexplained timeout"
+  plan_refs: [W1-T5617, W1-T5693, W1-T9919, W1-T9794]
+  files: [scripts/census-precheck.mjs, scripts/lib/retained-fixtures.mjs, scripts/lib/retained-fixtures.d.mts, test/setup/retained-fixtures.ts, test/setup/tmp-hygiene.ts, test/ci/gates/an-incomplete-census-capture-survives-its-producer-exit.test.ts, test/census-reader-runtime-calibration.test.ts, test/a-census-this-branch-grows-is-refused-before-the-push.test.ts, test/census-precheck-counts-the-house-layout-ratchet.test.ts, test/dispatch-lifetime-breaker.test.ts, test/ledger-rotation.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED in three fresh-process controls on actual unchanged production readers:
+    runCensusSuitesViaChild reports an incomplete child's private capture as retained.
+    Its native.json exists before the producing process exits, but is absent afterwards
+    when that process uses the maintained tmp-hygiene preload. The same real incomplete
+    capture survives when explicitly registered with the existing retainFixture map.
+    A healthy child remains a positive control. Normal host admission, physical fixtures,
+    source digests and complete command output are retained privately; these observations
+    are not three TAP tests, a native pass, or evidence for a historical timeout's cause.
+    runCensusChild creates its capture with mkdtempSync; tmp-hygiene records that directory
+    and removes it at exit unless the shared retention map names it. The existing timeout
+    test reads native.json inside its producing process, so it cannot falsify this loss.
+    W9794's exact native-base reproduction passed: its original timeout cause stays UNKNOWN.
+    W9919 separately owns the loaded census-child timeout disposition and the same script;
+    this task waits for that actual merge and preserves its decision rather than competing.
+  design: |
+    1. Reuse ONE retention contract for production capture and the maintained fixture exit
+       sweep. If a dependency-free shared MJS module is necessary, move/re-export the
+       existing retention implementation; do not create a second registry, test-only
+       production hook, daemon scanner, broad environment exemption or blanket temp hold.
+    2. Register only the real incomplete capture when the production reader says it is
+       retained. Keep its original error/status/signal/output-completeness/native receipt
+       and private location. A missing or unwriteable capture remains explicit unknown;
+       never manufacture evidence or turn a timeout, unreadable tree or failed test green.
+       Complete captures retain their existing cleanup. A receipt is not public permission.
+    3. Prove fresh-process behavior through the actual production child/default and actual
+       tmp-hygiene preload: the owned incomplete capture is readable after producer exit,
+       complete/healthy cleanup remains, explicit fixture retention still works, and
+       malformed/unreadable evidence stays unknown. Tests remove their own expected
+       diagnostic fixtures after checking them; unexpected failures retain useful evidence.
+       Bound and reap only their own disposable child groups, never a peer worker.
+       Register an-incomplete-census-capture-survives-its-producer-exit.test.ts in
+       PRECHECK_PARITY in the already-declared scripts/census-precheck.mjs, with its
+       actual reader/retention sources as triggers. Run the real semantic suite; no dummy
+       registration, rule-suite naming exemption or census baseline change.
+    4. Delete actual production retention forwarding to make the post-exit semantic test
+       fail, then restore it to pass. A map unit test or an in-process existence assertion
+       alone does not prove custody. Test default IO and each new catch; source-map every
+       changed supported source file and name every unchanged or non-instrumented boundary.
+    5. Fresh merged trailer/run-branch credit, ALL OPEN subjects, selector and ordinary
+       ownership checks precede build/publication. Preserve the W9919 owner and actual
+       merged structured reasons. Commit before verified-path/tsx/tmp/shipped-slot tests;
+       one native per distinct committed repair, actual pinned-base comparisons for new
+       failures, stored canonical proofs and normal required hosted CI/review/merge.
+       No time-bound/admission/worker-limit/gate/scanner/baseline change or waiver.
+    6. Registry/admission stays opt-in SHADOW ONLY with independent owner/admin override,
+       trusted PR flow, scoped services and complete public Apache code. No schedule,
+       live configuration/credential/settings/infrastructure change, deployment, external
+       closure or worker stop. Source merge does not diagnose the old timeout or activate it.
+  acceptance:
+    - claim: The actual incomplete census capture survives producer exit under the maintained preload
+      proof: 'unit test: an incomplete census capture survives actual producer exit'
+    - claim: Healthy cleanup and existing explicit fixture retention remain independently correct
+      proof: 'unit test: census capture retention preserves healthy cleanup and explicit fixture custody'
+    - claim: Missing or unreadable diagnostic evidence never becomes a successful test result
+      proof: 'unit test: census capture custody failures stay unknown without widening author admission'
+    - claim: Removing production retention forwarding restores the observed post-exit loss
+      proof: 'unit test: actual census capture retention forwarding is load-bearing'
+  falsifier: |
+    At base the real timeout capture exists inside its producer but disappears at exit;
+    the same-case explicit retainFixture control survives and a healthy child completes.
+    After repair delete the actual forwarding: the fresh-process semantic failure returns
+    while map tests can still pass. Restore exact source and preserve private diagnostics,
+    healthy cleanup, unknown reasons, owner controls and every original failed receipt.

@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test, type TestContext } from "node:test";
+import type { Config } from "../src/lib/config.js";
+import { fixedClock } from "../src/lib/clock.js";
+import { openWeightAllowancePath, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+import { finishTransientRetry, implementAttemptOutcome } from "./helpers/run-task-test.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { buildFixProgressInput, type FixProgressInput, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
 import {
   judgeCappedRepair,
@@ -668,4 +676,83 @@ test("a transient judge escalation keeps the transient class, the named loop and
   });
   assert.equal(strike.outcome, "gave_up");
   assert.equal(strike.exhaustedClass, "strike");
+});
+
+// W1-T10040: this suite is in stryker's commandRunner. Keep the driver assertions here so
+// mutations of the cash refusal arm are exercised by the PR mutation gate.
+const CASH_NOW = Date.parse("2026-10-17T09:50:29.000Z");
+function cashCapFixture(t: TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-classify-cash-cap-"));
+  const config: Config = { root, claudeBin: "/unused", dailyCapUsd: 25,
+    workerProviders: { enabled: ["claude", "codex", "cash"], cashFallbackWhenBlocked: true,
+      cashEndpoint: "https://foundry.example.test/" } };
+  const allowance = openWeightAllowancePath(config);
+  mkdirSync(dirname(allowance), { recursive: true });
+  writeFileSync(allowance, JSON.stringify({ utcDay: "2026-10-17", reservations: {
+    earlier: { reservedUsd: 24.95, settledUsd: null, deployment: "gpt-6-luna" },
+  } }));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return { root, config };
+}
+async function refusedCashWorker(t: TestContext) {
+  const f = cashCapFixture(t);
+  const worker = await spawnOpenWeightWorker({ cwd: f.root, workerHome: join(f.root, "home"),
+    prompt: "x".repeat(300_000), env: { RMD_OPENWEIGHT_API_KEY: "fixture-only-key" },
+    clock: fixedClock(CASH_NOW), tools: [],
+    fetchImpl: async () => { throw new Error("transport must not run"); } },
+  f.config, { model: "gpt-6-luna", effort: "low" });
+  assert.equal(worker.subtype, "cash_allowance_exhausted");
+  return { ...f, worker };
+}
+
+test("W1-T10040: the retry driver stops on a cap refusal and names it", async t => {
+  const { root, worker } = await refusedCashWorker(t);
+  let attempts = 0, diagnoses = 0, judges = 0, removals = 0;
+  const sleeps: number[] = [], rows: Array<{step: string} & Record<string, unknown>> = [];
+  const result = await runDiagnoseThenRetry({ now: () => CASH_NOW,
+    attempt: async () => { attempts++; return implementAttemptOutcome(worker); },
+    diagnose: async () => { diagnoses++; return { text: "unused" }; },
+    sleep: async ms => { sleeps.push(ms); },
+    fixProgressJudge: async () => { judges++; return undefined; } });
+  assert.equal(result.outcome, "gave_up");
+  assert.equal(attempts, 1);
+  assert.equal(diagnoses, 0);
+  assert.equal(judges, 0);
+  assert.deepEqual(sleeps, []);
+  assert.equal(result.strikes, 0);
+  assert.match(result.reason ?? "", /cash daily allowance exhausted until 2026-10-18T00:00:00.000Z/);
+  const terminal = finishTransientRetry(result, { taskId: "FIXTURE", runId: "fixture", repoDir: root,
+    worktreePath: root, costUsd: 0, worker, log: (step, extra) => rows.push({step,...extra}), say: () => {} }, () => { removals++; });
+  assert.equal(terminal?.verdict, "blocked_transient");
+  const verdict = rows.find(r => r.step === "verdict");
+  assert.match(String(verdict?.reason), /cash daily allowance exhausted until/);
+  assert.doesNotMatch(String(verdict?.reason), /repeated transient API error|fix progress/);
+  assert.equal(removals, 0, "a mid-tool-loop cap must never force-remove unpublished work");
+  assert.ok(rows.some(r => r.step === "worktree.retained"));
+});
+
+test("a mid-loop cash cap preserves real unpublished edits through the default cleanup boundary", async t => {
+  const { worker } = await refusedCashWorker(t);
+  const repo = gitRepo({ scope: t, kind: "cash-partial" });
+  const work = repo.addWorktree(join(repo.dir, "partial"), "partial");
+  const path = join(work.dir, "unpublished.txt");
+  writeFileSync(path, "partial worker result");
+  const stopped = await runDiagnoseThenRetry({
+    attempt: async () => implementAttemptOutcome(worker), diagnose: async () => ({ text: "unused" }),
+  });
+  const result = finishTransientRetry(stopped, { taskId: "FIXTURE", runId: "fixture", repoDir: repo.dir,
+    worktreePath: work.dir, costUsd: 0, worker, log: () => {}, say: () => {} });
+  assert.equal(result?.verdict, "blocked_transient");
+  assert.equal(readFileSync(path, "utf8"), "partial worker result");
+  assert.match(repo.git("worktree", "list", "--porcelain"), /partial/);
+});
+
+
+test("classifyFailure: a bare gh HTTP 503 is transient without a server-error phrase", () => {
+  for (const text of ["gh: HTTP 500", "gh: HTTP 502", "gh: HTTP 503", "gh: HTTP 504", "HTTP/2 503"]) {
+    assert.equal(classifyFailure({ text }), "transient", text);
+  }
+  for (const text of ["gh: HTTP 403", "gh: HTTP 404", "gh: HTTP 422", "503 tests failed", "HTTP 5030"]) {
+    assert.equal(classifyFailure({ text }), "strike", text);
+  }
 });

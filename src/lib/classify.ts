@@ -36,6 +36,7 @@ export type FailureClass = "transient" | "strike";
  * closed — evidence of transience must be POSITIVE, never assumed).
  */
 export interface FailureSignal {
+  cashAllowanceResetAt?: string;
   subtype?: string;
   text?: string;
   ciConclusion?: string;
@@ -54,7 +55,7 @@ export interface FailureSignal {
 // assertion or compiler diagnostic — those are always a STRIKE).
 const TRANSIENT_TEXT_PATTERNS: RegExp[] = [
   /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i,
-  /HTTP\/[\d.]+\s*5\d\d|(?:^|[^0-9])5\d\d\s+(?:Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)/i,
+  /\bHTTP(?:\/[\d.]+)?\s*5\d\d\b|(?:^|[^0-9])5\d\d\s+(?:Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)/i,
   /gateway timeout|bad gateway|service unavailable|internal server error/i,
   /rate limit exceeded|secondary rate limit|abuse detection mechanism/i, // gh API backpressure
   /runner has received a shutdown signal|lost communication with the server|no space left on device/i,
@@ -398,6 +399,7 @@ export interface DiagnoseThenRetryDeps {
 }
 
 export interface DiagnoseThenRetryResult {
+  cashAllowanceExhausted?: true;
   outcome: "success" | "gave_up" | "held";
   strikes: number;
   transientRetries: number;
@@ -443,6 +445,12 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
         diagnosed,
       });
       return { outcome: "success", strikes: state.strikes, transientRetries: state.transientRetries, diagnosed, attempts };
+    }
+    if (result.evidence.subtype === "cash_allowance_exhausted") {
+      const reason = `cash daily allowance exhausted until ${result.evidence.cashAllowanceResetAt ?? "an unobserved reset"}: ${result.evidence.text ?? "allowance refused"}`;
+      log("retry.cash_allowance_exhausted", { attempts, reset_at: result.evidence.cashAllowanceResetAt, reason });
+      return { outcome: "gave_up", strikes: state.strikes, transientRetries: state.transientRetries,
+        diagnosed, attempts, reason, exhaustedClass: "transient", cashAllowanceExhausted: true };
     }
 
     // W1-T2515: A SHUT WINDOW IS NOT A FLAKE. Checked BEFORE classification, because

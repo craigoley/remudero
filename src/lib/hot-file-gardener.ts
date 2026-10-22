@@ -13,6 +13,7 @@ import {
   runPrIndex,
 } from "./ci-friction-gardener.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
+import { newTestPath } from "./plan.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
 import { ledgerLivePath, ledgerRotationEntries } from "./ledger-union.js";
@@ -242,7 +243,7 @@ export function hotFileShardStem(file: string): string {
 
 /** The NEW regression test a restructuring adds: two pull requests editing the file merge cleanly. */
 export function hotFileTestPath(file: string): string {
-  return `test/${hotFileShardStem(file)}.test.ts`;
+  return newTestPath(hotFileShardStem(file), [file], "hot-file-gardener");
 }
 /** A file this cheap is noise, not a hot file: nothing is filed below it. */
 export const HOT_FILE_MIN_MINUTES = 10;

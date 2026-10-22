@@ -1,4 +1,84 @@
+import {
+  runTask as runTaskFromModule,
+  runTaskBody as runTaskBodyFromModule,
+  createProbeVerdictCache as createProbeVerdictCacheFromModule,
+  runTaskCommandHelpers,
+  IMPLEMENT_REFUSAL_REPORT_CONTRACT,
+  IMPLEMENT_WAIT_TARGET_CONTRACT,
+  RUN_BRANCH_FILED_FORM,
+  RUN_BRANCH_UNFILED_FORM,
+  WORKER_ACTIVITY_LEDGER_STEP,
+  WORKER_RUNAWAY_TURNS_LEDGER_STEP,
+  FALLBACK_PUSH_EVIDENCE_ABSENT,
+  ALREADY_SATISFIED_VERIFY_ATTEMPTS,
+  ImplementBudgetBreach,
+  PLAN_RECORD_ABSENT,
+  RECON_MAX_TURNS,
+  ManagedCheckoutRefreshRefusedError,
+  type RunTaskCommandHost,
+  type GitRunner,
+  type WorkerStateSensor,
+  type SyncedPlan,
+  type RollupEntry,
+  type PrCreateDiagnostic,
+  type PrCreateCommand,
+  type BoundaryCheckpointRestore,
+  type AddedTestsAtHead,
+  type PrHeadGateway,
+  type OwnershipVerdict,
+  type RemotePresenceProbeFailure,
+  type FallbackPushCause,
+  type GateOutcome,
+  type PollDeps,
+  type PrOpenHandoffDeclineReason,
+  type ExternalWaitFreshness,
+  type CiGateOutcome,
+  type ReviewRunResult,
+  type FixRungOutcome,
+  type CiEvidenceDisagreementObservation,
+  type LiveHeadResult,
+  type WorktreeSnapshot,
+  type FixRebaseMergeFacts,
+  type FixRoundCommit,
+  type ReadFixRoundCommits,
+  type WorkerErrorVerdict,
+  type NoPrVerdict,
+  type AlreadySatisfiedClaim,
+  type AlreadySatisfiedRefusal,
+  type AlreadySatisfiedResolution,
+  type AlreadySatisfiedVerdict,
+  type ReconArtifact,
+  type ProbeKeyInputs,
+  type ProbeProof,
+  type ProbeVerdictCache,
+  type ProbeAdmissionOptions,
+  type RunTaskBodyOptions,
+  type RunTaskContext,
+  type ManagedCheckoutRefresh,
+  type SourceSizeGatePostureRuntime,
+  type SourceSizeGatePostureResult,
+  type RunErrorCause,
+  type CensusPushRefusal,
+  type CensusChildResult,
+  type CensusChildRunner,
+  type FixRoundPushReceipt,
+  type CoveragePrecheck,
+  type CoverageRunResult,
+  type CoveragePrecheckPorts,
+  type CensusPushRungOutcome,
+  type MaterializationErrorClass,
+  type MaterializationFailure,
+  type WorkerEditCommit,
+  type RequiredCompanion,
+  type PublishAbandonedFixOwnerAheadDeps,
+} from "./cli/commands/run-task-verb.js";
+export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
+export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
+import { daemonCommand as daemonCommandFromModule, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
+import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
+  type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
+import type { DependencyMergeEvidence } from "./lib/plan.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
@@ -28,17 +108,14 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
-import { judgeFixProgress,
+import { judgeFixProgress, resolveFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
-import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration,
-  revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
+import { revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput } from "./lib/read-plane.worker.js";
 import { globSync, renameSync } from "node:fs";
-import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
-import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "./lib/ci-escalation-judge.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to src/lib/report-commands.ts
@@ -60,15 +137,17 @@ import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
-import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, type ImportClosureRead } from "./lib/base-reproduction.js";
+import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
+import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
+import { admittedFixTestPaths } from "./lib/fix-test-scope.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
-import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
+import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
-import { createHash } from "node:crypto";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, setGhReadActorResolver, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
+import { createHash, randomUUID } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
@@ -76,8 +155,8 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
-// @ts-expect-error W1-T10064: the daemon's own copy of the W1-T9864 codemod, which has no declaration file.
-import { rewriteSource as codemodRewriteSource } from "../scripts/test-location-codemod.mjs";
+// @ts-expect-error executable gate module has no declaration file.
+import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -122,21 +201,7 @@ import {
   type LedgerCompactionOutcome,
 } from "./lib/ledger-compaction-rung.js";
 // Compatibility re-export target: lib/escalation-catalogue"
-import {
-  DISK_HEADROOM_EPISODE_MS,
-  POST_REVIEW_STALL_EPISODE_MS,
-  escalateCircuitBreak,
-  escalateCrashLoop,
-  escalateDiskHeadroomBreach,
-  escalateHeadroomParkCeiling,
-  escalateHeadroomReserve,
-  escalateLifetimeCapExceeded,
-  escalatePostReviewStall,
-  escalateQuotaExhaustion,
-  escalateReplayStranded,
-  escalateStarvation,
-  escalateStarvationCleared,
-} from "./lib/escalation-catalogue.js";
+import { DISK_HEADROOM_EPISODE_MS, POST_REVIEW_STALL_EPISODE_MS, escalateCircuitBreak, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateLifetimeCapExceeded, escalatePostReviewStall, escalateQuotaExhaustion, escalateStarvation, escalateStarvationCleared } from "./lib/escalation-catalogue.js";
 export {
   DISK_HEADROOM_EPISODE_MS,
   POST_REVIEW_STALL_EPISODE_MS,
@@ -218,24 +283,19 @@ export {
 };
 export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidence, DisarmOutcome, ArmLane };
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
-import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic } from "./lib/fs-race-safe.js";
 import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
-import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
-import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
-import { gardenSchedule } from "./lib/garden-registry.js";
-import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -253,22 +313,23 @@ import {
   recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts,
 } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
-import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
+import { openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
-import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreOperatorEscalation, sreRunbookCatalog } from "./lib/sre-runbooks.js";
-import { daemonBreakerRunbookHost, releaseBreaker } from "./lib/breaker-release.js";
+import { sreOperatorEscalation } from "./lib/sre-runbooks.js";
+import { releaseBreaker } from "./lib/breaker-release.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
-import { createThreadEventSync, realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
-import { gitRecommendationEvidence, realRecommendationWriter, RECOMMENDATION_SEED_PATH } from "./lib/inbox-recommendation.js";
+import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
+import { realThreadDecider, type ThreadDecisionContext } from "./lib/inbox-responder.js";
+import { realRecommendationWriter } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
-import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
+import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "./lib/preopen-gate.js";
+import { createGateSandboxMetrics } from "./lib/gate-sandbox-metrics.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -313,30 +374,12 @@ export type { FixEvidence, FixMode };
  * and to the compaction anchor from the same constant, so the contract cannot disappear midway
  * through a run. The fixed grammar is parsed in lib/review.ts — ordinary prose is not authority.
  */
-export const IMPLEMENT_REFUSAL_REPORT_CONTRACT = [
-  "",
-  "# REFUSAL REPORTING",
-  "- If evidence at the current HEAD shows that you cannot satisfy a specific acceptance criterion,",
-  "  put this exact block in your final REPORT, with one line for each refused criterion:",
-  "  REFUSED:",
-  "  <criterion index>. [premise-rotted|outside-declared-files|needs-operator-input|proof-unexecutable-at-head|contradicts-another-criterion] <one concrete sentence>",
-  "- Use only a listed class. Do not use this block for a transient tool failure or a guess.",
-  "- A refusal is advisory evidence: it can fail only that criterion and routes to an operator; it",
-  "  never approves work, changes declared scope, or authorizes a retry.",
-  "- If you refuse criterion N, do not state `Criterion N: COMPLETE`, `IMPLEMENTED`, or `SATISFIED`",
-  "  in the PR body. That explicit contradiction fails review.",
-].join("\n");
 
 /**
  * W1-T7807: the one line that PREVENTS the shape the quiet-worker watchdog recovers from. W1-T7734's worker polled
  * `until grep -q "^ℹ duration_ms" <output>` for a reporter line a finished run never printed, and sat quiet ~55 minutes.
  * Appended beside {@link IMPLEMENT_REFUSAL_REPORT_CONTRACT} at both sites that use it (first prompt and compaction anchor).
  */
-export const IMPLEMENT_WAIT_TARGET_CONTRACT = [
-  "",
-  "# WAITING ON A BACKGROUND RUN",
-  "- A wait on a background test run waits on the RUNNER'S EXIT (the process, or the `[exited with code N]` marker in its output), never on a reporter-specific line such as `duration_ms`.",
-].join("\n");
 
 /**
  * THE TWO CONFORMING SESSION-BRANCH FORMS (W1-T3388). CLAUDE.md's own rule names
@@ -349,8 +392,6 @@ export const IMPLEMENT_WAIT_TARGET_CONTRACT = [
  * and `scripts/head-identity-gate.mjs` (the refusal gate) can never name a different spelling for
  * the same case.
  */
-export const RUN_BRANCH_FILED_FORM = "run-<taskId>-<epochMs>";
-export const RUN_BRANCH_UNFILED_FORM = "run-unfiled-<epochMs>";
 /** {@link RUN_BRANCH_UNFILED_FORM} as a matchable shape (a real epoch-ms literal in place of the
  *  placeholder) — the one `scripts/head-identity-gate.mjs` tests a real head ref against. */
 export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
@@ -360,7 +401,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -422,7 +463,7 @@ import {
   runRelintLoop,
 } from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
-import { censusRunDirs } from "./lib/run-child-contract.js";
+import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refusal.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
@@ -485,40 +526,13 @@ import {
   type MergedSet,
   type OpenPrCheck,
   resolveReleasedIds,
+  type ReleaseReaders,
 } from "./lib/drain.js";
-import {
-  daemonBoot,
-  daemonExitCode,
-  daemonExitCodeForSummary,
-  resolveFleetControlHold,
-  runDaemon,
-  readRestartHistoryLines,
-  restartWorkHistory,
-  type CrashLoopVerdict,
-  type DaemonFreshness,
-  type DaemonOpts,
-  type DaemonSummary,
-  type RestartBoundary,
-  type RestartBoundaryContext,
-  type HeadroomPolicy,
-  type IntakeRungDecision,
-  type IntakeRungRunResult,
-  type LightPassScope,
-  lightPassFixAdmitted,
-  type ReviewAdmissionGate,
-  type StarvationCensus,
-  type StarvationClearedInfo,
-  type SweepCycleOutcome,
-  priorUnrecognisedResetStrings,
-  pendingWorkerBoundaryHandoffs,
-  daemonPushTokenSource,
-  receivePackCredentialProbe,
-  v8HeapStatistics,
-} from "./lib/daemon.js";
+import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
-import { holdReviewWorktree, releaseReviewWorktree, sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
+import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { sweepReclaimableArtifacts } from "./lib/disk-artifact-reclaim.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -531,21 +545,16 @@ import {
 // W1-T117/W1-T356: the orphan sweep's own exported defaults — see the shared `sweepOrphans`
 // closure below (daemonCommand), wired into BOTH daemonBoot's boot-time param and
 // DaemonDeps.sweepOrphans.
-import {
-  defaultListCandidates,
-  defaultReadMarkers,
-  killProcessGroup,
-  sweepOrphanWorkers,
-  workerInstallationScope,
-  type OrphanSweepDeps,
-} from "./lib/worker-containment.js";
+import { defaultListCandidates, defaultReadMarkers, killProcessGroup, type OrphanSweepDeps } from "./lib/worker-containment.js";
 import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
-import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
+import { reapWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
-import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
+import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
+import { testPlaceOutcome } from "./lib/test-placement.js";
+import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
@@ -600,11 +609,13 @@ import {
   escalationContractRevision,
   findDuplicateEscalation,
   taskContractRevision,
+  taskSemanticRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
   presenceMode,
   setPresenceMode,
   tryEscalate,
+  tryEscalateAsync,
   type Escalation,
   type EscalationClass,
   type EscalationJudgeVerdict,
@@ -621,6 +632,9 @@ import {
   createGhCallPacer,
   type OpenPrRest,
   fetchSinglePrRest,
+  codeqlCheckFailed,
+  hydrateCodeqlHeadAlertsSteps,
+  CODEQL_CHECK_NAME,
   fetchSinglePrRestAsync,
   hydrateMergeStates,
   liveStateFromRest,
@@ -645,20 +659,7 @@ import {
   type RestRollupEntry,
   fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
-import {
-  buildMainHealthRung,
-  mainCeilingLogReducer,
-  mainRepairRecordsFromLedger,
-  mainRepairMergesBrief,
-  withMainHealthOnLightPass,
-  type MainCeilingLogVerdict,
-  type MainRatchetRecordOutcome,
-  type MainRatchetRecordRequest,
-  type MainRepairFixRequest,
-  type MainRepairLane,
-  type MainRepairRevertOutcome,
-  type MainRepairRevertRequest,
-} from "./lib/main-health-rung.js";
+import { mainCeilingLogReducer, mainRepairRecordsFromLedger, mainRepairMergesBrief, reviewerRegressionRevertText, withMainHealthOnLightPass, type MainCeilingLogVerdict, type MainRatchetRecordOutcome, type MainRatchetRecordRequest, type MainRepairFixRequest, type MainRepairLane, type MainRepairRevertOutcome, type MainRepairRevertRequest } from "./lib/main-health-rung.js";
 import { emailChannel, imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -678,7 +679,7 @@ import {
   type AlertLaneAlert,
 } from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
-import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
+import { readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
 import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
@@ -729,6 +730,7 @@ import {
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
 import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
 import {
   buildPreflightSummary,
   callerReachableSuites,
@@ -756,6 +758,7 @@ import { discoverSourceTextReaders, readerJoins, type SourceTextReader } from ".
 // MECHANICAL remedy (a new file's baseline row, never a raised ceiling) before the implement
 // worker's final commit. See {@link commitWorkerEditsWithCensusFix} below for the call site.
 import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
+import { COVERAGE_SOURCE_FILE, coverageNarrowRowFields, coverageNarrowSuites, judgeCoverage, type CoverageRun, type CoverageVerdict } from "./lib/coverage-narrow.js";
 // W1-T4108 — the same suite selector CI's shadow selector and `--coverage`'s report-only step
 // already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
 // default step can never independently derive a second notion of "which suites reach a changed
@@ -785,7 +788,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -909,7 +912,6 @@ import {
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
   decideDraftDeferral,
-  declinedReasonInLedger,
   type ProposalVerdictKind,
   deferralFromOutcomes,
   parseDraftDeferralCache,
@@ -979,6 +981,7 @@ import {
   ratificationPrBody,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
+import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
 import {
@@ -1013,7 +1016,8 @@ import {
   type PlanCoherenceShardListing,
   probeGithubThrottle,
   probeGithubThrottleAsync,
-  recordFollowupHarvest,
+  publishFollowupHarvestAsync,
+  withRetroPublicationCancellation,
   renderGather,
   renderNetStateUnwiredAdvisories,
   renderPlanHealth,
@@ -1027,7 +1031,6 @@ import {
   type RetroLedgerRead,
   escalateRetroPublicationFailure,
   retireSettledFollowups,
-  routeFollowupsToRegistry,
   type FollowupReferentRead,
   runlessMergesSince,
   saveMarker,
@@ -1110,6 +1113,12 @@ import {
   parseProofAmendmentProposal,
   requestProofAmendment,
   requestScopeAmendment,
+  isUngrantableInstrumentPath,
+  readBuildScopeRecovery,
+  saveBuildScopeRecovery,
+  restoreBuildScopeRecovery,
+  saveScopeAmendmentWork,
+  restoreScopeAmendmentWork,
   type ScopeAmendmentOutcome,
   type ScopeAmendmentRequest,
   type ProofAmendmentOutcome,
@@ -1122,12 +1131,19 @@ import {
   isSpawnInfraBlockedError,
   LEDGER_COST_TAG_INFRA,
   DECISION_RELEVANT_LEDGER_STEPS,
+  deriveLedgerActor,
   markDaemonProcessActor,
   markLedgerProcessActor,
   MAX_RETAINED_LINES_PER_STEP,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
+import { createTaskFilingHistoryInvocation, resolveTaskFilingHistory,
+  type FilingHistoryOptions, type TaskFilingHistoryInvocation } from "./lib/task-filing-history.js";
+import { requiredSemanticDecisionDigest } from "./lib/required-semantic-review.js";
+import { classifyReviewOutcome, recordedReviewVerdictLines, reviewReplayLedgerFields, type ReviewReplayInput,
+  type ReviewOutcomeDecision } from "./lib/review-outcome-class.js";
+import { refreshReviewReplaySample, reviewReplayGardenSpec } from "./lib/review-replay-sample.js";
 import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
@@ -1147,6 +1163,7 @@ import {
   applyAutomateVerdict,
   awaitingRelease,
   releaseEscalatedKeys,
+  observedStateOfProposalSummary,
   type ShardUnderJudgement,
   type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
@@ -1160,7 +1177,6 @@ import { getHeapStatistics } from "node:v8";
 import {
   ledgerRotationEntries,
   resolveLedgerUnion,
-  resolveLedgerUnionAsync,
   rotationStampIso,
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
@@ -1177,7 +1193,7 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -1197,13 +1213,15 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
+import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerMemoHolders, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1230,47 +1248,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import {
-  decideMeasurementCadence,
-  measurementCadenceCheck,
-  ciLearningCadenceCheck,
-  CI_LEARNING_MINT_CEILING,
-  ciLearningLookbackDays,
-  type CiLearningCadencePolicy,
-  type CiLearningCadenceRunResult,
-  measurementCadenceMarkerPath,
-  ciLearningRecordVerdict,
-  ciLearningShardYaml,
-  fileCiLearningShards,
-  mintCiLearningShards,
-  readMeasurementCadenceMarker,
-  recordCiLearningAttempt,
-  recordCiLearningCadenceFire,
-  recordMeasurementCadenceFire,
-  createWipeTestEvidenceReader,
-  wipeTestSlotDraw,
-  recordWipeTestCadenceFire,
-  scheduleWipeTestAblation,
-  renderVerbCensusDigestLine,
-  priorVerifyHumanAgeBandKeys,
-  runMeasurementCadenceReportAsync,
-  childMeasurementCadenceSpawn,
-  measurementCadenceChildRunner,
-  runVerbCensus,
-  verifyHumanCadence,
-  wipeTestCadenceCheck,
-  type MeasurementCadenceDecision,
-  buildPlanReconcileCadenceInput,
-  type PlanReconcileCadenceOpts,
-  type PlanReconcileCadenceInputOptions,
-  type PlanReconcileShardRecord,
-  type MeasurementCadenceReportOpts,
-  type MeasurementCadenceRunResult,
-  type VerifyHumanCadenceResult,
-  type WipeTestCadenceDecision,
-  type WipeTestCadencePolicy,
-  type WipeTestCadenceRunResult,
-} from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -1355,14 +1333,7 @@ import {
   type LintViolation,
   type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
-import {
-  readPriorRefusal,
-  terminalPreDispatchRefusalRevisions,
-  preDispatchContractRevision,
-  writePriorRefusal,
-  repairRefusedTask,
-  type RefusalViolation,
-} from "./lib/dispatch-repair.js";
+import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
   pairedReviewerReplayCommand, replayPairedReviews, type ReviewerReplayCommandInput } from "./lib/replay-harness.js";
 import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./lib/fleet-liveness.js";
@@ -1569,6 +1540,9 @@ import {
   postReviewCommentGuarded,
   postReviewPending,
   postReviewStatusGuarded,
+  readReviewStatusEntry,
+  reviewStatusEntryFromCombined,
+  refreshReviewPublisherToken as refreshInstallationToken,
   priorReviewVerdictFromLedger,
   reviewLedgerKeyFor,
   UNFILED_RUN_SENTINEL,
@@ -1583,6 +1557,8 @@ import {
   preparePromisedReviewDecision,
   reviewTaskIdEvidenceAsync,
   reviewContractDigest,
+  reviewTaskNarrative,
+  type ReviewTaskNarrativeInput,
   reviewInputDigest,
   cappedReason,
   reviewLedgerLegibilityFields,
@@ -1623,7 +1599,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError, unknownReservationReads } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
@@ -1637,7 +1613,11 @@ import {
   buildDepReviewEscalation,
   reconcileDepReviewHold,
   reconcileDependabotRefresh,
+  dependabotCommandAnswer,
+  type DependabotIssueComment,
   reconcileDependabotOwnRed,
+  prioritizeDepReviewRepairs,
+  type DepReviewRepairSnapshot,
   reconcileDependabotRefusedPath,
   reconcileDependabotStaleEvent,
   dependabotStaleEventVerdict,
@@ -1669,26 +1649,8 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, feedbackStatusOnMain, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
-import {
-  decideDispatchClaim,
-  releaseDispatchClaim,
-  releaseDispatchClaimAsync,
-  gitDispatchClaimReserver,
-  gitDispatchClaimReserverAsync,
-  gitClaimRunnerAsync,
-  dispatchClaimRef,
-  // W1-T2784: the dead-claimant arm's two probe leaves + the anchor decoder.
-  claimDropRefusal,
-  pidIsPresent,
-  readNamespaceBootMs,
-  findClaimMintRow,
-  releaseReplacedContainerClaims,
-  releaseLandedDispatchClaims,
-  claimMintedByRerun,
-  type DispatchClaimReserver,
-  type DispatchClaimReserverAsync,
-} from "./lib/dispatch-claim.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideDispatchClaim, releaseDispatchClaim, releaseDispatchClaimAsync, gitDispatchClaimReserver, gitDispatchClaimReserverAsync, gitClaimRunnerAsync, dispatchClaimRef, claimDropRefusal, pidIsPresent, readNamespaceBootMs, reclaimSilentDispatchClaim, holdDispatchClaim, renewDispatchClaim, DISPATCH_CLAIM_RENEW_INTERVAL_MS, type DispatchClaimRenewal, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
   readGithubPosture,
@@ -1696,209 +1658,15 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import {
-  buildBatchedGithub,
-  defaultCreditStorePath,
-  loadCreditStore,
-  saveCreditStore,
-  buildCommitTrailerIndex,
-  classifyGhFailure,
-  createDispatchBreakerCache,
-  deriveStatus,
-  dispatchesWithoutNewOwnedPr,
-  evaluateDispatchBreakerCorroboratedDetailed,
-  type LedgerSnapshot,
-  readLedgerSnapshot,
-  type DispatchBreakerDetail,
-  ghGateway,
-  ghRequiredStatusCheckContexts,
-  isGhRateLimitError,
-  effectiveLifetimeDispatches,
-  hasRepeatedTaskAttributableLifetimeDispatches,
-  orphanedRunIds,
-  streakRefusal,
-  taskAttributableLifetimeDispatches,
-  type LifetimeDispatchTally,
-  projectPlan,
-  independentBlockReleasesFrom,
-  readLedgerLines,
-  type DeriveDeps,
-  type GitHub,
-  type GhFailureReason,
-  preferImplementingPr,
-  type PrRef,
-  type BatchedPr,
-  type OpenSiblingBuild,
-  type StatusProjection,
-  planBranchReap,
-  type BranchFacts,
-  type BranchReapPlan,
-  BRANCH_REAP_REASON_LABEL,
-  readLedgerUnionBounded,
-  taskIdFromRunBranch,
-  taskIdFromSlugBranch,
-  readMergeCreditedTaskIds,
-  isMergeCreditLine,
-  readRequiredStatusCheckContexts,
-  readRequiredStatusCheckContextsAsync,
-  persistVerifiedCredit,
-  type ThrownRunVerdictStage,
-  type RefusedRunVerdictStage,} from "./lib/status.js";
-import {
-  readyDraftPullRequest,
-  DEFAULT_SWEEP_POLICY,
-  decideRedBaseRefresh,
-  isCiHarnessPath,
-  prAddedLinesFromPullFiles,
-  failingSourceFilesFromCiFailures,
-  failingTestFilesFromCiFailures,
-  projectMergedTaskCandidates,
-  actionableGateFailuresFromReasons,
-  armOutcomeArmed,
-  dispatchFixSpent,
-  checkCostGovernor,
-  checkMemoryGovernor,
-  installedSlackReclaim,
-  reclaimBeforeHold,
-  type SlackReclaim,
-  checkQueueGovernor,
-  productionFixPressure,
-  deriveQueueGovernorTrailingFlow,
-  isFleetOwnedRunBranch,
-  checksStateFromRollup,
-  checksPendingSinceFromRollup,
-  CI_GATE_CHECK_NAME,
-  supersededRedsNowPassing,
-  dedupeRollupByLatestAttempt,
-  deriveDayCostUsd,
-  deriveDayUnpricedRows,
-  deriveDisposition,
-  diffCoverageReport,
-  fixCeilingInForce,
-  fixDispatchBudget,
-  fixRoundTally,
-  buildFixProgressInput,
-  flakeClaimsForHead,
-  isBlockedCi,
-  listRetirableEscalationIssues,
-  listRetirableEscalationIssuesAsync,
-  createEscalationTriageHistoryReader,
-  ESCALATION_TRIAGE_EVIDENCE_SLICE,
-  indexEscalationTriageHistory,
-  type EscalationTriageHistoryReader,
-  logCostGovernorDeferral,
-  logMemoryObservation,
-  logQueueGovernorDeferral,
-  renderClarificationQuestion,
-  renderSweepSummary,
-  type SweepSummary,
-  REQUIRED_CHECK_FAIL,
-  REQUIRED_CHECK_OK,
-  runCreditBackfill,
-  closedPrFromRef,
-  closedPrLookup,
-  runPrTerminalReconcile,
-  type PrTerminalReconcileSummary,
-  runEscalationReconcile,
-  runStaleEscalationRejudge,
-  buildStaleEscalationRejudgePrompt,
-  type StaleEscalationRejudgeCandidate,
-  runPostFixReverification,
-  runSweep,
-  runSweepLightPass,
-  runLightPassReadyRefresh,
-  runLightPassRefreshAdmission,
-  withFullSweepRepairAdmission,
-  redQualityGateNames,
-  stillRedRequiredNames,
-  terminalStateReason,
-  toQuestionEntry,
-  usableInstrumentEntanglementPaths,
-  type ActionableGateFailure,
-  type ArmedStalledPr,
-  type CiFailure,
-  type ClarificationQuestion,
-  type CostGovernorResult,
-  type EscalationReconcileSummary,
-  type FixClass,
-  type FixDispatchEvidence,
-  type FixOwnerResidue,
-  type FixDispatchSnapshot,
-  type FixSuperseded,
-  type LiveStateResult,
-  type MemoryGovernorResult,
-  type MergeConflictEvidence,
-  type OpenPrView,
-  type PlanScopedFixRoundInput,
-  type ReviewDispatchMode,
-  type ReviewReuseInputs,
-  type RollupCheckEntry,
-  type PostFixReverificationSummary,
-  type ProofDiscriminationEvidence,
-  type QueueGovernorResult,
-  type RedBaseRefreshFacts,
-  type PostReviewStallVerdict,
-  type RepairFilingCapture,
-  type Disposition,
-  type SweepDeps,
-  type SweepPolicy,
-  type UpdateBranchOutcome,
-  type UncreditableHeadReason,
-  ABSENT_REPUSH_CAP,
-  DEFAULT_FIX_CLASSES,
-  buildSweepEffects as buildSweepEffectsFromLib,
-  checkJobId,
-  RATIFIED_BASELINE_RATCHET_REPAIRS,
-  currentPlanIneligibilityReason,
-  defaultSweepGhRun,
-  dispatchFixCatchOutcome,
-  discriminateReviewReuse,
-  discriminateReviewReuseAsync,
-  escalationTaskIdFor,
-  fixDispatchErrorClass,
-  fixDispatchSignalDeath,
-  fixHeadAcceptable,
-  fixRungTaskFor,
-  foreignHeadIsStuck,
-  isDispatchedRunBranch,
-  detectPostReviewStall,
-  isCappedReviewOrphanEscalation,
-  proofDiscriminationEvidenceFromCriteria,
-  type ArmAttemptOutcome,
-  type ArmOutcomeName,
-  type BuildSweepEffectsDeps,
-  type MetadataRepairResult,
-  sweepArmTaskId,
-  uncreditableHeadReason,
-  planOnlyRunBranchReceipts,
-  REGENERABLE_ARTIFACT_GENERATORS,
-  ADDITIVE_REGISTRATION_SURFACES,
-  isAdditiveRegistrationChange,
-  type RegistrationChange,
-  repairLadderCommand,
-  trackRepairLadder,
-  riskJudgeHandedOffHead,
-  handedOffHeadJudgmentPool,
-  type HandedOffHeadJudgmentPool,
-  awaitHandedOffHeadJudgments,
-  riskJudgeCodeScanning,
-  hasCapturedMergeConflictEvidence,
-  clearedConflictEscalationCause,
-  type FixRoundBranchClaim,
-  inFlightReviewCount,
-  readIdleLightCadence,
-} from "./lib/sweep.js";
+import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import {
-  createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
-} from "./lib/daemon-memory-census.js";
-import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
+import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
+  terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
-import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
-import {
-  applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
-  reclaimLedgerFields,
-} from "./lib/daemon-memory-policy.js";
+import { type DaemonFootprint } from "./lib/daemon-footprint.js";
+import { reclaimLedgerFields } from "./lib/daemon-memory-policy.js";
 import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -2237,22 +2005,32 @@ export function spawnRmdReviewForFreshTree(
   });
 }
 
-export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode">): string[] {
+function acceptedReviewAttemptId(value: unknown, prNumber?: number): string | undefined {
+  return typeof value === "string" && value.length <= 80 &&
+    /^review-PR[1-9][0-9]*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) &&
+    (prNumber === undefined || value.startsWith(`review-PR${prNumber}-`)) ? value : undefined;
+}
+
+export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "reviewAttemptId">): string[] {
+  const attemptId = acceptedReviewAttemptId(opts.reviewAttemptId);
   return [
     ...(opts.planOnlyFiling === undefined ? [] : [opts.planOnlyFiling ? "--plan-only-filing" : "--not-plan-only-filing"]),
     ...(opts.executionMode === undefined ? [] : ["--execution-mode", opts.executionMode]),
+    ...(attemptId === undefined ? [] : ["--review-attempt-id", attemptId]),
   ];
 }
 
 /** W1-T9727 — a fresh-tree review child is handed no start reading, so it takes its own (see {@link reviewCommand}). */
 export const JUDGE_AT_OWN_START_FLAG = "--judge-at-own-start";
 
-export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart"> {
+export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId"> {
   const mode = flagValue(rest, "--execution-mode");
+  const reviewAttemptId = acceptedReviewAttemptId(flagValue(rest, "--review-attempt-id"));
   return {
     ...(rest.includes(JUDGE_AT_OWN_START_FLAG) ? { judgeAtOwnStart: true } : {}),
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
     ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
+    ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
   };
 }
 
@@ -2345,6 +2123,131 @@ export function buildReviewerCodeFreshnessGate(
       return next(prArg, rest, { ...reviewDeps, reviewStartFreshness: freshness });
     },
     staleThisPass: () => firstStale,
+  };
+}
+
+/** W1-T10269 — the escalation's issue gateway, assigning each issue it files to the repo owner
+ *  (escalation by assignment: Remudero Issues are the alert channel). */
+export function assigningIssueGateway(owner: string, repo: string, log: (step: string, extra?: Record<string, unknown>) => void,
+  gateway: AsyncIssueGateway = ghIssueGatewayAsync(owner, repo)): AsyncIssueGateway {
+  return {
+    ...gateway,
+    create: async (title, body, labels) => {
+      const url = await gateway.create(title, body, labels);
+      await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", owner]).catch((error: unknown) =>
+        log("reviewer.regression_assign_failed", { issue_url: url, error: String((error as Error)?.message ?? error) }));
+      return url;
+    },
+  };
+}
+
+/** W1-T10269 — the red-main repair lane for a reviewer regression's revert PR, with the PR read and
+ *  close over REST that the main-health rung uses when its lane names none. */
+export function reviewerRevertLane(owner: string, repo: string, config: Config, ledgerPath: string, runId: string): MainRepairLane {
+  const pull = (url: string) => /\/pull\/(\d+)$/.exec(url)?.[1] ?? "";
+  return {
+    ...mainRepairLaneFor(owner, repo, config, ledgerPath, runId),
+    readPr: async (url) => {
+      const pr = (await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${pull(url)}`])) as { state?: unknown; merged?: unknown };
+      return { state: pr?.merged === true ? "merged" : pr?.state === "open" ? "open" : "closed" };
+    },
+    closePr: async (url, comment) => {
+      await ghJsonAsync(["api", "--method", "POST", `repos/${owner}/${repo}/issues/${pull(url)}/comments`, "-f", `body=${comment}`]);
+      await ghJsonAsync(["api", "--method", "PATCH", `repos/${owner}/${repo}/pulls/${pull(url)}`, "-f", "state=closed"]);
+    },
+  };
+}
+
+/**
+ * W1-T10269 — A REVIEWER REGRESSION HEALS ITSELF: every daemon review asks reviewer health first
+ * (src/lib/reviewer-health.ts). With no open incident the review runs exactly as before. With one,
+ * it runs from a HEALED tree — origin/main with the offending merge reverted on top, rebuilt whenever
+ * origin/main moves, so W1-T228 reads it fresh — never from an old head or an engine tree; while
+ * today's reviewer has no judgment yet it also runs in shadow, publishing nothing. A healed tree that
+ * cannot be built escalates and the review falls back to today's path, unchanged.
+ * Injection reuses the review path's own {@link FreshTreeReviewSeams} (the same object the stale-code
+ * fresh-tree runner takes), the escalation's issue gateway and the red-main repair lane.
+ */
+export function buildReviewerHealthRoute(
+  repoDir: string,
+  config: Config,
+  ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  tree: FreshTreeReviewSeams,
+  issues?: AsyncIssueGateway,
+  lane?: MainRepairLane,
+): (prArg: string, rest: string[], reviewDeps: ReviewCommandDeps, normal: () => Promise<number>) => Promise<number> {
+  const git = gitIn(repoDir);
+  const runId = `reviewer-health-${systemClock.now()}`;
+  const self = (): { owner: string; repo: string } => resolveOwnerRepo();
+  const escalation = { issues: issues ?? assigningIssueGateway(self().owner, self().repo, log), ledgerPath, runId };
+  const repairLane = lane ?? reviewerRevertLane(self().owner, self().repo, config, ledgerPath, runId);
+  const statePath = reviewerHealthStatePath(dirname(ledgerPath));
+  const readRows = (cursor: Parameters<typeof readReviewerHealthRows>[1]) => readReviewerHealthRows(dirname(ledgerPath), cursor);
+  const healthLog = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra });
+  // A tree left at a healed path by an earlier process (its memo gone) is removed, then cut again.
+  const cut = (prefix: string, sha: string): string => {
+    try {
+      return prepareFreshOriginMainTree(repoDir, tree, prefix, sha);
+    } catch (error) {
+      try {
+        worktreeRemove(repoDir, `${tree.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`);
+      } catch {
+        throw error; // deliberate: nothing was there to remove, so the cut's own refusal stands
+      }
+      return prepareFreshOriginMainTree(repoDir, tree, prefix, sha);
+    }
+  };
+  const remove = (dir: string): void => worktreeRemove(repoDir, dir);
+  const escalatedConflicts = new Set<string>();
+  return async (prArg, rest, reviewDeps, normal) => {
+    // An unreadable origin/main still ingests; no current reviewer is judged this call.
+    const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
+    const decision = await evaluateReviewerHealth({ originMainSha }, statePath, readRows, git, escalation, repairLane, healthLog, systemClock);
+    if (decision.route === "normal") return normal();
+    const incident: ReviewerIncident = decision.incident;
+    // A healed tree built from a PR's head never reviews that same PR: the revert-built tree judges it.
+    const withPr = decision.withPr !== null && String(decision.withPr) !== prArg ? decision.withPr : undefined;
+    const healed = await buildHealedReviewerTree(repoDir, incident.offending!.sha, cut, remove, withPr === undefined ? {} : { withPr });
+    if (healed.state === "empty") {
+      log("reviewer.healed_patch_empty", { incident_id: incident.id, origin_main_sha: healed.originMainSha, pr: prArg });
+      return normal();
+    }
+    if (healed.state !== "ready") {
+      log("reviewer.healed_tree_unavailable", { incident_id: incident.id, pr: prArg, state: healed.state, reason: healed.reason,
+        ...(healed.state === "conflict" ? { conflict_paths: healed.paths } : {}), origin_main_sha: healed.originMainSha });
+      const key = `${incident.id}:${healed.originMainSha}`;
+      if (healed.state === "conflict" && !escalatedConflicts.has(key)) {
+        escalatedConflicts.add(key);
+        // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
+        await tryEscalateAsync(reviewerRegressionEscalation(incident, healed), escalation);
+      }
+      return normal();
+    }
+    const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
+    if (decision.shadow && originMainSha !== null) {
+      // Today's reviewer, from the review path's own fresh origin/main tree, publishing nothing. The
+      // runner never rejects: a failure reads undefined, its reason on the line below.
+      let why: string | undefined;
+      const code = await buildFreshTreeReviewRunner(repoDir, tree)(prArg, [...childArgs, REVIEWER_SHADOW_FLAG], { originMainSha }, (failure) => { why = failure; });
+      log("reviewer.shadow_ran", { incident_id: incident.id, pr: prArg, origin_main_sha: originMainSha, exit_code: code ?? null,
+        ...(why === undefined ? {} : { failure: why }) });
+    }
+    let failure: string | undefined;
+    let code: number;
+    try {
+      code = await (tree.withWorktreeLease ?? withReviewerWorktreeLease)(healed.path, () =>
+        tree.spawnReview(healed.path, [prArg, ...childArgs, REVIEWER_INCIDENT_FLAG, incident.id], (why) => { failure = why; }));
+    } catch (error) {
+      // COULD NOT RUN: today's path reviews, as it would with no incident; never an older reviewer.
+      log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, error: String((error as Error)?.message ?? error) });
+      return normal();
+    }
+    log("review.ran_from_healed_tree", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, origin_main_sha: healed.originMainSha,
+      offending_sha: incident.offending!.sha, patch: healed.patch, ...(healed.withPr === undefined ? {} : { with_pr: healed.withPr }),
+      exit_code: code, ...(code === 0 ? {} : { failure: failure ?? "no failure reported" }) });
+    return code;
   };
 }
 
@@ -2558,6 +2461,9 @@ export function buildSweepEffects(
     reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
     instanceRegistryTextImpl?: () => string | undefined;
     feedbackLandingStateRoot?: string;
+    /** W1-T10269 test seam: the reviewer-health route. Omitted ⇒ the real route in a live process,
+     *  none under test (a review there runs exactly as before). */
+    reviewerHealthRouteImpl?: ReturnType<typeof buildReviewerHealthRoute>;
   },
 ): Pick<
   SweepDeps,
@@ -2565,6 +2471,7 @@ export function buildSweepEffects(
   | "fixProgressJudge"
   | "arm"
   | "close"
+  | "withDependencyCloseFence"
   | "dispatchFix"
   | "escalate"
   | "fixOwnerReclaimableAtHold"
@@ -2645,31 +2552,38 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, feedbackLandingStateRoot, ...libDeps } = deps;
+  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, feedbackLandingStateRoot, reviewerHealthRouteImpl, ...libDeps } = deps;
   // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
+  const freshTreeSeams: FreshTreeReviewSeams = {
+    git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString(),
+    // THE REVIEW PATH'S OWN HELPER, not a fifth raw site. worktree-sites.ts pins exactly four
+    // and refuses another; this needs the same throwaway detached tree, at the base revision.
+    addWorktree: realDeps().reviewWorktree.addWorktree,
+    worktreeRoot: join(repoRoot, "..", "worktrees"),
+    spawnReview: spawnRmdReviewForFreshTree,
+  };
   const reviewerCodeGate = buildReviewerCodeFreshnessGate(
     reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env)),
     deps.log,
     reviewCommand,
-    buildFreshTreeReviewRunner(repoRoot, {
-      git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString(),
-      // THE REVIEW PATH'S OWN HELPER, not a fifth raw site. worktree-sites.ts pins exactly four
-      // and refuses another; this needs the same throwaway detached tree, at the base revision.
-      addWorktree: realDeps().reviewWorktree.addWorktree,
-      worktreeRoot: join(repoRoot, "..", "worktrees"),
-      spawnReview: spawnRmdReviewForFreshTree,
-    }),
+    buildFreshTreeReviewRunner(repoRoot, freshTreeSeams),
   );
+  // W1-T10269: every review asks reviewer health first; with no open incident it is the gate above, unchanged.
+  const reviewerHealthRoute = reviewerHealthRouteImpl ??
+    (deriveLedgerActor() === "test" ? undefined : buildReviewerHealthRoute(repoRoot, deps.config, deps.ledgerPath, deps.log, freshTreeSeams));
+  const reviewGateCall = (prArg: string, rest: string[], opts: ReviewCommandDeps): Promise<number> =>
+    reviewerHealthRoute ? reviewerHealthRoute(prArg, rest, opts, () => reviewerCodeGate.call(prArg, rest, opts)) : reviewerCodeGate.call(prArg, rest, opts);
   const reviewFallbackRunner =
     deps.reviewRunner ??
-    ((_prNumber: number, isPlanFiling?: boolean) => {
+    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string) => {
       const args = ["--repo", deps.repo];
-      const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling };
+      const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling,
+        ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }) };
       return deps.reviewCommandImpl
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
-        : reviewerCodeGate.call(String(_prNumber), args, opts);
+        : reviewGateCall(String(_prNumber), args, opts);
     });
   const reviewRepoDir =
     deps.repo === (deps.localRepoName ?? resolveOwnerRepo().repo) ? repoRoot : join(deps.config.root, "repos", deps.repo);
@@ -2678,7 +2592,14 @@ export function buildSweepEffects(
   const buildBaseProofReuse =
     (deps.buildBaseProofDirImpl as typeof buildBaseProofDir | undefined) ?? buildBaseProofDir;
   const reviewReuseExecProof = deps.reviewReuseExecProofImpl as ProofExecutor | undefined;
-  const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<number> => {
+  const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string): Promise<number> => {
+    const reuseRunId = reviewAttemptId === undefined ? deps.runId : `review-PR${pr.prNumber}-${systemClock.now()}`;
+    if (reviewAttemptId !== undefined) {
+      const key = { taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber), prUrl: pr.prUrl, headSha: pr.headSha };
+      appendLedger(deps.ledgerPath, { run_id: reuseRunId, task_id: key.taskId, step: "review.provider_provenance",
+        ...reviewProviderProvenanceLedgerFields(resolveReviewProviderProvenance(readLedgerLines(deps.ledgerPath), key), key),
+        review_attempt_id: reviewAttemptId, review_input_digest: pr.reviewInputDigest });
+    }
     const fallbackToFullReview = async (reason: string): Promise<number> => {
       deps.log("sweep.review_reuse_discrimination_fallback", {
         pr_number: pr.prNumber,
@@ -2688,7 +2609,7 @@ export function buildSweepEffects(
         fallback_reason: reason,
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId);
     };
 
     if (mode.kind === "discriminate-only") {
@@ -2748,7 +2669,7 @@ export function buildSweepEffects(
                 taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
                 evidence: reviewEvidenceStrength(verdict.criteria),
                 ledgerPath: deps.ledgerPath,
-                runId: deps.runId,
+                runId: reuseRunId,
                 prUrl: pr.prUrl,
                 reviewInputDigest: pr.reviewInputDigest,
                 reviewEngineRevision: REVIEW_ENGINE_REVISION,
@@ -2758,7 +2679,8 @@ export function buildSweepEffects(
                 exitCode = 1;
               } else {
                 appendLedger(deps.ledgerPath, {
-                  run_id: deps.runId,
+                  run_id: reuseRunId,
+                  ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId }),
                   task_id: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
                   step: "review.posted",
                   context: REVIEW_CONTEXT,
@@ -2812,7 +2734,7 @@ export function buildSweepEffects(
     const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId);
     }
     const reusedStatus = await postReviewStatusGuarded({
       owner: deps.owner,
@@ -2823,7 +2745,7 @@ export function buildSweepEffects(
       taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
       evidence: reviewEvidenceStrength(verdict.criteria ?? []),
       ledgerPath: deps.ledgerPath,
-      runId: deps.runId,
+      runId: reuseRunId,
       prUrl: pr.prUrl,
       reviewInputDigest: pr.reviewInputDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
@@ -2831,7 +2753,8 @@ export function buildSweepEffects(
     });
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
     appendLedger(deps.ledgerPath, {
-      run_id: deps.runId,
+      run_id: reuseRunId,
+      ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId }),
       task_id: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
       step: "review.posted",
       context: REVIEW_CONTEXT,
@@ -2860,7 +2783,7 @@ export function buildSweepEffects(
     captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log, feedbackLandingStateRoot),
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
-    reviewCommandImpl: reviewerCodeGate.call,
+    reviewCommandImpl: reviewGateCall,
     reviewReuseRunner,
     reviewerCodeStaleThisPassImpl: reviewerCodeGate.staleThisPass,
     stallNotice: escalatePostReviewStall,
@@ -3079,87 +3002,13 @@ export function handedOffHeadRiskJudge(
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
-import {
-  DEFAULT_PRUNE_GRACE_MS,
-  appendQuestion,
-  ghJson,
-  ghRateLimitRefusalUnknown,
-  type GhRateLimitRefusal,
-  parseDecisionRequest,
-  parseFollowups,
-  parseLearningsUsed,
-  parseSkillsUsed,
-  parseQuestion,
-  parseReconReport,
-  parseReport,
-  pruneStaleRuns,
-  reapStaleWorktrees,
-  removeWorktreeBase,
-  removeRunLock,
-  renderWorkerSettings,
-  resolveGenericRouteToolBound,
-  harnessOwnsGitFor,
-  IMPLEMENT_CASH_TOOLS,
-  IMPLEMENT_CLAUDE_TOOLS,
-  WORKER_RULE_TOOL_NAME,
-  implementToolBound,
-  resolveDispatchLaneToolBound,
-  cashDivertSpawnFields,
-  cashFallbackRefusal,
-  resolveClaudeExecutable,
-  claudeExecutableCache,
-  runAdhocLaneReapRung,
-  runWorktreeReapRung,
-  spawnWorker,
-  readClaudeProviderCapacity,
-  activeWorkerCount,
-  cacheTokenLedgerFields,
-  capStderrExcerpt,
-  REPORT_EXCERPT_CAP,
-  STDERR_EXCERPT_CAP,
-  noPrReportExcerpt,
-  foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath,
-  workerLedgerFields,
-  workerTranscript,
-  withAssignmentTrailer, resolveCommitAssignment,
-  uniqueRunBranch,
-  excludeNodeModulesFromGit,
-  linkWorktreeNodeModules, resolveNodeModulesSource,
-  worktreeAdd,
-  worktreeAddAsync,
-  worktreeLockIsPidAlive,
-  worktreeRemove,
-  worktreeRemoveAsync,
-  worktreesDir,
-  writeRunLock,
-  WorktreeBaseStaleError,
-  WorktreeNodeModulesRefusedError,
-  detectWorktreeBaseUncheckableStreak,
-  WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
-  type RunLockInfo,
-  type SpawnWorkerArgs,
-  buildInboxDraftWorkerArgs,
-  type ForeignTreeStandDown, type RegisteredWorktree,
-  type WorkerResult,
-  type WorktreeReapSummary,
-  openUsageProbeSession,
-  type UsageProbeQueryFn,
-  WorkerStateTracker,
-  DEFAULT_WORKER_QUIET_FLOOR_MS,
-  type WorkerState,
-  type WorkerStreamObserver,
-  type WorkerStreamEvent, type WorkerSelectionAssignment,
-  WorkerAbandonedError,
-  SubscriptionOnlyRefusedError,
-  deliverOperatorAnswerToRunningWorker,
-  sharesHarnessCheckout,
-  unwireCredentialHelperSocket,
-} from "./lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, workerContinuation } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
 } from "./lib/quiet-worker-watchdog.js";
 import { codexHarnessCommits, isCodexWorkerOutputLimitError, type CodexHarnessCommit } from "./lib/worker-provider.js";
+import { aliasRewriteFields, mergeHeadPresent, rewriteAddedTestImports, type AddedTestAliasRewrite, type TestAliasRewriter } from "./lib/added-test-alias-rewrite.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 import { toolStepSignature } from "./lib/tool-step-signature.js";
 
@@ -3192,11 +3041,12 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
-import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { memoryStoreReadFailure, readMemoryLedger } from "./lib/host-memory-ledger.js";
 import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
+import { installStarvationAlertSink } from "./lib/host-memory-admission.js";
 import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
@@ -3221,31 +3071,12 @@ import {
   type PushRunBranchAsyncOpts,
   type Steps,
 } from "./lib/git-push.js";
-import {
-  ensureWorkerKeychain,
-  materializeWorkerHome,
-  perRunWorkerHomeDir,
-  sweepStaleWorkerHomes,
-  sweepStaleWorkerHomesAsync,
-  workerKeychainPaths,
-  type ClaudeCredentialSeedEvent,
-} from "./lib/worker-home.js";
+import { materializeWorkerHome, perRunWorkerHomeDir, sweepStaleWorkerHomes, sweepStaleWorkerHomesAsync, workerKeychainPaths, type ClaudeCredentialSeedEvent } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
-import {
-  asyncGit,
-  checkCliFreshness,
-  checkReviewerCodeFreshnessAsync,
-  checkServiceFreshness,
-  checkServiceFreshnessAsync,
-  daemonFreshnessFromService,
-  testRunnerOnItsOwnCheckout,
-  type ReviewerCodeFreshness,
-  type SelfSyncDeps,
-} from "./lib/self-sync.js";
-import { withTouchedDeclarations } from "./lib/advance-declarations.js";
+import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
 import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
-import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
+import { LIVE_EDIT_TREES, runLiveEditLadder, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
@@ -3271,70 +3102,13 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import {
-  checkSharedPause,
-  disposeSharedPauseRefresh,
-  prepareSharedPause,
-  clearKick,
-  requestKick,
-  consumeDrainNow,
-  clearPrAction,
-  consumeStop,
-  isQuietHours,
-  pauseDetail,
-  pendingKicks,
-  pendingPrActions,
-  requestFleetPause,
-  requestPause,
-  requestStop,
-  resumeFleet,
-  resumeFleetWide,
-  sharedPauseRef,
-  stopDetail,
-} from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
-import {
-  readGithubWebhookSecret,
-  resolveGithubWebhookSecretFilePath,
-  wireSweepWakeToDaemon,
-} from "./lib/github-event-wake.js";
-import {
-  refreshInstallationToken,
-  startInstallationTokenRefresh,
-} from "./lib/github-app.js";
-import { LEDGER_REQUEST_STEP, realScopedMint, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
-import {
-  automaticBranchReapStateFileName,
-  orphanRunBranchEvidenceReader,
-  branchCitationPattern,
-  branchNamesFingerprint,
-  decideAutomaticBranchReap,
-  DECLARED_BRANCH_GUARDS,
-  declaredGuardsBlockSpan,
-  DECLARED_BRANCH_GUARDS_FILE,
-  nextMergedHeadCache,
-  nextNoPrHeadCache,
-  parseBranchCitationHits,
-  planReverseBranchDrift,
-  pruneDeletableBranches,
-  pruneDeletableBranchesSteps,
-  readAutomaticBranchReapState,
-  readNamedInSource,
-  readNamedInSourceSteps,
-  readRemoteBranchTips,
-  readRemoteBranchTipsSteps,
-  readTipInMainMembership,
-  readTipInMainMembershipSteps,
-  remoteBranchNames,
-  remoteBranchNamesSteps,
-  tipInMainFor,
-  writeAutomaticBranchReapState,
-  type AutomaticBranchReapState,
-  type BranchReapExec,
-  withholdActiveBranches,
-  type BranchManifestEntry,
-} from "./lib/branch-reaper.js";
+import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
+import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { runChildCredentialSocket } from "./lib/secret-boundary.js";
+import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, pruneDeletableBranches, pruneDeletableBranchesSteps, readAutomaticBranchReapState, readNamedInSource, readNamedInSourceSteps, readRemoteBranchTips, readRemoteBranchTipsSteps, readTipInMainMembership, readTipInMainMembershipSteps, remoteBranchNames, remoteBranchNamesSteps, tipInMainFor, writeAutomaticBranchReapState, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
 // an interface change. `resolveRepoRoot` is re-exported below so every existing import path
@@ -3619,10 +3393,7 @@ export {
  * which is the point of it having three states.
  */
 export function defaultBinaryPinDeps(claudeBin: string): Parameters<typeof readBinaryPin>[0] {
-  return {
-    readCliManifest: () => readFileSync(fileURLToPath(new URL("../deploy/package.json", import.meta.url)), "utf8"),
-    runClaudeVersion: () => execFileSync(claudeBin, ["--version"], { encoding: "utf8" }),
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).defaultBinaryPinDeps(claudeBin);
 }
 
 
@@ -3675,7 +3446,6 @@ export const WORKER_STATE_LEDGER_STEP = "worker.state";
  *  program and subcommand, or a file tool and its repo-relative path. A row never carries a prompt,
  *  a raw tool argument, a flag value, or tool output. It is diagnostic telemetry only and must
  *  never become a dispatch decision input. */
-export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
 
 /**
  * W1-T2557: appended AT MOST ONCE per run, the instant {@link WorkerStateTracker.turnsSoFar}
@@ -3686,7 +3456,6 @@ export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
  * else. Not added to `DECISION_RELEVANT_LEDGER_STEPS` for the same reason `worker.state` and
  * `cost.anomaly` are not: this reports, nothing reads it to decide anything (yet).
  */
-export const WORKER_RUNAWAY_TURNS_LEDGER_STEP = "worker.runaway_turns";
 
 /**
  * W1-T2557: the turn-count bound one run is judged against, sized against an OBSERVED
@@ -3707,17 +3476,12 @@ export function deriveRunawayTurnBound(
   historicalTurnCounts: readonly number[],
   policy: Pick<CostAnomalyPolicy, "multiplier" | "minSamples">,
 ): number | undefined {
-  if (historicalTurnCounts.length < policy.minSamples) return undefined;
-  const sorted = [...historicalTurnCounts].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-  return median * policy.multiplier;
+  return runTaskCommandHelpers(runTaskCommandHost()).deriveRunawayTurnBound(historicalTurnCounts, policy);
 }
 
 /** How often {@link WorkerStateSensor.startPolling}'s timer checks the quiet floor while a
  *  spawn is in flight. Cheap: the check itself is a no-op unless the floor has genuinely
  *  elapsed, so this only bounds how promptly a real silence gets ledgered, not any cost. */
-const WORKER_STATE_POLL_MS = 5_000;
 
 /** Byte AND line ceilings for the live tail (W1-T942 design note iv) — capped in BOTH
  *  dimensions so a runaway transcript can neither bloat the disk with one enormous line nor
@@ -3758,23 +3522,6 @@ export function writeWorkerTailBestEffort(tailPath: string, lines: readonly stri
  *  invocation (never once per spawn: recon → implement → the DECISION_REQUEST resume are all
  *  the SAME live run an operator watches, and a fresh tracker per spawn would seesaw the
  *  console with a synthetic UNKNOWN→working "restart" that never actually happened). */
-export interface WorkerStateSensor {
-  /** Pass as `spawnWorker`'s `streamObserver` at every call site for this run. */
-  observer: WorkerStreamObserver;
-  /** Start the quiet-floor poll for the DURATION of one in-flight spawn call; returns the stop
-   *  function — call it (typically via `.finally`) the instant that spawn settles. Safe to call
-   *  again for the NEXT spawn in the same run: each call owns its own timer, `unref`'d so it
-   *  never keeps the process alive on its own. */
-  startPolling: () => () => void;
-  /**
-   * W1-T2557: set (at most meaningfully once per run, right after `taskClass` resolves — see
-   * `runTask`'s own call site) the turn-count bound {@link deriveRunawayTurnBound} derived for
-   * this run's class. `undefined` — the default until this is called, and the value a
-   * best-effort derivation failure passes — means the mid-flight runaway signal never fires for
-   * this run: never a guessed bound standing in for one that could not be derived.
-   */
-  setRunawayBound: (bound: number | undefined) => void;
-}
 
 /** W1-T4615: stamp an activity event with its spawn's assignment; never promoted to `servedModel`. */
 export function attributeWorkerStreamEvent(
@@ -3796,11 +3543,7 @@ export function dispatchStreamObserver(
   spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider"> & { cwd?: string },
   assignment: () => Pick<WorkerSelectionAssignment, "id" | "requested" | "selected"> | undefined,
 ): WorkerStreamObserver {
-  return (event) => {
-    const current = assignment();
-    const located = spawn.cwd && !event.cwd ? { ...event, cwd: spawn.cwd } : event;
-    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(located, spawn, current), current));
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).dispatchStreamObserver(base, spawn, assignment);
 }
 
 /** W1-T9527: the process's one quiet-bound history; every dispatch spawn's watchdog reads through it. */
@@ -3822,8 +3565,6 @@ export function watchDispatchSpawn(
     log: (step: string, fields: Record<string, unknown>) => void;
     /** The daemon's recycle-PAUSE reader: a pending recycle ends the round on the checkpoint path. */
     recyclePending?: () => string | undefined;
-    /** W1-T8139: the daemon's restart latch, read in-process (never the fetching freshness read): a latched restart ends the round too. */
-    restartPending?: () => string | undefined;
   },
   seams: {
     runWatchdog?: typeof runQuietWorkerWatchdog;
@@ -3837,62 +3578,7 @@ export function watchDispatchSpawn(
     headSha?: (cwd: string) => string;
   } = {},
 ): typeof spawnWorker {
-  if (!watch.enabled) return rawSpawn;
-  const { taskId, spawnArgs, task, log } = watch;
-  const state: { rootPid?: number; ended?: QuietRoundEndedError } = {};
-  const abort = new AbortController();
-  const readRows = seams.history ? undefined : seams.readRows;
-  const watchdogOptions: Parameters<typeof runQuietWorkerWatchdog>[0] = {
-    taskId,
-    runId: watch.runId,
-    rootPid: () => state.rootPid,
-    provider: watch.provider,
-    ...(readRows ? {
-      history: () => {
-        const read = readRows(dirname(watch.ledgerPath), { step: ["worker.state", "worker.assignment"] });
-        return read.ok ? read.rows : [];
-      },
-    } : quietHistoryOptions(dirname(watch.ledgerPath), seams.history ?? quietBoundHistory)),
-    fallbackBoundMs: watch.fallbackBoundMs,
-    quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
-    ledger: (step, fields) => log(step, fields),
-    judge: seams.judge ?? productionQuietWorkerJudge({ cwd: spawnArgs.cwd, settingsFile: spawnArgs.settingsFile }),
-    nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
-      === "delivered" ? "delivered" : "unsupported",
-    ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),
-    ...(watch.restartPending ? { restartPending: watch.restartPending } : {}),
-    endRound: async (reason, trigger) => {
-      if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
-      const cwd = spawnArgs.cwd;
-      let undeclaredPaths: readonly string[] = [];
-      try {
-        // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
-        if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
-          const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
-            `${checkpointCommitSubject(`yield at ${trigger === "recycle" ? "container recycle" : trigger === "restart" ? "daemon restart" : "quiet worker"}`)}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
-            {}, task.acceptance, { checkpoint: true });
-          // W1-T8008: a checkpoint keeps undeclared work too; only what git forces (markers, unresolved paths) refuses.
-          if (!checkpoint.committed) {
-            return { ended: false, reason: `checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}` };
-          }
-          undeclaredPaths = checkpoint.undeclared;
-        }
-        await pushRestartCheckpoint(cwd, seams.push); // W1-T8397: the recycle/quiet/restart round end skips the PR gate too
-      } catch (error) {
-        return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
-      }
-      const checkpointSha = (seams.headSha ?? ((dir: string) => hostWorktreeGit(dir, ["rev-parse", "HEAD"]).trim()))(cwd);
-      state.ended = new QuietRoundEndedError({ checkpointSha, reason, ...(trigger ? { trigger } : {}),
-        ...(undeclaredPaths.length > 0 ? { undeclaredPaths: [...undeclaredPaths] } : {}) });
-      abort.abort();
-      return { ended: true, checkpointSha };
-    },
-  };
-  // Direct call on the run path; a test may substitute the runner through the seam.
-  const watchdog = seams.runWatchdog ? seams.runWatchdog(watchdogOptions) : runQuietWorkerWatchdog(watchdogOptions);
-  return guardSpawnWithQuietWatchdog(rawSpawn, {
-    watchdog, abort, onRootPid: (pid) => { state.rootPid = pid; }, ended: () => state.ended,
-  });
+  return runTaskCommandHelpers(runTaskCommandHost()).watchDispatchSpawn(rawSpawn, watch, seams);
 }
 
 /** The rows a round ended mid-stream writes. A recycle's is the W1-T7697 freshness yield taken mid-round: the same
@@ -3900,7 +3586,7 @@ export function watchDispatchSpawn(
  * pushed checkpoint (`pendingWorkerBoundaryHandoffs`) instead of starting over. */
 /** W1-T8008: the exact undeclared paths a restart checkpoint kept (`undeclared_paths`), absent when there are none. */
 export function checkpointUndeclaredFields(undeclared: readonly string[]): { undeclared_paths?: string[] } {
-  return undeclared.length === 0 ? {} : { undeclared_paths: [...undeclared] };
+  return runTaskCommandHelpers(runTaskCommandHost()).checkpointUndeclaredFields(undeclared);
 }
 
 /** W1-T8008: the W1-T7697 restart checkpoint of `yieldAtWorkerBoundary`, as one seamed step: commit EVERY worker change
@@ -3912,22 +3598,13 @@ export async function commitAndPushRestartCheckpoint(
   waitingOn: string,
   seams: { push?: typeof gitPushRunBranchAsync; hasUncommittedChanges?: typeof worktreeHasUncommittedChanges } = {},
 ): Promise<{ undeclared: readonly string[] }> {
-  let undeclared: readonly string[] = [];
-  if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(worktreePath)) {
-    const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
-      `${checkpointCommitSubject(`yield at ${waitingOn}`)}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
-      {}, task.acceptance, { checkpoint: true });
-    if (!checkpoint.committed) throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
-    undeclared = checkpoint.undeclared;
-  }
-  await pushRestartCheckpoint(worktreePath, seams.push);
-  return { undeclared };
+  return runTaskCommandHelpers(runTaskCommandHost()).commitAndPushRestartCheckpoint(worktreePath, task, taskId, waitingOn, seams);
 }
 
 /** W1-T8397: THE one restart-checkpoint push, shared by `commitAndPushRestartCheckpoint` and the `watchDispatchSpawn`
  * `endRound` round end so the two cannot drift: a checkpoint opens no PR, so it skips the PR gate (see worktreePushExecAsync). */
 export async function pushRestartCheckpoint(worktreePath: string, push: typeof gitPushRunBranchAsync = gitPushRunBranchAsync): Promise<void> {
-  await push(worktreePath, { prGates: false });
+  return runTaskCommandHelpers(runTaskCommandHost()).pushRestartCheckpoint(worktreePath, push);
 }
 
 /** W1-T8008: the `run.freshness_handoff` and `freshness_yield` verdict fields of a boundary yield, naming the undeclared paths. */
@@ -3935,55 +3612,20 @@ export function freshnessYieldRows(a: {
   waitingOn: string; branch: string; headSha: string; undeclared: readonly string[];
   freshness?: { oldSha: string; newSha: string }; recycle?: string;
 }): Array<{ step: string; fields: Record<string, unknown> }> {
-  const undeclared = checkpointUndeclaredFields(a.undeclared);
-  return [
-    { step: "run.freshness_handoff", fields: { waiting_on: a.waitingOn, branch: a.branch, head_sha: a.headSha,
-      ...(a.freshness ? { old_sha: a.freshness.oldSha, new_sha: a.freshness.newSha } : { trigger: "recycle", detail: a.recycle }), ...undeclared } },
-    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: a.waitingOn, branch: a.branch, head_sha: a.headSha, ...undeclared } },
-  ];
-}
-
-/** W1-T8139: the daemon's restart latch as the watchdog's pending-yield read: the in-process `restartAtWorkerBoundary`
- * only (never the fetching `externalWaitFreshness`), named by the sha pair it waits on. Undefined without a daemon. */
-export function restartLatchDetail(
-  latch: RestartBoundary | undefined,
-  context?: () => RestartBoundaryContext,
-): (() => string | undefined) | undefined {
-  if (!latch) return undefined;
-  return () => {
-    const freshness = latch(context?.());
-    return freshness ? `daemon restart latched: ${freshness.oldSha.slice(0, 9)}..${freshness.newSha.slice(0, 9)}` : undefined;
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).freshnessYieldRows(a);
 }
 
 export function roundEndedHandoffRows(
   detail: QuietRoundEndedError["detail"],
   branch: string,
 ): Array<{ step: string; fields: Record<string, unknown> }> {
-  const headSha = detail.checkpointSha ?? null;
-  const undeclared = checkpointUndeclaredFields(detail.undeclaredPaths ?? []);
-  if (detail.trigger !== "recycle" && detail.trigger !== "restart") {
-    return [{ step: "verdict", fields: { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: headSha, detail: detail.reason, ...undeclared } }];
-  }
-  return [
-    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: detail.trigger, detail: detail.reason, ...undeclared } },
-    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: "worker_round", branch, head_sha: headSha, detail: detail.reason, ...undeclared } },
-  ];
+  return runTaskCommandHelpers(runTaskCommandHost()).roundEndedHandoffRows(detail, branch);
 }
 
-const WORKER_TELEMETRY_TEXT_MAX_CHARS = 240;
 
 /** Keep a worker-authored sentence useful as a tool rationale without turning status telemetry
  *  into a transcript or a prompt/output transport. Control characters collapse to spaces and the
  *  visible ellipsis makes truncation honest. */
-function boundedWorkerTelemetryText(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!normalized) return undefined;
-  return normalized.length <= WORKER_TELEMETRY_TEXT_MAX_CHARS
-    ? normalized
-    : `${normalized.slice(0, WORKER_TELEMETRY_TEXT_MAX_CHARS)}…`;
-}
 
 /**
  * Build the real `worker.state` sensor for one run: a {@link WorkerStateTracker} folding the
@@ -3995,156 +3637,10 @@ function boundedWorkerTelemetryText(value: string | undefined): string | undefin
  * in {@link sweepStaleWorkerTails}, called from the SAME `runTmpSweepRung` that already reclaims
  * other run scratch).
  */
-export function buildWorkerStateSensor(args: {
-  ledgerPath: string;
-  runId: string;
-  taskId: string;
-  root: string;
-  quietFloorMs?: number;
-  now?: () => number;
-  pollMs?: number;
-}): WorkerStateSensor {
-  const now = args.now ?? Date.now;
-  const tracker = new WorkerStateTracker(args.quietFloorMs ?? DEFAULT_WORKER_QUIET_FLOOR_MS);
-  const tailPath = join(args.root, "state", "runs", `${args.runId}.tail`);
-  let tailLines: string[] = [];
-  // W1-T2557: mutable ONLY via `setRunawayBound` below — `undefined` until `runTask`'s own call
-  // site resolves one (or a derivation failure leaves it unset), meaning the runaway signal
-  // stays silent rather than guessing.
-  let runawayBoundTurns: number | undefined;
-  let runawaySignaled = false;
-  let lastWorkerText: string | undefined;
-  let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
-  let lastActivityKey: string | undefined;
-  let nextToolCallIndex = 0;
-
-  const recordTransition = (next: WorkerState): void => {
-    try {
-      appendLedger(args.ledgerPath, {
-        run_id: args.runId,
-        task_id: args.taskId,
-        step: WORKER_STATE_LEDGER_STEP,
-        state: next,
-      });
-    } catch {
-      // Best-effort (design note iv/note at end of the task file: "the design's best-effort,
-      // never-fatal contract for BOTH the observer and the tail write"). A ledger-append
-      // hiccup (an unwritable `state/` dir, a torn concurrent write) must never propagate out
-      // of the observer and take the worker it is trying to observe down with it.
-    }
-  };
-
-  /**
-   * W1-T2557: check the running count on every observed stream event. `worker.activity` already
-   * carries the event's count while the spawn is in flight. Append `worker.runaway_turns` AT MOST
-   * ONCE per run, when the count first clears `runawayBoundTurns` — a report, never a kill/defer.
-   */
-  const observeTurns = (): void => {
-    const current = tracker.turnsSoFar();
-    if (!runawaySignaled && runawayBoundTurns !== undefined && current > runawayBoundTurns) {
-      runawaySignaled = true;
-      try {
-        appendLedger(args.ledgerPath, {
-          run_id: args.runId,
-          task_id: args.taskId,
-          step: WORKER_RUNAWAY_TURNS_LEDGER_STEP,
-          turns_so_far: current,
-          bound_turns: runawayBoundTurns,
-        });
-      } catch {
-        // Best-effort (W1-T942 design note iv, unchanged discipline): an observability organ
-        // that can kill a worker is worse than the blindness it cures.
-      }
-    }
-  };
-
-  const observer: WorkerStreamObserver = (event) => {
-    if (event.text) {
-      tailLines = capWorkerTailLines([...tailLines, event.text]);
-      writeWorkerTailBestEffort(tailPath, tailLines);
-    }
-    const toolEnded = activeTool !== undefined && event.kind !== "tool-executing";
-    const eventAt = new Date(event.tsMs).toISOString();
-    const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
-    const toolCallIndex = event.kind === "tool-executing" ? nextToolCallIndex++ : undefined;
-    try {
-      const toolSignature = event.toolName ? toolStepSignature(event.toolName, event.toolInput, event.cwd ?? "") : undefined;
-      const activityRow = {
-        run_id: args.runId,
-        task_id: args.taskId,
-        step: WORKER_ACTIVITY_LEDGER_STEP,
-        event_kind: event.kind,
-        event_at: eventAt,
-        ...(event.workerRole ? { worker_role: event.workerRole } : {}),
-        ...(event.provider ? { provider: event.provider } : {}),
-        ...(event.requestedModel ? { requested_model: event.requestedModel } : {}),
-        ...(event.servedModel ? { served_model: event.servedModel } : {}),
-        // W1-T4615: the routed half beside the requested alias, or a named gap.
-        ...(event.selectionAssignmentId
-          ? { selection_assignment_id: event.selectionAssignmentId }
-          : { assignment_unavailable_reason: "assignment-not-observed" }),
-        ...(event.routedProvider ? { routed_provider: event.routedProvider } : {}),
-        ...(event.routedModel ? { routed_model: event.routedModel } : {}),
-        ...(event.turnsSoFar === undefined ? {} : { turns_so_far: event.turnsSoFar }),
-        ...(event.kind === "tool-executing"
-          ? {
-              tool_name: toolName ?? "unknown",
-              tool_call_index: toolCallIndex,
-              ...(toolSignature ? { tool_signature: toolSignature } : {}),
-              ...(lastWorkerText ? { tool_reason: boundedWorkerTelemetryText(lastWorkerText) } : {}),
-              tool_started_at: eventAt,
-            }
-          : {}),
-        ...(toolEnded && activeTool
-          ? {
-              tool_name: activeTool.name,
-              tool_completed_at: eventAt,
-              tool_duration_ms: Math.max(0, event.tsMs - activeTool.startedAtMs),
-              ...(event.toolOutcome ? { tool_outcome: event.toolOutcome } : {}),
-            }
-          : {}),
-      };
-      // E5: a same-millisecond burst of bare heartbeats renders byte-identical rows; ledger one.
-      const activityKey = JSON.stringify(activityRow);
-      const isBareHeartbeat = event.kind === "message" && !event.text && !event.toolName && !event.toolOutcome && !toolEnded;
-      if (!isBareHeartbeat || activityKey !== lastActivityKey) {
-        appendLedger(args.ledgerPath, activityRow);
-        lastActivityKey = isBareHeartbeat ? activityKey : undefined;
-      }
-    } catch {
-      // Best-effort: telemetry must never be able to take down the worker it observes.
-    }
-    if (event.kind === "working") lastWorkerText = event.text;
-    if (event.kind === "tool-executing") {
-      activeTool = {
-        name: toolName ?? "unknown",
-        startedAtMs: event.tsMs,
-        reason: boundedWorkerTelemetryText(lastWorkerText),
-      };
-    } else {
-      activeTool = undefined;
-    }
-    const next = tracker.observe(event);
-    if (next) recordTransition(next);
-    observeTurns();
-  };
-
-  const startPolling = (): (() => void) => {
-    const timer = setInterval(() => {
-      const next = tracker.check(now());
-      if (next) recordTransition(next);
-    }, args.pollMs ?? WORKER_STATE_POLL_MS);
-    timer.unref?.();
-    return () => clearInterval(timer);
-  };
-
-  return {
-    observer,
-    startPolling,
-    setRunawayBound: (bound) => {
-      runawayBoundTurns = bound;
-    },
-  };
+export function buildWorkerStateSensor(
+  args: Parameters<ReturnType<typeof runTaskCommandHelpers>["buildWorkerStateSensor"]>[0],
+): WorkerStateSensor {
+  return runTaskCommandHelpers(runTaskCommandHost()).buildWorkerStateSensor(args);
 }
 
 /** Retention window {@link sweepStaleWorkerTails} ages a `.tail` file out on — generously above
@@ -4503,8 +3999,36 @@ export function derivePrOwnerVerdict(
   corpus: PrOwnerLedgerRead,
   claimRead: PrOwnerClaimRead = { claims: [] },
 ): PrOwnerVerdict {
+  const sweepRows = corpus.rows.filter((row) => row.step === "sweep.disposed" && prNumberFromLedgerRow(row) === prNumber);
+  const taskIds = new Set(sweepRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v && v !== "SWEEP"));
+  const headShas = new Set(sweepRows.map((row) => stringField(row, "head_sha")).filter((v): v is string => !!v));
+  const fixRows = corpus.rows.filter((row) => {
+    if (row.step !== "fix.dispatch") return false;
+    if (prNumberFromLedgerRow(row) === prNumber) return true;
+    const taskId = stringField(row, "task_id");
+    if (!taskId || !taskIds.has(taskId)) return false;
+    const headSha = stringField(row, "head_sha");
+    return headSha === undefined || headShas.size === 0 || headShas.has(headSha);
+  });
+  const latestFix = newestLedgerRow(fixRows);
+  const latestSweep = newestLedgerRow(sweepRows);
+  const claimTaskIds = [...taskIds, ...fixRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v)];
+  const related = claimRead.claims.filter((c) => claimTaskIds.some((id) => c.key.includes(`run-${id}-`)));
+
+  return prOwnerVerdictFromFacts(prNumber, corpus, claimRead, {
+    corpusNewestTs: stringField(newestLedgerRow(corpus.rows) ?? {}, "ts"), latestFix, latestSweep,
+    relatedClaimKeys: related.map((claim) => claim.key),
+  });
+}
+
+function prOwnerVerdictFromFacts(
+  prNumber: number,
+  corpus: Omit<PrOwnerLedgerRead, "rows">,
+  claimRead: PrOwnerClaimRead,
+  facts: Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">,
+): PrOwnerVerdict {
   const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
-  const corpusNewestTs = stringField(newestLedgerRow(corpus.rows) ?? {}, "ts");
+  const corpusNewestTs = facts.corpusNewestTs;
   const base = {
     prNumber,
     corpusNewestTs,
@@ -4527,24 +4051,10 @@ export function derivePrOwnerVerdict(
     return { ...base, verdict: "UNKNOWN", reason: "no compressed ledger rotation opened" };
   }
 
-  const sweepRows = corpus.rows.filter((row) => row.step === "sweep.disposed" && prNumberFromLedgerRow(row) === prNumber);
-  const taskIds = new Set(sweepRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v && v !== "SWEEP"));
-  const headShas = new Set(sweepRows.map((row) => stringField(row, "head_sha")).filter((v): v is string => !!v));
-  const fixRows = corpus.rows.filter((row) => {
-    if (row.step !== "fix.dispatch") return false;
-    if (prNumberFromLedgerRow(row) === prNumber) return true;
-    const taskId = stringField(row, "task_id");
-    if (!taskId || !taskIds.has(taskId)) return false;
-    const headSha = stringField(row, "head_sha");
-    return headSha === undefined || headShas.size === 0 || headShas.has(headSha);
-  });
-  const latestFix = newestLedgerRow(fixRows);
-  const latestSweep = newestLedgerRow(sweepRows);
-  const claimTaskIds = [...taskIds, ...fixRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v)];
-  const related = claimRead.claims.filter((c) => claimTaskIds.some((id) => c.key.includes(`run-${id}-`)));
-  const liveClaim = related.find((c) => !c.stale);
-  const staleClaim = related.find((c) => c.stale);
-
+  const { latestFix, latestSweep } = facts;
+  const related = claimRead.claims.filter((claim) => facts.relatedClaimKeys.includes(claim.key));
+  const liveClaim = related.find((claim) => !claim.stale);
+  const staleClaim = related.find((claim) => claim.stale);
   if (latestFix !== undefined || liveClaim !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
     return {
       ...base,
@@ -4604,7 +4114,7 @@ export function prOwnerCommand(
     write?: (text: string) => void;
     error?: (text: string) => void;
   } = {},
-): number {
+): number | Promise<number> {
   const badArg = unknownArgError("pr-owner", rest.slice(1), [], []);
   if (badArg) {
     (deps.error ?? console.error)(badArg + "\n" + USAGE);
@@ -4616,9 +4126,19 @@ export function prOwnerCommand(
     return 2;
   }
   const stateDir = deps.stateDir ?? (deps.readLedger ? "" : dirname(ledgerPathFor(loadConfig())));
+  if (deps.readLedger === undefined) {
+    let claimRead: PrOwnerClaimRead = { claims: [] };
+    return readPrOwnerLedgerProjection(stateDir, prNumber, () => {
+      claimRead = readPrOwnerClaims(join(stateDir, "inflight"));
+      return claimRead.claims.map((claim) => claim.key);
+    }).then((projection) => {
+      (deps.write ?? console.log)(renderPrOwnerVerdict(prOwnerVerdictFromFacts(prNumber, projection, claimRead, projection)));
+      return 0;
+    });
+  }
   let corpus: PrOwnerLedgerRead;
   try {
-    corpus = (deps.readLedger ?? ((dir) => readLedgerUnionRecordsSync(dir, { requireArchives: true, refuseIncomplete: true })))(stateDir);
+    corpus = deps.readLedger(stateDir);
   } catch (error) {
     corpus = {
       rows: [],
@@ -4670,15 +4190,7 @@ function workerCreatedCurrentHead(
 }
 
 /** Owner org, read from THIS repo's origin — no hardcoded account in the tree. */
-function resolveOwner(): string {
-  return resolveOwnerRepo().owner;
-}
 
-export interface SyncedPlan {
-  plan: Plan;
-  /** True when `git fetch` failed and `allowStale` let the run proceed on the last-known refs. */
-  staleDispatch: boolean;
-}
 
 /**
  * Sync git state and load the plan from the `origin/main` BLOB — never the working tree
@@ -4865,7 +4377,7 @@ export async function reloadPlanRevisionAsync(store: PlanRevisionStore, planPath
  *  a test passes a fake that throws to exercise the ls-tree and shard-read failure paths.
  *  `stdin` is OPTIONAL (`git cat-file --batch` takes its object list there), so every existing
  *  `(args) => string` fake stays assignable and keeps working unchanged. */
-export type GitRunner = (args: string[], stdin?: string) => string;
+export type { GitRunner };
 
 /** The real default: one `git -C <repoDir> …`, with `stdin` piped when the verb wants it. */
 const defaultShardGitRunner = (repoDir: string): GitRunner => (args, stdin) =>
@@ -5133,19 +4645,6 @@ function isTerminalRed(state: string): boolean {
   return REQUIRED_CHECK_FAIL.has(state) && !NO_VERDICT_CONCLUSIONS.has(state);
 }
 
-interface RollupEntry {
-  __typename?: string;
-  name?: string;
-  context?: string;
-  status?: string;
-  conclusion?: string;
-  state?: string;
-  /** W1-T2804 — when this ATTEMPT started. Already carried at runtime by every producer this
-   *  interface widens ({@link RestRollupEntry.startedAt}); declared here so the poll-loop readers
-   *  can hand these entries to {@link dedupeRollupByLatestAttempt}, which sorts on it, without
-   *  the type silently erasing the only field that distinguishes one attempt from its successor. */
-  startedAt?: string;
-}
 
 /**
  * W1-T1202: reproduce `gh pr create --fill`'s own body-derivation rule LOCALLY, over
@@ -5185,14 +4684,12 @@ export function fillDerivedBody(worktreePath: string): string {
 
 /** Counterfactual over the same arm decision the live instance uses. */
 export function shadowLiveWouldHaveDone(armed: boolean, reason?: string): { would: "would_merge" | "would_block"; reason?: string } {
-  return armed ? { would: "would_merge" } : { would: "would_block", reason };
+  return runTaskCommandHelpers(runTaskCommandHost()).shadowLiveWouldHaveDone(armed, reason);
 }
 
 /** A shadow instance's arm decision, in the live arm decision's shape. */
 export function resolveShadowInstanceArmPermission(shadowInstance: boolean): { armed: boolean; reason?: string } {
-  return shadowInstance
-    ? { armed: false, reason: "shadow instance — never arms or merges a pull request (W1-T4265)" }
-    : { armed: true };
+  return runTaskCommandHelpers(runTaskCommandHost()).resolveShadowInstanceArmPermission(shadowInstance);
 }
 
 /**
@@ -5252,27 +4749,10 @@ export async function ghPrCreateFillCommandAsync(
   openOnFailingProof = false,
   childStore: ChildEntryStoreOptions = {},
 ): Promise<PrCreateCommand> {
-  const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
-  let checkedBody: string;
-  try {
-    checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo });
-  } catch (err) {
-    if (!openOnFailingProof || !(err instanceof PrOpenRefusedError) || err.failingProof === undefined) throw err;
-    const opened: PrCreateDiagnostic = {
-      step: "pr.opened_with_failing_proof",
-      extra: { branch, proof: err.failingProof.proof, refusal_class: err.refusalClass },
-    };
-    return withDiagnostics(
-      prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithFailingProofAtOpen(err.failingProof)),
-      [...draft.diagnostics, opened],
-    );
-  }
-  return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
+  return runTaskCommandHelpers(runTaskCommandHost()).ghPrCreateFillCommandAsync(worktreePath, owner, repo, branch, title, runProofAsync, openOnFailingProof, childStore);
 }
 
 /** W1-T4263: a ledger row the builder could not write itself, written by {@link runGhPrCreate}, which holds `log`. */
-type PrCreateDiagnostic = { step: string; extra: Record<string, unknown> };
-type PrCreateCommand = { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" }; diagnostics?: PrCreateDiagnostic[] };
 
 function withDiagnostics(command: PrCreateCommand, diagnostics: PrCreateDiagnostic[]): PrCreateCommand {
   return diagnostics.length ? { ...command, diagnostics } : command;
@@ -5508,48 +4988,24 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
 
 /** The worktree's HEAD sha, or undefined when git cannot say (W1-T9030: a round that cannot show its head is read as moved). */
 export function worktreeHeadOrUndefined(worktreePath: string): string | undefined {
-  try {
-    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim() || undefined;
-  } catch (e) {
-    void e; // an unreadable head only costs the harness-tip shortcut; the subject rule still applies
-    return undefined;
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).worktreeHeadOrUndefined(worktreePath);
 }
 
 /** The round's uncommitted work as the progress judge reads it (W1-T9030): tracked diff stat plus untracked paths,
  *  bounded. Empty when there is none or git cannot say — the judge then simply sees no working-tree line. */
 export function worktreeDiffStat(worktreePath: string): string {
-  try {
-    const stat = hostWorktreeGit(worktreePath, ["diff", "--stat", "HEAD"]).trim().split("\n").filter(Boolean).slice(-12).join("; ");
-    const untracked = hostWorktreeGit(worktreePath, ["ls-files", "--others", "--exclude-standard"]).trim().split("\n").filter(Boolean);
-    const text = [stat, untracked.length ? `untracked: ${untracked.slice(0, 12).join(", ")}` : ""].filter(Boolean).join("; ");
-    return text.length > 800 ? `${text.slice(0, 800)}...` : text;
-  } catch (e) {
-    void e; // the stat is evidence for the judge, not a gate
-    return "";
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).worktreeDiffStat(worktreePath);
 }
 
 /** A build PR's title, never a `wip:` one (#10482). With its filed task it is the task's own title (W1-T7952),
  *  so a checkpoint-only branch never opens as "chore: yield at worker" and no merge commit (`--no-merges`, so
  *  the restore merge too, #10936) lends it words or a type; with no task, the newest non-checkpoint subject. */
 export function branchPrTitle(worktreePath: string, task?: { id: string; title?: string }): string | undefined {
-  try {
-    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", ...(task ? ["--no-merges"] : []), "origin/main..HEAD"]).split("\n");
-    return (task && prTitleForTask(subjects, task)) || (prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath));
-  } catch (e) {
-    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour; a filed task still names its PR.
-    void e;
-    const tip = lastCommitSubject(worktreePath);
-    return (task && prTitleForTask(tip ? [tip] : [], task)) || tip;
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).branchPrTitle(worktreePath, task);
 }
 
 /** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint's
  *  own base when main conflicts with it (naming those paths, or why the merge could not be read). */
-export type BoundaryCheckpointRestore =
-  (| { base: "main"; headSha: string; dropped?: true }
-  | { base: "checkpoint"; headSha: string; mainConflicts: string[]; reason?: string }) & { sourceBranchAbsent?: true };
 
 /**
  * A restart checkpoint is RESTORED BY MERGE, never replayed: the fresh branch becomes the checkpoint's
@@ -5565,61 +5021,7 @@ export async function restoreBoundaryCheckpoint(
   git: (args: string[]) => Promise<string>,
   log: (step: string, data: Record<string, unknown>) => void = () => {},
 ): Promise<BoundaryCheckpointRestore> {
-  const remoteHead = (await git(["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
-  if (remoteHead && remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
-  const absence = remoteHead ? {} : { sourceBranchAbsent: true as const };
-  const mainSha = (await git(["rev-parse", "HEAD"])).trim();
-  if (!remoteHead) {
-    try {
-      await git(["merge-base", "--is-ancestor", checkpoint.headSha, mainSha]);
-      return { base: "main", headSha: mainSha, ...absence };
-    } catch (error) {
-      // A missing local object or non-ancestor needs the remote fetch before deciding whether work is lost.
-    }
-    const drop = (reason: string): BoundaryCheckpointRestore => {
-      log("implement.checkpoint_dropped", { task_id: taskId, source_branch: checkpoint.branch, head_sha: checkpoint.headSha, reason });
-      return { base: "main", headSha: mainSha, dropped: true, ...absence };
-    };
-    try {
-      await git(["fetch", "origin", checkpoint.headSha]);
-    } catch (error) {
-      const detail = String((error as { stderr?: unknown }).stderr ?? (error as Error).message ?? error);
-      if (!/not our ref|unadvertised object|couldn't find remote ref/.test(detail)) throw error;
-      return drop(`checkpoint object unavailable on origin: ${detail}`);
-    }
-    if ((await git(["rev-parse", "FETCH_HEAD"])).trim() !== checkpoint.headSha) return drop("fetched object does not match the checkpoint head");
-    await git(["push", `--force-with-lease=refs/heads/${checkpoint.branch}:`, "origin", `${checkpoint.headSha}:refs/heads/${checkpoint.branch}`]);
-    log("implement.checkpoint_branch_recreated", { task_id: taskId, source_branch: checkpoint.branch, head_sha: checkpoint.headSha });
-  } else {
-    await git(["fetch", "origin", checkpoint.branch]);
-  }
-  const fetchedHead = (await git(["rev-parse", "FETCH_HEAD"])).trim();
-  if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
-  const base = (await git(["merge-base", checkpoint.headSha, mainSha])).trim();
-  if (base === checkpoint.headSha) return { base: "main", headSha: mainSha, ...absence }; // main already carries it
-  if (base === mainSha) {
-    await git(["reset", "--hard", "--quiet", checkpoint.headSha]); // it already sits on current main
-    return { base: "main", headSha: checkpoint.headSha, ...absence };
-  }
-  const probe = await probeMerge({ headSha: checkpoint.headSha, mainSha, git: async (args) => {
-    try {
-      return { status: 0, stdout: await git([...args]) };
-    } catch (error) {
-      // merge-tree exits 1 on a conflict with the tree and the conflicted paths still on stdout.
-      const failed = error as { code?: unknown; status?: unknown; stdout?: unknown };
-      const status = typeof failed.code === "number" ? failed.code : typeof failed.status === "number" ? failed.status : null;
-      return { status, stdout: typeof failed.stdout === "string" ? failed.stdout : "" };
-    }
-  } });
-  if (probe.verdict !== "clean") {
-    await git(["reset", "--hard", "--quiet", checkpoint.headSha]);
-    return { base: "checkpoint", headSha: checkpoint.headSha, mainConflicts: probe.verdict === "conflict" ? probe.paths : [],
-      ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}), ...absence };
-  }
-  const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
-    `${checkpointCommitSubject("merge main into the restored checkpoint")}\n\nRemudero-Task: ${taskId}`])).trim();
-  await git(["reset", "--hard", "--quiet", merged]);
-  return { base: "main", headSha: merged, ...absence };
+  return runTaskCommandHelpers(runTaskCommandHost()).restoreBoundaryCheckpoint(checkpoint, taskId, git, log);
 }
 
 /**
@@ -5709,33 +5111,6 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
  * copy of the same "diff paths only" shape a few lines above (the W1-T142 scope guard's
  * `diffFiles`), for the identical reason: each consumer reads git/the diff on its own terms.
  */
-function diffFileChangesFromPatch(diff: string): DiffFileChange[] {
-  const byFile = new Map<string, string[]>();
-  let file = "";
-  for (const raw of diff.split("\n")) {
-    if (raw.startsWith("diff --git")) {
-      const m = raw.match(/\sb\/(\S+)\s*$/);
-      file = m ? m[1] : "";
-      continue;
-    }
-    if (raw.startsWith("+++ ")) {
-      // A deleted file's `+++` line is `/dev/null` — keep the path the `diff --git` header
-      // already set rather than clobbering it (mirrors lib/review.ts's own walkDiff, W1-T389).
-      const plus = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
-      if (plus !== "/dev/null") file = plus;
-      continue;
-    }
-    if (raw.startsWith("--- ") || raw.startsWith("@@") || !file) continue;
-    if (raw.startsWith("+") || raw.startsWith("-")) {
-      const lines = byFile.get(file) ?? [];
-      lines.push(raw.slice(1));
-      byFile.set(file, lines);
-    } else if (!byFile.has(file)) {
-      byFile.set(file, []);
-    }
-  }
-  return [...byFile.entries()].map(([path, lines]) => ({ path, content: lines.join("\n") }));
-}
 
 /**
  * W1-T947: whether the diff `diffText` unifies to is classified IRREVERSIBLE, per
@@ -5750,7 +5125,7 @@ function diffFileChangesFromPatch(diff: string): DiffFileChange[] {
  * exists yet for a diff-only caller to read.
  */
 export function diffIsClassifiedIrreversible(diffText: string): boolean {
-  return reversibilityFactor({ files: diffFileChangesFromPatch(diffText) }, {}).band === "critical";
+  return runTaskCommandHelpers(runTaskCommandHost()).diffIsClassifiedIrreversible(diffText);
 }
 
 /**
@@ -5761,14 +5136,6 @@ export function diffIsClassifiedIrreversible(diffText: string): boolean {
  * never itself grounds for refusing to arm — it degrades to `false`, the pre-existing
  * behavior every caller had before this task.
  */
-function irreversibleSignalForWorktree(worktreePath: string): boolean {
-  try {
-    const patch = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD"], { maxBuffer: 64 * 1024 * 1024 });
-    return diffIsClassifiedIrreversible(patch);
-  } catch {
-    return false;
-  }
-}
 
 /**
  * W1-T1215 — the arm's OWN `run_id`, read off the ledger rows `logArmAttribution` already writes.
@@ -5784,13 +5151,7 @@ export function armRunIdFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   prUrl: string,
 ): string | undefined {
-  let runId: string | undefined;
-  for (const line of lines) {
-    if (line.step !== "automerge.armed") continue;
-    if (line.pr_url !== prUrl) continue;
-    if (typeof line.run_id === "string") runId = line.run_id;
-  }
-  return runId;
+  return runTaskCommandHelpers(runTaskCommandHost()).armRunIdFromLedger(lines, prUrl);
 }
 
 /**
@@ -5804,19 +5165,10 @@ export function armRunIdFromLedger(
  * payload; `RestPullRow` does not declare it (it has no other consumer), so it is read off the raw
  * row rather than by widening a type this task does not own.
  */
-export function mergeShaNow(prUrl: string, fetch: GhApiFetcher = ghJson): string | undefined {
-  const target = prUrlTarget(prUrl);
-  if (!target) return undefined;
-  try {
-    const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as {
-      merge_commit_sha?: unknown;
-    };
-    return typeof row?.merge_commit_sha === "string" && row.merge_commit_sha.length > 0
-      ? row.merge_commit_sha
-      : undefined;
-  } catch {
-    return undefined;
-  }
+export function mergeShaNow(
+  ...args: Parameters<ReturnType<typeof runTaskCommandHelpers>["mergeShaNow"]>
+): string | undefined {
+  return runTaskCommandHelpers(runTaskCommandHost()).mergeShaNow(...args);
 }
 
 /**
@@ -5851,35 +5203,7 @@ export function lostRaceEscalation(input: {
   options: Array<{ label: string; detail: string }>;
   recommendation: string;
 } {
-  const sha = input.mergeSha ?? "unresolved";
-  const confidence = typeof input.confidence === "number" ? input.confidence.toFixed(2) : "n/a";
-  const reasons = input.reasons && input.reasons.length > 0 ? input.reasons.join("\n  - ") : "none recorded";
-  return {
-    class: "HARD_STOP",
-    taskId: input.taskId,
-    runId: input.runId,
-    summary: `REFUSED VERDICT MERGED UNATTENDED — the withdrawal lost the race — ${input.prUrl}`,
-    detail:
-      `${input.refusal}\n\n` +
-      `The withdrawal was attempted and GitHub reported the pull request already MERGED, so the ` +
-      `arm this run refused was never withdrawn.\n\n` +
-      `merge sha:    ${sha}\n` +
-      `confidence:   ${confidence}\n` +
-      `armed by run: ${input.armRunId ?? "unattributed — no automerge.armed row for this pull request"}\n` +
-      `judge reasons:\n  - ${reasons}\n\n` +
-      `NOTHING WAS REVERTED, REOPENED OR FORCE-PUSHED. Whether this commit stands is your ruling.`,
-    options: [
-      {
-        label: "accept-the-merge",
-        detail: "read the merged diff and, if it is acceptable, record that and continue — no action on the commit.",
-      },
-      {
-        label: "back-it-out-by-hand",
-        detail: "revert the merge sha above yourself; the fleet deliberately does not revert on its own.",
-      },
-    ],
-    recommendation: "accept-the-merge",
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).lostRaceEscalation(input);
 }
 
 export async function riskJudgeDisarm(
@@ -5887,7 +5211,7 @@ export async function riskJudgeDisarm(
   disarm: typeof disarmAutoMergeAsync = disarmAutoMergeAsync,
   disposition: Parameters<typeof disposeDisarm>[2] = {},
 ): Promise<ReturnType<typeof disposeDisarm>> {
-  return disposeDisarm(await disarm(ctx.prUrl), ctx, disposition);
+  return runTaskCommandHelpers(runTaskCommandHost()).riskJudgeDisarm(ctx, disarm, disposition);
 }
 
 /**
@@ -5905,43 +5229,11 @@ export async function riskJudgeDisarm(
  * read — the same discipline `disarmAutoMerge` applies to `isMerged`.
  */
 export function disposeDisarm(
-  outcome: DisarmOutcome | void,
-  ctx: {
-    prUrl: string;
-    taskId: string;
-    runId: string;
-    ledgerPath: string;
-    reason: string;
-    refusal: string;
-    confidence?: number;
-    reasons?: readonly string[];
-  },
-  deps: {
-    mergeSha?: (prUrl: string) => string | undefined;
-    ledgerLines?: () => Array<Record<string, unknown>>;
-  } = {},
-): {
-  step: "automerge.disarmed" | "automerge.disarm_skipped";
-  row: Record<string, unknown>;
-  escalation?: ReturnType<typeof lostRaceEscalation>;
-} {
-  const step = disarmOutcomeWithdrawn(outcome) ? "automerge.disarmed" : "automerge.disarm_skipped";
-  const row: Record<string, unknown> = { reason: ctx.reason, outcome: outcome ?? null };
-  if (outcome !== "lost-race") return { step, row };
-  return {
-    step,
-    row,
-    escalation: lostRaceEscalation({
-      prUrl: ctx.prUrl,
-      taskId: ctx.taskId,
-      runId: ctx.runId,
-      refusal: ctx.refusal,
-      mergeSha: (deps.mergeSha ?? mergeShaNow)(ctx.prUrl),
-      confidence: ctx.confidence,
-      reasons: ctx.reasons,
-      armRunId: armRunIdFromLedger((deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(), ctx.prUrl),
-    }),
-  };
+  outcome: Parameters<ReturnType<typeof runTaskCommandHelpers>["disposeDisarm"]>[0],
+  ctx: Parameters<ReturnType<typeof runTaskCommandHelpers>["disposeDisarm"]>[1],
+  deps: Parameters<ReturnType<typeof runTaskCommandHelpers>["disposeDisarm"]>[2] = {},
+): ReturnType<ReturnType<typeof runTaskCommandHelpers>["disposeDisarm"]> {
+  return runTaskCommandHelpers(runTaskCommandHost()).disposeDisarm(outcome, ctx, deps);
 }
 
 
@@ -6069,6 +5361,7 @@ export function armAndLogOutcome(
     { ...(error !== undefined ? { outcome, error } : { outcome }), ...(headSha !== undefined ? { head_sha: headSha } : {}) },
     rateLimit,
     directMergePreflight,
+    typeof result === "string" ? undefined : result.ratchetJudge,
   );
   return outcome;
 }
@@ -6762,7 +6055,6 @@ export function diffSinceMergeBase(cwd: string, head = "HEAD"): string | undefin
 }
 
 /** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
-export type AddedTestsAtHead = { kind: "read"; files: readonly string[] } | { kind: "unreadable"; reason: string };
 
 /** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/**\/*.test.ts` files added since the merge base with
  *  origin/main. */
@@ -6966,7 +6258,103 @@ function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: stri
   return false;
 }
 
+/** W1-T9289: one git call whose non-zero exit is a RESULT (`status`), never an erasure. */
+function gitStatusResult(git: (args: string[]) => string, args: string[]): { status: number | null; out: string; error?: string } {
+  try {
+    return { status: 0, out: git(args) };
+  } catch (error) {
+    const failed = error as { status?: unknown; stdout?: unknown; message?: unknown };
+    return { status: typeof failed.status === "number" ? failed.status : null, out: String(failed.stdout ?? ""),
+      error: String(failed.message ?? error) };
+  }
+}
+
+/**
+ * W1-T9289 — THE CONFLICT MODE OF THE PLAN-SCOPED ROUND. A dirty fleet plan PR gets origin/main MERGED into its head
+ * (a merge commit, never a rebase or a force push). Main's side is the newer fleet decision and is kept; the worker
+ * re-applies the branch's change only where it still applies to the merged task and edits ONLY the conflicted plan
+ * paths. The pushed merge commit must preflight clean, so a head that fails `planPrPreflight` is never pushed.
+ */
+async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+  const { pr, deps, worktreePath } = input;
+  const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
+  const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => deps.preflight
+    ? deps.preflight(tree, sha, { ...meta, headRef: pr.headRefName })
+    : planPrPreflightAtCommitAsync(tree, sha, { ...meta, headRef: pr.headRefName }, { log: deps.log });
+  let roundId: string | undefined;
+  const roundFields = () => ({ task_id: input.task.id, pr_number: pr.prNumber, head_sha: pr.headSha,
+    round_id: roundId, strike: pr.priorStrikes + 1, mode: "plan-conflict" });
+  const refuse = (reason: string, verdict?: PlanPrPreflightResult) => {
+    if (roundId) {
+      deps.log("fix.commit_refused", { ...roundFields(), reason });
+      deps.log("fix.done", { ...roundFields(), subtype: "commit_refused" });
+    }
+    return { outcome: "refused" as const, reason, preflight: verdict };
+  };
+  const metadata = { title: input.title, body: input.body };
+  try {
+    if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the plan round head moved before dispatch");
+    const merged = gitStatusResult(git, ["merge", "--no-commit", "--no-ff", "origin/main"]);
+    const unmerged = git(["diff", "--name-only", "--diff-filter=U", "-z"]).split("\0").filter(Boolean);
+    if (merged.status !== 0 && unmerged.length === 0) return refuse(`merging origin/main failed without a conflict: ${merged.error}`);
+    const outside = unmerged.filter((path) => !isInPlanScope(path) || path.split("/").includes(".."));
+    if (outside.length) return refuse(`the merge conflicts outside the plan scope: ${outside.join(", ")}`);
+    let report = "";
+    if (unmerged.length > 0) {
+      roundId = `${input.runId ?? input.task.id}:${pr.priorStrikes + 1}:${systemClock.now()}`;
+      deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
+      report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files: unmerged }, round: 1, branch: pr.headRefName!,
+        harnessCommits: true, evidence: {
+          planGateFindings: unmerged.map((path) => ({ check: "merge-conflict", firstLine:
+            `${path} has conflict markers: keep main's side (the newer fleet decision, e.g. a retirement or status); ` +
+            "re-apply the branch's change only where it still applies to the merged task; drop an edit aimed at a task " +
+            "main has retired or merged, and propose a PR_ACCEPTANCE without its line" })),
+          constraint: [input.lastRefusal, feedbackFixConstraint(pr.pendingAnswer)].filter(Boolean).join("\n\n") || undefined } }));
+      if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
+      const touched = git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]).split("\0")
+        .filter((entry) => entry.length >= 4 && entry[1] !== " ").map((entry) => entry.slice(3));
+      const stray = touched.filter((path) => !unmerged.includes(path));
+      if (stray.length) return refuse(`plan round changed paths outside the conflicted plan paths: ${stray.join(", ")}`);
+      git(["add", "-A", "--", ...unmerged]);
+      const markers = gitStatusResult(git, ["grep", "--cached", "-n", "-E", "^(<{7}|>{7})( |$)", "--", ...unmerged]);
+      if (markers.status === 0) return refuse(`conflict markers remain: ${markers.out.split("\n")[0]}`);
+      if (markers.status !== 1) return refuse(`checking for conflict markers failed: ${markers.error}`);
+    }
+    const proposedTitle = /^PR_TITLE:[ \t]*(.+)$/m.exec(report)?.[1];
+    const proposedAcceptance = /^PR_ACCEPTANCE:[ \t]*\r?\n([\s\S]*?)^END_PR_ACCEPTANCE[ \t]*$/m.exec(report)?.[1];
+    const proposedBody = /^PR_BODY:[ \t]*\r?\n([\s\S]*?)^END_PR_BODY[ \t]*$/m.exec(report)?.[1];
+    if (proposedTitle) metadata.title = proposedTitle.trim();
+    if (proposedBody) metadata.body = proposedBody.trimEnd();
+    if (proposedAcceptance) {
+      const check = acceptanceAuthorTimeCheck(proposedAcceptance);
+      if (!check.ok) return refuse(check.message);
+      // The block is REPLACED in place, so a criterion for a retired task's edit is gone, not demoted.
+      const region = acceptanceBlockRegion(metadata.body);
+      const rendered = renderAcceptanceBlock(parseAcceptanceBlock(proposedAcceptance) as AcceptanceCriterion[]).replace(/\n+$/, "");
+      if (region) {
+        const lines = metadata.body.split("\n");
+        lines.splice(region.headerLine, region.endLine - region.headerLine, ...rendered.split("\n"));
+        metadata.body = lines.join("\n");
+      } else metadata.body = replaceAcceptanceBlock(metadata.body, parseAcceptanceBlock(proposedAcceptance));
+    }
+    git(["commit", "-m", `Merge branch 'main' into ${pr.headRefName}`]);
+    const sha = git(["rev-parse", "HEAD"]).trim();
+    const verdict = await preflight(worktreePath, sha, metadata);
+    if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
+    if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
+    await deps.push(sha);
+    deps.log("sweep.plan_round.merged", { pr_number: pr.prNumber, head_sha: pr.headSha, merge_sha: sha, conflicted: unmerged });
+    if (roundId) deps.log("fix.done", { ...roundFields(), subtype: "success", pushed_head_sha: sha });
+    return { outcome: "pushed", headSha: sha, preflight: verdict };
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
+    return refuse(reason);
+  }
+}
+
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+  if (input.conflict === true) return runPlanScopedConflictRound(input);
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
   const preflightImpl = deps.preflight ?? planPrPreflightAtCommitAsync;
@@ -7154,10 +6542,6 @@ export function ensureTaskTrailer(
  * Behind an interface (mirroring `status.ts`'s {@link GitHub}) so unit tests can
  * inject a fixture instead of exec'ing `gh`.
  */
-export interface PrHeadGateway {
-  /** The PR's head branch name, or `undefined` if it cannot be resolved. */
-  headRefName(prUrl: string): string | undefined;
-}
 
 /**
  * Real gateway: `gh pr view <url> --json headRefName`. Fail-SOFT at the `gh`
@@ -7214,19 +6598,6 @@ export function ghPrHeadGateway(gh: (args: string[]) => unknown = ghJson): PrHea
  * W1-T54b-1784151420811 was ledgered `verdict=merged` via PR #80 — Dependabot's
  * own PR, not this run's — because attribution had no ownership check at all.
  */
-export interface OwnershipVerdict {
-  verdict: "pr_attribution_failed";
-  ledger: {
-    verdict: "pr_attribution_failed";
-    claimed_url: string;
-    claimed_branch: string | null;
-    owned_branch: string;
-    cost_usd: number;
-    /** W1-T268: the account this run's spend is attributed to — see {@link WorkerResult.accountLabel}. */
-    account_label?: string;
-    reason: string;
-  };
-}
 
 /**
  * RUN-OWNERSHIP GUARD (W1-T62, the backstop). Before ANY verdict may credit a
@@ -7272,10 +6643,6 @@ export function checkPrOwnership(
 /** The `git ls-remote --exit-code` probe's OWN failure evidence — captured from the `catch`
  *  at the fallback-push site (W1-T2267) instead of discarded. `status` is `null` when the
  *  process never produced one at all (e.g. git itself failed to spawn). */
-export interface RemotePresenceProbeFailure {
-  status: number | null;
-  stderr: string;
-}
 
 /** {@link fallbackPushCause}'s answer: the fallback always fires for the same reason
  *  (`branchOnOrigin === false`), but WHY that is true splits into four distinguishable shapes.
@@ -7289,16 +6656,10 @@ export interface RemotePresenceProbeFailure {
  *  the distinguishing text and threw it away. `evidence` is always populated too: a class is
  *  never asserted from evidence nobody can now inspect (see {@link fallbackPushEvidence}'s
  *  "names the absence" fallback for the case where there is truly nothing to carry). */
-export type FallbackPushCause =
-  | { cause: "probe_unreadable"; detail: string; evidence: string }
-  | { cause: "credential_expired"; detail: string; evidence: string }
-  | { cause: "push_not_attempted"; detail: string; evidence: string }
-  | { cause: "undetermined"; detail: string; evidence: string };
 
 /** Named placeholder for {@link fallbackPushEvidence} when there is truly nothing to carry — an
  *  absent/empty stderr or transcript must still SAY so (acceptance: "names the absence"), never a
  *  silently blank string a future reader could mistake for a field that just wasn't populated. */
-export const FALLBACK_PUSH_EVIDENCE_ABSENT = "(no readable stderr/transcript text was captured)";
 
 /**
  * Scrubs a git/gh credential out of failure text before {@link fallbackPushCause} ledgers it
@@ -7333,9 +6694,7 @@ export function scrubGitCredentialText(text: string): string {
  * from SOMETHING, and when that something is unreadable the row must say so, not fall silent.
  */
 export function fallbackPushEvidence(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed === "") return FALLBACK_PUSH_EVIDENCE_ABSENT;
-  return capStderrExcerpt(scrubGitCredentialText(trimmed), STDERR_EXCERPT_CAP);
+  return runTaskCommandHelpers(runTaskCommandHost()).fallbackPushEvidence(text);
 }
 
 /**
@@ -7367,46 +6726,7 @@ export function fallbackPushCause(
   probe: RemotePresenceProbeFailure | undefined,
   workerEvidence: string,
 ): FallbackPushCause {
-  if (!probe || probe.status !== 2) {
-    const reason = classifyGhFailure(probe?.status ?? null, probe?.stderr ?? "");
-    // `detail` is scrubbed too (not only the new `evidence` field below): it already interpolated
-    // the probe's raw stderr before this task, and a credential-bearing URL in THAT stderr would
-    // have leaked exactly the same way. Existing consumers only ever regex/substring-match `detail`
-    // (see the sibling suite's `assert.match(..., /status 128/)`) — none depend on a credential
-    // surviving inside it, so scrubbing changes no observable behavior except closing the leak.
-    const scrubbedStderr = probe?.stderr ? scrubGitCredentialText(probe.stderr) : "";
-    return {
-      cause: "probe_unreadable",
-      detail:
-        `git ls-remote could not confirm the branch is absent (status ${probe?.status ?? "none"}, ` +
-        `classified ${reason})${scrubbedStderr ? `: ${scrubbedStderr}` : ""}`,
-      evidence: fallbackPushEvidence(probe?.stderr ?? ""),
-    };
-  }
-  if (classifyGhFailure(null, workerEvidence) === "auth") {
-    return {
-      cause: "credential_expired",
-      detail: "the worker's own transcript/stderr carries a git/gh authentication failure",
-      // THE FIX: `credential_expired`'s `detail` above stayed a fixed sentence on all 15 incidents
-      // to date — this is the text the classifier just read to reach that verdict, carried instead
-      // of discarded (W1-T2522).
-      evidence: fallbackPushEvidence(workerEvidence),
-    };
-  }
-  if (!/\bgit\s+push\b/i.test(workerEvidence)) {
-    return {
-      cause: "push_not_attempted",
-      detail: "no \"git push\" invocation appears anywhere in the worker's own transcript",
-      evidence: fallbackPushEvidence(workerEvidence),
-    };
-  }
-  return {
-    cause: "undetermined",
-    detail:
-      "the branch is confirmed absent from origin but neither a credential failure nor a missing " +
-      "push attempt is evident in the worker's own transcript",
-    evidence: fallbackPushEvidence(workerEvidence),
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).fallbackPushCause(probe, workerEvidence);
 }
 
 /**
@@ -7619,17 +6939,7 @@ export function openTaskIdsFromPlan(plan: Plan, projection?: ReadonlyMap<string,
   );
 }
 
-interface GateOutcome {
-  merged: boolean;
-  verdict?: "awaiting_merge" | "blocked_ci" | "handed_off";
-  reason: string;
-  headSha?: string;
-  checks?: string[];
-}
 
-function rollupCheckSummary(rollup: RollupEntry[] | undefined): string[] {
-  return (rollup ?? []).map((c) => `${c.name ?? c.context ?? "unknown"}:${c.conclusion ?? c.status ?? c.state ?? ""}`);
-}
 
 /**
  * Poll a PR to a terminal gate decision. Returns merged only on state MERGED.
@@ -7728,29 +7038,6 @@ function pollRestTarget(prUrl: string, who: string): { owner: string; repo: stri
  * test can drive the real loop without a network or a six-second wall clock — production supplies
  * neither, and `{}` is byte-identical to the pre-W1-T463 call shape at every existing call site.
  */
-export interface PollDeps {
-  /** Defaults to {@link ghJsonAsync}. */
-  readJson?: (args: string[]) => Promise<unknown>;
-  /** Defaults to {@link yieldingSleep}. */
-  sleep?: (ms: number) => Promise<void>;
-  /**
-   * W1-T3584: the target repo's own required-status-check contexts — the SAME seam shape
-   * `ghRequiredStatusCheckContexts` already exposes and the sweep's `deps.requiredContexts`
-   * (line ~30372) already takes, so no new contract is invented. `waitForCiGreen` calls this
-   * ONCE per wait (never per poll — see its own call site) and defaults to
-   * {@link ghRequiredStatusCheckContexts}. `undefined` (unreadable protection or a genuinely
-   * unprotected branch) takes `ciGateFromRollup` down its unchanged fail-closed fallback.
-  */
-  requiredContexts?: (owner: string, repo: string) => string[] | undefined;
-  externalWaitFreshness?: ExternalWaitFreshness;
-  externalWaitRecycle?: () => string | undefined;
-  /**
-   * W1-T5345: yield the CI wait on its FIRST poll, after `run.awaiting_external` is written, so
-   * the daemon lane that opened the PR is free at PR open. Only the daemon's `runOne` sets it;
-   * `rmd run-task` by hand, `rmd drain` and `rmd approve` leave it off and wait in-lane.
-   */
-  handOffAtPrOpen?: boolean;
-}
 
 /**
  * W1-T5345 (design 2) — WHO OWNS EACH STEP THE IN-RUN PATH WOULD DO AFTER CI GREEN, once a run
@@ -7761,7 +7048,6 @@ export interface PollDeps {
  * it and declining for it would decline EVERY run — named on the `pr_open` hand-off row
  * (`in_run_only_skipped`) so the skip is never silent.
  */
-export type PrOpenHandoffDeclineReason = "irreversible_diff" | "no_merge_boundary" | "shadow_instance";
 export type PrOpenHandoffStepOwner =
   | { kind: "sweep" | "before_yield" | "in_run_only"; by: string }
   | { kind: "declined"; reason: PrOpenHandoffDeclineReason };
@@ -7783,20 +7069,10 @@ const PR_OPEN_HANDOFF_IN_RUN_ONLY = PR_OPEN_HANDOFF_STEP_OWNERS.filter((s) => s.
 
 /** W1-T5345: the per-run gate that keeps a run in-lane — a post-CI refusal the sweep's re-arm path cannot see. */
 export function prOpenHandoffDecline(run: { irreversible: boolean; noMerge: boolean; shadowInstance: boolean }): PrOpenHandoffDeclineReason | undefined {
-  // The sweep's re-arm path is never handed the irreversible signal (W1-T947's named residual).
-  if (run.irreversible) return "irreversible_diff";
-  // The wipe-test no-merge boundary lives only in this run (`resolveWipeTestArmPermission`).
-  if (run.noMerge) return "no_merge_boundary";
-  // The shadow-instance arm refusal lives only in this run (`resolveShadowInstanceArmPermission`).
-  if (run.shadowInstance) return "shadow_instance";
-  return undefined;
+  return runTaskCommandHelpers(runTaskCommandHost()).prOpenHandoffDecline(run);
 }
 
 /** W1-T5282: a CI wait's freshness hook; the daemon's is awaited, so its `git fetch` never holds the loop. */
-export type ExternalWaitFreshness = () =>
-  | Extract<DaemonFreshness, { stale: true }>
-  | undefined
-  | Promise<Extract<DaemonFreshness, { stale: true }> | undefined>;
 
 export function ciWaitFreshness(read: () => DaemonFreshness, clock?: Clock): () => Extract<DaemonFreshness, { stale: true }> | undefined;
 export function ciWaitFreshness(read: () => Promise<DaemonFreshness>, clock?: Clock): () => Promise<Extract<DaemonFreshness, { stale: true }> | undefined>;
@@ -7816,12 +7092,11 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
 /** W1-T5282 — the daemon's two freshness reads of `repoDir`, both awaited: a sync `git fetch` here stalled the
  *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
-  const localGit: AsyncGitRunner = deps.git ? async (args) => deps.git!(args) : asyncGit(repoDir);
   // W1-T9092: an advance is material only when it touches the import closure of the entry this process started from.
   const closureGit: ClosureGit = deps.git ? async (args) => deps.git!(args) : daemonClosureGit(repoDir);
   const entry = daemonProcessEntry(repoDir);
   const read = (): Promise<DaemonFreshness> =>
-    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit))
+    checkServiceFreshnessAsync(repoDir, env, deps)
       .then((svc) => withDaemonClosure(svc, (sha) => daemonProcessClosure(closureGit, sha, entry))).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
@@ -7885,6 +7160,14 @@ export function hostAlertCommand(rest: string[], clock: Clock = systemClock): nu
   return 0;
 }
 
+/** `rmd test-place <path...>` (W1-T9874): the folder a test belongs in, computed from its imports. */
+export function testPlaceCommand(rest: string[], root: string = repoRoot): number {
+  const done = testPlaceOutcome(rest, root, () => hostWorktreeGit(root, ["rev-parse", "HEAD^{tree}"]).trim());
+  if (done.out !== "") console.log(done.out);
+  if (done.error !== "") console.error(done.code === 2 ? `${done.error}\n${USAGE}` : done.error);
+  return done.code;
+}
+
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
 // LAST source line in this file, where `--experimental-test-coverage` stamps `DA:<line>,0` on the
 // trailing records, so adding a name to it costs a permanently-uncoverable added line at
@@ -7895,70 +7178,7 @@ export async function pollToGate(
   everySec = 6,
   deps: PollDeps = {},
 ): Promise<GateOutcome> {
-  const read = deps.readJson ?? ghJsonAsync;
-  const sleep = deps.sleep ?? yieldingSleep;
-  // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
-  const { owner, repo, number } = pollRestTarget(prUrl, "pollToGate");
-  const readings: (RollupEntry[] | undefined)[] = [];
-  for (let i = 0; ; i++) {
-    const row = (await retryPollRead(() => read(singlePrRestArgs(owner, repo, number)), { log, sleep })) as RestPullRow;
-    const state = prStateFromRest(row);
-    if (state === "MERGED") return { merged: true, reason: "checks green" };
-    if (state === "CLOSED") return { merged: false, verdict: "blocked_ci", reason: "pr closed" };
-    const sha = mapRestPr(row).headRefOid;
-    const roll = await retryPollRead(() => restRollupFor(owner, repo, sha, read), { log, sleep });
-    const checks = rollupCheckSummary(roll);
-    const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
-    if (red) {
-      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown", head_sha: sha, checks });
-      return {
-        merged: false,
-        verdict: "blocked_ci",
-        reason: `required check red: ${red.name ?? red.context ?? "unknown"}`,
-        headSha: sha,
-        checks,
-      };
-    }
-    if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
-    const recycle = deps.externalWaitRecycle?.();
-    if (recycle) {
-      log("run.freshness_handoff", { waiting_on: "pr", head_sha: sha, trigger: "recycle", detail: recycle });
-      return { merged: false, verdict: "handed_off", reason: "recycle_yield", headSha: sha, checks };
-    }
-    readings.push(roll);
-    if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
-    const stall = checkWaitStalled(readings);
-    if (stall.stalled) {
-      const verdict = stall.pending.length === 0 ? "awaiting_merge" : "blocked_ci";
-      const reason =
-        stall.pending.length > 0
-          ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
-          : `all observed checks terminal green for ${STALL_WINDOW} consecutive polls; awaiting GitHub merge`;
-      log("pr.stalled", {
-        pending: stall.pending,
-        identicalPolls: STALL_WINDOW,
-        verdict,
-        reason,
-        head_sha: sha,
-        checks,
-      });
-      return {
-        merged: false,
-        verdict,
-        reason,
-        headSha: sha,
-        checks,
-      };
-    }
-    if (i === 0 || i % 5 === 0) {
-      log("pr.polling", {
-        state,
-        checks,
-      });
-    }
-    // W1-T463: see `waitForCiGreen`'s note — a timer, not a blocking child process.
-    await sleep(everySec * 1000);
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).pollToGate(prUrl, log, everySec, deps);
 }
 
 /**
@@ -8049,44 +7269,6 @@ export function ciGateFromRollup(
 /** PRIMARY CONTROL: bounded CI evidence distinguishes terminal causes; unavailable is distinct from an observed empty set. */
 export const CI_GATE_EVIDENCE_MAX = 8;
 
-export type CiGateOutcome =
-  | {
-      state: "green" | "red" | "timeout";
-      sha?: string;
-      checks?: string[];
-      checkCount?: number;
-    }
-  | {
-      state: "freshness_handoff";
-      sha: string;
-      oldSha: string;
-      newSha: string;
-      recycle?: never;
-      trigger?: never;
-      checks?: never;
-      checkCount?: never;
-    }
-  | {
-      state: "freshness_handoff";
-      sha: string;
-      recycle: string;
-      oldSha?: never;
-      newSha?: never;
-      trigger?: never;
-      checks?: never;
-      checkCount?: never;
-    }
-  | {
-      // W1-T5345: the daemon lane's hand-off at PR open.
-      state: "freshness_handoff";
-      sha: string;
-      trigger: "pr_open";
-      recycle?: never;
-      oldSha?: never;
-      newSha?: never;
-      checks?: never;
-      checkCount?: never;
-    };
 
 function boundedCiGateChecks(names: Iterable<string>): { checks: string[]; checkCount: number } {
   const all = [...new Set([...names].map((name) => name.trim() || "unknown"))].sort((a, b) => a.localeCompare(b));
@@ -8094,18 +7276,7 @@ function boundedCiGateChecks(names: Iterable<string>): { checks: string[]; check
 }
 
 export function ciGateBlockReason(r: CiGateOutcome | "green" | "red" | "timeout"): string {
-  const state = ciGateState(r);
-  if (state === "freshness_handoff") {
-    return "daemon code became stale while CI was pending; yielded at the recorded external-wait boundary";
-  }
-  const base = `ci ${state} before review`;
-  if (typeof r === "string" || r.checks === undefined) return `${base}; relevant checks unavailable`;
-  const checkCount = Math.max(r.checkCount ?? r.checks.length, r.checks.length);
-  const kind = state === "timeout" ? "pending" : "red";
-  if (checkCount === 0) return `${base}; ${kind} checks: none (0 total)`;
-  const shown = r.checks.join(", ");
-  const truncated = checkCount > r.checks.length ? `; first ${r.checks.length} shown` : "";
-  return `${base}; ${kind} checks: ${shown} (${checkCount} total${truncated})`;
+  return runTaskCommandHelpers(runTaskCommandHost()).ciGateBlockReason(r);
 }
 
 /** W1-T2804: normalize a {@link CiGateOutcome} or a bare verdict (what a caller-supplied
@@ -8560,22 +7731,19 @@ export function reappendLostReviewPosted(
  * FIELD FINDING 12 self-updater race) never blocks the gate — the deterministic
  * floor still posts, fail-closed.
  */
-export type ReviewRunResult = ReviewVerdict & {
-  headSha: string;
-  reviewerOutcome: string;
-  verdictWithheld?: string;
-  reviewDecisionDigest?: string;
-  decisionDisposition?: "computed" | "replayed" | "in_flight" | "conflict";
-  evaluatorProvenance?: ReviewEvaluatorProvenance;
-};
 
 async function runReview(args: {
   owner: string;
   repo: string;
   prUrl: string;
+  /** W1-T10269: judge, then stop before any arm, status or comment — the reviewer-health shadow. */
+  shadow?: boolean;
+  reviewReplaySetupInput?: ReviewReplayInput;
+  /** W1-T9970 test seam: the reviewer's image; `null` is off-container. Default {@link readRuntimeImageSha}. */
+  runtimeImageSha?: string | null;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string };
+  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -8612,6 +7780,8 @@ async function runReview(args: {
   account: (r: WorkerResult) => WorkerResult;
   /** false ⇒ deterministic floor only, no LLM spawn (used by the live proofs). */
   spawnReviewer?: boolean;
+  /** Explicit semantic mode must complete before the deterministic floor can publish or arm. */
+  requireSemanticReview?: boolean;
   /**
    * W1-T2205: injectable replacement for the SDK's own `query()`, threaded straight into the
    * advisory reviewer's `spawnWorker` call below — see {@link SpawnWorkerArgs.queryFn}'s own
@@ -8721,6 +7891,32 @@ async function runReview(args: {
 }): Promise<ReviewRunResult> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const headSha = readHeadShaRest(prUrl);
+  let replayInput: ReviewReplayInput = args.reviewReplaySetupInput ?? {
+    stage: "setup", plan_only: false, required_semantic: args.requireSemanticReview === true,
+    criteria_count: task.acceptance?.length ?? 0, risk_present: task.risk !== undefined,
+    budget_present: task.budget_usd !== undefined, untasked: false, head_task_resolved: true,
+    own_task_record_missing: false, reviewer_outcome: "not_attempted", verdict_lines: [],
+  };
+  const recordReplay = (decision: ReviewOutcomeDecision): void => {
+    if (args.shadow) return;
+    const sha = reviewerHealthRowFields("review.posted", undefined).reviewer_code_sha;
+    log("review.replay_input", reviewReplayLedgerFields(replayInput, decision, {
+      pr_url: prUrl, head_sha: headSha, reviewer_code_sha: typeof sha === "string" ? sha : null,
+    }));
+  };
+  const narrative = reviewTaskNarrative(task);
+  if (narrative === undefined) {
+    const reason = "head-task-narrative-unavailable";
+    replayInput = { ...replayInput, stage: "setup", setup_unavailable: true };
+    recordReplay(classifyReviewOutcome(replayInput));
+    log("review.reviewer.skipped", { reason, head_sha: headSha, pr_url: prUrl });
+    return {
+      state: "failure", criteria: [], testTheater: false,
+      summary: "review stood down: task design or amendment is unavailable",
+      floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: "not_attempted_task_narrative_unavailable", verdictWithheld: reason,
+    };
+  }
   // A substituted worker transcript is not a material PR input. Production fix-rung callers
   // supply the independently fetched body; a degraded caller with neither fails open toward
   // retrying rather than letting unrelated worker prose consume the cap.
@@ -8736,8 +7932,8 @@ async function runReview(args: {
   // read failure — `fetchLifecycle` has no retry of its own, unlike the post itself) is caught
   // HERE and degrades the SAME way: legibility is strictly additive, so a pending-post hiccup must
   // never abort the review it exists to make visible — the terminal post below still runs and is
-  // what actually gates the merge, exactly as it always has.
-  try {
+  // what actually gates the merge, exactly as it always has. A shadow review (W1-T10269) posts nothing.
+  if (!args.shadow) try {
     const pending = await postReviewPending({
       owner,
       repo,
@@ -8752,6 +7948,8 @@ async function runReview(args: {
     });
     if (!pending.posted && pending.lifecycle !== undefined) {
       const reason = `pr_${pending.lifecycle}`;
+      replayInput = { ...replayInput, publication_refusal: "pr-lifecycle-stood-down" };
+      recordReplay(classifyReviewOutcome(replayInput));
       log("review.stood_down", { reason, head_sha: headSha, pr_url: prUrl });
       return {
         state: "failure", criteria: [], testTheater: false,
@@ -8770,6 +7968,8 @@ async function runReview(args: {
   // bound is a named refusal below, never a hang.
   const diffOutcome = await fetchPrDiff(prUrl, headSha, prDiffSourceAsync(repoRoot));
   if (diffOutcome.kind === "refused") {
+    replayInput = { ...replayInput, publication_refusal: "diff-unreadable" };
+    recordReplay(classifyReviewOutcome(replayInput));
     // The pending status remains unsatisfied. Record a named refusal and return a withheld
     // result so both the CLI and sweep can retry or escalate without losing this attempt.
     log("review.diff_unreadable", { pr_url: prUrl, head_sha: headSha, reason: diffOutcome.reason });
@@ -8789,10 +7989,17 @@ async function runReview(args: {
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
   const preparedDecision = await preparePromisedReviewDecision({
-    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership },
+    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership, ...narrative },
     headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
-  const decisionDigest = preparedDecision.decisionDigest;
+  // W1-T9970: read once per review; a reviewer-image re-review of this head is its own decision.
+  const runtimeImageSha = args.runtimeImageSha === undefined ? readRuntimeImageSha() : args.runtimeImageSha ?? undefined;
+  const requeues = runtimeImageSha === undefined ? [] : (await readLedgerUnionRawLinesAsync(dirname(args.ledgerPath),
+    { maxRotations: 0, step: REVIEW_REQUEUED_STEP, keep: (line) => line.includes(headSha) })).rawLines.flatMap((line) => {
+    try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; /* deliberate: a torn line requests nothing */ }
+  });
+  const decisionDigest = reviewerImageDecisionDigest(requiredSemanticDecisionDigest(preparedDecision.decisionDigest,
+    args.requireSemanticReview === true), { headSha, runtimeImageSha, requeues });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -8879,7 +8086,7 @@ async function runReview(args: {
         });
         const prompt =
           buildReviewPrompt({
-            task: { id: task.id, acceptance: criteria },
+            task: { id: task.id, acceptance: criteria, ...narrative },
             prUrl,
             owner,
             repo,
@@ -9033,6 +8240,21 @@ async function runReview(args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
+  replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
+    criteria_count: criteria.length, reviewer_outcome: outcome,
+    verdict_lines: recordedReviewVerdictLines(reviewerFindingText ?? "", criteria.length) };
+  const replayDecision = classifyReviewOutcome(replayInput);
+  const semanticRefusal = replayDecision.class === "posted" ? undefined : replayDecision.reason;
+  if (semanticRefusal !== undefined) {
+    recordReplay(replayDecision);
+    log("review.semantic_incomplete", { reason: semanticRefusal, head_sha: headSha, pr_url: prUrl,
+      reviewer_outcome: outcome, review_decision_digest: decisionDigest });
+    say(`remudero-review: verdict WITHHELD — ${semanticRefusal}; no verdict publication or merge effect`);
+    return { state: "failure", criteria: [], cannotEvaluate: true, testTheater: false,
+      summary: semanticRefusal, floorDegraded: true, capped: true, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: outcome, verdictWithheld: semanticRefusal,
+      reviewDecisionDigest: decisionDigest, evaluatorProvenance };
+  }
   // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
   // advisory; a filesystem/telemetry problem cannot become a review failure.
   let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
@@ -9119,6 +8341,7 @@ async function runReview(args: {
     declaredFiles: task.files,
     risk: task.risk,
     budgetUsd: task.budget_usd ?? args.budgetUsd,
+    ...narrative,
   });
   verdict = { ...verdict, reviewContractDigest: contractDigest };
 
@@ -9160,6 +8383,13 @@ async function runReview(args: {
   // named reason on the posted description itself — the operator reading the
   // commit status (not just the ledger) sees WHY, never only "unavailable".
   const description = reviewPostedDescription(verdict, args.materializationFailure);
+  // W1-T10269: the shadow's would-be terminal. It reached publication and publishes nothing.
+  if (args.shadow) {
+    log(REVIEWER_SHADOW_VERDICT_STEP, { state: verdict.state, head_sha: headSha, pr_url: prUrl, reviewer_outcome: outcome,
+      review_decision_digest: decisionDigest });
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: "reviewer-health shadow: no publication",
+      reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
 
   // impl-BF — WITHDRAW AN EXISTING ARM BEFORE THE STATUS GOES UP.
   //
@@ -9194,8 +8424,10 @@ async function runReview(args: {
   // against an already-merged/closed PR. See lib/review.ts's W1-T228 block
   // comment for the full design.
   if (verdict.taskIdOwnershipWithheld) {
+    replayInput = { ...replayInput, publication_refusal: "task-id-ownership-withheld" };
+    recordReplay(classifyReviewOutcome(replayInput));
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
-    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld, unknown_reservations: unknownReservationReads(verdict.taskIdOwnership) });
+    log("review.post_refused", withheldReviewRefusalRow({ headSha, prUrl, reason: verdict.taskIdOwnershipWithheld, ownership: verdict.taskIdOwnership, inputDigest }));
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -9237,10 +8469,14 @@ async function runReview(args: {
       { disarm: args.disarm },
     );
     if (!posted.posted) {
+      replayInput = { ...replayInput, publication_refusal: "conflict-hold-publication-failed" };
+      recordReplay(classifyReviewOutcome(replayInput));
       say(`remudero-review: conflict hold FAILED to post for ${headSha.slice(0, 7)} — ${posted.reason}`);
       return { ...verdict, headSha, reviewerOutcome: outcome, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
     }
   } else if (!posted.posted) {
+    replayInput = { ...replayInput, publication_refusal: "terminal-publication-refused" };
+    recordReplay(classifyReviewOutcome(replayInput));
     // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
     // `review.post_refused` with the full reason; this is the loud console
     // twin so a refusal is as visible as an ordinary posted verdict is.
@@ -9288,6 +8524,7 @@ async function runReview(args: {
     pr_url: prUrl,
     ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
     review_engine_revision: REVIEW_ENGINE_REVISION,
+    ...(runtimeImageSha !== undefined ? { runtime_image_sha: runtimeImageSha } : {}),
     review_decision_digest: decisionDigest,
     decision_verdict: verdict,
     evaluator_provenance: evaluatorProvenance,
@@ -9355,6 +8592,7 @@ async function runReview(args: {
     changeset_fence_unbalanced_at_eof: verdict.changesetFenceUnbalancedAtEof ?? null,
   };
   log("review.posted", reviewPostedRow);
+  recordReplay(replayDecision);
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
   // {@link "./lib/review.js".UnwiredAdvisory}'s doc), naming the PR (taskId + headSha + prUrl), the
@@ -9446,7 +8684,12 @@ async function runReview(args: {
   if (hasUnmet) {
     parts.push(
       `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
-        unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
+        visibleUnmet.map((c, i) => {
+          const tail = c.failureTail?.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+          return `${i + 1}. ${c.claim}\n   - ${reasons[i]}` + (tail
+            ? `\n\n   <details>\n   <summary>Proof failure output</summary>\n\n   <pre>${tail}</pre>\n   </details>\n`
+            : "");
+        }).join("\n") +
         (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
         `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
     );
@@ -9875,107 +9118,10 @@ function renderEscalationEvidence<T>(items: readonly T[], format: (item: T) => s
 export function fixRungTerminationVerdict(
   rung: Pick<FixRungOutcome, "outcome" | "reason" | "standDownReason" | "blockedOnPr">,
 ): { reason: string; extra: Record<string, unknown>; phrase: string } {
-  if (rung.outcome === "parked") {
-    return {
-      reason: rung.reason,
-      extra: { blocked_on_pr: rung.blockedOnPr },
-      phrase: `parked on prerequisite #${rung.blockedOnPr}`,
-    };
-  }
-  if (rung.outcome === "rebased") {
-    // W1-T1095 (capability 3): the head MOVED, so this rung is over — see `runFixRung`'s own
-    // comment at the return site for why continuing against a now-stale worktree would push
-    // nothing. Carries the same `blocked_on_pr` field the parked arm does, because it is the
-    // same prerequisite that put this PR here.
-    return {
-      reason: rung.reason,
-      extra: { blocked_on_pr: rung.blockedOnPr },
-      phrase: `rebased onto its base (prerequisite #${rung.blockedOnPr})`,
-    };
-  }
-  if (rung.outcome === "base_refreshed") {
-    return {
-      reason: rung.reason,
-      extra: {},
-      phrase: "base refreshed without spending a strike",
-    };
-  }
-  return {
-    reason: `stood down — ${rung.standDownReason}`,
-    extra: {},
-    phrase: `stood down (${rung.standDownReason})`,
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).fixRungTerminationVerdict(rung);
 }
 
-export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed" | "needs_design" | "handed_off";
-  /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
-   *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
-   *  abandoned never produced a new head to re-review. */
-  review: ReviewRunResult;
-  strikes: number;
-  /**
-   * W1-T2403: how many rounds this invocation spent on a RETRIGGER-SHAPED outcome (see
-   * {@link isRetriggerShapedCommit}) rather than an ordinary strike — SEPARATE from `strikes`,
-   * never folded into it. `0` on every outcome this task's own change did not touch (no round
-   * this rung ran was ever classified retrigger-shaped).
-   */
-  retriggers: number;
-  /**
-   * W1-T1095 (design note ii — "every termination writes a reason"): a short, ALWAYS-PRESENT
-   * machine-legible reason naming why THIS pass ended the way it did — never blank, regardless
-   * of `outcome`. Distinct from `standDownReason` (a longer, human-facing sentence set only for
-   * `"stood_down"`): this field is populated on every branch, including `"fixed"` (where nothing
-   * else on this type otherwise says why the loop stopped) and the plain-exhaustion escalate.
-   */
-  reason: string;
-  /**
-   * W1-T1044: set only when `outcome === "spawn_abandoned"` — how long (ms) the abandoned
-   * `deps.spawn` call had been running when the wall-clock bound gave up on it. See
-   * {@link spawnFixWorkerBounded}'s own doc for why this is ledgered BEFORE the worker is
-   * reclaimed, never only reported here.
-   */
-  spawnAbandonedElapsedMs?: number;
-  /**
-   * Set when `outcome === "escalated"`, and — W1-T296 — also set when a
-   * `"stood_down"` outcome escalated a foreign-authorship stand-down (the
-   * ONLY stand-down reason that opens a needs-human issue; the terminal-state
-   * reasons, W1-T177 below, still ledger-only — nothing for a human to decide
-   * on a merged/closed PR).
-   */
-  issueUrl?: string;
-  /**
-   * W1-T177: set only when `outcome === "stood_down"` — the freshly observed
-   * terminal-state reason (from {@link terminalStateReason}) that stopped a
-   * strike from being spent, or the exhaustion escalate() from firing, on a
-   * PR that no longer carries a live block. W1-T296 extends this SAME field
-   * with a second reason source — see {@link branchAuthorshipStandDownReason}.
-   */
-  standDownReason?: string;
-  superseded?: FixSuperseded;
-  /**
-   * W1-T1095: set only when `outcome === "parked"` — the prerequisite PR number
-   * {@link outOfDiffBlockerFor} found. The rung spent ZERO strikes reaching this outcome
-   * (design note iv — parking is not retrying) and expects to be invoked again later (the
-   * SAME way every other dispatch is re-polled); the next call resumes normally the moment
-   * {@link prerequisiteMerged} reads this PR as merged.
-   */
-  blockedOnPr?: number;
-}
 
-type CiEvidenceDisagreementObservation = {
-  /** W1-T2804 — the head sha BOTH readers resolved for within this one decision. Absent only when
-   *  no reader reported one, in which case the row asserts a disagreement without claiming a shared
-   *  subject. Never hand-authored: it is whatever the gate read actually judged. */
-  sha?: string;
-  rollup: {
-    checks_state: OpenPrView["checksState"];
-    red_checks: string[];
-  };
-  miner: {
-    enumerable_failures: Array<{ name: string }>;
-  };
-};
 
 function ciEvidenceDisagreementObservation(args: {
   checksState?: OpenPrView["checksState"];
@@ -10033,12 +9179,6 @@ function ghLiveState(prUrl: string): LiveStateResult {
  * only when `ok`; `author` itself may still be absent (an unattributable
  * commit, e.g. a squash-merge bot) even on an otherwise-successful read.
  */
-export interface LiveHeadResult {
-  ok: boolean;
-  headSha?: string;
-  author?: string;
-  headRefName?: string;
-}
 
 /**
  * W1-T296: the real live-head reader the fix rung wires for its pre-strike
@@ -10114,7 +9254,6 @@ export function branchAuthorshipStandDownReason(
  * changes neither of the other two fields). NOT PROPOSED: prime-agent's IPython-kernel substrate,
  * which this repo has no equivalent of.
  */
-export type WorktreeSnapshot = { status: string; diff: string; untrackedHash: string };
 
 /**
  * W1-T1284: FAILS TOWARD RUNNING — mirrors prime-agent's own `gitWorktreeSnapshotsEqual`
@@ -10993,10 +10132,6 @@ export function fixRebaseAlreadySpent(lines: ReadonlyArray<Record<string, unknow
  *  above stays pure and this orchestrator stays thin. `mergeable` comes from `GET /pulls/{n}`,
  *  `behindBy` from `GET /compare/{base}...{head}` — both REST, never `--json` (GraphQL), the
  *  same quota split W1-T511 measured and this file already follows everywhere else. */
-export interface FixRebaseMergeFacts {
-  mergeable?: string;
-  behindBy?: number;
-}
 
 /**
  * W1-T1095 (capability 3): the I/O half — gather the two observations, ask {@link decideFixRebase},
@@ -11241,25 +10376,15 @@ export function fixRebaseMergeFactsFromRest(
  * matched nothing on every real abandonment — see `fixArgs`'s own W1-T2261 note.
  */
 export function reclaimAbandonedWorker(
-  info: { runId: string; taskId: string; elapsedMs: number },
+  info: Parameters<RunTaskCommandHost["reclaimAbandonedWorker"]>[0],
   // APPENDED LAST, the house convention, so no positional caller shifts: both call sites
   // (`runTaskBody`'s `reclaimWorker` wiring and `reclaimWorkerImpl`'s default) pass `info` alone
   // and keep today's behaviour byte-for-byte. Injected only so this function's own arms are
   // reachable from a test — the primitives it wraps enumerate and signal REAL processes, so
   // driving the defaults could neither exercise the match nor the failure without touching the
   // host's process table.
-  deps: {
-    listCandidates?: typeof defaultListCandidates;
-    readMarkers?: typeof defaultReadMarkers;
-    kill?: typeof killProcessGroup;
-    /** W1-T2261: optional ledger sink — omitted (every pre-existing test) ⇒ no log call, byte-
-     *  identical to before this task. Both real call sites (`runTaskBody` and `buildSweepEffects`'s
-     *  `reclaimWorkerImpl` default) now bind this to the SAME `log` the rung/sweep already writes
-     *  `fix.spawn_abandoned`/`fix.spawn_reclaim_failed` through, so the three lines land in one
-     *  ledger stream. */
-    log?: (step: string, extra?: Record<string, unknown>) => void;
-  } = {},
-): void {
+  deps: Parameters<RunTaskCommandHost["reclaimAbandonedWorker"]>[1] = {},
+): ReturnType<RunTaskCommandHost["reclaimAbandonedWorker"]> {
   const listCandidates = deps.listCandidates ?? defaultListCandidates;
   const readMarkers = deps.readMarkers ?? defaultReadMarkers;
   const kill = deps.kill ?? killProcessGroup;
@@ -11402,27 +10527,18 @@ export function fixWorkerReceipt(
  * `fixSpawnWallClockBoundMs` has a real, uncensored sample to read.
  */
 async function spawnFixWorkerBounded(
-  deps: {
-    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
-    spawnWallClockBoundMs?: number;
-    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
-    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-  },
-  args: SpawnWorkerArgs,
-  ctx: { runId: string; taskId: string; snapshot?: FixDispatchSnapshot },
-): Promise<
-  | { kind: "spawned"; result: WorkerResult; elapsedMs: number }
-  | { kind: "abandoned"; elapsedMs: number }
-  | { kind: "superseded"; elapsedMs: number; superseded: FixSuperseded }
-> {
+  deps: Parameters<RunTaskCommandHost["spawnFixWorkerBounded"]>[0],
+  args: Parameters<RunTaskCommandHost["spawnFixWorkerBounded"]>[1],
+  ctx: Parameters<RunTaskCommandHost["spawnFixWorkerBounded"]>[2],
+): ReturnType<RunTaskCommandHost["spawnFixWorkerBounded"]> {
   // W1-T1219: this bound is the FIX-RUNG SPAWN's own — see `fixSpawnWallClockBoundMs`'s own
   // plan/policy.yaml row for why it is no longer `sweepWallClockBoundMs` (the sweep-tick bound,
   // a different population). Every real call site now threads that row explicitly; this default
   // fires only for a caller (test or otherwise) that supplies no `deps.spawnWallClockBoundMs`.
   const boundMs = deps.spawnWallClockBoundMs ?? DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS;
   const startedAt = Date.now();
-  const spawnPromise = deps.spawn(args);
+  const spawnStop = new AbortController();
+  const spawnPromise = deps.spawn({ ...args, signal: AbortSignal.any([spawnStop.signal, ...(args.signal ? [args.signal] : [])]) });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bound = new Promise<"abandoned">((resolve) => {
     timer = setTimeout(() => resolve("abandoned"), boundMs);
@@ -11460,6 +10576,8 @@ async function spawnFixWorkerBounded(
           strike_spent: false,
         });
       }
+      // Cancel this call's pending admission before reclaiming any child that already started.
+      spawnStop.abort();
       try {
         await deps.reclaimWorker?.({ runId: ctx.runId, taskId: ctx.taskId, elapsedMs });
       } catch (e) {
@@ -11506,12 +10624,6 @@ async function spawnFixWorkerBounded(
  *  is the number of files that commit touched (0 for an empty commit, `git commit --allow-empty`
  *  shaped); `subject` is that commit's own subject line, never its body (see the classifier's own
  *  doc for why body-matching was tried and dropped). */
-export interface FixRoundCommit {
-  changedFiles: number;
-  subject: string;
-  diffStat?: string;
-  diffDigest?: string;
-}
 
 /**
  * A commit is RETRIGGER-SHAPED if EITHER (a) it changed ZERO files — an empty commit — OR (b)
@@ -11557,7 +10669,6 @@ export const DEFAULT_FIX_RETRIGGER_CAP = 2;
  *  {@link isRetriggerShapedCommit} can be applied to each in the order they landed. Real
  *  production call sites wire {@link readFixRoundCommitsViaGit}; tests inject a fake so the whole
  *  rung stays free of a real `git` call, matching every other `deps` reader here. */
-export type ReadFixRoundCommits = (worktreePath: string, sinceSha: string) => FixRoundCommit[] | Promise<FixRoundCommit[]>;
 
 /**
  * The real `git`-backed {@link ReadFixRoundCommits}: every commit `sinceSha..HEAD` in
@@ -11733,400 +10844,7 @@ export function formerBoundStandIn(reached: () => boolean,
   };
 }
 
-export async function runFixRung(opts: {
-  /** W1-T4072: production pins harness commits and pushes to the dispatch head. */
-  guardRoundHead?: boolean;
-  taskId: string;
-  runId: string;
-  /** `files` (W1-T322) — see runReview's own `task` doc; every real caller already passes the
-   *  full plan `Task`, so this widens for free. */
-  task: { id: string; title: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
-  prUrl: string;
-  branch: string;
-  worktreePath: string;
-  /** The failing implement worker's session id — resumed on strike 1. */
-  initialSessionId: string;
-  mount: Mount;
-  /** The final fresh strike's mount (`step_up:`); absent keeps every strike on {@link mount}. */
-  stepUpMount?: Mount;
-  settingsFile: string;
-  config: Config;
-  budgetUsd: number;
-  strikeCap: number;
-  progressDecision?: FixProgressVerdict;
-  progressApproach?: string;
-  /** W1-T7096: ask the production LLM progress judge when `deps.fixProgressJudge` is unwired. */
-  useProductionProgressJudge?: boolean;
-  /**
-   * W1-T2403: the per-head bound on retrigger-shaped rounds (see {@link isRetriggerShapedCommit})
-   * this invocation spends before it stops retriggering and escalates naming the check(s) that
-   * stayed red. Optional — defaults to {@link DEFAULT_FIX_RETRIGGER_CAP}. NEVER `strikeCap`
-   * itself, which this task leaves unchanged in either direction.
-   */
-  retriggerCap?: number;
-  /** The blocked_review verdict that triggered this rung. */
-  initialReview: ReviewRunResult;
-  initialCriterionIndices?: readonly number[];
-  reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
-  /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
-   * reviewer does not reread policy from disk on every fix strike. */
-  reviewerClockBoundMs?: number;
-  /** Parent run sensor shared by implement, fix, and advisory review workers. */
-  workerTelemetry?: WorkerStateSensor;
-  /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
-   *  `openTaskIds` doc. Optional; absent behaves exactly as every pre-W1-T322 caller already does. */
-  openTaskIds?: ReadonlySet<string>;
-  /** Re-read immediately before each fix-rung terminal verdict; never reuse a boot-time code
-   * observation after the worker has spent time changing or waiting on the PR. */
-  reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
-  /**
-   * W1-T78: an operator's answer to a clarification question, if this is a
-   * RE-DISPATCH — carried verbatim on EVERY strike's prompt as an added
-   * constraint (never paraphrased). Absent for an ORIGINAL blocked_review
-   * dispatch (W1-T76, unchanged).
-   */
-  constraint?: string;
-  feedbackContributions?: readonly unknown[];
-  /**
-   * W1-T100 (the #170 fix): failing required-check name+log-tail evidence for
-   * a blocked_ci dispatch — this PR is checks-red with NO review verdict
-   * posted yet, so the failing signal IS the CI log, never a reviewer verdict.
-   * Present ONLY for a ci-log-mode dispatch; undefined for the ordinary
-   * blocked_review path (W1-T76, unchanged). Drives the ci-log MODE
-   * (deriveFixMode/renderFixPrompt, W1-T94) for every strike UNTIL a real
-   * review actually runs (only reached once CI goes green) — from then on
-   * every subsequent strike reverts to review-mode evidence, even if that
-   * review itself still fails (a real verdict is never re-treated as "no
-   * review yet").
-   */
-  ciFailures?: CiFailure[];
-  ciEvidenceDisagreement?: CiEvidenceDisagreementObservation;
-  /** W1-T3166: the residual escalation judge (W1-T349). Defaulted to the real spawn, so production
-   *  is wired by OMISSION — a mechanism behind a default-off flag is unwired wearing a switch. */
-  escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
-  /**
-   * W1-T106 (the #170 DIRTY strand): merge-conflict evidence for a
-   * `conflicted` dispatch — this PR's merge state is dirty, so no CI check
-   * even runs and no review can post until the conflict resolves. Present
-   * ONLY for a merge-conflict-mode dispatch; undefined for every other path
-   * (ci-log/reviewer-unmet/body-coverage, unchanged). Drives the
-   * merge-conflict MODE (deriveFixMode/renderFixPrompt, W1-T94) UNTIL a
-   * strike's push leaves CI able to run at all — from then on this PR is no
-   * longer dirty, so every subsequent strike reverts to whichever mode its
-   * (now-computable) review/checks state derives, exactly like ci-log's own
-   * `noReviewYet` reversion.
-   */
-  mergeConflict?: MergeConflictEvidence;
-  baseSha?: string;
-  /**
-   * W1-T2236: the SWEEP's already-computed structured gate-failure remedy (W1-T923,
-   * {@link OpenPrView.actionableGateFailures}) — seeds ROUND 1 ONLY of a review-mode dispatch
-   * whose `initialReview` is a lossy ledger reconstruction (`buildFixRungDispatchArgs`: no
-   * `testTheater`/`changesetContradictions`, so `reviewLedgerReasons` on it alone would read
-   * `[]` even for the exact shape this field exists to carry). From round 2 on, this rung
-   * derives the gate-failure evidence FRESH off that round's own live re-review instead (the
-   * SAME `reviewLedgerReasons`/`actionableGateFailuresFromReasons` pair the ledger's own
-   * `review.posted` line and `actionableGateFailuresFromLedger` use) — never this stale seed —
-   * exactly like `ciFailures`' own per-round refresh via `deps.fetchCiFailures`. Present ONLY
-   * for a review-mode dispatch whose `unmetCriteria` is empty; undefined otherwise.
-   */
-  actionableGateFailures?: ActionableGateFailure[];
-  /** W1-T3306: capped-green evidence that makes a same-head PR-body repair actionable. */
-  proofDiscrimination?: ProofDiscriminationEvidence;
-  /** W1-T6434: a dead fix owner's preserved patch at the dispatched head (see PriorPartialWork). Offered to
-   *  every strike that still targets that head; once a push moves the head it is no longer shown. */
-  priorPartialWork?: PriorPartialWork;
-  deps: {
-    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
-    fixProgressJudge?: FixProgressJudge;
-    /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
-    harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
-    writeFixCensusSnapshot?: (...args: Parameters<typeof writeFixCensusSnapshot>) => string | undefined | Promise<string | undefined>;
-    readMainTip?: () => string | Promise<string>;
-    reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
-    requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
-    /** W1-T5544: test seam for the proof-repair gate; production reads the round's git diff and runs `check-proof --base`. */
-    proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
-    scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
-    scopeAmendmentPortsIo?: Parameters<typeof buildProofAmendmentWritePorts>[1];
-    /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
-    worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
-    /** W1-T4458 (i): test seam; production runs `git merge --no-commit --no-ff origin/main`. */
-    startShellLessMergeConflictMerge?: typeof startShellLessMergeConflictMerge;
-    /** W1-T4458 (ii): test seam; production reads `git rev-list --count <roundStart>..HEAD`. */
-    commitsAhead?: (worktreePath: string, base: string) => number;
-    readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; // W1-T9618: production runs `git ls-remote`
-    /**
-     * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
-     * for, or the bare verdict every pre-existing stub already returns. Read it through
-     * {@link ciGateState}/{@link ciGateSha}, never by comparing it to a string directly: a bare
-     * verdict pins nothing and each consumer falls back to its own read, exactly as before.
-     */
-    waitForCiGreen: (
-      prUrl: string,
-      log: (step: string, extra?: Record<string, unknown>) => void,
-    ) => Promise<CiGateOutcome | "green" | "red" | "timeout">;
-    /**
-     * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
-     * re-read of THIS PR's live GitHub state, consulted at the top of every
-     * round — BEFORE `strikes++`, the only point that stops a strike being
-     * spent on a PR that went terminal since the previous round — and again
-     * immediately before the exhaustion escalate() call, so a PR that went
-     * terminal mid-rung never files a BLOCKED "fix rung exhausted" issue.
-     * Never the sweep/drain snapshot the caller may itself hold — a fresh
-     * `gh` read every time. Omitted, or a failed/indeterminate read
-     * (`ok:false`), behaves EXACTLY as before this check existed: the rung
-     * proceeds. Standing down fires ONLY on a positive, freshly-observed
-     * terminal reading (see {@link terminalStateReason}).
-     */
-    readLiveState?: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>;
-    /**
-     * W1-T296: an OPTIONAL fresh read of a PR's live head sha + head commit author, consulted at the pre-strike
-     * gate (site `rung.strike`) only once this invocation has pushed a round (see {@link branchAuthorshipStandDownReason}'s
-     * "first round has no prior head" contract), and (W1-T5779) for an opened prerequisite's head ref. Never a
-     * cached snapshot, mirroring `readLiveState`. Omission refuses a prerequisite dispatch; indeterminate reads proceed.
-     */
-    readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
-    /**
-     * W1-T138 (the #303/#305/#292/#315 fix): fetch the CURRENTLY failing
-     * required check(s) + log tails for THIS pr, called whenever a strike's
-     * push leaves CI non-green — refreshes the NEXT strike's ci-log evidence
-     * so it targets what is ACTUALLY still broken right now, never a stale
-     * `opts.ciFailures` snapshot from before this push (or, for a dispatch
-     * that started in reviewer-unmet mode, the STALE review criteria from
-     * before a strike's own commit newly broke a required check like
-     * commitlint/CodeQL). Optional + best-effort: when omitted (or it throws),
-     * the rung degrades to keeping whatever ci-log evidence it already had —
-     * the MODE still corrects itself (see `noReviewYet` below), only the
-     * failing-check CONTENT stays stale.
-     *
-     * W1-T2804: `sha` is APPENDED LAST with a default, so no positional caller shifts. When the
-     * round's gate read reported a sha, the miner is PINNED to it and both readers answer about
-     * ONE commit; omitted, the miner resolves its own head exactly as it always did.
-     */
-    fetchCiFailures?: (prUrl: string, sha?: string) => Promise<CiFailure[]>;
-    /**
-     * W1-T1278 (condition A): a FRESH read of THIS PR's current status-check rollup — the raw,
-     * per-attempt entries `fetchCiFailures` above filters down to failing names only. Consulted
-     * ONLY at the pre-strike gate (site `rung.strike`), and ONLY when this round is dispatching
-     * in ci-log mode (`currentCiFailures` non-empty) — to answer "does the ONE (or more) required
-     * name I am about to spend a strike on still read red right now, or has a later attempt on
-     * this same head already superseded it" ({@link stillRedRequiredNames}). Never the caller's
-     * own `currentCiFailures` snapshot — a fresh `gh` read every round, mirroring `readLiveState`'s
-     * own discipline. Omitted, or a throwing read, skips this check entirely (fail open — the
-     * rung proceeds exactly as it did before this task).
-     */
-    readCiRollup?: (prUrl: string) => RollupCheckEntry[] | Promise<RollupCheckEntry[]>;
-    /**
-     * W1-T256: fetch THIS PR's current body. Used as the review report in `body-coverage`
-     * fix mode, where the fix worker was told (renderFixPrompt) that the review
-     * floor judges the PR BODY, and the authoritative `reviewCommand`/`post-review`
-     * path DOES judge the body (`report: body`). Without it, this re-review judges
-     * the fix worker's CHAT TEXT instead, so a correct body substantiation is
-     * invisible and the rung can never heal a keyword-floor block — it keeps
-     * posting a worker-text verdict that shadows the body. Tests may inject it; production call
-     * sites wire {@link fetchPrBodyViaGh} explicitly. Every fix mode also uses the fetched
-     * snapshot only as its retry/backoff identity, so a worker transcript never masquerades as PR
-     * input. Best-effort: a throwing fetcher falls back to the worker-text report for judgment
-     * and leaves the exact-input identity unset. Omission refuses a prerequisite dispatch (W1-T5810).
-     */
-    fetchPrBody?: (prUrl: string) => Promise<string>;
-    /**
-     * W1-T307: fetch THIS PR's CURRENT changeset (file paths) — consulted alongside
-     * `fetchPrBody` in `body-coverage` mode ONLY, to check whether this strike's own commit
-     * left the just-fetched body's file-count/enumeration claim stale (see
-     * {@link deriveChangesetClaimUpdate}). Injected only by tests; in production it DEFAULTS
-     * to {@link fetchPrDiffFilesViaGh}. Best-effort: a throwing fetcher skips the repair for
-     * this strike (the claim, if stale, is left exactly as `bodyContradictsDiff` would have
-     * found it — never a partial or guessed edit).
-     */
-    fetchPrDiffFiles?: (prUrl: string) => Promise<string[]>;
-    /**
-     * W1-T307: write a PR's body — how {@link deriveChangesetClaimUpdate}'s narrow,
-     * mechanical edit actually reaches GitHub before the review below re-runs. Injected only
-     * by tests; in production it DEFAULTS to {@link updatePrBodyViaGh}. Best-effort: a
-     * throwing writer leaves the live body stale (the review that follows judges the
-     * fetched-but-unwritten body text this round already computed, so the CORRECTED review
-     * report is still used for this round's verdict even if persisting it to GitHub failed).
-     */
-    updatePrBody?: (prUrl: string, body: string) => Promise<void>;
-    /** The test files the PR head adds: the proofs a body repair prefers. Default: the real diff in the worktree. */
-    addedTestsAtHead?: (headSha: string) => AddedTestsAtHead;
-    /** W1-T4263: the PR head's diff since its merge base, the anchor a body repair falls back to. Default: the worktree's. */
-    diffAtHead?: (headSha: string) => string | undefined;
-    /**
-     * W1-T3506: runs one `grep:` proof from a CANDIDATE acceptance-gate body repair, exactly at
-     * the moment `acceptanceGateBodyRepair` is about to be pushed via `updatePrBody` — the write
-     * boundary {@link repairedProofsAreSafeToPush} (W1-T3389, lib/body-repair.ts) exists to guard
-     * but that PR never wired in. `undefined` reports the SAME `exec_error` causes the reviewer's
-     * own `judgeCriterion` reports (a parse failure, a timeout, a spawn error, grep exit 2) — this
-     * gate refuses to push on any of them. OPTIONAL WITH NO INTERNAL DEFAULT (mirrors
-     * `readCiRollup`/`fetchPrDiffFiles` above, never `fetchPrBody`'s `?? fetchPrBodyViaGh` shape):
-     * omitted, `diagnoseUnrunnableProofs` (body-repair.ts) itself degrades to its pure parse-shape
-     * check only — never a false refusal from a caller that never wired a runner. The real
-     * production call site wires {@link execGrepProofInWorktree} bound to that round's own
-     * `worktreePath`, the SAME checkout every other strike in this rung already reads and writes,
-     * through {@link "./lib/review.js".execWhitelistedProof} — this repo's ONE proof executor,
-     * never a second hand-rolled one.
-     */
-    execAcceptanceGateRepairProof?: (proof: string) => { hits: number } | undefined;
-    /**
-     * W1-T3557: re-resolve THIS task's acceptance criteria + declared files from the plan AS IT
-     * STANDS AT THE CURRENT PR HEAD — the same head-bound resolver `rmd review` uses
-     * ({@link "./lib/review.js".resolvePlanCriteriaAtHead}) — rather than replaying `opts.task`,
-     * a snapshot captured once at sweep admission. A daemon run that begins before a legitimate
-     * plan split or scope amendment (the W1-T3545 shape this fixes) can otherwise judge a PR
-     * against a contract the plan has already superseded by the time this rung's re-review
-     * actually runs. `undefined` back means the current head's contract could not be read (an
-     * unresolvable git object, a duplicate id) — the call site below NEVER falls back to
-     * `opts.task` on that signal; it stands the rung down instead (see the call site's own
-     * comment). A LEGITIMATE empty/narrowed criteria set at a READABLE head (no divergence) is
-     * not this case — it is exactly the refreshed contract this task exists to pass through.
-     * OPTIONAL, purely for pre-existing fixtures: omitted preserves the exact pre-W1-T3557
-     * behavior of passing `opts.task` straight through, so every fixture that predates this task
-     * needs no update. Production wires {@link resolveFixRungTaskContractAtHead}, which always
-     * runs — an un-updated production call site is not a shape this deps object allows silently,
-     * only a test fixture that never touches this field is.
-     */
-    resolveTaskContractAtHead?: (
-      prUrl: string,
-      taskId: string,
-    ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
-    runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
-    /** Push whatever the fix worker committed. Best-effort — a worker that
-     * already pushed leaves nothing new, which is not an error.
-     * W1-T2610: `expectedHeadSha`, when this rung can name the sha it just committed, is
-     * threaded to the leaf's post-condition (`gitPushRunBranch`'s `expectedHeadSha`) so a ref
-     * rewound between the commit and this call raises `LanePushForeignHeadError` instead of
-     * silently no-op'ing. Optional and additive — every existing test double that ignores its
-     * third argument keeps working unchanged. */
-    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown;
-    /** Fresh REST head read used only after the push to bind this worker to its exact output. */
-    readHeadShaForProvenance?: (prUrl: string) => string;
-    issues: IssueGateway;
-    escalationIssues?: AsyncIssueGateway;
-    ledgerPath: string;
-    /** W1-T5535: the fix rows the routing learner folds. Defaults to the cached async ledger-union read. */
-    readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>>;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-    say: (msg: string) => void;
-    account: (r: WorkerResult) => WorkerResult;
-    /**
-     * W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND): the WALL-CLOCK BOUND (ms) on ONE
-     * `deps.spawn` call below — see this task's own rationale for the measured incident (a
-     * fix-rung worker's `until` shell loop with no exit condition ran 8,970s as a direct
-     * daemon child; neither `--max-turns` nor `--max-budget-usd` can fire on a shell command
-     * that never returns). Optional: omitted defaults to {@link DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS}
-     * (policy.ts) — POLICY DATA (see that constant's own doc), never a literal at this call
-     * site; the real call sites here thread `plan/policy.yaml`'s `fixSpawnWallClockBoundMs` row
-     * (W1-T1219 split this OFF `sweepWallClockBoundMs` — a sweep tick and this spawn are
-     * different populations, so one row could no longer bound both).
-     */
-    spawnWallClockBoundMs?: number;
-    /**
-     * W1-T1044: best-effort RECLAIM of a worker THIS bound abandoned — the daemon-side bound
-     * (daemon.ts's `deps.sweep` call site) frees the DAEMON but never touches what the sweep
-     * spawned; this is what stops an abandoned worker becoming an unreaped orphan (still
-     * holding its worktree, its lock and its live API session, still polling). Called AFTER
-     * the abandonment is ledgered (`fix.spawn_abandoned`), never before — see
-     * {@link spawnFixWorkerBounded}'s own doc for why recording precedes reclaiming. Optional:
-     * omitted, the worker is left running (exactly pre-W1-T1044 behavior) — reclaim is a
-     * best-effort improvement layered on top of the bound returning control, never a
-     * precondition for it.
-     */
-    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
-    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
-    /**
-     * W1-T1095 (capability 1's resume half): an OPTIONAL fresh live-state read of an
-     * ARBITRARY prerequisite PR number (never `opts.prUrl` itself) — consulted ONLY when
-     * {@link outOfDiffBlockerFor} finds a "blocked on #N" review, to decide whether N has
-     * merged yet. Mirrors `readLiveState`'s own contract exactly ({@link LiveStateResult});
-     * omitted, or a failed/indeterminate read, behaves as "not yet merged" — the SAME
-     * fail-safe direction every other live-state read in this rung already takes (see
-     * {@link prerequisiteMerged}'s own doc). The real call site (`buildSweepEffects`) wires
-     * this to the SAME `ghLiveState` reader every other spending site here already uses,
-     * against the prerequisite's own PR URL in this task's repo.
-     */
-    readPrerequisiteState?: (prNumber: number) => LiveStateResult | Promise<LiveStateResult>;
-    /**
-     * W1-T1095 (capability 3 — REBASE): the two REST observations {@link runFixRebase} needs
-     * once a prerequisite has merged — `mergeable` and `behind_by`. Optional: a call site that
-     * omits it leaves `mergeable` unreadable, which {@link decideFixRebase} REFUSES on, so an
-     * unwired reader can only ever decline to rebase, never rebase blindly.
-     */
-    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
-    /**
-     * W1-T1095 (capability 3): the update-branch WRITE — {@link ghUpdateBranchArgv} over `gh api`.
-     * Optional, and its absence is ledgered as a refusal rather than assumed: the rung must never
-     * report a rebase it did not perform.
-     */
-    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
-    /**
-     * W1-T2671: fresh REST evidence for the checks-red branch's own base gap. Consulted only for
-     * ci-log mode, before the first strike. Omitted or unreadable facts leave the existing fix
-     * path unchanged.
-     */
-    readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
-    /** W1-T8396: the trial-merge probe the exact-path refresh decides from. Unwired, the refresh is kept
-     *  as today and its `refresh.clearance` row says why. */
-    reproduceFailingTestsOnMerge?: NonNullable<SweepDeps["reproduceFailingTestsOnMerge"]>;
-    /**
-     * W1-T1095 (capability 3): the ledger rows the ONE-rebase-per-pull-request bound is folded
-     * from ({@link fixRebaseAlreadySpent}). Defaults to reading `deps.ledgerPath`, the same
-     * `ledgerLines?` seam `armAuto`/`disarmAuto` already take.
-     */
-    ledgerLines?: () => Array<Record<string, unknown>>;
-    /**
-     * W1-T1284: an OPTIONAL fresh capture of `opts.worktreePath`'s own local content —
-     * consulted ONLY at the pre-strike gate (site `rung.strike`), to detect a strike that
-     * pushed nothing changing nothing — see {@link unchangedTreeStandDownReason}'s own doc.
-     * Never the PR's remote head sha, and never anything about `origin/main`. Omitted, or a
-     * failed/throwing capture, behaves EXACTLY as before this check existed: the rung proceeds
-     * (fail open — a read failure can only ever cause a strike to spend). The real call sites
-     * wire {@link captureWorktreeSnapshotViaGit}.
-     */
-    captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>; readRegisteredWorktrees?: () => readonly RegisteredWorktree[] | Promise<readonly RegisteredWorktree[]>;
-    /**
-     * W1-T2403: read THIS round's own new commit(s) — `sinceSha..HEAD` in `opts.worktreePath` —
-     * consulted right after `deps.spawn` demonstrably returns and BEFORE `strikes` is committed,
-     * to decide whether the round is an ordinary repair or RETRIGGER-SHAPED (see
-     * {@link isRetriggerShapedCommit}). Optional and FAIL OPEN, exactly like every other reader
-     * here: omitted, or a throwing read, leaves this round's commit list empty, which classifies
-     * as an ORDINARY repair — an unreadable signal can only ever cause a strike to spend, never
-     * invent a retrigger. The real call sites wire {@link readFixRoundCommitsViaGit}.
-     */
-    readRoundCommits?: ReadFixRoundCommits;
-    /**
-     * W1-T2551: run ONE declared generator's npm script (`npm run <name>` semantics) against this
-     * rung's own worktree — the ONLY mechanism {@link generatorFixFor}'s class of ci-log failure
-     * is resolved by (never a hand-composed edit). Optional; when EITHER this or
-     * `commitGeneratorOutput` below is absent, the generator-fix short-circuit (site
-     * `rung.generator_fix`, before `strikes++`) never fires and every ci-log round goes straight
-     * to the ordinary fix-worker path exactly as it did before this task — fail OPEN, the same
-     * discipline every other optional dep here already uses.
-     */
-    runGeneratorScript?: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
-    /**
-     * W1-T2551: commit whatever the generator run above staged into the worktree's OWN working
-     * tree — `git add -A && git commit`, never a hand-composed diff (acceptance criterion 5).
-     * `changed: false` when nothing was staged (the fresh regeneration already matched what was
-     * committed).
-     */
-    commitGeneratorOutput?: (opts: { cwd: string; message: string }) => { sha: string; changed: boolean } | Promise<{ sha: string; changed: boolean }>;
-    /**
-     * W1-T2551: this repo's OWN package.json `scripts` map — the declared-pairing source
-     * (rationale (2), acceptance criterion 2): a `<name>:check` script is a generator's verify
-     * mode IFF the bare `<name>` is ALSO declared there. Optional; absent behaves as `{}`, under
-     * which {@link generatorFixFor} never matches anything — "unknown" reads as "no pairing", the
-     * one input this feature must fail CLOSED on rather than guess.
-     */
-    packageScripts?: Readonly<Record<string, string>>;
-    /** W1-T5955: the round's branch claim — released at its `fix.done`, re-taken before reuse. */
-    branchClaim?: FixRoundBranchClaim;
-    /** The approved skill tree the fix lane selects from; production reads the implement lane's. */
-    approvedSkillsDir?: string;
-  };
-}): Promise<FixRungOutcome> {
+export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0]): ReturnType<RunTaskCommandHost["runFixRung"]> {
   const roundRows: Record<string, unknown>[] = [];
   const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
     roundRows.push({ ...extra, task_id: opts.taskId, step });
@@ -12153,6 +10871,8 @@ export async function runFixRung(opts: {
   // into both the pre-strike probe's key and the false-block producer below, so the two can never
   // disagree about "current".
   const currentContractRevision = taskContractRevision(opts.task);
+  const currentSemanticRevision = taskSemanticRevision(opts.task);
+  let progressReviewInputDigest = opts.progressReviewInputDigest;
   const admitFixTests = !(opts.task.files?.length && opts.task.files.every(isInPlanScope));
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
   // queue, no ledger step. The ten fix-rung sites below are the NEEDS ME board's largest class.
@@ -12165,6 +10885,7 @@ export async function runFixRung(opts: {
       settingsFile: opts.settingsFile,
     });
   let review = opts.initialReview;
+  let reconstructedReviewChecked = false;
   const proofDiscriminationStillNeedsRepair = () =>
     opts.proofDiscrimination !== undefined &&
     review.capped === true &&
@@ -12188,6 +10909,9 @@ export async function runFixRung(opts: {
     return { outcome: "handed_off", review, strikes, retriggers, reason };
   };
   let sessionToResume: string | undefined = opts.initialSessionId;
+  let previousForResume: Pick<WorkerResult, "provider" | "text" | "blocks"> = {
+    provider: opts.initialSessionProvider, text: "", blocks: [],
+  };
   // W1-T100: true until a REAL review has run FOR THE CURRENT head. A
   // blocked_ci dispatch (opts.ciFailures set) has no reviewer verdict at all
   // yet, so its evidence is ci-log-shaped rather than review-shaped. Flips
@@ -12277,7 +11001,7 @@ export async function runFixRung(opts: {
   // does not parse, in which case the pre-strike merge-conflict check below is skipped every
   // round (never a guessed number).
   const prNumber = prNumberFromRef(opts.prUrl);
-  const amendScope = async (paths: string[], changedPaths: string[], headSha: string): Promise<ScopeAmendmentOutcome> => {
+  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
       const body = await (deps.fetchPrBody ?? fetchPrBodyViaGh)(opts.prUrl);
@@ -12294,10 +11018,22 @@ export async function runFixRung(opts: {
     } catch (error) {
       outcome = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
     }
-    deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
-      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined });
+    let recovery: Record<string, unknown> = {};
+    if (saveWork && (outcome.kind === "created" || outcome.kind === "resumed")) {
+      try {
+        recovery = { recovery_status: "saved",
+          recovery_path: await saveScopeAmendmentWork(scopeWork(paths, outcome.amendmentNumber)) };
+      } catch (error) {
+        const reason = String(error);
+        recovery = { recovery_status: "unavailable", recovery_reason: reason };
+      }
+    }
+    if (outcome.kind !== "amendment_merged") deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
+      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery });
     return outcome;
   };
+  const scopeWork = (paths: string[], amendmentNumber: number) => ({ root: opts.config.root,
+    worktreePath: opts.worktreePath, taskId: opts.taskId, prNumber: prNumber!, amendmentNumber, paths });
   // W1-T2671: at most one base-gap read/update attempt per invocation. A successful update ends
   // this invocation because GitHub's update-branch endpoint is asynchronous and the current
   // worktree is now stale; the next level-triggered sweep reconstructs both CI and the checkout
@@ -12377,10 +11113,11 @@ export async function runFixRung(opts: {
       operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap, parkedReason: forJudge ? parkedReason : undefined });
     standInEscalates = true;
     try {
-      const decision = await judgeFixProgress(input, progressJudge);
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
+      const { decision, receipt } = await resolveFixProgress(input, persisted,
+        { judge: progressJudge, reviewInputDigest: progressReviewInputDigest, contractRevision: currentContractRevision });
+      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
         parked_reason: parkedReason, former_ceiling: input.formerCeiling,
-        round_count: input.rounds.length, signals: input.signals, ...decision });
+        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       return decision;
     } finally {
       standInEscalates = false;
@@ -12587,6 +11324,40 @@ export async function runFixRung(opts: {
       return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
     }
 
+    // W1-T10029: revalidate concrete reconstructed failed proofs before the first dispatch on
+    // this head. A missing proof cannot be re-executed, and an earlier dispatch owns the
+    // progress decision for its head; neither is a fresh no-op prevention opportunity.
+    if (!reconstructedReviewChecked && currentMergeConflict === undefined && !noReviewYet &&
+      review.reviewerOutcome === "sweep-reconstructed" &&
+      review.criteria.some((criterion) => !criterion.met && criterion.proof_exec === "executed_fail" && criterion.proof.trim() !== "") &&
+      !(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))().some((row) =>
+        row.step === "fix.dispatch" && row.task_id === opts.taskId && row.head_sha === review.headSha)) {
+      reconstructedReviewChecked = true;
+      try {
+        const body = await (deps.fetchPrBody ?? fetchPrBodyViaGh)(opts.prUrl);
+        const fresh = await deps.runReview({
+          ...opts.reviewBase, prUrl: opts.prUrl, task: opts.task, report: body,
+          reportIsSubstitute: false, reviewInputBody: body, settingsFile: opts.settingsFile,
+          config: opts.config, budgetUsd: opts.budgetUsd, log: deps.log, say: deps.say,
+          account: deps.account, reviewerClockBoundMs: opts.reviewerClockBoundMs,
+          workerTelemetry: opts.workerTelemetry, reviewerCodeFreshness: opts.reviewerCodeFreshness,
+          ledgerPath: deps.ledgerPath, runId: opts.runId, openTaskIds: opts.openTaskIds,
+        });
+        deps.log("fix.pre_dispatch_review", { head_sha: fresh.headSha, prior_head_sha: review.headSha,
+          state: fresh.state, verdict_withheld: fresh.verdictWithheld });
+        if (fresh.verdictWithheld || fresh.headSha !== review.headSha) {
+          const reason = fresh.verdictWithheld ?? "PR head moved during pre-dispatch review";
+          deps.log("fix.stood_down", { site: "rung.pre_dispatch_review", reason, head_sha: fresh.headSha });
+          return { outcome: "stood_down", review: fresh, strikes, retriggers, reason, standDownReason: reason };
+        }
+        review = fresh;
+        progressReviewInputDigest = reviewInputDigest(fresh.headSha, body);
+        if (fresh.state === "success") continue;
+      } catch (error) {
+        deps.log("fix.pre_dispatch_review_error", { head_sha: review.headSha, error: String(error) });
+      }
+    }
+
     // W1-T2671 SITE — BASE-GAP REFRESH, BEFORE `strikes++` and before every deterministic/worker
     // repair below. This is deliberately restricted to a ci-log round with a non-empty failure
     // set: only that shape supplies the failing test or diff-coverage source path needed to prove
@@ -12628,14 +11399,15 @@ export async function runFixRung(opts: {
           refresh: decision.refresh,
         });
         // W1-T8396: an exact-path match says main touched the red's files, not that merging main clears
-        // the red — a failing test file that still fails on a trial merge is the PR's own. Rule 3 (no
-        // repeat on the same red) needs no read here: this arm's matched paths are themselves counted.
+        // the red — a failing test file that still fails on a trial merge is the PR's own. This arm's
+        // matched paths are themselves counted, so rule 3's path test never refuses here; the history
+        // read below still makes a repeat on the same red need a trial merge that clears it.
         const refreshTestFiles = baseReproductionFiles(currentCiFailures);
         const refreshChecks = [...new Set(currentCiFailures.map((failure) => failure.name))];
         let refreshMainSha: string | undefined;
         const probeMerge = deps.reproduceFailingTestsOnMerge;
         if (decision.refresh && refreshTestFiles.length > 0 && probeMerge) {
-          // An unreadable main tip leaves the probe unrunnable, which keeps today's refresh.
+          // An unreadable main tip leaves the probe unrunnable, which keeps only a first refresh of this red.
           refreshMainSha = await Promise.resolve(deps.readMainTip ? deps.readMainTip() : mainTipViaGit(opts.worktreePath)).then(
             (sha) => sha, (error: unknown) => { deps.log("refresh.clearance.main_tip_unreadable", { error: boundedBaseProbeReason(error) }); return undefined; });
         }
@@ -12643,7 +11415,8 @@ export async function runFixRung(opts: {
           failingTestFiles: refreshTestFiles,
           reach: mainPathsReachingRed({ failingTestFiles: refreshTestFiles, mainChangedFiles: facts.baseChangedFiles, closure: undefined,
             isHarnessPath: isCiHarnessPath, matchedPaths: decision.matchingBaseFiles }),
-          priorRefresh: false,
+          priorRefresh: refreshedOnSameRed(refreshRecordsFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))()),
+            prNumber, refreshChecks, refreshTestFiles),
         }, probeMerge && refreshMainSha !== undefined
           ? () => probeMerge({ prNumber, headSha: review.headSha } as OpenPrView, refreshTestFiles, refreshMainSha!) : undefined)
           : undefined;
@@ -12707,11 +11480,13 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = await judgeFixProgress(input, progressJudge);
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
+      const { decision, receipt } = await resolveFixProgress(input, persisted,
+        { judge: progressJudge, firstRound: true, reviewInputDigest: progressReviewInputDigest,
+          contractRevision: currentContractRevision });
+      deps.log(receipt.step, { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
-        round_count: input.rounds.length, signals: input.signals, ...decision });
+        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
+        round_count: input.rounds.length, signals: input.signals, ...decision, ...receipt });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
         const loop = `fix progress loop: ${decision.loop} — ${decision.reason}`;
@@ -13088,7 +11863,9 @@ export async function runFixRung(opts: {
           ? fixRungScopeStandDownReason(
               currentDiffFiles,
               baselineDiffFiles,
-              admitFixTests && opts.task.files ? [...opts.task.files, "test/"] : opts.task.files,
+              admitFixTests && opts.task.files
+                ? [...opts.task.files, "test/", ...admittedFixTestPaths(currentDiffFiles, opts.task.files.length > 0)]
+                : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
               readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha),
@@ -13554,12 +12331,71 @@ export async function runFixRung(opts: {
     const pendingScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
       row.task_id === opts.taskId && row.pr_number === prNumber && row.head_sha === priorHeadSha &&
       ["created", "resumed", "branch_update_requested"].includes(String(row.outcome)));
+    let scopeMergeStartSha: string | undefined;
+    let scopeRecoveryEvidence: string | undefined;
     if (pendingScope && Array.isArray(pendingScope.paths)) {
       const paths = pendingScope.paths as string[];
       const resumed = await amendScope(paths, paths, priorHeadSha);
       if (resumed.kind === "refused") deps.log("fix.commit_refused", { head_sha: priorHeadSha,
         reason: resumed.detail, scope_amendment_detail: `NEEDS_SCOPE ${paths.join(",")}` });
-      return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      if (resumed.kind !== "amendment_merged") {
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      }
+      const git = (args: string[], input?: string) =>
+        (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { input, maxBuffer: 1 << 26 });
+      let mergeSha: string | undefined;
+      let mergeAttempted = false;
+      try {
+        if ((await git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL])).trim()) {
+          throw new Error("local scope merge requires a clean worktree");
+        }
+        scopeMergeStartSha = (await git(["rev-parse", "HEAD"])).trim();
+        await git(["fetch", "--no-tags", "origin", "main"]);
+        mergeAttempted = true;
+        await git(["merge", "--no-edit", "--no-ff", "refs/remotes/origin/main"]);
+        mergeSha = (await git(["rev-parse", "HEAD"])).trim();
+        const contract = await resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${opts.taskId}`,
+          opts.worktreePath, "plan/tasks.yaml", mergeSha, git);
+        const declaredFiles = contract.taskDeclaredFiles;
+        if (contract.divergence || declaredFiles === undefined || !paths.every((path) => declaredFiles.includes(path))) {
+          throw new Error(`the locally merged task contract does not admit the amendment paths: ${contract.divergence?.reason ?? JSON.stringify(contract.taskDeclaredFiles)}`);
+        }
+        opts.task = { ...opts.task, files: contract.taskDeclaredFiles, acceptance: contract.criteria };
+      } catch (error) {
+        let reason = `${String(error)}\n${String((error as { stdout?: unknown }).stdout ?? "")}\n${String((error as { stderr?: unknown }).stderr ?? "")}`;
+        if (mergeAttempted && mergeSha === undefined) try {
+          await git(["merge", "--abort"]);
+        } catch (abortError) {
+          const error = String(abortError);
+          reason += `; merge abort: ${error}`;
+        }
+        let update: { ok: boolean; error?: string };
+        try {
+          const ports = deps.scopeAmendmentWritePorts ?? buildProofAmendmentWritePorts({
+            taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config,
+            owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, prNumber: prNumber!,
+            ledgerLinesNow: roundLedger, log: deps.log, gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
+          }, deps.scopeAmendmentPortsIo);
+          update = ports.updateBranch(opts.prUrl, priorHeadSha);
+        } catch (updateError) {
+          update = { ok: false, error: String(updateError) };
+        }
+        deps.log("fix.scope_amendment", { outcome: "branch_update_requested", ...update, reason,
+          paths, head_sha: priorHeadSha, pr_number: prNumber, amendment_number: resumed.amendmentNumber, merged_locally: false });
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+      }
+      let recovery: Record<string, unknown>;
+      try {
+        const restored = await restoreScopeAmendmentWork(scopeWork(paths, resumed.amendmentNumber));
+        recovery = { recovery_status: "restored", restored_paths: restored };
+        scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber}: ${restored.join(", ")} restored from the round that asked for scope.`;
+      } catch (error) {
+        const reason = String(error);
+        recovery = { recovery_status: "unavailable", recovery_reason: reason };
+        scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber} admitted ${paths.join(", ")}. Saved work unavailable: ${reason}. Repair these admitted paths against the red below.`;
+      }
+      deps.log("fix.scope_amendment", { outcome: "amendment_merged", merged_locally: true, merge_sha: mergeSha,
+        amendment_number: resumed.amendmentNumber, paths, head_sha: priorHeadSha, pr_number: prNumber, ...recovery });
     }
     // W1-T9807: a main-owned refusal is retried, without a worker, at the first head holding the main it compared.
     const lastScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" && row.task_id === opts.taskId && row.pr_number === prNumber);
@@ -13574,8 +12410,25 @@ export async function runFixRung(opts: {
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
     if (priorDesign) {
       const reason = String(priorDesign.reason);
-      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design" });
-      return { outcome: "needs_design", review, strikes, retriggers, reason };
+      const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
+        row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
+      let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
+      let deliveryError: { error: string } | undefined;
+      if (!issueUrl) try {
+        issueUrl = (await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+          headSha: priorHeadSha, cause: "ci", contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
+          summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
+          detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
+            `at this head without a round. The worker's diagnosis:\n\n${reason}`,
+          options: [{ label: "repair-cause", detail: "repair what the diagnosis names; a new head resumes the fix lane" },
+            { label: "hand-fix", detail: "push a fix to this PR by hand; a new head resumes the fix lane" }],
+          recommendation: "repair-cause", consequence: "this PR stays red and unmerged at this head" },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge })) || undefined;
+      } catch (error) {
+        deliveryError = { error: String(error) };
+      }
+      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design", issue_url: issueUrl, ...deliveryError });
+      return { outcome: "needs_design", review, strikes, retriggers, reason, issueUrl };
     }
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     // W1-T2328: the ci-log evidence THIS round's dispatch (below) is about to target, snapshotted
@@ -13668,6 +12521,7 @@ export async function runFixRung(opts: {
         // read one shared value, never two independently derived ones.
         reachableRemedyFiles,
       }),
+      ...(scopeRecoveryEvidence ? [scopeRecoveryEvidence] : []),
       ...(refutedFlake ? [`this red reproduced on a rerun at ${priorHeadSha}; it is not a flake. Make a real fix; another FLAKE outcome will be recorded as a no-op without a rerun.`] : []),
       ...(proofRepairRound && proofDiscriminationNow
         ? proofRepairPromptLines({ proofs: proofDiscriminationNow.proofs, stageable: proofRepairStageable })
@@ -13707,6 +12561,9 @@ export async function runFixRung(opts: {
       prompt,
       ...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {}),
       resumeSessionId: round === "resume" ? sessionToResume : undefined,
+      ...(round === "resume" && sessionToResume ? {
+        continuation: workerContinuation(previousForResume, "The current self-contained repair contract and evidence appear in the pending action below.", opts.worktreePath),
+      } : {}),
       // W1-T210: ci-log mode's prompt carries an untrusted CI log tail, so no WebFetch/WebSearch.
       // W1-T4458 (iii): a round the harness commits loses Bash too, so its prompt and tools agree.
       tools: fixHarnessOwnsGit ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
@@ -13779,6 +12636,8 @@ export async function runFixRung(opts: {
         }
       },
     });
+    // The unpublished local merge is the commit base; the push still leases the PR's original tip.
+    const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
@@ -13872,7 +12731,8 @@ export async function runFixRung(opts: {
         standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` };
     }
 
-    const censusCheck = await checkFixCensusSnapshotAsync(opts.worktreePath, censusSnapshotPath, deps.log);
+    const censusCheck = await checkFixCensusSnapshotAsync(opts.worktreePath, await censusSnapshotForCheck(opts.worktreePath,
+      censusSnapshotPath, currentMergeConflict !== undefined, deps.writeFixCensusSnapshot, deps.log), deps.log);
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
@@ -13974,6 +12834,7 @@ export async function runFixRung(opts: {
             declaredPaths: opts.task.files ?? [],
           }),
           resumeSessionId: fixResult.sessionId,
+          continuation: workerContinuation(fixResult, prompt, opts.worktreePath),
         },
         { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
       );
@@ -14135,6 +12996,7 @@ export async function runFixRung(opts: {
       );
     }
     sessionToResume = fixResult.sessionId;
+    previousForResume = fixResult;
     if (harnessCommitRefused && fixAction.kind !== "scope-needed") {
       const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
@@ -14164,6 +13026,7 @@ export async function runFixRung(opts: {
       round_id: roundId,
       ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
       fix_outcome: fixOutcome?.kind ?? "unstated",
+      ...(harnessCommitRefused && fixOutcome?.kind === "FIXED" ? { fix_outcome: "NOT_LANDED", worker_fix_outcome: "FIXED" } : {}),
       ...fixClaimFields,
       head_sha: priorHeadSha,
       pushed_head_sha: pushedHeadSha,
@@ -14318,30 +13181,50 @@ export async function runFixRung(opts: {
       return { outcome: "stood_down", review, strikes: green ? strikes - 1 : strikes, retriggers,
         reason: green ? "flake-confirmed" : "flake claim refuted" };
     }
+    const amendProofs = (proofEvidence: ProofDiscriminationEvidence) => dispatchProofAmendmentWrite({
+      prUrl: opts.prUrl, taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config, reviewBase: opts.reviewBase,
+      evidence: proofEvidence, transcriptText: workerTranscript(fixResult), priorHeadSha, log: deps.log,
+      review: { state: review.state, capped: review.capped, criteria: review.criteria, reviewerOutcome: review.reviewerOutcome },
+      getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
+    });
     if (fixAction.kind === "hand-off") {
+      // A NEEDS_DESIGN round still carries the PROOF_AMENDMENT its prompt asks for (W1-T8921, W1-T5689: dropped here).
+      if (evidence.proofDiscrimination) amendProofs(evidence.proofDiscrimination);
       const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
-      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
+      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, contract_revision: currentContractRevision,
+        ...(currentSemanticRevision === undefined ? {} : { task_semantic_revision: currentSemanticRevision }),
+        ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
       logFixDone();
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
     }
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha,
         ...(fixAction.attribution ? { attribution: fixAction.attribution.kind, attribution_reason: fixAction.attribution.reason } : {}) });
-      if (unfiledScope) {
+      const workflowPaths = fixAction.paths.filter((path) => path.startsWith(".github/workflows/"));
+      const instrumentPaths = fixAction.paths.filter(isUngrantableInstrumentPath);
+      if (workflowPaths.length > 0 || instrumentPaths.length > 0 || unfiledScope) {
+        const scopeKind = workflowPaths.length > 0 ? "workflow" : instrumentPaths.length > 0 ? "instrument" : "unfiled";
         const paths = [...new Set(fixAction.paths)].sort();
         const identityKey = createHash("sha256").update(JSON.stringify([prNumber, priorHeadSha, paths])).digest("hex");
         const prior = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
-          row.outcome === "unfiled-escalated" && row.identity_key === identityKey);
+          row.outcome === `${scopeKind}-escalated` && row.identity_key === identityKey);
         let issueUrl = typeof prior?.issue_url === "string" ? prior.issue_url : undefined;
         let deliveryError: { error: string } | undefined;
         if (!issueUrl) try {
           issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
             headSha: priorHeadSha, cause: "ci", contractRevision: identityKey,
-            summary: `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`,
-            detail: `@${opts.reviewBase.owner}: ${opts.prUrl} has no plan record to amend. Round ${roundId} ` +
+            summary: scopeKind === "workflow"
+              ? `PR #${prNumber} needs a workflow repair outside the fix lane — ${opts.prUrl}`
+              : scopeKind === "instrument" ? `PR #${prNumber} needs an instrument edit only the operator can grant — ${opts.prUrl}`
+              : `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`,
+            detail: `@${opts.reviewBase.owner}: ${opts.prUrl} ` + (scopeKind === "workflow"
+              ? `needs workflow edits that the fix lane cannot amend or commit: ${workflowPaths.join(", ")}.`
+              : scopeKind === "instrument" ? `needs instrument edits a scope amendment always refuses (instrument-path): ${instrumentPaths.join(", ")}.`
+              : "has no plan record to amend.") + ` Round ${roundId} ` +
               `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}\n\n` +
               `Worker's NEEDS_SCOPE diagnosis (including any main-inherited cause):\n${fixReport}\n\n` +
-              `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}`,
+              `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}` +
+              (scopeKind === "workflow" ? `\n\nBaked-closure catalog:\n${bakedClosureCatalogDetails((priorCiFailures ?? []).map((failure) => failure.logTail ?? "").join("\n"))}` : ""),
             options: [{ label: "route-repair", detail: "route the named paths to their owner or a filed repair task" },
               { label: "revise-pr", detail: "revise this PR's scope explicitly, then resume its fix lane" }],
             recommendation: "route-repair", consequence: "this fix lane stays down at this head until its scope is resolved" },
@@ -14349,11 +13232,11 @@ export async function runFixRung(opts: {
         } catch (error) {
           deliveryError = { error: String(error) };
         }
-        const reason = issueUrl ? "unfiled scope need escalated" : "unfiled scope escalation undelivered";
-        deps.log("fix.scope_amendment", { outcome: issueUrl ? "unfiled-escalated" : "unfiled-escalation-failed",
+        const reason = issueUrl ? `${scopeKind} scope need escalated` : `${scopeKind} scope escalation undelivered`;
+        deps.log("fix.scope_amendment", { outcome: issueUrl ? `${scopeKind}-escalated` : `${scopeKind}-escalation-failed`,
           identity_key: identityKey, paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
-          issue_url: issueUrl, reason, ...deliveryError });
-        deps.log("fix.stood_down", { site: "rung.unfiled_scope", head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
+          issue_url: issueUrl, reason, contract_revision: currentContractRevision, ...deliveryError });
+        deps.log("fix.stood_down", { site: `rung.${scopeKind}_scope`, head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
         logFixDone();
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
       }
@@ -14377,7 +13260,7 @@ export async function runFixRung(opts: {
           pr_number: prNumber, main_sha: mainTip.status === 0 ? mainTip.stdout.trim() : undefined,
           changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)), changed_paths_error: "error" in read ? read.error : undefined });
       } else try {
-        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha);
+        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true);
       } catch (error) {
         amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
@@ -14387,12 +13270,13 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
       }
       deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha,
-        reason: "non-test paths need scope", scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
+        reason: `non-test paths need scope (${amendment.reason}: ${amendment.detail})`,
+        scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
         fix_outcome: fixOutcome?.kind });
       if (harnessCommitCount > 0) {
         let landing: FixRoundLanding | undefined;
         try {
-          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
           landing = await roundLanding(expectedHeadShaForPush);
           if (pushed && pushed !== "refused") return pushed;
         } catch (error) {
@@ -14422,19 +13306,7 @@ export async function runFixRung(opts: {
       // W1-T5544: a proof-repair round that produced no pushable test edit may instead carry a PROOF_AMENDMENT — the
       // parent validates it on the gate-log evidence and opens the one proof-only plan PR. Best-effort, logged either way.
       if (proofRepairRound && proofDiscriminationNow) {
-        dispatchProofAmendmentWrite({
-          prUrl: opts.prUrl,
-          taskId: opts.taskId,
-          worktreePath: opts.worktreePath,
-          config: opts.config,
-          reviewBase: opts.reviewBase,
-          evidence: proofDiscriminationNow,
-          transcriptText: workerTranscript(fixResult),
-          review: { state: review.state, capped: review.capped, criteria: review.criteria },
-          priorHeadSha,
-          log: deps.log,
-          getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
-        });
+        amendProofs(proofDiscriminationNow);
       }
       logFixDone();
       if (censusCheck?.refusal) {
@@ -14471,7 +13343,7 @@ export async function runFixRung(opts: {
     let roundPush: FixRungOutcome | "refused" | undefined;
     let landing: FixRoundLanding = { landed: false, outcome: "failed", reason: "the push did not return" };
     try {
-      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
       landing = await roundLanding(expectedHeadShaForPush);
     } catch (error) {
       landing = pushThrew(error);
@@ -14620,6 +13492,21 @@ export async function runFixRung(opts: {
     // W1-T106: green CI proves the merge ref computes, so merge mode ends (a named red ends it above, #10787).
     currentMergeConflict = undefined;
 
+    const judgedCiHead = ciGateSha(ci);
+    if (judgedCiHead !== undefined) {
+      const checkout = await hostWorktreeGitAsync(opts.reviewBase.headCheckoutDir, ["rev-parse", "HEAD"]).then(
+        head => ({ kind: "known" as const, headSha: head.trim() }),
+        error => ({ kind: "unknown" as const, reason: String(error) }),
+      );
+      if (checkout.kind === "unknown" || checkout.headSha !== judgedCiHead) {
+        const reason = checkout.kind === "unknown" ? `review checkout unreadable after CI: ${checkout.reason}`
+          : `CI judged ${judgedCiHead}, but the review checkout is ${checkout.headSha}`;
+        deps.log("fix.stood_down", { site: "rung.post_ci_review_source", ci_head_sha: judgedCiHead,
+          ...(checkout.kind === "known" ? { checkout_head_sha: checkout.headSha } : { checkout_error: checkout.reason }), reason });
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      }
+    }
+
     // W1-T3501: judge the CURRENT PR BODY — the artifact the authoritative
     // reviewCommand/post-review path judges — not the fix worker's chat text. The
     // worker transcript remains available to the prompt and diagnostics, including
@@ -14721,19 +13608,7 @@ export async function runFixRung(opts: {
     if (fixMode === "proof-discrimination" && evidence.proofDiscrimination) {
       // NOT `reviewReport`: for this mode it was just overwritten with the live PR BODY (above) —
       // the worker's PROOF_AMENDMENT proposal lives only in its own transcript.
-      dispatchProofAmendmentWrite({
-        prUrl: opts.prUrl,
-        taskId: opts.taskId,
-        worktreePath: opts.worktreePath,
-        config: opts.config,
-        reviewBase: opts.reviewBase,
-        evidence: evidence.proofDiscrimination,
-        transcriptText: workerTranscript(fixResult),
-        review: { state: review.state, capped: review.capped, criteria: review.criteria },
-        priorHeadSha,
-        log: deps.log,
-        getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
-      });
+      amendProofs(evidence.proofDiscrimination);
     }
     // W1-T3557: RE-RESOLVE THE CONTRACT AT THE CURRENT PR HEAD, right before it is handed to the
     // reviewer — never earlier, so a strike's own push (just landed, just gone CI-green above)
@@ -14798,6 +13673,7 @@ export async function runFixRung(opts: {
       runId: opts.runId,
       openTaskIds: opts.openTaskIds,
     });
+    progressReviewInputDigest = reviewInputBody === undefined ? undefined : reviewInputDigest(review.headSha, reviewInputBody);
     if (review.verdictWithheld) {
       deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.verdictWithheld });
       return { outcome: "stood_down", review, strikes, retriggers, reason: review.verdictWithheld, standDownReason: review.verdictWithheld };
@@ -15170,12 +14046,13 @@ export function buildProofAmendmentWritePorts(
     assertLiveWriteAllowedFn?: typeof assertLiveWriteAllowed;
   } = {},
 ): ProofAmendmentWritePorts {
+  const scope = params.amendmentKind === "scope_amendment";
   const {
     findShardFn = findTaskShard,
     worktreeAddFn = worktreeAdd,
     worktreeRemoveFn = worktreeRemove,
     writeFileFn = (absPath: string, text: string) => writeFileSync(absPath, text),
-    gitPushFn = (wp: string, branch: string, expectedHeadSha: string) => gitPushRunBranch(wp, { stdio: "ignore", expectedHeadSha }),
+    gitPushFn = (wp: string, branch: string, expectedHeadSha: string) => gitPushRunBranch(wp, { stdio: "ignore", expectedHeadSha, ...(scope ? { destination: branch } : {}) }),
     ghJsonFn = ghJson,
     probeExistingPlanPrFn = probeExistingPlanPr,
     createPlanPrRestFn = createPlanPrRest,
@@ -15184,12 +14061,12 @@ export function buildProofAmendmentWritePorts(
     assertLiveWriteAllowedFn = assertLiveWriteAllowed,
   } = io;
   const { taskId, worktreePath, config, owner, repo, prNumber, ledgerLinesNow, log, gitOps } = params;
-  const scope = params.amendmentKind === "scope_amendment";
   return {
     repoDir: worktreePath,
     findShard: findShardFn,
     worktreeAdd: (repoDir, wp, branch) => {
-      worktreeAddFn(repoDir, wp, branch, "origin/main", { log });
+      const localBranch = scope ? `${branch}-attempt-${randomUUID()}` : branch;
+      worktreeAddFn(repoDir, wp, localBranch, "origin/main", { log });
     },
     worktreeRemove: (repoDir, wp) => worktreeRemoveFn(repoDir, wp),
     writeFile: writeFileFn,
@@ -15422,7 +14299,7 @@ export function dispatchProofAmendmentWrite(
      *  only in its own transcript, never in `reviewReport` (which this mode overwrites with the
      *  live PR body before this runs). */
     transcriptText: string;
-    review: { state: ReviewRunResult["state"]; capped: boolean; criteria: ReviewRunResult["criteria"] };
+    review: { state: ReviewRunResult["state"]; capped: boolean; criteria: ReviewRunResult["criteria"]; reviewerOutcome?: string };
     priorHeadSha: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     /** Lazy: only actually read once a non-empty proposal exists — mirrors the pre-extraction
@@ -15495,7 +14372,8 @@ export function dispatchProofAmendmentWrite(
           isOpen: true,
           planOnly: false,
           taskId: params.taskId,
-          reviewState: params.review.state,
+          // The sweep sends capped evidence only from a posted SUCCESS review; its reconstruction's `failure` is a placeholder.
+          reviewState: params.review.reviewerOutcome === "sweep-reconstructed" ? "success" : params.review.state,
           capped: params.review.capped,
           criteria: params.review.criteria.map((c) => ({ claim: c.claim, proof: c.proof, met: c.met })),
         },
@@ -15524,33 +14402,6 @@ export function dispatchProofAmendmentWrite(
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
-export interface WorkerErrorVerdict {
-  verdict: "blocked_budget" | "failed";
-  budgetBreach: boolean;
-  /** Spread verbatim onto the `verdict` ledger line — carries turns + cost. */
-  ledger: {
-    worker_exit?: NonNullable<WorkerResult["exit"]>["kind"];
-    worker_exit_signal?: string;
-    worker_exit_code?: number;
-    verdict: "blocked_budget" | "failed";
-    stage: string;
-    subtype: string;
-    num_turns: number;
-    cost_usd: number;
-    billing_mode: BillingMode;
-    /** W1-T268: the account this spend is attributed to — see {@link WorkerResult.accountLabel}. */
-    account_label?: string;
-    reason: string;
-    /** W1-T6: the failing call's configured model/effort + its token usage —
-     * a failed worker call is never free OR untelemetered in the ledger. */
-    model: string;
-    effort: string;
-    tokens: WorkerResult["tokens"];
-    /** W1-T35 named columns — see {@link cacheTokenLedgerFields}. */
-    cache_read_input_tokens: number;
-    cache_creation_input_tokens: number;
-  };
-}
 
 /**
  * The routing receipt fields for a terminal `verdict` row — the ONE helper every terminal
@@ -15616,88 +14467,10 @@ export function workerErrorVerdict(
   costUsd: number,
   stage: string,
 ): WorkerErrorVerdict | null {
-  // A "success" subtype is a CLEAN terminal state and is NEVER a worker error — even if
-  // isError is set. collectWorkerResult sets isError=true when the SDK iterator throws
-  // AFTER yielding the result envelope; on a SUCCESS envelope that leaves the pair
-  // {isError:true, subtype:"success"}, which previously produced the contradictory verdict
-  // "worker error at implement: success" (run W1-T12a-1784117152056). A success-but-no-PR
-  // run is handled downstream by noPrVerdict, not here.
-  if (!r.isError || r.subtype === "success") return null;
-  const budgetBreach = r.subtype === "error_max_budget_usd";
-  const verdict: WorkerErrorVerdict["verdict"] = budgetBreach ? "blocked_budget" : "failed";
-  return {
-    verdict,
-    budgetBreach,
-    ledger: {
-      ...(r.exit ? { worker_exit: r.exit.kind } : {}),
-      ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
-      ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
-      verdict,
-      stage,
-      subtype: r.subtype,
-      num_turns: r.numTurns,
-      cost_usd: costUsd,
-      billing_mode: billingMode(r.childEnvKeys),
-      account_label: r.accountLabel,
-      reason: budgetBreach
-        ? "worker breached maxBudgetUsd — not retried (dollars are the backstop)"
-        : r.exit?.kind === "signal"
-          ? `worker ended by signal ${r.exit.signal} at ${stage}`
-          : `worker error at ${stage}: ${r.subtype}`,
-      model: r.model,
-      effort: r.effort,
-      tokens: r.tokens,
-      ...cacheTokenLedgerFields(r.tokens),
-    },
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).workerErrorVerdict(r, costUsd, stage);
 }
 
 /** The verdict + ledger payload for a terminal-SUCCESS worker that produced NO PR. */
-export interface NoPrVerdict {
-  verdict: "no_pr";
-  ledger: {
-    verdict: "no_pr";
-    stage: string;
-    subtype: string;
-    num_turns: number;
-    cost_usd: number;
-    billing_mode: BillingMode;
-    /** W1-T268: the account this spend is attributed to — see {@link WorkerResult.accountLabel}. */
-    account_label?: string;
-    reason: string;
-    model: string;
-    effort: string;
-    tokens: WorkerResult["tokens"];
-    /** W1-T35 named columns — see {@link cacheTokenLedgerFields}. */
-    cache_read_input_tokens: number;
-    cache_creation_input_tokens: number;
-    /**
-     * W1-T407: commits on HEAD ahead of `origin/main` at verdict time — the SILENT NO-OP
-     * GUARD's own predicate (`commitsAhead`, above), threaded through instead of computed and
-     * discarded. Appended LAST so no existing positional `noPrVerdict` caller shifted. Lets a
-     * reader separate WROTE NOTHING from WROTE SOMETHING THAT COULD NOT BE PUSHED without
-     * re-deriving it from a worktree `worktreeRemove` has already deleted by the time anyone
-     * reads this row.
-     */
-    commits_ahead: number;
-    /**
-     * W1-T407: the worker's own closing report — `text` + `blocks`, already parsed three
-     * times at this call site (decision request, PR url, already-satisfied claim) before
-     * being dropped — riding the row as a capped excerpt ({@link noPrReportExcerpt}).
-     * `undefined`, never an empty string, when the worker left nothing to carry.
-     */
-    report_excerpt?: string;
-    /**
-     * (W1-T465) WHICH KIND of `no_pr` this row is, per {@link classifyNoPrShape} — the stalled
-     * "backgrounded a job and ended the turn" shape, or unclassified. DIAGNOSTIC ONLY: no
-     * scheduling path reads it, and `no_pr` remains drain-halting either way. Always present, so
-     * a reader can tell "looked and found nothing" from "the field predates this task".
-     */
-    no_pr_shape: "awaiting-notification" | "unclassified";
-    /** W1-T3978: producer-owned terminal classification. Absent means the ordinary no-PR path. */
-    terminal_class?: "harness_commit_refused";
-  };
-}
 
 /**
  * Terminal verdict for a worker that reached a SUCCESS subtype but committed nothing and
@@ -15728,33 +14501,7 @@ export function noPrVerdict(
   commitsAheadCount: number,
   terminalClass?: "harness_commit_refused",
 ): NoPrVerdict {
-  const reportExcerpt = noPrReportExcerpt(r);
-  return {
-    verdict: "no_pr",
-    ledger: {
-      verdict: "no_pr",
-      stage,
-      subtype: r.subtype,
-      num_turns: r.numTurns,
-      cost_usd: costUsd,
-      billing_mode: billingMode(r.childEnvKeys),
-      account_label: r.accountLabel,
-      reason:
-        reportExcerpt !== undefined
-          ? "worker completed without opening a PR — left its own account, see report_excerpt"
-          : "worker completed without opening a PR",
-      model: r.model,
-      effort: r.effort,
-      tokens: r.tokens,
-      ...cacheTokenLedgerFields(r.tokens),
-      commits_ahead: commitsAheadCount,
-      ...(reportExcerpt !== undefined ? { report_excerpt: reportExcerpt } : {}),
-      // W1-T465: recorded UNCONDITIONALLY, unlike `report_excerpt` above — an absent field and a
-      // field reading `unclassified` mean different things, and only one of them is a measurement.
-      no_pr_shape: classifyNoPrShape(reportExcerpt),
-      ...(terminalClass === "harness_commit_refused" ? { terminal_class: terminalClass } : {}),
-    },
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).noPrVerdict(r, costUsd, stage, commitsAheadCount, terminalClass);
 }
 
 // ── W1-T272: the ALREADY_SATISFIED exit ─────────────────────────────────────────────────
@@ -15770,10 +14517,6 @@ export function noPrVerdict(
 
 /** A parsed ALREADY_SATISFIED claim off a worker's REPORT (compaction.ts's third exit) — the
  *  PR reference text named, verbatim and NOT YET resolved to a number. */
-export interface AlreadySatisfiedClaim {
-  raw: string;
-  ref: string;
-}
 
 /**
  * ANCHORED ALREADY_SATISFIED extraction — same discipline as worker.ts's `anchoredPrUrl`:
@@ -15782,10 +14525,7 @@ export interface AlreadySatisfiedClaim {
  * mirroring "last line of the REPORT". No matching line ⇒ `undefined`, never a guess.
  */
 export function parseAlreadySatisfied(text: string): AlreadySatisfiedClaim | undefined {
-  const matches = [...text.matchAll(/^[ \t]*ALREADY_SATISFIED:[ \t]*(\S.*)$/gim)];
-  if (!matches.length) return undefined;
-  const ref = matches[matches.length - 1][1].trim();
-  return ref ? { raw: text, ref } : undefined;
+  return runTaskCommandHelpers(runTaskCommandHost()).parseAlreadySatisfied(text);
 }
 
 /** Extract a PR number from a claimed ref — a bare number, a `#123` form, or a full GitHub
@@ -15809,13 +14549,6 @@ export function prNumberFromRef(ref: string): number | undefined {
  * path. An unverifiable honesty exit is worse than none.
  */
 /** Why a claim was REFUTED — the gateway answered, and the answer contradicts the claim. */
-export type AlreadySatisfiedRefusal =
-  /** `claim.ref` is not a PR reference at all, so there is nothing to verify against. */
-  | "unparsable_ref"
-  /** The gateway was consulted and holds no merged PR carrying this task's trailer. */
-  | "not_found"
-  /** A merged PR carries the trailer, but it is NOT the one the worker claimed. */
-  | "different_pr";
 
 /**
  * THREE STATES, NEVER TWO (W1-T119's law applied to rung (c)). Before this,
@@ -15833,10 +14566,6 @@ export type AlreadySatisfiedRefusal =
  * must stay distinguishable" — and the same family as {@link GitHub.readFailed},
  * `projectPlan`'s indeterminate and {@link GitHub.listOpenHeadBranches}.
  */
-export type AlreadySatisfiedResolution =
-  | { outcome: "verified"; number: number; url: string }
-  | { outcome: "refuted"; reason: AlreadySatisfiedRefusal; creditedNumber?: number }
-  | { outcome: "unverifiable"; reason: GhFailureReason };
 
 /**
  * Verify a worker's ALREADY_SATISFIED claim against the board gateway.
@@ -15867,32 +14596,7 @@ export function resolveAlreadySatisfied(
   github: GitHub,
   taskId: string,
 ): AlreadySatisfiedResolution {
-  const claimedNumber = prNumberFromRef(claim.ref);
-  if (claimedNumber === undefined) return { outcome: "refuted", reason: "unparsable_ref" };
-  // W1-T441: ask for EVERY merged PR carrying the trailer, not just the newest. Membership needs
-  // no file reads at all — the claim is either among the trailered PRs or it is not — which is
-  // why this half of the fix is free while rung (c)'s ATTRIBUTION half is not. Falls back to the
-  // single-answer method when a gateway does not implement the wider one.
-  const all = github.findMergedByTrailerAll?.(taskId);
-  const credited = all === undefined ? github.findMergedByTrailer(taskId) : undefined;
-  const candidates: PrRef[] = all ?? (credited ? [credited] : []);
-
-  if ((all === null || (all === undefined && !credited)) && github.readFailed?.()) {
-    // The gateway could not answer. Unchanged from #1631: an unreadable read is not a false claim.
-    return { outcome: "unverifiable", reason: github.readFailureReason?.() ?? "unknown" };
-  }
-  if (candidates.length === 0) return { outcome: "refuted", reason: "not_found" };
-
-  // THE FIX: a worker citing the PR that IMPLEMENTED the task is verified even when a later
-  // `chore(plan): close ... as already-satisfied` PR carries the same trailer and is newer.
-  const match = candidates.find((pr) => pr.number === claimedNumber);
-  if (match) return { outcome: "verified", number: match.number, url: match.url };
-
-  // Genuinely not among them — still refused, and the row names the PR the gateway would credit.
-  // `preferImplementingPr` picks WHICH rival to name; with one candidate it is that candidate,
-  // so the single-hit message is byte-identical to before.
-  const rival = preferImplementingPr(candidates, (url) => github.changedFiles?.(url)) ?? candidates[0];
-  return { outcome: "refuted", reason: "different_pr", creditedNumber: rival.number };
+  return runTaskCommandHelpers(runTaskCommandHost()).resolveAlreadySatisfied(claim, github, taskId);
 }
 
 /**
@@ -15904,7 +14608,6 @@ export function resolveAlreadySatisfied(
  * attempts clear 18 of 25 (72%); the seven they cannot are genuine outages lasting minutes to hours,
  * where no bound short of unbounded would help.
  */
-export const ALREADY_SATISFIED_VERIFY_ATTEMPTS = 3;
 
 /**
  * Re-READ the verification when the gateway could not answer — never re-run the WORK.
@@ -15941,42 +14644,12 @@ export function resolveAlreadySatisfiedWithRetry(
   ) => AlreadySatisfiedResolution = resolveAlreadySatisfied,
   attempts: number = ALREADY_SATISFIED_VERIFY_ATTEMPTS,
 ): { resolution: AlreadySatisfiedResolution; attempts: number } {
-  // A bound below one would ask nothing and return no resolution at all, so the first read always
-  // happens; `attempts` bounds the RE-reads, never the question itself.
-  const total = Math.max(1, attempts);
-  let last = resolve(claim, github, taskId);
-  let used = 1;
-  while (last.outcome === "unverifiable" && used < total) {
-    last = resolve(claim, github, taskId);
-    used += 1;
-  }
-  return { resolution: last, attempts: used };
+  return runTaskCommandHelpers(runTaskCommandHost()).resolveAlreadySatisfiedWithRetry(claim, github, taskId, resolve, attempts);
 }
 
 /** The verdict + ledger payload for a terminal-SUCCESS worker whose ALREADY_SATISFIED claim
  *  was VERIFIED (see {@link resolveAlreadySatisfied}) — distinct from both `merged` (this run
  *  opened no PR of its own) and `no_pr` (this is forward progress, not an anomaly). */
-export interface AlreadySatisfiedVerdict {
-  verdict: "already_satisfied";
-  prUrl: string;
-  ledger: {
-    verdict: "already_satisfied";
-    stage: string;
-    subtype: string;
-    num_turns: number;
-    cost_usd: number;
-    billing_mode: BillingMode;
-    account_label?: string;
-    reason: string;
-    pr_number: number;
-    pr_url: string;
-    model: string;
-    effort: string;
-    tokens: WorkerResult["tokens"];
-    cache_read_input_tokens: number;
-    cache_creation_input_tokens: number;
-  };
-}
 
 export function alreadySatisfiedVerdict(
   r: WorkerResult,
@@ -15984,32 +14657,14 @@ export function alreadySatisfiedVerdict(
   stage: string,
   pr: { number: number; url: string },
 ): AlreadySatisfiedVerdict {
-  return {
-    verdict: "already_satisfied",
-    prUrl: pr.url,
-    ledger: {
-      verdict: "already_satisfied",
-      stage,
-      subtype: r.subtype,
-      num_turns: r.numTurns,
-      cost_usd: costUsd,
-      billing_mode: billingMode(r.childEnvKeys),
-      account_label: r.accountLabel,
-      reason: `worker found acceptance already satisfied by merged ${pr.url} — credited, no new PR opened`,
-      pr_number: pr.number,
-      pr_url: pr.url,
-      model: r.model,
-      effort: r.effort,
-      tokens: r.tokens,
-      ...cacheTokenLedgerFields(r.tokens),
-    },
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).alreadySatisfiedVerdict(r, costUsd, stage, pr);
 }
 
 /** The classifier's view of a worker result: its subtype, its text/stderr evidence, and
  *  the Anthropic-side api-error flag. Feeds W1-T7's {@link classifyFailure}. */
 function workerSignal(r: WorkerResult): FailureSignal {
   return {
+    cashAllowanceResetAt: r.cashAllowanceResetAt,
     subtype: r.subtype,
     text: [workerTranscript(r), r.stderr].join("\n"),
     apiError: r.apiError,
@@ -16037,11 +14692,6 @@ export function isTransientResult(r: WorkerResult): boolean {
  * must exit `runDiagnoseThenRetry`'s loop immediately, never spend a strike (or a diagnose
  * dispatch) retrying a call that is already over budget.
  */
-export class ImplementBudgetBreach extends Error {
-  constructor() {
-    super("worker breached maxBudgetUsd — not retried (dollars are the backstop)");
-  }
-}
 
 /**
  * W1-T7B: classify one implement-stage `WorkerResult` into the shape
@@ -16066,11 +14716,7 @@ export class ImplementBudgetBreach extends Error {
  * envelope as transient (network/5xx/CI-infra text) exactly as it always has.
  */
 export function implementAttemptOutcome(r: WorkerResult): AttemptOutcome {
-  if (r.apiError) return { success: false, evidence: workerSignal(r) };
-  if (r.isError && r.subtype === "error_max_budget_usd") throw new ImplementBudgetBreach();
-  if (r.isError && r.subtype === "success") return { success: true };
-  if (r.isError) return { success: false, evidence: workerSignal(r) };
-  return { success: true };
+  return runTaskCommandHelpers(runTaskCommandHost()).implementAttemptOutcome(r);
 }
 
 /** Finish an exhausted transient remedy without losing its class to the judge's loop text. */
@@ -16080,27 +14726,7 @@ export function finishTransientRetry(
     worker: WorkerResult; log: RunTaskContext["log"]; say: RunTaskContext["say"] },
   removeWorktree: typeof worktreeRemove = worktreeRemove,
 ): RunResult | undefined {
-  if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
-  const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
-  try {
-    removeWorktree(repoDir, worktreePath);
-    log("worktree.remove", { on: "blocked_transient" });
-  } catch (e) {
-    log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
-  }
-  log("verdict", {
-    verdict: "blocked_transient",
-    stage: "implement",
-    subtype: worker.subtype,
-    num_turns: worker.numTurns,
-    cost_usd: costUsd,
-    billing_mode: billingMode(worker.childEnvKeys),
-    account_label: worker.accountLabel,
-    reason: `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
-    ...terminalVerdictFields(worker),
-  });
-  say(`verdict: blocked_transient — ${driverResult.reason}`);
-  return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
+  return runTaskCommandHelpers(runTaskCommandHost()).finishTransientRetry(driverResult, context, removeWorktree);
 }
 
 /**
@@ -16248,15 +14874,7 @@ export function workerVisibleRecordPath(
   planPath: string,
   recordPath: string | undefined,
 ): string | undefined {
-  if (!recordPath) return undefined;
-  if (!isAbsolute(recordPath)) return recordPath; // already tree-relative — nothing to re-anchor
-  // The tree `planPath` LIVES IN, never the module-level `repoRoot`: that one is resolved from
-  // `process.cwd()` at import time, so for an injected `opts.planPath` it names an unrelated tree
-  // and every answer would escape as `../..`. `dirname(planPath)/..` is the same anchor the
-  // neighbouring `learningsDir` already uses.
-  const rel = relative(dirname(dirname(planPath)), recordPath);
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
-  return rel;
+  return runTaskCommandHelpers(runTaskCommandHost()).workerVisibleRecordPath(planPath, recordPath);
 }
 
 /**
@@ -16279,16 +14897,7 @@ export function taskRecordContextLine(
   recordPath: string | undefined,
   criteria: ReadonlyArray<AcceptanceCriterion> = [],
 ): string {
-  if (!recordPath) return "";
-  const rendered = criteria.map(
-    (c, i) => `    (${String.fromCharCode(97 + i)}) ${c.claim}\n        proof: ${c.proof}`,
-  );
-  return (
-    `- YOUR TASK'S OWN RECORD IS AT ${recordPath} — READ IT FIRST. It carries the design, ` +
-    "rationale and acceptance criteria that recon would otherwise have relayed, and nothing " +
-    `else in this prompt contains them. ${citation(`plan#${taskId}`)}` +
-    (rendered.length ? `\n    Acceptance criteria, verbatim from that record:\n${rendered.join("\n")}` : "")
-  );
+  return runTaskCommandHelpers(runTaskCommandHost()).taskRecordContextLine(taskId, recordPath, criteria);
 }
 
 /**
@@ -16372,12 +14981,6 @@ export const RECON_UNVERIFIED_PREFIX = "RECON DID NOT ESTABLISH THIS — verify 
  * heading to leave behind — the silently-empty-block condition {@link reconDegradedContextNote}'s
  * doc exists to prevent cannot arise here, because there is nothing to be empty.
  */
-function nonEmptyLines(s: string): string[] {
-  return s
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-}
 
 /**
  * Render OBSERVED lines as plain cited bullets and COULDN'T-VERIFY lines as
@@ -16394,17 +14997,6 @@ function renderReconClaimLines(taskId: string, observedLines: string[], gapLines
   ];
 }
 
-function reconObservedToContext(recon: WorkerResult, taskId: string, recordPath?: string): string {
-  const parsed = parseReconReport(workerTranscript(recon));
-  const lines = nonEmptyLines(parsed?.observed ?? "");
-  const gaps = nonEmptyLines(parsed?.couldntVerify ?? "");
-  // Each line becomes a cited CONTEXT claim (provenance from recon). The record line leads: it is
-  // stable per task, while recon's output is per-run (cache-aware ordering, W1-T35). Gaps come
-  // LAST so the prompt reads observations-then-caveats, and each carries the prefix above.
-  return [taskRecordContextLine(taskId, recordPath), ...renderReconClaimLines(taskId, lines, gaps)]
-    .filter((s) => s.length > 0)
-    .join("\n");
-}
 
 /**
  * W1-T299: the CONTEXT block injected when recon DEGRADED — a bounded retry (see the recon
@@ -16416,35 +15008,6 @@ function reconObservedToContext(recon: WorkerResult, taskId: string, recordPath?
  * `recon#<taskId>` citation so the provenance linter (assertProvenance) treats "recon produced
  * nothing" as a claim like any other, not an omission that slips past unlinted.
  */
-function reconDegradedContextNote(
-  subtype: string,
-  taskId: string,
-  recordPath?: string,
-  acceptance: ReadonlyArray<AcceptanceCriterion> = [],
-): string {
-  const lines = [
-    `- RECON CONTEXT ABSENT: the recon worker errored twice in a row (${subtype}) and the ` +
-      "bounded retry was exhausted, so no OBSERVED lines are available for this run — do not " +
-      "assume recon ran cleanly; rely only on the CONTEXT/TASK below and your own read-only " +
-      `inspection. ${citation(`recon#${taskId}`)}`,
-  ];
-
-  // ── SAY WHERE. The note above has always told a degraded worker to rely on "your own read-only
-  // inspection" and never said WHERE to look — and nothing else in the prompt carries the task's
-  // own text. `renderImplementPrompt` renders `task.prompt ?? task.title` (MEASURED: zero task
-  // records carry `prompt:`, so it is always the title), `design:` is read by nothing in src/ at
-  // all, and `task.acceptance` is consumed by `runReview` — the REVIEWER, not the worker. The
-  // specification therefore reaches a worker ONLY because recon opens the record from disk and
-  // relays it, which makes recon the sole transport for the task's own text rather than a
-  // research phase. When recon degrades that transport is gone: MEASURED on W1-T399, implement
-  // burned 138 turns and produced zero commits from a one-line title.
-  // The bullet itself now lives in {@link taskRecordContextLine}, shared with the HEALTHY path —
-  // extracted rather than copied so the two cannot drift and this path cannot gain a second copy.
-  // Output here is byte-identical to before the extraction; only the criteria travel on this side.
-  const recordLine = taskRecordContextLine(taskId, recordPath, acceptance);
-  if (recordLine) lines.push(recordLine);
-  return lines.join("\n");
-}
 
 /**
  * W1-T2512: the CONTEXT block injected when recon was MASKED — arm B of a RECON-factor
@@ -16457,22 +15020,6 @@ function reconDegradedContextNote(
  * same `recon#<taskId>` citation so {@link assertProvenance} treats "recon was masked" as a
  * claim like any other.
  */
-function reconMaskedContextNote(
-  taskId: string,
-  recordPath?: string,
-  acceptance: ReadonlyArray<AcceptanceCriterion> = [],
-): string {
-  const lines = [
-    "- RECON CONTEXT MASKED: this run is arm B of a RECON-factor wipe-test pair (W1-T2512) — " +
-      "the recon worker was deliberately never spawned, and the recon artifact store was " +
-      "neither read nor written, so no OBSERVED lines are available for this run by design; " +
-      "rely only on the CONTEXT/TASK below and your own read-only inspection. " +
-      `${citation(`recon#${taskId}`)}`,
-  ];
-  const recordLine = taskRecordContextLine(taskId, recordPath, acceptance);
-  if (recordLine) lines.push(recordLine);
-  return lines.join("\n");
-}
 
 // ── W1-T2241: RECON ARTIFACT — a recon run's TTL'd, task-scoped write-forward ───────────────
 //
@@ -16519,16 +15066,6 @@ function reconMaskedContextNote(
 // human-owned tree — the exact hazard `plan/tasks.yaml`'s own header forbids). A corrupt or
 // unreadable artifact is treated as ABSENT, never fatal — recon degrading a worker's whole
 // dispatch over a broken cache file would be a worse defect than the one this organ fixes.
-export interface ReconArtifact {
-  task_id: string;
-  plan_sha: string;
-  files_digest: string;
-  observed: string;
-  inferred: string;
-  couldnt_verify: string;
-  written_at: string;
-  run_id: string;
-}
 
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
@@ -16568,13 +15105,6 @@ export function planSha(worktreePath: string): string {
  * of `readFileSync` and both read as the same "absent" sentinel — the same semantics the old
  * check-then-read had, without the race window.
  */
-function fileDigestOrAbsent(p: string): string {
-  try {
-    return sha256Hex(readFileSync(p, "utf8"));
-  } catch {
-    return "absent";
-  }
-}
 
 /**
  * Content digest of the task's own declared `files:` — the OTHER invalidation key component
@@ -16584,9 +15114,7 @@ function fileDigestOrAbsent(p: string): string {
  * to invalidate a reuse.
  */
 export function filesDigest(worktreePath: string, files: ReadonlyArray<string>): string {
-  const sorted = [...files].sort();
-  const combined = sorted.map((f) => `${f}:${fileDigestOrAbsent(join(worktreePath, f))}`).join("\n");
-  return sha256Hex(combined);
+  return runTaskCommandHelpers(runTaskCommandHost()).filesDigest(worktreePath, files);
 }
 
 /**
@@ -16598,7 +15126,6 @@ export function filesDigest(worktreePath: string, files: ReadonlyArray<string>):
  * plan sync). "Fail closed" here means the ABSENCE itself can never be the thing two dispatches
  * agree on.
  */
-export const PLAN_RECORD_ABSENT = "absent";
 
 /**
  * Content digest of the task's OWN plan record (W1-T2510) — the file {@link taskRecordPath}
@@ -16614,15 +15141,7 @@ export const PLAN_RECORD_ABSENT = "absent";
  * `decideReconArtifactReuse`).
  */
 export function taskRecordSha(planPath: string, taskId: string): string {
-  const recordPath = taskRecordPath(planPath, taskId);
-  if (!recordPath) return PLAN_RECORD_ABSENT;
-  try {
-    return sha256Hex(readFileSync(recordPath, "utf8"));
-  } catch {
-    // A race (the resolved path vanished between taskRecordPath's read and this one) reads
-    // identically to "never resolved" — both are the same ABSENT sentinel to every consumer.
-    return PLAN_RECORD_ABSENT;
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).taskRecordSha(planPath, taskId);
 }
 
 /**
@@ -16658,46 +15177,19 @@ export function decideReconArtifactReuse(
   currentPlanSha: string,
   currentFilesDigest: string,
 ): { valid: boolean; invalidationReason?: "plan_sha" | "files_digest" } {
-  if (!prior) return { valid: false };
-  if (currentPlanSha === PLAN_RECORD_ABSENT) return { valid: false, invalidationReason: "plan_sha" };
-  const valid = prior.plan_sha === currentPlanSha && prior.files_digest === currentFilesDigest;
-  if (valid) return { valid: true };
-  return { valid: false, invalidationReason: prior.plan_sha !== currentPlanSha ? "plan_sha" : "files_digest" };
+  return runTaskCommandHelpers(runTaskCommandHost()).decideReconArtifactReuse(prior, currentPlanSha, currentFilesDigest);
 }
 
-function reconArtifactPath(root: string, taskId: string): string {
-  return join(root, "state", "recon-artifacts", `${taskId}.json`);
-}
 
 /** Fail-soft: a missing OR corrupt artifact both read as ABSENT — never a thrown error, since
  *  that would make a broken cache file cost a dispatch its recon, exactly the harm this exists
  *  to remove. */
 export function loadReconArtifact(root: string, taskId: string): ReconArtifact | undefined {
-  const p = reconArtifactPath(root, taskId);
-  if (!existsSync(p)) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(p, "utf8"));
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      typeof (parsed as ReconArtifact).plan_sha === "string" &&
-      typeof (parsed as ReconArtifact).files_digest === "string" &&
-      typeof (parsed as ReconArtifact).observed === "string" &&
-      typeof (parsed as ReconArtifact).inferred === "string" &&
-      typeof (parsed as ReconArtifact).couldnt_verify === "string"
-    ) {
-      return parsed as ReconArtifact;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).loadReconArtifact(root, taskId);
 }
 
 export function writeReconArtifact(root: string, artifact: ReconArtifact): void {
-  const p = reconArtifactPath(root, artifact.task_id);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(artifact, null, 2));
+  return runTaskCommandHelpers(runTaskCommandHost()).writeReconArtifact(root, artifact);
 }
 
 /**
@@ -16714,15 +15206,7 @@ export function writeReconArtifact(root: string, artifact: ReconArtifact): void 
  * than trusting each bullet's own wording to carry that caveat.
  */
 export function reconArtifactToContext(artifact: ReconArtifact, taskId: string, recordPath?: string): string {
-  const lines = nonEmptyLines(artifact.observed);
-  const gaps = nonEmptyLines(artifact.couldnt_verify);
-  const header =
-    `- REUSED RECON ARTIFACT from a prior dispatch of this task (written ${artifact.written_at}): ` +
-    "the claims below are EVIDENCE to VERIFY-AND-EXTEND, not settled fact — confirm each before " +
-    `building on it, the same as you would recon's own OBSERVED output. ${citation(`recon#${taskId}`)}`;
-  return [header, taskRecordContextLine(taskId, recordPath), ...renderReconClaimLines(taskId, lines, gaps)]
-    .filter((s) => s.length > 0)
-    .join("\n");
+  return runTaskCommandHelpers(runTaskCommandHost()).reconArtifactToContext(artifact, taskId, recordPath);
 }
 
 /**
@@ -16758,7 +15242,6 @@ export function reconArtifactToContext(artifact: ReconArtifact, taskId: string, 
  * still reaches implement with an explicit absent-context note — rather than ending the dispatch.
  * task a dispatch it can never get back.
  */
-export const RECON_MAX_TURNS = 40;
 
 /** Shared default `readFile` for a rule-source read ({@link retrieveRuleBodyOnDemand} and
  *  {@link buildRuleHeadlinesPart} below both default to this ONE function, never a
@@ -16855,7 +15338,6 @@ export function followRuleBodyPointer(
  *  parse/index/degrade primitives {@link buildRuleHeadlinesPart} is built from. Not a per-rule
  *  citation (CLAUDE.md's individual headlines carry no per-line provenance of their own); this
  *  cites the MECHANISM that makes surfacing them to a worker safe. */
-const RULE_HEADLINES_SRC = "plan#W1-T2508";
 
 /**
  * W1-T2761, design (ii)/(iii) — build the `rule_headlines` prompt PART / anchor section: CLAUDE.md's
@@ -16886,43 +15368,7 @@ export function buildRuleHeadlinesPart(
   readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
   displayPath: string = sourcePath,
 ): string {
-  if (!enabled) return "";
-  // `sourcePath` is where the file is READ from (an absolute worktree path at the real call site);
-  // `displayPath` is what the WORKER is told. The worker's cwd is its own worktree, so the
-  // repo-relative name is the one that resolves for it, and no prompt line names a foreign tree.
-  const introLine =
-    `- CLAUDE.md's rule headlines (progressive disclosure, W1-T2508) — headlines only, no ` +
-    `bodies, so you know what exists without paying for what you don't need yet. ` +
-    citation(RULE_HEADLINES_SRC);
-  const raw = readFile(sourcePath);
-  if (raw === undefined) {
-    const unreadable: RuleHeadline = {
-      headline: "CLAUDE.md rule index",
-      body: ` (unavailable — could not read rule source ${displayPath})`,
-    };
-    // Indented without its own bullet, like the index lines below: it continues the cited intro claim. As a
-    // bullet it was an uncited claim, and the provenance gate refused every dispatch to a tree with no CLAUDE.md.
-    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined).replace(/^- /, "")}`].join("\n");
-  }
-  const rules = parseRuleHeadlines(raw);
-  const indexLines = renderHeadlineOnlyIndex(rules)
-    .split("\n")
-    .filter((l) => l.length > 0)
-    .map((l) => `    ${l.replace(/^- /, "")}`);
-  // W1-T3323: the bodies left CLAUDE.md for `doctrine/`, so the line telling a worker WHERE to
-  // read one has to move with them or it sends the worker to a file that no longer holds the
-  // evidence. The 56 paths themselves stay OUT of the prompt — that is ~2800 bytes on every
-  // turn-0 to save one `grep`, and this part exists to spend fewer bytes, not more; the source
-  // names the exact path beside every headline and the worker has it in its own worktree.
-  // A corpus whose bodies are still inline (any un-migrated tree) keeps the original line.
-  const migrated = rules.some((r) => parseRuleBodyPointer(r.body) !== undefined);
-  const pointer = migrated
-    ? `    Each headline's full body — the measurement that earned it — is a file under ` +
-      `doctrine/ in your own worktree, and ${displayPath} names the exact path beside every ` +
-      `headline. Read one when you are about to apply that rule precisely, or you doubt it.`
-    : `    Read a headline's full body from ${displayPath} in your own worktree when you need it — ` +
-      "this index carries headlines only.";
-  return [introLine, ...indexLines, pointer].join("\n");
+  return runTaskCommandHelpers(runTaskCommandHost()).buildRuleHeadlinesPart(enabled, sourcePath, readFile, displayPath);
 }
 
 /**
@@ -16947,7 +15393,7 @@ export function softBudgetWarning(
   thresholdUsd: number,
   alreadyWarned: boolean,
 ): boolean {
-  return !alreadyWarned && costUsd >= thresholdUsd;
+  return runTaskCommandHelpers(runTaskCommandHost()).softBudgetWarning(costUsd, thresholdUsd, alreadyWarned);
 }
 
 /** One resolved bundle of every mount a run needs (W1-T167 class routing included),
@@ -16985,55 +15431,7 @@ export function resolveRunMounts(
   taskClass: string;
   mountClass: string;
 } {
-  const mountsTable = loadMounts(mountsPath(repoRootDir));
-  const taskClass = deriveTaskClass(task);
-  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, implementRouteClass(task, taskClass));
-  if (mountResolution.fellBackToDefault) {
-    // W1-T167 acceptance: a class with no row falls back to the default LOUDLY —
-    // a ledger line NAMING the missing class, never a silent number swap.
-    log("mount.class_fallback", {
-      task_type: task.type,
-      risk: task.risk,
-      requested_class: taskClass,
-      resolved_class: mountResolution.resolvedClass,
-    });
-  }
-  // The fresh advisory reviewer is its OWN mount-governed phase (task_type="reviewer",
-  // W1-T63/P10); the blocked_review fix rung rides its own "fix" row (W1-T76) —
-  // both resolved here alongside the task's own mount, never an undeclared literal.
-  // impl-BP — RESOLVE THE RECON ROW, the one `routes:` entry nothing read. `.remudero/
-  // mounts.yaml` has carried a fully-specified `recon:` block (haiku for low-risk/docs/plan-lint,
-  // sonnet for medium/high src) since the class axis landed, and the recon spawn passed neither
-  // `model` nor `effort` — so every recon in this repo's history ran on the SDK default. Measured
-  // over the ledger unioned across all 661 rotations: 413 `recon.done` rows, model label
-  // `"default"` on every single one, never a routed model. Same defect class as the `#781
-  // architect:` row CLAUDE.md already records — a row that looks configured and has no reader.
-  //
-  // FAIL-SOFT BY CONSTRUCTION, because recon runs on EVERY dispatch: `resolveMountForClass`
-  // throws on an absent/unroutable row, so a table without `recon:` (or an older committed table)
-  // must degrade to today's behaviour rather than take the whole fleet down. The catch yields
-  // `undefined`, the spawn then omits both knobs, and `lib/worker.ts`'s `if (args.model)` /
-  // `if (args.effort)` guards leave the SDK default in place exactly as before.
-  let reconMount: Mount | undefined;
-  try {
-    reconMount = resolveMountForClass(mountsTable, "recon", task.risk, taskClass).mount;
-  } catch (e) {
-    log("mount.recon_unrouted", {
-      risk: task.risk,
-      task_class: taskClass,
-      reason: String((e as Error)?.message ?? e),
-    });
-  }
-  return {
-    mount: mountResolution.mount,
-    reviewerMount: resolveMount(mountsTable, "reviewer", task.risk),
-    fixMount: resolveMount(mountsTable, "fix", task.risk),
-    diagnoseMount: resolveMount(mountsTable, "diagnose", task.risk),
-    ...(mountsTable.step_up ? { stepUpMount: mountsTable.step_up } : {}),
-    reconMount,
-    taskClass,
-    mountClass: mountResolution.resolvedClass,
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).resolveRunMounts(repoRootDir, task, log);
 }
 
 // ── W1-T5346: CONTAINMENT AND ISOLATION ARE PROVEN ONCE PER BOOT AND ON ANY CHANGE OF THEIR INPUTS ──
@@ -17050,28 +15448,15 @@ export function resolveRunMounts(
 // key and the proving run's id, so an audit can name the probe any run relied on.
 
 /** The fields {@link probeVerdictKey} digests, in a fixed order — every one must be present. */
-const PROBE_KEY_FIELDS = ["imageBuildSha", "harnessRevision", "workerSettings", "hooks", "cliVersion", "provider", "claudeBin", "root"] as const;
 
 /** Everything a containment/isolation verdict could depend on, each reduced to a string. */
-export type ProbeKeyInputs = Record<(typeof PROBE_KEY_FIELDS)[number], string>;
 
 /** The cache key: a sha256 over every {@link PROBE_KEY_FIELDS} value. Throws on a missing field
  *  rather than keying without it — an input silently left out is an input that cannot re-probe. */
 export function probeVerdictKey(inputs: ProbeKeyInputs): string {
-  const hash = createHash("sha256");
-  for (const field of PROBE_KEY_FIELDS) {
-    const value = inputs[field];
-    if (typeof value !== "string") throw new Error(`probe key input ${field} is missing`);
-    hash.update(`${field}\0${value}\0`);
-  }
-  return hash.digest("hex");
+  return runTaskCommandHelpers(runTaskCommandHost()).probeVerdictKey(inputs);
 }
 
-function hookFilesUnder(dir: string, rel = ""): string[] {
-  return readdirSync(join(dir, rel), { withFileTypes: true })
-    .flatMap((entry) => (entry.isDirectory() ? hookFilesUnder(dir, join(rel, entry.name)) : [join(rel, entry.name)]))
-    .sort();
-}
 
 /** Read the probe key's inputs from disk. The worker settings and every file in the hooks dir are
  *  read by CONTENT; the run's own id is normalised out of the settings so a per-run path is not a
@@ -17088,147 +15473,20 @@ export function readProbeKeyInputs(src: {
   claudeBin: string;
   root: string;
 }): ProbeKeyInputs {
-  const digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
-  return {
-    imageBuildSha: existsSync(src.imageBuildShaPath) ? readFileSync(src.imageBuildShaPath, "utf8").trim() : "absent",
-    harnessRevision: src.harnessRevision,
-    workerSettings: digest(readFileSync(src.settingsFile, "utf8").split(src.runId).join("<run>")),
-    hooks: hookFilesUnder(src.hooksDir).map((rel) => `${rel}:${digest(readFileSync(join(src.hooksDir, rel)))}`).join(","),
-    cliVersion: src.cliVersion ?? "unobserved",
-    provider: src.provider,
-    claudeBin: src.claudeBin,
-    root: src.root,
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).readProbeKeyInputs(src);
 }
 
 /** The passing proof a later run with the same key may rely on. */
-export interface ProbeProof {
-  runId: string;
-  provedAtMs: number;
-  provedAt: string;
-  containmentReason: string;
-  isolationReason: string;
-}
 
-export interface ProbeVerdictCache {
-  /** The stored pass for `key` — never while the process is held. */
-  lookup(key: string): ProbeProof | undefined;
-  /** A ticket taken before probing; {@link ProbeVerdictCache.recordPass} refuses it if a hold landed since. */
-  open(): number;
-  /** Store a clean pass and lift the hold — unless a failure was observed after `ticket` was taken. */
-  recordPass(key: string, proof: ProbeProof, ticket: number): boolean;
-  /** A probe did not cleanly pass: drop every stored pass and hold until one does. */
-  hold(reason: string): void;
-  readonly heldReason: string | undefined;
-}
 
 export function createProbeVerdictCache(): ProbeVerdictCache {
-  const passes = new Map<string, ProbeProof>();
-  let generation = 0;
-  let heldReason: string | undefined;
-  return {
-    lookup: (key) => (heldReason === undefined ? passes.get(key) : undefined),
-    open: () => generation,
-    recordPass: (key, proof, ticket) => {
-      if (ticket !== generation) return false;
-      passes.set(key, proof);
-      heldReason = undefined;
-      return true;
-    },
-    hold: (reason) => {
-      passes.clear();
-      heldReason = reason;
-      generation += 1;
-    },
-    get heldReason() {
-      return heldReason;
-    },
-  };
+  return createProbeVerdictCacheFromModule();
 }
 
 /** The one cache a daemon's implement lanes share — they run inside the daemon's own process. */
-const PROCESS_PROBE_VERDICTS = createProbeVerdictCache();
 
-interface ProbeAdmissionOptions {
-  /** W1-T5346: the probe-verdict cache. Default: the process-wide one — EXCEPT when a probe executor
-   *  is injected, where a fresh per-run cache keeps a test executor's verdict out of the process. */
-  probeVerdictCache?: ProbeVerdictCache;
-  /** W1-T5346 test seam for two key inputs. Default: {@link IMAGE_BUILD_SHA_PATH} and the harness
-   *  revision this module was loaded from. */
-  probeKeySources?: { imageBuildShaPath?: string; harnessRevision?: string };
-}
 
-interface RunTaskBodyOptions extends ProbeAdmissionOptions {
-  /** W1-T7096: set only by the drain and the CLI — the fix rung then asks the production judge. */
-  productionProgressJudge?: boolean;
-  /** Test seam for the pre-open fast gate; production runs `runPreopenGate`, an injected spawn skips it. */
-  preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
-  instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
-  selectedModeFileIO?: RegistryFileIO;
-  armAdhocLaneReap?: boolean;
-  binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
-  claimReserver?: DispatchClaimReserverAsync;
-  containmentExec?: ProbeExecutor;
-  externalWaitFreshness?: ExternalWaitFreshness;
-  restartAtWorkerBoundary?: RestartBoundary;
-  externalWaitRecycle?: () => string | undefined;
-  handOffAtPrOpen?: boolean;
-  isolationExec?: IsolationProbeExecutor;
-  managedCheckoutInstall?: (repoDir: string) => void;
-  maskLearnings?: boolean;
-  maskRecon?: boolean;
-  maskRules?: boolean;
-  noMerge?: boolean;
-  readHeadShaForProvenance?: (prUrl: string) => string;
-  /** W1-T4797: test seam for the pre-push diff-coverage precheck; production reads the real ones. */
-  coveragePrecheckPorts?: CoveragePrecheckPorts;
-  /** Where a stale-proof PR-open refusal or managed-checkout install failure escalates; production files the task repo's own issue. */
-  prOpenRefusalIssues?: IssueGateway;
-  /** W1-T5520: test seams for the sibling-PR check and the REST create; production reads `ghJsonAsync` and `execFileSync`. */
-  otherOpenPrReader?: OpenPrJsonReader;
-  prCreateExec?: Parameters<typeof runGhPrCreate>[4];
-  prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
-  /** W1-T10026: test seam for a build's left-out-import scope request; production asks `requestScopeAmendment`. */
-  implementScopeAmendment?: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome;
-  spawnWallClockBoundMs?: number;
-  workerRuleHeadlinesEnabled?: boolean;
-  worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
-}
 
-export interface RunTaskContext {
-  restartPhase?: { current: string };
-  /** W1-T7096: a caller-supplied worker spawn (a test seam); a run on the real spawn asks the LLM judge. */
-  spawnInjected?: boolean;
-  /**
-   * Shared with the one real spawn wrapper.  The preflight runs in runTaskBody, while the wrapper
-   * is built in runTask, so a scalar in either scope would silently describe different runs.
-   */
-  cashContainmentState?: { contained: boolean };
-  /** One shared proof function for both preflights and the spawn wrapper of this run. */
-  cashContainmentBoundary?: typeof assertOpenWeightToolBoundary;
-  config: Config;
-  fetchPrBodyFn: typeof fetchPrBodyViaGh;
-  github: GitHub;
-  isMerged: (task: Task) => boolean;
-  ledgerPath: string;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-  openTaskIds: ReadonlySet<string>;
-  opts: RunTaskBodyOptions;
-  owner: string;
-  plan: Plan;
-  planPath: string;
-  recordDecisionFn: typeof recordDecision;
-  repoRoot: string;
-  runId: string;
-  runReviewFn: typeof runReview;
-  say: (msg: string) => void;
-  spawn: typeof spawnWorker;
-  task: Task;
-  taskId: string;
-  /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
-  workerAbandonMs?: number;
-  workerStateSensor: WorkerStateSensor;
-}
 
 /**
  * W1-T2862: report the maintainability obligation without ever changing the implementation
@@ -17241,38 +15499,10 @@ export function reportWorkerSourceSizeFollowup(
   say: (message: string) => void,
   consume?: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult,
 ): ConsumeSourceSizeFollowupResult | undefined {
-  try {
-    const result = consume ? consume(args) : consumeSourceSizeFollowup(args);
-    if (result.action === "filed") {
-      say(`source-size follow-up filed as ${result.feedbackId} for ${result.files.length} material hotspot(s)`);
-      return result;
-    }
-    if (result.action === "noop") {
-      log("source_size.followup.noop", {
-        reason: result.reason,
-        ...(result.signature ? { signature: result.signature } : {}),
-      });
-      return result;
-    }
-    log("source_size.followup.error", { reason: result.reason, detail: result.detail });
-    say(`source-size follow-up could not be filed (${result.reason}) — implementation verdict is unchanged`);
-    return result;
-  } catch (error) {
-    const detail = String((error as Error)?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 512);
-    log("source_size.followup.error", { reason: "unexpected_throw", detail });
-    say("source-size follow-up could not be evaluated — implementation verdict is unchanged");
-    return undefined;
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).reportWorkerSourceSizeFollowup(args, log, say, consume);
 }
 
 /** W1-T4356: a managed checkout the refresh could not leave consistent — deferred, like W1-T4193's refusal, as blocked_toolchain. */
-export class ManagedCheckoutRefreshRefusedError extends RmdError {
-  readonly reasonClass = "blocked_toolchain" as const;
-  constructor(readonly reason: string) {
-    super("git", GENERIC_EXIT_CODE, `managed checkout refresh refused: ${reason}`, { reason });
-    this.name = "ManagedCheckoutRefreshRefusedError";
-  }
-}
 
 /**
  * W1-T4933: the REVIEWER's call site of the staged install. `reviewCommand` cuts its worktrees from a managed checkout and
@@ -17305,22 +15535,12 @@ export function refreshReviewSubjectInstall(
 }
 
 export function isManagedCheckoutLockBusy(error: unknown): boolean {
-  return error instanceof ManagedCheckoutRefreshRefusedError && error.reason.startsWith("another dispatch holds ");
+  return runTaskCommandHelpers(runTaskCommandHost()).isManagedCheckoutLockBusy(error);
 }
 
 /** W1-T4356: W1-T4193's refusal, naming why the checkout whose install it would borrow was left behind. */
-class ManagedCheckoutNotRefreshedError extends WorktreeNodeModulesRefusedError {
-  constructor(refused: WorktreeNodeModulesRefusedError, readonly notRefreshed: string) {
-    super(refused.packageName, refused.worktreePath, refused.nodeModulesSource);
-    this.message += `; the managed checkout was not fast-forwarded: ${notRefreshed}`;
-  }
-}
 
 /** `skipped` carries the reason a later W1-T4193 refusal names; `release` frees the lock a borrowed checkout was taken under. */
-export type ManagedCheckoutRefresh = { release: () => void } & (
-  | { kind: "unborrowed" | "current" | "fast_forwarded" }
-  | { kind: "skipped"; reason: string }
-);
 
 /**
  * W1-T4356: keep `repoDir` current before a worktree borrows its install. Only a checkout with its OWN node_modules is
@@ -17338,77 +15558,10 @@ export function refreshManagedCheckout(
   install?: (repoDir: string) => void | Promise<void>,
   escalate?: (failure: StagedInstallFailure) => void,
 ): Promise<ManagedCheckoutRefresh> {
-  if (!existsSync(join(repoDir, "node_modules"))) return Promise.resolve({ kind: "unborrowed", release: () => {} });
-  // W1-T4933: staged and swapped, never the in-place clear-then-fill of ensureInstallFresh, which empties a tree others are linked to.
-  const runInstall = install ?? ((dir: string) => void stagedInstall(dir, { log, escalate }));
-  // W1-T6356: the lock is taken SYNCHRONOUSLY (a cheap file create) so a busy lock still throws from the call itself, which is
-  // what retryWhileLockBusy's try/catch sees; only the git work after it is awaited.
-  let lock: DrainLockHandle;
-  try {
-    lock = acquireDrainLock(lockPath);
-  } catch (error) {
-    throw new ManagedCheckoutRefreshRefusedError(`another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})`);
-  }
-  // Async, so a fetch over a slow origin never holds the daemon loop (2026-10-08 profile: 20.1 s and 29.5 s blocks).
-  const git = async (...args: string[]) => (await execFilePromise("git", ["-C", repoDir, ...args], { encoding: "utf8" })).stdout.trim();
-  return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
+  return runTaskCommandHelpers(runTaskCommandHost()).refreshManagedCheckout(repoDir, lockPath, log, install, escalate);
 }
 
 /** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
-async function refreshHeldManagedCheckout(
-  repoDir: string,
-  release: () => void,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-  runInstall: (repoDir: string) => void | Promise<void>,
-  git: (...args: string[]) => Promise<string>,
-): Promise<ManagedCheckoutRefresh> {
-  const skip = (reason: string): ManagedCheckoutRefresh => {
-    log("managed_checkout.refresh_skipped", { reason });
-    return { kind: "skipped", reason, release };
-  };
-  try {
-    const dirty = await git("status", "--porcelain");
-    if (dirty) return skip(`checkout is dirty (${dirty.split("\n").length} changed path(s))`);
-    const branch = await git("rev-parse", "--abbrev-ref", "HEAD");
-    if (branch !== "main") return skip(`checkout is on ${branch}, not main`);
-    try {
-      await git("fetch", "--quiet", "origin");
-    } catch (error) {
-      // Not a refusal: an unreachable origin leaves the checkout as it is, and `skip` ledgers the reason the refusal names.
-      return skip(`could not fetch origin (${String((error as Error)?.message ?? error)})`);
-    }
-    const beforeSha = await git("rev-parse", "HEAD");
-    if (beforeSha === (await git("rev-parse", "origin/main"))) {
-      // W1-T4933: code that is already current can still sit on a tree that predates its lockfile. A failed refresh keeps
-      // the old tree (stagedInstall ledgered and escalated it); the dispatch goes on and W1-T4193 names any mismatch it causes.
-      try {
-        await runInstall(repoDir);
-      } catch (error) {
-        log("managed_checkout.install_kept_stale", { reason: String((error as Error)?.message ?? error).slice(0, 512) });
-      }
-      return { kind: "current", release };
-    }
-    if ((await git("merge-base", "HEAD", "origin/main")) !== beforeSha) return skip("checkout has diverged from origin/main");
-    const borrower = listRegisteredWorktrees(repoDir).find(({ path }) => {
-      const held = path === repoDir ? undefined : readRunLock(path);
-      return held?.kind === "corrupt" || (held?.kind === "live" && defaultIsPidAlive(held.info.pid));
-    });
-    if (borrower) return skip(`a live worker still borrows its node_modules (${borrower.path})`);
-    await git("merge", "--ff-only", "--quiet", "origin/main");
-    log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: await git("rev-parse", "HEAD") });
-    try {
-      await runInstall(repoDir);
-    } catch (error) {
-      // Revert, so the checkout still reads as behind and the next dispatch retries the install instead of linking it.
-      await git("reset", "--quiet", "--keep", beforeSha);
-      throw new Error(`install failed after the fast-forward, reverted to ${beforeSha}: ${String((error as Error)?.message ?? error)}`);
-    }
-    return { kind: "fast_forwarded", release };
-  } catch (error) {
-    release();
-    throw new ManagedCheckoutRefreshRefusedError(String((error as Error)?.message ?? error));
-  }
-}
 
 /**
  * W1-T3801: route the already-shipped source-size maintainability signal through the bounded
@@ -17421,15 +15574,7 @@ async function refreshHeldManagedCheckout(
  * ledger makes retries idempotent. The judge never receives raw source text, only bounded paths and
  * measurements already emitted by the source-size signal.
  */
-type SourceSizeGatePostureRuntime = GatePostureRuntime & {
-  decide?: typeof decideGatePosture;
-  consume?: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult;
-};
 
-export interface SourceSizeGatePostureResult {
-  decision: GatePostureDecision;
-  followup?: ConsumeSourceSizeFollowupResult;
-}
 
 export function sourceSizeGateFollowupConsumer(
   input: ConsumeSourceSizeFollowupArgs,
@@ -17437,13 +15582,7 @@ export function sourceSizeGateFollowupConsumer(
   say: (message: string) => void,
   report: typeof reportWorkerSourceSizeFollowup = reportWorkerSourceSizeFollowup,
 ): ConsumeSourceSizeFollowupResult {
-  return (
-    report(input, log, say) ?? {
-      action: "error",
-      reason: "filing_failed",
-      detail: "source-size follow-up consumer returned no result",
-    }
-  );
+  return runTaskCommandHelpers(runTaskCommandHost()).sourceSizeGateFollowupConsumer(input, log, say, report);
 }
 
 export function buildSourceSizeGatePostureRuntime(
@@ -17454,39 +15593,9 @@ export function buildSourceSizeGatePostureRuntime(
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (message: string) => void,
 ): SourceSizeGatePostureRuntime {
-  try {
-    const spend = riskJudgeSpendCollector();
-    return {
-      runRiskJudge,
-      spend,
-      judge: realRiskJudge({
-        mount: resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))),
-        cwd: worktreePath,
-        settingsFile,
-        spawn,
-        spend,
-        log: (step, extra) => log(step, extra),
-      }),
-      consume: (input) => sourceSizeGateFollowupConsumer(input, log, say),
-    };
-  } catch (error) {
-    log("gate_posture.judge_unavailable", {
-      gate: "ci:source-size",
-      reason: `source-size judge setup unavailable — ${String((error as Error)?.message ?? error)}`,
-    });
-    return {};
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).buildSourceSizeGatePostureRuntime(repoRoot, worktreePath, settingsFile, spawn, log, say);
 }
 
-function sourceSizeFollowupDebtResult(result: ConsumeSourceSizeFollowupResult | undefined): string | undefined {
-  if (result?.action === "filed") return `feedback:${result.feedbackId}`;
-  // A duplicate is the successful retry outcome for this pilot: the durable signature already
-  // proves the bounded follow-up exists, so it is not a failed side effect.
-  if (result?.action === "noop" && result.reason === "duplicate") {
-    return `source-size://duplicate/${result.signature ?? "unknown"}`;
-  }
-  return undefined;
-}
 
 export async function reportWorkerSourceSizeFollowupWithGatePosture(
   args: ConsumeSourceSizeFollowupArgs,
@@ -17494,90 +15603,7 @@ export async function reportWorkerSourceSizeFollowupWithGatePosture(
   say: (message: string) => void,
   deps: SourceSizeGatePostureRuntime = {},
 ): Promise<SourceSizeGatePostureResult> {
-  let classified: ReturnType<typeof classifySourceSizeSummary>;
-  try {
-    const raw = (args.readFile ?? ((path) => readFileSync(path, "utf8")))(preflightSummaryPath(args.worktreeRoot));
-    classified = classifySourceSizeSummary(JSON.parse(raw), args.expectedHead);
-  } catch {
-    // The existing consumer owns the exact no-op/error narration for an unreadable summary. An
-    // unreadable sensor is not a deterministic finding and therefore must not spawn a judge.
-    return {
-      decision: {
-        outcome: "LAND",
-        reason: "source-size summary was unreadable; no deterministic gate finding",
-        judgmentSpawned: false,
-        fallback: false,
-      },
-      followup: reportWorkerSourceSizeFollowup(args, log, say, deps.consume),
-    };
-  }
-
-  const materialHotspots = classified.action === "material" ? classified.hotspots : undefined;
-  const finding: GatePostureFinding | undefined =
-    materialHotspots !== undefined
-      ? {
-          gate: "ci:source-size",
-          finding: `source-size reported ${materialHotspots.length} material maintainability hotspot(s)`,
-          evidence: materialHotspots.map((hotspot) => hotspot.path),
-          recoverability: "recoverable",
-          currentConsequence: "LAND+DEBT",
-        }
-      : undefined;
-
-  if (finding === undefined) {
-    const decision = await (deps.decide ?? decideGatePosture)({ finding: undefined }, { log });
-    return {
-      decision,
-      followup: reportWorkerSourceSizeFollowup(args, log, say, deps.consume),
-    };
-  }
-
-  let sideEffectAttempted = false;
-  let followup: ConsumeSourceSizeFollowupResult | undefined;
-  const applyFollowup = (): string | undefined => {
-    if (sideEffectAttempted) return sourceSizeFollowupDebtResult(followup);
-    sideEffectAttempted = true;
-    followup = reportWorkerSourceSizeFollowup(args, log, say, deps.consume);
-    return sourceSizeFollowupDebtResult(followup);
-  };
-
-  const decision = await (deps.decide ?? decideGatePosture)(
-    {
-      finding,
-      change: {
-        description: "source-size maintainability signal produced a bounded follow-up candidate",
-        files: [...(finding.evidence ?? [])],
-      },
-      planContext: { taskId: args.sourceTask, taskType: "source-size-followup" },
-      headSha: args.expectedHead,
-      ...(args.sourcePr === undefined ? {} : { prNumber: Number(args.sourcePr.match(/\/pull\/(\d+)/)?.[1]) || undefined }),
-    },
-    {
-      runRiskJudge: deps.runRiskJudge,
-      judge: deps.judge,
-      cache: deps.cache,
-      spend: deps.spend,
-      log,
-      // Both labels have the same bounded effect for this pilot: file the existing, deduped
-      // decomposition follow-up. The judge chooses whether the work is ordinary repair or debt;
-      // it never receives authority to rewrite the deterministic hotspot finding.
-      repair: applyFollowup,
-      fileDebt: applyFollowup,
-    },
-  );
-
-  // A fallback means the judge did not choose a consequence. Restore the pre-pilot behavior,
-  // which was to file the source-size follow-up, without trying a second time after a failed
-  // callback (the callback itself is the existing idempotent consumer).
-  if (decision.fallback && !sideEffectAttempted) applyFollowup();
-  if (decision.outcome === "LAND" && !decision.fallback) {
-    log("source_size.followup.deferred", {
-      reason: decision.reason,
-      hotspot_count: finding.evidence?.length ?? 0,
-    });
-    say("source-size follow-up deferred by the gate judge — implementation remains unblocked");
-  }
-  return { decision, ...(followup === undefined ? {} : { followup }) };
+  return runTaskCommandHelpers(runTaskCommandHost()).reportWorkerSourceSizeFollowupWithGatePosture(args, log, say, deps);
 }
 
 // ── Worker transcript archive (W1-T3079) ────────────────────────────────────────────────────
@@ -18011,630 +16037,9 @@ export function gitCredentialFixSpawn(
 
 async function runTask(
   taskId: string,
-  opts: ProbeAdmissionOptions & {
-    planPath?: string;
-    config?: Config;
-    /** W1-T7096: the drain and the CLI ask the production LLM progress judge in the fix rung. */
-    productionProgressJudge?: boolean;
-    preopenGate?: RunTaskBodyOptions["preopenGate"];
-    /** Frozen at the executing module boundary by default; trial runners may supply pinned artifacts. */
-    benchmarkStackEvidence?: BenchmarkStackEvidence;
-    allowStale?: boolean;
-    /** Explicit `--plan <path>` escape hatch (daemon only): read that file LITERALLY, no git
-     *  sync — the operator named an exact file, so honor it verbatim, same as the sibling
-     *  guard around the daemon's own non-self clone-sync (`!flagValue(rest, "--plan")`). */
-    skipGitSync?: boolean;
-    /**
-     * W1-T2513 — coalescing seam for the multi-lane dispatch path: threaded straight through
-     * to {@link syncPlanOrRefuse}'s identical param (see that function's and
-     * {@link createPlanSyncCoalescer}'s own docs for the full contract). `drainCommand` and
-     * `daemonCommand` build ONE coalescer per invocation and pass its `sync` method here for
-     * every lane's `runTask` call, so the three lanes of one tick share a single origin fetch
-     * and a single plan parse instead of paying for it three times. Omitted — every other
-     * caller (`rmd run-task`, `rmd wipe-test`, every existing test) — `runTask` fetches and
-     * loads for itself exactly as it always has.
-     */
-    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
-    /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
-     *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
-     *  task the projection already reports merged refuses at zero cost, verdict
-     *  `task_already_merged`; set, the dispatch proceeds EXACTLY as it did before this guard
-     *  existed. Always ledgered (`dispatch.rerun_override`) so a deliberate re-run is never
-     *  indistinguishable from a guard that failed to fire. */
-    rerun?: boolean;
-    /** Injectable worker-spawn — behavioral tests (W1-T20c criterion 5) count calls to prove
-     *  a linter-failing task NEVER reaches a spawn. Default: the real {@link spawnWorker}. */
-    spawn?: typeof spawnWorker;
-    /** Injectable GitHub gateway for the status projection — lets a behavioral test drive the
-     *  dispatch path without a network round-trip. Default: the real {@link ghGateway}. */
-    github?: GitHub;
-    /**
-     * W1-T2509 — A GATEWAY *FACTORY* THE CALLER MAY MEMOISE, so N concurrent lanes pay ONE cold
-     * walk instead of N. `buildBatchedGithub` holds `knownBoardPrs` at GATEWAY scope, so a gateway
-     * built per lane always starts `undefined`, takes `mode: "full"`, and walks the whole repo
-     * again — the identical constructor-lifetime defect `buildInboxDraftHook`'s own doc measured
-     * for the board rungs (5,022 `mode: "full"` at a mean of 9.74 REST calls against a warm
-     * gateway's steady-state 2). `runOne` never received that fix, so each dispatch lane paid a
-     * full walk SYNCHRONOUSLY before yielding, and `Promise.allSettled(admitted.map(runOne))` could
-     * not enter lane 2 until lane 1 finished it.
-     *
-     * A FACTORY, NOT AN INSTANCE, BECAUSE THE KEY IS `(owner, task.repo)` AND NOT THE DRAIN TARGET:
-     * a task carrying a different `repo:` than the drain's must not be answered by the target's
-     * gateway. The caller memoises per owner/repo; this seam only lets it.
-     *
-     * `github` above still wins when both are supplied — no existing test caller changes shape.
-     */
-    githubFor?: (owner: string, repo: string) => GitHub;
-    /** W1-T86 (P12 wipe-test harness): arm B of a LEARNINGS-factor `rmd wipe-test` pair —
-     *  MASK learnings injection for this run. Forces the rendered prompt's matched-learnings
-     *  text to "" WITHOUT reading the store (see {@link computeMatchedLearningsForArm}); never
-     *  set by any caller other than `wipeTestCommand`. */
-    maskLearnings?: boolean;
-    /** W1-T2512 (P12 wipe-test harness, RECON factor): arm B of a RECON-factor `rmd wipe-test`
-     *  pair — skip the recon spawn ENTIRELY for this run. The recon artifact store
-     *  (`loadReconArtifact`/`writeReconArtifact`) is neither read nor written — masked, not
-     *  deleted, the same discipline `maskLearnings` keeps for the learnings store — and
-     *  implement proceeds with an explicit "recon masked" context note (never a silently empty
-     *  CONTEXT block; see {@link reconMaskedContextNote}) instead of whatever recon would have
-     *  observed. Never set by any caller other than `wipeTestCommand`. */
-    maskRecon?: boolean;
-    /** W1-T2761 (P12 wipe-test harness, RULES factor): arm B of a RULES-factor `rmd wipe-test`
-     *  pair — force the `rule_headlines` prompt part to `""` for this run REGARDLESS of the
-     *  `workerRuleHeadlines.enabled` policy row, masking the part and nothing else
-     *  ({@link wipeTestFactorMasksRules}, wipe-test.ts). Never set by any caller other than
-     *  `wipeTestCommand`. */
-    maskRules?: boolean;
-    /** Injectable override for the `workerRuleHeadlines.enabled` policy gate (design (i)) — the
-     *  SAME `?? loadDefaultPolicy()` seam every other opts-defaulted policy knob in this file
-     *  uses, so a test can drive the `rule_headlines` prompt part on/off without a real
-     *  `plan/policy.yaml` row. Default: `loadDefaultPolicy().values.workerRuleHeadlines.enabled`
-     *  (absent/off unless an operator commits the row). */
-    workerRuleHeadlinesEnabled?: boolean;
-    /** Injectable containment-probe executor (W1-T91) — behavioral tests drive the REAL
-     *  blocked_containment catch branch (the structured guard/check/observed fields on its
-     *  ledger verdict line) through this seam, the SAME shape `defaultReconRunLens`'s own
-     *  `deps.probeExec` already uses, without touching `loadConfig()` (unavailable in CI) or
-     *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
-    containmentExec?: ProbeExecutor;
-    externalWaitFreshness?: ExternalWaitFreshness;
-    /** The daemon asks this run to yield or grants it a measured, bounded holdout at its current phase. */
-    restartAtWorkerBoundary?: RestartBoundary;
-    externalWaitRecycle?: () => string | undefined;
-    /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
-    handOffAtPrOpen?: boolean;
-    /** Injectable isolation-probe executor (W1-T91) — the isolation sibling of
-     *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
-     *  real spawn-backed executor. */
-    isolationExec?: IsolationProbeExecutor;
-    /** Injectable cash boundary proof. Default executes the production bubblewrap-backed proof;
-     * behavioral tests use this only to drive the capacity-recovery terminal paths. */
-    cashContainmentBoundary?: typeof assertOpenWeightToolBoundary;
-    /** Injectable reads for the BINARY-PIN rung. Default: {@link defaultBinaryPinDeps} over the
-     *  resolved `config.claudeBin` — a test drives a chosen version pair through this seam without
-     *  a real binary, and test/binary-pin-rung.test.ts separately exercises the DEFAULT for real. */
-    binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
-    /** Injectable review judge for the PRIMARY (post-CI-green) review call — the same
-     *  shape `runFixRung`'s own `deps.runReview` already exposes. Default: the real
-     *  {@link runReview}. W1-T125: lets a behavioral test drive a REAL runTask() through
-     *  the capped-refusal branch (and its `disarmAutoMerge` call, right before escalating)
-     *  without a live reviewer spawn — `runReview` itself hard-codes `spawnWorker` (never
-     *  this file's injectable `spawn` param), so a genuine CAPPED verdict from a real
-     *  reviewer round-trip cannot be produced deterministically in a test. */
-    runReview?: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
-    /**
-     * Read THIS PR's current body, so the review judges the artefact the author is told is judged.
-     * Appended LAST so no positional caller shifts. Injected only by tests; in production it
-     * DEFAULTS to {@link fetchPrBodyViaGh}. Best-effort — a throwing fetcher falls back to the
-     * worker-text report, i.e. exactly the pre-fix behaviour.
-     */
-    fetchPrBody?: (prUrl: string) => Promise<string>;
-    /** Fresh REST read for the exact-head producer claim; injectable for offline runTask tests. */
-    readHeadShaForProvenance?: (prUrl: string) => string;
-    /** Injectable decision-record writer+lander (W1-T191, write site 1) — lets a behavioral
-     *  test drive a REAL runTask() through the DECISION_REQUEST auto-choose branch and assert
-     *  exactly what it writes/lands, without ever shelling out to a real git/gh. Default: the
-     *  real {@link recordDecision} (feedback-landing.js), which writes
-     *  `plan/decisions.d/<taskId>-<runId>.md` and lands it via the shared decisions-landing
-     *  bridge — the same mechanism W1-T243 proved for `plan/feedback/**`. */
-    recordDecision?: typeof recordDecision;
-    /** W1-T1045: override the resolved clock bound (ms) — the SAME injection convention as
-     *  every other opt-in seam above. Default: `policy.values.workerAbandon`, read below. */
-    workerAbandonMs?: number;
-    /** W1-T7807: override the quiet-worker watchdog's no-history fallback bound (ms). Default: `policy.values.workerStall`. */
-    workerStallMs?: number;
-    /** W1-T2847: overrides `plan/policy.yaml`'s `sweep.armAdhocLaneReap` for the ad-hoc lane reap
-     *  rung — the same `?? loadDefaultPolicy()` seam `workerAbandonMs` above uses, so a test can
-     *  drive both arms without editing the shipped policy file. */
-    armAdhocLaneReap?: boolean;
-    /** W1-T4797: test seam for the pre-push diff-coverage precheck; production reads the real ones. */
-    coveragePrecheckPorts?: CoveragePrecheckPorts;
-    /**
-     * W1-T1044: override for the fix rung's worker-spawn wall-clock bound (see
-     * `runFixRung`'s own `deps.spawnWallClockBoundMs` doc). Optional — omitted reads
-     * `plan/policy.yaml`'s `fixSpawnWallClockBoundMs` row (`loadDefaultPolicy`) — W1-T1219 split
-     * this OFF `sweepWallClockBoundMs`, so retuning the sweep tick's bound no longer moves this
-     * one — the SAME `?? loadDefaultPolicy()` injection seam `test/config-reader-seams.test.ts`
-     * requires every unredirectable policy read to carry; a test overrides this directly to
-     * drive the bound without writing a fixture policy file.
-     */
-    spawnWallClockBoundMs?: number;
-    /**
-     * W1-T1062 (DISPATCH-PATH OWNER THREADING): overrides the owner this run clones from,
-     * gateways against, and opens its PR/issues against — every one of the eleven uses fed by
-     * the single `owner` binding just below. `resolveDaemonTarget`'s `--repo <owner>/<name>`
-     * resolution (via the SAME `resolveReviewTarget` splitter `rmd review --repo` already
-     * uses) is the one production source that sets this, threaded through `daemonCommand`'s
-     * `runOne` closure. Omitted — every OTHER caller (manual `rmd run-task`, `rmd drain`,
-     * `rmd wipe-test`) — this is `undefined` and `owner` resolves from THIS checkout's own
-     * origin (`resolveOwner()`), byte-identical to before this option existed. Threading this
-     * WITHOUT the daemon-side fix (or vice versa) is the partial-fix hazard the task record
-     * warns about: cloning under one owner and opening the PR under another is worse than
-     * today's honest self-owner-only behaviour.
-     */
-    owner?: string;
-    /**
-     * W1-T1256 (THE NO-MERGE BOUNDARY, operator ruling 2026-08-23): this run's PR may open,
-     * but the deferred arm-at-verdict call site (right before `pollToGate`, below) must never
-     * call {@link armAutoMergeAtOpen} for it — set ONLY by `wipeTestCommand`, for BOTH arms of
-     * a wipe-test pair. Why: a merged arm A moves `origin/main` and flips `projectPlan`'s
-     * `isMerged` for arm B, a REMOTE channel no local reset/reclone can reach (design note
-     * (iii)/(iv) of the task record) — so a successful arm A would otherwise destroy its own
-     * control by making arm B refuse at zero cost (W1-T319's already-merged guard). The
-     * decision itself is a pure policy function ({@link resolveWipeTestArmPermission},
-     * src/lib/wipe-test.ts) this call site consults rather than re-deriving; every OTHER
-     * caller of `runTask` omits this, so today's arm-at-verdict behavior is unchanged for
-     * every non-wipe-test dispatch.
-     */
-    noMerge?: boolean;
-    /**
-     * W1-T1268 (CROSS-HOST DISPATCH CLAIM): overrides the reserver the claim taken right
-     * after the clone is confirmed (below) attempts against, releases on every refusal, and
-     * releases again in the holder-arm `finally`. Default: the real
-     * {@link dispatchClaimReserverFor} bound to `repoDir` — every production caller omits
-     * this and gets the genuine `refs/rmd-dispatch/` git-ref-CAS. The seam mirrors every
-     * other injectable above (`spawn`, `github`, `containmentExec`): a test drives the
-     * `taken`/`unreachable` refusal, the release it triggers, and a release that itself
-     * throws (best-effort, caught in the `finally`) deterministically, without a genuine
-     * two-writer race against a real git remote.
-     */
-    claimReserver?: DispatchClaimReserverAsync;
-    /**
-     * W1-T1268 coverage seam: overrides the independent remote-head read `worktreeAdd`'s own
-     * `assertWorktreeBaseCurrent` performs right after this run's ONE worktree is cut. Default:
-     * `worktreeAdd`'s own default (a real, fresh `git ls-remote`). The genuine mechanism that
-     * lets a base go stale despite the fetch immediately before it is, per `worktreeAdd`'s own
-     * doc, UNMEASURED — an in-process race no test can script against a real remote — so this
-     * is the same injection {@link WorktreeBaseStaleError}'s own direct tests
-     * (`test/worktree-base-currency.test.ts`) already use, threaded here so a test can drive
-     * the REAL `runTask()` catch branch that drops this run's dispatch claim on that refusal.
-     */
-    worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
-    /** W1-T4356/W1-T4933: refreshes a managed checkout whose lockfile hash moved; default {@link stagedInstall}. */
-    managedCheckoutInstall?: (repoDir: string) => void;
-    /** Test gateway for checkout install escalation; production uses the task repo's issue gateway. */
-    prOpenRefusalIssues?: IssueGateway;
-    /** W1-T5520: test seams for the sibling-PR check and the REST create; production reads `ghJsonAsync` and `execFileSync`. */
-    otherOpenPrReader?: OpenPrJsonReader;
-    prCreateExec?: Parameters<typeof runGhPrCreate>[4];
-    prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
-    instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
-    selectedModeFileIO?: RegistryFileIO;
-    pairedTrial?: Partial<PairedTrialInput>;
-    pairedTrialHost?: "daemon";
-    /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
-     *  `rmd run-task` keeps the ambient helper byte-for-byte. */
-    gitCredentialSocketPath?: string;
-    /** W1-T9085: a run child's cancel, chained into every worker spawn's `signal` (W1-T5659). Omitted, no spawn gets one. */
-    abortSignal?: AbortSignal;
-    /** W1-T9085: receives the fire-and-forget paired-trial work so a run child can await it. Omitted, it is detached as before. */
-    onBackgroundWork?: (work: Promise<unknown>) => void;
-  } = {},
+  opts: Parameters<typeof runTaskFromModule>[1] = {},
 ): Promise<RunResult> {
-  const config = opts.config ?? loadConfig();
-  const rawSpawn = opts.spawn ?? spawnWorker;
-  const runReviewFn = opts.runReview ?? runReview;
-  const fetchPrBodyFn = opts.fetchPrBody ?? fetchPrBodyViaGh;
-  const recordDecisionFn = opts.recordDecision ?? recordDecision;
-  const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
-  const ledgerPath = ledgerPathFor(config);
-  const owner = opts.owner ?? resolveOwner();
-  // W1-T1045: THE CLOCK BOUND — read here, once, alongside every other opts-defaulted knob
-  // above, and threaded into the `spawn` wrap-once shape below so every real dispatch spawn
-  // (recon/implement/diagnose/decision-resume) gets it BY CONSTRUCTION, the same rationale
-  // `onSpawnError`/`workerStateSensor.observer` already state for that wrapper.
-  const workerAbandonMs = opts.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
-  // W1-T7807: the policy `workerStall` row is the quiet-worker watchdog's no-history fallback bound.
-  const workerStallFallbackMs = opts.workerStallMs ?? loadDefaultPolicy().values.workerStall;
-
-  // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
-  // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
-  const runId = `${taskId}-${Date.now()}`;
-  const log = benchmarkRunLedgerLogger((step, fields) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }),
-    opts.benchmarkStackEvidence ?? workerBoundaryStack);
-
-  // W1-T942: ONE worker-state sensor for THIS run's whole lifetime — recon, implement, and the
-  // DECISION_REQUEST resume below all share it (see `buildWorkerStateSensor`'s own doc for why
-  // a fresh tracker per spawn would misreport a restart the operator never actually saw).
-  const workerStateSensor = buildWorkerStateSensor({ ledgerPath, runId, taskId, root: config.root });
-  const restartPhase = { current: "recon" };
-  const noteRestartPhase = (phase: string): void => {
-    restartPhase.current = phase;
-    log("run.phase", { waiting_on: phase });
-  };
-
-  /**
-   * W1-T442: THE DESTINATION for a spawn's asynchronous 'error' event. Wrapping
-   * the `spawn` dep ONCE here — rather than adding `onSpawnError` at each of
-   * recon's, implement's and fix's call sites — means a spawn added later is
-   * diagnosed by construction instead of by remembering.
-   *
-   * `worker.spawn_error` is DIAGNOSTIC and is deliberately NOT added to
-   * `DECISION_RELEVANT_LEDGER_STEPS`: nothing reads it, so a rotation dropping
-   * it costs a post-mortem rather than a wrong decision — the same argument
-   * #1629 made for `dispatch.circuit_broken`. (#1648 took the OPPOSITE decision
-   * for its own rows, and the difference is the whole test: there, a consumer
-   * had appeared that read them. `test/ledger-rotation.test.ts` re-derives the
-   * set from consumer source, so it will refuse this the moment one appears
-   * here too.)
-   *
-   * W1-T942: the SAME wrap-once shape now ALSO attaches `workerStateSensor.observer` — the
-   * real observer, wired at the real spawn path rather than merely available (Standing rule
-   * 14) — and polls the quiet floor for exactly the duration this ONE spawn is in flight.
-   */
-  // Set only after a blocked subscription containment/isolation probe is replaced by the cash
-  // adapter's structural boundary proof below.  Ordinary runs keep the existing per-spawn auction.
-  const cashContainmentState = { contained: false };
-  const cashContainmentBoundary = opts.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
-  const spawn: typeof spawnWorker = (requestedSpawnArgs) => {
-    noteRestartPhase(restartPhase.current);
-    // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
-    const socketPath = runChildCredentialSocket(opts.gitCredentialSocketPath);
-    const spawnArgs = chainAbortSignal(socketPath
-      ? withGitCredentialSocket(requestedSpawnArgs, socketPath)
-      : requestedSpawnArgs, opts.abortSignal);
-    const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
-    const stopPolling = workerStateSensor.startPolling();
-    let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
-    const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
-    const receiptLog: typeof log = callerOwnsBenchmarkReceipt(effectiveSpawnArgs) ? () => {} : log; // W1-T4613: fixWorkerReceipt owns it
-    // W1-T7807: the quiet-worker watchdog rides every REAL dispatch spawn (an injected spawn has no process tree to read).
-    const watchedSpawn = watchDispatchSpawn(rawSpawn, {
-      enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
-      provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)),
-      restartPending: restartLatchDetail(opts.restartAtWorkerBoundary, () => ({ waitingOn: restartPhase.current, runId })),
-    });
-    return recordBenchmarkWorkerAttempt(() => watchedSpawn({
-      ...effectiveSpawnArgs,
-      // A dispatch run builds in its task worktree: its workers reserve (and learn) host memory as "implement".
-      workerClass: effectiveSpawnArgs.workerClass ?? "implement",
-      // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
-      // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
-      runId: effectiveSpawnArgs.runId ?? runId,
-      taskId: effectiveSpawnArgs.taskId ?? taskId,
-      onSelectionAssignment: (assignment) => {
-        selectionAssignment = assignment;
-        receiptLog("worker.assignment", { worker_assignment: assignment });
-        effectiveSpawnArgs.onSelectionAssignment?.(assignment);
-      },
-      onModelFallbackAttempt: dispatchFallbackObserver(receiptLog, effectiveSpawnArgs.onModelFallbackAttempt),
-      onSpawnError:
-        effectiveSpawnArgs.onSpawnError ??
-        ((err) =>
-          log("worker.spawn_error", {
-            // The errno IS the finding — everything else is context for it.
-            code: err.code ?? null,
-            errno: typeof err.errno === "number" ? err.errno : null,
-            syscall: err.syscall ?? null,
-            path: err.path ?? null,
-            error: String(err.message ?? err),
-          })),
-      // Keep provider/model attribution specific to THIS spawn, not the run's initial mount.
-      // The selected assignment is authoritative for provider + requested model; the selected
-      // model is deliberately not promoted to a served-model receipt.
-      streamObserver: dispatchStreamObserver(baseStreamObserver, effectiveSpawnArgs, () => selectionAssignment),
-      // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
-      // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
-      // its own `clockBound` (none exist today) is respected; every future dispatch call site
-      // through this wrapper is covered without remembering to add it individually.
-      clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-    }), receiptLog, () => selectionAssignment, stopPolling);
-  };
-  // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
-  // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
-  // writes are why daemon.out.log sat empty for a whole live run (see writeSyncLine's doc).
-  const say = (msg: string) => writeSyncLine(1, `\n### [${taskId}] ${msg}`);
-
-  // ── GIT SELF-SYNC (W1-T60): read the plan from `origin/main`, never the working tree — a
-  // dirty local WIP file or a stale local `main` must never change what this run dispatches,
-  // and the runner must never require a manual `git pull` first. A fetch failure FAILS
-  // CLOSED (named ledger error, no spawn) unless `--allow-stale` explicitly opts in.
-  let plan: Plan;
-  if (opts.skipGitSync) {
-    plan = loadPlan(planPath);
-  } else {
-    const synced = await syncPlanOrRefuseAsync(planPath, {
-      allowStale: opts.allowStale ?? false,
-      log,
-      say,
-      planSnapshot: opts.planSnapshot,
-    });
-    if ("error" in synced) {
-      return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_git_fetch" };
-    }
-    plan = synced.plan;
-  }
-  const task = selectTask(plan, taskId);
-
-  // ── Merge-state is DERIVED FROM GITHUB, never from the yaml `status:` field
-  // (MASTER-PLAN v2.1). Project the whole plan against GitHub, cache it to a
-  // machine-owned status.json, and gate on the derived merged predicate. The
-  // runner NEVER writes tasks.yaml.
-  const statusPath = join(config.root, "state", "status.json");
-  // Hoisted (was inline) so runTaskBody's SILENT NO-OP GUARD (W1-T272) can reuse the SAME
-  // gateway instance for its ALREADY_SATISFIED evidence check, rather than opening a second one.
-  //
-  // BATCHED, NOT `ghGateway` — the dispatch path was the last O(N)-GraphQL surface. The line
-  // below feeds `projectPlan(plan, …)` on the very next line, which is the WHOLE plan (441 tasks
-  // at this sha), and `ghGateway.findMergedByTrailer` spends ONE `gh pr list --search
-  // '"Remudero-Task: <id>" in:body'` per task — a GraphQL search each. So a single dispatch could
-  // cost ~441 of the account's 5000/hour, and a two-lane drain doubled it: MEASURED exhaustion at
-  // 5661/5000 while REST sat untouched at 5000/5000, with a drain reporting `no_runnable` at
-  // $0.00. `buildBatchedGithub` answers the same question client-side off ONE `fetchBoardPrsRest`
-  // pass (steady state 2 REST calls), which is the same batch-once-amortize-over-N-tasks shape
-  // `projectPlan` already applies to the ledger read and to rung (c2)'s head-branch corroboration.
-  //
-  // THE CREDIT IS UNCHANGED, and that is the load-bearing claim rather than the cost. The batched
-  // `findMergedByTrailer` matches the ANCHORED `^Remudero-Task: <id>$` line — the SAME regex
-  // `hasAnchoredTrailer` re-verifies with before `creditsByAnchoredTrailer` may credit — whereas
-  // the search form is documented fuzzy and returns candidates the caller then rejects. Same
-  // credits, strictly fewer rejected candidates. Coverage is not lost either: the REST walk is
-  // bounded at 50 pages x 100 per state (5000 open + 5000 closed) against ~1.5k PRs in this repo,
-  // and it reports `truncated` rather than silently dropping a tail.
-  // W1-T2509: `githubFor` lets a multi-lane caller hand every lane ONE memoised gateway per
-  // owner/repo, so lanes 2..N hit a warm `knownBoardPrs` index (a `mode: "delta"` fetch)
-  // instead of each paying `mode: "full"`. Absent it, this is byte-identical to before.
-  const github = opts.github ?? opts.githubFor?.(owner, task.repo) ?? createDaemonGatewayFactory(config.root, log)(owner, task.repo);
-  const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
-  const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
-  // W1-T322/W1-T367: computed once per run off the SAME plan+projection already built above —
-  // the SHIPS-UNWIRED marker verification set both `runReviewFn` and `runFixRung` below consult.
-  // Feeding `openTaskIdsFromPlan` the derived `projection` (never the plan alone) is the W1-T367
-  // fix — see that function's own doc for why the yaml `status:` field wrongly credited 248
-  // merged tasks as open. No second GitHub read: this is the SAME `projectPlan` pass `isMerged`
-  // above already paid for.
-  const openTaskIds = openTaskIdsFromPlan(plan, projection);
-
-  // ── ALREADY-MERGED BY-ID REFUSAL (W1-T319, fb-1784773321502-86793d): `isMerged` above is
-  // handed to `assertRunnable` next, which spends it ENTIRELY on the target's DEPENDENCIES —
-  // nothing on this path ever asks the one question the projection already answers about the
-  // TARGET itself. The incident this fixes: a task the projection already recorded merged
-  // (source:ledger, via a real PR) was dispatched anyway, pushed an empty branch, and claimed
-  // the OLD PR (pr_attribution_failed) — $1.30 for an outcome decided before the worker
-  // spawned. Reuses the SAME `projection` and `github` gateway already in scope — no second
-  // `projectPlan` call, no second gateway. Sits BEFORE `assertRunnable` (so the refusal names
-  // the accurate reason, not a downstream dependency message), before the §5C linter, the
-  // inflight lock, worktree materialization and any spawn: zero cost beyond the map lookup.
-  // The daemon's console-kick loop (`isMerged(kick.taskId)` in daemon.ts) and drain's
-  // eligibility filter already guard their own paths — this was the one dispatch entry point
-  // without it. `--rerun` is the explicit, ledgered escape hatch (mirrors `--allow-stale`).
-  if (isMerged(task)) {
-    if (opts.rerun) {
-      log("dispatch.rerun_override", { pr_url: projection.get(task.id)?.prUrl });
-    } else {
-      const mergedPrUrl = projection.get(task.id)?.prUrl;
-      log("dispatch.refused_already_merged", { pr_url: mergedPrUrl });
-      say(
-        `REFUSED: ${task.id} is already merged${mergedPrUrl ? ` (${mergedPrUrl})` : ""} — pass --rerun to dispatch anyway`,
-      );
-      // W1-T2446: EVIDENCE ARM, HOISTED HERE. `decideDispatchClaimRelease`'s evidence arm
-      // (dispatch-claim.ts) fires only where `claimReserver` is in scope, and until now that
-      // was exactly ONE call site 300 lines below (`claimOutcome === "taken"`, at the CAS this
-      // refusal always returns before reaching) -- so the one release arm that needs neither a
-      // live holder nor an operator was unreachable in exactly the case it was written for.
-      // W1-T2424's claim survived its own merge until an operator deleted the ref by hand.
-      // `isMerged(task)` above is the SAME projection already paid for -- no new probe. The
-      // reserver is bound to `repoDir`'s path, not constructed yet this early: reading and
-      // dropping a claim that turns out to be held costs one `ls-remote` plus, at most, one
-      // delete -- no new I/O beyond that. Best-effort and silent when there is nothing to
-      // release: `holder()`/`drop()` are plain git reads/writes that fail closed (return
-      // undefined/false) on an unreachable remote or on a repo this host has never cloned,
-      // same as any other dispatch attempt for this task would see from a fresh host -- see
-      // `dispatchClaimReserverFor`'s own doc for why `repoDir`, not `repoRoot`. NO TIMER: the
-      // only new input is `isMerged`, the identical evidence `decideDispatchClaimRelease`'s
-      // one existing call site already reuses -- this hoists ITS reach, never its meaning.
-      const staleClaimReserver = opts.claimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", task.repo));
-      if ((await staleClaimReserver.holder(task.id)) !== undefined) {
-        const released = await releaseDispatchClaimAsync(task.id, staleClaimReserver, { evidenceObserved: true });
-        log("dispatch.claim_released", {
-          ref: dispatchClaimRef(task.id),
-          arm: released.arm,
-          release: released.release,
-          dropped: released.dropped,
-          reason: released.reason,
-        });
-      }
-      return { taskId, runId, merged: false, costUsd: 0, verdict: "task_already_merged" };
-    }
-  }
-
-  // W1-T3216: the released set is passed so an operator-ratified verify:human task runs here too.
-  // Read once, at this single-task entry point — there is no pass to amortise it over.
-  assertRunnable(plan, task, isMerged, releasedTaskIds(readLedgerRawLines(ledgerPath)));
-
-  // ── §5C LAYER A: deterministic task linter, FAIL-CLOSED pre-dispatch guard
-  // (MASTER-PLAN §5C). Four malformed tasks (W1-T6, W1-T9, W1-T12) reached a
-  // worker and burned budget before a human noticed the pattern; this refuses a
-  // linter-failing task BEFORE the inflight lock is even taken — no lock, no
-  // worktree, no worker ever spawns. `rmd drain` dispatches every task through
-  // this same `runTask` path, so this ONE call site gates both entry points.
-  try {
-    // proofDialect — W1-T246's pre-dispatch "warn" demotion is REVERSED here: a proof that
-    // cannot execute now BLOCKS pre-dispatch, exactly as it already blocks at filing (`rmd
-    // lint-plan`, the inbox draft rung, the retro's plan-health sweep). The demotion's stated
-    // reason was that a "~90-task legacy backlog" would brick into blocked_illformed
-    // overnight; measured over the 7 days to 2026-07-30 that premise no longer holds — only
-    // 24 tasks are dispatchable at all, 15 of which still dispatch under this gate, while the
-    // demotion let 45 runs / $400.83 (49.4% of run spend, 34 distinct tasks) reach a worker
-    // with a proof that could never execute. NONE of those 45 merged, and none could have:
-    // review.ts's `capped` (`executableCriteria.length > 0 && executedCount === 0`) is
-    // unavoidable for such a task, and decideAutoMergeArm has refused to arm auto-merge on
-    // ANY capped verdict since W1-T229/#528 (2026-07-22). So this refusal declines to pay for
-    // a run a downstream gate would refuse anyway. The escape hatch is `git revert` of the
-    // one commit that made this change — deliberately no config key, env var, or policy row.
-    //
-    // proofResolvability:"warn" — DELIBERATELY LEFT DEMOTED, and this is not an oversight.
-    // W1-T101's rollout reason still binds: a queued task's proof legitimately FORWARD-
-    // REFERENCES the test its own PR will create (recon-AB measured 27 of 39 path proofs
-    // doing exactly that), and resolvability cannot tell that apart from a dead reference
-    // pre-dispatch. Blocking it would refuse correct authoring at scale. BLOCKS at
-    // filing/plan-health (the birth gate this check exists for); WARNS pre-dispatch.
-    //
-    // ONE options object for both calls: the loop below is visibility-only (it ledgers a
-    // `lint.warned` line per still-demoted violation) and `assertLintClean` is the actual
-    // gate, so the two MUST agree — two separate literals had already drifted once.
-    const preDispatchLint = { proofResolvability: "warn" } as const;
-    for (const v of lintTask(task, preDispatchLint).violations) {
-      if ((v.check === "proof-dialect" || v.check === "proof-resolvability") && v.severity === "warn") {
-        log("lint.warned", { check: v.check, message: v.message });
-      }
-    }
-    assertLintClean(task, preDispatchLint);
-  } catch (e) {
-    if (e instanceof TaskLintError) {
-      log("lint.blocked", { violations: e.violations });
-      say(
-        `REFUSED: task ${taskId} failed the pre-dispatch linter — ${e.violations.length} violation(s):\n` +
-          e.violations.map((v) => `  • [${v.check}] ${v.message}`).join("\n"),
-      );
-      // W1-T3657: A TASK THE LINTER REFUSES IS REPAIRED, NOT RE-ATTEMPTED FOREVER. Deterministic
-      // re-attempts of the SAME task reach the IDENTICAL verdict every tick (measured: 1,232
-      // refusals of one already-shipped task in 10.4h) — no strike spent, no escalation, nothing
-      // touched. `repairRefusedTask` (src/lib/dispatch-repair.ts) spends the decision instead:
-      // dispatch ONE repair lane carrying `e.violations` VERBATIM, or, on a SECOND refusal
-      // carrying the SAME verdict, escalate to the operator rather than re-reconning. A later
-      // identical refusal is held after that terminal escalation, with no second GitHub write.
-      // NEVER spawns (`dispatchRepairLaneDefault` below only logs+says) — the "no spawn on a
-      // linter-failing task" invariant (W1-T20c criterion 5, test/task-linter-wiring.test.ts)
-      // holds exactly as it did before this task.
-      const dispatchRepairLaneDefault = (input: { taskId: string; verdict: string; progress: boolean }) => {
-        log("dispatch.repair.dispatched", input);
-        say(
-          `REPAIR: dispatching one repair lane for ${input.taskId} (${input.progress ? "verdict changed — progress" : "first refusal"}) ` +
-            `carrying the linter's own verdict:\n${input.verdict}`,
-        );
-      };
-      const escalateDefault = (input: { taskId: string; verdict: string; attempts: number }) => {
-        const escalation: Escalation = {
-          class: "BLOCKED",
-          taskId: input.taskId,
-          runId,
-          summary: `pre-dispatch linter refused ${input.taskId} again with the SAME verdict (${input.attempts}x) — repair lane made no progress`,
-          detail:
-            `A repair lane already ran once for this exact verdict and the task still refuses to dispatch:\n\n${input.verdict}\n\n` +
-            `A second automatic repair lane would only repeat it — this is why the loop stops here instead of re-reconning.`,
-          options: [
-            {
-              label: "restructure-task",
-              detail: "edit the task's plan record to resolve the named linter violation(s), then re-dispatch.",
-            },
-          ],
-          recommendation: "restructure-task",
-        };
-        const issueUrl = escalate(escalation, { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId });
-        log("dispatch.repair.escalated", { ...input, issue_url: issueUrl });
-      };
-      const violations: RefusalViolation[] = e.violations.map((v) => ({ check: v.check, message: v.message }));
-      const refusalStateRoot = join(config.root, "state");
-      const repairAction = repairRefusedTask(
-        taskId,
-        violations,
-        (id) => readPriorRefusal(refusalStateRoot, id),
-        (id, prior) => writePriorRefusal(refusalStateRoot, id, prior),
-        dispatchRepairLaneDefault,
-        escalateDefault,
-        preDispatchContractRevision(task),
-      );
-      if (repairAction.kind === "held") {
-        log("dispatch.repair.held", {
-          reason: "unchanged pre-dispatch verdict was already escalated",
-          verdict: repairAction.verdict,
-          escalation_attempts: repairAction.attempts,
-        });
-      }
-      return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_illformed" };
-    }
-    throw e;
-  }
-
-  // ── PER-TASK IN-FLIGHT LOCK (guard 1, docs/archive/DIAGNOSIS.md diag/drain-sequential-await).
-  // No two runs of the SAME task may overlap — whatever launched them (two drains, or a
-  // manual run-task beside a running drain). A LIVE holder ⇒ REFUSE this run (naming the
-  // holder); a stale (dead-pid) lock ⇒ reclaim.
-  //
-  // RELEASED ON EVERY *UNWOUND* PATH — return OR throw — via the finally below. THAT IS NOT
-  // "every terminal path", and the difference is the whole reason the sweep rung exists: a
-  // `finally` only runs if the stack unwinds. There are NO signal handlers anywhere in src/,
-  // so SIGKILL (unhandleable) AND SIGTERM/SIGINT (Node's default terminates without unwinding)
-  // both leave the lock file behind — as does an OOM-kill or power loss. An earlier revision of
-  // this comment claimed "a crash never leaves a permanent stale lock"; that was false, and
-  // `sweepStaleInflightLocks`' own doc already contradicted it with an observed case
-  // (`W1-T1.lock` holding pid 65304, dead two days, still present). Stale locks are REAL,
-  // EXPECTED, and cleared by the next acquire of this same task or by the sweep rung.
-  const inflightDir = join(config.root, "state", "inflight");
-  let inflightLock;
-  try {
-    inflightLock = acquireInflightLock(inflightDir, taskId, { run_id: runId });
-  } catch (e) {
-    if (e instanceof InflightLockError) {
-      log("inflight.refused", { holder_pid: e.holder.pid, holder_run_id: e.holder.run_id });
-      say(`REFUSED: task ${taskId} already running (pid ${e.holder.pid}, run ${e.holder.run_id}) — not starting a duplicate`);
-      return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_inflight" };
-    }
-    throw e;
-  }
-  const detach = (work: Promise<unknown>): void => opts.onBackgroundWork?.(work);
-  detach(runPairedTrial({ ...(opts.pairedTrialHost === "daemon"
-    ? { dispatchAttempt: sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo), spawn: rawSpawn,
-      maxBudgetUsd: task.budget_usd ?? DEFAULT_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
-    : { dispatchRefusal: PAIRED_CLI_REFUSAL }), ...opts.pairedTrial, task, lane: "implement", stateDir: join(config.root, "state"), log,
-    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision }));
-  // W1-T4647: a registered prospective A/A pairs the task on its one pinned stack, subscription only; inert otherwise.
-  detach(runProspectiveAaPair({ ...(opts.pairedTrialHost === "daemon"
-    ? { dispatchAttempt: sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
-      spawn: benchmarkNonDispatchSpawn("aa-prospective", rawSpawn), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
-    : { dispatchRefusal: PAIRED_CLI_REFUSAL }), task, lane: "implement", stateDir: join(config.root, "state"), config,
-    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision }));
-  return withInflightRunLock(inflightLock, taskId, log, async (runLog) => {
-    const ctx: RunTaskContext = {
-      restartPhase,
-      spawnInjected: opts.spawn !== undefined,
-      cashContainmentBoundary,
-      cashContainmentState,
-      config,
-      fetchPrBodyFn,
-      github,
-      isMerged,
-      ledgerPath,
-      log: runLog,
-      openTaskIds,
-      opts,
-      owner,
-      plan,
-      planPath,
-      recordDecisionFn,
-      repoRoot,
-      runId,
-      runReviewFn,
-      say,
-      spawn,
-      task,
-      taskId,
-      workerAbandonMs,
-      workerStateSensor,
-    };
-    return await runTaskBody(ctx);
-  });
+  return runTaskFromModule(taskId, opts, runTaskCommandHost());
 }
 
 /** Release the run's task lock after unwinding, retaining attribution for a recycle handoff. */
@@ -18644,33 +16049,10 @@ export async function withInflightRunLock<T>(
   log: (step: string, extra?: Record<string, unknown>) => void,
   run: (log: (step: string, extra?: Record<string, unknown>) => void) => Promise<T>,
 ): Promise<T> {
-  let waitingOn: unknown;
-  try {
-    return await run((step, extra) => {
-      if (step === "run.freshness_handoff" && extra?.trigger === "recycle") waitingOn = extra.waiting_on;
-      log(step, extra);
-    });
-  } finally {
-    try {
-      if (waitingOn) log("inflight.recycle_yield", {
-        lock_key: basename(lock.path, ".lock"), task_id: taskId, run_id: lock.info.run_id, waiting_on: waitingOn,
-      });
-    } finally {
-      lock.release();
-    }
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).withInflightRunLock(lock, taskId, log, run);
 }
 
 /** W1-T4655: the closed set of HARNESS causes a run that threw is ledgered under — never a model judgement. */
-export type RunErrorCause =
-  | "census-refused-push"
-  | "git-push-failed"
-  | "git-commit-failed"
-  | "pr-create-failed"
-  | "github-read-failed"
-  | "base-proof-refused"
-  | "subscription-only-refused"
-  | "run-error";
 
 /** Classifies a thrown run by the message shapes measured on the fleet ledger 2026-09-24..28; census first,
  *  since a census refusal is also a failed push. Anything unrecognised stays the generic `run-error`. */
@@ -18695,13 +16077,7 @@ export function endThrownRun(
   err: unknown,
   costUsd: number,
 ): void {
-  endRunOnce(log, alreadyEnded, () => ({
-    verdict: "failed",
-    reason: boundedVerdictReason(String((err as Error)?.message ?? err)),
-    stage,
-    cause: runErrorCause(err),
-    cost_usd: costUsd,
-  }));
+  return runTaskCommandHelpers(runTaskCommandHost()).endThrownRun(log, alreadyEnded, stage, err, costUsd);
 }
 
 /**
@@ -18711,43 +16087,6 @@ export function endThrownRun(
  * `pr_url` or `pr.opened`, because this run does not own that PR. An unreadable list is ledgered and the open
  * proceeds as today: refusing would strand a finished build to prevent a duplicate the sweep already closes.
  */
-async function deferOpenToSiblingPr(
-  ctx: RunTaskContext,
-  run: { impl: WorkerResult; branch: string; worktreePath: string; repoDir: string; costUsd: number },
-): Promise<RunResult | undefined> {
-  const { log, say, opts, owner, task, taskId, runId } = ctx;
-  const { impl, branch, worktreePath, repoDir, costUsd } = run;
-  const sibling = await readOtherOpenPrForTask(owner, task.repo, taskId, branch, opts.otherOpenPrReader ?? ((args) => ghJsonAsync(args)));
-  if (sibling.state === "unreadable") {
-    log("pr.open_existing_check_unreadable", { branch, error: boundedVerdictReason(sibling.error) });
-    return undefined;
-  }
-  if (sibling.state === "none") return undefined;
-  const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
-  log("pr.open_deferred_to_existing", {
-    existing_pr_number: sibling.number,
-    existing_pr_url: sibling.url,
-    existing_head_ref: sibling.head_ref,
-    matched_by: sibling.matched_by,
-    branch,
-    head_sha: headSha,
-    cost_usd: costUsd,
-  });
-  reclaimRunWorktree(repoDir, worktreePath, "pr_open.deferred_to_existing", log);
-  log("verdict", {
-    verdict: "blocked_inflight",
-    reason: `${taskId} already has open PR #${sibling.number} (${sibling.head_ref}); not opening a second`,
-    stage: "pr_open.deferred_to_existing",
-    branch,
-    head_sha: headSha,
-    cost_usd: costUsd,
-    billing_mode: billingMode(impl.childEnvKeys),
-    account_label: impl.accountLabel,
-    ...terminalVerdictFields(impl),
-  });
-  say(`verdict: blocked_inflight — ${taskId} already has open PR #${sibling.number}; branch ${branch} kept on origin at ${headSha}`);
-  return { taskId, runId, merged: false, costUsd, verdict: "blocked_inflight" };
-}
 
 /** Best-effort worktree reclaim for a run that is ending: a failed remove is ledgered, never thrown over the verdict. */
 export function reclaimRunWorktree(
@@ -18757,12 +16096,7 @@ export function reclaimRunWorktree(
   log: RunTaskContext["log"],
   remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
 ): void {
-  try {
-    remove(repoDir, worktreePath);
-    log("worktree.remove", { on });
-  } catch (e) {
-    log("worktree.remove.error", { on, error: String((e as Error)?.message ?? e) });
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).reclaimRunWorktree(repoDir, worktreePath, on, log, remove);
 }
 
 /** W1-T4708: a pre-worktree refusal that RETURNS gets the same one terminal row, carrying the verdict it returns. */
@@ -18773,30 +16107,14 @@ export function endRefusedRun(
   result: RunResult,
   reason: string,
 ): RunResult {
-  endRunOnce(log, alreadyEnded, () => ({ verdict: result.verdict, reason: boundedVerdictReason(reason), stage, cost_usd: result.costUsd }));
-  return result;
+  return runTaskCommandHelpers(runTaskCommandHost()).endRefusedRun(log, alreadyEnded, stage, result, reason);
 }
 
-const boundedVerdictReason = (text: string): string => capStderrExcerpt(scrubGitCredentialText(text), STDERR_EXCERPT_CAP);
 
 /** The once-per-run guard both enders share. Best-effort: a ledger failure never replaces the run's own outcome. */
-function endRunOnce(log: RunTaskContext["log"], alreadyEnded: boolean, row: () => Record<string, unknown>): void {
-  if (alreadyEnded) return;
-  try {
-    log("verdict", { ...row(), ...terminalVerdictFields(null) });
-  } catch {
-    const reason = "thrown-run-verdict-ledger-write-failed";
-    void reason; // the caller's rethrow or return is the authoritative outcome
-  }
-}
 
 /** W1-T4656: a pre-push census refusal read off a push error — the hook's block, the censuses its rows name,
  *  and the baseline files a row itself offers ("or record … in <file>"). Undefined for any other failure. */
-export interface CensusPushRefusal {
-  text: string;
-  censuses: string[];
-  offeredBaselines: string[];
-}
 
 export function censusPushRefusal(err: unknown): CensusPushRefusal | undefined {
   const lines = String((err as Error)?.message ?? err).split("\n");
@@ -18849,6 +16167,15 @@ export function fixCensusAppliesToRepo(
   return false;
 }
 
+export async function censusSnapshotForCheck(
+  root: string, path: string | undefined, merging: boolean,
+  write: ((root: string, log: (step: string, extra?: Record<string, unknown>) => void) => string | undefined | Promise<string | undefined>) | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  if (path === undefined || !merging || write === undefined) return path;
+  return (await write(root, log)) ?? path;
+}
+
 export function writeFixCensusSnapshot(root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit: typeof hostWorktreeGit = hostWorktreeGit): string | undefined {
   return runStepsSync(writeFixCensusSnapshotSteps(root, log, runGit));
 }
@@ -18865,12 +16192,14 @@ function* writeFixCensusSnapshotSteps(
   try {
     const headSha = (yield* step(() => runGit(root, ["rev-parse", "HEAD"]))).trim();
     const mainSha = (yield* step(() => runGit(root, ["rev-parse", "origin/main"]))).trim();
-    const mergeBase = (yield* step(() => runGit(root, ["merge-base", headSha, mainSha]))).trim();
+    const mergeHeadPath = resolve(root, (yield* step(() => runGit(root, ["rev-parse", "--git-path", "MERGE_HEAD"]))).trim());
+    const mergingMain = existsSync(mergeHeadPath) && readFileSync(mergeHeadPath, "utf8").split("\n")[0]!.trim() === mainSha;
+    const mergeBase = mergingMain ? mainSha : (yield* step(() => runGit(root, ["merge-base", headSha, mainSha]))).trim();
     const censusPath = (p: string) =>
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
     function* paths(args: string[]): Steps<string[]> {
-      return (yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p));
+      return [...new Set((yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p)))];
     }
     const headPaths = yield* paths(["ls-files"]);
     const basePaths = yield* paths(["ls-tree", "-r", "--name-only", mergeBase]);
@@ -18903,7 +16232,8 @@ function* writeFixCensusSnapshotSteps(
     if (lstatSync(join(root, "state")).isSymbolicLink()) throw new Error("census state directory is a symlink");
     const path = join(mkdtempSync(join(root, "state", "rmd-census-")), "snapshot.json");
     writeFileSync(path, JSON.stringify(snapshot), { flag: "wx", mode: 0o444 });
-    log("fix.census_snapshot", { outcome: "available", path, head_sha: headSha, main_sha: mainSha, merge_base: mergeBase });
+    log("fix.census_snapshot", { outcome: "available", path, head_sha: headSha, main_sha: mainSha, merge_base: mergeBase,
+      ...(mergingMain ? { merge_head: mainSha } : {}) });
     return path;
   } catch (error) {
     log("fix.census_snapshot", { outcome: "unavailable", reason: String(error) });
@@ -18912,9 +16242,7 @@ function* writeFixCensusSnapshotSteps(
 }
 
 /** A census child's result: `spawnSync`'s own fields, or the same fields from {@link spawnCensusChild}. */
-export type CensusChildResult = Pick<SpawnSyncReturns<string>, "status" | "signal" | "stdout" | "stderr" | "error">;
 /** How a census check runs one child: `spawnSync` on the CLI, an awaited spawn on the daemon's loop (W1-T7744). */
-export type CensusChildRunner<R> = (file: string, args: string[], options: SpawnSyncOptionsWithStringEncoding) => R;
 
 export function checkFixCensusSnapshot(
   root: string,
@@ -18996,7 +16324,7 @@ export class FixRoundPushError extends RmdError {
   }
 }
 
-export type FixRoundPushReceipt = { fixRoundPushedHead: string | undefined }; // W1-T9618: a real push names the head it sent to origin
+// W1-T9618: a real push names the head it sent to origin
 const isFixRoundPushReceipt = (value: unknown): value is FixRoundPushReceipt =>
   typeof value === "object" && value !== null && "fixRoundPushedHead" in value;
 export type FixRoundLanding = { landed: true; remoteHead?: string } // W1-T9618: did the round's commit reach the remote branch?
@@ -19045,7 +16373,7 @@ export async function pushFixRound(
     const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
       .then((stdout) => stdout.split(/\s/)[0], () => undefined);
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return { fixRoundPushedHead: expectedHeadSha };
-    throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
+    throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err) ?? prePushGateRefusal(err), String((err as Error)?.message ?? err));
   }
 }
 
@@ -19055,29 +16383,13 @@ export async function pushFixRound(
  * pushes as today; `unavailable` (timeout, spawn failure, unreadable lcov, a selector that cannot
  * scope) ALSO pushes: a precheck that cannot look must never block; consumer repos return `not-applicable`.
  */
-export type CoveragePrecheck =
-  | { outcome: "not-applicable"; repo: string; reason: string }
-  | { outcome: "covered"; reason: string; suites: number }
-  | { outcome: "uncovered"; text: string; suites: number }
-  | { outcome: "unavailable"; reason: string };
 
 /** What one scoped `diff-coverage-local.mjs` run came back with. */
-export type CoverageRunResult = { status: number | null; output: string; timedOut: boolean; spawnError?: string };
 
 /** Everything the precheck reads or spawns, so a test can drive each arm without an instrumented suite. */
-export type CoveragePrecheckPorts = {
-  repo?: string;
-  changedFiles?: (wt: string) => string[] | Promise<string[]>;
-  select?: (wt: string, changed: string[]) => AffectedSelection | Promise<AffectedSelection>;
-  manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
-  run?: (wt: string, suites: string[], timeoutMs: number) => CoverageRunResult | Promise<CoverageRunResult>;
-  /** Bounds captured output in the real runner; the default retains spawnSync's 64 MiB ceiling. */
-  maxOutputBytes?: number;
-  /** W1-T5227: the head's files (against origin/main) still holding a conflict marker. */
-  conflictMarkers?: (wt: string) => string[];
-};
 
-const COVERAGE_SRC_FILE = /^src\/.*\.ts$/;
+/** W1-T5309: CI's own gate predicate — src/ TypeScript and src/ or scripts/ ESM — so an .mjs change is measured. */
+const COVERAGE_SRC_FILE = COVERAGE_SOURCE_FILE;
 const COVERAGE_UNCOVERED_HEADLINE = /^diff-coverage: (?:BLOCKED -- this diff adds|INVALID process-boundary)/m;
 const COVERAGE_MISSING_SF = /no SF record in the coverage report/;
 const COVERAGE_TEXT_CAP = 4000;
@@ -19199,6 +16511,15 @@ export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts 
   if (!changed.some((f) => COVERAGE_SRC_FILE.test(f))) {
     return { outcome: "covered", reason: "no changed src file for diff-coverage to prove", suites: 0 };
   }
+  // W1-T9483: the diff's own test files and the direct importers of its changed src files run FIRST (lib/coverage-narrow.ts).
+  // An unreadable listing is no narrow pass, never a verdict: the reach passes then decide exactly as they always did.
+  let narrow: string[] = [];
+  let narrowUnreadable = "";
+  try {
+    narrow = await (ports.narrow ?? coverageNarrowSuites)(wt, changed);
+  } catch (e) {
+    narrowUnreadable = ` (the narrow suite listing was unreadable: ${reasonOf(e)})`;
+  }
   let selection: AffectedSelection;
   let manifest: { thresholdMs: number; files: Record<string, number> };
   try {
@@ -19208,29 +16529,22 @@ export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts 
   } catch (e) {
     return { outcome: "unavailable", reason: `could not derive the affected-suite scope: ${reasonOf(e)}` };
   }
-  if (selection.fullRun) return { outcome: "unavailable", reason: selection.reasons[0] ?? "a changed file forces the full suite" };
-  if (selection.suites.length === 0) return { outcome: "unavailable", reason: "no suite reaches the changed src files" };
+  const run = ports.run ?? ((w: string, suites: string[], timeoutMs: number) => realCoverageRun(w, suites, timeoutMs, ports.maxOutputBytes ?? COVERAGE_RUN_MAX_BUFFER));
   const tiers = tierFiles(selection.suites, manifest) as { fast: string[]; slow: string[] };
   const passes = [tiers.fast.length > 0 ? tiers.fast : tiers.slow];
   if (tiers.fast.length > 0 && tiers.slow.length > 0) passes.push([...tiers.fast, ...tiers.slow]);
-  const run = ports.run ?? ((w: string, suites: string[], timeoutMs: number) => realCoverageRun(w, suites, timeoutMs, ports.maxOutputBytes ?? COVERAGE_RUN_MAX_BUFFER));
-  for (const suites of passes) {
-    if (suites.length > PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING) {
-      return { outcome: "unavailable", reason: `${suites.length} suite(s) are too wide to precheck quickly (over preflight's scoped ceiling of ${PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING})` };
-    }
-    const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
-    const boundMs = Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number)));
-    const r = await run(wt, suites, boundMs);
-    if (r.timedOut) return { outcome: "unavailable", reason: `timed out over its ${boundMs}ms bound (manifest-measured ${predictedMs}ms for ${suites.length} suite(s))` };
-    if (r.spawnError !== undefined) return { outcome: "unavailable", reason: `spawn failed: ${r.spawnError.slice(0, 300)}` };
-    if (r.status === 0) return { outcome: "covered", reason: `${suites.length} scoped suite(s) cover every added src line`, suites: suites.length };
-    if (COVERAGE_UNCOVERED_HEADLINE.test(r.output)) return { outcome: "uncovered", text: coverageRefusalText(r.output), suites: suites.length };
-    if (!COVERAGE_MISSING_SF.test(r.output)) {
-      const why = /^diff-coverage-local: .*$/m.exec(r.output)?.[0] ?? `exited ${r.status}`;
-      return { outcome: "unavailable", reason: why.slice(0, 300) };
-    }
-  }
-  return { outcome: "unavailable", reason: "a changed src file has no SF record even after widening to the slow-tier siblings" };
+  return judgeCoverage({
+    narrow, narrowUnreadable, selection, passes, ceiling: PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING,
+    bounded: async (suites) => {
+      const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
+      const boundMs = Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number)));
+      return { predictedMs, boundMs, r: await run(wt, suites, boundMs) };
+    },
+    head: () => (ports.head ?? ((w) => hostWorktreeGitAsync(w, ["rev-parse", "HEAD"]).then((t) => t.trim())))(wt),
+    isUncovered: (output) => COVERAGE_UNCOVERED_HEADLINE.test(output),
+    refusalText: coverageRefusalText,
+    isMissingSf: (output) => COVERAGE_MISSING_SF.test(output),
+  });
 }
 
 /** W1-T4797: ledger the precheck's outcome and reason, then hand back a refusal only for `uncovered`. */
@@ -19243,9 +16557,11 @@ export function coveragePushRefusal(
     site,
     outcome: result.outcome,
     reason: result.outcome === "uncovered" ? "diff-coverage would refuse this head" : result.reason,
-    ...(result.outcome === "covered" || result.outcome === "uncovered" ? { suites: result.suites } : {}),
+    ...(result.outcome === "covered" || result.outcome === "uncovered" || result.outcome === "uncovered-narrow" ? { suites: result.suites } : {}),
     ...(result.outcome === "not-applicable" ? { repo: result.repo } : {}),
     ...(result.outcome === "uncovered" ? { refusal: result.text } : {}),
+    // W1-T9483: advisory only — the lines to cover and the head they were judged on, never a refusal.
+    ...coverageNarrowRowFields(result),
   });
   if (result.outcome !== "uncovered") return undefined;
   return { text: `${COVERAGE_PUSH_CHECK}: CI's coverage-ratchet would refuse this head —\n${result.text}`, censuses: ["diff-coverage"], offeredBaselines: [] };
@@ -19291,9 +16607,6 @@ export async function pushFixRoundPrechecked(
   }
 }
 
-export type CensusPushRungOutcome =
-  | { outcome: "cleared"; strikes: number; remedy: "code-change" | "baseline-row"; baselineFiles: string[] }
-  | { outcome: "refused"; strikes: number; refusal: CensusPushRefusal; reason: string };
 
 /**
  * W1-T4656: the fix rung's own strike — ci-log prompt, fix mount, wall-clock bound, harness commit, strike
@@ -19308,6 +16621,7 @@ export async function repairCensusRefusedPush(input: {
   worktreePath: string;
   branch: string;
   resumeSessionId: string;
+  resumeSessionProvider?: WorkerResult["provider"];
   mount: Mount;
   stepUpMount?: Mount;
   settingsFile: string;
@@ -19322,3096 +16636,15 @@ export async function repairCensusRefusedPush(input: {
   /** W1-T4797: re-run a NON-hook gate (the diff-coverage precheck) after each strike's commit, before the push;
    *  a refusal it returns becomes the next strike's evidence exactly as a hook refusal does. */
   recheck?: () => Promise<CensusPushRefusal | undefined>;
+  /** Only the implement fallback offers closure catalog edits; the fix lane never does. */
+  catalogFiles?: (refusal: CensusPushRefusal) => readonly string[];
 }): Promise<CensusPushRungOutcome> {
-  const { task, worktreePath: cwd, log } = input;
-  const head = () => hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
-  const startHead = head();
-  const offered = new Set(input.refusal.offeredBaselines);
-  const { harnessCommits, cashTools } = fixRoundGitOwnership(input.config);
-  const strikeCap = fixStrikeCap(input.config);
-  let refusal = input.refusal;
-  for (let strike = 1; strike <= strikeCap; strike++) {
-    log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
-    const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
-    const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? await writeFixCensusSnapshotAsync(cwd, log) : undefined;
-    const prompt = [
-      renderFixPrompt({
-        task,
-        round: strike,
-        branch: input.branch,
-        harnessCommits,
-        censusSnapshotPath,
-        evidence: { ciFailures: [{ name: input.recheck ? COVERAGE_PUSH_CHECK : CENSUS_PUSH_CHECK, logTail: refusal.text }] },
-        reachableRemedyFiles: refusal.offeredBaselines.map((path) => ({ path, job: "census-precheck" })),
-      }),
-      "",
-      input.recheck
-        ? "PRE-PUSH DIFF-COVERAGE (W1-T4797): no PR exists yet — CI's coverage-ratchet would refuse this head; add the tests that cover each line named above."
-        : "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above.",
-      CENSUS_PUSH_NEVER_BYPASS,
-    ].join("\n");
-    const roundStart = head();
-    const receipt = fixWorkerReceipt(input.spawn, log, fixWorkerRunId(input.runId, `census${strike}`, systemClock.now()), fixLaneBenchmarkWork(task, input.ledgerPath));
-    const spawned = await spawnFixWorkerBounded(
-      { spawn: receipt.spawn, log, spawnWallClockBoundMs: input.spawnWallClockBoundMs, reclaimWorker: (info) => reclaimAbandonedWorker(info, { log }) },
-      {
-        cwd,
-        permissionMode: "bypassPermissions",
-        settingsFile: input.settingsFile,
-        model: mount.model,
-        mountProvider: mount.provider,
-        effort: mount.effort,
-        maxTurns: mount.maxTurns,
-        maxBudgetUsd: input.budgetUsd,
-        config: input.config,
-        prompt,
-        ...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {}),
-        resumeSessionId: strike === 1 ? input.resumeSessionId : undefined,
-        tools: harnessCommits ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
-        ...(cashTools === undefined ? {} : { cashTools }),
-        runId: input.runId,
-        taskId: task.id,
-      },
-      { runId: input.runId, taskId: task.id },
-    );
-    if (spawned.kind !== "spawned") return { outcome: "refused", strikes: strike, refusal, reason: `fix worker ${spawned.kind} after ${spawned.elapsedMs}ms` };
-    const result = input.account(spawned.result);
-    const censusCheck = await checkFixCensusSnapshotAsync(cwd, censusSnapshotPath, log);
-    if (censusCheck?.refusal) {
-      refusal = censusCheck.refusal;
-      log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd,
-        reason: "saved edits refused by census before commit", refusal: refusal.text });
-      continue;
-    }
-    harnessCommitForShellLessWorker({
-      harnessOwnsGit: harnessCommits,
-      commitCount: commitsAhead(cwd, roundStart),
-      report: workerTranscript(result),
-      worktreePath: cwd,
-      declaredPaths: [...(task.files ?? []), ...refusal.offeredBaselines],
-      acceptance: task.acceptance,
-      assignmentId: result.selectionAssignmentId,
-      log,
-      say: input.say,
-    });
-    const baselineFiles = hostWorktreeGit(cwd, ["diff", "--name-only", startHead, "HEAD", "--", ...CENSUS_BASELINE_FILES])
-      .split("\n")
-      .filter(Boolean);
-    log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd, baseline_files: baselineFiles });
-    const unoffered = baselineFiles.filter((f) => !offered.has(f));
-    if (unoffered.length > 0) return { outcome: "refused", strikes: strike, refusal, reason: `raised a baseline no refusal row offers: ${unoffered.join(", ")}` };
-    const stillRefused = await input.recheck?.();
-    if (stillRefused) {
-      refusal = stillRefused;
-      continue;
-    }
-    try {
-      await gitPushRunBranchAsync(cwd);
-    } catch (err) {
-      const next = censusPushRefusal(err);
-      if (!next) throw err;
-      refusal = next;
-      for (const f of next.offeredBaselines) offered.add(f);
-      continue;
-    }
-    const remedy = baselineFiles.length > 0 ? "baseline-row" : "code-change";
-    log("census_push.cleared", { strikes: strike, remedy, baseline_files: baselineFiles, censuses: input.refusal.censuses });
-    return { outcome: "cleared", strikes: strike, remedy, baselineFiles };
-  }
-  return { outcome: "refused", strikes: strikeCap, refusal, reason: `not cleared in ${strikeCap} strike(s)` };
+  return runTaskCommandHelpers(runTaskCommandHost()).repairCensusRefusedPush(input);
 }
 
 export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
-  const {
-    config,
-    fetchPrBodyFn,
-    github,
-    isMerged,
-    ledgerPath,
-    log: ctxLog,
-    openTaskIds,
-    opts,
-    owner,
-    plan,
-    planPath,
-    recordDecisionFn,
-    repoRoot,
-    runId,
-    runReviewFn,
-    say,
-    spawn,
-    task,
-    taskId,
-    workerAbandonMs,
-    workerStateSensor,
-    spawnInjected = false,
-  } = ctx;
-  // W1-T4655: set BEFORE the write, so no thrown-run exit (endThrownRun) writes a second verdict.
-  let verdictWritten = false;
-  const log: RunTaskContext["log"] = (step, extra) => {
-    if (step === "verdict") verdictWritten = true;
-    ctxLog(step, extra);
-  };
-  const restartPhase = ctx.restartPhase ?? { current: "recon" };
-  const noteRestartPhase = (phase: string): void => {
-    restartPhase.current = phase;
-    log("run.phase", { waiting_on: phase });
-  };
-  // Direct callers of the exported body retain ordinary routing.  Production runTask always
-  // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
-  const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
-  const cashContainmentBoundary = ctx.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
-
-  // Hold the instance mode for the run so a registry edit cannot flip its deferred arm decision.
-  const shadowInstance = instanceMode(`${owner}/${task.repo}`, (opts.instanceRegistryTextImpl ?? readInstanceRegistryText)(repoRoot)) === "shadow";
-  const selectedModeQualification = createSelectedModeQualification(config.selectedRegistryMode, `${owner}/${task.repo}`,
-    { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
-
-  // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
-  // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
-  // task omits it; the SOFT threshold ($25 default, config-tunable) only surfaces an
-  // anomaly as a WARNING and never kills.
-  const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
-  const softThresholdUsd = softBudgetThreshold(config);
-
-  // ── MOUNT RESOLUTION (§9; class axis W1-T167). The (task_type × risk × class)
-  // routing table OWNS the model/effort/max_turns a run rides — never a
-  // hardcoded literal (the W1-T6 defect: a dead mounts.yaml + a hardcoded
-  // 60-turn ceiling, see docs/archive/DIAGNOSIS.md). Resolve ONCE here and FAIL LOUD on a
-  // type/risk miss: a missing route is a config gap, never a silent fallback
-  // to some default number. loadMounts throws on a bad/absent table;
-  // resolveMountForClass throws on an unrouted (type × risk); an unrouted
-  // CLASS is expected (not every class has a cheap row) and falls back to the
-  // table's `src` default — LOUDLY, via the `mount.class_fallback` line below.
-  // The table is a COMMITTED repo artifact (§9, golden-gated), read from the repo
-  // checkout — resolution + the loud class-fallback ledgering live in
-  // resolveRunMounts (exported, above) so every branch, including the fallback a
-  // COMPLETE committed table can never reach, is unit-covered with fixture tables.
-  const { mount, reviewerMount, fixMount, diagnoseMount, stepUpMount, reconMount, taskClass, mountClass } = resolveRunMounts(
-    repoRoot,
-    task,
-    log,
-  );
-  log("run.start", {
-    repo: task.repo,
-    type: task.type,
-    risk: task.risk,
-    // W1-T167: the task's routing class (docs / plan-lint / src) and the class
-    // the mount actually resolved to (differs from task_class only on a loud
-    // fallback, logged above) — the pair the retro's per-class calibration
-    // (lib/retro.ts's aggregateByClass) reads alongside this line's cost/verdict.
-    task_class: taskClass,
-    mount_class: mountClass,
-    task_shape: dispatchTaskShape({ task, tasks: plan.tasks, ledgerPath, lane: "run-task", reconUnavailableReason: "recon-not-yet-run" }),
-    provider: mount.provider,
-    worker_role: "implementer",
-    budget_usd: budgetUsd,
-    soft_threshold_usd: softThresholdUsd,
-    mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
-  });
-
-  // The decision and its failure-tolerant arms live in `exploreMount`, which never throws; only real data sources are wired here.
-  // `runId` is clock-derived, so no harness can steer this call onto explore — the arms are seamed.
-  const explored = await exploreMount(
-    {
-      taskType: task.type,
-      risk: task.risk,
-      taskClass,
-      currentMount: mount,
-      config,
-      runId,
-      taskId,
-      enabledProviders: enabledWorkerProviders(config),
-    },
-    {
-      loadCells: async () => {
-        const scriptUrl = pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href;
-        const sweep = (await import(scriptUrl)) as {
-          buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-        };
-        return sweep.buildMountHeadroomSweep(join(config.root, "state")).cells;
-      },
-      loadMountsTable: () => loadMounts(mountsPath(repoRoot)),
-      log,
-    },
-  );
-  const implementMount = explored.mount;
-  const implementConfig = explored.config;
-  say(`run ${runId} — target ${owner}/${task.repo} · mount ${implementMount.model}/${implementMount.effort} · ${implementMount.maxTurns} turns (${task.type}×${task.risk}×${taskClass})`);
-
-  // W1-T3573: `task.type` "review"/"manual" ride this SAME generic implement spawn (below) with
-  // no dedicated dispatch path of their own, so — unlike `implement`/`diagnose`/`recon`, which
-  // this deliberately leaves untouched — they get an EXPLICIT declared tool bound instead of the
-  // spawn's unrestricted default. `resolveGenericRouteToolBound` is fail-closed: a lane it does
-  // not name throws rather than resuming unrestricted, so this is only ever called for the two
-  // lanes the table declares.
-  const genericRouteTools =
-    task.type === "review" || task.type === "manual" ? [...resolveGenericRouteToolBound(task.type)] : undefined;
-  // W1-T3696 step (2): implement's surface is chosen from WHAT IS RUNNING IT. A cash-billed mount
-  // gets the bounded, shell-less surface; Claude keeps exactly what it has today (unrestricted for
-  // implement, the declared bound for review/manual) — this is a per-provider equivalence, never a
-  // narrowing of the Claude lane to fit a cheaper one.
-  const implementTools = implementToolBound(implementMount.provider, genericRouteTools);
-  // Read from the SAME value the spawn is bounded with, so the contract a worker was given and the
-  // verdict it is judged by cannot disagree. True for the shell-less cash surface above, and ALSO
-  // when the operator has handed implement's git effects to the harness on every provider — the
-  // opt-in that makes a Claude implement run divertible, because its prompt then already says so.
-  const harnessOwnsGit = config.workerProviders?.harnessCommitsImplement === true
-    || harnessOwnsGitFor(implementTools);
-  // THE COHERENCE RULE, AND IT IS ONE LINE ON PURPOSE: a spawn may offer a shell-less divert
-  // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
-  // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
-  const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
-  const cashTrial = decideCashTrial({
-    task,
-    taskClass,
-    config,
-    harnessCommits: implementCashTools !== undefined,
-    stateDir: dirname(ledgerPath),
-  });
-  if (cashTrial) log("cash_trial.decided", { arm: cashTrial.arm, reason: cashTrial.reason });
-  const cashTrialSpawn = cashTrialSpawnFields(cashTrial, implementCashTools, cashTrialPolicy(config).models);
-
-  /**
-   * The subscription probes are intentionally shell-backed, so a blocked auction cannot run
-   * them on cash. Cash has a different structural boundary: no shell, a fixed check table, and
-   * a scrubbed environment. Accept it only when every later worker in this run has an explicit
-   * cash equivalent, then pin all later spawns to cash so a recovered subscription cannot inherit
-   * a proof for the wrong execution boundary.
-   */
-  const establishCashContainedRun = (preflight: "containment" | "isolation"): string | undefined => {
-    const refusal = cashContainmentState.contained ? undefined : cashContainedRunRefusal(config, implementCashTools);
-    if (refusal !== undefined) return refusal;
-    const reason = cashContainmentBoundary(config.root);
-    cashContainmentState.contained = true;
-    log(`${preflight}.probe`, {
-      provider: "cash",
-      method: "structural-adapter-boundary",
-      reason,
-      subscription_probe: "blocked",
-    });
-    say(`${preflight} preflight PASSED on the cash adapter — ${reason}`);
-    return undefined;
-  };
-
-  // W1-T2557: THE RUNAWAY BOUND — sized against THIS task's own class's OBSERVED turn-count
-  // history (see `deriveRunawayTurnBound`'s own doc), read ONCE here rather than re-derived on
-  // every poll tick. `taskClass` is only known from this point on (resolveRunMounts, above), so
-  // the sensor is built with no bound and this call configures it as soon as one is available.
-  // Best-effort and SILENT on failure (a bad/absent ledger or policy read must never block
-  // dispatch) — the SAME "cannot observe, never a guess" polarity `WorkerStateTracker`'s own
-  // UNKNOWN state already keeps, so an unresolved bound simply leaves the mid-flight runaway
-  // signal quiet for this one run rather than fabricating a threshold nothing measured.
-  try {
-    const historyNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
-    const classTurnHistory = gatherRuns(parseLedger(historyNdjson))
-      .filter((r) => (r.taskClass ?? "unknown") === taskClass && r.numTurns > 0)
-      .map((r) => r.numTurns);
-    workerStateSensor.setRunawayBound(deriveRunawayTurnBound(classTurnHistory, loadDefaultCostAnomalyPolicy()));
-  } catch {
-    // best-effort — see this block's own doc above.
-  }
-
-  let costUsd = 0;
-  let budgetWarned = false;
-  const account = (r: WorkerResult) => {
-    costUsd += r.costUsd; // NOTIONAL on subscription — tripwire/meter only (FF10d)
-    // SOFT threshold: ledger a WARNING once and CONTINUE — anomalies must be VISIBLE
-    // without being FATAL. The hard cap (maxBudgetUsd, per spawn) remains the kill.
-    if (softBudgetWarning(costUsd, softThresholdUsd, budgetWarned)) {
-      budgetWarned = true;
-      log("budget.warning", {
-        cost_usd: costUsd,
-        soft_threshold_usd: softThresholdUsd,
-        hard_cap_usd: budgetUsd,
-        note: "notional spend crossed the soft tripwire — NOT a kill; a run this expensive is likely looping",
-      });
-      say(`⚠️ budget.warning: notional $${costUsd.toFixed(2)} ≥ soft $${softThresholdUsd.toFixed(2)} (hard cap $${budgetUsd.toFixed(2)}) — continuing`);
-    }
-    return r;
-  };
-
-  // W1-T8676: the boundary checkpoint this run restored, which `failOnWorkerError` keeps through a worker error.
-  let restoredCheckpoint: { branch: string; headSha: string } | undefined;
-  /** W1-T8676/W1-T9786: the restored checkpoint a failed exit keeps, unless this run pushed its own branch (the newer
-   *  checkpoint, W1-T7837). Read while the worktree stands; only a proven absence (exit 1) keeps it. */
-  const checkpointToKeep = (): { branch: string; headSha: string } | undefined => restoredCheckpoint !== undefined &&
-    hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
-    ? restoredCheckpoint : undefined;
-  /**
-   * A worker returned an ERROR envelope (max_turns, max_budget_usd, execution
-   * error). Turn it into a terminal verdict: clean the worktree so no debris
-   * survives, ledger the verdict WITH num_turns + cost_usd (a failed run is never
-   * free in the ledger), and return. A budget breach is verdict=blocked_budget
-   * and is NEVER retried — dollars are the hard backstop. Any other error is
-   * `failed`. Returns null when the result is not an error (caller proceeds).
-   */
-  const failOnWorkerError = (r: WorkerResult, stage: string, reason?: string): RunResult | null => {
-    const v = workerErrorVerdict(r, costUsd, stage);
-    if (!v) return null;
-    // W1-T8676: a worker error is not the checkpoint's fault.
-    const keptCheckpoint = v.verdict === "failed" ? checkpointToKeep() : undefined;
-    try {
-      worktreeRemove(repoDir, worktreePath);
-      log("worktree.remove", { on: `${stage}.error` });
-    } catch (e) {
-      log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
-    }
-    log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
-    if (keptCheckpoint) {
-      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptCheckpoint.branch, head_sha: keptCheckpoint.headSha,
-        failed_stage: stage, failed_subtype: r.subtype });
-    }
-    say(
-      `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
-    );
-    return { taskId, runId, merged: false, costUsd, verdict: v.verdict };
-  };
-
-  // ── Validate-before-spawn guard (FF10a): reject a bad settings file BY NAME.
-  const settingsFile = renderWorkerSettings({
-    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
-    hooksDir: join(resolveInstallRoot(config), "hooks"),
-    outPath: join(config.root, "tmp", `worker-settings-${runId}.json`),
-  });
-  validateWorkerSettingsFile(settingsFile); // throws WorkerSettingsError if invalid
-  log("settings.validated", { settingsFile });
-  say("worker settings validated against pinned SandboxSettingsSchema");
-
-  // ── BINARY-PIN RUNG (wires checkBinaryPin, which shipped with no production caller).
-  //
-  // WHY HERE. It runs on the WORKER'S HOST, once per run, in the same preflight block as the two
-  // probes below — the mismatch bites where a worker spawns, not in CI, and the granularity that
-  // is right for containment is right for this: the binary is constant across every spawn in a run.
-  // It is placed FIRST because it is the cheapest reading that could explain either probe failing.
-  //
-  // LOUD AND NON-BLOCKING, and that is checkBinaryPin's OWN stated contract, not a softening
-  // invented here: it "returns {drift: true, reason} naming both versions, so a caller can LEDGER
-  // the drift and CONTINUE rather than hard-fail: the operator still updates the CLI deliberately,
-  // so this makes a swap VISIBLE and INTENTIONAL, never impossible". Two facts agree with it. The
-  // fleet has been running on a mismatch (declared 2.1.220, operator host 2.1.227) and merging PRs
-  // throughout, so a mismatch is demonstrably not fatal. And a refusal here would be the FIFTH
-  // bound in this repo measured firing on a healthy condition — it would meet the operator at the
-  // door on a host that is mismatched TODAY.
-  const binaryPin = readBinaryPin(opts.binaryPinDeps ?? defaultBinaryPinDeps(config.claudeBin));
-  log("preflight.binary_pin", {
-    status: binaryPin.status,
-    declared_version: binaryPin.declaredVersion,
-    observed_version: binaryPin.observedVersion,
-    reason: binaryPin.reason,
-  });
-  if (binaryPin.status !== "match") say(`binary pin ${binaryPin.status.toUpperCase()} — ${binaryPin.reason}`);
-
-  // ── PROBE ADMISSION (W1-T5346): reuse this process's last passing proof only while every input the
-  // probes read is unchanged. See `probeVerdictKey`'s section above for the fail-closed contract.
-  const probeCache = opts.probeVerdictCache
-    ?? (opts.containmentExec !== undefined || opts.isolationExec !== undefined ? createProbeVerdictCache() : PROCESS_PROBE_VERDICTS);
-  let probeKey: string | undefined;
-  let probeKeyError = "";
-  try {
-    probeKey = probeVerdictKey(readProbeKeyInputs({
-      settingsFile,
-      runId,
-      hooksDir: join(resolveInstallRoot(config), "hooks"),
-      imageBuildShaPath: opts.probeKeySources?.imageBuildShaPath ?? IMAGE_BUILD_SHA_PATH,
-      harnessRevision: opts.probeKeySources?.harnessRevision ?? JSON.stringify(workerBoundaryStack.harnessRevision),
-      cliVersion: binaryPin.observedVersion,
-      provider: implementMount.provider ?? "claude",
-      claudeBin: config.claudeBin,
-      root: config.root,
-    }));
-  } catch (error) {
-    // UNKEYED, not unproven: the `probe_cache.miss` row below records this error and the run probes.
-    probeKeyError = String((error as Error)?.message ?? error).slice(0, 300);
-  }
-  const probeTicket = probeCache.open();
-  const cachedProof = probeKey === undefined ? undefined : probeCache.lookup(probeKey);
-  if (cachedProof === undefined) {
-    const heldReason = probeCache.heldReason;
-    log("probe_cache.miss", {
-      probe_key: probeKey ?? null,
-      reason: probeKey === undefined ? `unkeyed: ${probeKeyError}` : heldReason !== undefined ? `held: ${heldReason}` : "no-entry",
-    });
-  }
-  /** A cached pass, ledgered on the probe's OWN step so every reader of probe history sees it. */
-  const reuseProof = (preflight: "containment" | "isolation", proof: ProbeProof) => {
-    const reason = preflight === "containment" ? proof.containmentReason : proof.isolationReason;
-    log(`${preflight}.probe`, {
-      [preflight === "containment" ? "contained" : "isolated"]: true,
-      reason,
-      cost_usd: 0,
-      cached: true,
-      probe_key: probeKey,
-      proved_by_run: proof.runId,
-      proved_at: proof.provedAt,
-      age_ms: systemClock.now() - proof.provedAtMs,
-    });
-    return { reason: `${reason} (reused from run ${proof.runId})`, costUsd: 0 };
-  };
-  let containmentProven: string | undefined;
-  let isolationProven: string | undefined;
-
-  // ── Post-spawn CONTAINMENT PREFLIGHT (W1-T2 #2 / WS-0 verdict 7 / Standing rule 11). Validation
-  // proves the file WELL-FORMED, not that the sandbox ENGAGED (`-p` silently runs unsandboxed — FF10a).
-  // Once per boot and on any change of its inputs (`probeVerdictKey`, W1-T5346), empirically confirm an
-  // outside-cwd write is OS-DENIED; otherwise `reuseProof` replays that verdict — never assumed from
-  // configuration. FAIL CLOSED: containment unproven ⇒ the run does not proceed.
-  try {
-    const probe = cachedProof !== undefined ? reuseProof("containment", cachedProof) : await probeContainment({
-      settingsFile,
-      config,
-      budgetUsd,
-      log: (s, extra) => log(s, extra),
-      exec: opts.containmentExec,
-    });
-    costUsd += probe.costUsd; // meter the probe spawn (notional; the ledger has it)
-    say(`containment preflight PASSED — ${probe.reason}`);
-    containmentProven = probe.reason;
-  } catch (caught) {
-    probeCache.hold(`containment: ${String((caught as Error)?.message ?? caught).slice(0, 300)}`);
-    let e: unknown = caught;
-    // A capacity block says the shell-backed probe cannot run, not that containment failed.  The
-    // cash adapter has no shell to probe; establish its separate boundary and pin this run to it.
-    if (e instanceof ProviderCapacityBlockedError && cashContainedRunRefusal(config, implementCashTools) === undefined) {
-      try {
-        establishCashContainedRun("containment");
-        e = undefined;
-      } catch (error) {
-        const detail = String((error as Error)?.message ?? error);
-        log("containment.probe", {
-          provider: "cash",
-          method: "structural-adapter-boundary",
-          reason: "cash_adapter_boundary_unproven",
-          detail,
-        });
-        e = new ContainmentError(
-          `containment preflight: cash adapter boundary could not be proven — ${detail}`,
-          "cash-adapter-boundary",
-          "unproven",
-        );
-      }
-    }
-    if (e instanceof ContainmentError) {
-      log("verdict", {
-        verdict: "blocked_containment",
-        reason: e.message,
-        // W1-T91/P23 (i): structured guard-cause alongside the prose reason — a
-        // guard-fired block reads as INFRASTRUCTURE at retro-read time without
-        // parsing prose (plan/mast-mapping.yaml's infrastructure row).
-        guard: e.guard,
-        check: e.check,
-        observed: e.observed,
-        cost_usd: costUsd,
-        billing_mode: billingMode(e.childEnvKeys),
-        account_label: e.accountLabel,
-        ...terminalVerdictFields(null),
-      });
-      say(`verdict: blocked_containment — ${e.message}`);
-      return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
-    }
-    if (e !== undefined) {
-      // W1-T4701: a capacity block is a deferral daemon.ts backs off on; the run still ends here.
-      endThrownRun(log, verdictWritten, "preflight.containment", e, costUsd);
-      throw e;
-    }
-  }
-
-  // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the current shell
-  // isolation (CLAUDE_CODE_SHELL routing the Bash-tool snapshot to an empty rc) works ONLY because
-  // THIS host's `~/.bashrc` happens to be absent — an accident of the machine, not construction
-  // (LEARNINGS.md). A populated `~/.bashrc` would silently isolate NOTHING. Once per boot and on any
-  // change of its inputs (`probeVerdictKey`, W1-T5346), empirically confirm a worker inherits ZERO
-  // operator aliases/functions before any task worker runs; otherwise `reuseProof` replays that
-  // verdict — never assumed from configuration. FAIL CLOSED: a nonzero count means isolation is not
-  // holding on this host — the run refuses to start.
-  try {
-    if (cashContainmentState.contained) {
-      // No shell exists on the cash adapter, so the shell alias/function probe is inapplicable.
-      // Re-run the adapter's executable boundary check rather than treating an absent shell probe
-      // as a successful one.
-      establishCashContainedRun("isolation");
-    } else {
-      const isoProbe = cachedProof !== undefined ? reuseProof("isolation", cachedProof) : await probeIsolation({
-        settingsFile,
-        config,
-        budgetUsd,
-        log: (s, extra) => log(s, extra),
-        exec: opts.isolationExec,
-      });
-      costUsd += isoProbe.costUsd; // meter the probe spawn (notional; the ledger has it)
-      say(`isolation preflight PASSED — ${isoProbe.reason}`);
-      isolationProven = isoProbe.reason;
-    }
-  } catch (caught) {
-    probeCache.hold(`isolation: ${String((caught as Error)?.message ?? caught).slice(0, 300)}`);
-    let e: unknown = caught;
-    if (e instanceof ProviderCapacityBlockedError && cashContainedRunRefusal(config, implementCashTools) === undefined) {
-      try {
-        establishCashContainedRun("isolation");
-        e = undefined;
-      } catch (error) {
-        const detail = String((error as Error)?.message ?? error);
-        log("isolation.probe", {
-          provider: "cash",
-          method: "structural-adapter-boundary",
-          reason: "cash_adapter_boundary_unproven",
-          detail,
-        });
-        e = new IsolationError(
-          `isolation preflight: cash adapter boundary could not be proven — ${detail}`,
-          "unproven",
-        );
-      }
-    }
-    if (e instanceof IsolationError) {
-      log("verdict", {
-        verdict: "blocked_isolation",
-        reason: e.message,
-        // W1-T91/P23 (i): structured guard-cause alongside the prose reason — see
-        // the identical comment on the ContainmentError branch above.
-        guard: e.guard,
-        check: e.check,
-        observed: e.observed,
-        cost_usd: costUsd,
-        billing_mode: billingMode(e.childEnvKeys),
-        account_label: e.accountLabel,
-        ...terminalVerdictFields(null),
-      });
-      say(`verdict: blocked_isolation — ${e.message}`);
-      return { taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" };
-    }
-    if (e !== undefined) {
-      endThrownRun(log, verdictWritten, "preflight.isolation", e, costUsd);
-      throw e;
-    }
-  }
-  // W1-T5346: store only a FRESH, clean shell pass of BOTH probes. A cash-routed run proved a
-  // different boundary, so it is never stored (its capacity-blocked probe already held the cache).
-  if (cachedProof === undefined && probeKey !== undefined && containmentProven !== undefined && isolationProven !== undefined) {
-    const recorded = probeCache.recordPass(probeKey, { runId, provedAtMs: systemClock.now(), provedAt: systemClock.iso(), containmentReason: containmentProven, isolationReason: isolationProven }, probeTicket);
-    log("probe_cache.recorded", { probe_key: probeKey, recorded });
-  }
-
-  // ── Clone + worktree.
-  const repoDir = join(config.root, "repos", task.repo);
-  if (!existsSync(repoDir)) {
-    mkdirSync(dirname(repoDir), { recursive: true });
-    ghExec(["repo", "clone", `${owner}/${task.repo}`, repoDir], { stdio: "inherit" });
-  }
-
-  // ── CROSS-HOST DISPATCH CLAIM (W1-T1268), TAKEN BEFORE ANY SPEND ────────────────────────────
-  // HERE, right after the clone is guaranteed to exist and before pruneStaleRuns/worktreeAdd —
-  // no worktree, no branch, no run lock and no worker have been touched yet, so a refusal below
-  // costs nothing to unwind. This closes the STRICTLY CROSS-HOST, STRICTLY PRE-ARTIFACT gap the
-  // ten `isDispatchEligible` probes (src/lib/drain.ts) cannot: `isOpenPr`/`hasPushedRunBranch`
-  // both read a PUBLISHED artifact, and neither exists at the moment a second host — or an
-  // operator dispatching by hand beside the fleet — starts the SAME task. `repoDir`, not
-  // `repoRoot`: see {@link dispatchClaimReserverFor}'s own doc for why.
-  // AWAITED, never `spawnSync` (2026-10-06): runTask runs inside the daemon process, and this
-  // claim's sync git was the loop's largest holder — 89 loop_lag rows, 1,506 s, up to 106 s each.
-  const claimReserver = opts.claimReserver ?? dispatchClaimReserverAsyncFor(repoDir);
-  const claimAnchor = await claimReserver.mintAnchor();
-  const claimOutcome = await claimReserver.attempt(task.id, claimAnchor);
-  const claimHolder = claimOutcome === "taken" ? await claimReserver.holder(task.id) : undefined;
-  // W1-T2552: the failing attempt's OWN git stderr, threaded into the refusal so an unreachable
-  // verdict names its cause instead of only its category. Optional on the interface, so a test's
-  // fake reserver that does not implement it yields today's wording byte-for-byte.
-  const claimDecision = decideDispatchClaim(claimOutcome, {
-    taskId: task.id,
-    holder: claimHolder,
-    stderr: claimOutcome === "unreachable" ? claimReserver.lastAttemptStderr?.() : undefined,
-  });
-  log("dispatch.claim", {
-    ref: dispatchClaimRef(task.id),
-    outcome: claimOutcome,
-    proceed: claimDecision.proceed,
-    reason: claimDecision.reason,
-  });
-  if (!claimDecision.proceed) {
-    // CONTENTION CARRIES ITS OWN EVIDENCE: `isMerged(task)` is the SAME projection this run
-    // already computed above (the W1-T319 already-merged guard) — exactly one of the three
-    // signals (`isMerged`, `readLiveState`/`isLiveMergeCredited`, `closedUnmergedRunBranches`)
-    // the dispatch rung's own probes already read, re-used rather than re-derived. A claim
-    // whose task is demonstrably merged is stale and this run (the loser) is exactly the run
-    // holding fresh proof of it, so it drops the stale ref rather than leaving it for a THIRD
-    // lane to find blocked by a dead claim. The refusal below stands either way.
-    if (claimOutcome === "taken") {
-      // W1-T2784: the DEAD-CLAIMANT probe, supplied HERE and nowhere else — this is the only
-      // path that meets a claim it does not own with no landed evidence, i.e. the exact case
-      // that was producing permanent refs. See `decideDispatchClaimRelease`'s arm 3 for why the
-      // narrow same-host/predates-boot shape is decidable when general cross-host liveness is
-      // not. The probe is a THUNK: `releaseDispatchClaim` only calls it once an anchor has
-      // actually parsed, so arms 1 and 2 still cost no /proc read and no git round trip.
-      // The awaited release hands the probe the anchor it already parsed, so the pid is read from
-      // the SAME git answer that decided the arm — no second fetch + cat-file round trip.
-      const released = await releaseDispatchClaimAsync(task.id, claimReserver, {
-        evidenceObserved: isMerged(task),
-        livenessProbe: (anchor) => {
-          const namespaceBootMs = readNamespaceBootMs();
-          if (namespaceBootMs === undefined) return undefined; // declines to the operator arm
-          return {
-            localHost: hostname(),
-            namespaceBootMs,
-            namespaceBootIso: new Date(namespaceBootMs).toISOString(),
-            pidPresent: pidIsPresent(anchor.pid),
-          };
-        },
-      });
-      log("dispatch.claim_released", {
-        ref: dispatchClaimRef(task.id),
-        arm: released.arm,
-        release: released.release,
-        dropped: released.dropped,
-        reason: released.reason,
-      });
-      // LOUD ON THE CONSOLE TOO, not only in the ledger (design note): this arm DELETES a lock a
-      // peer might believe it holds, so the operator reading stdout must see it happen and see
-      // which signals decided it — the ledger row alone is a record nobody is watching live.
-      if (released.arm === "dead-claimant") say(`RELEASED a dead claim — ${released.reason}`);
-    }
-    say(`REFUSED: ${claimDecision.reason}`);
-    // `unreachable` mirrors `blocked_git_fetch`'s own "cannot reach origin" refusal (this IS a
-    // git-connectivity failure, not a new failure mode); `taken` mirrors `blocked_inflight`'s
-    // own "another holder owns this run right now" (this IS that condition, cross-host instead
-    // of same-host) — no new RunResult verdict is introduced for either arm.
-    // W1-T4708: ledgered too, or the refused run read as in flight to every reader.
-    const refused: RunResult = {
-      taskId,
-      runId,
-      merged: false,
-      costUsd: 0,
-      verdict: claimOutcome === "unreachable" ? "blocked_git_fetch" : "blocked_inflight",
-    };
-    return endRefusedRun(log, verdictWritten, "dispatch.claim", refused, claimDecision.reason);
-  }
-
-  // ── Reclaim debris from crashed prior runs (WS-1: a max-turns death left its
-  // run-* worktree + branch behind). Do this BEFORE adding ours so leftovers can
-  // never block the new worktree/branch. Best-effort; ledger what was reclaimed.
-  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
-  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) {
-    log("worktree.prune", { worktrees: pruned.worktrees, branches: pruned.branches, skipped: pruned.skipped });
-    say(
-      `pruned ${pruned.worktrees.length} stale worktree(s), ${pruned.branches.length} branch(es)` +
-        (pruned.skipped.length ? `; SKIPPED ${pruned.skipped.length} live worktree(s)` : ""),
-    );
-  }
-  // W1-T406: pruneStaleRuns (above) only reclaims what git's OWN worktree registry still
-  // names — it leaves three coverage holes (git-invisible dirs, detached-HEAD `sweep-*`
-  // orphans, widowed `.lock` files) that only reapStaleWorktrees closes, and this one-shot
-  // dispatch never reaches the daemon poll or `rmd sweep` call site that would otherwise run
-  // it. Best-effort and ships dry (`worktreeReapBoot.enabled`) — see logWorktreeReapBootSurvey.
-  logWorktreeReapBootSurvey(config, log);
-  // W1-T2847: the SAME start-of-run rung, pointed at the ad-hoc lane root. MEASURED 2026-09-04:
-  // `worktreesDir` (the only root the line above ever scans) held 11 entries totalling 44K while
-  // 180 linked worktrees totalling 4.7G sat as its SIBLINGS under config.root, reached by nothing
-  // on any cadence. Ships SURVEY-ONLY — `runAdhocLaneReapRung`'s `enabled` seam defaults false, so
-  // this ledgers what it would reclaim and removes nothing; arming it is an operator decision that
-  // earns its own policy key once several passes' dispositions have been read, exactly the posture
-  // `worktreeReapBoot` shipped in.
-  //
-  // SCOPE: `src/run-task.ts` is NOT in W1-T2847's declared `files:`. The shard's own note invites
-  // this — "the rung wiring already exists via runWorktreeReapRung, and an implementer who needs
-  // it should widen the shard deliberately rather than inherit it" — and it is needed: a rung with
-  // no call site is a dead parameter (the #339/W1-T281 shape, where deleting the call fails no
-  // test). Recorded here and in the PR body because the linter refuses the shard edit that would
-  // record it in `files:`; the reviewer's `scope_violation` is advisory and names review-ratified
-  // widenings legitimate.
-  // W1-T2847: ARMED from policy, not from a hardcoded default. The rung's own doc calls arming "a
-  // separate operator decision"; until this row existed the call site passed no `enabled` at all,
-  // so the decision had nowhere to live and the pass was permanently survey-only. Every refusal
-  // underneath is unchanged — live pid, live upstream branch, incomplete probe, 14-day ceiling.
-  runAdhocLaneReapRung(config, log, { repoDir, enabled: () => opts.armAdhocLaneReap ?? loadDefaultPolicy().values.sweep.armAdhocLaneReap });
-  // W1-T411: three MORE sweeps with call sites only inside daemonCommand — stale rmd temp
-  // dirs, abandoned review clones, and per-spawn worker homes — get the SAME start-of-run
-  // reclaim rung pruneStaleRuns and logWorktreeReapBootSurvey already occupy. Unlike the
-  // worktree reaper above, all three already run ARMED wherever they run today, so this needs
-  // no dry-run flag of its own — see logDiskReclaimRung.
-  await logDiskReclaimRung(config, log, { objectOwnInflightLock: basename(inflightLockPath(join(config.root, "state", "inflight"), taskId)) });
-
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  // W1-T4356: nothing else fast-forwards repos/<repo>, so a lockfile change on main left every implement dispatch refused by
-  // W1-T4193 below. A refusal here is that same deferral, raised before a worktree exists.
-  let checkoutRefresh: ManagedCheckoutRefresh;
-  try {
-    checkoutRefresh = await retryWhileLockBusy(
-      () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall, (failure) => {
-        void tryEscalate(managedCheckoutInstallEscalation(failure, task.id, runId), { issues: opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo), ledgerPath, runId });
-      }),
-      isManagedCheckoutLockBusy,
-      { log },
-    );
-  } catch (e) {
-    log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
-    // W1-T4701: above the outer catch, so without this row the deferred run read as in flight forever.
-    endThrownRun(log, verdictWritten, "managed_checkout.refresh", e, costUsd);
-    await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
-    throw e;
-  }
-  // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
-  // recon/implement/commit spend anything, so a stale base is refused HERE rather than surfacing
-  // after a full run as the scope guard's "forged merge-base" misdiagnosis. Verdict stays
-  // "failed", the scope guard's own verdict for that condition, so drain.ts needs no new case.
-  try {
-    // LIVENESS TOKEN: a SIBLING file (never committed), so a concurrent pruneStaleRuns skips this
-    // worktree instead of `--force`-removing it; dropped at terminal verdict (the finally below) or
-    // by the catch below, and a crashed run's dead pid lets prune reclaim it (docs/archive/DIAGNOSIS.md).
-    // W1-T5280: written BEFORE the 5-10 minute add, or a same-process DAEMON lane's prune removes the
-    // registered, lockless worktree mid-add (2026-10-01 17:28:16Z). The empty dir comes first because
-    // reapStaleWorktrees' widowed-lock pass deletes a `.lock` whose directory does not exist yet.
-    // W1-T4356: written BEFORE the checkout lock is released, so a peer's refresh sees this borrower.
-    mkdirSync(worktreePath, { recursive: true });
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
-    // W1-T2621: `log` goes last so a test's `worktreeBaseDeps` can never swallow this run's ledger.
-    // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
-    await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
-  } catch (caught) {
-    removeRunLock(worktreePath); // W1-T5280: no arm below hands this worktree on
-    // W1-T4356: a refusal over a checkout the refresh had to leave behind names why it was left.
-    const e = caught instanceof WorktreeNodeModulesRefusedError && checkoutRefresh.kind === "skipped"
-      ? new ManagedCheckoutNotRefreshedError(caught, checkoutRefresh.reason)
-      : caught;
-    if (e instanceof WorktreeBaseStaleError) {
-      log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref, behind: e.behind });
-      say(
-        `REFUSED: worktree base ${e.base} is behind origin/${e.ref}'s remote head ${e.remoteHead} — ` +
-          "refusing before recon/implement/commit spend anything",
-      );
-      // W1-T4708: the terminal row lands BEFORE the release, so a throwing release cannot lose it.
-      const refused = endRefusedRun(log, verdictWritten, "worktree.stale_base", { taskId, runId, merged: false, costUsd: 0, verdict: "failed" }, e.message);
-      // W1-T1268: this run already holds the dispatch claim taken above — drop it (holder arm)
-      // before returning, or a stale base on THIS host would strand the claim for an operator
-      // to clear even though nothing is actually in flight.
-      await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
-      return refused;
-    }
-    if (e instanceof WorktreeNodeModulesRefusedError) {
-      // W1-T4193: a DEFERRAL, not a strike. Rethrown so daemon.ts's `isSpawnInfraBlocked` backs off on its
-      // `blocked_toolchain` tag; the claim is dropped first, or every later dispatch would meet it as taken.
-      log("worktree.node_modules_refused", {
-        package: e.packageName,
-        worktreePath: e.worktreePath,
-        node_modules_source: e.nodeModulesSource,
-        ...(e instanceof ManagedCheckoutNotRefreshedError ? { managed_checkout_not_refreshed: e.notRefreshed } : {}),
-      });
-      endThrownRun(log, verdictWritten, "worktree.node_modules", e, costUsd);
-      say(`REFUSED: ${e.message}`);
-      try {
-        worktreeRemove(repoDir, worktreePath);
-        log("worktree.remove", { on: "node_modules_refused" });
-      } catch (removeErr) {
-        log("worktree.remove.error", { on: "node_modules_refused", error: String((removeErr as Error)?.message ?? removeErr) });
-      }
-      try {
-        await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
-      } catch (releaseErr) {
-        // Never replace the typed refusal: a generic throw here would read as a fatal crash, not a deferral.
-        log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
-      }
-      throw e;
-    }
-    // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
-    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
-    endThrownRun(log, verdictWritten, "worktree.add", e, costUsd);
-    try {
-      rmdirSync(worktreePath); // only the EMPTY dir made above; a partly-built worktree stays for prune
-    } catch {
-      // not empty, or already gone — either way nothing of this run's is left to free
-    }
-    // W1-T5280: drop the claim AFTER the terminal row (W1-T4708), or the next dispatches read
-    // `blocked_inflight` until the breaker trips; a throwing release never replaces the add's error.
-    try {
-      await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
-    } catch (releaseErr) {
-      log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
-    }
-    throw e;
-  } finally {
-    checkoutRefresh.release();
-  }
-  // W1-T9374: this fresh main worktree has a usable install even when repos/<repo> is unborrowed.
-  // Fill the shared store off-loop and unawaited; the builder writes its own --out, never this tree.
-  log("child_entry.store_build_requested", { source: "run-worktree", tree: worktreePath, checkout_kind: checkoutRefresh.kind });
-  void buildIntoStore(worktreePath, {
-    storeRoot: childEntryStoreRoot(config.root),
-    log,
-    liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
-  }).then((stored) => buildEngineAfterStore(worktreePath, join(config.root, "state"), childEntryStoreRoot(config.root), stored, log));
-  // W1-T2626 (design note (iii)): a single unreadable remote head is already ledgered --
-  // `worktree.add`'s `remote_head: "unreadable"` plus its `worktree.base_uncheckable`
-  // companion, both from worktreeAdd itself -- but nothing yet distinguished "this happened
-  // once" from "this guard has not actually measured anything in N creations running". Read
-  // the ledger back and name that run explicitly, once it crosses the bound, so an operator
-  // (or the retro) finds ONE line rather than reconstructing a streak by counting warnings
-  // across a session. Never refuses, never repairs -- only the record (see this task's
-  // rationale: "no refusal, no policy, no repair").
-  const uncheckableStreak = detectWorktreeBaseUncheckableStreak(readLedgerLines(ledgerPath));
-  if (uncheckableStreak.degraded) {
-    log("worktree.base_check_degraded", {
-      ref: "main",
-      consecutive_unreadable: uncheckableStreak.consecutiveUnreadable,
-      threshold: WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
-      oldest_ts: uncheckableStreak.oldestTs,
-      newest_ts: uncheckableStreak.newestTs,
-    });
-  }
-
-  try {
-    const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
-    if (checkpoint) {
-      try {
-        const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args), log);
-        if (!(restored.base === "main" && restored.dropped)) {
-          restoredCheckpoint = checkpoint;
-          log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
-            base: restored.base, restored_head_sha: restored.headSha,
-            ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
-            ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
-        }
-      } catch (error) {
-        log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
-          source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
-        return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
-      }
-    }
-    // ── Recon (read-only).
-    say("recon worker");
-    // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
-    // carries a content-hash-cached PLAN INDEX derived from MASTER-PLAN.md, not the plan body.
-    // `loadPlanIndex` is non-fatal when the source is missing and never writes a generated file.
-    const planIndex = loadPlanIndex(join(dirname(planPath), "..", "MASTER-PLAN.md"));
-    const planIndexBlock = planIndex ? renderPlanIndex(planIndex) : "";
-    // W1-T164: task-scoped operator guidance notes — read from the durable console-editable
-    // store (`repoRoot`, the SAME root worker.ts's question store reads/writes), scoped strictly
-    // to THIS task's id (never another task's), and rendered ONCE so the identical block injects
-    // into both the recon prompt below and the implement prompt further down.
-    const operatorNotes = loadOperatorNotesForTask(repoRoot, task.id);
-    const operatorNotesBlock = renderOperatorNotes(operatorNotes);
-    log("operator_notes.injected", { count: operatorNotes.length });
-    // W1-T2632: HOISTED from further below (was computed only after recon returned, "since
-    // recon already relayed all of this" — a premise `renderReconPrompt`'s own doc disproves).
-    // ONE lookup shared by the recon prompt below AND the post-recon CONTEXT block further
-    // down, never re-derived: `taskRecordPath` is fail-soft (`undefined` on an unresolvable
-    // record) and `workerVisibleRecordPath` (W1-T501) re-anchors it to the WORKER's own tree,
-    // never the orchestrator's `planPath`.
-    // W1-T2920: `plan` (loaded a few lines above) already carries every task's `sourcePath`, so
-    // this is a `Map.get` rather than the walk-and-reparse-every-shard fallback — the cost this
-    // task exists to stop paying once per dispatch prompt.
-    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, plan));
-    // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
-    // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
-    // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
-    // default and `routes.recon` was dead data.
-    //
-    // `undefined` is a SUPPORTED value, not a bug: `lib/worker.ts`'s `if (args.model)` /
-    // `if (args.effort)` guards leave the option unset, which is exactly today's behaviour.
-    // That is what makes an absent/unreadable `recon:` row inert here — see resolveRunMounts.
-    //
-    // Hoisted into a closure (W1-T299) so the SAME spawn can be issued a bounded second time
-    // on a worker error, below — never a copy-pasted second call site to drift out of sync.
-    const spawnRecon = () =>
-      spawn({
-        cwd: worktreePath,
-        permissionMode: "bypassPermissions",
-        // W1-T3616: recon's prompt names `git remote -v`, `git log --oneline -5` and `ls`, so its
-        // honest bound includes Bash. Read-only, so no Write/Edit.
-        tools: [...resolveDispatchLaneToolBound("recon", reconMount?.provider ?? "claude")],
-        // W1-T3726: plus the surface to use if the auction BLOCKS — see cashDivertSpawnFields.
-        ...cashDivertSpawnFields("recon"),
-        settingsFile,
-        model: reconMount?.model,
-        mountProvider: reconMount?.provider,
-        effort: reconMount?.effort,
-        // maxTurns DELIBERATELY NOT taken from the mount, and the ROW agrees with this cap.
-        // impl-BP flagged a 50x contradiction (rows said 400, this said 8); the operator ruled the
-        // ROW moves rather than this bound moving to 400, so recon stays cheap on every dispatch
-        // and the table no longer asserts something the code does not do (impl-BS). Both halves
-        // are pinned by test/recon-mount-routing.test.ts so neither can drift back.
-        maxTurns: RECON_MAX_TURNS,
-        maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
-        config,
-        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath),
-      });
-
-    let recon: WorkerResult | undefined;
-    let reconDegradedSubtype: string | undefined;
-    let reusedReconArtifact: ReconArtifact | undefined;
-    let reconMasked = false;
-
-    if (opts.maskRecon) {
-      // W1-T2512 (RECON factor, arm B): the spawn is SKIPPED ENTIRELY — never issued, not even
-      // once — and the recon artifact store is NEITHER READ NOR WRITTEN: `loadReconArtifact`/
-      // `writeReconArtifact` both sit inside the branch below, which this `if` skips outright,
-      // same as `computeMatchedLearningsForArm("B", ...)` never calls its own `deps` chain.
-      // MASKED, NOT DELETED — a later non-wipe-test dispatch of this same task still sees
-      // whatever artifact a prior real recon left behind, untouched by this run.
-      reconMasked = true;
-      say("recon masked (wipe-test RECON factor, arm B) — implement proceeds with NO recon context");
-      log("recon.masked", {
-        reason: "wipe-test RECON-factor pair, arm B (W1-T2512): recon spawn skipped, artifact store untouched",
-      });
-    } else {
-      // W1-T2241: RECON ARTIFACT REUSE — before ever spawning recon, check whether a VALID prior
-      // artifact exists for THIS task at THIS `(plan_sha, files_digest)`. Both are computed against
-      // `worktreePath`, already checked out fresh from `origin/main` above, so "current" always
-      // means what THIS dispatch would itself observe — never a stale read of the orchestrator's
-      // own tree. See `taskRecordSha`/`filesDigest`/`ReconArtifact`'s doc (above `RECON_MAX_TURNS`)
-      // for the key's derivation and why it drops `head_sha`.
-      //
-      // W1-T2510: `plan_sha` is now `taskRecordSha` — the digest of THIS task's own plan record —
-      // not `planSha` (the whole `plan/` directory, kept above only as the rejected alternative).
-      // The record is looked up against the WORKTREE's own `plan/tasks.yaml`, the same "fresh off
-      // this dispatch's own checkout" discipline `filesDigest` already follows, never the
-      // orchestrator's own (possibly staler) `planPath`.
-      const currentPlanSha = taskRecordSha(join(worktreePath, "plan", "tasks.yaml"), taskId);
-      const currentFilesDigest = filesDigest(worktreePath, task.files ?? []);
-      const priorReconArtifact = loadReconArtifact(config.root, taskId);
-      const reconDecision = decideReconArtifactReuse(priorReconArtifact, currentPlanSha, currentFilesDigest);
-      const reconArtifactValid = reconDecision.valid;
-
-      if (reconArtifactValid) {
-        // HIT: recon is skipped entirely this dispatch — the cost this task exists to stop
-        // paying twice. `reconArtifactToContext` (below, at the CONTEXT-render site) frames every
-        // relayed line as evidence to VERIFY-AND-EXTEND, never authority (MASTER-PLAN Q3).
-        reusedReconArtifact = priorReconArtifact;
-        say(`recon artifact reused (written ${priorReconArtifact!.written_at}) — recon skipped this dispatch`);
-        log("recon.reused", {
-          plan_sha: currentPlanSha,
-          files_digest: currentFilesDigest,
-          written_at: priorReconArtifact!.written_at,
-          source_run_id: priorReconArtifact!.run_id,
-        });
-      } else {
-        // MISS: a full recon runs, exactly as before this task (MASTER-PLAN Q3 — "recon still
-        // runs when the key misses"). The MISS ITSELF is ledgered explicitly, distinguishing a
-        // first-ever dispatch (`recon.absent`) from a prior artifact this task's `plan_sha` or
-        // `files:` has since moved past (`recon.invalidated`) — never a silent, unexplained
-        // full recon (P48(ii): no silent empty).
-        if (priorReconArtifact) {
-          const reason = reconDecision.invalidationReason!;
-          say(`recon artifact invalidated (${reason} changed) — running a full recon`);
-          log("recon.invalidated", {
-            reason,
-            prior_plan_sha: priorReconArtifact.plan_sha,
-            plan_sha: currentPlanSha,
-            prior_files_digest: priorReconArtifact.files_digest,
-            files_digest: currentFilesDigest,
-          });
-        } else {
-          log("recon.absent", { plan_sha: currentPlanSha, files_digest: currentFilesDigest });
-        }
-
-        recon = account(await spawnRecon());
-        log("recon.done", {
-          session_id: recon.sessionId,
-          cost_usd: recon.costUsd,
-          num_turns: recon.numTurns,
-          subtype: recon.subtype,
-          attempt: 1,
-          // W1-T6: every worker call ledgers the standard telemetry shape.
-          ...workerLedgerFields(recon),
-        });
-
-        // W1-T299: recon is a READ-ONLY preamble — a worker ERROR here (overwhelmingly
-        // `error_max_turns`; RECON_MAX_TURNS's own doc above measured 11/18 recons dying on the cap
-        // on 2026-08-03) used to be FATAL to the WHOLE RUN via failOnWorkerError, ending dispatch
-        // before implement ever spawned and burning a strike toward `dispatchesWithoutNewOwnedPr`'s
-        // per-task breaker with no PR and no chance of ever getting one. Degrade instead of abort:
-        // ONE bounded retry, and if that ALSO errors, proceed to implement anyway with an EXPLICIT
-        // "recon context absent" claim (reconDegradedContextNote, never a silently empty CONTEXT
-        // block) and a loud `recon.degraded` ledger line naming the subtype.
-        //
-        // The ONE exception is a budget breach: workerErrorVerdict's own doc says dollars are the
-        // hard backstop, never retried anywhere in this file — recon gets no special case there and
-        // stays fatal on a budget breach, unchanged from before this task.
-        //
-        // OPEN QUESTION the task file left for the implementer: should a degraded-recon run be
-        // exempted from `dispatchesWithoutNewOwnedPr`? Decided NO — `run.start` above already
-        // ledgered this dispatch before recon ever spawned, so it counts as a REAL dispatch exactly
-        // like every other run regardless of what recon does; a task whose recon can never complete
-        // must still eventually trip the breaker rather than dispatch forever for free.
-        const reconVerdict1 = workerErrorVerdict(recon, costUsd, "recon");
-        if (reconVerdict1) {
-          if (reconVerdict1.budgetBreach) {
-            const reconFail = failOnWorkerError(recon, "recon");
-            if (reconFail) return reconFail;
-          }
-          say(`recon worker errored (${recon.subtype}) — one bounded retry before degrading (W1-T299)`);
-          log("recon.retry", { subtype: recon.subtype, num_turns: recon.numTurns });
-          recon = account(await spawnRecon());
-          log("recon.done", {
-            session_id: recon.sessionId,
-            cost_usd: recon.costUsd,
-            num_turns: recon.numTurns,
-            subtype: recon.subtype,
-            attempt: 2,
-            ...workerLedgerFields(recon),
-          });
-          const reconVerdict2 = workerErrorVerdict(recon, costUsd, "recon");
-          if (reconVerdict2) {
-            if (reconVerdict2.budgetBreach) {
-              const reconFail = failOnWorkerError(recon, "recon");
-              if (reconFail) return reconFail;
-            }
-            // Second failure — DEGRADE, never abort: proceed to implement with an EMPTY recon
-            // context (reconDegradedContextNote below makes the absence explicit in the prompt).
-            reconDegradedSubtype = recon.subtype;
-            log("recon.degraded", {
-              subtype: recon.subtype,
-              num_turns: recon.numTurns,
-              reason: `recon errored twice in a row (${recon.subtype}) — bounded retry exhausted; implement proceeds with an EMPTY recon context`,
-            });
-            say(`⚠️ recon.degraded (${recon.subtype}) — implement proceeds with NO recon context`);
-          }
-        }
-
-        // W1-T2241: persist the artifact for the NEXT dispatch of this SAME task — only on a
-        // genuine success (never on a degrade: the final attempt's text is an error envelope, not
-        // a report worth keeping) and only when the transcript actually parses as a RECON REPORT
-        // (an unparseable "success" has nothing worth persisting either — same guard
-        // `reconObservedToContext` already applies via `parseReconReport`'s `null` return).
-        if (!reconDegradedSubtype) {
-          const parsedForArtifact = parseReconReport(workerTranscript(recon));
-          if (parsedForArtifact) {
-            writeReconArtifact(config.root, {
-              task_id: taskId,
-              plan_sha: currentPlanSha,
-              files_digest: currentFilesDigest,
-              observed: parsedForArtifact.observed,
-              inferred: parsedForArtifact.inferred,
-              couldnt_verify: parsedForArtifact.couldntVerify,
-              written_at: new Date().toISOString(),
-              run_id: runId,
-            });
-          }
-        }
-      }
-    }
-
-    // Recon's own optional '## Follow-ups' section (renderReconPrompt above) — no `pr_url`
-    // (recon never opens one); the retro harvest still cites its run/task. Skipped on a
-    // degraded recon (the final attempt's text is an error envelope, not a report) AND on a
-    // reused artifact (no fresh transcript this dispatch — the artifact's origin run already
-    // harvested its own follow-ups when it ran).
-    if (recon && !reconDegradedSubtype) {
-      harvestFollowupsFromReport(workerTranscript(recon), { label: "recon", runId, log, say });
-    }
-
-    // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33;
-    // LAYERED — project + user-overall + global, P32/W1-T145): inject the
-    // distrust rule, the autonomy clause, and the task-matched LEARNINGS
-    // facts. `loadLayeredLearningsForTaskFiles` reads the PROJECT layer via
-    // the index-based LOOKUP (W1-T33's `learnings/index.json`, not a scan —
-    // it parses only the corpus shards task.files could match), then merges
-    // in the USER-OVERALL layer (a fleet-readable home outside this repo)
-    // and the RMD-GLOBAL layer (a hash-pinned artifact — a tampered/missing
-    // one contributes zero entries and is logged, never silently trusted) in
-    // PRECEDENCE order. `selectLearnings` then matches by file-glob and
-    // filters out any `lifecycle: superseded` entry before ranking, so a
-    // decayed fact can never be injected; the KNOWLEDGE BUDGET caps the
-    // injected facts and DROPPED entries are logged so a growing corpus never
-    // becomes an unbounded context tax. On a fresh instance the user-overall
-    // directory and global artifact don't exist yet (§6 transport is
-    // deferred) — both layers are non-fatal absences, so this is a pure
-    // superset of the project-only injection that shipped before.
-    const learningsDir = projectLearningsHome(repoDir); // W1-T2506: follows the TARGET repo, not the plan's checkout
-    // `recordPath` is REUSED, not re-resolved: it was hoisted above the recon spawn (W1-T2632)
-    // so the SAME lookup now feeds both the recon prompt's pointer line and this CONTEXT block —
-    // one `taskRecordPath`/`workerVisibleRecordPath` computation, three consumers, never a second
-    // anchoring rule. It used to be resolved only here, on the degraded arm, "since recon already
-    // relayed all of this" — but recon was never told WHICH TASK it was reconning, only its
-    // `OBSERVED:` section survives `reconObservedToContext`, and that section can be empty. See
-    // that function's doc.
-    // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
-    // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
-    // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
-    // it was introduced last.
-    const reconContext = reconMasked
-      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
-      : reusedReconArtifact
-        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
-        : reconDegradedSubtype
-          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
-          : reconObservedToContext(recon!, taskId, recordPath);
-    const learningsSelectionText = [
-      task.title,
-      task.rationale ?? "",
-      task.prompt ?? "",
-      ...(task.context ?? []).map((claim) => claim.claim),
-      ...(task.acceptance ?? []).flatMap((criterion) => [criterion.claim, criterion.proof]),
-      reconContext,
-    ];
-    // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
-    // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
-    // load/select/render chain below, so the store is never touched, only the
-    // resulting text is forced empty. A normal (non-wipe-test) run always passes
-    // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
-    // block ran before W1-T86.
-    const learningUsage = readLearningUsage(learningUsagePath(join(config.root, "state")));
-    const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
-      homes: {
-        projectDir: learningsDir,
-        userOverallDir: userOverallLearningsHome(config),
-        globalArtifactPath: globalArtifactPath(config),
-      },
-      taskFiles: task.files,
-      selectionContext: {
-        text: learningsSelectionText,
-        usage: learningUsage,
-        seed: seedOf(runId),
-        propensityDraws: LEARNING_PROPENSITY_DRAWS,
-      },
-      budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-    });
-    // W1-T4094: only the Claude implement bound gets the rule tool; cash and review/manual keep theirs.
-    const ruleLookup = implementTools === IMPLEMENT_CLAUDE_TOOLS
-      ? {
-          onPulled: (id: string, status: "found" | "missing" | "error") => log("knowledge.pulled", { id, status }),
-          learningLookup: {
-            homes: { projectDir: learningsDir, userOverallDir: userOverallLearningsHome(config), globalArtifactPath: globalArtifactPath(config) },
-            allowedIds: learningsResult.selectedIds,
-          },
-        }
-      : undefined;
-    // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
-    // preamble here: renderImplementPrompt places this LAST in the CONTEXT
-    // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
-    // the cache for the stable/per-task bytes that precede it.
-    const matchedLearnings = learningsResult.matchedLearnings;
-    // W1-T419: `matched_ids` sits beside the pre-existing `matched` count — `dropped` already
-    // logged ids, so a count-only `matched` was asymmetric and made per-entry injection
-    // frequency unrecoverable from the ledger. This row is deliberately NOT added to
-    // DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts): no decision reads it, so a rotation
-    // archiving it away loses analytics (the retro-side citation miner's input), never
-    // correctness — the inverse of the #977 trap (a DECISION reading a rotated step), and the
-    // next reader should know which side of that line this row sits on before "fixing" it.
-    log("learnings.injected", {
-      matched: learningsResult.selectedIds.length,
-      matched_ids: learningsResult.selectedIds,
-      dropped: learningsResult.droppedIds,
-      budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      matched_by: learningsResult.matchedBy,
-      global_refused_reason: learningsResult.globalRefusedReason,
-      masked: !!opts.maskLearnings,
-      // W1-T4241: the budget cut, not match strength, decided these entries (0 < p < 1), so injected
-      // vs dropped is a seeded randomization the outcome fold (knowledge-outcome.ts) can read.
-      propensity: contestedPropensities(learningsResult.propensity),
-      usage_sha: createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
-    });
-
-    // ── Render + provenance-lint the prompt.
-    // W1-T2761: the `rule_headlines` part — "" (identical to every render before this task)
-    // unless `workerRuleHeadlines.enabled` is on AND this isn't a RULES-factor wipe-test arm B.
-    // Read from THIS dispatch's own worktree (W1-T501's "the worker's own tree, never the
-    // orchestrator's" discipline `recordPath` above already follows), never the orchestrator's
-    // own checkout, so a worker is only ever handed an index of the CLAUDE.md it can itself see.
-    const ruleHeadlinesEnabled = opts.maskRules
-      ? false
-      : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
-    const ruleHeadlinesPart = buildRuleHeadlinesPart(
-      ruleHeadlinesEnabled,
-      join(worktreePath, "CLAUDE.md"),
-      undefined,
-      "CLAUDE.md",
-    );
-    // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
-    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
-    // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
-    const skillSelection = observeSkillSelection(
-      loadInjectableSkills(join(repoRoot, ".claude", "skills")),
-      task.type,
-      DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      task.files,
-      (skillName) => skillWithheldForRun(runId, skillName),
-    );
-    const injectableSkills = skillSelection.selected;
-    const skillsPart = renderSkillsPart(injectableSkills);
-    // W1-T3379: unlike skills.injected this is emitted even at zero selection, preserving the
-    // denominator and budget omission needed for the read-only implement-path effectiveness report.
-    log("skills.selection", skillSelection.observation);
-    // Same shape as learnings.injected above, and same status: analytics, never a decision input.
-    const skillsEvent = skillsInjectedEvent(injectableSkills, task.type, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
-    if (skillsEvent) log("skills.injected", skillsEvent);
-    // ONE call yields both the text the worker gets and the parts it was assembled from. The
-    // manifest below is ledgered from THESE parts; deriving them a second time is what let the
-    // manifest disagree with the prompt (see renderImplementPromptWithParts).
-    const { prompt: renderedImplementPrompt, parts: implementParts } = renderImplementPromptWithParts(
-      task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
-      harnessOwnsGit,
-    );
-    // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
-    // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a
-    // compaction from deleting the only syntax the deterministic judge is allowed to honour.
-    const ruleToolPointer = ruleLookup
-      ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
-      : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
-    assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
-    // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
-    // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
-    // ground-truth field to read instead of a fabricated one. Rides the SAME `prompt.linted` line
-    // (a one-line addition, per the task's own design), never a second ledger step.
-    log("prompt.linted", { provenance: "clean", prompt_template_hash: createHash("sha256").update(prompt).digest("hex") });
-    say("prompt provenance-linted: clean");
-    // W1-T2297: RECORDS the composition of the prompt this run just spawned with. `prompt.linted`
-    // above already fingerprints the WHOLE rendered prompt; this ledgers the per-PART breakdown
-    // (the SAME array the render above returned — this sentence used to be a CLAIM about a second
-    // `implementPromptParts` call typed out beside it, and the claim was false: `skillsPart` was
-    // handed to the render and dropped from the manifest, so an injected skill the worker really
-    // received was ledgered `present: false`. It is now a fact about a single call) —
-    // doctrine / task claims / recon / operator notes / matched learnings / task body — each as a
-    // sha256 + byte length, NEVER the part's own text (rows stay greppable forever and rotate
-    // through archives; republishing prompt content into them is out of scope by design). An
-    // absent part (operator notes nobody wrote, a recon context that rendered empty) is recorded
-    // `present: false` rather than a hash of the empty string standing in for "nothing here" — see
-    // `buildPromptManifest`'s own doc. A RECORD, never a gate: nothing reads this to decide
-    // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
-    log("prompt.manifest", { parts: buildPromptManifest(implementParts) });
-
-    // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
-    // criteria + hard constraints, built ONCE and ledgered here so the anchor
-    // this run WOULD re-inject verbatim after a compaction is a matter of
-    // repo-state fact, not a claim in a possibly-lossy REPORT. Live mid-stream
-    // re-injection (a real compaction firing during THIS spawn) is W1-T12e's
-    // operator-golden drill — this run-level wiring records the anchor that
-    // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
-    // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
-    // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
-    log("anchor.built", { anchor });
-
-    // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
-    // deliverable). `classify.js`'s `runDiagnoseThenRetry` (built by W1-T7, PR #48, with ZERO
-    // call site since — the two-strikes DIAGNOSE dispatch was UNREACHABLE) now DRIVES every
-    // implement attempt. A TRANSIENT failure (an Anthropic-side server_error mid-response, or a
-    // network/5xx/CI-infra blip) retries bounded (MAX_TRANSIENT_RETRIES), consuming NO strike —
-    // byte-identical to the pre-W1-T7B behavior. A REAL strike no longer fails the run on the
-    // FIRST one: it accumulates, and at DIAGNOSE_AT_STRIKES (two) an evidence-only DIAGNOSE
-    // worker (mount steps UP, §9) runs BEFORE any third patch attempt — that third attempt's
-    // prompt carries the diagnose findings verbatim, never a third blind patch (acceptance #1).
-    noteRestartPhase("implementing");
-    say("implement worker");
-    const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
-    // W1-T9030: the head every round starts from — after a checkpoint restore it is the harness's own merge commit.
-    let roundHeadBefore = worktreeHeadOrUndefined(worktreePath);
-    let impl!: WorkerResult;
-    // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
-    const yieldAtWorkerBoundary = async (waitingOn: string, phase = waitingOn): Promise<RunResult | undefined> => {
-      noteRestartPhase(phase === "checkpoint" ? "checkpointed" : phase === "decision" ? "implementing" : phase);
-      const freshness = opts.restartAtWorkerBoundary
-        ? opts.restartAtWorkerBoundary({ waitingOn: restartPhase.current, runId })
-        : await opts.externalWaitFreshness?.();
-      const recycle = freshness ? undefined : (opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)))();
-      if (!freshness && !recycle) return undefined;
-      let undeclared: readonly string[] = [];
-      try {
-        ({ undeclared } = await commitAndPushRestartCheckpoint(worktreePath, task, taskId, waitingOn));
-      } catch (error) {
-        log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
-          detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });
-        return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
-      }
-      const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
-      for (const row of freshnessYieldRows({ waitingOn, branch, headSha, undeclared,
-        ...(freshness ? { freshness: { oldSha: freshness.oldSha, newSha: freshness.newSha } } : { recycle }) })) {
-        log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(impl) } : row.fields);
-      }
-      return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
-    };
-    const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
-      // The diagnose-informed attempt is the LAST one before the task goes to a human, and it only
-      // happens after the implement mount has failed twice: that attempt steps up (operator ruling
-      // 2026-09-22 — Opus and Sol are for work the Sonnet/Luna tier could not do).
-      const attemptMount = findings && stepUpMount ? stepUpMount : implementMount;
-      if (attemptMount !== implementMount) log("implement.step_up", { from: implementMount.model, to: attemptMount.model });
-      impl = account(
-        // `spawn` (opts.spawn ?? the real spawnWorker, exactly like the recon dispatch
-        // above) — not the raw spawnWorker import. Zero behavior change on the real path
-        // (opts.spawn is omitted by every real caller, so this is the same function
-        // object either way); the seam lets a behavioral test drive the implement
-        // dispatch the same way it already can recon (W1-T105's post-PR-open harvest
-        // call site below is otherwise unreachable without a live worker spawn).
-        await spawn({
-          cwd: worktreePath,
-          permissionMode: "bypassPermissions",
-          // model/effort/max_turns come from the MOUNT (task_type × risk, §9), never a
-          // hardcoded literal. max_turns is the runaway-LOOP guard; dollars (maxBudgetUsd)
-          // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
-          // needed >61 turns — docs/archive/DIAGNOSIS.md), an order of magnitude above expected.
-          model: attemptMount.model,
-          mountProvider: attemptMount.provider,
-          effort: attemptMount.effort,
-          maxTurns: attemptMount.maxTurns,
-          maxBudgetUsd: budgetUsd,
-          settingsFile,
-          config: implementConfig,
-          // W1-T3573: `undefined` for `implement`/`diagnose`/`recon` — byte-identical
-          // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
-          tools: implementTools === undefined ? undefined : [...implementTools],
-          ...(ruleLookup === undefined ? {} : { ruleLookup }),
-          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
-          ...(attemptMount === implementMount ? cashTrialSpawn : {}),
-          // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
-          // DIAGNOSE worker's report appended verbatim — never paraphrased, never silently
-          // re-issued as an identical blind prompt (acceptance #1's "never blind" falsifier).
-          prompt: findings
-            ? `${prompt}\n\n## DIAGNOSE FINDINGS (a prior evidence-only worker's report — read before ` +
-              `trying again; do NOT repeat the same failing approach blind)\n${findings}`
-            : prompt,
-        }),
-      );
-      const implHead = headProvenanceFields(worktreePath);
-      log("implement.done", {
-        session_id: impl.sessionId,
-        cost_usd: impl.costUsd,
-        num_turns: impl.numTurns,
-        subtype: impl.subtype,
-        api_error: impl.apiError,
-        diagnose_informed: !!findings,
-        permission_denials: impl.permissionDenials.length,
-        // W1-T6: every worker call ledgers the standard telemetry shape.
-        ...workerLedgerFields(impl),
-        ...implHead,
-        self_forecast: parseSelfForecast(workerTranscript(impl)),
-      });
-      // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
-      // above `runTask`. Best-effort and keyed on `runId` alone (not per-attempt), so a
-      // transient/diagnose-informed retry's own re-dispatch OVERWRITES the same file rather than
-      // multiplying it: `implement.done` is one archive point per run, unlike the fix rung's
-      // per-strike archive below.
-      const implHeadShaForArchive = implHead.head_sha;
-      archiveWorkerTranscript(
-        {
-          root: config.root,
-          taskId,
-          runId,
-          rung: "implement",
-          text: workerTranscript(impl),
-          model: attemptMount.model,
-          verdict: impl.subtype,
-          headSha: implHeadShaForArchive,
-          worker: impl,
-        },
-        log,
-      );
-      // implementAttemptOutcome reproduces isTransientResult's/workerErrorVerdict's existing
-      // invariants byte-for-byte (see its own doc) and THROWS ImplementBudgetBreach on
-      // error_max_budget_usd rather than returning failure — dollars are the hard backstop and
-      // must never be retried, so that case is handled OUTSIDE the driver, below.
-      return implementAttemptOutcome(impl);
-    };
-    const dispatchDiagnose = async (): Promise<{ text: string }> => {
-      say("diagnose worker (two strikes — evidence-only, before any third patch)");
-      const d = account(
-        await withPredecessorTranscriptCopies({
-          cwd: worktreePath,
-          permissionMode: "bypassPermissions",
-          // W1-T3616: diagnose inspects `git diff`/`git status` and re-runs whatever failed, so it
-          // declares Bash. "Do NOT modify, commit, or push ANYTHING" — hence no Write/Edit.
-          tools: [...resolveDispatchLaneToolBound("diagnose", diagnoseMount.provider ?? "claude")],
-          // W1-T3726: plus the surface to use if the auction BLOCKS — see cashDivertSpawnFields.
-          ...cashDivertSpawnFields("diagnose"),
-          model: diagnoseMount.model,
-          mountProvider: diagnoseMount.provider,
-          effort: diagnoseMount.effort,
-          maxTurns: diagnoseMount.maxTurns,
-          maxBudgetUsd: budgetUsd,
-          settingsFile,
-          config,
-          prompt: renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
-        }, { root: config.root, taskId, excludeRunId: runId }, spawn, log),
-      );
-      log("diagnose.worker_done", {
-        session_id: d.sessionId,
-        cost_usd: d.costUsd,
-        num_turns: d.numTurns,
-        subtype: d.subtype,
-        // W1-T6: every worker call ledgers the standard telemetry shape.
-        ...workerLedgerFields(d),
-      });
-      // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
-      // above `runTask`. `runDiagnoseThenRetry` calls `diagnose` at most once per run, so this
-      // never overwrites a sibling round's file the way the implement archive above can.
-      archiveWorkerTranscript(
-        { root: config.root, taskId, runId, rung: "diagnose", text: workerTranscript(d), model: diagnoseMount.model, verdict: d.subtype, worker: d },
-        log,
-      );
-      return { text: workerTranscript(d) };
-    };
-
-    let driverResult: Awaited<ReturnType<typeof runDiagnoseThenRetry>>;
-    try {
-      // W1-T2515: SUPPLY THE BACKOFF. This was the ONLY production call site of
-      // runDiagnoseThenRetry and it passed no `sleep`, so the seam classify.ts had carried since
-      // W1-T46 — documented as 'default: no-op — tests never sleep' — was a no-op in production
-      // too. MEASURED on 2026-08-30: MAX_TRANSIENT_RETRIES spent in 3.519s (19:52:34.185Z ->
-      // 19:52:37.704Z) against a session limit whose own message said it reset at 20:50Z, 57m23s
-      // later. The schedule lives in classify.ts (transientBackoffMs, bounded); this passes only
-      // the clock, so a test can drive the whole thing without a real timer.
-      driverResult = await runDiagnoseThenRetry({
-        fixProgressJudge: ctx.spawnInjected ? undefined : productionFixProgressJudge({ cwd: worktreePath, settingsFile }),
-        progressInput: buildFixProgressInput({ taskId, headSha: "implement", currentRed: [], ledger: [] }),
-        attempt: attemptImplement,
-        diagnose: dispatchDiagnose,
-        log,
-        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      });
-    } catch (e) {
-      if (!(e instanceof ImplementBudgetBreach)) throw e;
-      // Exits the diagnose-then-retry loop immediately — `impl` (the breaching attempt) is
-      // already captured above; the ordinary post-loop code below (failOnWorkerError) renders
-      // it blocked_budget exactly as it always has, off that SAME `impl`.
-      driverResult = { outcome: "gave_up", strikes: 0, transientRetries: 0, diagnosed: false, attempts: 1, reason: e.message };
-    }
-
-    if (driverResult.outcome === "held") {
-      log("verdict", { verdict: "blocked_transient", stage: "implement", reason: driverResult.reason });
-      return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
-    }
-
-    const transientVerdict = finishTransientRetry(driverResult, {
-      taskId, runId, repoDir, worktreePath, costUsd, worker: impl, log, say,
-    });
-    if (transientVerdict) return transientVerdict;
-    // ── The worker's OWN preflight verdict, surfaced before any verdict branch consumes the run.
-    // `rmd preflight` writes `<repoRoot>/coverage/preflight-summary.json` in the worktree it ran
-    // in — and that worktree is still on disk here, because every `worktreeRemove` in this
-    // function sits inside a verdict branch BELOW this line and the `finally` drops only the run
-    // lock. Read it now, above `failOnWorkerError`, so a worker that hit its turn cap while
-    // fighting a failing check still reports WHICH check. Silent when preflight passed, when the
-    // worker never ran it, and when the file cannot be read — see `preflightFailureNotice`.
-    const preflightNotice = preflightFailureNotice(worktreePath);
-    if (preflightNotice) {
-      log("preflight.failed", { detail: preflightNotice, worktree: worktreePath });
-      say(preflightNotice);
-    }
-
-    // W1-T2862/W1-T3801: consume the worker's successful source-size signal while this exact
-    // worktree and its durable preflight summary still exist. This runs before every implementation
-    // verdict branch that may remove the worktree. The source-size pilot is advisory: it can defer
-    // or file a bounded decomposition follow-up, but never blocks the feature verdict.
-    try {
-      const expectedHead = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
-      const gatePostureDeps = buildSourceSizeGatePostureRuntime(repoRoot, worktreePath, settingsFile, spawn, log, say);
-      // Keep the wrapper call in the worker-return window so the worktree and summary are still
-      // present; its injected consumer above remains the existing source-size writer.
-      // The production adapter still owns the existing reportWorkerSourceSizeFollowup( consumer;
-      // the gate posture layer only decides whether to invoke that same bounded writer.
-      await reportWorkerSourceSizeFollowupWithGatePosture(
-        {
-          root: repoDir,
-          worktreeRoot: worktreePath,
-          expectedHead,
-          stateDir: dirname(ledgerPath),
-          ledgerPath,
-          runId,
-          sourceTask: taskId,
-          sourcePr: parseReport(workerTranscript(impl))?.prUrl,
-          sourceBranch: branch,
-        },
-        log,
-        say,
-        gatePostureDeps,
-      );
-    } catch (error) {
-      const detail = String((error as Error)?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 512);
-      log("source_size.followup.noop", { reason: "head_unreadable", detail });
-    }
-
-    const implFail = failOnWorkerError(impl, "implement", driverResult.reason);
-    if (implFail) return implFail;
-
-    const fullText = (r: WorkerResult) => workerTranscript(r);
-
-    // ── DECISION_REQUEST → auto-choose RECOMMENDED → resume (§4).
-    const decision = parseDecisionRequest(fullText(impl));
-    if (decision && !parseReport(fullText(impl))?.prUrl) {
-      const chosen = decision.recommended ?? decision.options[0] ?? "(first option)";
-      // W1-T32: decision-record hygiene. Every DECISION_REQUEST is auto-chosen and
-      // ledgered — that never changes — but only decisions worth a human's
-      // future attention (risk >= medium, or an explicit reversibility
-      // caveat) get PROMOTED to a durable, human-read record. A trivial
-      // filename pick stays ledger-only instead of burying real decisions.
-      const recordVerdict = shouldRecordDecision(decision);
-      let landed = false;
-      if (recordVerdict.record) {
-        // W1-T191: one shard per resolution (`plan/decisions.d/<taskId>-<runId>.md`), never
-        // the shared `DECISIONS.md` append this replaces — concurrent runs across different
-        // tasks/run ids can never collide on the same path. Harness-owned and deterministic
-        // (never delegated to the worker's own commit — the resume prompt below never even
-        // mentions this file), and best-effort landed via the SAME commit-bridge mechanism
-        // W1-T243 proved for `plan/feedback/**`, so `repoRoot` never sits dirty waiting for
-        // an operator to notice (the defect this task fixes).
-        landed = recordDecisionFn(repoRoot, {
-          taskId,
-          runId,
-          options: decision.options,
-          chosen,
-          band: recordVerdict.band,
-          reason: recordVerdict.reason,
-          ...(decision.falsifier ? { falsifier: decision.falsifier } : {}),
-        }).landed;
-      }
-      log("decision.autochoose", {
-        chosen,
-        recorded: recordVerdict.record,
-        risk_band: recordVerdict.band,
-        landed,
-        falsifier: decision.falsifier ?? null,
-      });
-      say(
-        `DECISION_REQUEST auto-chose: ${chosen} (${
-          recordVerdict.record
-            ? `recorded in plan/decisions.d/ — ${landed ? "landed" : "landing pending"}`
-            : "ledger-only, " + recordVerdict.band + " risk"
-        })`,
-      );
-      const boundaryYield = await yieldAtWorkerBoundary("decision");
-      if (boundaryYield) return boundaryYield;
-      impl = account(
-        // W1-T191: this resumed spawn used to call the real `spawnWorker` directly, bypassing
-        // the injectable `spawn` (`opts.spawn ?? spawnWorker`) every OTHER spawn call site in
-        // this function uses — the DECISION_REQUEST resume branch was consequently untestable
-        // in isolation (no behavioral test could drive it without a real Claude subprocess).
-        // Production behavior is unchanged: `spawn` defaults to the exact same `spawnWorker`.
-        await spawn({
-          cwd: worktreePath,
-          permissionMode: "bypassPermissions",
-          settingsFile,
-          resumeSessionId: impl.sessionId,
-          model: implementMount.model, // same mount as the initial implement spawn (§9).
-          mountProvider: implementMount.provider,
-          effort: implementMount.effort,
-          maxTurns: implementMount.maxTurns,
-          maxBudgetUsd: budgetUsd,
-          config: implementConfig,
-          // W1-T3573: same declared bound as the initial spawn above — a resumed session is
-          // still the SAME lane, so it must not regain unrestricted tools on resume.
-          tools: implementTools === undefined ? undefined : [...implementTools],
-          ...(ruleLookup === undefined ? {} : { ruleLookup }),
-          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
-          ...cashTrialSpawn,
-          // W1-T3696: the RESUMED turn must restate the SAME contract the initial spawn was given.
-          // A shell-less worker told here to `git push` would spend its remaining turns failing at
-          // a tool it does not have, which is the one place this lane cannot recover from.
-          prompt: harnessOwnsGit
-            ? `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
-              `save your edits to the files, run NO git or gh commands, and end with a REPORT carrying ` +
-              `a line \`COMMIT_MESSAGE: <type>(<scope>): <subject>\` — the harness commits, pushes and opens the PR.`
-            : `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
-              `commit, \`git push origin HEAD\` (no -u), open the PR with \`gh pr create --fill --base main\`, ` +
-              `and end with a REPORT whose last line is exactly: PR_URL: <url>`,
-        }),
-      );
-      log("implement.resumed", {
-        session_id: impl.sessionId,
-        cost_usd: impl.costUsd,
-        num_turns: impl.numTurns,
-        subtype: impl.subtype,
-        // W1-T6: every worker call ledgers the standard telemetry shape.
-        ...workerLedgerFields(impl),
-      });
-      const resumeFail = failOnWorkerError(impl, "implement.resumed");
-      if (resumeFail) return resumeFail;
-    }
-
-    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it. The first
-    // stop always resumes; whether a later stop resumes again is the progress judge's call (W1-T7096).
-    const checkpointStops: CheckpointStop[] = [];
-    let checkpointJudge: FixProgressJudge | undefined;
-    for (;;) {
-      const tipSubject = lastCommitSubject(worktreePath);
-      const roundReport = parseReport(fullText(impl));
-      const roundTip = classifyRoundTip({
-        tipSubject, headBefore: roundHeadBefore, headNow: worktreeHeadOrUndefined(worktreePath),
-        finishedByReport: roundReport?.prUrl !== undefined || (harnessOwnsGit && roundReport?.commitMessage !== undefined),
-        reportOpenedPr: roundReport?.prUrl !== undefined,
-      });
-      if (tipSubject === undefined || !roundTip.unfinished) {
-        // A wip-shaped tip the harness wrote, left unmoved by a round that reported its completion line: finished.
-        if (tipSubject !== undefined && isWipSubject(tipSubject) && !roundTip.headMoved && roundReport?.prUrl === undefined) {
-          log("implement.finished_on_harness_tip", { subject: tipSubject, tip_author: roundTip.tipAuthor, head_moved: roundTip.headMoved });
-        }
-        break;
-      }
-      const checkpointYield = await yieldAtWorkerBoundary("checkpoint");
-      if (checkpointYield) return checkpointYield;
-      let tipBody = "";
-      try {
-        tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
-      } catch (e) {
-        // An unreadable body only loses the remaining hint; the resume still runs with a generic prompt.
-        void e;
-      }
-      const remaining = checkpointRemaining(tipBody);
-      log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null, tip_author: roundTip.tipAuthor, head_moved: roundTip.headMoved });
-      const workingTree = worktreeDiffStat(worktreePath);
-      checkpointStops.push({ round: checkpointStops.length + 1, subject: tipSubject, remaining, ...(workingTree ? { workingTree } : {}) });
-      const decision = await judgeCheckpointStop(checkpointStops, {
-        readHead: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]),
-        makeJudge: () => (checkpointJudge ??= opts.productionProgressJudge === true || !spawnInjected
-          ? productionFixProgressJudge({ cwd: worktreePath, settingsFile }) : undefined),
-      });
-      log("implement.checkpoint_judged", { stop: checkpointStops.length, resume: decision.resume, by: decision.by, reason: decision.reason });
-      if (!decision.resume) break;
-      const judgedYield = await yieldAtWorkerBoundary("checkpoint");
-      if (judgedYield) return judgedYield;
-      noteRestartPhase("implementing");
-      roundHeadBefore = worktreeHeadOrUndefined(worktreePath);
-      impl = account(
-        await spawn({
-          cwd: worktreePath,
-          permissionMode: "bypassPermissions",
-          settingsFile,
-          resumeSessionId: impl.sessionId,
-          model: implementMount.model,
-          mountProvider: implementMount.provider,
-          effort: implementMount.effort,
-          maxTurns: implementMount.maxTurns,
-          maxBudgetUsd: budgetUsd,
-          config: implementConfig,
-          tools: implementTools === undefined ? undefined : [...implementTools],
-          ...(ruleLookup === undefined ? {} : { ruleLookup }),
-          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
-          ...cashTrialSpawn,
-          prompt: renderContinuationPrompt(tipSubject, remaining, harnessOwnsGit),
-        }),
-      );
-      log("implement.continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
-      const continueFail = failOnWorkerError(impl, "implement.continued");
-      if (continueFail) return continueFail;
-    }
-
-    // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
-    const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
-    if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
-      const workerYield = await yieldAtWorkerBoundary("worker", "preopen_gate");
-      if (workerYield) return workerYield;
-      const gate = await preopenGate(worktreePath);
-      log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
-        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}), ...preopenGateLedgerFields(gate) });
-      if (gate.kind === "fail") {
-        const preopenYield = await yieldAtWorkerBoundary("preopen_gate", "implementing");
-        if (preopenYield) return preopenYield;
-        noteRestartPhase("implementing");
-        impl = account(
-          await spawn({
-            cwd: worktreePath,
-            permissionMode: "bypassPermissions",
-            settingsFile,
-            resumeSessionId: impl.sessionId,
-            model: implementMount.model,
-            mountProvider: implementMount.provider,
-            effort: implementMount.effort,
-            maxTurns: implementMount.maxTurns,
-            maxBudgetUsd: budgetUsd,
-            config: implementConfig,
-            tools: implementTools === undefined ? undefined : [...implementTools],
-            ...(ruleLookup === undefined ? {} : { ruleLookup }),
-            ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
-            ...cashTrialSpawn,
-            prompt: renderPreopenGatePrompt(gate.failedSteps, harnessOwnsGit),
-          }),
-        );
-        log("implement.preopen_continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
-        const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
-        if (gateFail) return gateFail;
-      }
-    }
-
-    if (!parseReport(fullText(impl))?.prUrl) {
-      const workerYield = await yieldAtWorkerBoundary("worker", "pushing");
-      if (workerYield) return workerYield;
-    }
-
-    // ── QUESTION contract (non-blocking) — log, don't stall (§2).
-    const question = parseQuestion(fullText(impl));
-    if (question) {
-      const logged = appendQuestion(repoRoot, {
-        ts: new Date().toISOString(),
-        task: taskId,
-        question: question.question,
-        current_assumption: question.currentAssumption,
-        impact_if_wrong: question.impactIfWrong,
-      });
-      log(logged ? "question.logged" : "question.log_failed", {
-        question: question.question.slice(0, 120),
-      });
-    }
-
-    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
-    logSkillsUsed(log, fullText(impl), injectableSkills.map((s) => s.name), skillUsagePath(join(config.root, "state")));
-
-    const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
-
-    // ── PR (worker REPORT or orchestrator fallback).
-    let prUrl = parseReport(fullText(impl))?.prUrl;
-
-    // SILENT NO-OP GUARD: by here the worker reached a terminal SUCCESS (non-success
-    // subtypes already returned above via workerErrorVerdict). If it committed NOTHING and
-    // opened no PR, it produced nothing to merge — an honest `no_pr` verdict, NOT a failed
-    // "worker error: success" (run W1-T12a-1784117152056) and NOT a gh-pr-create throw on an
-    // empty branch. Only reached when there's no PR to gate.
-    //
-    // Computed ONCE and held in `commitCount` (W1-T407) rather than re-called inline: the guard's
-    // predicate is unchanged (still `=== 0`), but the same value now also rides the `no_pr`
-    // ledger row below instead of being thrown away after deciding the branch.
-    let commitCount = commitsAhead(worktreePath, "origin/main");
-
-    // W1-T3696 step (1), WIRED: a worker with no shell cannot commit its own edits, so the harness
-    // commits them here. This is the ONLY missing verb — the fallback push below and the
-    // orchestrator PR creation after it already exist, so once this produces a commit the rest of
-    // the run is the long-proven path, unchanged.
-    //
-    // GATED ON THE SPAWN'S OWN TOOL SURFACE, not on the provider. `harnessOwnsGit` is true exactly
-    // when this spawn was bounded without a shell, which is the condition under which the worker
-    // was TOLD the harness would commit (the same flag built its output contract). A shell-capable
-    // worker that committed nothing is left alone: it could have committed and chose not to, and
-    // turning that into a pull request would change a long-standing verdict rather than enable a
-    // new lane.
-    //
-    // The first attempt uses the worker's anchored subject. A non-resumable writer that still omits
-    // it after one contextual re-ask may use the task-record fallback below.
-    // CALLED UNCONDITIONALLY, and it owns its own precondition. Guarding here instead would put the
-    // decision on lines no test can reach without driving this entire dispatch — which is what
-    // `diff-coverage` refused, and rightly: the branch deciding whether a run produces a pull
-    // request must be exercised, not reasoned about from outside.
-    const harnessCommitRefusalState: { reason?: string } = {};
-    let harnessCommitted: { sha: string; undeclared: readonly string[] } | undefined;
-    const onHarnessCommit = (sha: string, undeclared: readonly string[] = []) => { harnessCommitted = { sha, undeclared }; };
-    commitCount = harnessCommitForShellLessWorker({
-      harnessOwnsGit,
-      commitCount,
-      report: fullText(impl),
-      worktreePath,
-      declaredPaths: task.files ?? [],
-      acceptance: task.acceptance,
-      assignmentId: impl.selectionAssignmentId,
-      log,
-      say,
-      onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
-      onCommit: onHarnessCommit,
-    });
-
-    // W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED. `resumeForMissingCommitLine`
-    // owns its own precondition (called unconditionally, exactly like the helper above) — it no-ops
-    // for every refusal EXCEPT the exact missing-line one, and only when the worktree still holds
-    // uncommitted changes. A Codex writer gets its own diff and report because its resumed spawn
-    // starts fresh. A still-missing line may use the task record, through the same commit guard.
-    const commitLineRecovery = await resumeForMissingCommitLine({
-      commitCount,
-      refusalReason: harnessCommitRefusalState.reason,
-      report: fullText(impl),
-      task: writerCannotResume(impl.provider ?? implementMount.provider, implementTools) ? task : undefined,
-      worktreePath,
-      declaredPaths: task.files ?? [],
-      acceptance: task.acceptance,
-      assignmentId: impl.selectionAssignmentId,
-      log,
-      say,
-      onCommit: onHarnessCommit,
-      resume: commitLineResume(spawn, account, {
-        cwd: worktreePath,
-        permissionMode: "bypassPermissions",
-        settingsFile,
-        resumeSessionId: impl.sessionId,
-        model: implementMount.model,
-        mountProvider: implementMount.provider,
-        effort: implementMount.effort,
-        maxTurns: implementMount.maxTurns,
-        maxBudgetUsd: budgetUsd,
-        config: implementConfig,
-        tools: implementTools === undefined ? undefined : [...implementTools],
-        ...(ruleLookup === undefined ? {} : { ruleLookup }),
-        ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
-        ...cashTrialSpawn,
-      }, { provider: impl.provider ?? implementMount.provider, title: task.title, report: fullText(impl), declaredPaths: task.files ?? [] }),
-    });
-    commitCount = commitLineRecovery.commitCount;
-    harnessCommitRefusalState.reason = commitLineRecovery.refusalReason;
-    const harnessCommitRefusalReason = harnessCommitRefusalState.reason;
-    const harnessCommitRefused = harnessCommitRefusalReason !== undefined && commitCount === 0;
-
-    // W1-T10026: a commit whose own files import a path it left out never opens bare; it asks for that scope.
-    const scopeNeeded = await askScopeForLeftOutImports({
-      taskId, branch, commit: harnessCommitted, log, git: (args) => hostWorktreeGit(worktreePath, args),
-      amend: opts.implementScopeAmendment ?? ((request) => requestScopeAmendment(request, buildProofAmendmentWritePorts({
-        taskId, worktreePath: repoDir, config, owner, repo: task.repo, prNumber: request.prNumber, ledgerLinesNow: [], log,
-        gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
-      }))),
-    });
-    if (scopeNeeded) {
-      harvestFollowupsFromReport(fullText(impl), { label: "implement", runId, log, say });
-      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log);
-      const { amendment } = scopeNeeded;
-      log("verdict", {
-        verdict: "no_pr",
-        reason: "scope_needed",
-        paths: scopeNeeded.companions.map((c) => c.path),
-        head_sha: harnessCommitted?.sha,
-        amendment_outcome: amendment.kind,
-        ...(amendment.kind === "refused" ? { amendment_reason: amendment.reason, amendment_detail: amendment.detail } : {}),
-        ...("amendmentUrl" in amendment ? { amendment_url: amendment.amendmentUrl } : {}),
-        cost_usd: costUsd,
-        ...terminalVerdictFields(impl),
-      });
-      say(`verdict: no_pr — committed files import left-out ${scopeNeeded.companions.map((c) => c.path).join(", ")}; ` +
-        `scope amendment ${amendment.kind}${amendment.kind === "refused" ? ` (${amendment.reason})` : ""}`);
-      return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
-    }
-
-    if (!prUrl && commitCount === 0) {
-      // W1-T412: HARVEST BEFORE THIS BLOCK'S RETURNS, because every path out of it returns and
-      // the implement phase's own harvest call sits far BELOW, after `gh pr create`/`pr.opened`
-      // — placed there because that is where `prUrl` becomes known on the orchestrator-fallback
-      // path. The consequence, measured across four empty-diff runs (W1-T388, W1-T392 twice,
-      // W1-T393): recon follow-ups survive and IMPLEMENT follow-ups are discarded on exactly the
-      // verdict where a worker most needs to say something. This is a call that never happens,
-      // not a verdict that needs changing — nothing below is altered.
-      //
-      // NOT A SECOND, PARALLEL CALL SITE: this block returns on EVERY path (already_satisfied
-      // and no_pr alike), so the call below is unreachable from here and no run can harvest
-      // twice. That disjointness is what makes one-harvest-per-phase hold by construction
-      // rather than by a flag, and `test/no-pr-followups-harvested.test.ts` locks BOTH
-      // directions — the PR-bearing run still harvests exactly once, with its pr_url intact.
-      //
-      // `prUrl` is deliberately NOT passed: this run opened no PR, and
-      // `harvestFollowupsFromReport` spreads `pr_url` in only when defined, so the line carries
-      // no blank field. That is the SAME shape the recon call site already emits on every
-      // dispatch — the PR-less path is long-proven, not new code.
-      harvestFollowupsFromReport(fullText(impl), { label: "implement", runId, log, say });
-      // W1-T272: the THIRD exit — before falling to the drain-halting `no_pr`, check whether
-      // the worker instead claimed ALREADY_SATISFIED and, if so, whether that claim actually
-      // verifies against the board gateway. A claim that fails to verify is deliberately NOT
-      // an error of its own — it just falls straight through to the unchanged `no_pr` path,
-      // exactly as if no claim had been made at all.
-      const claim = parseAlreadySatisfied(fullText(impl));
-      // W1-T2370: an UNVERIFIABLE read is re-asked here, between the resolution and the verdict —
-      // never inside the resolver, which stays a pure function over the gateway it is handed.
-      const verify = claim ? resolveAlreadySatisfiedWithRetry(claim, github, taskId) : undefined;
-      const resolution = verify?.resolution;
-      const resolved = resolution?.outcome === "verified" ? resolution : undefined;
-      if (claim && resolved) {
-        const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
-        // Make the credit the dispatcher's too, or its next projection re-dispatches the task.
-        const credit = persistVerifiedCredit(ledgerPath, task, resolved, github.changedFiles?.(resolved.url));
-        log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
-        try {
-          worktreeRemove(repoDir, worktreePath);
-          log("worktree.remove", { on: "already_satisfied" });
-        } catch (e) {
-          log("worktree.remove.error", { on: "already_satisfied", error: String((e as Error)?.message ?? e) });
-        }
-        log("verdict", { ...v.ledger, ...terminalVerdictFields(impl) });
-        say(`verdict: already_satisfied — credited via ${v.prUrl} · ${impl.numTurns} turns`);
-        return { taskId, runId, prUrl: v.prUrl, merged: true, costUsd, verdict: "already_satisfied" };
-      }
-      if (claim && resolution?.outcome === "unverifiable") {
-        // NEITHER CREDIT NOR REFUSAL. The gateway could not answer, so the claim is not
-        // refuted — recording it as `already_satisfied.refused` is what turned a failed read
-        // into "the worker lied" and re-dispatched two already-shipped tasks. The verdict
-        // still falls to `no_pr` (an unverifiable claim can never be credited — that would be
-        // strictly worse than the defect), but the RECORD no longer asserts the claim was false.
-        log("already_satisfied.unverified", {
-          claimed_ref: claim.ref,
-          claimed_number: prNumberFromRef(claim.ref) ?? null,
-          reason: resolution.reason,
-          // W1-T2370: how many gateway READS were spent before giving up, so a later reader can tell
-          // "the bound was exhausted" from "the read failed once" without replaying anything.
-          verify_attempts: verify?.attempts ?? 1,
-        });
-        say(
-          `ALREADY_SATISFIED claim ("${claim.ref}") could NOT be verified — the board gateway read ` +
-            `failed (${resolution.reason}). Not refuted; falling to no_pr.`,
-        );
-      } else if (claim && resolution?.outcome === "refuted") {
-        log("already_satisfied.refused", {
-          claimed_ref: claim.ref,
-          claimed_number: prNumberFromRef(claim.ref) ?? null,
-          // WHICH of the three things happened — the row is the forensic record and could not
-          // say before. `credited_number` rides along on the one reason that has a rival PR.
-          reason: resolution.reason,
-          ...(resolution.creditedNumber !== undefined ? { credited_number: resolution.creditedNumber } : {}),
-        });
-        say(
-          `ALREADY_SATISFIED claim ("${claim.ref}") did not verify against the board gateway ` +
-            `(${resolution.reason}) — falling to no_pr`,
-        );
-      }
-      const v = noPrVerdict(
-        impl,
-        costUsd,
-        "implement",
-        commitCount,
-        harnessCommitRefused ? "harness_commit_refused" : undefined,
-      );
-      try {
-        worktreeRemove(repoDir, worktreePath);
-        log("worktree.remove", { on: "no_pr" });
-      } catch (e) {
-        log("worktree.remove.error", { on: "no_pr", error: String((e as Error)?.message ?? e) });
-      }
-      log("verdict", { ...v.ledger, pre_dispatch_contract_revision: preDispatchContractRevision(task), ...terminalVerdictFields(impl) });
-      say(`verdict: no_pr — worker completed without opening a PR · ${impl.numTurns} turns`);
-      return {
-        taskId,
-        runId,
-        merged: false,
-        costUsd,
-        verdict: "no_pr",
-        ...(harnessCommitRefused
-          ? { harnessCommitRefused: true as const, harnessCommitRefusalReason }
-          : {}),
-      } as RunResult;
-    }
-
-    // W1-T4656: ONE policy read shared by the census rung and the fix rung (config-reader-seams counts reads).
-    const fixSpawnWallClockBoundMs = () => opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs;
-    // Ensure the branch is on origin (worker pushes without -u).
-    let branchOnOrigin = false;
-    let probeFailure: RemotePresenceProbeFailure | undefined;
-    try {
-      // W1-T2267: was `stdio: "ignore"`, which discarded the probe's own stderr — the exact
-      // evidence `fallbackPushCause` needs to tell an unreadable remote from a genuinely
-      // absent ref. The leaf pipes it, so a failed probe's error carries it.
-      hostWorktreeGit(worktreePath, ["ls-remote", "--exit-code", "origin", branch]);
-      branchOnOrigin = true;
-    } catch (e) {
-      branchOnOrigin = false;
-      // W1-T2267: capture the probe's exit status/stderr instead of a bare, unbound `catch` —
-      // see `fallbackPushCause` (above scopeGuardOutOfScopeFiles) for what this evidence feeds.
-      const err = e as { status?: number | null; stderr?: Buffer | string };
-      probeFailure = {
-        status: typeof err.status === "number" ? err.status : null,
-        stderr: err.stderr !== undefined ? String(err.stderr).trim() : "",
-      };
-    }
-    if (!branchOnOrigin) {
-      // W1-T2267: WHY the fallback fired, not only that it did (design (i)). Computed and
-      // ledgered BEFORE the push below, from evidence already in hand — the probe's own
-      // status/stderr and the implement worker's own transcript+stderr (identical evidence
-      // `workerSignal` already builds for the retry classifier, just reused for a different
-      // question). This does not gate or delay the push itself (design note: "a run that cannot
-      // determine WHY still pushes" — acceptance #4).
-      const pushCause = fallbackPushCause(probeFailure, [workerTranscript(impl), impl.stderr].join("\n"));
-      // `evidence` (W1-T2522) rides the SAME line as `cause`/`detail`, never a second ledger step —
-      // one row per fallback push, now carrying the scrubbed/bounded text that class was read from
-      // instead of losing it, exactly what left all 15 `credential_expired` rows to date
-      // indistinguishable from one another.
-      log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail, evidence: pushCause.evidence });
-      say(`fallback push firing for ${branch} — cause: ${pushCause.cause} (${pushCause.detail})`);
-      // W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG — the ONE orchestrator-initiated push in this
-      // file (the worker itself normally pushes from inside its own sandbox; this fallback runs on
-      // whatever the worktree holds, which is exactly the shape a refreshed/collapsed/squashed
-      // branch would have). Computed FRESH from this worktree, never a cached list, and BEFORE the
-      // push, so the ledger line is written against the diff that is about to reach origin.
-      //
-      // THE ANSWER TO AN OVERRUN IS NO LONGER A REFUSAL (W1-T434). It used to return verdict
-      // "failed" with no push, and that answer DESTROYED ITS OWN EVIDENCE: the branch never
-      // reached origin and died with the reaped worktree, so nobody could afterwards tell a
-      // phantom revert from an under-declared `files:` — the two shapes produce an identical file
-      // list, and the refusal deleted the only artifact that separates them. Four refusals in one
-      // week cost roughly $29 of already-completed work each time it fired (operator report,
-      // UNMEASURED here), while the very class it exists to contain merged anyway through the
-      // worker's own sandbox push (W1-T393's implementation, #1521, touching src/lib/ledger.ts
-      // beyond its declared files) — because this guard reaches ONE of gitPushRunBranch's nine
-      // call sites and only when the branch is ABSENT from origin. It could punish the fallback
-      // path after the money was spent; it could never contain a worker.
-      //
-      // WHAT IS GIVEN UP, STATED RATHER THAN GLOSSED. The DETECTION is unchanged — the detector
-      // below is untouched and still names exactly the same paths — but the BLOCK becomes a FLAG,
-      // and `unwiredAdvisories` folds into neither `state` nor `floorState` (lib/review.ts), while
-      // `armAutoMergeAtOpen` arms the instant the PR exists. So on this one path a phantom revert
-      // that passes CI and the review floor can now merge carrying the revert, where before it
-      // could not reach origin at all. That is accepted because real containment is the merge gate
-      // (Standing rule 3B), because the branch surviving is what lets a human adjudicate at all,
-      // and because a guard covering one push site was never the containment it read as.
-      //
-      // AND ONE CASE GOES QUIET RATHER THAN SOFT: `scopeGuardOutOfScopeFiles` treats an
-      // absent/empty declared scope as "everything is out of scope", but review-side
-      // `scopeViolationFiles` deliberately does the opposite and never fires on an empty scope. A
-      // task declaring no `files:` therefore still ledgers `scope_guard.overrun` here — the
-      // detector is untouched — but earns NO PR advisory. The ledger keeps it; the comment does not.
-      //
-      // THREE-DOT, AND THIS WAS A REAL DEFECT RATHER THAN A STYLE PREFERENCE. Two-dot
-      // `origin/main..HEAD` diffs the two TIPS, so every file merged to main AFTER this worktree
-      // was cut reads as something this branch changed. MEASURED: a drain booted at 3147755
-      // dispatched W1-T395, #1533 merged mid-run, and the guard refused the push naming
-      // `src/run-task.ts` and `test/drain-gateway-batched.test.ts` — #1533's files, which the
-      // worker never opened. A merge to main must not break a running drain.
-      //
-      // `origin/main...HEAD` diffs against the MERGE BASE — what THIS BRANCH changed relative to
-      // where it started — which is the question the guard is actually asking, and is already the
-      // convention `lib/ci-parity.ts` uses at both of its own diff sites.
-      let diffFiles: string[] | undefined;
-      try {
-        diffFiles = hostWorktreeGit(worktreePath, MERGE_BASE_DIFF_ARGS)
-          .split("\n")
-          .map((f) => f.trim())
-          .filter(Boolean);
-      } catch (e) {
-        // W1-T434: an unreadable diff no longer refuses either, and the reason is NOT merely
-        // symmetry with the overrun arm below — an orchestrator-side `git diff` that will not run
-        // is a fact about THIS WORKTREE'S git, not about the work the worker did. Failing closed
-        // here answered a question about the tooling by throwing away the branch. The line carries
-        // no `out_of_scope` key at all rather than an empty one: nothing was compared, and an
-        // empty list would read as "compared, found nothing" (the W1-T186 emitter discipline, and
-        // the same unknown-is-not-zero law `probeIdle` was corrected to follow).
-        log("scope_guard.diff_unreadable", {
-          error: String((e as Error)?.message ?? e),
-          declared_files: task.files ?? [],
-          reason:
-            "pushing unflagged rather than refusing: an unreadable orchestrator-side diff says nothing " +
-            "about the work, and the scope comparison is re-run per PR at review time",
-        });
-        say(
-          `branch ${branch}'s diff against origin/main could not be read — pushing anyway and leaving the ` +
-            `declared-scope comparison to the review, rather than discarding completed work over a diff ` +
-            `this worktree could not produce`,
-        );
-        diffFiles = undefined;
-      }
-      const outOfScope = diffFiles === undefined ? [] : scopeGuardOutOfScopeFiles(diffFiles, task.files,
-        readRegistrationChanges(worktreePath, diffFiles, "origin/main"));
-      if (outOfScope.length > 0) {
-        // THE REASON IS THIS DECISION'S OWN (the #981 rule — a ledger line carries the reason from
-        // the decision that produced its outcome, never from a neighbouring gate).
-        log("scope_guard.overrun", {
-          out_of_scope: outOfScope,
-          declared_files: task.files ?? [],
-          reason:
-            "pushed and flagged rather than refused: the branch is the only evidence that separates a " +
-            "phantom revert from an under-declared files:, and a refusal reaped it — W1-T401's review-side " +
-            "advisory carries the overrun to the human gate instead",
-        });
-        // THE MESSAGE NAMES WHAT IT OBSERVED, NOT A CAUSE IT CANNOT SEE. It used to assert
-        // "likely a forged merge-base / phantom revert (the reset --soft near-miss)" — the RAREST
-        // of several causes producing an identical file list, and the one a reader then spends an
-        // hour chasing. The stale-base cause is gone as of the three-dot fix above, so what remains
-        // really is more likely to be a genuine scope problem; the honest phrasing says which two
-        // things it compared and leaves the diagnosis to whoever can see more than a file list.
-        say(
-          `SCOPE OVERRUN: branch ${branch}'s diff against its merge base with origin/main touches file(s) ` +
-            `outside task ${taskId}'s declared scope — either the work genuinely went out of scope or ` +
-            `the task under-declares files:; pushing and flagging on the PR: ${outOfScope.join(", ")}`,
-        );
-      }
-      say("fallback: pushing branch from orchestrator (outside sandbox)");
-      // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
-      // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
-      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
-      try {
-        if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
-        await gitPushRunBranchAsync(worktreePath);
-      } catch (err) {
-        const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err);
-        if (!refusal) throw err;
-        const refusalLabel = coverageRefusal && err instanceof FixRoundPushError ? "coverage-refused" : "census-refused";
-        const rung = await repairCensusRefusedPush({
-          refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, mount: fixMount,
-          ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,
-          spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
-          spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
-          ...(refusalLabel === "coverage-refused"
-            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push.repair") }
-            : {}),
-        });
-        if (rung.outcome === "refused") {
-          // The gate refuses every push of this head, so the worktree is the evidence W1-T434 would have pushed.
-          log("verdict", {
-            verdict: "failed",
-            reason: `${refusalLabel} push not cleared by the fix rung (${rung.reason})`,
-            stage: "fallback_push.census",
-            cause: "census-refused-push" satisfies RunErrorCause,
-            censuses: rung.refusal.censuses,
-            refusal: rung.refusal.text,
-            strikes: rung.strikes,
-            ...headProvenanceFields(worktreePath),
-            cost_usd: costUsd,
-            billing_mode: billingMode(impl.childEnvKeys),
-            account_label: impl.accountLabel,
-            ...terminalVerdictFields(impl),
-          });
-          say(`verdict: failed — ${refusalLabel} push (${rung.refusal.censuses.join(", ")}); worktree kept: ${worktreePath}`);
-          return { taskId, runId, merged: false, costUsd, verdict: "failed" };
-        }
-      }
-    }
-    // W1-T4425: when the worker already reported its OWN PR, normalize its body from THIS run's
-    // plan record before the trailer-amend push below, so `trailer-body-proof-divergence` never
-    // reaches CI (#6888, #6929, #6931). Best-effort/no-op cases are documented on the function
-    // itself. The fallback below may adopt a worker-opened PR and normalize it afterward.
-    if (prUrl) {
-      normalizeRunPrAcceptanceFromPlan(prUrl, taskId, task.acceptance ?? [], log);
-    }
-    // W1-T1012: append the `Remudero-Task:` trailer to the branch's actual tip commit HERE —
-    // after both push paths above (the worker's own sandbox push, or the orchestrator
-    // fallback just above) have already landed it on origin, and before EITHER PR path below
-    // (the worker's own already-reported `prUrl`, or the `gh pr create --fill` fallback) can
-    // read that tip. `appendTaskTrailerToCommit` amends only when the trailer is missing, so
-    // an already-trailered commit (a worker that wrote it itself) pays no second amend.
-    if (appendTaskTrailerToCommit(worktreePath, taskId)) {
-      await gitPushRunBranchAsync(worktreePath, { force: true });
-    }
-    if (!prUrl) {
-      let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
-      try {
-        // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log });
-      } catch (err) {
-        if (!(err instanceof PrOpenRefusedError)) throw err;
-        // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
-        const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
-        const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
-        const changedFiles = refusedBranchChangedFiles(worktreePath);
-        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
-        reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
-        log("verdict", {
-          verdict: "failed",
-          reason: boundedVerdictReason(err.message),
-          stage: "pr_open.refused",
-          cause: "base-proof-refused" satisfies RunErrorCause,
-          branch,
-          head_sha: headSha,
-          refusal_class: err.refusalClass,
-          ...(issueUrl ? { issue_url: issueUrl } : {}),
-          cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
-          account_label: impl.accountLabel,
-          ...terminalVerdictFields(impl),
-        });
-        say(`verdict: failed — PR open refused (${err.refusalClass}); branch ${branch} kept on origin at ${headSha}`);
-        return { taskId, runId, merged: false, costUsd, verdict: "failed" };
-      }
-      // After the local open checks: a refused open never reads GitHub, and a sibling still stops the create.
-      const deferred = await deferOpenToSiblingPr(ctx, { impl, branch, worktreePath, repoDir, costUsd });
-      if (deferred) return deferred;
-      prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
-      // A worker may have opened this exact PR without reporting its URL. The generic-422
-      // adoption above discovers it only here, after the earlier direct-PR normalization point.
-      // Reuse that same body repair before review so the adopted worker prose cannot fail the
-      // plan's acceptance gate. A newly created, already-matching body is a no-op.
-      if (prUrl) normalizeRunPrAcceptanceFromPlan(prUrl, taskId, task.acceptance ?? [], log);
-    }
-    if (!prUrl) {
-      log("verdict", {
-        verdict: "failed",
-        reason: "no PR opened",
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        ...terminalVerdictFields(impl),
-      });
-      return { taskId, runId, merged: false, costUsd, verdict: "failed" };
-    }
-    // RUN-OWNERSHIP GUARD (W1-T62) — before ANY side effect touches this PR, assert
-    // it is actually this run's own PR (the false-merged inversion backstop; see
-    // checkPrOwnership). Fails closed and named on mismatch; the PR is left untouched.
-    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), costUsd, impl.accountLabel);
-    if (ownership) {
-      log("verdict", { ...ownership.ledger, ...terminalVerdictFields(impl) });
-      say(
-        `verdict: pr_attribution_failed — claimed PR ${prUrl} (branch ${ownership.ledger.claimed_branch ?? "unresolved"}) ` +
-          `is not this run's own branch (${branch}) — PR left UNTOUCHED`,
-      );
-      return { taskId, runId, merged: false, costUsd, verdict: "pr_attribution_failed" };
-    }
-    // Stamp the provenance trailer (deriveStatus source (c)) before gating.
-    ensureTaskTrailer(prUrl, taskId, log);
-    recordHeadProviderAfterPush(
-      { taskId, prUrl, source: "implement", worker: impl, workerHeadCreatedLocally },
-      {
-        readProducedHeadSha: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(),
-        readHeadSha: opts.readHeadShaForProvenance ?? readHeadShaRest,
-        log,
-      },
-    );
-    // W1-T4614: the head the PR opened at, joinable to its review and CI verdicts and to the assignment that wrote it.
-    log("pr.opened", { pr_url: prUrl, ...headProvenanceFields(worktreePath) });
-    say(`PR: ${prUrl}`);
-
-    // ── IRREVERSIBILITY SIGNAL (W1-T947, W1-T919 ruling): computed ONCE, right
-    // after the PR exists, and reused at BOTH arm-time gates below — the
-    // post-review decision gate and the deferred arm call itself (W1-T975; see
-    // the "── ARM" block further down, right before pollToGate). Kept here
-    // rather than re-derived at either later site: a re-derive could disagree
-    // with itself on the identical diff if either read failed differently.
-    const irreversible = irreversibleSignalForWorktree(worktreePath);
-
-    // The implement worker's own optional '## Follow-ups' section (§2 OUTPUT CONTRACT,
-    // outputContractLines in lib/compaction.ts).
-    harvestFollowupsFromReport(fullText(impl), { label: "implement", prUrl, runId, log, say });
-
-    // ── REVIEW GATE (W1-T1D). Wait for `ci` green, then JUDGE the task's
-    // acceptance criteria and POST `remudero-review` to the PR head sha — only
-    // THEN arm auto-merge. This is the call site the T1C/T1D split left unowned:
-    // a REQUIRED check that nothing posts deadlocks every merge, so the poster
-    // lives here, before arming. A ci that never greens is blocked_ci (no review
-    // over unproven code); a review=failure is blocked_review (the required check
-    // is red and GitHub will not merge). Pending is never treated as pass.
-    // W1-T5345: the daemon lane hands its PR to the sweep at PR open unless a post-CI gate only
-    // this run can apply stands over it (PR_OPEN_HANDOFF_STEP_OWNERS) — that decline is ledgered.
-    const handoffDeclined = opts.handOffAtPrOpen
-      ? prOpenHandoffDecline({ irreversible, noMerge: !!opts.noMerge, shadowInstance })
-      : undefined;
-    if (handoffDeclined) log("run.handoff_declined", { trigger: "pr_open", reason: handoffDeclined, pr_url: prUrl });
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
-      externalWaitFreshness: opts.restartAtWorkerBoundary
-        ? () => opts.restartAtWorkerBoundary!({ waitingOn: "ci", runId }) : opts.externalWaitFreshness,
-      externalWaitRecycle: opts.externalWaitRecycle,
-      handOffAtPrOpen: opts.handOffAtPrOpen === true && handoffDeclined === undefined,
-    });
-    if (ci.state === "freshness_handoff") {
-      // W1-T4662: this is a HAND-OFF, never a failure — a healthy run that reached the CI-wait
-      // boundary and left its OPEN pr_url for a fresher daemon lifetime to pick back up. It used
-      // to share `blocked_transient` with a genuine, repeated Anthropic-side API error, which made
-      // the daemon's cross-task API-window hold and lane refill back dispatch off a signal that
-      // named nothing wrong. The shared RunResult union names this outcome directly.
-      const reason = ci.trigger === "pr_open" ? "pr_open_yield" : ci.recycle === undefined ? "freshness_yield" : "recycle_yield";
-      say(
-        ci.trigger === "pr_open"
-          ? "PR-open handoff: CI is pending; the sweep owns this PR's CI wait, review and merge"
-          : `daemon ${ci.recycle === undefined ? "freshness" : "recycle"} handoff: CI is pending; leaving PR open for the refreshed daemon`,
-      );
-      log("verdict", {
-        verdict: "handed_off",
-        pr_url: prUrl,
-        reason,
-        head_sha: ci.sha,
-        old_sha: ci.oldSha,
-        new_sha: ci.newSha,
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        ...terminalVerdictFields(impl),
-      });
-      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "handed_off" };
-    }
-    const ciState = ciGateState(ci);
-    if (ciState !== "green") {
-      const reason = ciGateBlockReason(ci);
-      say("fallback: pushing branch already done; ci not green — skipping review, leaving PR open");
-      log("verdict", {
-        verdict: "blocked_ci",
-        pr_url: prUrl,
-        reason,
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        ...terminalVerdictFields(impl),
-      });
-      say(`verdict: blocked_ci (${reason}) — PR left OPEN: ${prUrl}`);
-      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
-    }
-    // THE REVIEW MUST JUDGE THE PR BODY, NOT THE WORKER'S CHAT TEXT (recon-GK).
-    //
-    // This passed `fullText(impl)` — the implementation worker's running narrative. `runReview`
-    // feeds that string to `bodyContradictsDiff` (lib/review.ts:1803), which asks whether the
-    // author's CLAIMS ABOUT THE CHANGESET match the diff. A narrative naturally contains phrases
-    // like "plan-only" or "exactly one file" while DESCRIBING the job, so the gate correctly
-    // reported a contradiction of a claim the PR BODY never made. Observed live on #1156, the
-    // first task PR the autonomous loop produced end to end: its 7,528-byte body contains zero
-    // occurrences of "plan-only", and driving `bodyContradictsDiff` with that body and that file
-    // list offline returns [] — the checker is right, it was handed the wrong document.
-    //
-    // W1-T256 fixed this EXACT confusion for the fix rung (see `fetchPrBody`'s doc, above:
-    // "this re-review judges the fix worker's CHAT TEXT instead"), and the authoritative
-    // `reviewCommand`/`post-review` path has always used `report: body`. This is the third and
-    // last consumer to be brought in line.
-    //
-    // Best-effort, same discipline as W1-T256: a failed read falls back to the worker text rather
-    // than blocking the review, so a `gh` outage degrades to the old behaviour instead of a stall.
-    //
-    // W1-T1100: `reviewReportIsSubstitute` starts true (the fallback value already assigned above
-    // is the substitute) and flips to false ONLY on a successful fetch — so a throw leaves it
-    // true, matching `reviewReport` staying the worker's text. Threaded into `runReviewFn` below
-    // so `bodyContradictsDiff` and the keyword floor both know this is not the PR body.
-    let reviewReport = fullText(impl);
-    let reviewReportIsSubstitute = true;
-    let reviewReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause | undefined;
-    try {
-      reviewReport = await fetchPrBodyFn(prUrl);
-      reviewReportIsSubstitute = false;
-    } catch (e) {
-      // This path ALWAYS attempts the fetch, so a substitute here can only mean the read
-      // FAILED -- unlike the fix rung, where three of four modes never ask at all.
-      reviewReportSubstituteCause = { kind: "fetch-failed" };
-      log("review.body_fetch_error", { error: String((e as Error)?.message ?? e) });
-    }
-    let review = await runReviewFn({
-      owner,
-      repo: task.repo,
-      prUrl,
-      task,
-      report: reviewReport,
-      reportIsSubstitute: reviewReportIsSubstitute,
-      reportSubstituteCause: reviewReportSubstituteCause,
-      implementationReport: fullText(impl),
-      settingsFile,
-      config,
-      budgetUsd,
-      log: (s, extra) => log(s, extra),
-      say,
-      account,
-      reviewerMount,
-      reviewerClockBoundMs: workerAbandonMs,
-      workerTelemetry: workerStateSensor,
-      // A run that established the cash adapter as its containment boundary must keep this
-      // reviewer on that same boundary; otherwise a recovered subscription could run after a
-      // cash-only proof. Ordinary runs retain runReview's existing default router.
-      reviewerSpawnWorker: cashContainmentState.contained ? spawn : undefined,
-      // W1-T65 (ratifies P15) — HEAD DISCIPLINE: worktreePath IS the PR head here
-      // (this run's own worktree, checked out at the branch it just pushed; CI
-      // that follows never mutates it). NEVER the operator's working checkout —
-      // the deterministic floor observes THIS run's repo state, not report prose.
-      headCheckoutDir: worktreePath,
-      reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
-      ledgerPath,
-      runId,
-      openTaskIds,
-    });
-
-    if (review.verdictWithheld) {
-      log("verdict", {
-        verdict: "blocked",
-        pr_url: prUrl,
-        reason: review.verdictWithheld,
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        ...terminalVerdictFields(impl),
-      });
-      say(`verdict: blocked — reviewer code freshness withheld the review verdict: ${prUrl}`);
-      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
-    }
-
-    // ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; §3's fixing state).
-    // A failing review used to be TERMINAL here — the PR sat OPEN, the reviewer's
-    // computed unmet_criteria + reasons were dropped, and a fresh re-run patched
-    // whichever criterion the LAST block named and dropped the other (#111/#113's
-    // ping-pong). Dispatch ONE bounded fix worker with the FULL unmet set at once,
-    // amending this SAME branch/PR. Wired at the ONE call site `runTask` has — the
-    // drain/daemon path and the manual `rmd run-task` path both reach it, so both
-    // get the rung for free (no duplicated fix-dispatch logic).
-    if (review.state !== "success") {
-      const rung = await runFixRung({
-        guardRoundHead: true,
-        // A run on the real worker spawn is a production run: it always asks the LLM judge.
-        useProductionProgressJudge: opts.productionProgressJudge === true || !spawnInjected,
-        taskId,
-        runId,
-        task,
-        prUrl,
-        branch,
-        worktreePath,
-        initialSessionId: impl.sessionId,
-        mount: fixMount,
-        ...(stepUpMount ? { stepUpMount } : {}),
-        settingsFile,
-        config,
-        budgetUsd,
-        strikeCap: fixStrikeCap(config),
-        initialReview: review,
-        reviewBase: { owner, repo: task.repo, headCheckoutDir: worktreePath, reviewerMount },
-        reviewerClockBoundMs: workerAbandonMs,
-        workerTelemetry: workerStateSensor,
-        openTaskIds,
-        reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
-        deps: {
-          writeFixCensusSnapshot: writeFixCensusSnapshotAsync,
-          // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
-          spawn: trackRepairLadder(spawn, { config, log }),
-          waitForCiGreen: (url, waitLog) => waitForCiGreen(url, waitLog, 6, { externalWaitRecycle: opts.externalWaitRecycle }),
-          // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
-          // non-green — see runFixRung's own doc for why this must happen on
-          // every strike, not just the first.
-          // W1-T2804: when the round's gate read reported the sha it judged, mine THAT commit's
-          // rollup over `restRollupFor` — the same REST read the gate itself used — so the two
-          // readers cannot answer about different heads. No sha (a stub, or a gate that reported
-          // none) falls back to the pre-existing `gh pr view` read unchanged, fail open.
-          fetchCiFailures: fixRungCiFailures(owner, task.repo),
-          // W1-T1278 (condition A): the SAME `gh pr view --json statusCheckRollup` shape
-          // `fetchCiFailures` above reads, but RAW (never filtered to failing names only) — the
-          // pre-strike gate needs to see a currently-red name's PENDING later attempt, which
-          // `fetchCiFailures` itself deliberately excludes.
-          readCiRollup: async (prUrlArg) => {
-            const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
-              statusCheckRollup?: RollupCheck[];
-            };
-            return v.statusCheckRollup ?? [];
-          },
-          // W1-T3557: ALWAYS wired in production — `worktreePath` is this rung's own checkout,
-          // the SAME one `headCheckoutDir` above already points at, so no extra fetch is spent
-          // resolving the plan at whatever head this round's push just landed.
-          resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHeadAsync(prUrlArg, taskIdArg, worktreePath),
-          runReview,
-          fetchPrBody: fetchPrBodyViaGh,
-          // W1-T3506: the SAME worktree this round pushes to, run through the SAME proof
-          // executor `judgeCriterion` itself uses (review.ts's parseWhitelistedProof/
-          // execWhitelistedProof) — never a second, hand-rolled grep invocation.
-          execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
-          // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
-          // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
-          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, { repo: task.repo }, pushFixRound, prior),
-          readHeadShaForProvenance: readHeadShaRest,
-          issues: ghIssueGateway(owner, task.repo),
-          escalationIssues: ghIssueGatewayAsync(owner, task.repo),
-          ledgerPath,
-          log: (s, extra) => log(s, extra),
-          say,
-          account,
-          // W1-T177: the SAME live-state reader every fix-rung call site
-          // wires — a fresh `gh pr view` read, never this run's own snapshot.
-          readLiveState: ghLiveState,
-          // W1-T296: the pre-strike branch-authorship check's live-head
-          // reader — same fresh-`gh`-read discipline as `readLiveState`.
-          readLiveHead: ghLiveHead,
-          // W1-T1227: wired EXPLICITLY (never left to the internal `?? fetchPrDiffFilesViaGh`
-          // default `body-coverage` mode already used, W1-T307) so the pre-strike SCOPE gate
-          // ({@link fixRungScopeStandDownReason}) is actually live here, not just in a test that
-          // happens to wire it — a fresh `gh pr view --json files` read every round, same
-          // fresh-read discipline as `readLiveState`/`readLiveHead` above.
-          fetchPrDiffFiles: fetchPrDiffFilesViaGh,
-          // W1-T1095: the SAME `ghLiveState` reader, aimed at whatever prerequisite PR number
-          // a "blocked on #N" review names, in THIS task's own owner/repo — see runFixRung's
-          // own `readPrerequisiteState` doc for the fail-safe (not-merged) default this takes
-          // on a failed/indeterminate read.
-          readPrerequisiteState: (n) => ghLiveState(`https://github.com/${owner}/${task.repo}/pull/${n}`),
-          // W1-T1095 (capability 3): the two REST observations and the update-branch write.
-          // Both are PURE API — no branch, no checkout — because the daemon is detached on every
-          // boot, the assumption that broke `armAuto`'s `--delete-branch` (W1-T1111).
-          readMergeFacts: (n) => fixRebaseMergeFactsFromRest(owner, task.repo, n),
-          // W1-T2671: separate reversed-compare read for the base-only gap. Kept distinct from
-          // `readMergeFacts` so ordinary pre-strike mergeability checks do not pay for or confuse
-          // this ci-log-only file-overlap optimization.
-          readRedBaseRefreshFacts: (n) => redBaseRefreshFactsFromRest(owner, task.repo, n),
-          // W1-T8396: this rung's own checkout already holds the head, so its trial merge needs no fetch of it.
-          reproduceFailingTestsOnMerge: buildBaseReproductionProbe(config, worktreePath, ledgerPath, (s, extra) => log(s, extra), { merge: true }),
-          updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
-          // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
-          // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
-          // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
-          spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
-          // W1-T2261: binds this rung's OWN `log` through so a match/no-match reclaim outcome
-          // (`fix.spawn_reclaimed`/`fix.spawn_reclaim_no_match`) lands in the same ledger stream
-          // as `fix.spawn_abandoned` — the bare function reference below this before this task
-          // reached `reclaimAbandonedWorker`'s default no-op log, so neither outcome was ever
-          // recorded, only inferred from the process table staying quiet.
-          reclaimWorker: (info) => reclaimAbandonedWorker(info, { log: (s, extra) => log(s, extra) }),
-          // W1-T1284: the pre-strike UNCHANGED-TREE check's live worktree reader — three LOCAL
-          // git reads against this rung's own checkout, never the PR's remote head.
-          captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
-          // W1-T2403: the SAME local-worktree discipline as `captureWorktreeSnapshot` above — a
-          // real `git` read against this rung's own checkout, never a remote call.
-          readRoundCommits: readFixRoundCommitsViaGit,
-          // W1-T2551: the generator-fix short-circuit's three real, local wirings — `npm run`,
-          // `git add -A && git commit`, and this checkout's OWN package.json scripts. See each
-          // helper's own doc for why every write stays best-effort/fail-closed.
-          runGeneratorScript: async (script, cwd) => runNpmScriptViaSpawn(script, cwd),
-          commitGeneratorOutput: (o) => commitGeneratorOutputViaGit(o),
-          packageScripts: readPackageScriptsFor(worktreePath),
-        },
-      });
-      review = rung.review;
-      if (rung.outcome === "spawn_abandoned") {
-        // W1-T1044: the worker never demonstrably returned — never a strike (see
-        // spawnFixWorkerBounded's own doc), and the abandonment is already ledgered
-        // (`fix.spawn_abandoned`) + reclaimed before this rung returned. Blocked, exactly like
-        // the escalated/stood-down outcomes below, so the drain's stop-on-block invariant holds.
-        log("verdict", {
-          verdict: "blocked",
-          pr_url: prUrl,
-          reason: `fix rung abandoned — worker spawn exceeded its ${rung.spawnAbandonedElapsedMs}ms wall-clock bound`,
-          cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
-          account_label: impl.accountLabel,
-          ...terminalVerdictFields(impl),
-        });
-        say(`verdict: blocked — fix worker spawn abandoned (wall-clock bound): ${prUrl}`);
-        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
-      }
-      if (rung.outcome === "handed_off") {
-        log("verdict", {
-          verdict: "handed_off", pr_url: prUrl, reason: rung.reason, cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys), account_label: impl.accountLabel, ...terminalVerdictFields(impl),
-        });
-        say(`verdict: handed_off (${rung.reason}) — PR left OPEN: ${prUrl}`);
-        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "handed_off" };
-      }
-      if (rung.outcome === "escalated") {
-        log("verdict", {
-          verdict: "blocked",
-          pr_url: prUrl,
-          reason: `fix rung exhausted after ${rung.strikes} strike(s)`,
-          issue_url: rung.issueUrl,
-          cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
-          account_label: impl.accountLabel,
-          ...terminalVerdictFields(impl),
-        });
-        say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
-        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
-      }
-      if (
-        rung.outcome === "stood_down" ||
-        rung.outcome === "parked" ||
-        rung.outcome === "rebased" ||
-        rung.outcome === "base_refreshed"
-      ) {
-        // NON-SPENDING TERMINATIONS, ONE EMISSION.
-        //
-        // W1-T177 (`stood_down`): this run's own PR went terminal (merged/closed) mid-rung —
-        // stand down rather than spend another strike or escalate.
-        //
-        // W1-T1095 (`parked`): the remedy lives OUTSIDE this diff — never a strike spent, never
-        // an issue opened (design note v: the operator's merge gate is never softened by this
-        // rung). The PR stays open exactly like every other "blocked" verdict; the next poll
-        // that reaches this same rung re-checks the prerequisite and resumes automatically the
-        // moment it merges (capability 3 — see `outOfDiffBlockerFor`/`prerequisiteMerged`).
-        //
-        // BOTH reuse the existing "blocked" verdict (never a spend, never a bypass) so the
-        // drain's stop-on-block invariant still holds; the ledger line names the SITE and the
-        // STATE, not just "blocked". What differs between them is ONLY the reason, one extra
-        // ledger field and the console phrasing — `fixRungTerminationVerdict` owns exactly that
-        // difference as a pure function with a unit fixture per arm, so `parked` shares this
-        // already-exercised emission instead of being a second near-identical block that no
-        // test can reach.
-        const termination = fixRungTerminationVerdict(rung);
-        log("verdict", {
-          verdict: "blocked",
-          pr_url: prUrl,
-          reason: termination.reason,
-          ...termination.extra,
-          cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
-          account_label: impl.accountLabel,
-          ...terminalVerdictFields(impl),
-        });
-        say(`verdict: blocked — ${termination.phrase}: ${prUrl}`);
-        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
-      }
-    }
-
-    // ── W1-T185 (Gap 1, criteria 2-3), raised by W1-T229: THE AUTO-MERGE
-    // ARMING PATH refuses ANY CAPPED verdict, unattended — the #411 shape
-    // (0/5 proofs executed, posted as an uncapped PASS, merged with no human
-    // reading the diff). W1-T229 removed the tdd:strict exemption this used
-    // to carry: a capped, non-tdd:strict PR previously armed exactly as if it
-    // were an ordinary PASS, which made prose the DEFAULT merge floor (since
-    // `{tdd: strict}` is opt-in, not the default). No autonomous run carries
-    // an operator override of its own: an override is a HUMAN decision,
-    // granted out of band via `rmd review <pr> --override-capped-by/
-    // --override-capped-reason` and recovered here from the SAME ledger every
-    // other precedence check in this file reads (readLedgerLines). A verdict
-    // that isn't capped arms exactly as before — decideAutoMergeArm only ever
-    // REFUSES the one shape rule 22's fixture (iii) named.
-    //
-    // KNOWN RESIDUAL GAP (explicitly out of this task's stated file scope,
-    // `plan/tasks.yaml` W1-T185 `files:`): `sweep.ts`'s independent
-    // "checks green + review success -> mergeable" reconciliation does not
-    // yet consult `capped`/an override — a PR this refuses stays OPEN and
-    // UNARMED, but a later sweep poll could still arm it via that separate
-    // path. Left for a follow-up task rather than widened here unreviewed.
-    //
-    // A SECOND, SAME-SHAPED RESIDUAL GAP (W1-T947, explicitly out of THIS task's stated file
-    // scope — `plan/tasks.d/W1-T947-*.yaml` `files:` names only review.ts, run-task.ts and this
-    // test file): `decideArmFromLedgerVerdict`/`armAutoMerge` (lib/review.ts, lib/run-task.ts) —
-    // the SWEEP's and `rmd review`'s independent re-arm path, reached via
-    // `withdrawArmIfVerdictRefuses`/`armIfVerdictPermits` — call the SAME `decideAutoMergeArm`
-    // this task raised, but neither passes it an `irreversible` signal (no live worktree diff
-    // is available at ledger-recovery time the way it is here). A PR this run's two gates
-    // correctly refuse could still be armed later by a sweep pass or a manual `rmd review`.
-    // Named here, not silently absorbed, per this task's own design clause (v).
-    const tddStrict = isTddStrict(task.principles);
-    // W1-T948: the specialist panel's testing trigger (specialist-panel.ts)
-    // reads the SAME `principles` this line just did, through the panel's one
-    // real production call path — `taskMetadataFromPrinciples` wraps the same
-    // `isTddStrict` read above, so the two can never disagree. Observability
-    // only (a log line): no diff content is sourced, since only the testing
-    // trigger is in this task's scope (specialist-panel.ts's own W1-T948
-    // determination doc explains why the diff is deliberately empty-files).
-    const specialistTriggers = routeSpecialists({
-      diff: { files: [] },
-      task: taskMetadataFromPrinciples(task.principles),
-    });
-    if (specialistTriggers.length > 0) {
-      log("specialist.panel", { triggers: specialistTriggers.map((t) => t.specialist) });
-    }
-    // W1-T219: head-bound — an override granted against a DIFFERENT head than
-    // this exact verdict's is never honoured (see cappedOverrideFromLedger).
-    const cappedOverride = review.capped
-      ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId, review.headSha)
-      : undefined;
-    // W1-T947: `irreversible` reuses the SAME diff-derived verdict computed above at PR-open
-    // (never re-derived — a re-derive here could disagree with the at-open gate on the
-    // identical diff if either read failed differently) so this decision-time gate honours the
-    // W1-T919 ruling exactly like the at-open one just did.
-    const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra), irreversible);
-    if (!armDecision.arm) {
-      // W1-T125 primitive, retargeted by W1-T975: this run itself never arms until
-      // AFTER this check passes (see the deferred arm call further down, right
-      // before pollToGate), so there is usually nothing here to withdraw. Kept as
-      // a defensive no-op against the KNOWN RESIDUAL GAP named a few lines above
-      // (sweep.ts's own "checks green + review success" arming predicate reacting
-      // to this same capped verdict's posted `success` status before this
-      // decision lands) — if the sweep armed the PR in that window, this
-      // withdraws it before escalating.
-      // W1-T947: CAPPED and IRREVERSIBLE are different facts about the PR — the reason below,
-      // and the escalation it feeds, must name the one that actually fired (design clause iii).
-      const reason = irreversible
-        ? "diff classified irreversible (W1-T919) — auto-merge refused unattended"
-        : "capped verdict refused auto-merge";
-      // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged `automerge.disarmed`
-      // unconditionally, so a withdrawal GitHub refused read as a completed one. `disposeDisarm`
-      // holds the whole decision (and every lost-race-only read) where a test can reach it.
-      const disposition = disposeDisarm(await disarmAutoMergeAsync(prUrl), { prUrl, taskId, runId, ledgerPath, reason, refusal: armDecision.reason });
-      log(disposition.step, disposition.row);
-      const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
-      const issueUrl = escalate(
-        // W1-T1215: the lost race outranks BOTH arms below — "auto-merge was NOT armed" is simply
-        // false once it armed and merged, so that must not be what an operator reads.
-        disposition.escalation ??
-        (irreversible
-          ? {
-              class: "BLOCKED",
-              taskId,
-              runId,
-              summary: `diff classified IRREVERSIBLE — auto-merge refused unattended (W1-T919) — ${prUrl}`,
-              detail: `${armDecision.reason}\n\nAuto-merge was NOT armed.`,
-              options: [
-                {
-                  label: "merge-manually",
-                  detail:
-                    "read the diff and, once satisfied it is correct and intended, merge it by hand — " +
-                    "or close/amend it if the irreversible effect should not ship as-is.",
-                },
-              ],
-              recommendation: "merge-manually",
-            }
-          : {
-              class: "BLOCKED",
-              taskId,
-              runId,
-              summary: `CAPPED verdict — auto-merge refused unattended — ${prUrl}`,
-              detail:
-                `remudero-review posted CAPPED (0 of ${review.criteria.length} proofs executed). ` +
-                `${armDecision.reason}\n\nAuto-merge was NOT armed.`,
-              options: [
-                {
-                  label: "add-proof",
-                  detail:
-                    "push executable proof (a whitelisted `grep:`/`unit test:` dialect proof) so the review " +
-                    "executes and certifies the diff for real, then re-drain.",
-                },
-                {
-                  label: "override",
-                  detail:
-                    `rmd review ${prNum} --override-capped-by <name> --override-capped-reason <text>, then ` +
-                    `re-drain to arm.`,
-                },
-              ],
-              recommendation: "add-proof",
-            }),
-        { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
-      );
-      log("verdict", {
-        verdict: "blocked",
-        pr_url: prUrl,
-        reason,
-        issue_url: issueUrl,
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        ...terminalVerdictFields(impl),
-      });
-      say(`verdict: blocked — ${irreversible ? "diff classified irreversible" : "CAPPED verdict"}, escalated: ${issueUrl}`);
-      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
-    }
-
-    // ── RISK JUDGE (P34 clause (b), MASTER-PLAN §4B/§9, W1-T248): assess THIS
-    // candidate change — never `task.risk` (a sizing artifact, never consulted here) —
-    // before an already-armed PR is allowed to fall through to the merge gate.
-    // Low-risk-and-confident PROCEEDS unchanged. High-risk OR low-confidence ESCALATES,
-    // naming the judge's own OBSERVED reasons (W1-T186 emitter discipline); the escalate
-    // dep below withdraws the early arm-at-open FIRST (the identical W1-T125 shape the
-    // capped-refusal branch above uses), so an already-armed PR can never merge behind
-    // this escalation. Judge-unavailable (spawn error, unparseable output) fails closed
-    // to ESCALATE inside assessRisk itself — this call site never has to remember that
-    // rule. Runs on the cheapest configured (haiku-class) mount, resolved fresh from
-    // mounts.yaml (W1-T5) rather than any mount already resolved for the task's own work.
-    // W1-T970: the identifiers a refusal needs to be sha-keyed — captured HERE, at input
-    // construction, never re-read later. `prUrl` is already in scope (used above in
-    // `change.description`) and `review.headSha` is the SAME head `cappedOverrideFromLedger`
-    // read a few statements earlier — the head this candidate change was actually assessed at,
-    // not whatever `gh pr view` would report if re-read after the judge returns.
-    // W1-T2284: `description` is the ONLY place `task.title` reaches the judge — it used to
-    // ALSO ride along as `planContext.title` below, the same string under a second label,
-    // which is what let #2853 read as a double confirmation of a defect rather than one
-    // description of one change. `planContext` now carries `taskId`/`taskType` only.
-    const riskJudgeInput: RiskJudgeInput = {
-      change: { description: `${task.title} — ${prUrl}`, files: task.files },
-      gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
-      planContext: { ...riskJudgePlanContext(task.id, task) },
-      planContextDigest: riskJudgePlanContextDigest(task),
-      prNumber: prNumberFromRef(prUrl),
-      headSha: review.headSha,
-    };
-    const riskJudgeMount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
-    // W1-T4050: LIVE, per-run read of `plan/policy.yaml`'s `risk:` section — never memoized
-    // (unlike `loadDefaultPolicy`), so an operator's merged policy edit governs the very next
-    // unattended risk judgment with no daemon restart. Absent section ⇒ DEFAULT_RISK_POLICY,
-    // reproducing the pre-existing hard-coded 0.7 exactly.
-    const riskPolicy = readRiskPolicy(policyPath(repoRoot));
-    // W1-T1031: fetch the ACTUAL change view (bounded, REST-sourced — see `changeView`'s own
-    // doc) and attach it to the input the real judge is given, right before it runs. A throw
-    // from `changeView(prUrl)` here (an unparseable prUrl, a failed REST call) is deliberately
-    // left to PROPAGATE, never caught: `assessRisk` marks the observation unavailable, and this
-    // caller's explicit policy retains the deterministic gates without inventing a risk decision
-    // or falling back onto the declared `task.files` list alone, which would reproduce this task's
-    // own defect under the cover of "best effort".
-    // W1-T2383 (rank 1): ONE collector per judgment — `realRiskJudge` records each spawn into it
-    // and `runRiskJudge` reads the total onto the `risk_judge.decision` row it already writes.
-    // Declared HERE, at the single call site, so it cannot outlive one judgment.
-    const riskJudgeSpend = riskJudgeSpendCollector();
-    let primaryRiskServedModel: string | null = null;
-    let judgedRiskInput = riskJudgeInput;
-    // W1-T7724: the view is read ONCE; the diff tier (a second judgment of an uncertain `low`) reuses its patches.
-    let readChangeViewOnce: RiskJudgeChangeView | undefined;
-    const judgeWithChangeView = async (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
-      const view = (readChangeViewOnce ??= changeView(prUrl));
-      judgedRiskInput = {
-        ...input,
-        change: { ...input.change, changeView: withoutRiskJudgePatches(view) },
-      };
-      return realRiskJudge({
-        mount: riskJudgeMount, cwd: worktreePath, settingsFile, spend: riskJudgeSpend,
-        spawn: async (options) => {
-          const result = await spawn(options);
-          primaryRiskServedModel = result.servedModel ?? result.routedModel ?? null;
-          return result;
-        },
-      })(judgedRiskInput);
-    };
-    const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
-      judge: judgeWithChangeView,
-      spend: riskJudgeSpend,
-      diffSource: {
-        read: () => readChangeViewOnce ?? changeView(prUrl),
-        inputBudgetChars: riskJudgeDiffInputBudget(riskJudgeMount),
-      },
-      escalate: async (verdict, action) => {
-        // W1-T125 shape, retargeted by W1-T975: this run itself never arms until
-        // AFTER the risk judge proceeds (see the deferred arm call further down),
-        // so there is usually nothing here to withdraw — kept as the same
-        // defensive no-op against a sweep race as the capped-refusal branch
-        // above, in case the sweep armed the PR in the window between the review
-        // posting and this decision.
-        // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged
-        // `automerge.disarmed` unconditionally beside it, so the withdrawal #2506 attempted —
-        // which GitHub refused because the pull request had ALREADY MERGED — was recorded as a
-        // completed withdrawal. Same predicate and same vocabulary `withdrawArmIfVerdictRefuses`
-        // already established (W1-T1056); this only applies them at the site that fired.
-        const disposition = await riskJudgeDisarm({
-          prUrl, taskId, runId, ledgerPath,
-          reason: "risk judge escalated — auto-merge refused",
-          refusal: `risk judge ESCALATED (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${action.reason}`,
-          confidence: verdict.confidence,
-          reasons: verdict.reasons,
-        });
-        log(disposition.step, disposition.row);
-        // W1-T1215: a REFUSED verdict on a change that MERGED ANYWAY is not a BLOCKED row — the
-        // thing BLOCKED says cannot proceed has already proceeded, so it escalates HARD_STOP.
-        return escalate(
-          disposition.escalation ?? {
-            class: "BLOCKED",
-            taskId,
-            runId,
-            summary: `risk judge ESCALATED (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${prUrl}`,
-            detail: `${action.reason}\n\nAuto-merge was NOT allowed to proceed unattended.`,
-            options: [
-              {
-                label: "review-manually",
-                detail: "read the diff and either merge it by hand or push a follow-up fix, then re-drain.",
-              },
-            ],
-            recommendation: "review-manually",
-          },
-          { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
-        );
-      },
-      // W1-T5403: key every judge row to the PR head, so the sweep never re-judges a head decided here.
-      log: (s, extra) => log(s, { ...extra, pr_number: riskJudgeInput.prNumber, head_sha: riskJudgeInput.headSha }),
-    }, {
-      // Judge unavailability is recorded, while the deterministic gates remain authoritative.
-      judgeUnavailableAction: "proceed",
-      // W1-T4050: the configured threshold (plan/policy.yaml's `risk.confidenceThreshold`,
-      // read live above) is the one this unattended caller applies — no longer the module's
-      // own DEFAULT_CONFIDENCE_THRESHOLD literal, unreachable from outside risk-judge.ts.
-      confidenceThreshold: riskPolicy.confidenceThreshold,
-      borderlineBand: riskPolicy.borderlineBand,
-    });
-    if (riskJudgeResult.verdict.availability !== "unavailable") {
-      await runShadowJudge({
-        surface: "risk", key: `${task.id}:${review.headSha}`,
-        primaryMount: riskJudgeMount, primaryDecision: riskJudgeResult.verdict.verdict,
-        primaryServedModel: primaryRiskServedModel,
-        mounts: () => [riskJudgeMount, resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", task.risk)],
-        log,
-        judge: async (mount) => {
-          let shadowServedModel: string | null = null;
-          const shadow = await realRiskJudge({
-            mount, cwd: worktreePath, settingsFile, maxAttempts: 1,
-            spawn: async (options) => {
-              const result = await spawn({
-                ...options, maxTurns: Math.min(options.maxTurns ?? 4, 4),
-                maxBudgetUsd: SHADOW_JUDGE_MAX_BUDGET_USD,
-                clockBound: { boundMs: 60_000 },
-              });
-              shadowServedModel = result.servedModel ?? result.routedModel ?? null;
-              return result;
-            },
-          })(judgedRiskInput);
-          if (shadow.availability === "unavailable") throw new Error("shadow risk verdict unavailable");
-          return { decision: shadow.verdict, servedModel: shadowServedModel };
-        },
-      });
-    }
-    if (riskJudgeResult.action.kind === "escalate") {
-      log("verdict", {
-        verdict: "blocked",
-        pr_url: prUrl,
-        reason: "risk judge escalated",
-        issue_url: riskJudgeResult.escalationUrl,
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        ...terminalVerdictFields(impl),
-      });
-      say(`verdict: blocked — risk judge escalated: ${riskJudgeResult.escalationUrl}`);
-      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
-    }
-
-    // ── ARM (W1-T125, DEFERRED BY W1-T975): register GitHub auto-merge only NOW —
-    // the FIRST point this run has a verdict it is willing to stand behind: ci
-    // went green, the review passed (or the fix rung earned a pass), the
-    // capped-verdict gate above did not refuse, and the risk judge above did not
-    // escalate. Every earlier exit (ci-not-green before review, fix-rung
-    // exhausted, stood down, a capped refusal, a risk-judge escalation) RETURNS
-    // before this line, so it leaves the PR with NO standing arm.
-    //
-    // WHY THIS MOVED (W1-T975): an already-armed PR short-circuits the sweep's
-    // own arming decision (`alreadyDone = pr.autoMergeArmed === true`,
-    // lib/sweep.ts) — the ONE place a durable risk-judge refusal (W1-T970) can
-    // ever be consulted. Arming at PR-open (the old W1-T125 site) left every
-    // early exit above with a standing arm that routed a would-be merge AROUND
-    // that predicate, permanently, not merely early — and a disarm on those
-    // exits would not have closed the gap: the sweep RE-ARMS on
-    // checks-green + review-success (lib/sweep.ts), which nullified five of
-    // five measured disarm races. Deferring the arm to here means an abandoned
-    // PR's only remaining route to a merge is the sweep's `mergeable` decision,
-    // so a durable refusal installed there is never bypassed.
-    //
-    // The LATE blocked_ci exit below (after pollToGate) still keeps its arm —
-    // by the time this line runs the review HAS been posted and the risk judge
-    // HAS passed, so that exit is unaffected: it polls an already-armed PR,
-    // exactly as before this task.
-    // W1-T1256: the no-merge boundary. `opts.noMerge` is set ONLY by `wipeTestCommand`, for
-    // BOTH arms of a wipe-test pair — the policy decision itself is pure and lives in
-    // wipe-test.ts (`resolveWipeTestArmPermission`); this call site only consults it and skips
-    // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
-    // never merge out from under the pair it belongs to.
-    // Check shadow before wipe-test; the counterfactual uses this same live arm decision.
-    if (shadowInstance) {
-      const shadowVerdict = shadowLiveWouldHaveDone(true);
-      log("shadow.verdict", {
-        pr_url: prUrl,
-        task_id: taskId,
-        review_verdict: review.state,
-        ...shadowVerdict,
-      });
-    }
-    const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
-    const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
-    const armOutcome = await observeSelectedMode<ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused">(
-      selectedModeQualification, "run-arm", async () => !shadowArmDecision.armed
-      ? "shadow-instance-refused"
-      : wipeTestArmDecision.armed
-        ? await armAutoMergeAtOpenAsync(prUrl,
-          selectedModeQualification === undefined ? undefined : realArmDepsAsync(() => config, selectedModeQualification), irreversible)
-        : "no-merge-boundary-refused", prUrl);
-    // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
-    // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
-    // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
-    log("automerge.armed", {
-      at: "verdict",
-      outcome: armOutcome,
-      irreversible,
-      head_sha: review.headSha,
-      ...(wipeTestArmDecision.reason ? { reason: wipeTestArmDecision.reason } : {}),
-    });
-    // ── POLL to the gate (W1-T1B).
-    // Auto-merge was armed immediately above, now that this run has a verdict it
-    // stands behind — this block only observes. The runner NEVER force-merges:
-    // GitHub merges only when the required check is green. If checks go red or
-    // the poll times out, the PR is LEFT OPEN and the verdict is blocked_ci —
-    // pending is treated as blocked, never as pass. No Action arms a PR; only
-    // this code, only on PRs it opened.
-    const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra), 6, {
-      externalWaitRecycle: opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)),
-    });
-
-    if (outcome.merged) {
-      log("pr.merged", { state: "MERGED" });
-      worktreeRemove(repoDir, worktreePath);
-      log("worktree.remove", {});
-      log("verdict", {
-        verdict: "merged",
-        pr_url: prUrl,
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        ...terminalVerdictFields(impl),
-      });
-      say(`verdict: merged · notional cost $${costUsd.toFixed(4)}`);
-      return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
-    }
-
-    // Blocked or awaiting merge: leave the PR open (auto-merge stays armed; it will land later if
-    // GitHub materializes it) and the worktree for post-mortem.
-    const terminalVerdict = outcome.verdict ?? "blocked_ci";
-    log("verdict", {
-      verdict: terminalVerdict,
-      pr_url: prUrl,
-      reason: outcome.reason,
-      ...(outcome.headSha ? { head_sha: outcome.headSha } : {}),
-      ...(outcome.checks ? { checks: outcome.checks } : {}),
-      cost_usd: costUsd,
-      billing_mode: billingMode(impl.childEnvKeys),
-      account_label: impl.accountLabel,
-      ...terminalVerdictFields(impl),
-    });
-    say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
-    return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
-  } catch (err) {
-    // W1-T7807: the quiet-worker watchdog's `end_round` verdict (or a pending recycle) stopped this round AFTER pushing a
-    // checkpoint. That is a handoff, never a failure, and the worktree is kept exactly as the freshness yield keeps it.
-    if (err instanceof QuietRoundEndedError) {
-      for (const row of roundEndedHandoffRows(err.detail, branch)) {
-        log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(null) } : row.fields);
-      }
-      say(`verdict: handed_off — ${err.detail.trigger === "recycle" ? "a pending recycle" : err.detail.trigger === "restart" ? "a latched daemon restart" : "the quiet-worker watchdog"} ended the round (${err.detail.reason})`);
-      return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
-    }
-    // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
-    // and return a terminal verdict rather than falling through to the generic `run.error` +
-    // re-throw below, which would leave this run's promise REJECTED instead of resolved: exactly
-    // the "vanishes rather than ends" gap criterion 5 exists to close.
-    if (err instanceof WorkerAbandonedError) {
-      const { evidence } = err;
-      // THE EVIDENCE LANDS FIRST — before the worktree is removed below, before this function's
-      // own `finally` drops the worktree liveness lock, and before `runTask`'s outer `finally`
-      // releases the inflight lock: the task note's own ordering requirement ("BEFORE anything
-      // is released"). `num_turns` is deliberately absent, never fabricated: a stalled stream
-      // never produced the SDK's completion envelope, so there is nothing to report.
-      log("verdict", {
-        verdict: "failed",
-        reason: err.message,
-        stage: "worker.abandoned",
-        elapsed_ms: evidence.elapsedMs,
-        bound_ms: evidence.boundMs,
-        last_state: evidence.lastState ?? null,
-        last_state_ms: evidence.lastStateMs ?? null,
-        cost_usd: costUsd,
-        ...terminalVerdictFields(null),
-      });
-      say(
-        `verdict: failed — worker abandoned after ${Math.round(evidence.elapsedMs / 1000)}s of silence ` +
-          `(bound ${Math.round(evidence.boundMs / 1000)}s, last observed state: ${evidence.lastState ?? "unknown"})`,
-      );
-      try {
-        worktreeRemove(repoDir, worktreePath);
-        log("worktree.remove", { on: "worker.abandoned" });
-      } catch (e) {
-        log("worktree.remove.error", { on: "worker.abandoned", error: String((e as Error)?.message ?? e) });
-      }
-      return { taskId, runId, merged: false, costUsd, verdict: "failed" };
-    }
-    if (isCodexWorkerOutputLimitError(err)) {
-      log("verdict", {
-        verdict: "failed",
-        reason: err.message,
-        stage: "worker.bounded_output",
-        stream: err.stream,
-        limit_bytes: err.limitBytes,
-        observed_bytes: err.observedBytes,
-        // W1-T4595: which event kinds filled it, on the task row too (not only on retro.error).
-        event_bytes_by_kind: err.event_bytes_by_kind ?? err.eventBytesByKind ?? {},
-        pending_line_bytes: err.pendingLineBytes ?? 0,
-        cost_usd: costUsd,
-        ...terminalVerdictFields(null),
-      });
-      say(
-        `verdict: failed — Codex worker ${err.stream} output exceeded ${err.limitBytes} bytes ` +
-          `(${err.observedBytes} observed)`,
-      );
-      try {
-        worktreeRemove(repoDir, worktreePath);
-        log("worktree.remove", { on: "worker.bounded_output" });
-      } catch (e) {
-        log("worktree.remove.error", { on: "worker.bounded_output", error: String((e as Error)?.message ?? e) });
-      }
-      return { taskId, runId, merged: false, costUsd, verdict: "failed" };
-    }
-    log("run.error", { error: String((err as Error)?.message ?? err) });
-    // W1-T9786: nor is a thrown harness error (W1-T9047's refused push), so this exit keeps it too.
-    let keptThroughThrow: { branch: string; headSha: string } | undefined;
-    try {
-      keptThroughThrow = verdictWritten ? undefined : checkpointToKeep();
-    } catch (error) {
-      // Unproven (a refused worktree pointer): keep nothing, as before, and never replace the run's own error.
-      log("implement.checkpoint_keep_unproven", { task_id: taskId, error: String((error as Error)?.message ?? error) });
-    }
-    // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause.
-    endThrownRun(log, verdictWritten, "run.error", err, costUsd);
-    if (keptThroughThrow) {
-      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptThroughThrow.branch, head_sha: keptThroughThrow.headSha,
-        failed_stage: "run.error", failed_cause: runErrorCause(err) });
-    }
-    // Reclaim the worktree even on an unexpected throw — a dead run must not
-    // leave debris that blocks the next one (start-of-run prune is the backstop,
-    // but clean up eagerly here too). Best-effort; the ledger already has the
-    // error. The stale run-* branch is swept by the next run's pruneStaleRuns.
-    try {
-      worktreeRemove(repoDir, worktreePath);
-      log("worktree.remove", { on: "run.error" });
-    } catch (e) {
-      log("worktree.remove.error", { on: "run.error", error: String((e as Error)?.message ?? e) });
-    }
-    throw err;
-  } finally {
-    // Terminal verdict (or throw) ⇒ this run no longer owns the worktree. Drop the
-    // liveness token so a later prune may reclaim the worktree. Idempotent; the
-    // sibling file also vanishes with the worktree on the paths that remove it.
-    removeRunLock(worktreePath);
-    // W1-T1268: HOLDER ARM — drop the dispatch claim this run took, CAS'd on `claimAnchor` so
-    // this can only ever delete the claim it still holds, never one that has since become
-    // another lane's. Best-effort, matching `removeRunLock` immediately above: a throw here
-    // must never replace whatever verdict this run actually reached.
-    try {
-      const released = await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
-      log("dispatch.claim_released", {
-        ref: dispatchClaimRef(task.id),
-        arm: released.arm,
-        release: released.release,
-        dropped: released.dropped,
-        reason: released.reason,
-      });
-    } catch (e) {
-      log("dispatch.claim_release_error", { error: String((e as Error)?.message ?? e) });
-    }
-  }
-} // ── end runTaskBody
+  return runTaskBodyFromModule(ctx, runTaskCommandHost());
+}
 
 /**
  * `rmd review <pr-number>` — the ESCAPE HATCH for hand-opened PRs. PR #13 made
@@ -22469,16 +16702,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
  * via a race), `fetch-failure` (network/auth, thrown by `deps.fetch`), or
  * `other` (disk, permissions, or any other `deps.addWorktree`/`revParseHead`
  * failure). */
-export type MaterializationErrorClass = "worktree-collision" | "fetch-failure" | "other";
 
 /** The named reason a materialization attempt failed — never a bare, thrown-
  * away Error. Carried to every surface that reports the degradation: the
  * console line, the CAPPED verdict description, and the `review.posted`
  * ledger's `degraded_reason`/`degraded_reason_class` fields. */
-export interface MaterializationFailure {
-  errorClass: MaterializationErrorClass;
-  message: string;
-}
 
 /** Result of {@link materializeReviewWorktree}: either a usable path, or a
  * clean workspace (nothing left behind) plus the named reason it failed. */
@@ -22753,17 +16981,10 @@ export function bodyCarriesGenericAcceptanceFallback(body: string): boolean {
  * throw is caught and ledgered as `acceptance.repair.error` rather than propagating.
  */
 export function repairRetroAcceptanceBlock(
-  prUrl: string,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: {
-    fetchBody?: (url: string) => string;
-    editBody?: (url: string, body: string) => void;
-    /** The PR's diff, already read by the caller. When absent, `diffText` reads it. */
-    diff?: string;
-    /** W1-T4263: reads the PR's unified diff. Default: the PR's diff read through gh. */
-    diffText?: (url: string) => string;
-  } = {},
-): "repaired" | "healthy" | "unrepresentable" | "error" {
+  prUrl: Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[0],
+  log: Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[1],
+  deps: Parameters<RunTaskCommandHost["repairRetroAcceptanceBlock"]>[2] = {},
+): ReturnType<RunTaskCommandHost["repairRetroAcceptanceBlock"]> {
   const { fetchBody, editBody, diffText } = {
     fetchBody: defaultRetroFetchBody,
     editBody: defaultRetroEditBody,
@@ -22846,20 +17067,17 @@ export function normalizeRunPrAcceptanceFromPlan(
   // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
   deps: Omit<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "diff"> = {},
 ): "rewritten" | "healthy" | "no-block" | "error" {
-  if (planCriteria.length === 0) return "no-block";
-  const { fetchBody, editBody } = { fetchBody: defaultRetroFetchBody, editBody: defaultRetroEditBody, ...deps };
-  try {
-    const body = fetchBody(prUrl);
-    // W1-T5544: the comparison and splice live in {@link rewriteAcceptanceBlockFromPlan}, shared with the sweep cure.
-    const rewrite = rewriteAcceptanceBlockFromPlan(body, taskId, planCriteria);
-    if (rewrite.kind !== "rewritten") return rewrite.kind;
-    editBody(prUrl, rewrite.repairedBody);
-    log("pr.body_normalized", { pr: prUrl, removed_proofs: rewrite.removedProofs, rendered_proofs: rewrite.planProofs });
-    return "rewritten";
-  } catch (e) {
-    log("pr.body_normalize.error", { pr_url: prUrl, error: String((e as Error)?.message ?? e) });
-    return "error";
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).normalizeRunPrAcceptanceFromPlan(prUrl, taskId, planCriteria, log, deps);
+}
+
+/** Show the exact closure catalog files the harness staged, above the task trailer. */
+export function recordBakedClosureCatalog(
+  prUrl: string,
+  files: readonly string[],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: Pick<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "fetchBody" | "editBody"> = {},
+): void {
+  return runTaskCommandHelpers(runTaskCommandHost()).recordBakedClosureCatalog(prUrl, files, log, deps);
 }
 
 function defaultRetroFetchBody(url: string): string {
@@ -22964,6 +17182,8 @@ export function repairRetroChangesetClaim(
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 interface ReviewCommandDeps {
+  /** Bounded admission identity, separate from the existing worker/run and ownership conventions. */
+  reviewAttemptId?: string;
   contributorAdmission?: AdmissionObserver;
   fetchView?: (args: string[]) => unknown;
   loadConfig?: () => Config;
@@ -23382,6 +17602,20 @@ export function makeLandingReviewRequest(
   };
 }
 
+export function reviewReplayCommand(rest: string[]): number {
+  if (rest[0] !== "refresh" || rest.length !== 1) {
+    console.error("usage: rmd review-replay refresh");
+    return 2;
+  }
+  const config = loadConfig();
+  const root = resolve(process.cwd());
+  const sha = reviewerHealthRowFields("review.posted", undefined).reviewer_code_sha;
+  if (typeof sha !== "string") throw new Error("review replay generator revision is unavailable");
+  const sample = refreshReviewReplaySample({ stateDir: dirname(ledgerPathFor(config)), root, generatorRevision: sha });
+  console.log(`review replay: ${sample.rows.length} distinct inputs; classes ${sample.header.classes.join(", ")}`);
+  return 0;
+}
+
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   deps = { ...reviewOptionsFromFlags(rest), ...deps };
   const {
@@ -23476,14 +17710,21 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
   const runId = `review-PR${view.number}-${Date.now()}`;
+  const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
+  // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
+  const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step: reviewerShadowStep(step, shadow), lane: "review",
+      ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }), ...extra,
+      ...reviewerHealthRowFields(step, flagValue(rest, REVIEWER_INCIDENT_FLAG)) });
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
-  await observeAdmissionDisposition(config.contributorAdmission,
-    { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root, log,
-    adoptionComment === undefined ? undefined : Number(adoptionComment));
-  await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
-    ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
+  if (!shadow) {
+    await observeAdmissionDisposition(config.contributorAdmission,
+      { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root, log,
+      adoptionComment === undefined ? undefined : Number(adoptionComment));
+    await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
+      ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
+  }
   const reviewSubject = resolveReviewSubjectCheckout({
     config,
     rest,
@@ -23526,6 +17767,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let taskDeclaredFiles: string[] | undefined;
   let taskRisk: TaskRisk | undefined;
   let taskBudgetUsd: number | undefined;
+  let taskNarrative: ReviewTaskNarrativeInput = {};
   // W1-T2623: PERMANENTLY `undefined` on THIS path, deliberately — `resolvePlanCriteriaAtHead`
   // (lib/review.ts) has no `openTaskIds` field to assign from (the field the resolver it replaced,
   // `resolvePlanCriteriaForReview`, DID carry — see that function's own comment on why: computing
@@ -23566,6 +17808,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
+  let ownTaskRecordMissing = false, headTaskResolved = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
   // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
@@ -23577,7 +17820,16 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     taskDeclaredFiles = resolved.taskDeclaredFiles;
     taskRisk = resolved.taskRisk;
     taskBudgetUsd = resolved.taskBudgetUsd;
+    taskNarrative = resolved.taskNarrative ?? {};
     resolverDivergence = resolved.divergence;
+    headTaskResolved = resolved.divergence === undefined && resolved.criteria.length > 0;
+    // W1-T9232: a head cut before its own shard merged is pending a refresh from main, not a plan fault. Only a task
+    // origin/main HAS qualifies; one absent from both, or a TRIAGE-/main-repair/unfiled identity, keeps today's path.
+    if (taskId !== UNFILED_RUN_SENTINEL && resolved.divergence === undefined && resolved.criteria.length === 0 &&
+      resolved.taskRisk === undefined && resolved.taskBudgetUsd === undefined) {
+      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main");
+      ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
+    }
   }
   if (criteria.length === 0) {
     const fromBody = parseAcceptanceBlock(reportBody);
@@ -23593,23 +17845,53 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
 
   let spawnReviewer = false, reviewerMount: Mount | undefined;
   let settingsFile = "";
+  const replaySetupInput: ReviewReplayInput = {
+    stage: "setup", plan_only: false, required_semantic: executionMode === "semantic",
+    criteria_count: criteria.length, risk_present: taskRisk !== undefined, budget_present: taskBudgetUsd !== undefined,
+    untasked: (!taskId || taskId === UNFILED_RUN_SENTINEL) ||
+      (resolverDivergence === undefined && usesUntaskedReviewMetadata(taskId, view.headRefName)),
+    head_task_resolved: headTaskResolved, own_task_record_missing: ownTaskRecordMissing,
+    reviewer_outcome: "not_attempted", verdict_lines: [],
+  };
+  const recordSetupReplay = (input: ReviewReplayInput, decision: ReviewOutcomeDecision): void => {
+    const sha = reviewerHealthRowFields("review.posted", flagValue(rest, REVIEWER_INCIDENT_FLAG)).reviewer_code_sha;
+    log("review.replay_input", reviewReplayLedgerFields(input, decision, {
+      pr_url: view.url, head_sha: view.headRefOid, reviewer_code_sha: typeof sha === "string" ? sha : null,
+    }));
+  };
+  if (reviewTaskNarrative(taskNarrative) === undefined) {
+    const unavailableInput = { ...replaySetupInput, setup_unavailable: true };
+    recordSetupReplay(unavailableInput, classifyReviewOutcome(unavailableInput));
+    log("review.reviewer.skipped", { reason: "head-task-narrative-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+    console.error("rmd review: head task design or amendment unavailable; no pending status, verdict or merge effect");
+    return 2;
+  }
+  const setupDecision = classifyReviewOutcome(replaySetupInput);
   if (executionMode === "semantic") {
-    // W1-T3387: an untrailered / unfiled PR is still a PR the fleet chose to review. No task id means
-    // nobody DECLARED a risk, not that the risk is low — so the `PR-<number>` identity (the one every
-    // ledger row above already uses) reviews under the default risk and a default hard cap instead of
-    // skipping the reviewer and letting the keyword floor decide alone.
-    if (!taskId || taskId === UNFILED_RUN_SENTINEL) {
+    // Unfiled PRs and exact generated lanes use bounded defaults; semantic review remains required.
+    // A missing real task shard still refuses rather than inheriting these defaults (W1-T3387).
+    if ((!taskId || taskId === UNFILED_RUN_SENTINEL) ||
+        (resolverDivergence === undefined && usesUntaskedReviewMetadata(taskId, view.headRefName))) {
       taskRisk ??= DEFAULT_RISK;
       taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
       log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
     }
+    const missing = [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean);
+    if (headTaskResolved && missing.length > 0) {
+      taskRisk ??= DEFAULT_RISK;
+      taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
+      log("review.reviewer.metadata_defaults", { task: taskId, missing, task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
+    }
     if (taskRisk === undefined || taskBudgetUsd === undefined) {
-      // A task id WAS derived but its shard gave no risk/budget at this head, and that is a plan-resolution fault, not an untasked PR.
+      // Only a derived task id whose shard did not resolve at this head reaches here: a plan-resolution fault, not an untasked PR.
       // Its reason stays distinct from `semantic-setup-unavailable`.
-      log("review.reviewer.skipped", {
-        reason: "head-task-metadata-unavailable",
-        missing: [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean),
-      });
+      log("review.reviewer.skipped", { reason: "head-task-metadata-unavailable", missing });
+      if (setupDecision.class === "refused") {
+        recordSetupReplay(replaySetupInput, setupDecision);
+        log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+        console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
+        return 2;
+      }
     } else {
       try {
         reviewerMount = resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", taskRisk);
@@ -23624,10 +17906,17 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       } catch (e) {
         reviewerMount = undefined;
         settingsFile = "";
+        const unavailableInput = { ...replaySetupInput, setup_unavailable: true };
+        recordSetupReplay(unavailableInput, classifyReviewOutcome(unavailableInput));
         log("review.reviewer.skipped", {
           reason: "semantic-setup-unavailable",
           error: String((e as Error)?.message ?? e),
         });
+        // An explicitly selected semantic review must not become a deterministic PASS that
+        // runReview can auto-arm. Refuse before either pending poster or materializer runs.
+        log("review.semantic_setup_refused", { reason: "semantic-setup-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+        console.error("rmd review: semantic setup unavailable; no pending status, verdict or merge effect");
+        return 2;
       }
     }
   }
@@ -23667,7 +17956,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     });
   }
   const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
-  try {
+  if (!shadow) try {
     await postReviewPendingDep({
       owner,
       repo,
@@ -23682,6 +17971,22 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     });
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
+
+  // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.
+  // The sweep reads this row, refreshes the branch from main and re-reviews the new head.
+  if (ownTaskRecordMissing) {
+    const withheldInput = { ...replaySetupInput, publication_refusal: OWN_TASK_RECORD_MISSING_CAUSE };
+    recordSetupReplay(withheldInput, classifyReviewOutcome(withheldInput));
+    log("review.reviewer.skipped", {
+      reason: OWN_TASK_RECORD_MISSING_CAUSE, pr_number: view.number, pr_url: view.url, head_sha: view.headRefOid,
+      derived_repair: "refresh the branch from main", missing: ["risk", "budget_usd", "criteria"],
+    });
+    console.log(
+      `rmd review PR #${view.number}: ${taskId} has no record at head ${view.headRefOid.slice(0, 7)} but origin/main has it ` +
+        `(${OWN_TASK_RECORD_MISSING_CAUSE}) — pending; refresh the branch from main, then re-review`,
+    );
+    return 2;
   }
 
   // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
@@ -23722,6 +18027,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     () =>
       withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(runId, () =>
         runReviewDep({
+          reviewReplaySetupInput: replaySetupInput,
           owner,
           repo,
           prUrl: view.url,
@@ -23733,6 +18039,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
             files: taskDeclaredFiles,
             risk: taskRisk,
             budget_usd: taskBudgetUsd,
+            ...taskNarrative,
           },
           report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
           settingsFile,
@@ -23742,6 +18049,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           say: (m) => console.log(m),
           account: (r) => r,
           spawnReviewer,
+          requireSemanticReview: executionMode === "semantic",
           reviewerMount,
           // W1-T185 (Gap 2): the materialized worktree above when available — the
           // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
@@ -23764,10 +18072,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           ledgerPath,
           runId,
           openTaskIds,
+          ...(shadow ? { shadow: true } : {}),
         })),
       ),
     baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
   );
+  // W1-T10269: a shadow review ends at its verdict: no restore, no status, no comment, no arm.
+  if (shadow) return verdict.verdictWithheld ? 2 : 0;
 
   // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
   // daemon may have posted pending after that decision; replay must check the live context and
@@ -23783,17 +18094,9 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       reviewerCodeFreshness: await publicationFreshness(),
       fetchLifecycle: () => fetchPrLifecycle(view.url),
-      fetchCurrentStatus: (): "success" | "failure" | "pending" | undefined => {
-        const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
-          statuses?: Array<{ context?: string; state?: string }>;
-        };
-        if (!raw || !Array.isArray(raw.statuses)) throw new Error("combined commit status has no statuses array");
-        const state = raw.statuses.find((entry) => entry.context === REVIEW_CONTEXT)?.state;
-        if (state === undefined) return undefined;
-        if (state === "success" || state === "pending") return state;
-        if (state === "failure" || state === "error") return "failure";
-        throw new Error(`unrecognized remudero-review state: ${state}`);
-      },
+      fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
+      fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
+      fetchPublisher: deps.fetchView,
     });
     if (restored.posted) {
       replayStatusAction = "restored";
@@ -23804,6 +18107,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         evaluator_provenance: verdict.evaluatorProvenance,
         reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
         status_recovered: true,
+        status_publisher: restored.publisherEvidence,
       });
     } else if (restored.replayed) {
       replayStatusAction = "confirmed";
@@ -23815,6 +18119,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         evaluator_provenance: verdict.evaluatorProvenance,
         reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
         status_confirmed: true,
+        status_publisher: restored.publisherEvidence,
       });
     } else {
       verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
@@ -24008,6 +18313,10 @@ export interface DepReviewPrMutations {
   close(prUrl: string, opts: { comment: string; deleteBranch: false }): void;
   /** W1-T9828: the REST title PATCH under the daemon's own gh identity, so `pull_request.edited` fires. */
   retitle?(prUrl: string, title: string): Promise<void>;
+  /** W1-T9994: the guarded REST update-branch with an expected head. Absent ⇒ unavailable, never a command. */
+  updateBranch?(prNumber: number, expectedHeadSha: string): Promise<{ ok: boolean; error?: string }>;
+  /** W1-T9994: the PR's issue comments since an ISO time, to read Dependabot's answer to a command. */
+  comments?(prNumber: number, sinceIso: string): Promise<readonly DependabotIssueComment[]>;
 }
 
 export async function defaultDepReviewRetitle(prUrl: string, title: string): Promise<void> {
@@ -24034,6 +18343,19 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
       ghExec(["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
     },
     retitle: defaultDepReviewRetitle,
+    async updateBranch(prNumber, expectedHeadSha) {
+      assertLiveWriteAllowed("gh-pr-update-branch", `refreshing the base of ${repoArg}#${prNumber}`);
+      try {
+        await ghTextAsync(ghUpdateBranchArgv(owner, repo, prNumber, expectedHeadSha));
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: String((error as Error)?.message ?? error) };
+      }
+    },
+    async comments(prNumber, sinceIso) {
+      const pages = await ghJsonAsync(["api", "--paginate", "--slurp", `repos/${repoArg}/issues/${prNumber}/comments?since=${sinceIso}`]);
+      return (pages as DependabotIssueComment[][]).flat();
+    },
   };
 }
 
@@ -24195,10 +18517,20 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   if (result.decision === "hold") {
     const refreshFlag = flagValue(rest, "--dependabot-refresh");
     try {
-      const refresh = reconcileDependabotRefresh({
+      const mutations = deps.prMutations ?? defaultDepReviewPrMutations(owner, repo);
+      const refresh = await reconcileDependabotRefresh({
         statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, result,
-        cause: DEPENDABOT_REFRESH_CAUSES.find((cause) => cause === refreshFlag), commits: view.commits, nowMs: clock.now(),
-        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body), log,
+        cause: DEPENDABOT_REFRESH_CAUSES.find((cause) => cause === refreshFlag), nowMs: clock.now(),
+        updateBranch: async (expected) => await mutations.updateBranch?.(view.number, expected) ?? { ok: false, error: "update-branch unavailable" },
+        readComments: async (since) => {
+          if (!mutations.comments) throw new Error("comment read unavailable");
+          return await mutations.comments(view.number, since);
+        },
+        escalate: (refreshed) => escalate(buildDepReviewEscalation({ prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+          body: view.body ?? "", semverLevel: result.semverLevel,
+          hold: { headSha: view.headRefOid, redChecks: result.redChecks, advisoryRed: result.advisoryRed, refresh: refreshed } }),
+        { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+        log,
       });
       if (refresh !== "none") console.log(`dependabot refresh ${refresh}: ${view.url}`);
     } catch (error) {
@@ -24259,6 +18591,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     });
 
     const prMutations = deps.prMutations ?? defaultDepReviewPrMutations(owner, repo);
+    const ignoreAtMs = clock.now();
     try {
       prMutations.comment(view.url, DEPENDABOT_IGNORE_MAJOR_COMMAND);
       log("dep-review.migrate.ignore_commented", {
@@ -24298,6 +18631,16 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       });
       console.log(`migration feedback captured (${entry.id}) and ignore commented, but close failed; will retry: ${view.url}`);
       return 1;
+    }
+
+    try { // W1-T9994: the ignore command has no REST counterpart, so a refusal is ledgered for the operator.
+      const answer = dependabotCommandAnswer(await prMutations.comments?.(view.number, fixedClock(ignoreAtMs).iso()) ?? [], ignoreAtMs);
+      if (answer.kind === "refused") {
+        log("dep-review.refresh_refused", { pr_number: view.number, head_sha: view.headRefOid, command: DEPENDABOT_IGNORE_MAJOR_COMMAND,
+          cause: "migrate", reply: answer.reply });
+      }
+    } catch (e) {
+      log("dep-review.migrate.answer_unread", { pr_number: view.number, head_sha: view.headRefOid, error: String((e as Error)?.message ?? e) });
     }
 
     log("dep-review.migrate.completed", {
@@ -25079,6 +19422,32 @@ function checkAcceptanceChangedFiles(): string[] {
     .filter(Boolean);
 }
 
+/** Explain copied build evidence using only shards in this branch's plan-only diff. */
+function checkAcceptanceFilingHint(criteria: AcceptanceCriterion[], refusal: string, deps: CheckAcceptanceDeps): string | undefined {
+  try {
+    const changed = (deps.changedFiles ?? checkAcceptanceChangedFiles)();
+    if (!isPlanOnlyDiff(changed)) return undefined;
+    const refused = new Set([...refusal.matchAll(/criterion (\d+)/g)].map((m) => Number(m[1]) - 1));
+    for (const shard of changed.filter((path) => /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path) && existsSync(path))) {
+      for (const task of parseTasksFromYaml(readFileSync(shard, "utf8"), shard)) {
+        const copied = criteria.some((criterion, index) => {
+          if (!refused.has(index)) return false;
+          const proof = criterion.proof?.trim() ?? "";
+          return (task.files ?? []).some((path) => proof.endsWith(` in ${path}`) || proof === `unit test: ${path}`) ||
+            (/^unit test:/i.test(proof) && (task.files ?? []).length > 0 &&
+              (task.acceptance ?? []).some((c) => c.proof?.trim() === proof));
+        });
+        if (copied) return `this is ${task.id}'s BUILD proof; a filing PR proves the filing, e.g. ` +
+          `grep: ^- id: ${task.id}$ in ${shard}, or a distinctive design phrase in the shard.`;
+      }
+    }
+    return undefined;
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    return `filing context unavailable: ${reason}; the proof refusal still applies.`;
+  }
+}
+
 /** Seam for {@link replayGoldensCommand} (W1-T2689). Every field is injectable so the whole verb --
  *  including its refusals -- is unit-drivable without dispatching a worker or touching a ledger. */
 export interface ReplayGoldensDeps {
@@ -25311,20 +19680,9 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     releaseBaseProofDir(process.cwd(), built, baseRemoveWorktree);
   }
 
-  // #11704 (2026-10-14): acceptance-author-gate refuses a body `grep:` pattern wrapped in quotes or backticks
-  // (wrappedGrepPattern, authorTimeProofShapeRefusal) whether or not it matches, and this verb printed OK on it.
-  // The gate skips the check when the criteria come from a trailer's shard, so this does too.
-  const wrapped = trailerResolved ? [] : criteria.flatMap((c, i) => {
-    const w = wrappedGrepPattern(c.proof ?? "");
-    return w ? [`criterion ${i + 1} wraps its grep pattern in ${w.delimiter}; use: grep: ${w.bare} in <path>`] : [];
-  });
   // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
   // still discriminate instead, and the exit code follows non-zero, the gate's own contract.
   const okOrStale = (okLine: string): number => {
-    if (wrapped.length > 0) {
-      console.log(`REFUSED by acceptance-author-gate (proof-shape): ${wrapped.join("; ")}.`);
-      return 1;
-    }
     if (staleCount === 0) {
       console.log(okLine);
       return 0;
@@ -25375,6 +19733,15 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     trailerResolves: (id) => id === taskId && trailerResolved,
   });
   if (authorCheck.ok) {
+    // Reuse the gate's private authorTimeProofShapeRefusal through its existing entry point.
+    // No PR identity/diff metadata is supplied: only body proofs are judged on this arm.
+    const gate = acceptanceBodyGate({ body, trailerResolves: () => false, root: process.cwd() });
+    if (!gate.ok) {
+      console.log(`REFUSED by acceptance-author-gate (${gate.defect}): ${gate.message}`);
+      const hint = checkAcceptanceFilingHint(criteria, gate.message, deps);
+      if (hint) console.log(hint);
+      return 1;
+    }
     return okOrStale("OK — the parser resolves exactly what was written, and every proof is non-empty.");
   }
   if (!d.headerFound) {
@@ -25574,8 +19941,13 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   for (const { name } of measurable) {
     const fn = name.replace(/-([a-z])/g, (_m, c: string) => String(c).toUpperCase()) + "Command";
     let n = 0;
-    for (const text of sources) n += [...text.matchAll(new RegExp(`\\b${fn}\\s*\\(`, "g"))].length;
-    callSites.set(name, Math.max(0, n - 2));
+    let definitions = 0;
+    for (const text of sources) {
+      n += [...text.matchAll(new RegExp(`\\b${fn}\\s*\\(`, "g"))].length;
+      definitions += [...text.matchAll(new RegExp(`\\bfunction\\s+${fn}\\s*\\(`, "g"))].length;
+    }
+    // W1-T9333: a verb moved into src/cli/commands/ keeps a delegating function here, so it has TWO definitions.
+    callSites.set(name, Math.max(0, n - Math.max(1, definitions) - 1));
   }
 
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -28022,11 +22394,7 @@ export function gitRunAdapter(
 /** The files a refused run branch changed since its merge base with origin/main, or undefined when either read
  *  fails: an unreadable diff keeps the refusal's escalation rather than guessing the build changed only tests. */
 export function refusedBranchChangedFiles(worktreePath: string): string[] | undefined {
-  const base = hostWorktreeGitResult(worktreePath, ["merge-base", "origin/main", "HEAD"]);
-  if (base.status !== 0 || base.stdout.trim() === "") return undefined;
-  const diff = hostWorktreeGitResult(worktreePath, ["diff", "--name-only", base.stdout.trim(), "HEAD"]);
-  if (diff.status !== 0) return undefined;
-  return diff.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  return runTaskCommandHelpers(runTaskCommandHost()).refusedBranchChangedFiles(worktreePath);
 }
 
 export function hostWorktreeGitResult(worktreePath: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
@@ -28037,6 +22405,62 @@ export function hostWorktreeGitResult(worktreePath: string, args: string[]): { s
     const failed = error as { status?: number | null; stdout?: unknown; stderr?: unknown };
     return { status: typeof failed.status === "number" ? failed.status : null, stdout: String(failed.stdout ?? ""), stderr: String(failed.stderr ?? "") };
   }
+}
+
+/**
+ * W1-T9488: what a lane's pushed branch says about the remote ids it reserved. `undefined` = no push was
+ * attempted, `"unknown"` = a push started and did not report (it threw: the branch may carry any id),
+ * an array = the push landed and these are the ids its plan diff declares.
+ */
+export type LanePushedIds = string[] | "unknown" | undefined;
+
+/** The task ids a committed branch declares in its plan diff against the merge base with origin/main. */
+export function branchDeclaredTaskIds(worktreePath: string): string[] {
+  const diff = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { maxBuffer: 64 * 1024 * 1024 });
+  return [...new Set(diff.split("\n").map((line) => /^\+\s*-\s*id:\s*(\S+)/.exec(line)?.[1]).filter((id): id is string => id !== undefined))];
+}
+
+/** {@link branchDeclaredTaskIds} for a branch that has JUST been pushed; a diff that cannot be read keeps the
+ *  outcome unknown (nothing is released) and says why. */
+export function pushedBranchIds(worktreePath: string, log: (step: string, fields: Record<string, unknown>) => void): LanePushedIds {
+  try {
+    return branchDeclaredTaskIds(worktreePath);
+  } catch (e) {
+    log("task_id.reservation_release_skipped", { lane_phase: "declared-ids-unreadable", outcome: "unknown", detail: String((e as Error)?.message ?? e) });
+    return "unknown";
+  }
+}
+
+/**
+ * W1-T9488: give back every remote id a lane reserved and its pushed branch does not declare, through the
+ * leased release the garden and approve lanes use. Nothing pushed: all of them. Pushed: the unused tail.
+ * Push outcome unknown: none, because a branch may carry the id. Never throws; `held` is drained.
+ */
+export function releaseUnfiledReservations(
+  held: HeldTaskIdReservation[],
+  pushed: LanePushedIds,
+  opts: { run: (args: string[]) => { status: number; stdout: string; stderr: string }; lane: string; reason: string; log: (step: string, fields: Record<string, unknown>) => void },
+): void {
+  const claims = held.splice(0);
+  if (pushed === "unknown") {
+    for (const c of claims) opts.log("task_id.reservation_release_skipped", { reserved_id: c.taskId, sha: c.sha, lane: opts.lane, reason: opts.reason, outcome: "push_outcome_unknown" });
+    return;
+  }
+  const declared = new Set(pushed ?? []);
+  for (const c of claims) {
+    if (!declared.has(c.taskId)) releaseTaskIdReservation(opts.run, c, { reason: opts.reason, lane: opts.lane, log: opts.log });
+  }
+}
+
+/** The release reason: the run's outcome, then what its push left on the remote. */
+export function laneReleaseReason(prefix: string, ending: string, pushed: LanePushedIds): string {
+  const pushNote = pushed === undefined ? "no branch pushed" : pushed === "unknown" ? "push outcome unknown" : `branch declares ${pushed.length} id(s)`;
+  return `${prefix}: ${ending}; ${pushNote}`;
+}
+
+/** The sha each reserved id was left at: the reserver's winning anchor, else the handle's own. */
+export function heldFromBlock(block: RemoteReservationBlock, reserver: { wonAnchor?(taskId: string): string | undefined }): HeldTaskIdReservation[] {
+  return block.handles.map((h) => ({ taskId: h.taskId, sha: reserver.wonAnchor?.(h.taskId) ?? h.anchor }));
 }
 
 /**
@@ -28748,6 +23172,9 @@ export function readReservationHolder(
  *  CLI dispatch below) omit `deps` entirely and get the real functions, same DI shape as
  *  `runTask`'s `opts.config ?? loadConfig()` / `opts.github ?? ghGateway(...)`. */
 export type LintPlanStatusDeps = {
+  /** A CI adapter may supply independently verified, invocation-bound dependency evidence.
+   * Offline callers still perform no GitHub/config writes. Omitted preserves the native store path. */
+  dependencyEvidence?: (task: Task) => DependencyMergeEvidence;
   /**
    * Checkout that owns an explicit `--plan` path and its `--base` reads. Omitted by the CLI;
    * tests use a throwaway clone so a fixture mutation cannot be observed by sibling test workers.
@@ -29776,20 +24203,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
-  // W1-T324: matched as a standalone token, same discipline as every other boolean flag in
-  // this file — never a substring match against a proof body that could legitimately quote
-  // "--all". Meaningless (and silently ignored) in --base mode: --base's own scope already
-  // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
+  // W1-T324: a standalone token, never a substring match on a proof body quoting "--all".
+  // Ignored in --base mode, whose own scope already defines what is in-bounds.
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true;
   const checkoutRoot = deps.repoRoot ?? repoRoot;
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
-  // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
-  // here, BY NAME — before any --base/git-show plumbing gets a chance to mis-report it
-  // as a base-resolution failure (the #271 fixture's second false green: `relative(
-  // repoRoot, planPath)` used to yield a `../../..` path that `git show <base>:<that>`
-  // died on as though the BASE ref were the problem, never naming the real one).
+  // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
+  // plumbing can mis-report it as a base-resolution failure (the #271 fixture's false green).
   if (planPathArg !== undefined && isPathOutsideRoot(checkoutRoot, planPath)) {
     console.error(
       `### rmd lint-plan: --plan ${planPath} resolves OUTSIDE the repo root ${checkoutRoot} — ` +
@@ -29859,21 +24281,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       writeFileSync(tmpFile, oldRaw, "utf8");
       materializeOriginShards(checkoutRoot, dirname(relPath), tmpDir, undefined, scopeBase);
       // A BASE THAT DOES NOT PARSE IS NOT THIS PR'S DEFECT, AND MUST NOT BE ITS FAILURE.
-      // `loadPlan` refuses a tree carrying a duplicate id, and the base tree is whatever
-      // origin/main happens to be — so one bad merge to main turned this REQUIRED check red on
-      // every open PR at once, including the plan-repair PR that would have fixed it. That is a
-      // deadlock: the gate proving the plan loads cannot pass while the plan does not load, and
-      // the only exit was an admin merge (the W1-T488 repair, #1820, went out that way).
-      //
-      // So the PARSED comparison degrades and the RAW one carries on. Everything below that
-      // needs `oldPlan` is skipped — `oldById`, `newTaskIds` and `newMonolithIds` are all
-      // already `| undefined` and every consumer already guards them, so this is a state the
-      // code was built to hold rather than a new one. `rawChangedTaskIds` further down needs
-      // only the base's raw TEXT, which is on disk regardless of whether it parses, so the
-      // changed-tasks scope survives and the check still lints exactly this PR's own tasks.
-      //
-      // FAIL-CLOSED IS PRESERVED WHERE IT BELONGS: a broken HEAD plan still fails, loudly and
-      // earlier — `loadPlan(planPath)` above this block throws before any of it runs.
+      // `loadPlan` refuses a duplicate id, and the base tree is whatever origin/main is — one bad
+      // merge turned this REQUIRED check red on every open PR, including the repair PR (W1-T488,
+      // #1820, went out by admin merge). So the PARSED comparison degrades and the RAW one carries
+      // on: everything needing `oldPlan` is skipped (those sets are already `| undefined` and
+      // guarded), while `rawChangedTaskIds` needs only the base's raw TEXT, so the changed-tasks
+      // scope survives. A broken HEAD plan still fails loudly earlier, at `loadPlan(planPath)`.
       let oldPlan: Plan | undefined;
       try {
         oldPlan = loadPlan(tmpFile);
@@ -29985,20 +24398,73 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // trap, `gh` unauthenticated/unavailable): `statusResolvable` stays false and the check
   // is skipped rather than redding a plan-only PR during a GitHub outage.
   let statusByTaskId: Map<string, StatusProjection> | undefined;
+  let dependencyStatusByTaskId: Map<string, StatusProjection> | undefined;
   let statusResolvable = false;
   if (!offline && scope && scope.size > 0) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
       const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
       const github = (deps.ghGateway ?? ghGateway)(owner, repo);
-      const scopedPlan: Plan = { tasks: plan.tasks.filter((t) => scope!.has(t.id)), byId: new Map() };
-      statusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, { ledgerPath: ledgerPathFor(config), github });
+      const evidenceIds = new Set(scope);
+      const pending = [...scope];
+      while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
+        if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
+      }
+      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
+      dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
+        ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
+      });
+      // Dependency-only evidence must not widen duplicate/post-merge credit; extra projection rows stay as before.
+      statusByTaskId = new Map([...dependencyStatusByTaskId].filter(([id]) => scope!.has(id) || !evidenceIds.has(id)));
       statusResolvable = true;
     } catch {
       statusByTaskId = undefined;
       statusResolvable = false;
     }
   }
+
+  // Read only for a changed machine task's non-retired dependency. Never enter loadConfig offline.
+  let offlineCredit: { store: CreditStore; repository: string; overrides: readonly CreditOverrideRow[] } | { reason: string } | undefined;
+  const dependencyEvidence = (candidate: Task): DependencyMergeEvidence => {
+    if (deps.dependencyEvidence) return deps.dependencyEvidence(candidate);
+    if (!offline) {
+      const projected = dependencyStatusByTaskId?.get(candidate.id);
+      return !projected || projected.indeterminate
+        ? { state: "unknown", reason: "online dependency credit projection unavailable or indeterminate" }
+        : { state: projected.merged ? "merged" : "unmerged" };
+    }
+    if (!offlineCredit) {
+      const configured = existingCliRootWithoutConfig();
+      if (configured.state !== "present" || !configured.root || !configured.root.trim() ||
+        !isAbsolute(configured.root) || configured.root.includes("\0")) {
+        offlineCredit = { reason: `instance config/root unavailable: ${configured.state}${configured.reason ? ` (${configured.reason})` : ""}; an explicit usable absolute root is required` };
+      } else {
+        const ledgerPath = join(configured.root, "state", LEDGER_FILENAME);
+        const creditRead: { value?: CreditReadState } = {};
+        const store = loadCreditStore(defaultCreditStorePath(ledgerPath), undefined, state => { creditRead.value = state; });
+        const overrideRead: { value?: CreditReadState } = {};
+        const overrides = loadCreditOverrides(() => readFileSync(defaultCreditOverridePath(ledgerPath), "utf8"), state => { overrideRead.value = state; });
+        if (creditRead.value?.state !== "present") offlineCredit = { reason: creditRead.value && "reason" in creditRead.value ? creditRead.value.reason : "native credit read unavailable" };
+        else if (!overrideRead.value || overrideRead.value.state !== "present" && overrideRead.value.state !== "missing" ||
+          overrides.refused.length > 0 || overrides.rows.some(row => !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(row.task) || !Number.isSafeInteger(row.pr) || row.pr <= 0)) {
+          offlineCredit = { reason: overrideRead.value && "reason" in overrideRead.value ? overrideRead.value.reason : "credit overrides malformed or contain invalid/refused rows" };
+        } else {
+          try {
+            const origin = hostWorktreeGit(checkoutRoot, ["remote", "get-url", "origin"]).trim();
+            const repository = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(origin)?.[1];
+            offlineCredit = !repository || repository.split("/").some(part => part === "." || part === "..")
+              ? { reason: "credit repository origin unavailable or not a canonical github.com repository" }
+              : { store, repository, overrides: overrides.rows };
+          } catch {
+            offlineCredit = { reason: "credit repository origin unavailable" };
+          }
+        }
+      }
+    }
+    return "reason" in offlineCredit ? { state: "unknown", reason: offlineCredit.reason }
+      : durableDependencyCredit(offlineCredit.store, candidate.id, offlineCredit.repository, offlineCredit.overrides);
+  };
 
   // W1-T1076: the duplicate corpus, resolved ONCE here and ONLY in changed-tasks scope — see the
   // section comment ahead of `openPlanShardSlugs` for why the whole-plan pass gets nothing. Its
@@ -30179,6 +24645,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         plan,
         releasedIds: releasedIdsForAdmission,
         isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
+        dependencyEvidence,
         pathExists: opts.moduleExists,
         pathExistsAtBase,
       };
@@ -30403,7 +24870,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
 export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
-export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs", "--sandbox-metrics"] as const;
 
 /** W1-T3738 — what {@link runPreflightProofs} needs, all injected so a test drives it without a
  *  base worktree, a real test run or a git call. */
@@ -30921,14 +25388,22 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const from = flagValue(rest, "--from");
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
+  const metrics = rest.includes("--sandbox-metrics") ? createGateSandboxMetrics() : undefined;
+  const fullTier = rest.some(arg => ["--ci-parity", "--coverage", "--proofs"].includes(arg));
+  const spawn: PreflightSpawn | undefined = metrics && !fullTier
+    ? (file, args, opts) => metrics.observe(() => (deps.spawn ?? defaultPreflightSpawn)(file, args, opts))
+    : deps.spawn;
+  const boundary = <T>(run: () => T): T => metrics ? metrics.observe(run) : run();
+  const onPhase = deps.onPhase ?? reportPreflightPhase;
+  const phase = <T>(name: string, run: () => T): T => observeSynchronousPreflightPhase(name, () => boundary(run), onPhase);
 
-  const result = runPreflight(repoRoot, { ...deps, range });
+  const result = phase("default", () => runPreflight(repoRoot, { ...deps, range, spawn, onPhase }));
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
   // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
+  const fast = rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(repoRoot, { spawn }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -30936,15 +25411,17 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
   const ciChecks = rest.includes("--no-fast")
     ? undefined
-    : preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn: deps.spawn }));
+    : phase("ci-checks", () => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
-    : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn }));
-  const ciParity = rest.includes("--ci-parity") ? runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
-  const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
+    : phase("fast-coverage", () => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
+  // Full-suite routes key containment/deadlines on the ORIGINAL spawn identity. Observe their
+  // tier boundaries, never wrap their executor into the injected-spawn synchronous route.
+  const ciParity = rest.includes("--ci-parity") ? phase("ci-parity", () => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const coverage = rest.includes("--coverage") ? phase("coverage", () => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
-  const proofs = rest.includes("--proofs") ? runPreflightProofs(repoRoot, { spawn: deps.spawn }) : undefined;
+  const proofs = rest.includes("--proofs") ? phase("proofs", () => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -31002,7 +25479,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // W1-T3017 — PEEK, never resolve. The pin belongs to whichever mode actually diffed; a run with
   // no diff-consuming step has no base, and resolving one here would put a sha on the line that no
   // step ever measured against.
-  const preflightSpawn = deps.spawn ?? defaultPreflightSpawn;
+  const preflightSpawn = spawn ?? defaultPreflightSpawn;
   const pin = peekPinnedBase(repoRoot, preflightSpawn);
   const runContext = detectRunContext({
     repoRoot,
@@ -31058,14 +25535,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // fall back to the default: that is the one call shape the orchestrator's own verdict comes
   // from.
   const summaryPath = preflightSummaryTarget(rest, deps);
-  const summary = buildPreflightSummary({
+  const summary = { ...buildPreflightSummary({
     steps,
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
     headSha,
     args: rest,
     runContext,
-  });
+  }), ...(metrics ? { sandboxMetrics: metrics.finish() } : {}) };
   if (summaryPath === undefined) {
     console.log(
       `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(repoRoot)}) — pass --summary-file to write one anyway`,
@@ -31152,6 +25629,7 @@ export function retroShippedGithubGateway(
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
+    cachedMerged: () => retroCachedShippedGateway(owner, repo, snapshotCache),
     unavailable: () => probeGithubThrottle(),
     // W1-T2288: backs `runlessMergesSince` (retro.ts) — the retro TRIGGER's only route to a
     // merge that has no run at all (a plan/triage/feedback filing). Full history, unscoped,
@@ -31177,6 +25655,22 @@ function retroShippedSnapshot(owner: string, repo: string, snapshotFor?: (owner:
     commitClosed: () => false,
     commitIssues: () => false,
     commitOpen: () => false,
+  };
+}
+
+/** W1-T10185: reuse the captured seed with the existing body index and P9 reducer, not a second
+ *  credit parser. No live fetch or commit-index subprocess may escape this hint. An uncaptured
+ *  commit-only credit can be omitted here: the hint can admit a refresh, never authorize a retry. */
+function retroCachedShippedGateway(owner: string, repo: string, snapshot: BoardSnapshotCache): ShippedGithub | undefined {
+  const seed = snapshot.closedSeed();
+  if (seed === undefined) return undefined;
+  const cached = buildBatchedGithub(owner, repo, {
+    fetchAll: () => [...seed.values()],
+    commitTrailerIndex: () => null,
+  });
+  return {
+    findMergedByTrailer: (taskId) => cached.findMergedByTrailer(taskId),
+    headRefName: (prUrl) => cached.headRefName(prUrl),
   };
 }
 
@@ -31284,6 +25778,7 @@ export async function retroShippedGithubGatewayAsync(
   return {
     findMergedByTrailer: (taskId) => read((github) => github.findMergedByTrailer(taskId)),
     headRefName: (prUrl) => read((github) => github.headRefName(prUrl)),
+    cachedMerged: () => retroCachedShippedGateway(owner, repo, snapshotCache),
   };
 }
 
@@ -31318,15 +25813,18 @@ export async function retroTriggerCheckAsync(
   now: Date = new Date(),
   deps: NonNullable<Parameters<typeof retroTriggerCheck>[1]> & {
     readMergedCommits?: () => Promise<GitLogCommit[]>;
-    /** The run ledger, read off the loop; production unions the rotations through `resolveLedgerUnionAsync`. */
+    /** The run ledger as NDJSON, in place of the default slice read through `runHistory` (W1-T10046). */
     readLedgerNdjson?: (config: Config) => Promise<string>;
+    runHistory?: EscalationTriageHistoryReader;
     /** The GitHub probe, awaited; production runs `probeGithubThrottleAsync`, an injected `github` its own. */
     probeUnavailable?: () => Promise<string | undefined>;
   } = {},
 ): Promise<RetroTriggerDecision | undefined> {
   const config = deps.config ?? loadConfig();
   if (retroMarkerIsCorrupt(config)) return undefined;
-  const ledgerNdjson = await (deps.readLedgerNdjson ?? readRetroTriggerLedgerAsync)(config);
+  const records = deps.readLedgerNdjson
+    ? parseLedger(await deps.readLedgerNdjson(config))
+    : await readRetroTriggerRunsAsync(config, deps.runHistory ?? retroTriggerRunHistory());
   // Constructed where the sync check constructs its gateway, so an unresolvable origin still fails the check here.
   const github = deps.github ?? (await retroShippedGithubGatewayAsync());
   let read: MergedCommitsRead;
@@ -31336,7 +25834,7 @@ export async function retroTriggerCheckAsync(
     // Carried, not erased: mergedCommitsSnapshotGateway re-throws it where the sync read threw.
     read = { error };
   }
-  const pre = retroTriggerPrelude(now, config, { policy: deps.policy, github: mergedCommitsSnapshotGateway(github, read) }, ledgerNdjson);
+  const pre = retroTriggerPrelude(now, config, { policy: deps.policy, github: mergedCommitsSnapshotGateway(github, read) }, records);
   if ("decided" in pre) return pre.decided;
   // Probed only past the back-off, as the sync check does, so a backed-off tick still spends no GitHub call.
   const probe = deps.probeUnavailable ?? (deps.github ? async () => github.unavailable?.() : () => probeGithubThrottleAsync());
@@ -31351,6 +25849,7 @@ export function mergedCommitsSnapshotGateway(github: ShippedGithub, read: Merged
   return {
     findMergedByTrailer: (taskId) => github.findMergedByTrailer(taskId),
     headRefName: (prUrl) => github.headRefName(prUrl),
+    cachedMerged: () => github.cachedMerged?.(),
     unavailable: () => github.unavailable?.(),
     mergedCommits: () => {
       if ("error" in read) throw read.error;
@@ -31368,6 +25867,7 @@ export function mergedCommitsSnapshotGateway(github: ShippedGithub, read: Merged
  */
 const RUN_LEDGER_STEP_PATTERN =
   '"step":"run\\.start"|"step":"verdict"|"step":"pr\\.opened"|"step":"recon\\.done"|"step":"implement\\.done"|"step":"implement\\.resumed"|"step":"correction\\.provenance"';
+const RETRO_TRIGGER_RUN_STEPS: string[] = RUN_LEDGER_STEP_PATTERN.split("|").map((alt) => JSON.parse(alt.slice('"step":'.length).replaceAll("\\.", ".")));
 
 /** Last unavailable observation already reported by this process. `retroTriggerCheck` is a
  * self-target-only command, so one fixed-width record is sufficient. This is transition memory for
@@ -31474,8 +25974,9 @@ function reportRetroTriggerBackoff(
   ledgerPath: string,
   marker: { ts: string } | undefined,
   backoff: Extract<RetroBackoffDecision, { eligible: false }>,
+  count: { mergesSinceMarker: number; basis: "attempt-or-runless-lower-bound" | "cached-shipped-plus-runless" | "authoritative-shipped-plus-runless" },
 ): void {
-  const fingerprint = `${marker?.ts ?? "absent"}\u0000backoff\u0000${backoff.streak}\u0000${backoff.nextEligibleAt}`;
+  const fingerprint = `${marker?.ts ?? "absent"}\u0000backoff\u0000${backoff.streak}\u0000${backoff.nextEligibleAt}\u0000${count.basis}\u0000${count.mergesSinceMarker}`;
   if (
     lastRetroTriggerDecline?.ledgerPath === ledgerPath &&
     lastRetroTriggerDecline.fingerprint === fingerprint
@@ -31494,6 +25995,8 @@ function reportRetroTriggerBackoff(
       streak: backoff.streak,
       next_eligible_at: backoff.nextEligibleAt,
       merges_floor: backoff.mergesFloor,
+      merges_since_marker: count.mergesSinceMarker,
+      count_basis: count.basis,
     });
     lastRetroTriggerDecline = { ledgerPath, fingerprint };
   } catch {
@@ -31546,7 +26049,7 @@ export function retroTriggerCheck(
 ): RetroTriggerDecision | undefined {
   const config = deps.config ?? loadConfig();
   if (retroMarkerIsCorrupt(config)) return undefined;
-  const pre = retroTriggerPrelude(now, config, deps, readRetroTriggerLedger(config));
+  const pre = retroTriggerPrelude(now, config, deps, parseLedger(readRetroTriggerLedger(config)));
   return "decided" in pre ? pre.decided : retroTriggerConcludeSync(now, pre, pre.github.unavailable?.());
 }
 
@@ -31563,12 +26066,78 @@ function readRetroTriggerLedger(config: Config): string {
   return ledgerUnion.ok ? ledgerUnion.matches.join("\n") : existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
 }
 
-/** {@link readRetroTriggerLedger} off the event loop: the same union through `resolveLedgerUnionAsync`, the same fallback. */
-async function readRetroTriggerLedgerAsync(config: Config): Promise<string> {
-  const stateDir = join(config.root, "state");
-  const ledgerUnion = await resolveLedgerUnionAsync(stateDir, RUN_LEDGER_STEP_PATTERN);
+// W1-T10046: OBSERVED 2026-10-17, each boot re-read the whole corpus twice (retro 288 MB, auto-triage 243 MB on the loop) for ~1 MB slices.
+export const RETRO_TRIGGER_RUN_SLICE: EscalationTriageSlice = { holder: "run-task.retro-trigger-runs", steps: RETRO_TRIGGER_RUN_STEPS, version: "1" };
+export const AUTO_TRIAGE_REFUSAL_SLICE: EscalationTriageSlice = {
+  holder: "run-task.auto-triage-refusals", steps: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP], version: "1",
+};
+
+let retroTriggerRunReader: EscalationTriageHistoryReader | undefined;
+let autoTriageRefusalReader: EscalationTriageHistoryReader | undefined;
+// One W1-T9710 slice reader each per process, built on first use: a restart loads each rotation's durable digest off the loop.
+const retroTriggerRunHistory = (): EscalationTriageHistoryReader =>
+  (retroTriggerRunReader ??= createEscalationTriageHistoryReader({ slice: RETRO_TRIGGER_RUN_SLICE }));
+const autoTriageRefusalHistory = (): EscalationTriageHistoryReader =>
+  (autoTriageRefusalReader ??= createEscalationTriageHistoryReader({ slice: AUTO_TRIAGE_REFUSAL_SLICE }));
+
+function sliceReadCost(reader: EscalationTriageHistoryReader, read: LedgerUnionRecordRead, startedMs: number): Record<string, number> {
+  const load = reader.lastLoad();
+  const pass = reader.lastPass();
+  return {
+    ms: Math.round(performance.now() - startedMs),
+    rotations: read.archiveCount,
+    unread: read.unread.length,
+    loaded_rotations: load.rotations,
+    digest_hits: load.digestHits,
+    digest_misses: load.digestMisses,
+    seeded_rotations: pass.seededRotations,
+    loop_read_bytes: pass.readBytes,
+    parsed_lines: pass.parsedLines,
+  };
+}
+
+/** Best-effort evidence: a failed append never changes what the read returns. */
+function appendSliceReadRow(
+  ledgerPath: string,
+  runId: string,
+  step: string,
+  extra: Record<string, unknown>,
+  append: typeof appendProducerLedger = appendProducerLedger,
+): void {
+  try {
+    append(ledgerPath, "daemon", { run_id: runId, step, ...extra });
+  } catch (e) {
+    process.stderr.write(`${step}: could not ledger the read's cost: ${String((e as Error)?.message ?? e)}\n`);
+  }
+}
+
+/** The run slice from `reader`, else (a rotation unread, or none yet) the whole live file, as the sync read falls back. */
+export async function readRetroTriggerRunsAsync(
+  config: Config,
+  reader: EscalationTriageHistoryReader,
+  append?: typeof appendProducerLedger,
+): Promise<ReturnType<typeof parseLedger>> {
+  const startedMs = performance.now();
   const ledgerPath = ledgerPathFor(config);
-  return ledgerUnion.ok ? ledgerUnion.matches.join("\n") : existsSync(ledgerPath) ? await readFileAsync(ledgerPath, "utf8") : "";
+  const read = await reader(join(config.root, "state"));
+  const union = read.ok && read.archiveCount > 0;
+  const records = union ? [...read.rows] : parseLedger(existsSync(ledgerPath) ? await readFileAsync(ledgerPath, "utf8") : "");
+  appendSliceReadRow(ledgerPath, "RETRO-TRIGGER", "retro_trigger.ledger_read",
+    { source: union ? "union" : "live-file", rows: records.length, ...sliceReadCost(reader, read, startedMs) }, append);
+  return records;
+}
+
+/** The refusal rows from `reader`; `undefined` when a rotation went unread. */
+export async function readAutoTriageRefusalRowsAsync(
+  config: Config,
+  reader: EscalationTriageHistoryReader,
+  append?: typeof appendProducerLedger,
+): Promise<Array<Record<string, unknown>> | undefined> {
+  const startedMs = performance.now();
+  const read = await reader(join(config.root, "state"));
+  appendSliceReadRow(ledgerPathFor(config), "AUTO-TRIAGE", "auto_triage.refusal_read",
+    { ok: read.ok, rows: read.rows.length, ...sliceReadCost(reader, read, startedMs) }, append);
+  return read.ok ? read.rows : undefined;
 }
 
 /** What the trigger knows once its local reads are done and only the GitHub-backed pass remains. */
@@ -31580,6 +26149,8 @@ interface RetroTriggerContext {
   runs: ReturnType<typeof gatherRuns>;
   taskIdsWithRuns: Set<string>;
   github: ShippedGithub;
+  lastAttempt: RetroAttemptRecord | undefined;
+  backoffPolicy: RetroBackoffPolicy;
 }
 
 /** Every LOCAL step of {@link retroTriggerCheck} — marker, policy, ledger parse and the back-off — over an already-read
@@ -31588,7 +26159,7 @@ function retroTriggerPrelude(
   now: Date,
   config: Config,
   deps: Pick<NonNullable<Parameters<typeof retroTriggerCheck>[1]>, "github" | "policy">,
-  ledgerNdjson: string,
+  records: ReturnType<typeof parseLedger>,
 ): { decided: RetroTriggerDecision | undefined } | RetroTriggerContext {
   const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
@@ -31612,16 +26183,15 @@ function retroTriggerPrelude(
   // `headRefName` credit pass), and computing it exactly ONCE here, rather than a second time
   // inside the back-off branch, keeps this file's one ledger-file read call site exactly one
   // (acceptance 7, test/intake-triggers-read-their-own-depth.test.ts).
-  // The read itself is the caller's (readRetroTriggerLedger, or its awaited twin): this parses it.
-  // ONE parse feeds every read below (W1-T2289 acceptance 7): `gatherRuns` for the fleet-activity
-  // signal this trigger already had, `mineFollowups` for the retro's OWN queue depth, and (W1-T4664)
-  // the back-off's own merges-floor pre-check — never a second `readFileSync`/`parseLedger`.
-  const records = parseLedger(ledgerNdjson);
+  // The caller reads (W1-T10046). ONE set of records feeds `gatherRuns`, `mineFollowups` (the retro's OWN queue
+  // depth) and (W1-T4664) the back-off's merges-floor pre-check — never a second `readFileSync`/`parseLedger`.
   const runs = gatherRuns(records);
   const taskIdsWithRuns = new Set(runs.map((r) => r.taskId));
 
   const backoffPolicy = retroBackoffPolicyFor(policy);
   const lastAttempt = loadRetroAttemptRecord(retroAttemptPath(config.root));
+  // One gateway and one captured seed feed both the hint and the refreshed pass.
+  const github = deps.github ?? retroShippedGithubGateway();
   if (lastAttempt !== undefined && lastAttempt.markerTs === (marker?.ts ?? null)) {
     // W1-T4664 design (ii): still on the SAME marker cycle as the last recorded attempt — widen
     // the merges reading BEFORE the expensive per-run GitHub credit pass below, so a busy window
@@ -31629,19 +26199,25 @@ function retroTriggerPrelude(
     // own `git log` (retro.ts's `runlessMergesSince`), never a GitHub round-trip, so this costs
     // nothing extra on the common "still not yet" answer — exactly what
     // test/retro-trigger-check.test.ts's "survives daemon restart" case measures via `githubReads`.
-    // `Math.max` with the attempt's own recorded count keeps this a conservative LOWER BOUND on the
-    // real (GitHub-credited) total: it omits `shippedSince`'s per-run crediting, so it can only
-    // ever DELAY an early exit, never grant one the real count below would refuse.
-    const githubEarly = deps.github ?? retroShippedGithubGateway();
-    const runlessMergesEarly = runlessMergesSince(githubEarly.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
-    const mergesProxy = Math.max(lastAttempt.mergesSinceMarker, runlessMergesEarly.length);
-    const backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
+    const commits = github.mergedCommits?.() ?? [];
+    const runlessMergesEarly = runlessMergesSince(commits, marker?.ts, taskIdsWithRuns);
+    let mergesProxy = Math.max(lastAttempt.mergesSinceMarker, runlessMergesEarly.length);
+    let basis: "attempt-or-runless-lower-bound" | "cached-shipped-plus-runless" = "attempt-or-runless-lower-bound";
+    let backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
     if (!backoff.eligible) {
-      reportRetroTriggerBackoff(ledgerPath, marker, backoff);
+      const cached = github.cachedMerged?.();
+      if (cached !== undefined) {
+        const cachedCount = shippedSince(runs, marker?.ts, { ...cached, mergedCommits: () => commits }).shipped.length + runlessMergesEarly.length;
+        if (cachedCount > mergesProxy) { mergesProxy = cachedCount; basis = "cached-shipped-plus-runless"; }
+        backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
+      }
+    }
+    if (!backoff.eligible) {
+      reportRetroTriggerBackoff(ledgerPath, marker, backoff, { mergesSinceMarker: mergesProxy, basis });
       return { decided: undefined };
     }
   }
-  return { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github: deps.github ?? retroShippedGithubGateway() };
+  return { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github, lastAttempt, backoffPolicy };
 }
 
 /** The GitHub-backed rest of {@link retroTriggerCheckAsync}, given the probe's answer (`undefined` when GitHub is usable):
@@ -31682,6 +26258,12 @@ function retroTriggerDecide(now: Date, ctx: RetroTriggerContext, shipped: Shippe
   const { marker, policy, records, taskIdsWithRuns, github } = ctx;
   const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
   const mergesSinceMarker = shipped.length + runlessMerges.length;
+  // A stale hint can open the refreshed read, never a retry. Shared by both trigger paths.
+  const backoff = evaluateRetroBackoff(ctx.lastAttempt, mergesSinceMarker, marker?.ts, now, ctx.backoffPolicy);
+  if (!backoff.eligible) {
+    reportRetroTriggerBackoff(ctx.ledgerPath, marker, backoff, { mergesSinceMarker, basis: "authoritative-shipped-plus-runless" });
+    return undefined;
+  }
   // THE RETRO'S OWN INPUT, NOT THE FLEET'S ACTIVITY (W1-T2289). `openTitles` is intentionally
   // omitted (defaults to none): the trigger only needs to know something is WAITING, and the full
   // dedup-against-open-titles pass belongs to the real harvest a fired retro performs moments
@@ -31724,7 +26306,7 @@ function retroTriggerDecide(now: Date, ctx: RetroTriggerContext, shipped: Shippe
 // throttle, so "refuse ⇒ behave as disabled" would WIDEN what dispatch may do — backwards for
 // design (v)'s "can only refuse" invariant. Wiring a rung whose refusal direction is inverted is
 // this task's own follow-up, not a call this diff makes for it.
-export const AUTO_TRIAGE_CONTRACT_VERSION = "v1";
+export const AUTO_TRIAGE_CONTRACT_VERSION = "v2-aged-dependency-repair-priority";
 export const MEASUREMENT_CADENCE_CONTRACT_VERSION = "v1";
 export const DIGEST_CADENCE_CONTRACT_VERSION = "v1";
 export const INTAKE_CADENCE_CONTRACT_VERSION = "v1";
@@ -31854,6 +26436,9 @@ export function buildAutoTriageDaemonHooks(deps: {
   runTriage?: (feedbackId: string) => Promise<number>;
   config?: Config;
   now?: () => Date;
+  repairSnapshot?: () => DepReviewRepairSnapshot | undefined;
+  /** Fixture repository for feedback reads; production retains repoRoot, distinct from config.root. */
+  feedbackRoot?: string;
   /** Injected policy, forwarded to {@link autoTriageCheck} — see its doc for why this seam exists.
    *  Production passes none and the checked-in `plan/policy.yaml` governs, exactly as before. */
   policy?: Policy;
@@ -31868,7 +26453,8 @@ export function buildAutoTriageDaemonHooks(deps: {
   const check =
     deps.check ??
     ((signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) =>
-      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ratifications: deps.ratifications, ...signals }));
+      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ratifications: deps.ratifications,
+        repairSnapshot: deps.repairSnapshot, feedbackRoot: deps.feedbackRoot, ...signals }));
   const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
   const configFor = () => deps.config ?? loadConfig();
   return {
@@ -31905,6 +26491,8 @@ export async function autoTriageCheck(
   opts: {
     config?: Config;
     now?: Date;
+    repairSnapshot?: () => DepReviewRepairSnapshot | undefined;
+    feedbackRoot?: string;
     policy?: Policy;
     /** W1-T2694: injected ratification pins — same seam shape as `policy` above (this
      *  function's own doc). Production passes none and the checked-in (or absent)
@@ -31922,7 +26510,8 @@ export async function autoTriageCheck(
      *  {@link resolveOwnerRepo}. */
     resolveClaimRepo?: () => { repo: string };
     /** W1-T4203: injected read of the refused-triage-commit rows; `undefined` = unreadable. */
-    readRefusalRows?: () => Array<Record<string, unknown>> | undefined;
+    readRefusalRows?: () => Array<Record<string, unknown>> | undefined | Promise<Array<Record<string, unknown>> | undefined>;
+    refusalHistory?: EscalationTriageHistoryReader;
   } = {},
 ): Promise<AutoTriageDecision> {
   const config = opts.config ?? loadConfig();
@@ -31938,6 +26527,7 @@ export async function autoTriageCheck(
   }
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
+  const feedbackRoot = opts.feedbackRoot ?? repoRoot;
   const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
@@ -31957,26 +26547,20 @@ export async function autoTriageCheck(
     marker: readAutoTriageMarker(autoTriageMarkerPath(config.root)),
     now,
     // repoRoot, NOT config.root — see this block's doc comment.
-    candidates: newFeedbackIdsOldestFirst(repoRoot),
+    candidates: newFeedbackIdsOldestFirst(feedbackRoot),
     // SAME repoRoot, SAME reasoning, read through the SAME underlying walk (W1-T2289) — see
     // `oldestFeedbackAgeMs`'s own doc for why this must never drift onto `config.root`.
-    oldestCandidateAgeMs: oldestFeedbackAgeMs(repoRoot, now),
+    oldestCandidateAgeMs: oldestFeedbackAgeMs(feedbackRoot, now),
   };
   // W1-T4769: decide FIRST without any claim knowledge — every refusal that does not depend on which
   // entry is claimed returns here with no git or ledger I/O. Only a would-be fire pays for the sweep.
   const first = decideAutoTriage(inputs);
   if (!first.fire) return first;
   // W1-T4203: an entry whose triage commit was REFUSED is terminal until cleared. An unreadable
-  // ledger reads as no refusals (the entry is retried, today's behaviour) rather than starving the rung.
+  // ledger reads as no refusals (the entry is retried, today's behaviour) rather than starving the rung. W1-T10046: off the loop.
   const refused = refusedTriageIds(
-    (opts.readRefusalRows ??
-      (() => {
-        const read = readLedgerUnionRecordsSync(dirname(ledgerPathFor(config)), {
-          step: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP],
-          refuseIncomplete: true,
-        });
-        return read.ok ? read.rows : undefined;
-      }))() ?? [],
+    (await (opts.readRefusalRows ??
+      (() => readAutoTriageRefusalRowsAsync(config, opts.refusalHistory ?? autoTriageRefusalHistory())))()) ?? [],
   );
   const candidates = inputs.candidates.filter((c) => !refused.has(c));
   if (candidates.length === 0) {
@@ -31984,7 +26568,12 @@ export async function autoTriageCheck(
   }
   const passInputs = { ...inputs, candidates };
   const sweep = await triageClaimSweepForPass(config, now, candidates, opts);
-  return decideAutoTriage(sweep === undefined ? passInputs : { ...passInputs, heldCandidates: sweep });
+  const ordered = await prioritizeDepReviewRepairs(candidates, join(config.root, "state"), opts.repairSnapshot?.(), now.getTime(),
+    (step, extra) => appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }));
+  const decision = decideAutoTriage({ ...passInputs, candidates: ordered, ...(sweep === undefined ? {} : { heldCandidates: sweep }) });
+  return decision.fire && ordered.indexOf(decision.feedbackId) < candidates.indexOf(decision.feedbackId)
+    ? { ...decision, reason: "verified aged dependency repair precedes ordinary FIFO feedback; all normal triage bounds passed" }
+    : decision;
 }
 
 /**
@@ -32393,11 +26982,12 @@ export async function defaultVerifyHumanCadenceResult(
     const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
     const ledgerPath = ledgerPathFor(config);
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
+    const judgedRows = rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows);
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const result = await verifyHumanCadence({
       shards: withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME }),
-      priorVerdicts: priorVerifyHumanVerdicts(rows),
-      priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
+      priorVerdicts: priorVerifyHumanVerdicts(judgedRows),
+      priorAgeBandKeys: priorVerifyHumanAgeBandKeys(judgedRows),
       judge: shadowedVerifyHumanJudge({
         mounts: loadMounts(mountsPath(repoRoot)),
         config,
@@ -33779,6 +28369,7 @@ async function retroCommand(
   if (opts.automated) {
     const tokenRunId = `retro-token-${process.pid}`;
     const refresh = (opts.startTokenRefresh ?? startInstallationTokenRefresh)({
+      refresh: refreshInstallationToken,
       log: (step, extra) => appendLedger(ledgerPath, {
         run_id: tokenRunId,
         task_id: "RETRO",
@@ -34024,20 +28615,13 @@ async function retroCommand(
     }
   }
 
-  // W1-T105: harvest marks are a REAL-RUN-ONLY side effect — mineFollowups (inside
-  // buildGather, above) is pure, so the --dry-run branch above never wrote anything.
-  // This is the ONE place a followup candidate/dedup gets ledger-marked so a later
-  // retro's mineFollowups pass over the now-updated ledger mints neither again.
-  recordFollowupHarvest(gather.followups, { ledgerPath });
-  // W1-T2458: THE MISSING CONSUMER. Before this, `gather.followups` fed only
-  // `renderFollowupCandidates` (a markdown section this retro's own report prints, that no rung
-  // ever read back) — the ledger marks above stopped a candidate being re-minted, but nothing
-  // ever routed one anywhere an operator/inbox could act on it. This is the ONE real-run call
-  // site: every routable candidate this pass mined is filed through the SAME single writer
-  // (`updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts already use,
-  // right alongside the ledger marks above (same real-run-only gate, same non-dry-run guard).
+  // W1-T9240: the real attempt owns cancellation; waiting yields to a live async holder.
+  // Publication precedes harvest acknowledgements and remains below the dry-run/integrity guards.
   const followupRegistryPath = join(config.root, "state", "inbox-proposals.json");
-  routeFollowupsToRegistry(gather.followups, { registryPath: followupRegistryPath });
+  await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,
+    { registryPath: followupRegistryPath, ledgerPath }, { signal,
+      log: (step, detail) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...detail }),
+    }));
 
   // W1-T2559: retro ships no code and supervises no worker, so G-17's Tier Invariant — which
   // exists to keep a supervisor strictly above what it reviews — does not bind it to plan
@@ -34331,6 +28915,7 @@ async function retroCommand(
           config: repairConfig,
           prompt: repairPrompt,
           resumeSessionId: worker.sessionId,
+          continuation: workerContinuation(worker, prompt, worktreePath),
         });
         log("retro.preflight_repair", {
           session_id: repaired.sessionId,
@@ -36044,7 +30629,7 @@ const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
  * paginated `pulls?state=closed` sweep, over the SAME `boardPrsRestArgs` shape `rmd reap-branches`
  * already reads (design (iii): "the capability is precedented and the cost is ONE additional
  * batched call per pass, never one lookup per branch"). Returns raw `<head-ref>\t<unmerged>` rows
- * for {@link closedUnmergedRunBranchTaskIds} (drain.ts) to parse ONCE PER PASS, above the dispatch
+ * for {@link closedUnmergedRunBranchRefs} (drain.ts) to parse ONCE PER PASS, above the dispatch
  * loop — never re-read per candidate, mirroring `readPushedRunBranchesOutput`'s own contract.
  *
  * `state=closed` returns BOTH merged and unmerged pull requests — GitHub has no separate
@@ -36061,7 +30646,7 @@ const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
  *
  * FAILS TOWARD STILL BLOCKING, THE OPPOSITE DIRECTION FROM `readPushedRunBranchesOutput`'s OWN
  * FAIL OPEN: a throw here (network blip, auth, rate limit) yields `""`, which parses to an EMPTY
- * exclusion set (drain.ts's `closedUnmergedRunBranchTaskIds("")`), so every pushed run branch
+ * exclusion set (drain.ts's `closedUnmergedRunBranchRefs("")`), so every pushed run branch
  * keeps blocking exactly as it did before this dependency existed — see that field's own doc for
  * why this direction, not the other one, is the only safe default for a guard deciding whether a
  * duplicate build starts.
@@ -36728,7 +31313,7 @@ async function drainCommand(
         // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
         // released set once per pass. Omitting this line is not a degraded feature — it is the
         // dead one #4715 shipped, so it is asserted by test rather than left to review.
-        readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
+        ...releaseReadersFor(ledgerPathFor(config)),
         // W1-T2397: the two halves of the observation. #3120 shipped the predicate live and said so
         // — `openSiblingBuild` is computed on every projection pass while
         // `NextRunnableOpts.openSiblingBuildFor`/`onOpenSiblingBuild` had no production caller,
@@ -36757,7 +31342,7 @@ async function drainCommand(
         // UNMERGED must stop blocking dispatch (a leftover, not a signal — design (i)), so the
         // predicate above needs the PR's state as well as the branch's existence. ONE batched,
         // paginated `pulls?state=closed` sweep per pass, parsed once by
-        // `closedUnmergedRunBranchTaskIds` (drain.ts) and subtracted from the pushed-branch set —
+        // `closedUnmergedRunBranchRefs` (drain.ts) and subtracted from the pushed-branch set —
         // never a second predicate threaded through the chain, and never one lookup per branch.
         readClosedRunBranchPrs: () => readRunBranchClosedPrsOutput(owner, repo),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
@@ -36852,18 +31437,7 @@ async function drainCommand(
   }
 }
 
-/** Render a {@link DaemonSummary} — "what happened, or is happening" — at a glance. */
-function renderDaemonSummary(s: DaemonSummary): string {
-  return [
-    "── daemon summary ────────────────────────────────────────",
-    `attempted : ${s.attempted.length ? s.attempted.join(", ") : "(none)"}`,
-    `merged    : ${s.merged.length ? s.merged.join(", ") : "(none)"}`,
-    `stopped   : ${s.stopReason}${s.stopDetail ? ` — ${s.stopDetail}` : ""}`,
-    `idle ticks: ${s.ticks}`,
-    `cost      : notional $${s.costUsd.toFixed(4)}`,
-    "──────────────────────────────────────────────────────────",
-  ].join("\n");
-}
+
 
 /**
  * `rmd daemon [--max <n>] [--poll-ms <n>]` — the PERSISTENT scheduler loop
@@ -36936,16 +31510,10 @@ export function headroomPolicyFromCurve(curve: PolicyHeadroomRung[]): HeadroomPo
  * reads the real policy and the real roots.
  */
 export function logCloneReapSurvey(
-  config: Config,
-  log: (step: string, fields: Record<string, unknown>) => void,
-  deps: {
-    roots?: () => string[];
-    reap?: typeof reapStaleClones;
-    policy?: () => { enabled: boolean; maxAgeHours: number };
-    /** W1-T2694: injected ratification pins — same seam shape as `policy` above. */
-    ratifications?: Ratifications;
-  } = {},
-): CloneReapSummary | null {
+  config: Parameters<RunTaskCommandHost["logCloneReapSurvey"]>[0],
+  log: Parameters<RunTaskCommandHost["logCloneReapSurvey"]>[1],
+  deps: Parameters<RunTaskCommandHost["logCloneReapSurvey"]>[2] = {},
+): ReturnType<RunTaskCommandHost["logCloneReapSurvey"]> {
   try {
     const plan = cloneReapPlan(config, log, deps);
     const summary = (deps.reap ?? reapStaleClones)(plan.roots, plan.opts);
@@ -36962,13 +31530,7 @@ export async function logCloneReapSurveyAsync(
   log: (step: string, fields: Record<string, unknown>) => void,
   deps: Omit<NonNullable<Parameters<typeof logCloneReapSurvey>[2]>, "reap"> & { reap?: typeof reapStaleClonesAsync } = {},
 ): Promise<CloneReapSummary | null> {
-  try {
-    const plan = cloneReapPlan(config, log, deps);
-    const summary = await (deps.reap ?? reapStaleClonesAsync)(plan.roots, plan.opts);
-    return logCloneReapRow(log, summary, plan.roots.length);
-  } catch {
-    return null; // best-effort, exactly like the sync survey — never blocks the dispatch
-  }
+  return runTaskCommandHelpers(runTaskCommandHost()).logCloneReapSurveyAsync(config, log, deps);
 }
 
 /** The policy read and roots both clone-reap surveys share, so they cannot drift. */
@@ -37040,51 +31602,11 @@ function logCloneReapRow(
  * (live-pid, live-branch, recent-activity, activity-unknown) still applies unchanged.
  */
 export function logWorktreeReapBootSurvey(
-  config: Config,
-  log: (step: string, fields: Record<string, unknown>) => void,
-  deps: {
-    root?: () => string;
-    reap?: typeof reapStaleWorktrees;
-    policy?: () => { enabled: boolean };
-    isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
-    /** W1-T2694: injected ratification pins — same seam shape as `policy` above. */
-    ratifications?: Ratifications;
-  } = {},
-): WorktreeReapSummary | null {
-  try {
-    const readPolicy =
-      deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.worktreeReapBoot);
-    const policyBlock = readPolicy();
-    // W1-T2694 (design (ii)): same "refuse forces dry-run, never widen" direction as
-    // {@link logCloneReapSurvey} — this rung can destroy uncommitted worktrees when armed.
-    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
-    const pin = ratificationPinCheck("worktreeReapBoot", policyBlock, WORKTREE_REAP_BOOT_CONTRACT_VERSION, pins);
-    if (!pin.fire) log("rung.unratified", { rung: "worktreeReapBoot", diff: pin.diff });
-    const enabled = pin.fire && policyBlock.enabled;
-    const reap = deps.reap ?? reapStaleWorktrees;
-    const root = (deps.root ?? (() => worktreesDir(config)))();
-    const summary = reap(root, {
-      dryRun: !enabled,
-      isPidAlive: deps.isPidAlive ?? worktreeLockIsPidAlive,
-    });
-    if (summary.reaped.length || summary.reapedLocks.length) {
-      log("worktree.reap_boot", {
-        dry_run: !enabled,
-        reaped: summary.reaped.length,
-        reaped_locks: summary.reapedLocks.length,
-      });
-    }
-    // W1-T378's own doctrine, unchanged: an `activity-unknown` keep is the reaper declining to
-    // decide, and it is what bounds disk growth now that an ambiguous signal keeps rather than
-    // destroys — so it earns its own row exactly as runWorktreeReapRung's does.
-    const undecidable = (summary.keptReasons ?? []).filter((k) => k.reason === "activity-unknown");
-    if (undecidable.length) {
-      log("worktree.reap_boot.undecidable", { kept: undecidable.map((k) => k.name) });
-    }
-    return summary;
-  } catch {
-    return null; // best-effort, exactly like the sibling boot sweeps — never blocks the dispatch
-  }
+  config: Parameters<ReturnType<typeof runTaskCommandHelpers>["logWorktreeReapBootSurvey"]>[0],
+  log: Parameters<ReturnType<typeof runTaskCommandHelpers>["logWorktreeReapBootSurvey"]>[1],
+  deps: Parameters<ReturnType<typeof runTaskCommandHelpers>["logWorktreeReapBootSurvey"]>[2] = {},
+): ReturnType<ReturnType<typeof runTaskCommandHelpers>["logWorktreeReapBootSurvey"]> {
+  return runTaskCommandHelpers(runTaskCommandHost()).logWorktreeReapBootSurvey(config, log, deps);
 }
 
 /** The rung's default sweeps: each the awaited twin of the sync sweep it replaced, so none of them
@@ -37173,93 +31695,11 @@ export async function runRepositoryMaintenanceRung(
  * the real sweeps against their real roots/policy.
  */
 export async function logDiskReclaimRung(
-  config: Config,
-  log: (step: string, fields: Record<string, unknown>) => void,
-  deps: {
-    sweepTempDirs?: (opts?: TempSweepOpts) => TempSweepSummary | Promise<TempSweepSummary>;
-    reapClonesSurvey?: (
-      ...a: Parameters<typeof logCloneReapSurveyAsync>
-    ) => CloneReapSummary | null | Promise<CloneReapSummary | null>;
-    cloneReapDeps?: Parameters<typeof logCloneReapSurveyAsync>[2];
-    sweepWorkerHomes?: (
-      ...a: Parameters<typeof sweepStaleWorkerHomes>
-    ) => ReturnType<typeof sweepStaleWorkerHomes> | Promise<ReturnType<typeof sweepStaleWorkerHomes>>;
-    workerHomeRoot?: () => string;
-    /** W1-T3092: the object reaper. Seams mirror the three sweeps above — appended LAST so no
-     *  positional caller shifts. `policy` and `ratifications` follow logWorktreeReapBootSurvey. */
-    reapObjects?: (repoDir: string, inflightDir: string, deps: ObjectReapDeps) => ObjectReapResult | Promise<ObjectReapResult>;
-    objectRepoDir?: () => string;
-    objectInflightDir?: () => string;
-    objectPolicy?: () => { enabled: boolean };
-    ratifications?: Ratifications;
-    /** W1-T4022: the real `lsof`-backed probe (src/lib/clone-reaper.ts) — a test can still inject
-     *  its own; production leaves this unset and gets the AWAITED, bounded
-     *  {@link defaultOpenFileCountAsync}, never the fail-closed `() => 1` object-reaper.ts falls back
-     *  to when NOTHING supplies a counter. */
-    objectOpenFileCount?: (dir: string) => number;
-    /** W1-T4022: where the consecutive-refusal streak persists across daemon restarts. */
-    objectStreakPath?: () => string;
-    objectOwnInflightLock?: string;
-    /** 2026-10-06: the daemon's own checkout, reaped as a second repo with its own streak. */
-    objectDaemonCheckoutDir?: () => string;
-  } = {},
-): Promise<{
-  tempDirsRemoved: number;
-  clonesReaped: number;
-  cloneBytesReclaimed: number;
-  workerHomesRemoved: number;
-  objectsPruned: number;
-  objectsWouldPrune: number;
-}> {
-  // AWAITED (2026-10-06): every sweep's default is the off-loop twin of the sync sweep it replaced.
-  const sweepTempDirs = deps.sweepTempDirs ?? DISK_RECLAIM_DEFAULT_SWEEPS.sweepTempDirs;
-  const reapClonesSurvey = deps.reapClonesSurvey ?? DISK_RECLAIM_DEFAULT_SWEEPS.reapClonesSurvey;
-  const sweepWorkerHomes = deps.sweepWorkerHomes ?? DISK_RECLAIM_DEFAULT_SWEEPS.sweepWorkerHomes;
-
-  let tempDirsRemoved = 0;
-  try {
-    tempDirsRemoved = (await sweepTempDirs()).removed.length;
-  } catch {
-    // best-effort — a throw here must never block the dispatch or the other two sweeps
-  }
-
-  let clonesReaped = 0;
-  let cloneBytesReclaimed = 0;
-  try {
-    // Suppressed logger: logCloneReapSurvey already best-effort-catches internally, but an
-    // injected `reapClonesSurvey` test double could still throw — belt-and-suspenders so this
-    // guard behaves identically to the other two.
-    const summary = await reapClonesSurvey(config, () => {}, deps.cloneReapDeps);
-    clonesReaped = summary?.reaped.length ?? 0;
-    cloneBytesReclaimed = summary?.bytesReclaimed ?? 0;
-  } catch {
-    // best-effort — a throw here must never block the dispatch or the other two sweeps
-  }
-
-  let workerHomesRemoved = 0;
-  try {
-    const root = (deps.workerHomeRoot ?? (() => workerHomeDir(config)))();
-    workerHomesRemoved = (await sweepWorkerHomes(root, { stateRoot: config.root })).removed.length;
-  } catch {
-    // best-effort — a throw here must never block the dispatch or the other two sweeps
-  }
-
-  const objectsPruned = 0;
-  const objectsWouldPrune = 0;
-
-  if (tempDirsRemoved || clonesReaped || workerHomesRemoved || objectsPruned || objectsWouldPrune) {
-    log("run.disk_reclaim", {
-      tmp_dirs_removed: tempDirsRemoved,
-      clones_reaped: clonesReaped,
-      clone_bytes_reclaimed: cloneBytesReclaimed,
-      worker_homes_removed: workerHomesRemoved,
-      objects_pruned: objectsPruned,
-      // SURVEY ESTIMATE, at survey time — the armed pass runs later against a repo that has moved.
-      objects_would_prune: objectsWouldPrune,
-    });
-  }
-
-  return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
+  config: Parameters<ReturnType<typeof runTaskCommandHelpers>["logDiskReclaimRung"]>[0],
+  log: Parameters<ReturnType<typeof runTaskCommandHelpers>["logDiskReclaimRung"]>[1],
+  deps: Parameters<ReturnType<typeof runTaskCommandHelpers>["logDiskReclaimRung"]>[2] = {},
+): ReturnType<ReturnType<typeof runTaskCommandHelpers>["logDiskReclaimRung"]> {
+  return runTaskCommandHelpers(runTaskCommandHost()).logDiskReclaimRung(config, log, deps);
 }
 
 /**
@@ -37847,8 +32287,8 @@ export function reviewerCodeRecoveryFromLoadedModule(
 // contract that existing daemon wiring tests inspect.
 const daemonDefaultBuildSweepHook = buildSweepHook;
 const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
-type DaemonSweepHookBuilder = typeof buildSweepHook;
-type DaemonSweepLightHookBuilder = typeof buildSweepLightHook;
+
+
 
 export function logLearningsUsed(
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -37856,12 +32296,7 @@ export function logLearningsUsed(
   injectedIds: readonly string[],
   usagePath?: string,
 ): void {
-  const parsed = parseLearningsUsed(text, injectedIds);
-  const row = parsed
-    ? { used_ids: parsed.usedIds, injected_ids: parsed.injectedIds, refused: parsed.refused }
-    : { silent: true, injected_ids: [...injectedIds] };
-  log("learnings.used", row);
-  if (usagePath) recordLearningUsage(usagePath, row);
+  return runTaskCommandHelpers(runTaskCommandHost()).logLearningsUsed(log, text, injectedIds, usagePath);
 }
 
 /** W1-T4114: `logLearningsUsed`'s own mirror for `SKILLS_USED` — the skills the knowledge
@@ -37872,12 +32307,7 @@ export function logSkillsUsed(
   injectedNames: readonly string[],
   usagePath?: string,
 ): void {
-  const parsed = parseSkillsUsed(text, injectedNames);
-  const row = parsed
-    ? { used_names: parsed.usedNames, injected_names: parsed.injectedNames, refused: parsed.refused }
-    : { silent: true, injected_names: [...injectedNames] };
-  log("skills.used", row);
-  if (usagePath) recordSkillUsage(usagePath, row);
+  return runTaskCommandHelpers(runTaskCommandHost()).logSkillsUsed(log, text, injectedNames, usagePath);
 }
 
 export function memoryLintCommand(rest: string[]): number {
@@ -38467,16 +32897,7 @@ function refreshKnowledgeAssertions(root: string): string[] {
 }
 
 /** What {@link buildRegisteredGarden} builds a garden over: the daemon's own config, repo and ledger writers. */
-export interface GardenBuildContext {
-  codeSha?: string;
-  pollIntervalMs?: number;
-  config: Config;
-  repoRoot: string;
-  owner: string;
-  repo: string;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-  raiseDuplicate: (e: Escalation) => string;
-}
+export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
   return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log });
@@ -38559,6 +32980,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
+    case "review-replay": {
+      const d = deps("review-replay");
+      return gardenPass(reviewReplayGardenSpec(d, () => {
+        const sha = reviewerHealthRowFields("review.posted", undefined).reviewer_code_sha;
+        if (typeof sha !== "string") throw new Error("review replay generator revision is unavailable");
+        return sha;
+      }), d);
+    }
     case "inbox": {
       return withDue(async () => {
         const { scope, ports } = await inboxGardenerRunTaskPorts(ctx);
@@ -39044,7 +33473,7 @@ export async function runInChildWhenOn(
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const inProcess = (reason: string): undefined => {
     if (input.mayRunInProcess?.(reason) === false) {
-      throw new TaskAdmissionError(`restart latched: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
+      throw new TaskAdmissionError(`restart decided: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
     }
     return undefined;
   };
@@ -39075,1636 +33504,111 @@ export async function runInChildWhenOn(
 
 export async function daemonCommand(
   rest: string[],
-  deps: {
-    /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
-     *  BATCHED {@link buildBatchedGithub} — one NON-search `gh pr list` per projection, which is
-     *  what keeps merge state derivable while GitHub's GraphQL `search()` connection is
-     *  throttled. Mirrors {@link drainCommand}'s identical seam so a test can prove which
-     *  gateway the daemon derives from without a network round-trip. */
-    githubFactory?: (owner: string, repo: string) => GitHub;
-    /** Injectable self-target repo root. Defaults to this module's real `repoRoot`. A
-     *  self-target run with no explicit `--plan` derives its plan path from THIS value
-     *  (`resolveDaemonTarget`) and then git-syncs it (`syncPlanOrRefuse`) — a test that
-     *  needs to drive that sync's REFUSED/WARNING branches (its own `say` callback,
-     *  W1-T143) without a real `git fetch origin` against this repo's actual remote
-     *  points it at a local git fixture instead. Production never passes this. */
-    repoRoot?: string;
-    /** Injectable daemon loop (W1-T160 coverage seam). Defaults to the real {@link runDaemon}.
-     *  A test passes a stub that captures the wired `DaemonDeps` and returns immediately, so the
-     *  hook-wiring the daemon builds just before its loop (checkRetroTrigger/runRetroTrigger,
-     *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
-     *  passes this. */
-    runDaemon?: typeof runDaemon;
-    runTask?: typeof runTask;
-    readRunChildMode?: () => RunChildMode;
-    /** Command seams for the selected-repository PR-action wiring test. Production keeps the
-     * established fix/review implementations; tests inject terminal fakes without touching GitHub. */
-    fixCommand?: typeof fixCommand;
-    reviewCommand?: typeof reviewCommand;
-    /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
-     * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
-     * the full and light paths without reading this source file as text. */
-    buildSweepHook?: DaemonSweepHookBuilder;
-    buildSweepLightHook?: DaemonSweepLightHookBuilder;
-    /** Injectable mutable boot routine. Tests use it to prove an already-held fleet does not
-     * enter daemonBoot's sweeps or keychain work. */
-    daemonBoot?: typeof daemonBoot;
-    /** Optional control readers for command-level wiring tests. Production omits them and reads
-     * the canonical local/shared fleet controls below. */
-    checkStop?: () => string | undefined;
-    checkPause?: () => string | undefined;
-    /** Injectable W1-T2568 wake wiring and signal re-raise for deterministic shutdown coverage.
-     * Production keeps the real filesystem watcher and `process.kill`; tests can observe that
-     * the watcher closes before the daemon re-raises SIGINT/SIGTERM without signalling the test
-     * runner itself. */
-    wireSweepWake?: typeof wireSweepWakeToDaemon;
-    processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
-    /** Best-effort boot projection for provider routing; production writes one bounded state file. */
-    writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
-    bootClaimReserver?: DispatchClaimReserver;
-    tickClaimReserver?: DispatchClaimReserverAsync;
-    /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
-    checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
-    /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
-    now?: () => number;
-    /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate — see drainCommand's
-     *  identical seam. Production omits it and reads the real `/proc/meminfo`. */
-    readAvailableMemoryMib?: () => number;
-    readQueuePressure?: typeof productionFixPressure;
-    /** W1-T3401: injectable residual escalation judge for `escalateBlock` below (the SAME seam
-     *  shape `runFixRung`'s own `opts.escalationJudge` already uses — `opts.escalationJudge ??
-     *  realEscalationJudge({...})`). Production omits it and gets the real, cheapest-mount,
-     *  no-tools spawn; a test injects a fake so the block-escalation wiring is exercised without
-     *  a real worker spawn. */
-    escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
-    gardenPassesInProcess?: boolean;
-    /** W1-T5361 test seam: the garden pass spawn every registered garden runs through, instead of the child. */
-    gardenPassSpawn?: GardenPassSpawn;
-    /** W1-T5115 test seams: the App refresh whose `ready` gates the git credential socket, and an
-     *  in-process mint for that socket. Production omits both: the real refresh, and the socket on
-     *  its own thread minting through `mintScopedToken`. */
-    startGithubAppRefresh?: typeof startInstallationTokenRefresh;
-    gitCredentialMint?: ScopedTokenMint;
-    ciJudgeIo?: CiJudgeIo;
-    /** The entry's GC tuning (daemon-memory-policy.ts). Production applies it to this process; a test
-     *  injects a recorder so the call is observed without retuning the test runner's own V8. */
-    applyMemoryPolicy?: typeof applyDaemonMemoryPolicy;
-  } = {},
+  deps: Parameters<typeof daemonCommandFromModule>[1] = {},
 ): Promise<number> {
-  // 2026-10-10: FIRST, BEFORE ANYTHING ALLOCATES. Keep the heap a fixed multiple of what survives each
-  // collection instead of letting garbage reach ~4x the live set under the 8 GB ceiling, and take that
-  // ceiling out of the NODE_OPTIONS every child inherits. Never fatal: a malformed policy row boots on
-  // the defaults and names itself on the daemon.memory_policy row below.
-  const memoryPolicyRead = readDaemonMemoryPolicy(policyPath(deps.repoRoot ?? repoRoot));
-  const memoryPolicyApplied = (deps.applyMemoryPolicy ?? applyDaemonMemoryPolicy)(memoryPolicyRead.policy);
-  // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
-  // every `appendLedger` call this process makes (in-process, e.g. a wired sweep tick) from here
-  // on reports `actor: "daemon"` rather than the operator-shell default. See
-  // `deriveLedgerActor`'s doc (src/lib/ledger.ts) for why a worker this daemon later spawns is
-  // still `"worker"` despite inheriting this same env marker.
-  markDaemonProcessActor();
-  // W1-T7092: subscribe the worker-heaps registry before anything below can spawn a thread, exactly
-  // as serve does, so daemon.alive can size every worker isolate by its spawn site.
-  workerThreads();
+  return daemonCommandFromModule(rest, deps, daemonCommandHost());
+}
 
-  // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
-  // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
-  // takes only these flags; anything else prints usage and exits non-zero, spawning nothing.
-  const badArg = unknownArgError(
-    "daemon",
-    rest,
-    ["--max", "--poll-ms", "--repo", "--plan"],
-    ["--dry-run", "--allow-self-target", "--allow-stale"],
-  );
-  if (badArg) {
-    writeSyncLine(2, badArg + "\n" + USAGE);
-    return 2;
-  }
-  const allowStale = rest.includes("--allow-stale");
-  const maxIdx = rest.indexOf("--max");
-  const pollIdx = rest.indexOf("--poll-ms");
-  // W1-T253 (P37 CONSUMERS): pollIntervalMs + the headroom curve read from `plan/policy.yaml`
-  // (never `daemon.ts`'s own fs-free literal defaults — see headroomPolicyFromCurve's doc)
-  // on every real invocation, so a plan-reviewed policy edit retunes the LIVE daemon with
-  // zero code change.
-  const policy = loadPolicy(policyPath(repoRoot));
-  const opts: DaemonOpts = {
-    max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : undefined,
-    pollIntervalMs: pollIdx >= 0 ? Number(rest[pollIdx + 1]) : policy.values.pollIntervalMs,
-    headroomPolicy: headroomPolicyFromCurve(policy.values.headroom.curve),
-    // W1-T343 (ADOPT drain's EXISTING LANE MACHINERY, SHIP DARK): the SAME SweepPolicy row
-    // `drainCommand` already reads for `rmd drain` (ONE threshold home, never a second) —
-    // raising either is a policy-data edit (plan/policy.yaml), never a CLI flag or a second
-    // constant here. Default 1 keeps this call BYTE-IDENTICAL to before this task — see
-    // `DaemonOpts.laneCount`'s own doc for the proof.
-    laneCount: DEFAULT_SWEEP_POLICY.dispatchLanes,
-    wipLimit: DEFAULT_SWEEP_POLICY.wipLimit,
-    // W1-T1044: the wall-clock bound on `await deps.sweep()`. W1-T1219: this row no longer also
-    // feeds `buildSweepEffects`'s fix-rung worker-spawn bound — a sweep tick and that spawn are
-    // different populations, so each now reads its OWN `plan/policy.yaml` row (see
-    // `fixSpawnWallClockBoundMs`'s own doc for why one row could no longer bound both).
-    sweepWallClockBoundMs: policy.values.sweepWallClockBoundMs,
-  };
-  const config = loadConfig();
-  // Headroom governor switch (operator ruling fb-1784894405468-a4153e; default clause
-  // reversed 2026-07-25 — the switch now defaults ON, and this host opts OUT explicitly
-  // via config `headroom.enabled: false`): resolve the host posture from config/env HERE
-  // and pass it explicitly, so the live daemon reads the flag while the library keeps
-  // its enforcement default.
-  opts.headroomEnabled = resolveHeadroomEnabled(config) && !providerRoutingOwnsHeadroom(config);
-  const ledgerPath = ledgerPathFor(config);
-  const statusPath = join(config.root, "state", "status.json");
-  const self = resolveOwnerRepo();
-  const reposDir = join(config.root, "repos");
-  // deps.repoRoot's doc (above, W1-T143) explains why this is injectable at all.
-  const effectiveRepoRoot = deps.repoRoot ?? repoRoot;
-  // W1-T3581: capture the SHA of the source tree that loaded THIS daemon process once. The
-  // mutable checkout may advance while the process stays alive, so it cannot prove which review
-  // code is executing. This is intentionally the same module-relative source used for the
-  // daemon.boot `boot_head_sha` below, and is never refreshed from cwd or HEAD during a sweep.
-  const daemonModuleRepoDir = dirname(dirname(fileURLToPath(import.meta.url)));
-  const daemonLoadedCodeSha = (() => {
-    try {
-      return execFileSync("git", ["-C", daemonModuleRepoDir, "rev-parse", "HEAD"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-    } catch {
-      return undefined;
-    }
-  })();
-  const reviewerCodeRecovery = {
-    ...reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha),
-    freshTreeReviewAvailable: true,
-  };
-  const buildSweepHook: DaemonSweepHookBuilder = (...args) => withGoalRemeasurement(
-    withCiJudgeAfterSweep((deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args), () => target.isSelf ? kickCiJudge?.() : undefined),
-    () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
-      tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
-      log }), log);
-  const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
+/**
+ * W1-T9089: the daemon wiring's answer to a failing run-child contract. With the in-process restart path retired, `auto`
+ * no longer demotes; each `contract_failing` decision escalates once per evidence window through `deliver`, the
+ * daemon's existing escalate path, and ledgers `run_child.contract_failing`. Returns the per-decision hook.
+ */
+export function daemonRunChildContract(
+  deliver: (escalation: RunChildContractEscalation) => string | null | undefined,
+  log: (step: string, extra: Record<string, unknown>) => void,
+): (decision: RunChildModeDecision | undefined) => boolean {
+  const escalated = new Set<string>();
+  return (decision) => escalateRunChildContract(decision, { escalate: deliver, log, escalated });
+}
 
-  // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
-  // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
-  // hardcoded the "remudero" gateway, so an unattended run silently drained its own source.
-  // --repo/--plan choose the gateway + plan source; W1-T12d targets the sandbox explicitly.
-  const resolved = resolveDaemonTarget(
-    { selfOwner: self.owner, selfRepo: self.repo, repoRoot: effectiveRepoRoot, reposDir },
-    rest,
-  );
-  if ("error" in resolved) {
-    writeSyncLine(2, resolved.error + "\n" + USAGE);
-    return 2;
-  }
-  const target = resolved.target;
-
-  const runId = `DAEMON-${Date.now()}`;
-  let lastReadPlaneStep: string | undefined;
-  const log = (step: string, extra: Record<string, unknown> = {}) => {
-    lastReadPlaneStep = step;
-    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
-  };
-  // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
-  const fleetRatify = fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath);
-  const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);
-  const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
-    owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
-  })), log);
-  log("daemon.memory_policy", {
-    ...memoryPolicyApplied,
-    tighten_share: memoryPolicyRead.policy.tightenShare,
-    restart_share: memoryPolicyRead.policy.restartShare,
-    heap_size_limit: getHeapStatistics().heap_size_limit,
-    ...(memoryPolicyRead.error ? { policy_error: memoryPolicyRead.error } : {}),
-  });
-  log("daemon.target", {
-    repo: target.repo,
-    gateway: `${target.owner}/${target.repo}`,
-    instance_mode: instanceMode(`${target.owner}/${target.repo}`, readInstanceRegistryText(repoRoot)),
-    plan_path: target.planPath,
-    self_host: target.isSelf,
-    dry_run: target.dryRun,
-  });
-  // W1-T143 (DAEMON OBSERVABILITY): name the daemon's canonical paths ALOUD, at boot,
-  // before ANYTHING else (including a --dry-run early return) — so the ledger location
-  // is provably deterministic (a pure function of config.root, ledgerPathFor) and never
-  // folklore (rationale: config.root defaults to os.homedir()/Remudero, the PARENT of the
-  // repo checkout, not where an operator instinctively looks). Ledgered (`daemon.paths`)
-  // AND printed (writeSyncLine — see its doc for why NOT console.log) so it lands on
-  // whichever channel the operator is actually watching.
-  const outLogPath = join(config.root, "state", "logs", "daemon.out.log");
-  const errLogPath = join(config.root, "state", "logs", "daemon.err.log");
-  log("daemon.paths", { ledger_path: ledgerPath, out_log: outLogPath, err_log: errLogPath });
-  writeSyncLine(
-    1,
-    `### rmd daemon — ledger: ${ledgerPath} | stdout: ${outLogPath} | stderr: ${errLogPath}`,
-  );
-
-  // W1-T1024 — THE FLEET AUTHENTICATES AS THE INSTALLED GITHUB APP, whose core/graphql pool is
-  // measured SEPARATE from an operator's interactive session (github-app.ts's own doc: the
-  // incident that files this task was an operator session exhausting graphql while the daemon's
-  // own traffic in that window was negligible). Started here, once, in the DAEMON'S OWN PROCESS
-  // — process.env only means anything to ITS children, and every existing GH_TOKEN consumer
-  // (env.ts's ALLOWLIST at worker spawn, review.ts's per-call spread, deploy/entrypoint.sh's
-  // credential helper) already reads it at call/spawn time, so refreshing it here reaches all
-  // three with NO call-site change.
-  //
-  // GATED ON CONFIG PRESENCE so an unconfigured host (the App not installed there yet) is BYTE-
-  // IDENTICAL to before this task: zero ledger lines, zero timers, GH_TOKEN's own optional shape
-  // preserved exactly. Where it IS configured, `refreshInstallationToken` mints once immediately
-  // and this loop reschedules itself off the minted `expires_at` (via `nextRefreshDelayMs`,
-  // strictly inside the one-hour life) — or off `REFRESH_MARGIN_MS` when a mint fails, so a
-  // transient outage keeps retrying rather than going silent (design iv: degrade, never refuse).
-  //
-  // THE WORKER GAP IS A KNOWN, ACCEPTED LIMIT (github-app.ts's file header, design iii): a
-  // worker's own GH_TOKEN copy is captured at spawn and held for its whole run, so a run
-  // outliving the token's one-hour life can still hit the failure it always could — closing that
-  // needs a change to worker.ts or git-push.ts, neither of which is in this task's declared
-  // files. This refresher fixes the DAEMON's own calls and every FRESHLY-spawned worker; it does
-  // not retrofit an already-running one.
-  //
-  // W1-T2554 — AWAIT THE FIRST MINT BEFORE THE FIRST BOARD READ. `startInstallationTokenRefresh`
-  // used to end on a bare, unawaited `tick()`, so `GH_TOKEN` was written on its own schedule while
-  // this function fell straight through into the first sweep's `gh api` calls — MEASURED landing
-  // the mint 1.899s AFTER the first board fetch had already failed `auth`. `ready` is present only
-  // when `armed` (a plain-`GH_TOKEN` host with no `GH_APP_*` names has nothing to wait for) and
-  // NEVER rejects (github-app.ts's own doc on `ready`), so this await can only delay the first
-  // sweep by the mint's own latency — it can never hang the daemon or surface a throw here.
-  const githubAppRefresh = (deps.startGithubAppRefresh ?? startInstallationTokenRefresh)({ log });
-  if (githubAppRefresh.ready) {
-    await githubAppRefresh.ready;
-  }
-
-  // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
-  // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
-  // default branch so the scheduled plan is current — a stale clone would drain an old plan.
-  let plan: Plan;
-  const raiseDuplicate = (e: Escalation): string =>
-    escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
-  const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
-  const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
-  const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
-  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
-  const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
-    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
-  const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
-  const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
-    daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
-    gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: registeredGardenEnabled(name, target.isSelf),
-      cadenceMs: Math.max(gardenSchedule(name).intervalFor(opts.pollIntervalMs ?? 60_000), gardenSchedule(name).minIntervalMs),
-      scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
-  const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
-    registeredGardenEnabled(name, target.isSelf)
-      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) })
-      : { stop() {} };
-  if (!target.isSelf && !flagValue(rest, "--plan")) {
-    const repoDir = join(reposDir, target.repo);
-    if (!existsSync(repoDir)) {
-      mkdirSync(dirname(repoDir), { recursive: true });
-      ghExec(["repo", "clone", `${target.owner}/${target.repo}`, repoDir], { stdio: "inherit" });
-    } else {
-      execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
-      execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
-    }
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
-  } else if (target.isSelf && !flagValue(rest, "--plan")) {
-    // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
-    // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
-    const synced = await syncPlanOrRefuseAsync(target.planPath, {
-      allowStale,
-      log,
-      say: (msg) => writeSyncLine(2, `### rmd daemon — ${msg}`),
-      quarantine: reportPlanQuarantine,
-      planSnapshot: planReaders.boot,
-    });
-    if ("error" in synced) return 1;
-    plan = synced.plan;
-  } else {
-    // An explicit --plan overrides the derived path — read it literally, no git sync.
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
-  }
-
-  // `lastProj` also backs `isOpenPr` (W1-T80, the in-flight dispatch-dedup
-  // guard) — the SAME projection `refreshMerged` just derived, never a second
-  // GitHub read path.
-  let lastProj: Map<string, StatusProjection> | undefined;
-  let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
-  const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
-  const targetCheckoutRoot = target.isSelf ? repoRoot : join(config.root, "repos", target.repo);
-  const targetCommitTrailerIndex = () =>
-    buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
-  const gatewayFor = createDaemonGatewayFactory(config.root, log, {
-    snapshotFor: boardSnapshotFor,
-    trailerIndexFor: (o, r) => (o === target.owner && r === target.repo ? targetCommitTrailerIndex : undefined),
-  });
-  const githubFactory = deps.githubFactory ?? gatewayFor;
-
-  // W1-T2509 — ONE GATEWAY PER owner/repo FOR THE WHOLE DAEMON, handed to every dispatch lane.
-  // STILL SEPARATE FROM `githubFactory` ABOVE, but no longer because the projection gateway is
-  // short-lived: R-24 hoisted that one too (`projectionGithub`, below), so both now live for the
-  // whole lifetime. What remains separate is the RESET — the projection gateway drops its failure
-  // verdicts at the top of every tick, the LANE gateway never does, because the lanes of ONE tick
-  // are admitted together and should answer from ONE snapshot. Keyed per owner/repo, so a task
-  // carrying a different `repo:` is never answered by the target's gateway.
-  //
-  // KEYED ON owner/repo, NOT ON THE DRAIN TARGET: a task carrying a different `repo:` than the
-  // drain's must never be answered by the target's gateway. Staleness is bounded by
-  // `buildBatchedGithub`'s own `ttlMs` (15 s default, far under `pollIntervalMs`), so a warm
-  // gateway still refetches every poll — warming changes a fetch's SHAPE, never whether one
-  // happens (`buildInboxDraftHook`'s doc makes the identical argument, with measurements).
-  const laneGithubFor = memoiseGatewayByRepo((o, r) => (deps.githubFactory ? deps.githubFactory(o, r) : gatewayFor(o, r)));
-  // W1-T9647/W1-T9763: the plans held are counted on `daemon.memory`; one revision is one instance there.
-  const daemonPlanCopies = createPlanCopyBook({ refs: () => [plan, activePlanRef.current, tickReadGeneration?.facts.plan] });
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, observedPlanSync(planReaders.sync, daemonPlanCopies.observe));
-  // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
-  // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
-  // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
-  // reassigns either for the life of the process — so there is no repo change for a rebuilt
-  // instance to track, and `drainCommand`'s `owner`/`repo` are `const` for the same reason.
-  //
-  // THE DEFECT. `buildBatchedGithub` holds `knownBoardPrs` — the row cache `fetchBoardPrsRest`'s
-  // early stop compares against — at GATEWAY scope. Invoking the factory INSIDE `refreshMerged`
-  // therefore handed every tick a gateway with an empty cache, so `projectPlan` →
-  // `listMergedHeadBranches` → `index` → `mergedRows` → the closed half walked the repo COLD every
-  // tick: the code's own 2026-08-26 measurement is 25 requests / 21.8 s at 2,400 PRs, and this
-  // repo has passed 4,080. The REST `sort=updated&direction=desc` early stop can only pay off on
-  // an instance that outlives one tick. It is the same fix `memoiseGatewayByRepo` (above) already
-  // applied to the LANE gateway, applied to the one consumer that reads on every tick.
-  //
-  // AND WHY THE OLD PER-TICK INSTANCE IS NOT SIMPLY LOST. It bought exactly one property: a
-  // gateway closes over mutable failure verdicts, and a hoisted instance would let one tick's
-  // outage mark every later tick indeterminate. `resetFailureFlags()` (called at the top of
-  // `refreshMerged`, below) buys that property directly and per tick, without discarding the
-  // delta cache alongside it — see that method's own doc for why a failed half's EMPTY rows are
-  // dropped WITH its verdict rather than left behind under a healthy label.
-  const activePlanRef: { current: Plan } = { current: plan };
-  const projectionGithub = githubFactory(target.owner, target.repo);
-  const boardOpenPrCount = createOpenPrCountObservation();
-  const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
-    if (freshReadGeneration(tickReadGeneration, { consumer: "refresh_merged", log })) {
-      const projection = lastProj;
-      return (id) => projection?.get(id)?.merged ?? false;
-    }
-    // R-24: called once per tick, because `refreshMerged` is called once per tick — `runDaemon`'s
-    // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
-    projectionGithub.resetFailureFlags?.();
-    boardOpenPrCount.reset();
-    const proj = projectPlan(
-      planOverride,
-      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe, skipUncreditedBuildWarning: true },
-      statusPath,
-    );
-    lastProj = proj;
-    return (id: string) => proj.get(id)?.merged ?? false;
-  };
-  const isOpenPr: OpenPrCheck = (id) => {
-    const p = lastProj?.get(id);
-    return p?.prState === "OPEN" ? p.prNumber : undefined;
-  };
-  // W1-T2675: the credit-read-failed probe, off the SAME `lastProj` snapshot `isOpenPr` reads and
-  // `refreshMerged` just built — never a second GitHub read path. `merged: false` alone cannot tell
-  // "no credit exists" from "the credit read failed"; `indeterminate` is the field that can, and
-  // `StatusProjection`'s own doc requires a dispatch gate to treat it as DO NOT ACT.
-  const isCreditIndeterminate = (id: string): boolean => lastProj?.get(id)?.indeterminate === true;
-  const isIndependentFailureBlocked = (id: string): boolean =>
-    lastProj?.get(id)?.independentFailureBlocked === true;
-  // W1-T2397: the SAME observation drainCommand builds, on the lane that carries the dispatches —
-  // `daemon.boot` 347 and `run.start` 558 against `drain.start` 16, and the motivating instance
-  // (W1-T2387 dispatched while #3102 was open, producing #3109) came through HERE. Reads
-  // `lastProj`, the same projection `isOpenPr` just above and `openPrCount` just below read, so it
-  // adds no fetch of its own.
-  const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("daemon", () => lastProj, log);
-  // W1-T3144: identical to drainCommand — complete board depth from the projection's existing
-  // batch read, with the old projection count retained only for gateways that omit that method.
-  // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
-  const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
-    let projected = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
-    return projected;
-  });
-  const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
-  // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
-  if (target.dryRun) {
-    // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
-    // drain.ts's own fs-free literal default.
-    const seq = plannedSequence(plan, refreshMerged(), { max: opts.max ?? policy.values.drain.max });
-    writeSyncLine(1, `### rmd daemon --dry-run — target ${target.owner}/${target.repo} · plan ${target.planPath}`);
-    writeSyncLine(1, seq.length ? seq.map((id, i) => `  ${i + 1}. ${id}`).join("\n") : "  (nothing runnable now)");
-    if (target.isSelf) writeSyncLine(2, "  ⚠️ SELF-HOSTING target — the daemon's own source repo.");
-    return 0;
-  }
-
-  // W1-T414: ONE batched read for this whole `rmd daemon` invocation — see drainCommand's
-  // identical wiring/doc just above. Resolved AFTER the `--dry-run` early return above (never
-  // before it — a preview must spawn/read nothing beyond `refreshMerged`'s own projection), and
-  // once at boot, like `breakerGateFor`'s own cache immediately below, rather than re-fetched
-  // per tick.
-  // W1-T2318: DEFERRED, NOT REMOVED. `listOpenHeadBranches()` is a full board walk — MEASURED at
-  // 26 sequential REST calls and 22.2s, of which the single open page its consumers actually read
-  // took 432ms — and computing it HERE put all of it on the boot critical path, synchronously,
-  // before anything needed the result. The closed half of that walk is still built, still shared,
-  // and still correct for `findMergedByTrailer`/`findMergedByTrailerAll`/`findMergedByHeadBranch`
-  // (W1-T377's design, deliberately untouched); it is simply no longer this caller's boot cost.
-  //
-  // MEMOISED HERE TOO, not just inside `breakerGateFor`, because `isFeedbackOpenPr` below reads the
-  // SAME list and must not trigger a second walk.
-  let openHeadBranchesMemo: ReadonlyArray<PrRef> | null | undefined;
-  let openHeadBranchesRead = false;
-  const openHeadBranchesForBreaker = (): ReadonlyArray<PrRef> | null | undefined => {
-    if (!openHeadBranchesRead) {
-      // R-24: the SAME instance `refreshMerged` reads, never a second gateway — see the identical
-      // line in `drainCommand`.
-      openHeadBranchesMemo = projectionGithub.listOpenHeadBranches?.();
-      openHeadBranchesRead = true;
-    }
-    return openHeadBranchesMemo;
-  };
-  // W1-T3758: one bounded archive scan before the daemon starts dispatching. The live ledger is
-  // still read at each gate consultation; unread history retains the old live-only behaviour.
-  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath));
-  if (archivedLifetime.history === undefined) {
-    log("dispatch.lifetime_history_unavailable", {
-      archive_count: archivedLifetime.archiveCount,
-      unread_archives: archivedLifetime.unread,
-      reason: archivedLifetime.unavailableReason,
-    });
-  } else {
-    log("dispatch.lifetime_history_loaded", {
-      archive_count: archivedLifetime.archiveCount,
-      records: archivedLifetime.records,
-    });
-  }
-  // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
-  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker, archivedLifetime.history);
-  // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
-  // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
-  // indeterminate when the ledger's dispatch-breaker read for this task cannot be
-  // trusted (absent/rotated ledger reading as fewer dispatches than a live process
-  // already knows about) — nextRunnable already skips-and-retries on indeterminate
-  // rather than escalating, exactly the behavior a torn read needs here too.
-  const isIndeterminate = (id: string) =>
-    lastProj?.get(id)?.indeterminate === true || breakerGate.isIndeterminate(id);
-
-  if (target.isSelf) {
-    writeSyncLine(
-      2,
-      `### rmd daemon — SELF-HOSTING: draining the daemon's own source repo '${target.repo}' (--allow-self-target).`,
-    );
-  }
-
-  // SINGLE-INSTANCE GUARD, shared with `rmd drain` (same lock file/docs/archive/DIAGNOSIS.md
-  // diag/drain-concurrency): refuse to start a daemon while a drain (or another
-  // daemon) already holds it; reclaim a stale (dead-pid) lock.
-  const drainLockPath = join(config.root, "state", "drain.lock");
-  let drainLock;
-  try {
-    drainLock = acquireDrainLock(drainLockPath);
-  } catch (e) {
-    if (e instanceof DrainLockError) {
-      writeSyncLine(
-        2,
-        `### rmd daemon REFUSED — a drain/daemon is already running ` +
-          `(pid ${e.holder.pid} on ${e.holder.host}, started ${e.holder.startedAt}).\n` +
-          `If that process is dead, remove ${drainLockPath} and retry.`,
-      );
-      return 1;
-    }
-    throw e;
-  }
-  const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
-  const landedClaimRerunReported = new Set<string>();
-  try {
-    const swept = releaseReplacedContainerClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
-      localHost: hostname(),
-      lockHeldSinceMs: bootClaimLock.now(),
-      lockHeldSinceIso: bootClaimLock.iso(),
-      findMintRow: (taskId, anchor) => findClaimMintRow(dirname(ledgerPath), taskId, anchor),
-    });
-    for (const claim of swept) {
-      log("dispatch.claim_released", { ref: dispatchClaimRef(claim.taskId), surface: "boot-sweep", arm: claim.arm, release: claim.release, dropped: claim.dropped, reason: claim.reason });
-    }
-  } catch (error) {
-    log("dispatch.claim_sweep_failed", { surface: "boot-sweep", error: String((error as Error)?.message ?? error).slice(0, 300) });
-  }
-  // Publish only after this process owns the shared daemon/drain lock. Dry-run returned above,
-  // and a refused second daemon returned from the catch, so neither can replace material state.
-  // This is telemetry only: disk failure must not change whether the daemon starts.
-  const bootProviderRoutingPolicy = resolveProviderRoutingPolicy(config.root, config);
-  if (bootProviderRoutingPolicy.fallback) {
-    log("daemon.provider_routing_policy_fallback", { reason: bootProviderRoutingPolicy.fallback.reason });
-  }
-  try {
-    (deps.writeProviderRoutingStatus ?? writeProviderRoutingStatus)(config.root, {
-      state: "not-probed",
-      enabledProviders: bootProviderRoutingPolicy.routableProviders,
-      reservePercent: bootProviderRoutingPolicy.reservePercent,
-      observedAtMs: Date.now(),
-      cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
-      policy: bootProviderRoutingPolicy,
-    });
-  } catch {
-    log("daemon.provider_routing_status_write_failed", { reason: "write-failed" });
-  }
-  // W1-T2787: ONE observer closure is shared by the ordinary full sweep and the daemon-side
-  // settled-check callback below. Its brief cache uses the SAME committed settle window, so an
-  // event observation followed immediately by the awakened full sweep spends one GitHub read,
-  // not two. Serve still only writes the signed marker and never receives this callback.
-  const mainHealthRung = buildMainHealthRung(target.owner, target.repo, {
-    fetch: (args) => ghJsonAsync(args),
-    issues: ghIssueGatewayAsync(target.owner, target.repo),
-    ledgerPath,
-    runId,
-    log,
-    freshMs: policy.values.githubEventWake.checkSettleMs,
-    readCiFailures: (rollup) => fetchCiFailuresAsync(target.owner, target.repo, [...(rollup ?? [])]),
-    requeueCheck: (failure) => requeueActionsJobAsync(target.owner, target.repo, failure, log),
-    // An attempt at a red that ended without a fix asks this judge for another; the dedupe is the red.
-    judgeRepairProgress: productionFixProgressJudge({ cwd: effectiveRepoRoot, settingsFile: join(effectiveRepoRoot, "settings", "worker.json") }),
-    // W1-T4056: judge only the checks that gate a merge. A scheduled monitor attaches its run to main's
-    // head too, and judging it filed 65 of 83 "main is red" issues; a red one is now ledgered as
-    // `advisory_failing_checks`. [] on any unreadable contract keeps "judge every check", never green.
-    readRequiredChecks: () => readCiGateRequiredChecks(targetCheckoutRoot),
-    // W1-T6403: a located red is repaired through a priority fix PR, then a revert PR, never a push.
-    repair: mainRepairLaneFor(target.owner, target.repo, config, ledgerPath, runId),
-    // A red that is only a ratified ceiling is read from the failing shard's own log, then recorded.
-    readCeilingVerdict: (check) => readMainCeilingVerdictAsync(target.owner, target.repo, check),
-    // W1-T9665: which failing tests each merge since green reaches, over this checkout's import graph.
-    readAffectedInput: (changed) => readAffectedSuitesInputAsync(targetCheckoutRoot, changed),
-  });
-  // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
-  // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
-  // shared state directory `remudero-serve`'s `POST /v1/hooks/github` route also writes into,
-  // and returns a drop-in replacement for `DaemonDeps.sleep` that resolves early on a wake —
-  // every idle wait in `runDaemon`'s loop (STOP/PAUSE, "nothing runnable", backoff) already
-  // funnels through that ONE dependency, so this is the entire interrupt: zero changes to
-  // lib/daemon.ts, which stays fs-free. `.close()` MUST run on every exit path (design v: "the
-  // watcher is closed on daemon shutdown and cannot keep the process alive after normal stop")
-  // — wired into `onSignal` immediately below AND the ordinary `finally`, mirroring exactly how
-  // `drainLock.release()`/`consumeStop` are already wired into both.
-  const githubEventWake = (deps.wireSweepWake ?? wireSweepWakeToDaemon)(config.root, log, undefined, {
-    checkSettleMs: policy.values.githubEventWake.checkSettleMs,
-    // W1-T2787: the callback fires when the daemon-side check/status burst settles, even when an
-    // older full sweep is still executing and the resulting wake is refused by its liveness gate.
-    onCheckBurstSettled: () => void mainHealthRung(),
-  });
-  const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
-  const onSignal = (sig: NodeJS.Signals) => {
-    githubEventWake.close();
-    consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
-    drainLock.release();
-    processKill(process.pid, sig); // re-raise with the default handler now cleared
-  };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
-
-  log("daemon.start", {
-    max: opts.max ?? null,
-    poll_interval_ms: opts.pollIntervalMs,
-    lock_pid: drainLock.info.pid,
-    repo: target.repo,
-    // Ruling fb-1784894405468-a4153e: the resolved governor posture, legible each boot.
-    headroom_enabled: opts.headroomEnabled,
-  });
-  // The contract census precedes adoption and boot sweeps; an unreadable corpus is reported, never counted as empty.
-  try {
-    log("run_child.boot_census", { ...censusRunDirs(join(config.root, "state")) });
-  } catch (censusError) {
-    log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
-  }
-  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot, fed every run-child
-  // row this daemon writes since (`childLog`); it keeps counts. W1-T9816: that window and the settlements are one UNION read,
-  // because rotation prunes them from the live file. Read here, before adoption, so the boot's adoption pass is folded once.
-  const bootLedgerLines = readLedgerLines(ledgerPath);
-  const childPolicy = deps.readRunChildMode ?? (() => loadRunChildMode());
-  const bootChildPolicy = readRunChildPolicy(childPolicy);
-  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
-  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
-  const childBoot = childMode
-    ? bootRunChildMode({ stateDir: dirname(ledgerPath), auto: bootChildPolicy.mode === "auto", liveRows: bootLedgerLines, log }) : undefined;
-  const childModeTracker = childBoot?.tracker ?? createRunChildModeTracker(bootLedgerLines);
-  const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
-    log(step, extra);
-    childModeTracker.observe(step, extra);
-  };
-  const adoptedRunIds = new Set<string>();
-  const adoptedChildren: AdoptedRunChild[] = childBoot ? adoptRunChildren({
-    stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log: childLog,
-    settledRunIds: childBoot.settledRunIds,
-  }) : [];
-  for (const child of adoptedChildren) {
-    adoptedRunIds.add(child.runId);
-    void child.settled.then(() => adoptedRunIds.delete(child.runId), () => adoptedRunIds.delete(child.runId));
-  }
-  // Once per boot, after the adoption pass the decision reads: `auto` ledgers what it decided and why.
-  if (bootChildPolicy.mode === "auto") childModeTracker.record(runChildModeFor("auto", childModeTracker.evidence()).decision, log, true);
-  // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
-  // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
-  // though the closure is invoked after that write. See the crashLoopCheck argument below.
-  const priorDaemonBootTs = bootLedgerLines
-    .filter((l) => l.step === "daemon.boot")
-    .map((l) => String(l.ts ?? ""))
-    .filter(Boolean)
-    .slice(-200);
-  // W1-T117/W1-T356: the orphan sweep, composed from the module's OWN exported defaults
-  // (design part i/ii) — ONE shared closure wired into BOTH daemonBoot's boot-time param
-  // (below) and DaemonDeps.sweepOrphans (the per-poll half, at the deps literal further
-  // down), so both halves run the identical attribution/kill/ledger logic rather than two
-  // independently drifting copies. `isRunActive` is `orphanSweepRunActive` (W1-T5998): a lock
-  // alone missed this daemon's lockless reviews and its fix workers. Each kill's own
-  // `worker_orphan_killed` ledger line carries the ORPHAN's run_id/task_id (never this
-  // daemon's own runId), matching `sweepOrphanWorkers`'s `ledger` dep contract.
-  const inflightDir = join(config.root, "state", "inflight");
-  const orphanWorkerScope = workerInstallationScope(config.root);
-  const sweepOrphans = () =>
-    sweepOrphanWorkers({
-      expectedScope: orphanWorkerScope,
-      listCandidates: defaultListCandidates,
-      readMarkers: defaultReadMarkers,
-      isRunActive: orphanSweepRunActive(runId, inflightDir, undefined, adoptedRunIds),
-      kill: (pid) => killProcessGroup(pid),
-      ledger: orphanWorkerKillLedger(ledgerPath),
-    });
-  // W1-T530: the feedback-landing sweep, ONE shared option set wired into BOTH daemonBoot's
-  // boot-time param (below) and DaemonDeps.sweepFeedbackLanding (the per-poll half, at the deps
-  // literal further down) — mirrors `sweepOrphans` immediately above in shape. `repoRoot` (not
-  // `config.root`/`target.repo`'s drained checkout) is the SAME root `captureFeedback`'s CLI
-  // entry point already lands from (line ~16396): `plan/feedback/` is this harness's own inbox.
-  // Only the self-target daemon owns that inbox. A non-self daemon must not push a branch from
-  // this checkout and ask GitHub to create its PR in the unrelated drained repository.
-  // W1-T1000002: `ledgerLines` lets this rung's ONE arm-origin (`ensurePrOpen`, feedback-landing.ts)
-  // honour a standing operator hold — the SAME `ledgerPath` this daemon boot already reads
-  // everywhere else in this function, never a second path construction.
-  // W1-T3990: opening/reusing a landing PR is also a durable review handoff. The callback starts
-  // the SAME review command the board sweep uses, so the first landing cannot sit green-but-
-  // unreviewed waiting for a human. `reviewCommand` owns its pending-post idempotency and exact
-  // head checks; a failed promise is logged and the landing remains open for the next pass.
-  // W1-T3995: extracted into `makeLandingReviewRequest` (parse/dispatch/log, no daemon-boot
-  // state) so the retry/ordering behaviour above is unit-testable without booting the daemon.
-  const requestLandingReview: LandingReviewRequest = makeLandingReviewRequest(
-    log,
+/** W1-T9333: the run-task.ts symbols the moved `daemonCommand` reaches, built per call (no top-level TDZ). */
+function daemonCommandHost(): DaemonCommandHost {
+  return {
+    USAGE,
+    auditedLifetimeTalliesFromArchives,
+    baseReproductionHostCache,
+    boardReviewHooksForTick,
+    breakerDetailDep,
+    breakerGateFor,
+    buildAutoTriageDaemonHooks,
+    buildBenchmarkCohortDaemonHooks,
+    buildCiLearningDaemonHooks,
+    buildCoverageNightlyDaemonHook,
+    buildDaemonReadRefresher,
+    buildDigestCadenceDaemonHooks,
+    buildGithubPostureDaemonHooks,
+    buildIntakeRungsDaemonHooks,
+    buildLedgerCompactionDaemonHooks,
+    buildMeasurementCadenceDaemonHooks,
+    buildRetroDaemonHooks,
+    buildSweepHook,
+    buildSweepLightHook,
+    buildWipeTestCadenceDaemonHooks,
+    costGovernorGateFor,
+    createDaemonGatewayFactory,
+    createOpenPrCountObservation,
+    createPlanSyncCoalescer,
+    daemonDefaultBuildSweepHook,
+    daemonDefaultBuildSweepLightHook,
+    daemonFreshnessReads,
+    daemonRunChildContract,
+    daemonGardenPassSpawn,
+    daemonMemoryTelemetryReader,
+    daemonPlanReaders,
+    dailyCostCeilingReloader,
+    dispatchClaimReserverAsyncFor,
+    dispatchClaimReserverFor,
+    dispatchFilingCache,
+    dispatchFilingPrefetch,
+    dispatchValueContextForSelection,
+    escalationSpoolDrainWiring,
+    fixCommand,
+    fleetRatifyGateway,
+    ghLiveStateByNumber,
+    headroomPolicyFromCurve,
+    inboxRecommendationWriter,
+    inboxThreadDecider,
+    liveEditLadderWiring,
+    loadDaemonPlan,
+    logCloneReapSurvey,
+    mainRepairLaneFor,
+    makeLandingReviewRequest,
+    memoiseBoardSnapshotByRepo,
+    memoiseGatewayByRepo,
+    memoryGovernorGateFor,
+    memoryReadTrackerFor,
+    onCircuitBreakWithVerifier,
+    openSiblingObservation,
+    orphanSweepRunActive,
+    orphanWorkerKillLedger,
+    plainInboxWriter,
+    productionLifetimePressureHook,
+    quarantineReporter,
+    queueGovernorGateFor,
+    readLedgerRawLines,
+    readMainCeilingVerdictAsync,
+    readPushedRunBranchesOutputAsync,
+    readUsageSnapshotPreferSdk,
+    realDeps,
+    registeredGardenDueProbe,
+    requeueActionsJobAsync,
+    resequenceMergedResolver,
+    resolveDaemonTarget,
+    resolveReloadPlan,
     reviewCommand,
-    `${target.owner}/${target.repo}`,
-  );
-  // W1-T5620: the per-poll rung awaits its plan-PR preflight off the loop; W1-T9695: so does the boot pass.
-  const feedbackLandingRungs = target.isSelf
-    ? feedbackLandingSweepRungs(repoRoot, {
-        log,
-        ...(config.contributorAdmission === undefined ? {} : { publication: { mode: "shadow" as const, record: log } }),
-        ledgerLines: () => readLedgerLines(ledgerPath),
-        requestReview: requestLandingReview,
-        // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
-        stateRoot: config.root,
-      })
-    : undefined;
-  const sweepFeedbackLandingRung = feedbackLandingRungs?.perPoll;
-  // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
-  // starts, over the daemon process's OWN live env — belt-and-suspenders atop
-  // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
-  // Also runs the W1-T115 boot sweep of stale rmd-owned temp dirs (the
-  // 26,711-dir ENOSPC incident's backstop) and logs the count via daemon.tmp_sweep.
-  const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
-  // `runDaemon` is a test-only loop seam. Its fixtures must not inherit the live shared hold a
-  // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
-  const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
-  if (!deps.checkPause && !deps.runDaemon && !checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
-  if (target.isSelf && !deps.runDaemon) unwireOwnCheckoutCredentialHelper(repoRoot, log);
-  const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
-  const bootHold = resolveFleetControlHold({ checkStop, checkPause });
-  if (bootHold) {
-    log("daemon.boot_held", {
-      control: bootHold.control,
-      detail: bootHold.detail,
-      reason: `fleet ${bootHold.control} hold: ${bootHold.detail}`,
-    });
-    // W1-T4194: the held loop never sweeps, so a replaced container's dead-holder locks would
-    // outlive the hold. Same predicate as daemonBoot's sweep; nothing else runs.
-    runInflightLockSweepRung(config, log);
-  } else {
-    await (deps.daemonBoot ?? invokeDaemonBoot)(
-    log,
-    process.env,
-    () => {
-      // STEP 2 backstop: reap SDK worker-scratchpad orphans a crashed orchestrator
-      // could not reap at teardown (lib/worker-scratch.ts). Age-ceilinged (24h) so a
-      // live session is never collateral; runs in the same clean-env boot as the tmp
-      // sweep. Logged separately; returns the tmp summary daemonBoot renders.
-      const scratch = sweepStaleWorkerScratch();
-      if (scratch.removed.length) {
-        log("daemon.scratch_sweep", { removed: scratch.removed.length, sample: scratch.removed.slice(0, 5) });
-      }
-      // impl-EK boot rung: abandoned REVIEW CLONES (36 measured across the scratch roots on
-      // 2026-08-01, 5866 MiB). DRY-RUN UNTIL THE OPERATOR OPTS IN — `scratchReap.enabled` is
-      // false by default, so this SURVEYS and ledgers what it would reclaim and deletes
-      // nothing. Ownership is decided by CONTENT (a standalone clone of this repo), never a
-      // name glob: these roots are shared with another application and other sessions.
-      logCloneReapSurvey(config, log);
-      // W1-T170 boot sweep: reap per-spawn worker-home dirs (`<root>/worker-home-<id>`)
-      // orphaned by a run/spawn that ended without reaching its own reapWorkerHome
-      // call (a kill -9, a crashed daemon). Same 24h age ceiling as the scratch/tmp
-      // sweeps above — a still-running spawn's home is always recent (materialize
-      // touches it on every use) and never collateral.
-      const homes = sweepStaleWorkerHomes(workerHomeDir(config), { stateRoot: config.root });
-      if (homes.removed.length) {
-        log("daemon.worker_home_sweep", { removed: homes.removed.length, sample: homes.removed.slice(0, 5) });
-      }
-      // W1-T320: the age ceiling is now POLICY DATA (plan/policy.yaml's sweep.tmpMaxAgeMs),
-      // read off the SAME repoRoot-scoped `policy` this function already reads
-      // pollIntervalMs/the headroom curve from — never a second, independently-resolved read.
-      return sweepStaleTempDirs({ maxAgeMs: policy.values.sweep.tmpMaxAgeMs });
-    },
-    () => sweepInflightLocksWithReceipts(join(config.root, "state", "inflight"), ledgerPath),
-    // W1-T235: the boot-time worker-keychain unlock, explicit and ledgered
-    // (`daemon.worker_keychain`) — macOS only; elsewhere the rung is absent.
-    process.platform === "darwin"
-      ? () =>
-          ensureWorkerKeychain({
-            ...workerKeychainPaths(join(config.root, "state")),
-            loginKeychainPath: join(
-              process.env.HOME ?? homedir(),
-              "Library",
-              "Keychains",
-              "login.keychain-db",
-            ),
-            grantApps: [config.claudeBin, "/usr/bin/security"],
-          })
-      : undefined,
-    // W1-T215's boot-rate invariant, WIRED (it shipped 2026-07-22/#590 and sat unasked through
-    // the 2026-08-03 ten-boot ENOSPC storm — the exact incident it detects). `priorBoots` is an
-    // EAGER pre-boot snapshot, never a lazy read: daemonBoot logs THIS boot's own `daemon.boot`
-    // line BEFORE consulting the check, and its contract says priorBoots "must NOT include this
-    // boot's own timestamp" (daemonBoot appends it via `now`). Bounded tail per
-    // detectDaemonCrashLoop's own doc ("a bounded recent tail, never full history"): 200 boots
-    // covers >3h of a one-per-minute storm. `daemon.boot` is DECISION_RELEVANT (W1-T244), so
-    // the read survives rotation. Window/now take DEFAULT_CRASHLOOP_WINDOW/wall-clock defaults.
-    {
-      priorBoots: () => priorDaemonBootTs,
-      onBreach: (verdict: CrashLoopVerdict) =>
-        escalateCrashLoop(verdict, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-    },
-    // W1-T357: wire the SAME resolver/cache spawnWorker uses (worker.ts's
-    // resolveClaudeExecutable against its shared, per-process
-    // claudeExecutableCache) so daemon.claude_bin logs the exact binary the
-    // fleet will actually run at spawn time, never a second, possibly
-    // different resolution.
-    () => resolveClaudeExecutable(claudeExecutableCache),
-    // §9 overflow valve (W1-T258): make the daemon.boot billing_mode canary
-    // report `api` iff this daemon deliberately drains on API credits, matching
-    // what its workers will actually bill (the key must ALSO be in the env).
-    config.overflow === "api_key",
-    // W1-T356: the boot-time half of the W1-T117 orphan sweep, wired at last — see the
-    // shared `sweepOrphans` closure defined above this call (built from worker-containment.ts's
-    // own exported defaults, never a hand-rolled substitute).
-    sweepOrphans,
-    // THE SHA THIS PROCESS IS ACTUALLY EXECUTING. Resolved from the directory the RUNNING
-    // MODULE was loaded from (`import.meta.url`), never from cwd and never re-read later — the
-    // deploy supervisor compares this against the checkout's HEAD, and a value read live at
-    // comparison time would always match and reproduce the very bug this closes. Best-effort:
-    // if git is unavailable the field is omitted and the supervisor fails eager (one extra
-    // restart at an idle gap), which is strictly safer than recording a wrong sha.
-    daemonLoadedCodeSha,
-    // W1-T530: the boot-time half of the feedback-landing sweep, wired at last (appended after
-    // `bootHeadSha` per that param's own "no positional caller shifts" discipline) — see the
-    // shared `feedbackLandingRungs` defined above this call (its boot form, awaited since W1-T9695).
-    feedbackLandingRungs?.atBoot,
-    // W1-T991: `undefined` ⇒ daemonBoot's own default (THIS process's real
-    // process.execPath/version) — never overridden here, only in tests.
-    undefined,
-    // W1-T991: the repo's declared node pin (.nvmrc, trimmed), read relative to THIS MODULE —
-    // never cwd, same discipline as `defaultBinaryPinDeps` reading deploy/Dockerfile above,
-    // since the daemon/CLI/worker all run from different directories and only the module path
-    // is stable across them. Best-effort: an unreadable .nvmrc omits the version-pin check
-    // rather than throwing (the account/roots check above still runs either way).
-    (() => {
-      try {
-        return readFileSync(fileURLToPath(new URL("../.nvmrc", import.meta.url)), "utf8").trim();
-      } catch {
-        return undefined;
-      }
-    })(),
-    // W1-T2332: the canonical checkout's HISTORY HORIZON, measured HERE — the caller — exactly
-    // where `bootHeadSha` above already resolves `git rev-parse HEAD`, over the SAME
-    // module-relative directory (never cwd, same reasoning as `bootHeadSha`'s own comment: the
-    // daemon/CLI/worker run from different directories and only the module path is stable across
-    // them). `readCheckoutDepth` shares its one try/catch with both git reads, so a partial
-    // answer omits the fields exactly like a failed one — never a guessed value. A shallow
-    // checkout does NOT halt this boot (T197 doctrine, this function's own doctrine for the
-    // keychain rung above); `rmd doctor`'s `checkout-depth` arm is where the FAIL verdict lives.
-    // Appended LAST, after the node pin, per `daemonBoot`'s own "no positional caller shifts"
-    // discipline.
-    readCheckoutDepth(daemonModuleRepoDir),
-    );
-  }
-
-  const runDaemonFn = deps.runDaemon ?? runDaemon;
-  const runTaskFn = deps.runTask ?? runTask;
-  // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
-  const retroHooks = target.isSelf ? buildRetroDaemonHooks() : undefined;
-  // impl-DM: the auto-triage rung's producer. SELF-TARGET ONLY, for the same reason the retro is —
-  // it reads THIS repo's plan/feedback and writes THIS repo's plan, never a drained target's.
-  // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
-  // exactly how #1066 merged: consumer wired, producer never.
-  const autoTriageHooks = target.isSelf ? buildAutoTriageDaemonHooks({ config }) : undefined;
-  // W1-T1040: the GitHub-side posture drift check. SELF-TARGET ONLY, same reason retro/auto-triage
-  // are — the baseline (state/github-posture.json) lives under THIS process's `config.root`, never
-  // a drained target's, so wiring it for a non-self target would either read the wrong repo's
-  // posture into the wrong repo's baseline or silently do nothing useful.
-  const githubPostureHooks = target.isSelf ? buildGithubPostureDaemonHooks({ config }) : undefined;
-  // W1-T1259: the measurement-cadence rung ("is this system getting better" —
-  // rule-efficacy/verdict-calibration/autonomy-rate). SELF-TARGET ONLY, same reason
-  // retro/auto-triage/github-posture are — the ledger/state this reads and the git history it
-  // joins against both live under THIS process's own config.root/repoRoot, never a drained
-  // target's. Without this line `deps.checkMeasurementCadence` is undefined and the whole rung
-  // is dead code, exactly how #1066 merged auto-triage's consumer with no producer.
-  const measurementCadenceHooks = target.isSelf ? buildMeasurementCadenceDaemonHooks({ config }) : undefined;
-  // W1-T5723: the cadence runs in a child that a daemon restart adopts rather than kills.
-  const measurementCadenceChild = target.isSelf ? measurementCadenceChildRunner({
-    statePath: join(config.root, "state", "measurement-cadence-child.json"),
-    spawn: childMeasurementCadenceSpawn({
-      entry: fileURLToPath(new URL(`./measurement-cadence-child${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
-      cwd: repoRoot,
-      config,
-    }),
-  }) : undefined;
-  // W1-T2277: the digest's own cadence rung. SELF-TARGET ONLY, same reason as the rungs above —
-  // the ledger this reads and the marker/inbox files it writes both live under THIS process's
-  // own config.root, never a drained target's. Without this line `deps.checkDigestCadence` is
-  // undefined and the whole rung is dead code, exactly how #1066 merged auto-triage's consumer
-  // with no producer.
-  const digestCadenceHooks = target.isSelf ? buildDigestCadenceDaemonHooks({ config }) : undefined;
-  // W1-T3368: the compaction loop is self-target only for the same root-bound reason as every
-  // cadence beside it. Its state directory is this daemon's own `config.root/state`; wiring it
-  // for a drained repository would compact the fleet ledger while evaluating somebody else's plan.
-  const ledgerCompactionHooks = target.isSelf ? buildLedgerCompactionDaemonHooks({ config }) : undefined;
-  // Each enrolled daemon owns its local ledger, including site/console target instances.
-  const benchmarkCohortHooks = buildBenchmarkCohortDaemonHooks({ config });
-  // W1-T2923: one policy-gated cadence over the repository-intake rungs that used to require
-  // hand-run verbs. SELF-TARGET ONLY: every runner writes this harness checkout/state.
-  const intakeRungHooks = target.isSelf ? buildIntakeRungsDaemonHooks({ config }) : undefined;
-  // W1-T2304: the board-review rung. SELF-TARGET ONLY, same reason as the rungs above — the
-  // marker, the report artifact and the proposal registry all live under THIS process's own
-  // config.root. WITHOUT THIS LINE `deps.checkBoardReview` is undefined and the whole rung is
-  // dead code, which is not a hypothetical here: that is precisely what shipped in #2952 and
-  // stayed dead for the eight hours between its merge and this fix.
-  // W1-T4051: handed THIS tick's projection and plan — the same `lastProj` `isOpenPr` and `openPrCount`
-  // read — so the check never derives a second one on a cold gateway (was ~120 s of synchronous `gh`).
-  const boardReviewHooks = target.isSelf
-    ? boardReviewHooksForTick(config, { projection: () => lastProj, plan: () => activePlanRef.current })
-    : undefined;
-  boardReviewHooks?.bindCheckItems(() => freshReadGeneration(tickReadGeneration, { consumer: "board_items", log })?.facts.boardItems);
-  // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
-  // its marker and ledger live under this harness checkout. The pair itself still targets the
-  // sandbox by default through runWipeTestPair/resolveWipeTestTarget.
-  const wipeTestCadenceHooks = target.isSelf ? buildWipeTestCadenceDaemonHooks({ config }) : undefined;
-  // W1-T2972: the CI-failure learning rung. SELF-TARGET ONLY, same reason as the rungs above — its
-  // marker and pull-request window both belong to THIS process's config.root, never a drained
-  // target's. WITHOUT THIS LINE the hooks are undefined and the rung is dead code — what W1-T2959
-  // shipped, after #1066 and #2952 each shipped it before that.
-  const ciLearningHooks = target.isSelf ? buildCiLearningDaemonHooks({ config }) : undefined;
-  // W1-T5115: the daemon's ONE git credential socket, started only on an App-configured host and
-  // only once the first App mint above has settled. Its path reaches every task worker (`runOne`)
-  // and every sweep fix worker (`sweep:`) below; `undefined` leaves both on the ambient helper.
-  const gitCredentialSocket = await startDaemonGitCredentialSocket({
-    ready: githubAppRefresh.ready,
-    stateDir: join(config.root, "state"),
-    log,
-    mint: deps.gitCredentialMint,
-  });
-  const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
-  let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
-  const readPlane = deps.githubFactory ? undefined : startReadPlane({
-    // W1-T9722: the worker starts from the narrow tick-read entry (a current bundle when one is vouched for).
-    workerUrl: tickReadWorkerUrl(), workerInput: readOptions, log, spawn: () => startTickReadWorker(readOptions),
-    inline: (input: TickReadRequest) => (inlineProducer ??= planReaders.inlineTickRead(readOptions, { log }))(input),
-  });
-  const readTick = readPlane && planReaders.tickRead(readPlane.read);
-  const loopTelemetry = startReadPlaneTelemetry();
-  // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
-  const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
-  installDaemonFootprint(daemonFootprint);
-  // W1-T8401: before a container-short hold the daemon reclaims its own slack (one tightest-factor collection, paced
-  // by its footprint's own variance) and ledgers what it freed and the heap ceiling it would derive, in shadow.
-  const daemonMemoryGovernor = createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy });
-  const daemonLiveSet = createLiveSetKeeper();
-  const slackReclaimer = createDaemonSlackReclaimer({
-    policy: memoryPolicyRead.policy,
-    inForcePercent: () => daemonMemoryGovernor.inForcePercent?.() ?? memoryPolicyRead.policy.heapGrowingPercent,
-    footprintBytes: () => daemonFootprint.samples().map((sample) => sample.bytes),
-    log: (record) => log("daemon.slack_reclaim", { ...daemonLiveSet.keep(record) }),
-  });
-  installDaemonSlackReclaimer(slackReclaimer);
-  // W1-T9647: what holds the heap, on its own unref'd timer; `unattributed_live_bytes` is read against the reclaimer's
-  // last measured live set above. Cheap counters and sliced walks only: no snapshot, no forced collection.
-  const stopMemoryCensus = startDaemonMemoryCensus({
-    holders: daemonHolderSource({
-      planCopies: daemonPlanCopies,
-      sizedMemos: { terminalUnionScans: terminalUnionScans.size, mergeLogEvidenceByRoot: mergeLogEvidenceByRoot.size,
-        dispatchFilingCache: dispatchFilingCache.size, baseReproductionHostCache: baseReproductionHostCache.size },
-      boardSnapshots: boardSnapshotFor.built,
-      tickRead: () => tickReadGeneration?.facts,
-      ledgerMemos: ledgerMemoHolders,
-      sourceMapsEnabled: () => process.sourceMapsEnabled,
-    }),
-    log, liveSet: daemonLiveSet.read, bootHeadSha: daemonLoadedCodeSha,
-  });
-  log("daemon.heap_ceiling_shadow", { basis: "boot", ...slackReclaimer.derivedCeiling() });
-  try {
-    try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
-    // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
-    await dispatchFilingPrefetch.refresh(target.planPath);
-    const summary = await runDaemonFn(
-      plan,
-      {
-        refreshMerged,
-        refreshMergedAsync: readTick ? buildDaemonReadRefresher({
-          read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,
-          invalidate: () => { tickReadGeneration = undefined; },
-          publish: (snapshot) => {
-            tickReadGeneration = snapshot;
-            lastProj = new Map(snapshot.facts.projection);
-            boardOpenPrCount.reset();
-            boardOpenPrCount.observe(snapshot.facts.openBranches);
-          },
-          ledgerPath, statusPath, log,
-        }) : undefined,
-        readLoopTelemetry: loopTelemetry.sample,
-        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
-        memoryGovernor: daemonMemoryGovernor,
-        lastStepBeforeBlock: () => lastReadPlaneStep,
-        idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
-        confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
-        onPlanReload: (fresh) => {
-          activePlanRef.current = fresh;
-          daemonPlanCopies.observe(fresh);
-        },
-        // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
-        // drain. A refused calibration returns undefined, preserving historic ordering.
-        buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath),
-        isOpenPr,
-        isCreditIndeterminate,
-        // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
-        // W1-T534/W1-T916 hit two lines below, and the one #4715 shipped for this very feature.
-        readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
-        readRestartHistory: () => {
-          return readRestartHistoryLines(dirname(ledgerPathFor(config)));
-        },
-        // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
-        // `repo:` field — the SAME value, never a second resolution that could drift from it.
-        targetRepo: target.repo,
-        // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
-        probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
-          token: daemonPushTokenSource(`${target.owner}/${target.repo}`, gitCredentialSocket ? (deps.gitCredentialMint ?? realScopedMint(log)) : undefined) }),
-        // W1-T2397: the second half of the wiring #3125 could only take for `drainCommand`. Same
-        // pair, same factory, same contract — and this is the lane that actually dispatches.
-        openSiblingBuildFor,
-        onOpenSiblingBuild,
-        // W1-T916 — THE ARGUMENT W1-T534 DECLARED AND NOTHING PASSED, SUPPLIED HERE AT LAST.
-        // `nextRunnable` consumes `opts.hasPushedRunBranch?.(t.id)`; with no supplier that
-        // optional call short-circuited to `undefined` on every pass, so the duplicate-dispatch
-        // guard never fired — invisibly, because the omission is legal at type-check and raises
-        // nothing at runtime. This module is where the read belongs: `drain.ts` is pure (it has no
-        // `child_process` import at all) and `git ls-remote` already runs here.
-        //
-        // ONE SWEEP PER PASS. Returns the RAW output; `runDrain` parses it once ABOVE its own
-        // dispatch loop via `runBranchTaskIds`. Scoped to `run-*` so the refspec filters
-        // server-side rather than shipping every head back. `ls-remote` speaks the git protocol and
-        // spends neither the REST nor the GraphQL budget — measured at 46 refs in 199 ms with
-        // `core` remaining identical before and after.
-        //
-        // FAIL OPEN, DELIBERATELY: a failed read (network blip, auth) refuses no task. W1-T5805: the
-        // daemon awaits it, at each tick and lane refill, and ledgers the failure.
-        readPushedRunBranches: () => readPushedRunBranchesOutputAsync(),
-        readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
-          join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
-          () => liveInflightRuns(inflightDir).map((r) => r.taskId),
-          systemClock,
-        ),
-        // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
-        // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
-        readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
-        isIndeterminate,
-        releaseLandedClaims: async (isMerged) => {
-          await releaseLandedDispatchClaims(deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
-            isMerged,
-            isIndeterminate,
-            prUrlFor: (id) => lastProj?.get(id)?.prUrl,
-            isRerunClaim: (id, anchor) => claimMintedByRerun(dirname(ledgerPath), id, anchor),
-            reportedRerun: landedClaimRerunReported,
-            localHost: hostname(),
-            log,
-          });
-        },
-        isIndependentFailureBlocked,
-        independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass
-        // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
-        // ledger every call — persists across daemon restarts, unlike this
-        // loop's own in-memory per-tick block-reasoning flag. W1-T206: routed through
-        // breakerGate/evaluateDispatchBreaker so a torn/rotated read reports
-        // "indeterminate" (handled above by isIndeterminate) rather than a false
-        // "clear" that would silently untrip an already-tripped task.
-        beginSelectionPass: breakerGate.beginSelectionPass,
-        isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
-        // W1-T314: the row records WHAT THE BREAKER SAW, from the same memoised
-        // evaluation the predicate above answered from — never a second call.
-        breakerDetail: breakerDetailDep(breakerGate),
-        // W1-T4678: reads the evidence before paging — see onCircuitBreakWithVerifier's own doc.
-        onCircuitBreak: onCircuitBreakWithVerifier(breakerGate, (id) => lastProj?.get(id), {
-          owner: target.owner,
-          repo: target.repo,
-          ledgerPath,
-          runId,
-          judge: productionDispatchBreakJudge({ cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json") }),
-        }),
-        // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
-        // daemon flushes one bounded batch after the pass and routes it through the existing judge;
-        // a judge/proposal failure is logged and does not hold this or a sibling task.
-        isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
-        onLifetimePressure: productionLifetimePressureHook({ plan: () => activePlanRef.current, root: repoRoot, config, ledgerPath, runId }),
-        // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
-        // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
-        // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
-        checkCostGovernor: costGovernorGateFor(ledgerPath, runId, deps.now),
-        // W1-T331: THE LIVE CEILING costGovernorGateFor's own doc, immediately above, describes —
-        // re-reads the SAME repoRoot-scoped plan/policy.yaml the boot-time `policy` (line ~8754,
-        // loaded ONCE for pollIntervalMs/the headroom curve) also reads, but THIS one is called
-        // AGAIN on every tick (runDaemon's own placement, daemon.ts) rather than reused from that
-        // boot-frozen binding — reusing it here would just move the identical frozen-at-import
-        // defect from sweep.ts's module scope to this function's closure scope. See
-        // dailyCostCeilingReloader's own doc for why production wires it with no `deps.policy`
-        // override (only a test does).
-        reloadDailyCostCeilingUsd: dailyCostCeilingReloader(),
-        // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
-        // 23-open-PR incident): the SAME batch `openPrCount` reads just above, split by ownership
-        // (W1-T4465 design (i)) — never a second GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGate,
-        readQueueAdmission: queueGate.readAdmission,
-        // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
-        // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
-        // Holds NEW implement dispatch only — never a running worker or a review.
-        checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
-        // W1-T7720: an unreadable probe / reservation store is tiered by how long it lasts.
-        memoryReadTracker: memoryReadTrackerFor(ledgerPath, runId, target.owner, target.repo),
-        readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
-        checkQuietHours: () =>
-          isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
-        // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
-        openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
-        // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
-        // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
-        // W1-T9924: the same mode read `runInChildWhenOn` makes below; a run it would keep in-process reads false.
-        ...(childMode ? {
-          adoptRunChildren: () => adoptedChildren,
-          refillRunsAsChild: () => runChildModeIsOn(childPolicy, childModeTracker.evidence).on && !flagValue(rest, "--plan"),
-        } : {}),
-        runOne: async (taskId, runOptions) => {
-          const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
-          // W1-T9087: each dispatch asks the mode; under `auto` that is the evidence's current answer, ledgered when it changes.
-          const dispatchPolicy = readRunChildPolicy(childPolicy);
-          const dispatchMode = dispatchPolicy.mode === undefined ? undefined : runChildModeFor(dispatchPolicy.mode, childModeTracker.evidence());
-          childModeTracker.record(dispatchMode?.decision, log);
-          // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
-          const inChild = await runInChildWhenOn({
-            taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
-            onPending: runOptions?.onChildPending, mayRunInProcess: runOptions?.mayRunInProcess,
-          }, { readMode: childPolicy, evidence: childModeTracker.evidence });
-          if (inChild) {
-            runOptions?.onChild?.(inChild);
-            return inChild.settled;
-          }
-          // W1-T9082: under mode shadow an unawaited, never-rejecting probe child measures a run child's cost beside this run.
-          const admittedPlan = createAdmittedPlanSlot();
-          void startRunChildProbe({
-            taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log: childLog,
-            options: childOptions,
-          }, dispatchMode ? { readMode: () => dispatchMode.mode } : {});
-          return runTaskFn(taskId, {
-            planPath: target.planPath,
-            config,
-            allowStale,
-            pairedTrialHost: "daemon",
-            skipGitSync: !!flagValue(rest, "--plan"),
-            owner: target.owner,
-            // W1-T2509: EVERY LANE SHARES ONE GATEWAY PER owner/repo — a per-lane COLD gateway paid a
-            // synchronous full-repo walk before its first yield, serialising lane starts (78 s apart).
-            // See `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
-            githubFor: laneGithubFor,
-            // W1-T2513/W1-T9763: the coalescer above, over the daemon's plan store; inert under `skipGitSync`.
-            planSnapshot: tapPlanSnapshot(admittedPlan, planSyncCoalescer.sync),
-            // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
-            // existing adapter is material-and-clean only; unassessed, dirty, and degraded
-            // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).externalWaitFreshness,
-            restartAtWorkerBoundary: runOptions?.restartAtWorkerBoundary,
-            externalWaitRecycle: () => recyclePauseDetail(config.root),
-            // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
-            handOffAtPrOpen: true,
-            ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
-          });
-        },
-        readUsage: () => readUsageSnapshotPreferSdk(config),
-        // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
-        // processes already announced, so a restart does not re-announce. Read ONCE at daemon
-        // construction, never per tick.
-        priorUnrecognisedResets: priorUnrecognisedResetStrings(readLedgerLines(ledgerPath)),
-        // P34 clause (c), W1-T249: the reserve gate's notification — dispatch is
-        // already paused (runDaemon's own in-process idle) by the time this fires.
-        onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        onHeadroomParkCeiling: (info) =>
-          escalateHeadroomParkCeiling(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        // W1-T372: both gh api rate_limit buckets, read fresh each tick alongside readUsage's
-        // own headroom reading immediately above — never a second gh api rate_limit call.
-        readGhQuota: () => readGhRateLimitBuckets(),
-        // W1-T372: observe-and-surface only — dispatch is NOT paused by this hook (unlike
-        // onHeadroomBreach above); see escalateQuotaExhaustion's own doc for why.
-        onQuotaExhausted: (info) => escalateQuotaExhaustion(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        // W1-T1082: real free space + verdict, read on the SAME `startInFlightTicker` cadence as
-        // `daemon.alive` itself — the SAME root `rmd doctor` reads (`readDiskFreeBytes(config.root)`,
-        // `doctorCommand`, above) and the SAME `judgeDiskHeadroom` it judges against, one read call
-        // and one shared threshold definition, never a second copy.
-        readDiskHeadroom: () => {
-          const freeBytes = readDiskFreeBytes(config.root);
-          return { freeBytes, verdict: judgeDiskHeadroom(freeBytes).verdict };
-        },
-        // Dispatch is NOT paused by this hook (design (vii) — SURFACE, DO NOT GATE): see
-        // escalateDiskHeadroomBreach's own doc for the two-layer dedup (in-process latch +
-        // cross-restart ledger episode window) this wiring relies on.
-        onDiskHeadroomBreach: (info) =>
-          escalateDiskHeadroomBreach(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        // W1-T3378: the daemon core owns the tick; this command owns the real filesystem/git
-        // effect. Supplying the closure here makes the reviewed `review-PR*` reclaimer reachable
-        // on every live daemon rather than leaving an optional DaemonDeps hook dead.
-        sweepStrandedReviewWorktrees: () => sweepStrandedReviewWorktrees(config, log),
-        // W1-T3528: same reasoning, different unit — this one frees regenerable build output
-        // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
-        sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),
-        // W1-T7093: maintain the worker-tree ledger on the same recurring heartbeat the reader
-        // consumes. This is report-only bookkeeping; a failure never alters dispatch or workers.
-        sweepHostMemoryReservations: () => {
-          const swept = sweepMemoryReservations({ root: config.root, log: (event) => log(String(event.event ?? "host_memory_ledger.diagnostic"), event) });
-          if (swept) {
-            log("daemon.host_memory_reservations.swept", {
-              state: swept.reading.state,
-              scope: swept.reading.scope,
-              live: swept.reading.entries.length,
-              released: swept.released.length,
-              uncertain: swept.reading.counts.uncertain,
-              incomplete_walk: swept.reading.counts.incompleteWalk,
-              reserved_mib: swept.reading.reservedMib,
-            });
-          }
-        },
-        // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
-        // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
-        // this fires.
-        onStarvation: (census) => escalateStarvation(census, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        // This task: the cleared half — closes the escalation `escalateStarvation` opened, on
-        // the SAME edge `runDaemon` already resets `starvationEscalated` at.
-        onStarvationCleared: (info) => escalateStarvationCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        checkStop,
-        // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
-        // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
-        // own doc for why UNREACHABLE reads as held, never as clear.
-        checkPause,
-        workerAdmissionHold: () => resolveFleetControlHold({ checkStop, checkPause }),
-        // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
-        // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
-        // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
-        // consequence on 2026-08-13: that daemon sat on one sha for five hours while origin/main
-        // moved seven commits, dispatched W1-T404 from the STALE plan blob (filtered
-        // `verify: human` after the flip had merged), and its triage selector re-picked a feedback
-        // entry that a merged commit had already settled — one cause, three symptoms.
-        //
-        // WHY THIS IS A TICK CHECK AND NOT THE BOOT GATE THAT ALREADY EXISTS. `serviceFreshnessGate`
-        // (below) runs this SAME predicate at every `rmd daemon` boot and has ledgered
-        // `daemon.stale_code` zero times — not because the daemon is never stale, but because
-        // `deploy/entrypoint.sh` checks out origin/main IMMEDIATELY BEFORE it, so the boot gate can
-        // only ever observe a condition the boot itself just eliminated. Staleness is acquired
-        // DURING a process's life; only a per-tick check can see it.
-        //
-        // NEVER INTERRUPTS A WORKER. `runDaemon` consults this between iterations only, after the
-        // current `runOne` has resolved — the same drain-and-hold discipline `checkStop`/`checkPause`
-        // rely on, stated in `DaemonDeps.checkFreshness`'s own contract and pinned by
-        // test/daemon-freshness-wiring.test.ts's ordering test. So no idle gate has to be added: a
-        // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
-        // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
-        // 2026-10-11: a tracked edit in a live checkout deferred every refresh for five hours, silently.
-        // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
-        checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
-          ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
-          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
-        readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
-        categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
-        // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
-        // paths, so the reload always reads the SAME source the boot did (origin/main, never the
-        // working tree). An explicit `--plan` keeps the frozen-at-boot behaviour for BOTH, because
-        // that caller asked for a literal file.
-        //
-        // Change detection is a TREE SHA, not a timestamp: `origin/main:plan` covers the monolith
-        // AND all 45 shards in one ~8ms call, and only when it moves do we pay the ~60ms parse of
-        // a ~1MB plan. Unchanged ticks therefore cost 8ms, not 60. The self-target sha is read from
-        // the already-fetched origin/main ref rather than fetching here — `checkFreshness` above
-        // already fetches this SAME checkout every tick — while the dedicated non-self target
-        // fetches for itself (see `dedicatedTargetPlanReloader`'s own doc for why: nothing else
-        // keeps ITS checkout's origin/main current between dispatches).
-        // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan` /
-        // `!target.isSelf && !--plan`) exactly, so the reload source can never diverge from the
-        // load source. Selection itself lives in `resolveReloadPlan` (its own doc, above) so this
-        // callsite stays a single reachable line regardless of which arm a given caller exercises.
-        reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log,
-          { load: planReaders.reload }),
-        // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
-        // consumes markers the write-token API drops, dispatching a kicked task
-        // through its normal assertRunnable-gated path and honouring "drain now".
-        pendingKicks: () => pendingKicks(config.root),
-        clearKick: (taskId) => clearKick(config.root, taskId),
-        consumeDrainNow: () => consumeDrainNow(config.root),
-        // Selected-repository PR controls (W1-T3989). The HTTP surface only writes a bounded
-        // marker; this is the sole point that reaches the established selected-repository CLI
-        // commands. Their own disposition, strike, worktree and review-lock gates remain the
-        // authority -- an action request is never a bypass.
-        pendingPrActions: () => pendingPrActions(config.root),
-        livenessPulse: true,
-        ...(target.isSelf
-          ? {
-              // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
-              gardens: [
-                // W1-T5361: the machine-filing judge is one of them, so its git work runs in a child too.
-                ...REGISTERED_GARDEN_NAMES.map(offLoopGarden),
-                // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
-                // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). W1-T8232: it runs on
-                // the registry's live `primary: true` instance, resolved from this daemon's own
-                // state root (`sreLaneEnabled`); `RMD_SRE_LANE=0` turns it off and `=1` still turns
-                // it on anywhere. The starter is inert until called, so it is built on every start
-                // and dropped when off; either way one `sre_lane.started`/`sre_lane.disabled` row
-                // says so. `state/SRE_LANE_OFF` stays the pause switch.
-                ...[
-                  startDaemonSreLane(
-                    (mergedLastDay) => daemonSreLaneInput({
-                      stateDir: join(config.root, "state"),
-                      root: repoRoot,
-                      ledgerPath,
-                      owner: self.owner,
-                      repo: self.repo,
-                      mergedLastDay: () => mergedLastDay,
-                      log,
-                      // W1-T4386: the allowlisted, reversible runbooks each incident meets first.
-                      runbookPass: daemonSreRunbookPass(
-                        sreRunbookCatalog(
-                          {
-                            ...daemonSreRunbookHost({ root: config.root, repoDir: repoRoot, owner: self.owner, repo: self.repo }),
-                            // W1-T8241: release-non-worker-breaker reads this ledger and writes through releaseBreaker.
-                            breakers: daemonBreakerRunbookHost({
-                              ledgerPath,
-                              owner: self.owner,
-                              repo: self.repo,
-                              closeIssue: (repo) => ghIssueGatewayAsync(self.owner, repo).closeWithComment,
-                            }),
-                          },
-                          () => readRunbookReceipts(ledgerPath),
-                        ),
-                        ledgerPath,
-                        self.owner,
-                        self.repo,
-                        log,
-                      ),
-                    }),
-                    () => mergedInLastDayAsync(repoRoot),
-                    log,
-                  ),
-                ].filter(() => {
-                  const sreLane = {
-                    instance: resolveSreLaneInstance({
-                      stateRoot: config.root,
-                      registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot),
-                    }),
-                    env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
-                  };
-                  const row = sreLaneStartRow(sreLane);
-                  log(row.step, row.fields);
-                  return sreLaneEnabled(sreLane);
-                }),
-              ],
-            }
-          : {}),
-        clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
-        plainBackfill: {
-          stateDir: join(config.root, "state"),
-          readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
-          summarize: plainInboxWriter(config, log),
-        },
-        recommendationBackfill: {
-          stateDir: join(config.root, "state"),
-          readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
-          evidence: gitRecommendationEvidence((args) => hostWorktreeGitAsync(repoRoot, args, { maxBuffer: 1 << 26 }), {
-            planDir: relative(repoRoot, resolveRepoLayout(repoRoot).planDir),
-            planMonolith: relative(repoRoot, resolveRepoLayout(repoRoot).planMonolith),
-          }),
-          summarize: inboxRecommendationWriter(config, log),
-          readSeed: () => readFileIfExists(join(repoRoot, RECOMMENDATION_SEED_PATH)),
-        },
-        fleetLane: {
-          stateDir: join(config.root, "state"),
-          ledgerPath,
-          mergedLastDay: () => mergedInLastDayAsync(repoRoot),
-          approve: (proposalId) => void fleetRatify.approve(proposalId),
-          escalateReplayStranded: (stranded) => escalateReplayStranded(stranded, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-          handoffInFlight: (proposalId) => fleetRatify.inFlight(proposalId),
-          originMainSha: async () => (await hostWorktreeGitAsync(repoRoot, ["rev-parse", "origin/main"])).trim(),
-        },
-        inboxResponder: {
-          threadStorePath: inboxThreadStorePath(config.root),
-          ledgerPath,
-          readItems: () => registryThreadItems(join(config.root, "state"), ledgerPath),
-          reframe: (proposalId, feedback) => void fleetRatify.reframe(proposalId, feedback),
-          // W1-T9252: the boot backfill, then the live tail, of operator actions and fleet outcomes onto threads.
-          syncEvents: createThreadEventSync({ ledgerPath, threadStorePath: inboxThreadStorePath(config.root), stateDir: join(config.root, "state"), log }).sync,
-          decide: inboxThreadDecider(config, log),
-        },
-        runPrAction: async (request) => {
-          const args = [String(request.prNumber), "--repo", target.repo];
-          const exitCode = request.action === "fix"
-            ? await (deps.fixCommand ?? fixCommand)([...args, "--requested"])
-            : await (deps.reviewCommand ?? reviewCommand)(String(request.prNumber), ["--repo", target.repo]);
-          return exitCode === 0
-            ? { outcome: "completed", detail: `${request.action} command accepted PR #${request.prNumber}` }
-            : { outcome: "refused", detail: `${request.action} command refused PR #${request.prNumber} (exit ${exitCode})` };
-        },
-        // W1-T2568: keep the existing sleep clock for nested in-flight tickers, and interrupt
-        // ONLY the top-level poll waits that return to the ordinary full-sweep gate. Sharing the
-        // interruptible clock with a heartbeat ticker could consume a wake without reconciling.
-        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-        sleepUntilSweepWake: githubEventWake.sleep,
-        acknowledgeSweepWake: githubEventWake.acknowledge,
-        // The real wall clock backing the TIME-AWARE headroom ceiling (see
-        // lib/daemon.ts's HeadroomPolicy) — resolves each window's own
-        // hours-to-reset. Explicit here (though `runDaemon` defaults the same
-        // way when omitted) so the real wiring is as self-documenting as `sleep`.
-        now: () => new Date(),
-        // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77): the SAME runSweep the
-        // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77): the SAME runSweep the
-        // `rmd sweep` CLI invokes, run once per poll iteration so no open PR
-        // strands open-and-orphaned (#111/#113/#123). Best-effort by contract.
-        // W1-T320: threads the SAME repoRoot-scoped `policy` (loaded above for
-        // pollIntervalMs/the headroom curve) into the per-poll tmp-sweep rung — the
-        // regression lock this task's design demands (proof against the sweep
-        // configuration the daemon command actually builds, never a hand-built fixture).
-        // W1-T468: the ONE real pacer instance for this daemon's life — shared by this hook's own
-        // sweep enumeration and its board gateway's PR/issue reads, so the three-call burst that
-        // trips GitHub's secondary rate limit at the poll cadence cannot collide. `github` (the
-        // param before this one) is left undefined so the hook builds its own board gateway,
-        // which is the ONLY construction this pacer can actually reach.
-        sweep: buildSweepHook(
-          target.owner,
-          target.repo,
-          config,
-          ledgerPath,
-          runId,
-          plan,
-          log,
-          policy.values.sweep.tmpMaxAgeMs,
-          undefined,
-          createGhCallPacer(),
-          // W1-T943: the policy-data quiet threshold — see runWorkerStallDetectorRung's own doc
-          // and plan/policy.yaml's `workerStall` row for the ~16-minute `--ci-parity` default's
-          // headroom rationale.
-          policy.values.workerStall,
-          mainHealthRung,
-          boardSnapshotFor(target.owner, target.repo),
-          reviewerCodeRecovery,
-          // W1-T3585 — the SAME `lastProj` snapshot `isOpenPr`/`isCreditIndeterminate` above already
-          // read, never a second GitHub walk: `refreshMerged()` runs once at the top of THIS tick
-          // (runDaemon's loop body, lib/daemon.ts) and this hook's own closure runs later in the
-          // same tick, so by the time it calls `buildOpenPrViews`, `lastProj` is already this tick's
-          // fresh dispatch projection.
-          resequenceMergedResolver(() => lastProj),
-          undefined,
-          targetCheckoutRoot,
-          () => activePlanRef.current,
-          // W1-T4471: the one real wiring of the owner-reply reader.
-          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
-            config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
-          gitCredentialSocket?.socketPath,
-          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readTick,
-            () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
-            () => tickReadGeneration),
-          target.isSelf ? { root: repoRoot, inboxRoot: config.root, feedbackLand: {} } : undefined,
-        ),
-        // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
-        // the deterministic post-review re-post while `runOne` is unbounded and in
-        // flight, so a green PR whose review went absent re-posts within one poll
-        // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
-        sweepLight: buildSweepLightHook(
-          target.owner,
-          target.repo,
-          config,
-          ledgerPath,
-          runId,
-          plan,
-          log,
-          reviewerCodeRecovery,
-          // W1-T3585 — the SAME accessor `sweep:` above threads, off the SAME `lastProj` tick
-          // snapshot: both daemon sweep paths must reconcile the identical current-plan
-          // eligibility predicate, never two independently-derived ones.
-          resequenceMergedResolver(() => lastProj),
-          undefined,
-          () => activePlanRef.current,
-          // A run in flight starves the full sweep, so the light pass also watches main.
-          mainHealthRung,
-        ),
-        // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
-        // derives from observed review duration and head churn. Reads the sweep's in-process memo only.
-        readIdleReviewDemand: () => readIdleLightCadence(systemClock.now()),
-        // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
-        // closure daemonBoot already runs once, above, wired here so a stray from a run that
-        // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
-        sweepOrphans,
-        repositoryMaintenance: (context) => runRepositoryMaintenanceRung(config, log, context, policy.values.objectReap),
-        // W1-T530: the per-poll half of the feedback-landing sweep — the SAME options daemonBoot's
-        // pass runs with, wired here so an entry captured (or a landing attempt that failed)
-        // BETWEEN polls is still found within one cycle; awaited off the loop (W1-T5620).
-        sweepFeedbackLanding: sweepFeedbackLandingRung,
-        // RETRO CADENCE TRIGGER (W1-T160) — SELF-TARGET ONLY: the retro reads/writes
-        // THIS repo's own MASTER-PLAN.md/LEARNINGS.md/plan/tasks.yaml/state, never a
-        // drained target's, so the trigger is wired only when the daemon is draining
-        // itself. `runRetroTrigger`'s return (an exit code) is discarded — retroCommand
-        // already ledgers everything the daemon loop needs (retro_triggered above,
-        // retro_aborted_integrity, pr.opened, retro.marker.advanced).
-        checkRetroTrigger: retroHooks?.checkRetroTrigger,
-        // Wrapped (not `retroHooks?.runRetroTrigger` directly) so the daemon's own per-boot
-        // ledger sink (`log`, closed over here) reaches the subprocess adapter without
-        // widening `buildRetroDaemonHooks`'s construction-time deps — see its own doc.
-        runRetroTrigger: retroHooks ? (decision) => retroHooks.runRetroTrigger(decision, log) : undefined,
-        // AUTO-TRIAGE RUNG (impl-DJ's design, wired here by impl-DM). Same shape as the retro
-        // hooks above and gated the same way. The rung is DEFAULT OFF in policy data — this line
-        // makes the switch REACHABLE, it does not turn anything on.
-        checkAutoTriage: autoTriageHooks?.checkAutoTriage,
-        runAutoTriage: autoTriageHooks?.runAutoTriage,
-        // W1-T1040: THE GITHUB-SIDE POSTURE DRIFT CHECK — reads `security_and_analysis` +
-        // `enforce_admins` at most once a day (github-posture.ts's own cadence gate), diffs
-        // against the recorded state/github-posture.json baseline, and returns only what
-        // changed. Best-effort like sweep/sweepOrphans above — `lib/daemon.ts`'s loop logs each
-        // finding and never gates dispatch on it (see that call site's own comment).
-        checkGithubPosture: githubPostureHooks ? buildCoverageNightlyDaemonHook({
-          ledgerPath, ...self, next: githubPostureHooks.checkGithubPosture,
-        }) : undefined,
-        // MEASUREMENT CADENCE RUNG (W1-T1259's design, wired here). Same shape as the auto-triage/
-        // github-posture hooks above and gated the same way — SAFE ON in policy data (see
-        // plan/policy.yaml's `measurementCadence` row for why this rung, unlike auto-triage,
-        // defaults to running: it writes nothing unless `escalate` is separately opted in).
-        checkMeasurementCadence: measurementCadenceHooks?.checkMeasurementCadence,
-        runMeasurementCadence: measurementCadenceHooks?.runMeasurementCadence,
-        measurementCadenceChild,
-        // DIGEST CADENCE RUNG (W1-T2277's design, wired here). Same shape as the
-        // measurement-cadence hooks immediately above and gated the same way — SAFE ON in
-        // policy data (plan/policy.yaml's `digestCadence` row): sending a digest spends nothing
-        // and writes nothing (Law 5), so it is safe to run unattended from the start.
-        checkDigestCadence: digestCadenceHooks?.checkDigestCadence,
-        runDigestCadence: digestCadenceHooks?.runDigestCadence,
-        // W1-T3368: this is the production edge the original feature omitted. `daemon.ts`
-        // deliberately owns its decision rows and invokes one bounded pass; this composition root
-        // owns filesystem pressure and the existing compactor. Leaving either undefined turns an
-        // over-bound corpus into a silent no-op until a union read OOMs the fleet.
-        checkLedgerCompaction: ledgerCompactionHooks?.checkLedgerCompaction,
-        runLedgerCompaction: ledgerCompactionHooks?.runLedgerCompaction,
-        checkBenchmarkCohort: benchmarkCohortHooks.checkBenchmarkCohort,
-        runBenchmarkCohortPass: benchmarkCohortHooks.runBenchmarkCohortPass,
-        checkIntakeRungs: intakeRungHooks?.checkIntakeRungs,
-        runIntakeRung: intakeRungHooks?.runIntakeRung,
-        // BOARD-REVIEW RUNG (W1-T2304's design, wired here). Same shape as the two cadences
-        // immediately above and gated the same way — SAFE ON in policy data (plan/policy.yaml's
-        // `boardReview` row): the rung writes one report artifact and drafts registry proposals,
-        // and nothing it produces files a task itself — the rung's own scope. W1-T2456: this
-            // cited "(Rule 15)" for a doctrine that rule does not carry; see §12 rule 27.
-        checkBoardReview: boardReviewHooks?.checkBoardReview,
-        runBoardReview: boardReviewHooks?.runBoardReview,
-        prefetchBoardReview: boardReviewHooks?.prefetchBoardReview,
-        checkWipeTestCadence: wipeTestCadenceHooks?.checkWipeTestCadence,
-        runWipeTestCadence: wipeTestCadenceHooks?.runWipeTestCadence,
-        // CI-LEARNING RUNG (W1-T2972). Same shape as the three cadences above and gated the same
-        // way, with one deliberate difference: its `ciLearningCadence` policy row ships DEFAULT
-        // OFF, because unlike its read-only siblings this rung drafts records. Wiring it here is
-        // what makes that switch mean something; the operator throws it.
-        checkCiLearningCadence: ciLearningHooks?.checkCiLearningCadence,
-        runCiLearningCadence: ciLearningHooks?.runCiLearningCadence,
-        // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
-        // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
-        // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
-        // refused a fire (77 `auto_triage.fired` rows against 0 `skipped_inflight`). Wired HERE,
-        // the one construction site the sibling `isOpenPr`/`readLiveState` pair above is also
-        // bound from, per daemon.ts's own comment: "the SAME shape as the task lane's
-        // `isOpenPr`/`readLiveState` pair above, keyed on feedback id instead of task id."
-        //
-        // isFeedbackOpenPr REUSES `openHeadBranchesForBreaker` — the SAME batched, once-per-boot
-        // `listOpenHeadBranches()` cache `isOpenPr` above reads via `lastProj`, never a second
-        // GitHub call — and `taskIdFromRunBranch` (status.ts, already imported), the SAME head-
-        // branch-ownership reader `corroborateOpenByBranch` uses. A triage run's own branch is
-        // `run-TRIAGE-<feedbackId>-<epochMs>` (triageCommandLocked's `taskId = \`TRIAGE-${feedbackId}\``,
-        // `branch = \`run-${runId}\``), so matching `taskIdFromRunBranch(head) === \`TRIAGE-${feedbackId}\``
-        // against the OPEN slice of that SAME cache is the feedback-keyed twin of `isOpenPr`'s own
-        // `lastProj`-backed read — newest PR wins on a multi-hit, mirroring status.ts's own rung.
-        isFeedbackOpenPr: (feedbackId) => {
-          const wantTaskId = `TRIAGE-${feedbackId}`;
-          const hit = (openHeadBranchesForBreaker() ?? [])
-            .filter((pr) => pr.state.toUpperCase() === "OPEN" && taskIdFromRunBranch(pr.headRefName) === wantTaskId)
-            .sort((a, b) => b.number - a.number)[0];
-          return hit?.number;
-        },
-        // readFeedbackLiveState REUSES `ghLiveStateByNumber` — the IDENTICAL fresh, always-live
-        // re-read `readLiveState` above calls, no new GitHub call shape and no new gateway — so a
-        // cached OPEN that has since merged/closed stands the guard down instead of parking a
-        // feedback entry forever (W1-T177's confirming-read discipline, applied to this lane).
-        readFeedbackLiveState: (_feedbackId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
-        readFeedbackStatusOnMain: (feedbackId) => feedbackStatusOnMain(repoRoot, feedbackId),
-        // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
-        // transitively needs the blocked task) opens a `needs-human` issue
-        // naming the dependents it protects, via W1-T8's escalation taxonomy
-        // — never a bare halt with no actionable trail.
-        //
-        // W1-T3401: routed through `escalateWithJudge` rather than the bare `escalate` this used
-        // to call — BLOCKED was the largest never-judged class (49 of 72 escalated task ids,
-        // measured over the ledger union since 2026-09-08) precisely because THIS site never
-        // consulted the residual escalation judge at all. Safe to make async: `escalateBlock`
-        // is already declared `(info) => void | Promise<void>` (lib/daemon.ts) and its one caller
-        // already `await`s it (lib/daemon.ts) — unlike the genuinely-synchronous breaker callbacks
-        // elsewhere in this file (e.g. the crash-loop/rate-limit breakers), no interface change is
-        // needed to add the `await` here. `realEscalationJudge` is built from `effectiveRepoRoot`
-        // (this repo's own checkout, self-target-injectable — never `config.root`, the separate
-        // state/workspace root, nor the drained TARGET repo's own checkout), the SAME root
-        // `verifyHumanSweepCommand` resolves its own read-only judge mounts/settings against
-        // (`mountsPath(root)`/`join(root, "settings", "worker.json")` with `root = deps.root ??
-        // repoRoot`). A judge that throws, times out, or returns unparseable output fails OPEN to
-        // `deliver` (`judgeEscalation`'s documented polarity) — the halt path never loses an
-        // escalation, it only gains a chance to demote a non-issue to a fleet notice.
-        escalateBlock: async ({ task, result, dependents }) => {
-          await escalateWithJudge(
-            {
-              class: "BLOCKED",
-              taskId: task.id,
-              runId,
-              summary: `${task.id} blocked (${result.verdict}) — ${dependents.length} task(s) transitively need it`,
-              detail:
-                `W1-T46 block-reasoning: ${task.id} did not merge (${result.verdict}` +
-                `${result.prUrl ? `, ${result.prUrl}` : ""}). Real downstream work transitively depends on it ` +
-                `(${dependents.join(", ")}), so the daemon halted rather than continue into the gap.`,
-              options: [
-                {
-                  label: "fix and resume",
-                  detail: `Resolve ${task.id}'s block (\`rmd fix\` or a manual patch), then \`rmd daemon\`/\`rmd drain\` to continue.`,
-                },
-                {
-                  label: "unblock the dependents",
-                  detail: `If ${task.id} is not a real prerequisite for ${dependents.join(", ")}, edit plan/tasks.yaml's depends_on and resume.`,
-                },
-              ],
-              recommendation: "fix and resume",
-            },
-            {
-              issues: ghIssueGatewayAsync(target.owner, target.repo),
-              ledgerPath,
-              runId,
-              judge:
-                deps.escalationJudge ??
-                realEscalationJudge({
-                  mounts: loadMounts(mountsPath(effectiveRepoRoot)),
-                  cwd: effectiveRepoRoot,
-                  settingsFile: join(effectiveRepoRoot, "settings", "worker.json"),
-                }),
-            },
-          );
-        },
-        log,
-      },
-      opts,
-    );
-    writeSyncLine(1, "\n" + renderDaemonSummary(summary));
-    // The pure stop-reason -> exit-code mapping lives in lib/daemon.ts
-    // (`daemonExitCode`), unit-tested there with no process spawn (Rule 18):
-    // 0 only on a clean stop (STOP requested / max reached); a block, a
-    // pause, or an error is non-zero so a supervising wrapper (or launchd,
-    // W1-T12b) notices. Headroom exhaustion never reaches here as a
-    // stopReason at all — it is an in-process idle state inside runDaemon,
-    // never a process exit.
-    // W1-T2546: the SUMMARY-aware code, so an environmental refusal (a rate-limit 403, a 5xx,
-    // a transport fault) is not charged to the container crash-restart budget. Every non-`error`
-    // reason still resolves through `daemonExitCode` itself, unchanged.
-    return daemonExitCodeForSummary(summary);
-  } finally {
-    await readPlane?.stop();
-    if (!deps.checkPause && !deps.runDaemon) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
-    loopTelemetry.stop();
-    stopMemoryCensus();
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
-    githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
-    // W1-T5115: closed and its path removed on normal stop; a failed close is ledgered, never thrown.
-    await gitCredentialSocket?.close().catch((e: unknown) => log(LEDGER_REQUEST_STEP, {
-      host: "github.com", decision: "refuse", status: "error", reason: `git credential socket did not close: ${String(e)}`,
-    }));
-    consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
-    drainLock.release();
-  }
+    reviewerCodeRecoveryFromLoadedModule,
+    runInChildWhenOn,
+    runInflightLockSweepRung,
+    runRegisteredGardenPass,
+    runRepositoryMaintenanceRung,
+    runTask,
+    servedTickRead,
+    shardRepairRequester,
+    syncPlanOrRefuseAsync,
+    unwireOwnCheckoutCredentialHelper,
+    writeSyncLine,
+  };
 }
 
 /**
@@ -42088,11 +34992,7 @@ export function ciFailurePromptEvidence(failures: readonly CiFailure[]): CiFailu
 }
 
 export function fixRungCiFailures(owner: string, repo: string): (prUrl: string, sha?: string) => Promise<CiFailure[]> {
-  return async (prUrl, sha) => {
-    if (sha) return fetchCiFailuresAsync(owner, repo, await restRollupFor(owner, repo, sha, ghJsonAsync));
-    const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"]) as { statusCheckRollup?: RollupCheck[] };
-    return fetchCiFailuresAsync(owner, repo, v.statusCheckRollup);
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).fixRungCiFailures(owner, repo);
 }
 
 /** One bounded ledger row per classification transition, never one row per unchanged poll. */
@@ -42329,6 +35229,7 @@ export function buildFixRungDispatchArgs(args: {
   evidence: FixDispatchEvidence;
   pr: {
     headSha: string;
+    reviewInputDigest?: string;
     reviewSummary?: string;
     pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
@@ -42433,6 +35334,7 @@ export function buildFixRungDispatchArgs(args: {
     budgetUsd: args.budgetUsd,
     strikeCap: args.strikeCap,
     initialReview,
+    progressReviewInputDigest: pr.reviewInputDigest,
     initialCriterionIndices,
     constraint: feedbackFixConstraint(pr.pendingAnswer),
     feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),
@@ -43154,81 +36056,8 @@ function preserveFixHead(repoDir: string, branch: string, localSha: string): str
 }
 
 /** W1-T3696 A1. What {@link commitWorkerEdits} did, and what it refused to touch. */
-export interface WorkerEditCommit {
-  /** True only when the worker's edits were committed onto the branch. */
-  readonly committed: boolean;
-  /** The new HEAD sha, present only when `committed`. */
-  readonly sha?: string;
-  /** Paths outside the declared surface and its allowed exceptions. Reported, never staged. */
-  readonly undeclared: readonly string[];
-  /** W1-T4450: registered regenerable artifacts staged although undeclared (see commitWorkerEdits). */
-  readonly regenerable?: readonly string[];
-  /** W1-T5386: new tests admitted by the task's own title proofs. */
-  readonly proofMatchedTests?: readonly string[];
-  readonly admittedTests?: readonly string[];
-  readonly admittedRegistrations?: readonly string[];
-  /** Why nothing was committed, when `committed` is false. */
-  readonly reason?: string;
-  /** W1-T5227: the declared paths still holding a conflict marker; nothing staged, MERGE_HEAD left live. */
-  readonly conflictMarkerFiles?: readonly string[];
-  readonly headMoved?: { prior_head_sha: string; observed_head_sha: string; other_worktrees: string[] };
-  readonly aliasRewrite?: AddedTestAliasRewrite;
-}
 
-/** W1-T10064: the W1-T9864 codemod's `rewriteSource` contract. */
-export type TestAliasRewriter = (text: string, file: string) => { text: string; rewritten: number; unresolved: string[] };
-
-/** W1-T10064: what the alias rewrite did to the new tests a harness commit stages. */
-export interface AddedTestAliasRewrite {
-  readonly rewritten: string[];
-  readonly unresolved: { path: string; specifier: string }[];
-  readonly failed: { path: string; error: string }[];
-}
-
-/**
- * W1-T10064: REWRITE THE RELATIVE IMPORTS OF THE TESTS THE WORKER ADDED to `#src/`/`#scripts/`/`#test/`, the
- * mechanical edit the W1-T9864 census asks of every new test. Only `??`/`A` test files absent from a merge's
- * MERGE_HEAD are touched; an existing file is never rewritten. A throw leaves the file as written and is named.
- */
-export function rewriteAddedTestImports(
-  repoDir: string,
-  status: string,
-  staged: readonly string[],
-  runGit: GitRunner,
-  rewrite: TestAliasRewriter = codemodRewriteSource,
-): AddedTestAliasRewrite {
-  const result: AddedTestAliasRewrite = { rewritten: [], unresolved: [], failed: [] };
-  let candidates = status.split("\0").filter((entry) => ["?? ", "A  ", "AM "].includes(entry.slice(0, 3)))
-    .map((entry) => entry.slice(3)).filter((path) => staged.includes(path) && /^test\/.+\.test\.m?ts$/.test(path) &&
-      !path.split("/").includes("..") && existsSync(join(repoDir, path)) && lstatSync(join(repoDir, path)).isFile());
-  if (candidates.length > 0 && mergeHeadPresent(runGit)) {
-    const fromMain = new Set(runGit(["ls-tree", "-r", "--name-only", "MERGE_HEAD", "--", ...candidates]).split("\n"));
-    candidates = candidates.filter((path) => !fromMain.has(path));
-  }
-  for (const path of candidates) {
-    try {
-      const out = rewrite(readFileSync(join(repoDir, path), "utf8"), path);
-      result.unresolved.push(...out.unresolved.map((specifier) => ({ path, specifier })));
-      if (out.rewritten > 0) {
-        writeFileSync(join(repoDir, path), out.text);
-        result.rewritten.push(path);
-      }
-    } catch (error) {
-      result.failed.push({ path, error: String((error as Error)?.message ?? error) });
-    }
-  }
-  return result;
-}
-
-/** W1-T10064: the `implement.harness_commit` fields of an alias rewrite, each present only when non-empty. */
-export function aliasRewriteFields(rewrite: AddedTestAliasRewrite | undefined): Record<string, unknown> {
-  if (rewrite === undefined) return {};
-  return {
-    ...(rewrite.rewritten.length > 0 ? { alias_rewritten: rewrite.rewritten } : {}),
-    ...(rewrite.unresolved.length > 0 ? { alias_unresolved: rewrite.unresolved } : {}),
-    ...(rewrite.failed.length > 0 ? { alias_rewrite_failed: rewrite.failed } : {}),
-  };
-}
+export { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite, type TestAliasRewriter };
 
 /** Read worker edits against HEAD, or committed registrations against their merge base. */
 export function readRegistrationChanges(
@@ -43419,7 +36248,7 @@ export function commitWorkerEdits(
     runGit(["ls-tree", "--name-only", "HEAD", "--", path]).trim() === "" &&
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
-  const admittedTests = options.admitTests ? changed.filter((path) => path.startsWith("test/") && !path.split("/").includes("..")) : [];
+  const admittedTests = admittedFixTestPaths(changed, options.admitTests);
   const registrationChanges = declaredPaths.every(isInPlanScope) ? [] :
     readRegistrationChanges(repoDir, changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)), undefined, runGit, options.priorHeadSha);
   const admittedRegistrations = registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
@@ -43485,8 +36314,9 @@ export function commitWorkerEdits(
     }
     if (mergeHead !== undefined) {
       runGit(["merge", "--quit"]);
-      runGit(["read-tree", sha]);
     }
+    // W1-T10068: refresh the index only after CAS; never update working-tree files.
+    runGit(["read-tree", sha]);
   }
   return {
     committed: true,
@@ -43580,17 +36410,6 @@ export function commitWorkerEditsWithCensusFix(
   return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps, acceptance), censusFix };
 }
 
-/** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
-function mergeHeadPresent(runGit: GitRunner): boolean {
-  try {
-    runGit(["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
-    return true;
-  } catch {
-    // No MERGE_HEAD: nothing is mid-merge.
-    return false;
-  }
-}
-
 /**
  * W1-T4458 design (i): starts a shell-less merge-conflict round's merge FOR the worker, whose prompt
  * says it has no shell. `--no-commit --no-ff` leaves MERGE_HEAD and conflict markers for a
@@ -43671,18 +36490,7 @@ export function cashContainedRunRefusal(
   config: Config,
   implementCashTools: readonly string[] | undefined,
 ): string | undefined {
-  const required: Array<{ lane: string; tools: readonly string[] | undefined }> = [
-    { lane: "recon", tools: cashDivertSpawnFields("recon").cashTools },
-    { lane: "implement", tools: implementCashTools },
-    { lane: "diagnose", tools: cashDivertSpawnFields("diagnose").cashTools },
-    { lane: "review", tools: cashDivertSpawnFields("review").cashTools },
-    { lane: "fix", tools: fixRoundGitOwnership(config).cashTools },
-  ];
-  for (const requirement of required) {
-    const refusal = cashFallbackRefusal(config, requirement.tools);
-    if (refusal !== undefined) return `${requirement.lane}: ${refusal}`;
-  }
-  return undefined;
+  return runTaskCommandHelpers(runTaskCommandHost()).cashContainedRunRefusal(config, implementCashTools);
 }
 
 /**
@@ -43692,16 +36500,7 @@ export function cashContainedRunRefusal(
  * the proof's scope without inventing a capacity window or claiming the raised squeeze-day cap.
  */
 export function forceCashContainedRunSpawn(args: SpawnWorkerArgs, config: Config): SpawnWorkerArgs {
-  const tools = args.cashTools ?? args.tools;
-  const refusal = cashFallbackRefusal(config, tools);
-  if (refusal !== undefined) {
-    throw new Error(`cash-contained run refuses a worker without a cash-equivalent surface: ${refusal}`);
-  }
-  return {
-    ...args,
-    mountProvider: "cash",
-    ...(tools === undefined ? {} : { tools: [...tools] }),
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).forceCashContainedRunSpawn(args, config);
 }
 
 /** W1-T4207: at most this many undeclared paths ride a `fix.commit_refused` row; the rest are counted. */
@@ -43774,34 +36573,9 @@ function fixWorkerEndedBySignal(result: Pick<WorkerResult, "exit">): result is W
 export const REFUSED_REPORT_TAIL_CHARS = 800;
 
 export function harnessCommitForShellLessWorker(
-  input: {
-    /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
-     *  could have committed and chose not to keeps its long-standing `no_pr` verdict. */
-    harnessOwnsGit: boolean;
-    commitCount: number;
-    report: string;
-    worktreePath: string;
-    declaredPaths: readonly string[];
-    acceptance?: readonly AcceptanceCriterion[];
-    admitTests?: boolean;
-    priorHeadSha?: string;
-    branch?: string;
-    fixOutcome?: TypedFixOutcome["kind"];
-    subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
-    derivedCommit?: { subject: string; reason: string };
-    /** W1-T4614: the selection assignment of the worker whose edits this commits; its trailer names it. */
-    assignmentId?: string;
-    requireMergeHead?: boolean;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-    say: (msg: string) => void;
-    /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
-     *  with the undeclared paths it refused to stage (W1-T4207; empty when none were computed). */
-    onRefusal?: (reason: string, undeclared?: readonly string[], conflictMarkerFiles?: readonly string[]) => void;
-    /** W1-T10026: also receives the changed paths the commit left out. */
-    onCommit?: (sha: string, undeclared?: readonly string[]) => void;
-  },
-  deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
-): number {
+  input: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[0],
+  deps: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[1] = {},
+): ReturnType<RunTaskCommandHost["harnessCommitForShellLessWorker"]> {
   if (!input.harnessOwnsGit || input.commitCount !== 0) return input.commitCount;
   if (input.requireMergeHead && !mergeHeadPresent(worktreeGitRunner(input.worktreePath))) {
     input.log("implement.harness_commit_refused", { reason: MERGE_HEAD_ABSENT_REASON });
@@ -43854,21 +36628,12 @@ export function harnessCommitForShellLessWorker(
 /** W1-T4614: the head sha a worktree holds and the assignment its commit names — the fields `implement.done` and
  * `pr.opened` carry so a review or CI verdict on that head joins to the worker that wrote it. Empty when no head reads. */
 export function headProvenanceFields(worktreePath: string): { head_sha?: string; head_assignment?: string } {
-  let headSha: string;
-  try {
-    headSha = hostWorktreeGit(worktreePath, ["rev-parse", "--verify", "HEAD"]).trim();
-  } catch {
-    // No head to name: the row omits both fields rather than inventing a sha.
-    return {};
-  }
-  return { head_sha: headSha, head_assignment: resolveCommitAssignment(worktreePath, headSha) };
+  return runTaskCommandHelpers(runTaskCommandHost()).headProvenanceFields(worktreePath);
 }
 
 /** Keep the run-body refusal state callback independently executable for the harness path. */
 export function createHarnessCommitRefusalRecorder(state: { reason?: string }): (reason: string) => void {
-  return (reason) => {
-    state.reason = reason;
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).createHarnessCommitRefusalRecorder(state);
 }
 
 /** W1-T4052: is there ANYTHING uncommitted in this worktree — declared surface or not? Checked
@@ -43926,66 +36691,10 @@ export async function resumeForMissingCommitLine(
   // commit is that helper's, so its `commit`/`ahead` fakes are the only seams this recovery needs.
   deps: Parameters<typeof harnessCommitForShellLessWorker>[1] = {},
 ): Promise<{ commitCount: number; refusalReason: string | undefined; report: string; resumed: boolean }> {
-  const noop = {
-    commitCount: input.commitCount,
-    refusalReason: input.refusalReason,
-    report: input.report,
-    resumed: false as const,
-  };
-  if (input.refusalReason !== MISSING_COMMIT_MESSAGE_REASON || input.commitCount !== 0) return noop;
-  if (!worktreeHasUncommittedChanges(input.worktreePath)) return noop;
-
-  input.log("implement.commit_line_requested", {});
-  input.say("no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
-  const resumed = await input.resume();
-  input.log("implement.resumed", {
-    ...(resumed.sessionId ? { session_id: resumed.sessionId } : {}),
-    cost_usd: resumed.costUsd,
-    ...(resumed.numTurns !== undefined ? { num_turns: resumed.numTurns } : {}),
-    ...(resumed.subtype !== undefined ? { subtype: resumed.subtype } : {}),
-    reason: "missing_commit_line",
-  });
-
-  // APPENDED, never replacing the original report — the original REPORT content (follow-ups,
-  // learnings-used, the worker's own narrative) survives; only the anchored COMMIT_MESSAGE line
-  // the resumed reply carries is new, and `parseReport`'s own "last one wins" rule picks it up.
-  const combinedReport = `${input.report}\n${resumed.text}`;
-  const derivedCommit = parseReport(combinedReport)?.commitMessage === undefined && input.task
-    ? derivedImplementCommit(input.task, input.declaredPaths)
-    : undefined;
-  if (parseReport(combinedReport)?.commitMessage === undefined && derivedCommit === undefined) {
-    const reason = `${MISSING_COMMIT_MESSAGE_REASON} (asked the worker's own session once; still absent)`;
-    input.log("implement.harness_commit_refused", { reason });
-    return { commitCount: input.commitCount, refusalReason: reason, report: combinedReport, resumed: true };
-  }
-
-  const refusalState: { reason?: string } = {};
-  const commitCount = harnessCommitForShellLessWorker(
-    {
-      harnessOwnsGit: true,
-      commitCount: input.commitCount,
-      report: combinedReport,
-      worktreePath: input.worktreePath,
-      declaredPaths: input.declaredPaths,
-      acceptance: input.acceptance,
-      subjectSource: derivedCommit ? "harness-derived" : "re-asked",
-      derivedCommit,
-      assignmentId: input.assignmentId,
-      log: input.log,
-      say: input.say,
-      onRefusal: createHarnessCommitRefusalRecorder(refusalState),
-      onCommit: input.onCommit,
-    },
-    deps,
-  );
-  return { commitCount, refusalReason: refusalState.reason, report: combinedReport, resumed: true };
+  return runTaskCommandHelpers(runTaskCommandHost()).resumeForMissingCommitLine(input, deps);
 }
 
 /** W1-T10026: a path the harness commit left out that the commit's own files import, and which files import it. */
-export interface RequiredCompanion {
-  path: string;
-  importers: string[];
-}
 
 /**
  * W1-T10026: THE LEFT-OUT PATHS THE COMMITTED TREE CANNOT LOAD WITHOUT. Each code file the harness commit holds is read
@@ -43997,18 +36706,13 @@ export function requiredCompanions(
   leftOut: readonly string[],
   git: (args: string[]) => string,
 ): RequiredCompanion[] {
-  if (leftOut.length === 0) return [];
-  const paths = (args: string[]) => git(args).split("\0").filter(Boolean);
-  const committed = paths(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--diff-filter=d", sha])
-    .filter((path) => /\.(?:ts|mts|mjs|js|cjs)$/.test(path));
-  const files = new Map(committed.map((path) => [path, git(["show", `${sha}:${path}`])]));
-  const { directImports } = buildAffectedSuitesGraph(files, [...paths(["ls-tree", "-r", "--name-only", "-z", sha]), ...leftOut]);
-  const left = new Set(leftOut);
-  const importers = new Map<string, string[]>();
-  for (const [file, deps] of directImports) {
-    for (const dep of deps) if (left.has(dep)) importers.set(dep, [...(importers.get(dep) ?? []), file]);
-  }
-  return [...importers].sort(([a], [b]) => a.localeCompare(b)).map(([path, by]) => ({ path, importers: by.sort() }));
+  return runTaskCommandHelpers(runTaskCommandHost()).requiredCompanions(sha, leftOut, git);
+}
+
+export async function readBuildScopeAmendmentState(
+  url: string, fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<"open" | "merged" | "closed"> {
+  return runTaskCommandHelpers(runTaskCommandHost()).readBuildScopeAmendmentState(url, fetch);
 }
 
 /**
@@ -44025,22 +36729,7 @@ export async function askScopeForLeftOutImports(input: {
   amend: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome | Promise<ScopeAmendmentOutcome>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<{ companions: RequiredCompanion[]; amendment: ScopeAmendmentOutcome } | undefined> {
-  if (!input.commit) return undefined;
-  const { sha, undeclared } = input.commit;
-  const companions = requiredCompanions(sha, undeclared, input.git);
-  if (companions.length === 0) return undefined;
-  const paths = companions.map((c) => c.path);
-  const importers = Object.fromEntries(companions.map((c) => [c.path, c.importers]));
-  input.log("implement.scope_needed", { task_id: input.taskId, paths, importers, head_sha: sha });
-  let amendment: ScopeAmendmentOutcome;
-  try {
-    amendment = await input.amend({ taskId: input.taskId, prNumber: 0, prUrl: "", headSha: sha, headRef: input.branch,
-      paths, changedPaths: [...undeclared] });
-  } catch (error) {
-    amendment = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
-  }
-  input.log("implement.scope_amendment", { ...amendment, outcome: amendment.kind, task_id: input.taskId, paths, head_sha: sha });
-  return { companions, amendment };
+  return runTaskCommandHelpers(runTaskCommandHost()).askScopeForLeftOutImports(input);
 }
 
 /** W1-T4052: the ONLY thing the missing-line resume asks the worker's own session for. */
@@ -44080,18 +36769,6 @@ export function missingCommitLinePrompt(input: {
     COMMIT_LINE_RESUME_PROMPT;
 }
 
-function derivedImplementCommit(task: Pick<Task, "id" | "title" | "type">, paths: readonly string[]): { subject: string; reason: string } | undefined {
-  if (task.type !== "implement" || !task.title.trim() || !paths[0]) return undefined;
-  const parts = paths[0].split("/");
-  const area = (parts.length > 1 ? parts[parts.length - 2] : parts[0].replace(/\.[^.]+$/, ""))
-    .toLowerCase().replace(/[^a-z0-9-]/g, "");
-  if (!area || area.length > 60) return undefined;
-  const clause = task.title.split(/\s+[—–-]\s+|[;:.!?]\s+/)[0].trim().toLowerCase().replace(/\s+/g, " ");
-  const prefix = `feat(${area}): `;
-  const subject = prefix + Array.from(clause).slice(0, 100 - prefix.length).join("").trimEnd().replace(/[^\p{L}\p{N}]$/u, "");
-  if (subject === prefix) return undefined;
-  return { subject, reason: `no COMMIT_MESSAGE after one re-ask; ${task.id} title and ${paths[0]}` };
-}
 
 export function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
   const pr = prUrl.match(/\/pull\/(\d+)(?:\/|$)/)?.[1];
@@ -44112,17 +36789,7 @@ export function commitLineResume(
   spawnArgs: Omit<SpawnWorkerArgs, "prompt">,
   context?: { provider?: WorkerResult["provider"]; title: string; report: string; declaredPaths?: readonly string[] },
 ): () => Promise<{ text: string; costUsd: number; sessionId: string; numTurns: number; subtype: string }> {
-  return async () => {
-    const prompt = context ? missingCommitLinePrompt({ ...context, tools: spawnArgs.tools, worktreePath: spawnArgs.cwd }) : COMMIT_LINE_RESUME_PROMPT;
-    const resumed = account(await spawn({ ...spawnArgs, prompt }));
-    return {
-      text: workerTranscript(resumed),
-      costUsd: resumed.costUsd,
-      sessionId: resumed.sessionId,
-      numTurns: resumed.numTurns,
-      subtype: resumed.subtype,
-    };
-  };
+  return runTaskCommandHelpers(runTaskCommandHost()).commitLineResume(spawn, account, spawnArgs, context);
 }
 
 /** Paths from `git status --porcelain -z`. NUL-delimited so a path with a space or a quote is
@@ -44146,9 +36813,6 @@ export function pathIsUnderDeclaredSurface(path: string, declaredPaths: readonly
   });
 }
 
-export interface PublishAbandonedFixOwnerAheadDeps {
-  runGit?: (args: string[]) => string;
-}
 
 function remoteHeadShaFromLsRemote(raw: string, ref: string): string | null {
   for (const line of raw.split("\n")) {
@@ -46206,6 +38870,13 @@ export function inFlightTaskIdsFrom(inflightDir: string): string[] {
     .map((entry) => entry.slice(0, -".lock".length));
 }
 
+/** W1-T9569 — what a review-only light pass writes on its rows: its scope, in the stand-down text and in
+ * `light_pass_scope`, never the ordinary "deferred to full sweep (light pass)". An ordinary pass gets nothing. */
+export function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps, "lightPassScope" | "standDownReasonFor"> {
+  const name = scope?.reviewOnly === true ? scope.scope : undefined;
+  return name ? { lightPassScope: name, standDownReasonFor: () => reviewOnlyStandDownReason(name) } : {};
+}
+
 export function buildSweepLightHook(
   owner: string,
   repo: string,
@@ -46289,7 +38960,8 @@ export function buildSweepLightHook(
       }
       // W1-T9595: a held head main has fixed is refreshed only through this one admission, never the fan-out below.
       const admitted = reviewOnly ? [] : await runLightPassRefreshAdmission(openPrs, { ...effects, ledgerPath, runId });
-      const passPrs = openPrs.filter((pr) => pr.prNumber !== readyRefreshed && !admitted.includes(pr.prNumber));
+      const ratchetRefreshed = reviewOnly ? [] : await runArmedRatchetRejudge(openPrs, { ...effects, ledgerPath, runId });
+      const passPrs = openPrs.filter((pr) => pr.prNumber !== readyRefreshed && !admitted.includes(pr.prNumber) && !ratchetRefreshed.includes(pr.prNumber));
       const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
       const restPrs = requeueOnlyPrNumbers.size === 0 ? passPrs : passPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
@@ -46311,6 +38983,7 @@ export function buildSweepLightHook(
             // W1-T8086: own-red and conflict repairs use per-claim capacity on ordinary passes;
             // review-only still stands them down.
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, fixAdmitted),
+            ...reviewOnlyLightPassDeps(scope),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
             // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.
@@ -46441,7 +39114,24 @@ export async function routeFix(
   if (terminal) {
     return { outcome: "refused", reason: terminal };
   }
-  const { disposition, reason } = deriveDisposition(pr, policy);
+  let { disposition, reason } = deriveDisposition(pr, policy);
+  let securityFix = disposition === "mergeable" &&
+    pr.codeqlHeadAlerts?.headSha === pr.headSha && pr.codeqlHeadAlerts.alerts.length > 0 &&
+    (pr.ciFailures ?? []).some(failure => failure.name === CODEQL_CHECK_NAME);
+  if (securityFix) {
+    if (!deps.ledgerLines) return { outcome: "refused", reason: "code-scanning ruling history unavailable; no security repair admitted" };
+    try {
+      securityFix = !deps.ledgerLines().some(row => row.step === CODE_SCANNING_FALSE_POSITIVE_STEP &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
+    } catch {
+      return { outcome: "refused", reason: "code-scanning ruling history unavailable; no security repair admitted" };
+    }
+  }
+  const ciFailures = withCodeqlAlertEvidence(pr, pr.ciFailures ?? []);
+  if (securityFix) {
+    disposition = "blocked-fixable";
+    reason = "CodeQL failed with open high-severity alerts at this exact head";
+  }
   let progressDecision: FixProgressVerdict | undefined;
   if (disposition === "blocked-fixable" && (pr.priorStrikes ?? 0) > 0) {
     // W1-T7096 (ruling 2026-10-09): a PR that already spent rounds gets another only when the progress
@@ -46451,7 +39141,7 @@ export async function routeFix(
       (line) => console.error(line));
     const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
       strikesSpent: pr.priorStrikes,
-      currentRed: isBlockedCi(pr) ? (pr.ciFailures ?? []).map((f) => f.name)
+      currentRed: isBlockedCi(pr) || securityFix ? ciFailures.map((f) => f.name)
         : pr.unmetCriteria.filter((c) => !c.met).map((c) => `review:${c.claim}`),
       ledger: [...(deps.ledgerLines?.() ?? [])], formerCeiling: policy.strikeCap,
       parkedReason: "fix-strike: another operator-requested repair after prior rounds" });
@@ -46481,8 +39171,8 @@ export async function routeFix(
       pr,
       { ...(progressDecision ? { progressDecision, progressJudge: deps.fixProgressJudge,
           progressApproach: progressDecision.verdict === "change-approach" ? progressDecision.approach : undefined } : {}),
-        ...(isBlockedCi(pr)
-        ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
+        ...(isBlockedCi(pr) || securityFix
+        ? { unmetCriteria: [], ciFailures }
         : {
             unmetCriteria: pr.unmetCriteria,
             actionableGateFailures: pr.actionableGateFailures,
@@ -46589,6 +39279,14 @@ export async function fixCommand(
   const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
   const ciGateRequired = readCiGateRequiredChecks(repoRoot);
   const redRequiredChecks = redQualityGateNames(raw.statusCheckRollup, ciGateRequired);
+  const falsePositive = ledger.some(row => row.step === CODE_SCANNING_FALSE_POSITIVE_STEP &&
+    row.pr_number === raw.number && row.head_sha === raw.headRefOid);
+  const failedCodeql = codeqlCheckFailed(raw.statusCheckRollup);
+  const codeqlHeadAlerts = failedCodeql && !falsePositive
+    ? (await runStepsAsync(hydrateCodeqlHeadAlertsSteps(owner, repo, [{ number: raw.number, headSha: raw.headRefOid }],
+      deps.fetch ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit)),
+      undefined, (pr_number, reason) => log("fix.codeql_alerts_unreadable", { pr_number, head_sha: raw.headRefOid, reason })))).get(raw.number)
+    : undefined;
   const pr: OpenPrView = {
     prNumber: raw.number,
     prUrl: raw.url,
@@ -46628,7 +39326,9 @@ export async function fixCommand(
     autoMergeArmed: raw.autoMergeRequest != null,
     reviewSummary: reviewState === "failure" ? reviewSummaryFromLedger(ledger, reviewLedgerKeyFor(taskId, raw.number), raw.url, raw.headRefOid) : undefined,
     // W1-T100: the ci-log fix mode's input — see buildOpenPrViews.
-    ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup) : undefined,
+    ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup)
+      : codeqlHeadAlerts ? [{ name: CODEQL_CHECK_NAME, logTail: "The CodeQL results check failed at this head." }] : undefined,
+    codeqlHeadAlerts,
     redRequiredChecks,
   };
 
@@ -47692,6 +40392,11 @@ async function triageCommandLocked(
   // LOST the claim holds nothing to release.
   let triageClaim: TriageClaimResult | undefined;
   let claimReserver: TriageClaimReserverAsync | undefined;
+  // W1-T9488: the remote ids this run holds, what its pushed branch declares, and how it ended —
+  // the finally gives back every id the branch does not carry.
+  const triageHeld: HeldTaskIdReservation[] = [];
+  let triagePushed: LanePushedIds;
+  let triageEnding = "ended before a verdict";
   try {
     // Read the entry from the FRESH worktree (origin/main snapshot), not repoRoot, which may be
     // a stale checkout — same discipline retro's next-task read follows.
@@ -47821,6 +40526,7 @@ async function triageCommandLocked(
     // NAMED FOR WHAT IT IS. The old `reservedTaskId` was bound to an advisory-derived value, and
     // that name is most of why this survived review: every reader who checked "does the worker get
     // the reserved id" read it and stopped. These two are derived from the remote block only.
+    triageHeld.push(...heldFromBlock(remoteIdBlock, triageRemoteRefReserver));
     const reservedIds = remoteIdBlock.taskIds;
     const reservedHeadTaskId = reservedIds[0];
     say(`next task id: ${describeMintWithHistory(mint)}`);
@@ -47893,6 +40599,7 @@ async function triageCommandLocked(
         }),
     });
     const { decision, changedFiles } = loop.decision;
+    triageEnding = `verdict ${decision.action}`;
     await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [],
       `triage-${decision.action}-adoption`, log);
 
@@ -48045,7 +40752,9 @@ async function triageCommandLocked(
 
     await observeFeedbackPublication(config.contributorAdmission === undefined ? undefined : { mode: "shadow", record: log },
       entry.contribution ? [entry.contribution] : [], `${owner}/${repo}`, "triage-publication");
+    triagePushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
     await gitPushRunBranchAsync(worktreePath);
+    triagePushed = pushedBranchIds(worktreePath, log);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
@@ -48169,6 +40878,7 @@ async function triageCommandLocked(
     return reviewCode;
   } catch (e) {
     log("triage.error", { error: String((e as Error)?.message ?? e) });
+    triageEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
       worktreeRemove(repoDir, worktreePath);
     } catch {
@@ -48177,11 +40887,16 @@ async function triageCommandLocked(
     throw e;
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
+    // W1-T9488: the REMOTE half is given back too — every reserved id the pushed branch does not declare.
+    releaseUnfiledReservations(triageHeld, triagePushed, {
+      run: gitRunAdapter((args) => hostWorktreeGitResult(repoDir, args)), lane: "triage", log,
+      reason: laneReleaseReason(`triage ${feedbackId}`, triageEnding, triagePushed),
+    });
     // Every LOCAL id is now either ON an open PR (where the mint's openPrs source sees it) or
     // unused and free to reissue. Either way holding the file longer protects nothing — release
     // the WHOLE block, used or not, exactly as `rmd plan`'s block does (a hole is not a defect;
-    // see task-id-reservation.ts's own doctrine). The REMOTE half is never released — nothing
-    // releases a remote reservation, deliberately (same module, same doctrine).
+    // see task-id-reservation.ts's own doctrine). The REMOTE half is released just above
+    // (W1-T9488), for every id the pushed branch does not declare.
     localIdBlock?.releaseAll();
     // W1-T1132 RELEASE ARM 1 (HOLDER): explicit, on completion, success or throw — never a timer.
     // Guarded on the ANCHOR rather than on `triageClaim` being set: a lane that refused because
@@ -48280,6 +40995,10 @@ export async function planCommand(
   const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   let planIdBlock: TaskIdReservationBlock | undefined;
+  // W1-T9488: see the triage lane's twin — the remote ids held, what the pushed branch declares, how it ended.
+  const planHeld: HeldTaskIdReservation[] = [];
+  let planPushed: LanePushedIds;
+  let planEnding = "ended before a verdict";
 
   try {
     // ID MINT + BLOCK RESERVATION (impl-DV), the SAME ordering triage uses at :10222-:10240: mint
@@ -48307,19 +41026,17 @@ export async function planCommand(
     // message) rather than falling through — the paid worker is still unstarted when it does.
     // Same closure-narrowing reason as the triage lane above.
     const planReserveFrom = planIdBlock.ids[0];
+    // Same non-throwing runner over `worktreePath` triage's own remote reserve uses — a
+    // rejected push is NORMAL here (contention), so a throwing runner would make it
+    // indistinguishable from an unreachable remote.
+    const planRemoteReserver = gatedRemoteRefReserver({
+      lane: "plan", log,
+      run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)),
+    });
     const planRemoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () =>
-      reserveTaskIdBlockRemote(
-        planReserveFrom,
-        PLAN_MAX_NEW_TASKS,
-        gatedRemoteRefReserver({
-          lane: "plan", log,
-          // Same non-throwing runner over `worktreePath` triage's own remote reserve uses — a
-          // rejected push is NORMAL here (contention), so a throwing runner would make it
-          // indistinguishable from an unreachable remote.
-          run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)),
-        }),
-      ),
+      reserveTaskIdBlockRemote(planReserveFrom, PLAN_MAX_NEW_TASKS, planRemoteReserver),
     );
+    planHeld.push(...heldFromBlock(planRemoteIdBlock, planRemoteReserver));
     const reservedIds = planRemoteIdBlock.taskIds;
     log("plan.id_minted", {
       reserved: reservedIds,
@@ -48377,6 +41094,7 @@ export async function planCommand(
     // directs the worker to add tasks, and PR #1074's monolith-filing rule pushes those into shards —
     // so the created-file case is the NORMAL one here, not an edge.
     const { decision, changedFiles } = loop.decision;
+    planEnding = `verdict ${decision.action}`;
 
     // W1-T985 — THE RARE-OVERLAP ADVISORY, AT THE POINT THE FILED SHARD IS ON DISK. The advisory
     // shipped 2026-08-16 (W1-T533) and gained its only reader the same day (W1-T917,
@@ -48498,7 +41216,9 @@ export async function planCommand(
       changedFiles: planPrFiles,
       proofCwd: worktreePath,
     });
+    planPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
     await gitPushRunBranchAsync(worktreePath);
+    planPushed = pushedBranchIds(worktreePath, log);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
@@ -48572,6 +41292,7 @@ export async function planCommand(
     return reviewCode;
   } catch (e) {
     log("plan.error", { error: String((e as Error)?.message ?? e) });
+    planEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
       worktreeRemove(repoDir, worktreePath);
     } catch {
@@ -48580,6 +41301,11 @@ export async function planCommand(
     throw e;
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
+    // W1-T9488: the REMOTE half is given back too — every reserved id the pushed branch does not declare.
+    releaseUnfiledReservations(planHeld, planPushed, {
+      run: gitRunAdapter((args) => hostWorktreeGitResult(repoDir, args)), lane: "plan", log,
+      reason: laneReleaseReason("plan", planEnding, planPushed),
+    });
       // Release EVERY reserved id — the ones the worker filed AND the ones it declined. Once the
       // PR exists the mint sees those ids via openPrMintTexts, so holding them longer would only
       // punch holes in the id space (the phantom-id trap: W1-T199/224/247/263).
@@ -48858,7 +41584,8 @@ export async function inboxBakeoffCommand(
   const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
   const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
   try {
-    const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+    // Match the production draft rung: a monolith-only sample silently omits shard dependencies.
+    const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
     const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {
       const cash = candidate.billing === "cash";
       // A cash candidate is pinned by restricting the cash ladder to its one deployment; the subscription candidate
@@ -49007,7 +41734,7 @@ export function buildInboxDraftHook(
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-          isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+          isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
@@ -49325,7 +42052,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
-      isDeclined: (id) => declinedReasonInLedger(ledgerLinesForRatify, id),
+      isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -49404,7 +42131,7 @@ function loadProposalForRatify(
     retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -49445,7 +42172,7 @@ function loadProposalsForRatify(
     retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
@@ -49650,7 +42377,27 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   ledgerPath: string;
   runId: string;
   shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
+  clock?: Clock;
+  filingHistory?: FilingHistoryOptions;
 };
+
+function lifetimeShardAge(
+  taskId: string,
+  nowMs: number,
+  rows: readonly Record<string, unknown>[],
+  filingHistory: TaskFilingHistoryInvocation,
+): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
+  const fromGit = shardAgeDays(taskId, nowMs, filingHistory);
+  if (fromGit.ageDays !== null) return fromGit;
+  let first: number | undefined;
+  for (const row of rows) {
+    if (row.task_id !== taskId && row.task !== taskId) continue;
+    const t = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isNaN(t) && (first === undefined || t < first)) first = t;
+  }
+  if (first === undefined) return fromGit;
+  return { ageDays: Math.max(0, Math.floor((nowMs - first) / 86400000)) };
+}
 
 function latestLifetimeOperatorRuling(note: string | undefined): { date: string; decision: "automate" | "needs_operator" } | undefined {
   if (!note) return undefined;
@@ -49668,6 +42415,8 @@ export async function routeAdaptiveLifetimePressure(
   deps: AdaptiveLifetimePressureRoute,
 ): Promise<VerifyHumanRouteResult> {
   const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
+  const nowMs = (deps.clock ?? systemClock).now();
+  const filingHistory = createTaskFilingHistoryInvocation(deps.root, tasks.map(task => task.id), deps.filingHistory);
   const shards: ShardUnderJudgement[] = [];
   const infraOnly: string[] = [];
   const rulings = new Map<string, VerifyHumanVerdict>();
@@ -49707,7 +42456,9 @@ export async function routeAdaptiveLifetimePressure(
         "inside the feature is not a build-time need. Judge why attributable attempts keep failing; " +
         "choose automate, backlog, or needs_operator for the build process.",
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
-      ageDays: 0,
+      route: "lifetime-pressure",
+      attributableDispatches,
+      ...lifetimeShardAge(task.id, nowMs, rows, filingHistory),
       depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: idCitedInSrc(task.id, deps.root),
       evidence,
@@ -49726,7 +42477,7 @@ export async function routeAdaptiveLifetimePressure(
     });
   const result = await routeVerifyHumanBacklog(shards, {
     judge: async (shard) => rulings.get(observedStateKey(shard)) ?? judge(shard),
-    priorVerdicts: priorVerifyHumanVerdicts(rows),
+    priorVerdicts: priorVerifyHumanVerdicts(rowsWithArchivedVerifyHumanVerdicts(deps.ledgerPath, rows)),
     maxJudged: tasks.length,
     stageProposal: (proposal) =>
       void stageInboxProposalOnce(join(deps.config.root, "state", "inbox-proposals.json"), proposal),
@@ -49841,6 +42592,16 @@ export async function routeVerifyHumanBacklog(
   return result;
 }
 
+/**
+ * W1-T10077: the live ledger's rows with every archived `verify_human.judged` row ahead of them, so a settled shard
+ * whose row rotated out of the carry-capped live file is not judged again. The live rows come last and win a key.
+ * An archive that cannot be read whole contributes what it did read: a missing row only ever costs one more judge call.
+ */
+export function rowsWithArchivedVerifyHumanVerdicts(ledgerPath: string, live: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const archived = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [VERIFY_HUMAN_JUDGED_STEP] });
+  return [...archived.rows, ...live];
+}
+
 /** Verdicts already on the ledger, keyed by the observed state they were taken against —
  *  {@link routeVerifyHumanBacklog}'s `priorVerdicts`. A row with no `observed_state` predates
  *  the key and is ignored rather than guessed at. */
@@ -49885,7 +42646,7 @@ export function productionMachineFilingJudgePorts(opts: {
   /** Test files main's CI failed at a sha (W1-T9694). Absent: read from GitHub, as the flake-incident gardener does. */
   mainFailures?: SelectorShadowMainFailures;
 }): MachineJudgePorts {
-  let judge: ((input: RiskJudgeInput) => Promise<RiskJudgeVerdict>) | undefined;
+  let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
   return {
     flakeEvidence: flakeJudgeEvidencePort({
@@ -49897,11 +42658,61 @@ export function productionMachineFilingJudgePorts(opts: {
     stateDir: opts.stateDir,
     plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
     riskJudge: (input) => {
-      if (!judge) {
+      if (!mount) {
         const mounts = loadMounts(mountsPath(opts.repoRoot));
-        judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"), spawn: opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+        mount = mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts);
       }
-      return judge(input);
+      // Per-judgment receipts precede parse retries; symbol-only identity preserves router inputs.
+      const identity = { runId: `machine-judge-${nextLaneEpochMs()}`, taskId: input.planContext.taskId ?? "RISK-JUDGE" };
+      const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge");
+      const record = (result: WorkerResult | undefined, assignmentId: string | undefined): void => {
+        try {
+          let resources: ReturnType<typeof benchmarkWorkerAttemptResources> | undefined;
+          try { if (result) resources = benchmarkWorkerAttemptResources(result); }
+          catch { /* unavailable accounting is unknown, never a replacement judgment */ }
+          const { billing_mode = "unknown" } = resources ?? {};
+          const price = resources?.total_cost_usd, notional = resources?.notional_cost_usd;
+          const priced = typeof price === "number" && Number.isFinite(price) && price >= 0;
+          opts.log("machine_judge.attempt_spend", {
+            run_id: identity.runId, task_id: identity.taskId,
+            ...attemptAssignmentJoin(assignmentId, result === undefined),
+            attempt_state: result ? "result" : assignmentId ? "failed" : "not-started",
+            accounting_source: "worker-result-estimate-not-invoice",
+            provider: result?.provider === "claude" || result?.provider === "codex" || result?.provider === "cash" ? result.provider : "unknown",
+            billing_mode,
+            price_state: priced ? "reported" : "unknown",
+            ...(priced ? { total_cost_usd: price } : {}),
+            ...(typeof notional === "number" && Number.isFinite(notional) && notional >= 0 ? { notional_cost_usd: notional } : {}),
+          });
+        } catch { /* a telemetry failure must not change the ruling, retries or provider result */ }
+      };
+      return realRiskJudge({ mount, cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"),
+        spawn: async (args) => {
+          let assignmentId: string | undefined;
+          const recorded = new Set<string>();
+          const recordedResults = new WeakSet<WorkerResult>();
+          const recordAttempt = (result: WorkerResult | undefined, id: string | undefined): void => {
+            // A fallback observer and final return can carry the same result object without IDs.
+            if (result !== undefined && recordedResults.has(result) || id !== undefined && recorded.has(id)) return;
+            record(result, id);
+            if (result !== undefined) recordedResults.add(result);
+            if (id !== undefined) recorded.add(id);
+          };
+          try {
+            const result = await spawn(withReceiptIdentity({ ...args,
+              onSelectionAssignment: (assignment) => { assignmentId = assignment.id; args.onSelectionAssignment?.(assignment); },
+              onModelFallbackAttempt: (attempt) => {
+                recordAttempt(attempt.result, attempt.selectionAssignmentId);
+                args.onModelFallbackAttempt?.(attempt);
+              },
+            }, identity));
+            recordAttempt(result, result.selectionAssignmentId ?? assignmentId);
+            return result;
+          } catch (error) {
+            recordAttempt(undefined, assignmentId);
+            throw error;
+          }
+        } })(input);
     },
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
@@ -50018,7 +42829,7 @@ export async function verifyHumanSweepCommand(
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
   const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
-  const priorVerdicts = priorVerifyHumanVerdicts(rows);
+  const priorVerdicts = priorVerifyHumanVerdicts(rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows));
 
   if (dryRun) {
     const due = shardsNeedingJudgement(shards, priorVerdicts);
@@ -50078,10 +42889,10 @@ export function planTaskLanded(task: Task | undefined, ledgerCredited?: Readonly
 
 /** The parked population, as {@link ShardUnderJudgement} — the ONE place plan records become
  *  judgeable input. Reads the plan and greps src/; writes nothing. */
-export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>): ShardUnderJudgement[] {
+export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): ShardUnderJudgement[] {
   const nowMs = clock.now();
   const out: ShardUnderJudgement[] = [];
-  for (const task of plan.tasks) {
+  const candidates = plan.tasks.filter(task => {
     // The machine-filing judge routes AND releases every machine record and every operator record that
     // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
     // W1-T4860: "queued" and "landed" read the credit the dispatcher and board use, not the raw yaml `status:` —
@@ -50089,14 +42900,17 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, 
     // W1-T9043: a machine record the judge ESCALATED to a person is admitted too, so it rides the 14/30/60-day
     // age-band re-asks a person already reads; an unjudged machine record stays the machine-filing judge's alone.
     const heldForAPerson = task.author_class === "machine" ? parkedEscalation(task) : isRulingShaped(task);
-    if (task.verify !== "human" || task.status !== "queued" || planTaskLanded(task, ledgerCredited) || !heldForAPerson) continue;
+    return task.verify === "human" && task.status === "queued" && !planTaskLanded(task, ledgerCredited) && heldForAPerson;
+  });
+  const filingHistory = createTaskFilingHistoryInvocation(root, candidates.map(task => task.id), filingHistoryOptions);
+  for (const task of candidates) {
     const deps = task.depends_on ?? [];
     out.push({
       id: task.id,
       title: task.title ?? task.id,
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
-      ...shardAgeDays(task.id, root, nowMs),
+      ...shardAgeDays(task.id, nowMs, filingHistory),
       depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
       citedInSrc: idCitedInSrc(task.id, root),
       ...(() => {
@@ -50141,19 +42955,13 @@ export function shardEvidence(task: Task): string | undefined {
   return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
-/** Days since the shard's file first appeared in git history, or `null` with the reason it could
+/** Days since the exact task record was introduced in qualified Git history, or `null` with the reason it could
  *  not be read — never 0, which reads as "filed today" (#7911). Age is CONTEXT for the judge,
  *  never a threshold — nothing here decides anything from it. */
-function shardAgeDays(taskId: string, root: string, nowMs: number): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
-  const shardFile = `plan/tasks.d/${taskId}-*.yaml`;
-  let out: string;
-  try {
-    out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)${shardFile}`], { encoding: "utf8" }).trim();
-  } catch {
-    return { ageDays: null, ageUnknownReason: "git log failed: no git, or the root is not a repository" };
-  }
-  if (!out) return { ageDays: null, ageUnknownReason: `no commit adds ${shardFile}; the record may be embedded in plan/tasks.yaml` };
-  return { ageDays: Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000)) };
+function shardAgeDays(taskId: string, nowMs: number, invocation: TaskFilingHistoryInvocation): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
+  const history = resolveTaskFilingHistory(taskId, invocation);
+  if (history.state === "unknown") return { ageDays: null, ageUnknownReason: history.reason };
+  return { ageDays: Math.max(0, Math.floor((nowMs - history.committerSeconds * 1000) / 86400000)) };
 }
 
 /** Whether anything under src/ cites this id — evidence the work may already have landed under
@@ -50471,6 +43279,11 @@ export function approveParkedTask(
   return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
 
+/** W1-T10348: the two release records beside a ledger, for the shared resolver (drain.ts `resolveReleases`). */
+export function releaseReadersFor(ledgerPath: string): ReleaseReaders {
+  return { readLedgerLines: () => readLedgerRawLines(ledgerPath), readDurableReleases: () => readOperatorReleases(dirname(ledgerPath)) };
+}
+
 /** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring
  *  before spending a JSON.parse), so handing it pre-parsed rows would parse every line twice.
  *  An unreadable ledger yields NO releases — the safe direction: the wall stands. */
@@ -50483,19 +43296,33 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
+export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
+  const { owner, repo } = deps ? { owner: "", repo: "" } : resolveOwnerRepo();
+  const actions = buildInboxVerbActions(deps ?? {
+    root: repoRoot, inboxRoot: config.root, planPath: join(repoRoot, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+    github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
+    ratify: ratifyCliGateway(repoRoot, join(config.root, "logs")),
+  });
+  return inboxVerbCommand(name, rest, actions);
+}
+
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = resolveOwnerRepo();
+  const summaries = new Map<string, string>();
   return proposalVerdictCommand(
     kind,
     rest,
     (id) => {
       const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
+      if (proposal) summaries.set(id, proposal.summary);
       return { exists: proposal !== undefined, classification };
     },
     (step, id, reason) => {
-      const row = appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason });
+      // W1-T10077: a decline of a verify-human proposal records the state it was given on.
+      const observedState = step === "panel.proposal_declined" ? observedStateOfProposalSummary(summaries.get(id) ?? "") : undefined;
+      const row = appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason, ...(observedState ? { observed_state: observedState } : {}) });
       // W1-T9252: the action also lands on the item's thread; a store fault never fails the verb.
       recordRowThreadEvents({ ...row, task_id: id, origin: "rmd-cli", reason }, [{ id }], { threadStorePath: inboxThreadStorePath(config.root) },
         (failed, extra) => console.error(`rmd ${row.step}: ${failed} ${JSON.stringify(extra)}`));
@@ -51248,6 +44075,18 @@ async function approveBatchCommand(
   let allWrittenPaths: string[] = [];
   let allFiledTaskIds: string[] = [];
   const idBlocks: TaskIdReservationBlock[] = [];
+  // W1-T9488: the remote claims behind idBlocks, and what the pushed batch branch declares. The batch gives back
+  // every member's id that branch does not carry, on every way out.
+  const batchHeld: HeldTaskIdReservation[] = [];
+  let batchPushed: LanePushedIds;
+  const releaseBatchUnfiled = (ending: string): void => {
+    if (batchHeld.length === 0 || repoDir === undefined) return;
+    const cloneDir = repoDir;
+    releaseUnfiledReservations(batchHeld, batchPushed, {
+      run: gitRunAdapter((args) => hostWorktreeGitResult(cloneDir, args)), lane: "approve-batch", log,
+      reason: laneReleaseReason(`rmd approve batch ${runId}`, ending, batchPushed),
+    });
+  };
   const ensureRepoDir = (): string => {
     repoDir = repoDir ?? join(config.root, "repos", repo);
     if (!existsSync(repoDir)) {
@@ -51294,23 +44133,20 @@ async function approveBatchCommand(
                 });
                 idBlocks.push(block);
                 const reserveFrom = block.ids[0];
+                const batchReserver = gatedRemoteRefReserver({
+                  lane: "approve-batch", log,
+                  run: (args) => {
+                    const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
+                    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+                  },
+                });
                 const remote = withIdReservationLogging(
                   log,
                   "approve.id_reservation_failed",
-                  () =>
-                    reserveTaskIdBlockRemote(
-                      reserveFrom,
-                      count,
-                      gatedRemoteRefReserver({
-                        lane: "approve-batch", log,
-                        run: (args) => {
-                          const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
-                          return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-                        },
-                      }),
-                    ),
+                  () => reserveTaskIdBlockRemote(reserveFrom, count, batchReserver),
                   { proposal_id: payload.proposalId },
                 );
+                batchHeld.push(...heldFromBlock(remote, batchReserver));
                 return { ids: remote.ids };
               },
             },
@@ -51330,7 +44166,9 @@ async function approveBatchCommand(
 
       execFileSync("git", ["-C", batchWorktree, "add", "--", ...allWrittenPaths], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
+      batchPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
       gitPushRunBranch(worktreePath);
+      batchPushed = pushedBranchIds(worktreePath, log);
       return branch;
     },
     openPlanPr(branch, ids) {
@@ -51376,6 +44214,7 @@ async function approveBatchCommand(
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     idBlocks.forEach((b) => b.releaseAll());
+    releaseBatchUnfiled(`errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
     if (repoDir && worktreePath) {
       try {
         worktreeRemove(repoDir, worktreePath);
@@ -51394,11 +44233,13 @@ async function approveBatchCommand(
   if (!result.ok) {
     console.error(`rmd approve: ${result.refusal}`);
     for (const s of result.skipped) console.error(`  skipped ${s.proposalId}: ${s.reason}`);
+    releaseBatchUnfiled(`refused: ${result.refusal.slice(0, 160)}`);
     return 1;
   }
   for (const s of result.skipped) console.log(`rmd approve: skipped ${s.proposalId} — ${s.reason}`);
 
   idBlocks.forEach((b) => b.releaseAll());
+  releaseBatchUnfiled("ratified");
 
   updateProposalRegistry(registryPath, (current) => {
     const acceptedIds = new Set(result.accepted.map((p) => p.proposalId));
@@ -52333,6 +45174,9 @@ export function mainRepairRevertCriteria(
 export function mainRepairRevertBody(request: MainRepairRevertRequest, evidence: { testFiles?: readonly string[]; revertDiff?: string } = {}): string {
   const taskId = mainRepairRevertTaskId(request.offendingSha);
   const pr = request.offendingPr !== undefined ? `#${request.offendingPr}` : "an unnamed PR";
+  // W1-T10269: a reviewer regression names its outcome-mix evidence, not failing checks.
+  const regression = reviewerRegressionRevertText(request);
+  if (regression) return [...regression.lead, "", renderAcceptanceBlock(mainRepairRevertCriteria(request, evidence)), "", `Remudero-Task: ${taskId}`].join("\n");
   return [
     `Reverts \`${request.offendingSha}\` (${pr}), the first red merge on \`${request.branch}\`.`,
     "",
@@ -52396,7 +45240,7 @@ export async function openMainRepairRevertPr(
     const subject = request.offendingPr !== undefined ? `revert #${request.offendingPr}` : `revert ${request.offendingSha.slice(0, 12)}`;
     const created = (await fetch(
       ratifyPrCreateRestArgs(owner, repo, {
-        title: `revert(main): ${subject}, the first red merge on ${request.branch}`,
+        title: reviewerRegressionRevertText(request)?.title ?? `revert(main): ${subject}, the first red merge on ${request.branch}`,
         body: mainRepairRevertBody(request, evidence),
         head: branch,
         base: request.branch,
@@ -54000,7 +46844,7 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("-")
     ? "rmd claim: a task id is required"
-    : unknownArgError("claim", rest.slice(1), [], ["--drop"]);
+    : unknownArgError("claim", rest.slice(1), [], ["--drop", "--renew"]);
   if (badArg !== null) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -54033,6 +46877,19 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
     console.log(`dropped ${ref}`);
     return 0;
   }
+  if (rest.includes("--renew")) {
+    const sha = reserver.holder(taskId);
+    if (!sha) {
+      console.error(`rmd claim: ${ref} is not held — nothing to renew`);
+      return 1;
+    }
+    const refusal = claimDropRefusal(ref, reserver.anchorMessage?.(taskId), opts.localHost ?? hostname(), "renew");
+    if (refusal !== undefined) {
+      console.error(`rmd claim: ${refusal}`);
+      return 1;
+    }
+    return reportClaimRenewal(ref, renewDispatchClaim(reserver, taskId, sha)) === undefined ? 1 : 0;
+  }
   const outcome = reserver.attempt(taskId, reserver.mintAnchor());
   const decision = decideDispatchClaim(outcome, {
     taskId,
@@ -54045,6 +46902,94 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
   }
   console.log(`claimed ${ref}`);
   return 0;
+}
+
+function reportClaimRenewal(ref: string, renewal: DispatchClaimRenewal): string | undefined {
+  if (renewal.outcome === "renewed") {
+    console.log(`renewed ${ref} ${renewal.sha} ${new Date().toISOString()}`);
+    return renewal.sha;
+  }
+  console.error(renewal.outcome === "lost"
+    ? `rmd claim: lost ${ref} — it is now held by ${renewal.holder ?? "nobody"}`
+    : `rmd claim: could not renew ${ref}: ${renewal.stderr}`);
+  return undefined;
+}
+
+export type ClaimHoldSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
+
+export interface ClaimHoldOpts extends ClaimVerbOpts {
+  signals?: {
+    once(event: ClaimHoldSignal, listener: () => void): unknown;
+    removeListener(event: ClaimHoldSignal, listener: () => void): unknown;
+  };
+}
+
+export async function claimHoldCommand(rest: string[], opts: ClaimHoldOpts = {}): Promise<number> {
+  const taskId = rest[0];
+  const badArg = taskId === undefined || taskId.startsWith("-")
+    ? "rmd claim: a task id is required"
+    : unknownArgError("claim", rest.slice(1), ["--interval-ms"], ["--hold"]);
+  if (badArg !== null) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const intervalMs = Number(flagValue(rest, "--interval-ms") ?? DISPATCH_CLAIM_RENEW_INTERVAL_MS);
+  if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId)) {
+    console.error(`rmd claim: '${taskId}' is not a task id, or --interval-ms is not a positive integer`);
+    return 2;
+  }
+  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
+    console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
+    return 1;
+  }
+  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const held = takeOrAdoptClaim(taskId, reserver, opts.localHost ?? hostname());
+  if (held === undefined) return 1;
+  console.log(`holding ${dispatchClaimRef(taskId)} ${held}`);
+  return await holdClaimUntilSignalled(taskId, reserver, held, intervalMs, opts.signals ?? process);
+}
+
+function takeOrAdoptClaim(taskId: string, reserver: DispatchClaimReserver, localHost: string): string | undefined {
+  const anchor = reserver.mintAnchor();
+  const outcome = reserver.attempt(taskId, anchor);
+  if (outcome === "created") return anchor;
+  const holder = outcome === "taken" ? reserver.holder(taskId) : undefined;
+  if (holder !== undefined && claimDropRefusal(dispatchClaimRef(taskId), reserver.anchorMessage?.(taskId), localHost, "renew") === undefined) return holder;
+  const stderr = outcome === "unreachable" ? reserver.lastAttemptStderr?.() : undefined;
+  console.error(`rmd claim: ${decideDispatchClaim(outcome, { taskId, holder, stderr }).reason}`);
+  return undefined;
+}
+
+function holdClaimUntilSignalled(
+  taskId: string,
+  reserver: DispatchClaimReserver,
+  anchor: string,
+  intervalMs: number,
+  signals: NonNullable<ClaimHoldOpts["signals"]>,
+): Promise<number> {
+  const ref = dispatchClaimRef(taskId);
+  const names: ClaimHoldSignal[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+  let held = anchor;
+  return new Promise((resolve) => {
+    const end = (code: number, drop: boolean): void => {
+      clearInterval(timer);
+      for (const name of names) signals.removeListener(name, onSignal);
+      if (drop && reserver.drop(taskId, { expect: held })) console.log(`dropped ${ref}`);
+      else if (drop) {
+        console.error(`rmd claim: could not drop ${ref} (it moved or origin is unreachable)`);
+        return resolve(1);
+      }
+      resolve(code);
+    };
+    const onSignal = (): void => end(0, true);
+    const timer = setInterval(() => {
+      const renewal = renewDispatchClaim(reserver, taskId, held);
+      const next = reportClaimRenewal(ref, renewal);
+      if (next !== undefined) held = next;
+      else if (renewal.outcome === "lost") end(1, false);
+    }, intervalMs);
+    for (const name of names) signals.once(name, onSignal);
+  });
 }
 
 export function capabilityInspectCommand(rest: string[], deps: Pick<AuthorityCommandDeps, "out" | "err"> = {}): number {
@@ -54145,7 +47090,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]",
+    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--sandbox-metrics]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
     detail:
       "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
@@ -54225,6 +47170,18 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "gh",
+    syntax: "rmd gh [--class interactive|agent|background] [--client claude|codex|agent] [--fresh] -- <gh args>",
+    summary: "Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.",
+    detail: "W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Reads only: a write (the one write rule, ghArgvIsWrite) or any auth call is refused with exit 2 and never run; run it as a plain gh call, where hooks/deny-floor.sh judges it. With no live broker a read runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --client names the reader (claude, codex or agent) in the broker's request log (W1-T10302); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.",
+  },
+  {
+    name: "gh-broker",
+    syntax: "rmd gh-broker serve | status [--since <dur>] | stop",
+    summary: "Serve, inspect or stop the per-account GitHub read broker (Mac only; installed by deploy/mac).",
+    detail: "W1-T10279: serve listens on <cache>/remudero/gh-broker/broker.sock (directory 0700, this uid only) and rewrites a heartbeat file every interval it advertises there; hooks/deny-floor.sh reads it to route raw gh reads to rmd gh. status prints queue depth by class, each limiter's gap, hold and primary spread, and counts of hit-fresh, coalesced, revalidated-304, upstream-200 and refused; --since <n>s|m|h|d summarises the request log (reads, upstream calls, share served without upstream, longest interactive wait). status also prints login_status (W1-T10302): per GitHub login, requests by client, upstream calls and refusals by limiter, with the Mac account whose broker saw each; accounts reading as one login share a pacer through /Users/Shared/remudero/gh-pace/<login>/ and fall back to a per-account pacer when it is unusable. stop ends the server. deploy/mac/install-gh-read-broker.sh installs the launchd agent that keeps serve running and joins that directory; nothing on Azure changes.",
+  },
+  {
     name: "inspect",
     syntax: "rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>",
     summary: "Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.",
@@ -54249,10 +47206,16 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "2026-10-11: the host watchdog's entry into src/lib/launcher-host-alerts.ts. --raise records one observation of a condition (crash-loop, units-not-on-main, units-diverged, deploy-code-fetch-failed, deploy-code-diverged, deploy-run-problem) under <state-root>/launcher-alerts/. A refusal is counted per consecutive observed tick: at the deployer's REFUSAL_PERSISTING_AT it writes launcher_alert.persisting, at REFUSAL_ESCALATE_AT it spools one needs-human escalation under <state-root>/escalation-spool/ for the daemon to post (the host has no GitHub credential). A crash loop is spooled on its first observation, because the launcher only names one after its own tiering. --clear ends the run when the launcher sees the step succeed: a still-spooled escalation is withdrawn and one the daemon already opened gets a spooled close. Prints one JSON line with --json.",
   },
   {
+    name: "test-place",
+    syntax: "rmd test-place <test-path...> [--json]",
+    summary: "Print the test/ folder each test file belongs in, computed from the src modules it imports.",
+    detail: "W1-T9874: a test's folder is computed, not chosen. Extracts the test's value, type-only and helper imports (helpers followed through test/helpers|setup|lib), repo path strings and imported symbol names with a comment-aware scanner, then scores every module by reach weight x IDF x symbol count plus name bonuses, sums per subsystem and maps the winner to one of the 21 folders (or rules/ for a suite that reads the repo as text). The data is scripts/test-placement/subsystem-map.json and test-folders.tsv. Prints the folder, the confidence (high, medium, low, none) and the reasons for each path; --json prints the same as an array. Exits 2 on no path or an unknown flag, 1 on a path that does not exist.",
+  },
+  {
     name: "claim",
     syntax: "rmd claim <task-id> [--drop]",
-    summary: "Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.",
-    detail: "W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. A claim needs no release verb: the existing release arms drop it once the task has landed.",
+    summary: "Take, hold, renew or drop the dispatch claim the fleet honours, for a hand-build.",
+    detail: "W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. W1-T9432: a claim holds only while its holder renews it. --hold takes the claim (or adopts this host's existing one), stays in the foreground, renews it every 5 minutes (--interval-ms <n> overrides the pace) printing one `renewed` line each time, and drops it on SIGINT, SIGTERM or SIGHUP; run it in the background of a session so the claim dies with the session. A `lost` renewal exits 1 naming the new holder. --renew renews once, and only a claim whose anchor's host is this host. A renewal is a child commit of the claim pushed with --force-with-lease, so it never recreates a reclaimed claim. A lane that meets a claim whose holder has been silent (no renewal and no run-<id>-* branch commit) for twice W, the p90 of this instance's measured claim-to-verdict durations, reclaims it; a hand-build that neither holds nor renews its claim is reclaimed that way.",
   },
   {
     name: "routing-ab",
@@ -54545,6 +47508,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence. `replay ci-friction` replays the ci-friction remedy ladder over the past --days (default 7) at --step-hours (default 6) from the ledger union and main's plan history, read-only.",
   },
   {
+    name: "review-replay",
+    syntax: "rmd review-replay refresh",
+    summary: "Refresh the recorded review sample from the complete retained ledger union.",
+    detail: "Derives every distinct healthy input shape, excludes regressed reviewer shas, and refuses empty or incomplete evidence. Writes test/fixtures/review-replay/sample.ndjson for replay in CI.",
+  },
+  {
     name: "escalate",
     syntax: "rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...",
     summary: "Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.",
@@ -54657,7 +47626,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "pr-owner",
     syntax: "rmd pr-owner <pr-number>",
     summary: "Report whether the local ledger shows a fix lane owning one PR.",
-    detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. READ-ONLY: this verb writes, claims and releases nothing.",
+    detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. Makes no ledger, claim or service changes; owned temporary disk scratch is removed after the read.",
   },
   {
     name: "plan",
@@ -54722,6 +47691,31 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd reframe <P##> --feedback \"<text>\" [--supersedes <rounds>]",
     summary: "The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.",
     detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range",
+  },
+
+  {
+    name: "reply",
+    syntax: 'rmd reply <threadId> --text "<text>" [--intent-id <id>]',
+    summary: "Reply on an operator inbox thread.",
+    detail: inboxVerbHelp("reply").detail,
+  },
+  {
+    name: "archive",
+    syntax: "rmd archive <proposalId> [--unarchive]",
+    summary: "Set an inbox item aside, or undo its archive.",
+    detail: inboxVerbHelp("archive").detail,
+  },
+  {
+    name: "snooze",
+    syntax: "rmd snooze <proposalId> --until <RFC3339-UTC>|--wake",
+    summary: "Hide an inbox item until a UTC instant, or wake it now.",
+    detail: inboxVerbHelp("snooze").detail,
+  },
+  {
+    name: "keep",
+    syntax: 'rmd keep <proposalId> [--reason "<text>"] [--unkeep]',
+    summary: "Record the current observation as kept, or undo that decision.",
+    detail: inboxVerbHelp("keep").detail,
   },
 
 ] as const;
@@ -54802,14 +47796,13 @@ import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js"
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, runChildModeIsOn, spawnRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { type RunChildMode } from "./lib/policy.js";
 import {
-  RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
-  type AdoptedRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts,
-} from "./lib/run-child.js";
-import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
-import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
+  escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
+} from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
-import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, startTickReadWorker, tickReadWorkerUrl, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger } from "./lib/tick-read-worker.js";
+import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -55041,14 +48034,25 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
 
 /** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
  *  (`~/Remudero`). Never `loadConfig()`, which can create the config and call `resolveClaudeBin()`. */
-function cliLedgerPathWithoutConfig(): string {
-  let root = join(homedir(), "Remudero");
+function existingCliRootWithoutConfig(): { state: "present" | "missing" | "unreadable" | "corrupt"; root?: string; reason?: string } {
+  let text: string;
   try {
-    const parsed = JSON.parse(readFileSync(instanceConfigPath(), "utf8")) as { root?: unknown };
-    if (typeof parsed.root === "string" && parsed.root !== "") root = parsed.root;
-  } catch {
-    // deliberate: an absent or unreadable config names no root, so the documented default stands.
+    text = readFileSync(instanceConfigPath(), "utf8");
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException)?.code === "ENOENT";
+    return { state: missing ? "missing" : "unreadable", reason: missing ? "instance config absent" : "instance config unreadable" };
   }
+  try {
+    const parsed = JSON.parse(text) as { root?: unknown };
+    return { state: "present", ...(typeof parsed.root === "string" && parsed.root !== "" ? { root: parsed.root } : {}) };
+  } catch {
+    return { state: "corrupt", reason: "instance config could not be decoded" };
+  }
+}
+
+function cliLedgerPathWithoutConfig(): string {
+  // Keep the diagnostic sink's exact old fallback/string semantics; admission validates separately.
+  const root = existingCliRootWithoutConfig().root ?? join(homedir(), "Remudero");
   return join(root, "state", LEDGER_FILENAME);
 }
 
@@ -55309,6 +48313,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     },
   ],
   ["merge-hold", (rest) => mergeHoldCommand(rest)],
+  ["review-replay", (rest) => reviewReplayCommand(rest)],
   ["feedback-reconcile", async (rest) => await feedbackReconcileCommand(rest)],
   [
     "dep-review",
@@ -55357,11 +48362,20 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["inspect", (rest) => readOnlyInspectionCommand(rest)],
+  ["gh", async (rest) => await ghCommand(rest)],
+  ["gh-broker", async (rest) => await ghBrokerCommand(
+    rest,
+    async (dir) => await serveGhReadBroker({ dir, broker: new GhReadBroker(dir) }),
+    process.env,
+    undefined,
+    (dir, sinceMs, login) => ghBrokerLoginStatus(dir, sinceMs, { login }),
+  )],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
-  ["claim", (rest) => claimCommand(rest)],
+  ["test-place", (rest) => testPlaceCommand(rest)],
+  ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
@@ -55533,6 +48547,10 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await reframeCommand(rest);
     },
   ],
+  ["reply", (rest) => inboxActionCliCommand("reply", rest)],
+  ["archive", (rest) => inboxActionCliCommand("archive", rest)],
+  ["snooze", (rest) => inboxActionCliCommand("snooze", rest)],
+  ["keep", (rest) => inboxActionCliCommand("keep", rest)],
 ]);
 
 /**
@@ -55566,6 +48584,9 @@ export async function main(
     }
     return await flushThenExit(readOnlyInspectionCommand(inspectionArgv.slice(1)));
   }
+  if (inspectionArgv[0] === "gh" && inspectionArgv[1] !== "--help" && inspectionArgv[1] !== "-h") {
+    return await flushThenExit(await ghCommand(inspectionArgv.slice(1)));
+  }
   // Local inspection bypasses invocation logging, housekeeping, credentials and self-sync.
   if (inspectionArgv[0] === "authority" && inspectionArgv[1] === "inspect") {
     await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
@@ -55576,6 +48597,7 @@ export async function main(
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
+  setGhReadActorResolver((env) => deriveLedgerActor(env));
   // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
   // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
   // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and
@@ -55597,6 +48619,7 @@ export async function main(
   // W1-T7094: every worker start this process makes writes its counterfactual `memory_budget.shadow` row to the
   // ledger of the root that start names. The recorder never throws and never delays the start; SHADOW ONLY.
   installShadowMemorySink((path, row) => appendLedger(path, row));
+  installStarvationAlertSink(spoolingStarvationAlert({ source: "memory-budget", host: hostname(), clock: systemClock }));
   // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
   // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
@@ -55884,3 +48907,127 @@ export {
   type ReviewInputAttemptFacts,
   type StrikeRegime,
 } from "./lib/tick-read-worker.js";
+
+function runTaskCommandHost(): RunTaskCommandHost {
+  return {
+    BRANCH_NAME_CONTRACT_PART,
+    syncPlanOrRefuse,
+    lintPlanForReview,
+    proofRepairRoundRefusalInWorktree,
+    startShellLessMergeConflictMerge,
+    terminalVerdictFields,
+    renderReconClaimLines,
+    CENSUS_BASELINE_FILES,
+    workerBoundaryStack,
+    buildBaseReproductionProbe,
+    writeSyncLine,
+    WORKER_STATE_LEDGER_STEP,
+    capWorkerTailLines,
+    writeWorkerTailBestEffort,
+    attributeWorkerStreamEvent,
+    quietBoundHistory,
+    readWorktreeHeadReflog,
+    workerCreatedCurrentHead,
+    syncPlanOrRefuseAsync,
+    isTerminalRed,
+    ghPrCreateFillCommand,
+    withDiagnostics,
+    draftPrCreate,
+    prCreateArgv,
+    runGhPrCreate,
+    lastCommitSubject,
+    appendTaskTrailerToCommit,
+    fetchPrBodyViaGh,
+    fetchPrDiffFilesViaGh,
+    changeView,
+    rewriteAcceptanceBlockFromPlan,
+    execGrepProofInWorktree,
+    ensureTaskTrailer,
+    ghPrHeadGateway,
+    checkPrOwnership,
+    scrubGitCredentialText,
+    openTaskIdsFromPlan,
+    yieldingSleep,
+    restRollupFor,
+    pollRestTarget,
+    ciGateState,
+    STALL_WINDOW,
+    checkWaitStalled,
+    waitForCiGreen,
+    runReview,
+    ghLiveState,
+    ghLiveHead,
+    captureWorktreeSnapshotViaGit,
+    ghUpdateBranch,
+    redBaseRefreshFactsFromRest,
+    fixRebaseMergeFactsFromRest,
+    reclaimAbandonedWorker,
+    fixWorkerRunId,
+    fixWorkerReceipt,
+    spawnFixWorkerBounded,
+    readFixRoundCommitsViaGit,
+    runNpmScriptViaSpawn,
+    commitGeneratorOutputViaGit,
+    readPackageScriptsFor,
+    runFixRung,
+    buildProofAmendmentGitOps,
+    buildProofAmendmentWritePorts,
+    prNumberFromRef,
+    workerSignal,
+    harvestFollowupsFromReport,
+    commitsAhead,
+    sha256Hex,
+    readRuleSourceFileOrUndefined,
+    DEFAULT_BUDGET_USD,
+    archiveWorkerTranscript,
+    withPredecessorTranscriptCopies,
+    benchmarkRunLedgerLogger,
+    recordBenchmarkWorkerAttempt,
+    dispatchFallbackObserver,
+    withGitCredentialSocket,
+    runErrorCause,
+    censusPushRefusal,
+    CENSUS_PUSH_CHECK,
+    CENSUS_SNAPSHOT_ENV,
+    COVERAGE_PUSH_CHECK,
+    CENSUS_PUSH_NEVER_BYPASS,
+    fixCensusAppliesToRepo,
+    writeFixCensusSnapshot,
+    writeFixCensusSnapshotAsync,
+    checkFixCensusSnapshotAsync,
+    FixRoundPushError,
+    pushFixRound,
+    coveragePrecheck,
+    coveragePushRefusal,
+    pushFixRoundPrechecked,
+    repairRetroAcceptanceBlock,
+    defaultRetroFetchBody,
+    defaultRetroEditBody,
+    prUrlTarget,
+    readHeadShaRest,
+    resolveFixRungTaskContractAtHeadAsync,
+    MERGE_BASE_DIFF_ARGS,
+    hostWorktreeGitResult,
+    dispatchClaimReserverAsyncFor,
+    WORKTREE_REAP_BOOT_CONTRACT_VERSION,
+    logCloneReapSurvey,
+    cloneReapPlan,
+    logCloneReapRow,
+    DISK_RECLAIM_DEFAULT_SWEEPS,
+    createDaemonGatewayFactory,
+    readRegistrationChanges,
+    commitWorkerEdits,
+    fixRoundGitOwnership,
+    MISSING_COMMIT_MESSAGE_REASON,
+    harnessCommitForShellLessWorker,
+    worktreeHasUncommittedChanges,
+    COMMIT_LINE_RESUME_PROMPT,
+    writerCannotResume,
+    missingCommitLinePrompt,
+    pathIsUnderDeclaredSurface,
+    execFilePromise,
+    AWAITING_EXTERNAL_LEDGER_STEP,
+    readLedgerRawLines,
+    releaseReadersFor,
+  };
+}

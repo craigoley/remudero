@@ -70,8 +70,10 @@ test("private NOT_RUN stops retro after enumeration without launching suites or 
   assert.equal(calls, 1, "only cheap enumeration runs"); assert.equal(repairs, 0);
 });
 test("private NOT_RUN cannot become a ran or successful result in the worker tool loop", async t => {
+  const workerClock = { ...systemClock }; // Keep real worker deadlines while occupied() advances only slot admission.
   const { repo } = occupied(t); tinyTree(repo.dir); let calls = 0, turns = 0;
   await spawnOpenWeightWorker({ cwd: repo.dir, workerHome: join(repo.dir, "home"), prompt: "typecheck", tools: ["RunCheck"], maxTurns: 3,
+    clock: workerClock,
     env: { RMD_OPENWEIGHT_API_KEY: "fixture" }, runCheck: async () => { calls++; return "fake success"; },
     fetchImpl: async () => {
       const message = ++turns === 1 ? { tool_calls: [{ id: "c1", type: "function", function: { name: "run_check", arguments: '{"check":"typecheck"}' } }] } : { content: "done" };

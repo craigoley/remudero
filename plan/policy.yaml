@@ -930,9 +930,13 @@ sweep:
       origin: "proposal"
       min: 0
       max: 16384
-    # Pages per second (pswpin delta); 256 pages is 1 MiB/s at 4 KiB pages.
+    # Pages per second (pswpin delta); 8192 pages is 32 MiB/s at 4 KiB pages (256 was 1 MiB/s).
+    # Operator ruling 2026-10-19: chronic host swap-in ~2,300 pages/s since 10-07 held every review start;
+    # 8192 holds only severe spikes until the learned-relation fix lands. The loader requires the
+    # row's origin to stay "proposal" (HOST_MEMORY_BUDGET_ORIGIN), so the ruling is named here.
+    # The loader caches the policy per process, so the daemon reads a new value at its next restart.
     swapInPagesPerSecMax:
-      value: 256
+      value: 8192
       origin: "proposal"
       min: 0
       max: 1000000
@@ -1771,8 +1775,11 @@ daemonMemory:
 # closed set), digest, or deliver. `shadow` ledgers `escalation.triaged` with the would-be outcome and
 # still delivers every escalation as needs-human; `act` follows the outcome. MANUAL and HARD_STOP are
 # always delivered in either mode. `maxAutoResolvesPerPass` is capped at 5 by the parser.
+# OPERATOR 2026-10-21: act. Shadow 10-14..10-21 triaged 662 escalations: 648 deliver, 3 digest, 11
+# auto_resolve (8 plan_amendment_pr for W1-T8707/W1-T9865/W1-T10250, each a confirmed stale-proof
+# refusal; 3 rekick_once). Shadow left stale-proof tasks wedged (W1-T5670 12 days).
 escalationTriage:
-  mode: shadow
+  mode: act
   maxAutoResolvesPerPass: 5
 
 # W1-T8864: the issue-revalidation garden (src/lib/issue-revalidation-garden.ts) re-checks every open

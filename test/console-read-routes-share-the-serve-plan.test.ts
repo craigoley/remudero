@@ -238,6 +238,7 @@ test("inbox approval ignores the read snapshot and resolves the target ref", asy
       "/v1/inbox/approve",
       "/v1/inbox/archive",
       "/v1/inbox/decline",
+      "/v1/inbox/keep",
       "/v1/inbox/reframe",
       "/v1/inbox/restore",
       "/v1/inbox/snooze",

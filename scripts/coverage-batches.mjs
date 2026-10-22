@@ -12,7 +12,8 @@ import { prepareJudgedRun, judgedNodeTestArgs, judgeRun, testFilesInArgv } from 
 import { extractCoverageFlags, readCiYaml, withLcovDestination } from './diff-coverage-local.mjs';
 import { gitOrThrow } from './lib/git.mjs';
 import { isMainModule } from './lib/argv.mjs';
-import { assessWorkspaceDiskBudget, sampleWorkspaceUsage, workspaceUsageEvidence } from '../src/lib/workspace-usage.ts';
+import { pinWorkspaceScratchRoot, sampleWorkspaceUsage, workspaceUsageEvidence } from '../src/lib/workspace-usage.ts';
+import { coverageDiskAdmission, coverageDiskProfile } from './lib/coverage-disk-profile.mjs';
 
 const hash = (text) => createHash('sha256').update(text).digest('hex');
 const MERGER = fileURLToPath(new URL('./coverage-merge-ratchet.mjs', import.meta.url));
@@ -138,7 +139,8 @@ function batchFlags(flags, dir, lcov) {
 /** Serial batches reuse the pinned raw-range merger. Only a closed, fully judged batch may
  * compact and dispose its raw scratch; all manifests, per-batch LCOV and failures remain. */
 export async function runCoverageBatches({ cwd = process.cwd(), flags, files, batchSize, lcov, keepRaw = false,
-  base = 'origin/main', diskProfile }, { run = runCoverageCommand, acquire = acquireTestSlotAsync, log = console.error } = {}) {
+  base = 'origin/main', diskProfile, diskProfileMode = 'caller-supplied',
+  estimatedPeakBasis = diskProfile ? 'declared-profile' : 'not-supplied' }, { run = runCoverageCommand, acquire = acquireTestSlotAsync, log = console.error } = {}) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error('batch size must be a positive integer');
   const root = realpathSync(cwd);
   const selected = [...new Set(files.flatMap((file) => {
@@ -157,8 +159,11 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
   mkdirSync(dirname(lcov), { recursive: true });
   const output = mkdtempSync(join(dirname(lcov), 'rmd-local-batches-'));
   const receiptPath = join(output, 'execution.json');
-  const samples = [sampleWorkspaceUsage(root)];
+  const scratchRoots = new Map([[output, pinWorkspaceScratchRoot(output)]]);
+  const observe = () => sampleWorkspaceUsage(root, { scratchRoots: [...scratchRoots.values()] });
+  const samples = [observe()];
   const receipt = { version: 1, head, selected, batchSize, state: 'not-run', batches: [],
+    resourceScope: 'workspace-and-registered-scratch', diskProfileMode, diskProfile: diskProfile ?? null, estimatedPeakBasis,
     inputs: selected.map((file) => ({ file, sha256: hash(readFileSync(resolve(root, file))) })) };
   const save = () => {
     receipt.resources = workspaceUsageEvidence(samples);
@@ -186,24 +191,27 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
       receipt.phases ??= []; receipt.phases.push({ args, result }); save();
       check(); return result;
     };
-    rmSync(lcov, { force: true });
     const compact = [], lineLcov = [];
     for (let offset = 0; offset < selected.length; offset += batchSize) {
       slot.refresh(); check();
-      const disk = sampleWorkspaceUsage(root); samples.push(disk);
-      if (diskProfile && assessWorkspaceDiskBudget(disk.hostFreeBytes, diskProfile) !== 'admitted') {
+      samples.push(observe());
+      const admission = diskProfile ? coverageDiskAdmission([root, dirname(lcov), tmpdir()], diskProfile) : undefined;
+      if (admission) { receipt.diskAdmission = admission; save(); }
+      if (admission && admission.state !== 'admitted') {
         receipt.state = 'not-run-disk-capacity'; receipt.reason = 'next batch cannot satisfy the supplied unchanged disk profile';
         save(); return { status: 75, receiptPath };
       }
       const batch = selected.slice(offset, offset + batchSize), dir = join(output, String(receipt.batches.length));
       mkdirSync(dir);
       const raw = mkdtempSync(join(tmpdir(), 'rmd-diff-coverage-raw-'));
+      scratchRoots.set(raw, pinWorkspaceScratchRoot(raw));
       const batchLcov = join(dir, 'lcov.info'), packed = join(dir, 'compact');
       const judged = prepareJudgedRun({ makeDir: () => { const p = join(dir, 'judge'); mkdirSync(p); return p; } });
       const record = { files: batch, raw, lcov: batchLcov, tap: join(dir, 'tap.log'), state: 'running' };
       receipt.batches.push(record); receipt.state = 'running'; save();
       const result = await phase(judgedNodeTestArgs([...batchFlags(flags, dir, batchLcov), ...batch], judged.args),
         { cwd: root, env: { ...env, ...judged.env, NODE_V8_COVERAGE: raw } });
+      samples.push(observe());
       const evidence = judged.read();
       const verdict = judgeRun(batch, { status: result.interrupted ? 1 : result.status, pool: false, root, ...evidence });
       Object.assign(record, { result, verdict }); save();
@@ -212,10 +220,17 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
       const compressed = await phase(['--expose-internals', MERGER, '--compact-output', packed, raw], { cwd: root, env });
       if (compressed.status !== 0 || compressed.interrupted) throw new Error('coverage batch compaction failed');
       Object.assign(record, { state: 'complete', lcov: batchLcov, lcovSha256: batchDigest, compact: packed });
-      if (!keepRaw) { rmSync(raw, { recursive: true, force: true }); record.rawDisposed = true; }
-      samples.push(sampleWorkspaceUsage(root));
+      samples.push(observe());
+      if (!keepRaw) {
+        const owned = scratchRoots.get(raw), current = pinWorkspaceScratchRoot(raw);
+        if (current.path !== owned.path || current.dev !== owned.dev || current.ino !== owned.ino || current.uid !== owned.uid)
+          throw new Error('raw scratch identity changed; retained without disposal');
+        rmSync(raw, { recursive: true, force: true }); record.rawDisposed = true; scratchRoots.delete(raw);
+      }
+      samples.push(observe());
       compact.push(packed); lineLcov.push('--line-lcov', batchLcov); save();
     }
+    rmSync(lcov, { force: true });
     const merged = await phase(['--expose-internals', MERGER, '--output', lcov, ...lineLcov, ...compact], { cwd: root, env });
     if (merged.status !== 0 || merged.interrupted) throw new Error('coverage aggregate failed');
     const aggregateDigest = coverageArtifactDigest(lcov);
@@ -244,9 +259,12 @@ export async function main(argv = process.argv.slice(2), { run = runCoverageBatc
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     'batch-size': { type: 'string' }, base: { type: 'string', default: 'origin/main' },
     lcov: { type: 'string', default: 'coverage/lcov.info' }, 'keep-raw': { type: 'boolean', default: false },
+    'disk-profile': { type: 'string' },
   } });
+  const disk = coverageDiskProfile(values['disk-profile']);
   const result = await run({ flags: extractCoverageFlags(readCiYaml()), files: positionals,
-    batchSize: Number(values['batch-size']), lcov: resolve(values.lcov), base: values.base, keepRaw: values['keep-raw'] });
+    batchSize: Number(values['batch-size']), lcov: resolve(values.lcov), base: values.base, keepRaw: values['keep-raw'],
+    diskProfile: disk.profile, diskProfileMode: disk.mode, estimatedPeakBasis: disk.estimatedPeakBasis });
   return result.status;
 }
 if (isMainModule(import.meta.url)) main().then((status) => { process.exitCode = status; }).catch((error) => {

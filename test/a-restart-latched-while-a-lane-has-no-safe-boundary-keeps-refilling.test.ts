@@ -1,22 +1,23 @@
+// W1-T7806 built a restart latch: a freed lane refilled while an in-flight run had no yield boundary, and each run was
+// asked to yield or held out at its next boundary. W1-T9089 (ADR 0007 A.10) retires it: once runs are children a restart
+// waits for nothing it does not own. A restart decided mid-phase now holds only a refill that would not run as a child,
+// awaits an in-process lane to its end, and never reaches into a run.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
-import { test, type TestContext } from "node:test";
-import { runDaemon, type DaemonDeps, type DaemonFreshness, type RestartBoundary } from "../src/lib/daemon.js";
+import { test } from "node:test";
+import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { daemonCommand, runTask, type RunResult } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { daemonCommand, type RunResult } from "../src/run-task.js";
 
 const minute = 60_000;
 const stale = { stale: true as const, oldSha: "a".repeat(40), newSha: "b".repeat(40),
-  changes: [{ sha: "b".repeat(40), subject: "fix: refresh", files: ["src/lib/daemon.ts", "package.json"] }] };
-type BoundaryOptions = { restartAtWorkerBoundary: RestartBoundary };
+  changes: [{ sha: "b".repeat(40), subject: "fix: refresh", files: ["src/lib/daemon.ts", "package.json"] }],
+  // W1-T9089: the daemon's own code weighs as any source advance, so a busy restart is decided on staleness pressure.
+  staleSinceMs: Date.now() - 120 * minute };
 const result = (id: string): RunResult => ({ taskId: id, runId: id, merged: true, verdict: "merged", costUsd: 0 });
 
 function deferred<T>() {
@@ -31,7 +32,7 @@ function phase(history = true, extra: Partial<DaemonDeps> = {}, startingMinute =
   const ids = "ABCDEFGHIJKL".split("");
   writeFileSync(path, ids.map((id) => `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/${id}.ts]\n`).join(""));
   const releases = new Map(ids.map((id) => [id, deferred<RunResult>()]));
-  const boundaries = new Map<string, BoundaryOptions>();
+  const offered: Array<Record<string, unknown>> = [];
   const sleeps: Array<ReturnType<typeof deferred<void>>> = [];
   const started: Array<{ id: string; age: number }> = [];
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
@@ -50,21 +51,16 @@ function phase(history = true, extra: Partial<DaemonDeps> = {}, startingMinute =
     checkFreshness: () => isStale ? stale : { stale: false },
     checkStop: () => cleaning ? "cleanup" : undefined,
     log: (step, fields) => rows.push({ step, extra: fields }),
-    runOne: (id: string, options?: BoundaryOptions) => {
+    runOne: (id, options) => {
       started.push({ id, age: nowMs - start });
-      if (options) boundaries.set(id, options);
+      offered.push({ ...options });
       return releases.get(id)!.promise;
     },
     sleep: () => { const sleep = deferred<void>(); sleeps.push(sleep); return sleep.promise; },
     ...extra,
-  } as DaemonDeps, { laneCount: 3, max: 12 });
+  } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 3, max: 12 });
   return {
-    run, started, rows, boundaries,
-    boundary: (id: string, waitingOn?: string) => {
-      const options = boundaries.get(id);
-      assert.ok(options, "the daemon supplies its live restart to every run");
-      return options.restartAtWorkerBoundary(waitingOn ? { waitingOn, runId: `${id}-fixture` } : undefined);
-    },
+    run, started, rows, offered,
     settle: async (id: string, age: number) => {
       nowMs = start + age * minute;
       merged.add(id);
@@ -88,296 +84,27 @@ function phase(history = true, extra: Partial<DaemonDeps> = {}, startingMinute =
   };
 }
 
-/** W1-T9069: the measurements a freed lane's refill needs under a latch: the src class's median span (16 min), a yield
- *  cost (62 min) and an implementing phase that finishes in 25 min, so a holdout there is cheaper to wait for. */
-function latchHistory(): string[] {
-  const now = Date.now();
-  const row = (age: number, fields: Record<string, unknown>) => JSON.stringify({
-    ts: new Date(now - age * minute).toISOString(), ...fields,
-  });
-  return [
-    row(300, { step: "run.start", task_class: "src", run_id: "span" }),
-    row(284, { step: "verdict", run_id: "span", verdict: "merged" }),
-    row(200, { step: "verdict", task_id: "yielded", run_id: "yielded", reason: "freshness_yield" }),
-    row(138, { step: "run.start", task_id: "yielded", run_id: "resumed" }),
-    row(100, { step: "run.phase", waiting_on: "implementing", run_id: "completed" }),
-    row(75, { step: "pr.opened", run_id: "completed" }),
-  ];
-}
-/** A change that is neither self-scoped nor an install input, so a measured run may hold the restart open. */
-const material = { ...stale, changes: [{ sha: stale.newSha, subject: "fix: update worker", files: ["src/lib/worker.ts"] }],
-  staleSinceMs: Date.now() - 120 * minute };
-function materialPhase(history = true, startingMinute = 0) {
-  let visible = false;
-  const h = phase(history, { readRestartHistory: latchHistory,
-    checkFreshness: () => visible ? material : { stale: false } } as Partial<DaemonDeps>, startingMinute);
-  return Object.assign(h, { show: () => { visible = true; } });
-}
-
-async function latch(h: ReturnType<typeof phase> & { show?: () => void }) {
+async function decide(h: ReturnType<typeof phase>) {
   await flush();
-  h.show?.();
   await h.tick(5, true);
   assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
 }
 
-test("W1-T7806: a freed lane refills while a young lane has no yield boundary since the latch", async () => {
-  const h = materialPhase(true, 3);
+test("W1-T9089: a restart decided mid-phase holds an in-process refill and awaits its lanes", async () => {
+  const h = phase();
   try {
-    await latch(h);
-    assert.equal(h.rows.find(({ step }) => step === "dispatch.refill_bound")?.extra?.bound_ms, 16 * minute);
+    await decide(h);
     await h.settle("B", 6);
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"], "no restart time is known while A has no estimate");
-    assert.equal(h.rows.findLast(({ step }) => step === "dispatch.lane_parked")?.extra?.reason, "restart time unknown");
-    assert.equal(h.boundary("A", "implementing"), undefined, "A holds, and its estimate wakes the parked lane");
-    await flush();
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"], "C has no estimate either");
-    await h.settle("C", 8);
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "E"]);
-    assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_refilled").map(({ extra }) => extra?.waiting_on),
-      [["A"], ["A"]]);
-    await h.tick(10);
-    const lanes = h.rows.findLast(({ step }) => step === "daemon.freshness_restart_waiting")?.extra?.lanes;
-    assert.deepEqual(lanes, [
-      { task: "A", age_ms: 7 * minute, holdout: true, admitted_under_latch: false },
-      { task: "D", age_ms: 2 * minute, holdout: false, admitted_under_latch: true },
-      { task: "E", age_ms: 2 * minute, holdout: false, admitted_under_latch: true },
-    ]);
-  } finally { await h.cleanup(); }
-});
-
-test("W1-T7806: refill stays open under a latch with no run history", async () => {
-  const h = materialPhase(false, 3);
-  try {
-    await latch(h);
-    assert.equal(h.rows.find(({ step }) => step === "dispatch.refill_bound")?.extra?.source, "no_history_fallback");
-    assert.equal(h.boundary("A", "implementing"), undefined);
-    await h.settle("B", 6);
-    await h.settle("C", 8);
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "E"]);
-  } finally { await h.cleanup(); }
-});
-
-test("W1-T8927: measured holdouts wait for current lanes without renewing the drain through refill", async () => {
-  const now = Date.now();
-  const row = (age: number, fields: Record<string, unknown>) => JSON.stringify({
-    ts: new Date(now - age * minute).toISOString(), ...fields,
-  });
-  const material = { ...stale, changes: [{ sha: stale.newSha, subject: "fix: update worker", files: ["src/lib/worker.ts"] }],
-    staleSinceMs: now - 120 * minute };
-  let materialVisible = false;
-  const h = phase(true, {
-    checkFreshness: () => materialVisible ? material : { stale: false },
-    readRestartHistory: () => [
-      row(200, { step: "verdict", task_id: "yielded", run_id: "yielded", reason: "freshness_yield" }),
-      row(138, { step: "run.start", task_id: "yielded", run_id: "resumed" }),
-      row(100, { step: "run.phase", waiting_on: "preopen_gate", run_id: "completed" }),
-      row(95, { step: "pr.opened", run_id: "completed" }),
-    ],
-  }, 3);
-  try {
-    await flush();
-    materialVisible = true;
-    await latch(h);
-    assert.equal(h.boundary("A", "preopen_gate"), undefined);
-    await h.settle("B", 6);
-    await h.settle("C", 7);
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"]);
-    await h.tick(8);
-    const waiting = h.rows.findLast(({ step }) => step === "daemon.freshness_restart_waiting")?.extra;
-    assert.deepEqual(waiting?.lanes, [{ task: "A", age_ms: 5 * minute, holdout: true, admitted_under_latch: false }]);
-    await h.tick(10);
-    assert.equal(h.boundary("A", "preopen_gate"), material);
-    await h.settle("A", 10);
-    assert.equal((await h.run).stopReason, "stale");
-  } finally { await h.cleanup(); }
-});
-
-function worker(text: string, isError = false): WorkerResult {
-  return { sessionId: "fixture", costUsd: 0, numTurns: 1, text, blocks: [], stderr: "",
-    subtype: isError ? "error_max_turns" : "success",
-    isError, apiError: false, permissionDenials: [], childEnvKeys: [], model: "test", effort: "test",
-    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false };
-}
-
-/** Drives the REAL runTask for task D through its first implement worker to the first worker boundary. */
-async function boundaryRun(t: TestContext, restartAtWorkerBoundary: BoundaryOptions["restartAtWorkerBoundary"] | undefined,
-  ownRead: () => Extract<DaemonFreshness, { stale: true }> | undefined) {
-  const root = mkdtempSync(join(tmpdir(), "rmd-t7806-boundary-"));
-  const origin = gitRepo({ bare: true });
-  const seed = gitRepo();
-  seed.addRemote("origin", origin.dir);
-  seed.git("push", "origin", "main");
-  mkdirSync(join(root, "repos"), { recursive: true });
-  const repo = gitRepo({ cloneFrom: origin.dir });
-  repo.git("config", "user.name", "fixture");
-  repo.git("config", "user.email", "fixture@remudero.invalid");
-  renameSync(repo.dir, join(root, "repos", "remudero"));
-  const planPath = join(root, "tasks.yaml");
-  writeFileSync(planPath, "- id: D\n  title: boundary fixture\n  repo: remudero\n  type: implement\n  verify: auto\n  risk: medium\n  origin: test\n  status: queued\n  files: [src/D.ts]\n");
-  const githubStub = ghShim([{ when: "pr create", stdout: "https://github.com/acme/remudero/pull/1" }]);
-  const priorPath = process.env.PATH;
-  process.env.PATH = `${githubStub.dir}:${priorPath}`;
-  t.after(() => { process.env.PATH = priorPath; });
-  let calls = 0;
-  let gates = 0;
-  const options: NonNullable<Parameters<typeof runTask>[1]> & Partial<BoundaryOptions> = {
-    config: { claudeBin: "/bin/true", root, installRoot: process.cwd(), workerProviders: { harnessCommitsImplement: true } },
-    skipGitSync: true, planPath,
-    github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
-    claimReserver: { mintAnchor: () => "boundary-anchor", attempt: () => "created", holder: () => undefined, drop: () => true },
-    containmentExec: async (token) => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
-    isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
-    restartAtWorkerBoundary,
-    externalWaitFreshness: ownRead,
-    spawn: async (args) => {
-      if (++calls === 1) return worker("RECON REPORT\nOBSERVED: fixture\n");
-      if (calls > 2) return worker("fixture stops after reaching the preopen gate", true);
-      mkdirSync(join(args.cwd, "src"), { recursive: true });
-      writeFileSync(join(args.cwd, "src/D.ts"), "export const value = 42;\n");
-      return worker("REPORT\nCOMMIT_MESSAGE: fix(test): retain boundary work\n");
-    },
-    preopenGate: async () => { gates++; return { kind: "fail", failedSteps: ["fixture"], durationMs: 1 }; },
-  };
-  const outcome = await withLiveWritesAllowed(() => runTask("D", options));
-  const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { outcome, calls, gates, rows };
-}
-
-test("W1-T7806: a refill admitted under the latch yields at its first boundary", async (t) => {
-  const h = materialPhase(true, 3);
-  try {
-    await latch(h);
-    assert.equal(h.boundary("A", "implementing"), undefined);
-    assert.equal(h.boundary("C", "implementing"), undefined);
-    await h.settle("B", 6);
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D"]);
-    assert.equal(h.boundary("C", "recon"), material);
-    // Past A's estimate no holdout remains, so the refill's first boundary is the restart's.
-    await h.tick(50);
-    assert.equal(h.boundary("A", "implementing"), material);
-    const latchRead = h.boundaries.get("D")?.restartAtWorkerBoundary;
-    assert.equal(typeof latchRead, "function");
-    // The run's own read reports fresh: only the daemon's latch can yield this boundary.
-    const { outcome, calls, gates, rows } = await boundaryRun(t, latchRead, () => undefined);
-    assert.equal(outcome.verdict, "handed_off");
-    assert.equal(outcome.prUrl, undefined);
-    assert.equal(calls, 2);
-    assert.equal(gates, 0, "the first worker boundary yields before the preopen gate");
-    assert.equal(rows.find(({ step }) => step === "run.freshness_handoff")?.new_sha, stale.newSha);
-    assert.equal(rows.find(({ step }) => step === "verdict")?.reason, "freshness_yield");
-    assert.equal(h.boundary("A"), material);
-    assert.equal(h.boundary("C"), material);
-    const count = h.started.length;
-    await h.settle("D", 51);
-    assert.equal(h.started.length, count, "the refill cannot renew the hold");
-  } finally { await h.cleanup(); }
-});
-
-test("W1-T8198: a clear daemon latch continues past the worker boundary without its own freshness read", async (t) => {
-  const ownStale = { ...stale, newSha: "c".repeat(40) };
-  let ownReads = 0;
-  const { outcome, calls, gates, rows } = await boundaryRun(t, () => undefined, () => {
-    ownReads++;
-    return ownStale;
-  });
-  assert.equal(gates, 1, "the clear daemon latch lets the worker reach the preopen gate");
-  assert.equal(calls, 3, "the run continues to the injected gate repair worker");
-  assert.equal(outcome.verdict, "failed", "the injected repair worker stops the fixture");
-  assert.equal(ownReads, 0, "the daemon latch is the sole freshness authority");
-  assert.equal(rows.some(({ step }) => step === "run.freshness_handoff"), false);
-});
-
-test("W1-T7806: refill closes as stale code once every holdout can yield", async () => {
-  const h = materialPhase(true);
-  try {
-    await flush();
-    assert.equal(h.boundary("A"), undefined, "a boundary before the latch does not release a future holdout");
-    await latch(h);
-    assert.equal(h.boundary("A", "implementing"), undefined);
-    await h.settle("B", 6);
-    await h.settle("C", 8);
-    assert.equal(h.boundary("D", "implementing"), undefined, "a refill ahead of the restart runs on and does not join the holdouts");
-    assert.equal(h.rows.some(({ step, extra }) => step === "daemon.restart_holdout" && extra?.task_id === "D"), false);
-    await h.settle("D", 9);
-    assert.equal(h.started.at(-1)?.id, "F", "A still holds the restart open");
-    assert.equal(h.boundary("A", "recon"), material);
-    assert.equal(h.boundary("A"), material, "repeated boundaries do not renew the hold");
-    const count = h.started.length;
-    await h.settle("E", 10);
-    await h.settle("F", 11);
-    assert.equal(h.started.length, count, "A is still in flight, but every holdout can yield");
-    assert.equal(h.rows.some(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.reason === "stale code"), true);
-    await h.settle("A", 12);
-    assert.equal((await h.run).stopReason, "stale");
-  } finally { await h.cleanup(); }
-});
-
-test("W1-T7806: a holdout that settles stops holding refill", async () => {
-  const h = materialPhase(true);
-  try {
-    await latch(h);
-    assert.equal(h.boundary("A", "implementing"), undefined);
-    await h.settle("B", 6);
-    await h.settle("C", 8);
-    await h.settle("A", 9);
-    const count = h.started.length;
-    await h.settle("D", 10);
-    await h.settle("E", 11);
-    assert.equal(count, 5);
-    assert.equal(h.started.length, count, "settlement also drains the holdout set");
-    assert.equal((await h.run).stopReason, "stale");
-  } finally { await h.cleanup(); }
-});
-
-test("a refill read finishing after the last holdout's boundary starts no run", async () => {
-  const read = deferred<string>();
-  let blockRead = false;
-  let reading = false;
-  const h = phase(true, { readPushedRunBranches: () => {
-    if (!blockRead) return "";
-    reading = true;
-    return read.promise;
-  } });
-  try {
-    await latch(h);
-    assert.equal(h.boundary("C"), stale);
-    blockRead = true;
-    await h.settle("B", 6);
-    assert.equal(reading, true, "the refill is awaiting its own branch read");
-    assert.equal(h.boundary("A"), stale);
-    read.resolve("");
-    await flush();
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"]);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"], "no refill starts on the old code in-process");
     assert.equal(h.rows.find(({ step }) => step === "dispatch.lane_refill_held")?.extra?.reason,
-      "stale code (decided while the refill read was in flight)");
-  } finally { read.resolve(""); await h.cleanup(); }
-});
-
-test("a restart wakes phase-bound parked lanes while a young holdout still runs", async () => {
-  const h = materialPhase(true);
-  try {
-    await flush();
-    await h.settle("A", 2);
-    await h.settle("B", 4);
-    await h.settle("C", 10);
-    await h.settle("D", 17);
-    await h.settle("E", 18);
-    assert.equal(h.rows.filter(({ step }) => step === "dispatch.lane_parked").length, 2);
-    h.show();
-    await h.tick(20, true);
-    assert.deepEqual(h.started.slice(6).map(({ id }) => id), [], "the young holdout has no estimate, so both lanes park");
-    assert.equal(h.boundary("F", "implementing"), undefined);
-    await flush();
-    assert.deepEqual(h.started.slice(6).map(({ id }) => id), ["G", "H"]);
-    assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_refilled").slice(-2)
-      .map(({ extra }) => extra?.waiting_on), [["F"], ["F"]]);
-    assert.equal(h.boundary("F", "recon"), material);
-    const count = h.started.length;
-    await h.settle("G", 21);
-    await h.settle("H", 22);
-    assert.equal(h.started.length, count);
+      "stale code: no candidate runs as a child");
+    await h.settle("A", 30);
+    await h.settle("C", 40);
+    assert.equal((await h.run).stopReason, "stale", "the restart fires once its in-process lanes have settled");
+    for (const step of ["daemon.restart_yield_asked", "daemon.restart_holdout", "daemon.freshness_restart_waiting", "daemon.restart_latch_cost"]) {
+      assert.equal(h.rows.some((row) => row.step === step), false, step);
+    }
+    for (const options of h.offered) assert.equal("restartAtWorkerBoundary" in options, false);
   } finally { await h.cleanup(); }
 });
 
@@ -385,7 +112,7 @@ test("a pending restart keeps the existing pause gate on lane refill", async () 
   let paused = false;
   const h = phase(true, { checkPause: () => paused ? "operator pause" : undefined });
   try {
-    await latch(h);
+    await decide(h);
     paused = true;
     await h.settle("B", 6);
     assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"]);
@@ -393,7 +120,7 @@ test("a pending restart keeps the existing pause gate on lane refill", async () 
   } finally { paused = false; await h.cleanup(); }
 });
 
-test("the daemon command threads its lane's boundary reader into runTask", async (t) => {
+test("the daemon command threads the recycle reader, never a restart latch, into runTask", async (t) => {
   const fixtureHome = mkdtempSync(join(tmpdir(), "rmd-t7806-wiring-"));
   const root = join(fixtureHome, "Remudero");
   mkdirSync(join(fixtureHome, ".config", "remudero"), { recursive: true });
@@ -405,19 +132,18 @@ test("the daemon command threads its lane's boundary reader into runTask", async
   t.mock.method(os, "homedir", () => fixtureHome);
   syncBuiltinESMExports();
   t.after(() => { os.homedir = originalHomedir; syncBuiltinESMExports(); });
-  const boundary = () => stale;
   let invoked = false;
   const code = await daemonCommand(["--repo", "foreign-owner/widgets", "--plan", planPath, "--max", "0"], {
     runDaemon: async (_plan, deps) => {
-      await deps.runOne("D", { restartAtWorkerBoundary: boundary });
+      await deps.runOne("D", {});
       return { attempted: ["D"], merged: [], stopReason: "stopped", costUsd: 0, ticks: 1 };
     },
     runTask: async (id, options) => {
       invoked = true;
       assert.equal(id, "D");
       assert.ok(options);
-      assert.equal(options.restartAtWorkerBoundary, boundary);
-      assert.equal(options.restartAtWorkerBoundary?.(), stale);
+      assert.equal("restartAtWorkerBoundary" in options, false, "W1-T9089: no run reads a daemon restart latch");
+      assert.equal(typeof options.externalWaitRecycle, "function", "a recycle still reaches the run");
       return result(id);
     },
   });

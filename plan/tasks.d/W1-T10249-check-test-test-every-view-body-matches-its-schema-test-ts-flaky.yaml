@@ -1,0 +1,56 @@
+- id: W1-T10249
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/every-view-body-matches-its-schema.test.ts:flaky cost 12.8 PR minute(s) across 5 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.42
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/every-view-body-matches-its-schema.test.ts:flaky"
+  files:
+    - src/lib/actions-view.ts
+    - test/console-api/views/check-test-test-every-view-body-matches-its-schema-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/every-view-body-matches-its-schema.test.ts:flaky"
+      proof: "grep: test(\"W1-T10249: check:test:test/every-view-body-matches-its-schema.test.ts:flaky is prevented, not retried\" in test/console-api/views/check-test-test-every-view-body-matches-its-schema-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/every-view-body-matches-its-schema.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/every-view-body-matches-its-schema.test.ts:flaky cost 12.8 PR minute(s) (seven-day half-life) across 5 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/actions-view.ts: test/every-view-body-matches-its-schema.test.ts imports it
+    - test/every-view-body-matches-its-schema.test.ts: named by the failing check
+    - the rounds name a failing test: test/every-view-body-matches-its-schema.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12892 (https://github.com/craigoley/remudero/pull/12892) at 2026-10-19T10:36:02.894Z: ci-log round — coverage-shard (3/8): test/every-view-body-matches-its-schema.test.ts; coverage-shard (8/8): pool defect: test/b.test.ts leaks into test/c.test.ts; coverage-shard (2/8): test/serves-mai
+        failing tests: every registered view body validates against its declared schema; W1-T8950: a ready item serves its recommendation with its route, W1-T8826: keep and untagged options carry no action, W1-T8826: actions are recomputed from the current lane without trusting stored routes, W1-T8826: a carried slow-lane message recomputes actions for a deferred item, every registered view body validates against its declared schema; every declared write route is either wiring-tested here or listed as explicit debt; inbox approval ignores the read snapshot and resolves the target ref, every declared write route is either wiring-tested here or listed as explicit debt; W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame
+        log excerpt:
+          | ...
+          | not ok 21 - every registered view body validates against its declared schema
+          |   ---
+          |   duration_ms: 540.861965
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/every-view-body-matches-its-schema.test.ts:192:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          | ","asOf":"2026-09-30T12:00:00.000Z","stale":false,"sources":[{"name":"inbox-store:core","asOf":"2026-09-30T12:00:00.000Z","state":"fresh","kind":"inbox-store","instance":"core","budgetMs":180000,"lagMs":0}],"data":{"snapshotKey":"bb0b83acc4fffe15a68a27b7587682036ef58c92c2b65c9902a7295e126cca56","section":"needsYou","items
+    - PR #11283 (https://github.com/craigoley/remudero/pull/11283) at 2026-10-13T09:57:10.473Z: ci-log round — coverage-shard (2/8): test/every-view-body-matches-its-schema.test.ts
+        failing tests: every registered view body validates against its declared schema; W1-T5739: every GET /v1/inbox lane item validates against its declared schema
+    - PR #10190 (https://github.com/craigoley/remudero/pull/10190) at 2026-10-09T02:17:43.961Z: ci-log round — coverage-shard (3/8): test/every-view-body-matches-its-schema.test.ts
+        failing tests: every registered view body validates against its declared schema
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.224Z"
+    pin: "ac49146f34b8f870d5cd245ace72219e1b14097188756972c7a8d0e152c76505"

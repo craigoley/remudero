@@ -55,7 +55,8 @@ test("a probe failing at a main sha whose CI is green dispatches the fix instead
   const h = harness([{ step: "main.health.observed", sha: MAIN, state: "green" }], MAIN);
   await h.sweep();
   assert.deepEqual(h.fixed, [10296]);
-  assert.deepEqual(h.judged, [["test-slow-shard (2/2)"]]);
+  assert.deepEqual(h.judged, [], "W1-T10039: a first round is not put to the judge");
+  assert.deepEqual(h.rows.filter((r) => r.step === "fix.progress_judged").map((r) => r.judge_skipped), ["first-round"]);
   const contradicted = h.rows.find((r) => r.step === "sweep.base_reproduction.contradicted");
   assert.equal(contradicted?.main_sha, MAIN);
   const disposed = h.rows.find((r) => r.step === "sweep.disposed" && r.pr_number === 10296);
@@ -70,7 +71,8 @@ test("an earlier probe contradicted by green CI still frees the PR at a newer, n
   ], "d".repeat(40));
   await h.sweep();
   assert.deepEqual(h.fixed, [10296]);
-  assert.deepEqual(h.judged, [["test-slow-shard (2/2)"]]);
+  assert.deepEqual(h.judged, [], "W1-T10039: a first round is not put to the judge");
+  assert.deepEqual(h.rows.filter((r) => r.step === "fix.progress_judged").map((r) => r.judge_skipped), ["first-round"]);
 });
 
 test("a probe failing where main's CI is not green still stands the PR down as base red", async () => {

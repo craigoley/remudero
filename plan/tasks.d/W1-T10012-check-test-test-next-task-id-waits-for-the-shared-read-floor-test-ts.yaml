@@ -3,10 +3,10 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.24
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/next-task-id-waits-for-the-shared-read-floor.test.ts"
@@ -49,3 +49,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.84
+    reasons:
+      - "The filing names one recurring test failure, supplies an assertion-failure excerpt, and scopes the remedy to its imported transport module plus a new regression test."
+      - "The stated scope requests no credential, permission, deletion, deployment, merge-policy, or irreversible action; the supplied gates identify no escalation trigger."
+      - "This is a filing-time assessment without a diff; the proposed remedy remains subject to CI and review."
+    judged_at: "2026-10-18T10:57:50.412Z"
+    pin: "68405f30b1fc61b693cfc412d5a31df73575a71eae5eca2edee40b77a9e073a8"

@@ -66,6 +66,12 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 - **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
   origin`), not only `origin/main`, counting per head against main.** → doctrine/plan-and-task-hygiene/sweep-open-pr-heads.md
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** → doctrine/plan-and-task-hygiene/name-the-session-branch.md
+- **A new test goes in the `test/<folder>/` that `rmd test-place` computes from its imports — never directly
+  under `test/`.** → doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md
+- **New test code imports repository modules through `#src/*`, `#scripts/*` and `#test/*`, never a
+  location-relative specifier.** → doctrine/plan-and-task-hygiene/new-test-imports-use-package-aliases.md
+- **New tests compute the repository root with `REPO_ROOT` or `repoRoot()` from
+  `#test/helpers/repo-root.js`, never from their own location.** → doctrine/plan-and-task-hygiene/new-tests-use-the-shared-root-helper.md
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names** → doctrine/plan-and-task-hygiene/confirm-the-frontier.md
 - **A contested reservation is never deleted and an unfiled one is never free — the
@@ -83,8 +89,8 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 
 ## CI and merging
 
-- **Space `gh` reads 180 s apart, never poll — `deny-floor.sh` refuses a closer read; GitHub's
-  SECONDARY limit 403s on RATE while `rate_limit` reads full; `gh pr create` may die, git push won't.** → doctrine/ci-and-merging/gh-read-cadence.md
+- **Read GitHub through `rmd gh -- <gh args>` while a broker is live (the hook says so), never poll;
+  the 180 s floor applies only with no live broker; `gh pr create` may die, git push won't.** → doctrine/ci-and-merging/gh-read-cadence.md
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** → doctrine/ci-and-merging/conflicting-pr-zero-checks.md
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close

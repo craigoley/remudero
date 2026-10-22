@@ -1,0 +1,76 @@
+- id: W1-T10265
+  title: "ELEVEN STORAGE-PERMISSION TESTS FAIL ON MAIN ON THE AZURE HOST — test/review/shared-git-storage (9), test/review/evidence-storage (1) and test/preflight-ci-parity (1) refuse with `unsafe-parent` and \"storage path is not account-owned and protected\"; investigate whether the cause is the host (its 0002 umask makes fixture directories group-writable, or a group-writable parent) or a real defect in the fixtures or the guards, with a positive control on each side"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: low
+  priority: 2  # every builder on this host reads these 11 as pre-existing reds and must prove each time they are not theirs
+  origin: "coordinator brief file1020 item 9 (2026-10-20); evidence from the tsconfig/GOMEMLIMIT hand build (logs-8864/tscfix-pf-fails-main.log, PR #13113)"
+  plan_refs: []  # the guards arrived in PR #12998 (evidence-storage) and PR #13009 (shared-workspace), neither carries a Remudero-Task trailer
+  files:
+    - docs/forensics/storage-permission-fixtures-on-the-azure-host.md
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED (logs-8864/tscfix-pf-fails-main.log: the three files at main 4c83ace0f on this host, run under
+    heavy-run.sh, `# tests 68 # pass 57 # fail 11`; the same 11 at the PR #13113 head, so they predate it):
+    - not ok in test/review/shared-git-storage.test.ts: "capacity and genuine-worker refusals precede every Git or receipt
+      mutation", "real linked workspaces share the common Git store ...", "occupied and dangling workspace paths are
+      retained ...", "dependency refusal preserves the real created worktree ...", "a dependency installer attempting
+      fresh npm is refused ...", "bare pools require their own full initial integrity proof ...", "Git alternates,
+      changed store kinds and invalid identities refuse ...", "shared workspace CLI status is read-only ...", "a lost
+      inherited worker is rechecked before the next Git phase ..." (9). Each expected a specific refusal (for example
+      /capacity/, /occupied/) and got "storage path is not account-owned and protected" first.
+    - not ok in test/review/evidence-storage.test.ts: "evidence root refuses symlinked roots and never recursively enters
+      checkouts" (error `unsafe-parent`).
+    - not ok in test/preflight-ci-parity.test.ts: "preflightCommand: --ci-parity ADDS the ci-parity steps after the three
+      hand-route steps ..." (not yet attributed to the same guard).
+    READ at origin/main e18320e75 (symbols, not lines):
+    - Both guards are new: scripts/lib/evidence-storage.mjs arrived in PR #12998 and scripts/lib/shared-workspace.mjs in
+      PR #13009 (both merged 2026-10-20), so CI passed them on its runners.
+    - scripts/lib/shared-workspace.mjs `ownedDirectory` refuses any directory between the path and HOME that is not
+      owned by this uid or has `mode & 0o022` set.
+    - scripts/lib/evidence-storage.mjs `privateParents` walks every parent up to `/` and refuses `unsafe-parent` on a
+      group- or world-writable parent unless it is a sticky directory owned by root or this uid.
+    - test/setup/tmp-hygiene.ts gives every test process HOME = `mkdtemp(<tmpdir>/rmd-test-home-...)`; the fixtures
+      create their directories under it with plain `mkdirSync` (no explicit mode).
+    OBSERVED host facts, 2026-10-20: this session's umask is 0002 (/etc/login.defs UMASK 022; the 0002 comes from the
+    user's environment); TMPDIR=/mnt/rmd/tmp (root, 1777 sticky); /mnt/scratch/rmd-qa-namespace.ulkfFP/operator is
+    0775 (group-writable) and holds every builder worktree.
+    HYPOTHESES, none proven:
+    (H1) host umask: `mkdirSync` under umask 0002 makes 0775 directories, which both guards correctly refuse; CI runners
+         use umask 022. Then the guards are right and the fixtures depend on the runner's umask (a fixture defect).
+    (H2) host layout: a path under the 0775 operator directory reaches `privateParents`' walk (a worktree path, or a
+         TMPDIR/HOME set inside it by some runner). Then the guard is right and the host layout is the cause.
+    (H3) a real defect in a guard (for example a sticky or root-owned parent judged unsafe).
+    NOT RUN BY THIS FILING: a discriminating re-run under `umask 022` versus `umask 002` was attempted and refused by a
+    local tool safety check before it started, so H1 is untested.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and the open PR heads' plan trees (2026-10-20) for
+    unsafe-parent, "account-owned and protected" and umask; the only hits are merged tasks on other subjects.
+  design: |
+    Write docs/forensics/storage-permission-fixtures-on-the-azure-host.md with these sections (headings verbatim):
+    1. "## Reproduction" — the three files at the current main sha on this host under heavy-run.sh, with the `# tests`
+       summary and each failing title; and the same run's HOME, TMPDIR, umask and the mode/owner of every parent the
+       guards walked (record them from inside the run, e.g. with a one-off diagnostic env, never by editing the guards).
+    2. "## Positive controls" — the same three files under `umask 022` and under `umask 002`, same sha, same host; and
+       one run with TMPDIR on a root-owned sticky directory versus one inside the 0775 operator directory. A zero-fail
+       run counts only beside a run that reproduces the 11 (doctrine: a zero needs a positive control). Name the window
+       and the exact commands.
+    3. "## Cause" — which of H1/H2/H3 the controls support, with the run that rules out each other one.
+    4. "## Remedy proposal" — for H1, the fixtures create directories with an explicit 0o700 mode (a fixture change,
+       filed as its own task); for H2, the host change is an operator action; for H3, the guard fix as its own task.
+       No guard is relaxed and no test is skipped in this task.
+  acceptance:
+    - claim: "the record reproduces the 11 failures with the run's umask, HOME, TMPDIR and parent modes"
+      proof: "grep: ## Reproduction in docs/forensics/storage-permission-fixtures-on-the-azure-host.md"
+    - claim: "the record has umask and TMPDIR positive controls on the same sha"
+      proof: "grep: ## Positive controls in docs/forensics/storage-permission-fixtures-on-the-azure-host.md"
+    - claim: "the record names the supported cause and what rules out the others"
+      proof: "grep: ## Cause in docs/forensics/storage-permission-fixtures-on-the-azure-host.md"
+  falsifier: |
+    At origin/main docs/forensics/storage-permission-fixtures-on-the-azure-host.md does not exist, so all three grep
+    proofs read 0. A record without its positive-control section fails the second proof.
+  note: |
+    Any change to the guards (ownedDirectory, privateParents) or to the host is out of scope here; the follow-up is filed
+    from the record's cause.

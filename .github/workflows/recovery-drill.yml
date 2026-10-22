@@ -31,7 +31,7 @@ on:
   pull_request:
     paths:
       - "scripts/recovery-drill.mjs"
-      - "test/recovery-drill.test.ts"
+      - "test/**/recovery-drill.test.ts"
       - ".github/workflows/recovery-drill.yml"
 
 permissions:

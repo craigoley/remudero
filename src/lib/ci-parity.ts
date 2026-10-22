@@ -11,10 +11,12 @@ import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type Prefligh
 import { CENSUS_POPULATION, isRuleSuitePath, type CensusPopulationMember } from "./rule-suites.js";
 import { resolveTestPath } from "./test-path-resolver.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
-import { systemClock } from "./clock.js";
+import { clockFromMillisFn, systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
+import { createStaticCheckTiming, type StaticCheckTiming } from "./preflight-step-timing.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { RMD_TMP_PREFIX } from "./tmp.js";
 import { shortPathWhenTooLong } from "./short-path-root.js";
 import { acquireTestSlot, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
@@ -337,6 +339,8 @@ export interface CiParityStepResult {
   name: string;
   ok: boolean;
   detail: string;
+  /** Diagnostic direct-command wall time, never native closure or runtime-profile assurance. */
+  staticTiming?: StaticCheckTiming;
   /** W1-T2862: bounded stdout, kept only where a fast step opts in; a truncated payload is never complete. */
   successOutput?: { text: string; truncated: boolean };
 }
@@ -453,7 +457,7 @@ export interface CiParityEntry {
   workflow?: string;
   mirrored: boolean;
   reason?: string;
-  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string, testSlot?: TestSlotOptions) => CiParityStepResult[];
+  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string, testSlot?: TestSlotOptions, coverageResources?: CoverageResourcePort) => CiParityStepResult[];
 }
 
 /** Parse ci.yml's top-level job keys. Pure text-in/array-out, so a falsifier hands it a synthetic document. */
@@ -827,6 +831,18 @@ export interface CoverageScratchPolicy {
   /** Whether two directories sit on one device; defaults to comparing `st_dev`. */
   sameVolume?: (a: string, b: string) => boolean;
 }
+
+/** Explicit resource lifetime for an injected caller; omitted ports retain the real leaf's admission. */
+export interface CoverageResourceLease {
+  readonly scratchDir: string;
+  readonly lcovPath: string;
+  readonly slot: TestSlotLease;
+  readonly note: string;
+  release(): void;
+}
+
+export type CoverageResourceAcquisition = { ok: true; lease: CoverageResourceLease } | { ok: false; detail: string };
+export type CoverageResourcePort = (repoRoot: string) => CoverageResourceAcquisition;
 
 function sameDevice(a: string, b: string): boolean {
   try {
@@ -1904,28 +1920,45 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   {
     job: "coverage-ratchet",
     mirrored: true,
-    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined) => {
-      const lcovPath = join(repoRoot, "coverage", "lcov.info");
-      const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot));
-      if (!test.ok) return [refresh, test];
-      const ratchet = runStep("coverage-ratchet:ratchet", () =>
-        shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
-          cwd: repoRoot,
-        }),
-      );
-      const diffCoverage = runStep("coverage-ratchet:diff-coverage", () => {
-        // W1-T3013: the diff is CHECKED before it becomes stdin. An unchecked one turns a git
-        // failure into a green step, because diff-coverage.mjs is right to pass over an empty
-        // added-line set — the gate was asking it a question it cannot refuse.
-        const diff = mergeBaseDiffForCoverage(repoRoot, spawn);
-        if (!diff.ok) return { ok: false, detail: diff.detail };
-        return shellOut(spawn, "diff-coverage.mjs (origin/main...HEAD, refreshed base)", process.execPath, [join(repoRoot, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath], {
-          cwd: repoRoot,
-          input: diff.text,
+    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined, coverageResources = undefined) => {
+      if (coverageResources !== undefined && spawn === defaultPreflightSpawn) {
+        return [runStep("coverage-ratchet:test-with-coverage", () => ({
+          ok: false, detail: "FAIL — fixture resources require an explicitly injected child transport; real coverage uses default admission",
+        }))];
+      }
+      let lease: CoverageResourceLease | undefined;
+      let lcovPath = join(repoRoot, "coverage", "lcov.info");
+      try {
+        const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
+        const test = runStep("coverage-ratchet:test-with-coverage", () => {
+          if (coverageResources === undefined) return testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot);
+          const acquired = coverageResources(repoRoot);
+          if (!acquired.ok) return { ok: false, detail: acquired.detail };
+          lease = acquired.lease;
+          lcovPath = lease.lcovPath;
+          if (!testSlotExecutionAllowed(lease.slot)) return { ok: false, detail: `coverage: NOT_RUN (${lease.slot.note})` };
+          const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, lease.scratchDir, join(lease.scratchDir, "raw-shards"), lease.slot, testSlot ?? {}, lease.note);
+          return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${lease.note})` };
         });
-      });
-      return [refresh, test, ratchet, diffCoverage];
+        if (!test.ok) return [refresh, test];
+        const ratchet = runStep("coverage-ratchet:ratchet", () =>
+          shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
+            cwd: repoRoot,
+          }),
+        );
+        const diffCoverage = runStep("coverage-ratchet:diff-coverage", () => {
+          // W1-T3013: the diff is CHECKED before it becomes stdin. An unchecked one turns a git
+          // failure into a green step, because diff-coverage.mjs is right to pass over an empty
+          // added-line set — the gate was asking it a question it cannot refuse.
+          const diff = mergeBaseDiffForCoverage(repoRoot, spawn);
+          if (!diff.ok) return { ok: false, detail: diff.detail };
+          return shellOut(spawn, "diff-coverage.mjs (origin/main...HEAD, refreshed base)", process.execPath, [join(repoRoot, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath], {
+            cwd: repoRoot,
+            input: diff.text,
+          });
+        });
+        return [refresh, test, ratchet, diffCoverage];
+      } finally { lease?.release(); }
     },
   },
   {
@@ -2055,6 +2088,31 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
 ];
 
+/** W1-T9380: the PR-body-free half of acceptance-author-gate (`--commit-trailer-only`), run locally.
+ * The range is origin/main's merge-base..HEAD, which the hosted gate also reads; the PR body
+ * checks stay hosted because no body exists before a PR does. An unresolvable base is a FAIL
+ * naming the cause, never a silent pass. */
+export function acceptanceAuthorGateCommitTrailerLeaf(repoRoot: string, spawn: PreflightSpawn): { ok: boolean; detail: string } {
+  // The run's PINNED base (a refusal throws into a named failing step), so this leaf and the diff-scoped
+  // leaves read one base; HEAD is the literal ref the gate resolves inside the checkout.
+  const baseSha = requirePinnedBase(repoRoot, spawn);
+  const headSha = "HEAD";
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}aag-event-`));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({ pull_request: { body: "", base: { sha: baseSha }, head: { sha: headSha } } }));
+    return shellOut(
+      spawn,
+      "node scripts/acceptance-author-gate.mjs --commit-trailer-only",
+      process.execPath,
+      [join(repoRoot, "scripts", "acceptance-author-gate.mjs"), "--commit-trailer-only", "--event-path", eventPath],
+      { cwd: repoRoot },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function standaloneNpmScriptEntry(workflow: string, job: string, script: string): CiParityEntry {
   return { ...npmScriptEntry(job, script), workflow };
 }
@@ -2066,8 +2124,8 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
   {
     workflow: "acceptance-author-gate.yml",
     job: "acceptance-author-gate",
-    mirrored: false,
-    reason: "needs the pull_request event's base/head range and PR body; a local checkout before a PR exists cannot supply either identity honestly",
+    mirrored: true,
+    run: (repoRoot, spawn) => [runStep("acceptance-author-gate:commit-trailers", () => acceptanceAuthorGateCommitTrailerLeaf(repoRoot, spawn))],
   },
   {
     workflow: "ci-gate.yml",
@@ -2205,6 +2263,8 @@ export interface CiParityDeps {
   coverageLockDiscriminator?: string;
   /** Seams for the host-wide test slot the coverage run takes. Production omits this. */
   testSlot?: TestSlotOptions;
+  /** Explicit resources for already-mocked children, never an environment/CLI admission exception. */
+  coverageResources?: CoverageResourcePort;
   /** Test seam for ci.yml's half of the drift check — production reads it off disk. */
   ciYamlText?: string;
   /** Test seam for the standalone pull-request workflow half of the drift check. */
@@ -2299,7 +2359,7 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {
     if (!entry.mirrored) return [excludedStep(entry.job, entry.reason ?? "no reason recorded")];
     try {
-      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot);
+      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot, deps.coverageResources);
     } catch (e) {
       return [toolchainFailure(`${entry.job}:error`, e)];
     }
@@ -3194,6 +3254,8 @@ export interface PreflightFastDeps {
   now?: () => number;
   /** Test seam — a falsifier injects a narrowed list without mutating {@link FAST_GATE_STEPS}. */
   steps?: readonly FastGateStep[];
+  /** Diagnostic monotonic clock only; never the census-pricing or re-measure clock. */
+  timingNow?: () => number;
 }
 
 export interface PreflightFastResult {
@@ -3257,9 +3319,11 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
+  const timingClock = deps.timingNow ? clockFromMillisFn(deps.timingNow) : undefined;
+  const timings = gateSteps.map(() => createStaticCheckTiming(spawn, timingClock));
   // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
   const consumer = isConsumerRepo(repoRoot, deps.packageJsonText);
-  const timedCensus = (script: string) => {
+  const timedCensus = (script: string, spawn: PreflightSpawn) => {
     const startedAt = now();
     const result = withoutNodeTestContext(() =>
       shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot }),
@@ -3270,8 +3334,9 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // refused on cost here: the threshold is derived from the population, which is not complete
   // until the last entry has run.
   const censusCosts = new Map<number, number>();
-  const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) =>
-    runStep(job, () => {
+  const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) => {
+    const spawn = timings[i].wrap("initial");
+    return runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
       }
@@ -3299,15 +3364,15 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       if (boundMs === undefined) {
         return shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot, retainSuccessOutput });
       }
-      const { result, elapsedMs } = timedCensus(script);
+      const { result, elapsedMs } = timedCensus(script, spawn);
       censusCosts.set(i, elapsedMs);
       // The SOFT bound reports and never refuses: a census suite's growing cost is news about the tree.
       if (elapsedMs > boundMs && result.ok) {
         return { ok: true, detail: `${result.detail} — COST ${elapsedMs}ms, over the ${boundMs}ms soft bound (reported, not refused)` };
       }
       return result;
-    }),
-  );
+    });
+  });
 
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
   // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
@@ -3328,7 +3393,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       const { job, script } = gateSteps[i];
       let againMs = 0;
       const again = runStep(job, () => {
-        const r = timedCensus(script);
+        const r = timedCensus(script, timings[i].wrap("remeasure"));
         againMs = r.elapsedMs;
         return r.result;
       });
@@ -3337,7 +3402,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         continue;
       }
       const reference = gateSteps[referenceIndex];
-      const refAgainMs = timedCensus(reference.script).elapsedMs;
+      const refAgainMs = timedCensus(reference.script, timings[referenceIndex].wrap("reference", job)).elapsedMs;
       const refAgain = `${reference.job} re-timed back to back at ${refAgainMs}ms`;
       const confirmationThreshold = Math.ceil(
         Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, refAgainMs) * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE * FAST_GATE_CENSUS_REMEASURE_MARGIN,
@@ -3361,7 +3426,10 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       };
     }
   }
-  return { steps, ok: steps.every((s) => s.ok) };
+  return {
+    steps: steps.map((step, i) => ({ ...step, staticTiming: timings[i].snapshot() })),
+    ok: steps.every((s) => s.ok),
+  };
 }
 
 // ── `rmd preflight --coverage` (W1-T1074) — diff-coverage, at author-time, on its OWN base ────

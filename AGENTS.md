@@ -55,6 +55,12 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
   origin`), not only `origin/main`, counting per head against main.**
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.**
+- **A new test goes in the `test/<folder>/` that `rmd test-place` computes from its imports — never directly
+  under `test/`.**
+- **New test code imports repository modules through `#src/*`, `#scripts/*` and `#test/*`, never a
+  location-relative specifier.**
+- **New tests compute the repository root with `REPO_ROOT` or `repoRoot()` from
+  `#test/helpers/repo-root.js`, never from their own location.**
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names**
 - **A contested reservation is never deleted and an unfiled one is never free — the
@@ -69,8 +75,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   ~16 min of CI and voids the review.**
 - **Leave a red fleet PR to the fix lane while a round is due or in flight — hand pushes out-race it
   and hide its defects.**
-- **Space `gh` reads 180 s apart, never poll — `deny-floor.sh` refuses a closer read; GitHub's
-  SECONDARY limit 403s on RATE while `rate_limit` reads full; `gh pr create` may die, git push won't.**
+- **Read GitHub through `rmd gh -- <gh args>` while a broker is live (the hook says so), never poll;
+  the 180 s floor applies only with no live broker; `gh pr create` may die, git push won't.**
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.**
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close

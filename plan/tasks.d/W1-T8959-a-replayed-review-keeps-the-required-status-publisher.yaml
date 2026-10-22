@@ -12,7 +12,7 @@
   origin: operator#2026-10-13-console-review-replay-publisher
   plan_refs: [W1-T203, W1-T2442, W1-T5726, W1-T5863]
   files: [src/lib/review.ts, src/run-task.ts, test/a-replayed-review-keeps-the-required-status-publisher.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: console PR2078 at exact c6e7a2b8c64e021cd5ebf3087f2afee72973e341

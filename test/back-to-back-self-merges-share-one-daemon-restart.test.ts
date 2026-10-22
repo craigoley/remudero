@@ -12,7 +12,14 @@ const PROOF = "test/back-to-back-self-merges-share-one-daemon-restart.test.ts";
 const MINUTE = 60_000;
 const START = Date.parse("2026-10-07T00:00:00Z");
 const window = { value: 10 * MINUTE, reason: "measured follow-on boots were 1–10 minutes apart" };
-const changes = (sha: string) => [{ sha, files: ["src/lib/daemon.ts"] }];
+// W1-T9089: the daemon's own code weighs the source floor of 1 like any other source, so an advance carries the
+// threshold's worth of source commits to be a window-held change; its newest commit is the advance's sha.
+const changes = (sha: string) => [
+  ...Array.from({ length: judge.DEPLOY_RESTART_SCORE_THRESHOLD.value - 1 }, (_, index) => ({ sha: `${sha}-pad-${index}`, files: ["src/lib/daemon.ts"] })),
+  { sha, files: ["src/lib/daemon.ts"] },
+];
+// A lifetime long past the 2026-10-17 minimum, so these cases measure the window and the horizon alone.
+const lifetimeStartedAtMs = -24 * 60 * MINUTE;
 
 function decide(nowMs = 0, options: Partial<Parameters<typeof judge.decideFreshnessRestart>[0]> = {}) {
   return judge.decideFreshnessRestart({
@@ -26,7 +33,7 @@ test(`${PROOF}: recorded window holds and releases at the quiet boundary`, () =>
   assert.equal(judge.FRESHNESS_COALESCE_WINDOW_MS.value, window.value);
   assert.match(judge.FRESHNESS_COALESCE_WINDOW_MS.reason, /2026-10-06/);
   const decision = decide();
-  const input = { decision, newSha: "one", lastAdvanceAtMs: 0, staleSinceMs: 0, window };
+  const input = { decision, newSha: "one", lastAdvanceAtMs: 0, staleSinceMs: 0, window, lifetimeStartedAtMs };
   assert.deepEqual(judge.coalesceFreshnessRestart({ ...input, nowMs: 0 }), {
     action: "hold", reason: "coalescing one: waiting for a quiet advance window",
     heldMs: 0, windowEndsAtMs: 10 * MINUTE,
@@ -38,7 +45,7 @@ test(`${PROOF}: recorded window holds and releases at the quiet boundary`, () =>
 });
 
 test(`${PROOF}: defer passes unchanged and harmful lag bypasses the hold`, () => {
-  const input = { newSha: "one", lastAdvanceAtMs: 0, staleSinceMs: 0, nowMs: 0, window };
+  const input = { newSha: "one", lastAdvanceAtMs: 0, staleSinceMs: 0, nowMs: 0, window, lifetimeStartedAtMs };
   const deferred = decide(0, { changes: [{ sha: "low", files: ["src/lib/inbox.ts"] }] });
   assert.equal(judge.coalesceFreshnessRestart({ ...input, decision: deferred }), deferred);
   for (const decision of [decide(0, { withheldReviews: 1 }), decide(0, { changes: undefined })]) {
@@ -54,7 +61,7 @@ test(`${PROOF}: defer passes unchanged and harmful lag bypasses the hold`, () =>
 });
 
 test(`${PROOF}: upper age releases a freshly rearmed window at half the recorded threshold`, () => {
-  const input = { newSha: "latest", lastAdvanceAtMs: 30 * MINUTE, staleSinceMs: 0, window };
+  const input = { newSha: "latest", lastAdvanceAtMs: 30 * MINUTE, staleSinceMs: 0, window, lifetimeStartedAtMs };
   assert.equal(judge.coalesceFreshnessRestart({ ...input, decision: decide(), lastAdvanceAtMs: 29 * MINUTE, nowMs: 30 * MINUTE - 1 }).action, "hold");
   assert.deepEqual(judge.coalesceFreshnessRestart({ ...input, decision: decide(), nowMs: 30 * MINUTE }), {
     action: "restart", reason: "upper_age", heldMs: 30 * MINUTE, windowEndsAtMs: 40 * MINUTE,
@@ -108,7 +115,7 @@ async function daemonRun(options: {
       rows.push({ step, atMs: nowMs, extra });
       if (step === "daemon.freshness_decision" && extra.action === "restart") releaseSweep?.();
     },
-  }, { sweepWallClockBoundMs: 24 * 60 * MINUTE }).finally(() => releaseSweep?.());
+  }, { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * MINUTE }).finally(() => releaseSweep?.());
   assert.equal(summary.stopReason, "stale");
   return rows;
 }

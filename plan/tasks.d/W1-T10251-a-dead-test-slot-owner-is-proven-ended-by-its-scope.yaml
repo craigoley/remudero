@@ -1,0 +1,84 @@
+- id: W1-T10251
+  title: "A DEAD OWNER'S HOST-WIDE TEST SLOT IS NEVER FREED, BECAUSE THE DEFAULT TREE PROBE CAN NEVER RETURN `ended` — src/lib/test-slot.ts `probeReservedTree` answers `live` or `unknown` only; on the Azure host a reservation whose owner pid was gone held slot 1 against every preflight, withheld as \"49 process(es) started since the owner could not be read (EACCES on /proc/<pid>/environ)\" until a builder moved the file by hand; prove the reservation's tree ended from a record the owner leaves (its dedicated cgroup scope), not from reading other users' environments"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, when a reservation-marker test slot whose owner pid is gone counts as ended; a too-eager answer double-books live work (W1-T9928's live-work safety amendment)
+  band_meaning: blast-radius
+  origin: "coordinator brief file1020 item 2 (2026-10-20); evidence from the W1-T10048 and W1-T10046 builders (logs-8864/10048-stale-test-slot-1.json, logs-8864/10046-preflight2.log)"
+  plan_refs: [W1-T9928, W1-T9541, W1-T8047, W1-T9952]
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts
+  status: merged
+  priority: 1  # one dead owner blocks every author preflight on the host until a person moves a file
+  attempts: 0
+  rationale: |
+    OBSERVED (logs-8864/10046-preflight2.log lines 14-17, a preflight-author run on 2026-10-20):
+    - `test_slot.reclaim_withheld` for slot 1, pid 1927460, label preflight-author:static-and-affected,
+      evidence `unknown`, coverage `proc-environ (incomplete)`, reason "incomplete: 49 process(es) started since the
+      owner could not be read (pid 2054429: environment unreadable (Error: EACCES: permission denied, open
+      '/proc/2054429/environ'), ...)"; the next poll said 50. Slot dir /mnt/scratch/rmd/test-slots.
+    - Then `test_slot.acquired` after waitedMs 50421, after a builder moved the slot file aside by hand
+      (logs-8864/10048-stale-test-slot-1.json; RESUME-1019.md "dead owner pid 1927460 ... flagged to operator").
+    - The moved record: pid 1927460, host Remudero, startedAt 2026-10-19T22:39:53.765Z, heartbeatAt 23:52:50Z,
+      processStart proc:293096225, ownerUid 1000, pidNs pid:[4026531836], workIdentity reservation-marker-v1. The
+      builder reports the pid dead and its systemd scope gone (OBSERVED by them, not re-checked here).
+    READ at origin/main a16d6d95f (symbols, not lines):
+    - `testSlotPolls`' legacy reclaim `isStale`: for a local record with a recorded cadence or a `workIdentity`, a dead
+      or reused owner pid is reclaimed ONLY when `observeReservedTree` returns `ended`; anything else is withheld.
+    - `probeReservedTree` (the default `treeProbe`) returns `live` when the owner pid or a process carrying the
+      reservation marker is seen, and otherwise ALWAYS `unknown`: "none of N process(es) carries the marker; marker
+      absence does not prove complete process-tree quiescence". It has no `ended` return at all. An unreadable
+      environ (another uid's process) only changes the reason to "incomplete".
+    - `releaseTestSlotForOwner`, the owner-assisted path, also requires `verifiedTerminalEvidence`, i.e. `ended` with
+      `complete: true` from the same probe.
+    - So the coordinator's framing ("refuses when it cannot read another user's environment") is the visible reason, but
+      the cause is wider: with the default probe, NO legacy reservation-marker slot whose owner died is ever freed by
+      code, on any host, whether or not every environ is readable. Only a hand `mv` or a changed slot dir frees it.
+    WHY NOT "A DEAD PID IS RECLAIMABLE": W1-T9928's live-work safety amendment (operator-approved 2026-10-16) exists
+    because a reparented or detached descendant can keep working after its owner exits; a dead owner pid is not
+    evidence the reserved work ended. Reclaiming on the pid alone reverses that ruling, so it is an OPERATOR DECISION and
+    this task does not take it.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and the plan trees of every open PR head (2026-10-20 11:40Z)
+    for probeReservedTree, reclaim_withheld, quiescence, terminal evidence and cgroup. W1-T9928 (merged) built the probe
+    and said "without an independent complete run monitor this probe returns unknown"; this task supplies that monitor.
+    W1-T9952 (queued) sizes the pool, W1-T9950 (queued) orders waiters; neither frees a dead reservation.
+  design: |
+    1. THE OWNER RECORDS ITS SCOPE. When a reservation is written on Linux, the record gains the owner's cgroup v2 path
+       read from /proc/self/cgroup, and whether that cgroup is DEDICATED to this run: a transient `run-*.scope` or
+       `*.scope` unit whose cgroup.procs at reservation time holds only the owner's process group (heavy-run.sh starts
+       every builder preflight in its own scope). A shared cgroup (a user session slice, a container root) is recorded
+       as not dedicated.
+    2. THE PROBE CAN SAY `ended`. `probeReservedTree` returns `{ state: "ended", complete: true, reservation }` when the
+       owner pid is gone (ENOENT/ESRCH on /proc/<pid>/stat, or a different start) AND the recorded dedicated cgroup
+       directory is gone or its cgroup.procs is empty. That is positive coverage of the whole tree, reparented and
+       detached descendants included, because they stay in the scope's cgroup. It reads no other process's environ.
+       Every other case keeps today's answer (marker scan, `live`/`unknown`).
+    3. Records without a recorded dedicated cgroup (old writers, macOS, shared cgroups) keep today's behaviour exactly.
+    4. A `test_slot.reclaimed_quiescent` row already exists; its `coverage` names the new basis (`cgroup-scope`), so the
+       ledger shows which basis freed each slot.
+    5. OPERATOR DECISION, named and not taken: whether a reservation with no dedicated cgroup and a dead owner should
+       ever be reclaimed (e.g. after a lease), which would relax W1-T9928's amendment.
+    6. TESTS in test/ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts (folder from `rmd
+       test-place`; re-run on the real file), `test(` titles verbatim as in the proofs; drive the probe through its
+       existing `ReservedTreeProbeHost` `list`/`read` seams plus a cgroup reader seam; one test reads the real
+       /proc/self/cgroup so the default seam is covered.
+  acceptance:
+    - claim: "a dead owner whose dedicated scope is gone is proven ended without reading any environ"
+      proof: "unit test: W1-T10251: a dead owner whose dedicated scope is gone is proven ended"
+    - claim: "a waiter reclaims that slot and records the cgroup-scope basis"
+      proof: "unit test: W1-T10251: a waiter reclaims a dead owner's slot on cgroup-scope evidence"
+    - claim: "a dead owner whose scope still holds a process stays live, and a shared cgroup stays unknown"
+      proof: "unit test: W1-T10251: a scope that still holds work keeps its slot"
+  falsifier: |
+    At origin/main `probeReservedTree` has no `ended` return, so the first two tests (dead pid, scope directory gone)
+    read `unknown` and fail. Delete the cgroup check and they fail again. The third holds on both sides for the live
+    scope case and fails if the fix reclaims on a dead pid alone.
+  note: |
+    EFFECT, measured after merge: `test_slot.reclaim_withheld` rows naming a dead owner stop repeating for one ownerNonce
+    across polls, and `test_slot.reclaimed_quiescent` rows with coverage `cgroup-scope` appear instead; no hand moves of
+    slot files are needed. Read from the preflight-author stderr captures and the core ledger.

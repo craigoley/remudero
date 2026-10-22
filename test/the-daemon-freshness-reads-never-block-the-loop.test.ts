@@ -72,8 +72,10 @@ async function afterTurns<T>(n: number, value: T): Promise<T> {
 }
 
 /** Everything AFTER the fetch, as local git answers it; the sync `fetch` returns at once. */
-function localGit(opts: { main?: string; changed?: string } = {}) {
+function localGit(opts: { main?: string; changed?: string; commits?: number } = {}) {
   const main = opts.main ?? HEAD;
+  // W1-T9089: the daemon's own code weighs as any source commit, so a restart-worthy advance is a threshold (18) of them.
+  const shas = Array.from({ length: opts.commits ?? 1 }, (_, n) => n === 0 ? main : n.toString(16).padStart(40, "c"));
   return (args: string[]): string => {
     const line = args.join(" ");
     if (args[0] === "fetch") return "";
@@ -81,7 +83,7 @@ function localGit(opts: { main?: string; changed?: string } = {}) {
     if (line === "rev-parse origin/main") return `${main}\n`;
     if (args[0] === "status") return "";
     if (args[0] === "diff") return `${opts.changed ?? "docs/a.md"}\n`;
-    if (args[0] === "log") return `\x1e${main}\x1ffeat: x\n\n${opts.changed ?? "docs/a.md"}\n`;
+    if (args[0] === "log") return shas.map((sha) => `\x1e${sha}\x1ffeat: x\n\n${opts.changed ?? "docs/a.md"}\n`).join("");
     throw new Error(`unrouted git ${line}`);
   };
 }
@@ -145,7 +147,7 @@ test("W1-T5282: the daemon freshness read lets a timer fire while git fetch is i
       log: (step: string, extra?: Record<string, unknown>) => {
         if (step === "daemon.freshness_not_stale") events.push(`${step}:${String(extra?.arm)}@${counter.turn() - fetchTurns[0]!}`);
       },
-    } as unknown as DaemonDeps);
+    } as unknown as DaemonDeps, { freshnessMinLifetimeMs: 0 });
     assert.equal(summary.stopReason, "stopped");
   } finally {
     counter.stop();
@@ -162,7 +164,7 @@ test("W1-T5282: the ci wait freshness read lets a timer fire while git fetch is 
   let fetchStartTurn: number | undefined;
   const { externalWaitFreshness } = daemonFreshnessReads("/repo", {}, {
     ignoreReentrancyGuard: true,
-    git: localGit({ main: MAIN, changed: "src/lib/daemon.ts" }),
+    git: localGit({ main: MAIN, changed: "src/lib/daemon.ts", commits: 18 }),
     gitAsync: async () => {
       fetchStartTurn = counter.turn();
       events.push("fetch:start");
@@ -275,7 +277,7 @@ async function staleFixtureRun(awaited: boolean) {
       const reading: DaemonFreshness = reads <= 2 ? { stale: false } : { stale: true, oldSha: HEAD, newSha: MAIN };
       return awaited ? afterTurns(2, reading) : reading;
     },
-  } as unknown as DaemonDeps);
+  } as unknown as DaemonDeps, { freshnessMinLifetimeMs: 0 });
   return { summary, steps };
 }
 
@@ -284,7 +286,7 @@ const ADVANCE: Extract<DaemonFreshness, { stale: true }> = {
   oldSha: HEAD,
   newSha: MAIN,
   installNeeded: true,
-  changes: [{ sha: MAIN, files: ["src/lib/daemon.ts"] }],
+  changes: Array.from({ length: 18 }, (_, n) => ({ sha: n === 0 ? MAIN : n.toString(16).padStart(40, "c"), files: ["src/lib/daemon.ts"] })),
 };
 
 /** W1-T5308's lane pool: A and B held open; the dispatch ticker reads freshness while they run. */
@@ -298,7 +300,6 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
   let stop = false;
   let reads = 0;
   let nowMs = Date.now();
-  const boundaries = new Map<string, () => unknown>();
   const run = runDaemon(plan(["A", "B", "C"], "lane-pool-await"), {
     refreshMerged: () => () => false,
     checkStop: () => (stop ? "fixture cleanup" : undefined),
@@ -317,14 +318,13 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
     sweepLight: async () => {},
     runInstall: () => steps.push({ step: "install" }),
     log: (step: string, extra?: Record<string, unknown>) => steps.push({ step, extra }),
-    runOne: async (id: string, options?: { restartAtWorkerBoundary: () => unknown }) => {
+    runOne: async (id: string) => {
       started.push(id);
-      if (options) boundaries.set(id, options.restartAtWorkerBoundary);
       if (started.length === 2) ready.resolve();
       await gates.get(id)?.promise;
       return okResult(id);
     },
-  } as unknown as DaemonDeps, { laneCount: 2, pollIntervalMs: 10, max });
+  } as unknown as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 2, pollIntervalMs: 10, max });
   return {
     steps,
     started,
@@ -335,8 +335,6 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
       advance = value;
     },
     release: (id: string) => gates.get(id)?.resolve(),
-    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
-    boundary: (id: string) => boundaries.get(id)?.(),
     wake: () => sleeps.shift()?.resolve(),
     advanceClock: (ms: number) => { nowMs += ms; },
     finish: async () => {
@@ -369,8 +367,7 @@ async function lanePoolRestart(awaited: boolean) {
   assert.equal(release?.extra?.reason, "window_quiet");
   assert.equal(release?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value);
   const decidedWhileInFlight = h.steps.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart");
-  // W1-T7806: A was in flight at the latch, so it holds refill open until it reaches a boundary (or settles).
-  assert.ok(h.boundary("A"), "A reaches a worker boundary and reads the latched restart");
+  // W1-T9089: A in flight at the decision is awaited; no daemon latch reaches into it.
   h.release("B");
   for (let i = 0; i < 3; i++) await flush();
   const startedBeforeA = [...h.started];

@@ -1,0 +1,98 @@
+- id: W1-T10253
+  title: "THE PRE-PUSH CENSUS-PRECHECK HAS NEVER MEASURED ON THE AZURE HOST — bwrap is not installed there, so every push prints \"census-precheck — proof sandbox could not start: bwrap cannot start on this Linux host (bwrap is not installed) ... skipped, NOT passed\" (50 of 52 builder push logs), and the hook's source-reader census arm refuses inside the sandbox even where bwrap exists; record the measured state and the remedies and put the host install to the operator"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  # an observation/decision record: installing a host package is an operator action
+  verify: human
+  risk: low
+  origin: "coordinator brief file1020 item 4 (2026-10-20); push logs of every hand build in logs-8864"
+  plan_refs: [W1-T6138, W1-T6120, W1-T7822, W1-T5617, W1-T10042, W1-T10044]
+  files:
+    - docs/forensics/pre-push-census-sandbox-on-the-azure-host.md
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10253 — Cause is gone: bwrap is now installed on the
+  # Azure host (/usr/bin/bwrap, bubblewrap 0.9.0-1ubuntu0.3), so census-precheck's 'bwrap cannot start' premise no
+  # longer holds.
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-20 on the Azure host (Ubuntu 24.04.4 LTS), read-only:
+    - `command -v bwrap` prints nothing (exit 1); /usr/bin/bwrap is absent; `dpkg -l bubblewrap` finds no package.
+    - The kernel would allow it: kernel.apparmor_restrict_unprivileged_userns = 0, kernel.unprivileged_userns_clone = 1,
+      user.max_user_namespaces = 63829. So installing the package is the missing step, INFERRED from those settings
+      and not yet tried.
+    - 50 of the 52 `*push*.log` files in logs-8864 (mtimes 10-14..10-20) contain the bwrap line (the two that do not
+      are doctrine pushes); for example
+      logs-8864/10046-push.log: "pre-push: census-precheck — proof sandbox could not start: bwrap cannot start on this
+      Linux host (bwrap is not installed); ran with a throwaway HOME and the env allowlist only: skipped, NOT passed
+      (CI runs it)", and the same for ci-control-plane-precheck.
+    - A SECOND BLOCKER beside bwrap, in 13 of the 52 push logs (memgate-push.log among them): "census-precheck: census
+      suites NOT MEASURED - ... test/bound-kind-declared.test.ts: source-reader runtime calibration is unavailable in
+      the managed-worktree proof sandbox".
+    READ at origin/main a16d6d95f (symbols, not lines):
+    - hooks/pre-push (W1-T6138): when the gate root is not the pushed tree, census suites run through
+      src/lib/git-push.ts `createPrePushSandboxRunner`; a runner error prints "skipped, NOT passed (CI runs it)". The
+      same arm throws "source-reader runtime calibration is unavailable in the managed-worktree proof sandbox" whenever
+      a `readerRuntimePolicy` is passed, before it even builds the sandbox, so reader-census suites stay unmeasured at
+      pre-push with or without bwrap.
+    - src/lib/review.ts `probeProofSandbox` turns a bwrap spawn ENOENT into "bwrap cannot start on this Linux host (bwrap
+      is not installed)".
+    - So on this host preflight-author (which runs census suites natively under heavy-run.sh) is the only local census
+      evidence a builder gets before CI.
+    NOT COVERED ELSEWHERE: W1-T10042 and W1-T10044 (queued) concern the daemon CONTAINER's pre-open gate, whose bwrap is
+    baked by deploy/Dockerfile; W1-T6138 (merged) made the host skip a named skip. No shard records the host's missing
+    package or the reader-census sandbox refusal (swept origin/main plan/tasks.d and the plan trees of every open PR head,
+    2026-10-20 11:40Z, for bwrap, census-precheck and "skipped, NOT passed").
+  amendment: |
+    W1-T10253 amended 2026-10-20 by coordinator brief file1020b item 3: bwrap is now installed; the reader arm remains.
+    The first blocker is gone. OBSERVED read-only, 15:20Z: /var/log/dpkg.log "2026-10-20 14:51:09 status installed
+    bubblewrap:amd64 0.9.0-1ubuntu0.3"; `command -v bwrap` prints /usr/bin/bwrap; at origin/main e4f73f7ea
+    src/lib/review.ts `probeProofSandbox()` returns {"mode":"bwrap","binary":"bwrap"} on this host. So remedy (a) of the
+    design is DONE, by the operator, and the "Operator decision" section asks about the second blocker instead.
+    The second blocker is the larger one. OBSERVED, logs-8864/childheap-push2.log (push of PR #13138 at 14:44:10Z, before
+    the install): 76 census suites printed "pre-push: census-precheck — source-reader runtime calibration is unavailable in
+    the managed-worktree proof sandbox: skipped, NOT passed (CI runs it)" against 3 bwrap lines, and the census-precheck
+    summary at line 92 lists them as NOT MEASURED; 18 of the 57 `*push*.log` files in logs-8864 carry that line.
+    READ at origin/main e4f73f7ea: hooks/pre-push's sandboxed `runSuites` throws that message whenever
+    `readerRuntimePolicy !== undefined`, BEFORE `createPrePushSandboxRunner` is called, so it does not depend on bwrap.
+    OBSERVED after the install, logs-8864/file1020b-push.log (this filing's own first push, 16:20:09Z): no bwrap line at
+    all, lint-plan-precheck now runs in the sandbox ("OK -- the plan lint passes on this diff"), and census-precheck still
+    prints "census suites NOT MEASURED" for the 3 admitted suites of that plan-only diff
+    (architect-lane-master-plan-commit, every-shard-on-main-is-lintable, task-linter-wiring), each with the reader
+    message. So the reader arm alone now keeps census-precheck from measuring; a code push admits more suites (76 above).
+    Not a new task: section 2 already asks why the reader arm refuses and what measuring it would take. These facts
+    narrow it; the acceptance proofs are unchanged.
+  design: |
+    Write docs/forensics/pre-push-census-sandbox-on-the-azure-host.md with these sections (headings verbatim):
+    1. "## Measured state" — the observations above, re-measured on the day of the build (command -v bwrap, the
+       userns sysctls, the count of skipped pushes in the newest builder push logs), each marked OBSERVED with its
+       window and method.
+    2. "## Second blocker: reader census in the sandbox" — why the reader-runtime arm refuses inside the managed-worktree
+       sandbox, quoting the hook branch by symbol, and what it would take to measure those suites at pre-push.
+    3. "## Remedies" — (a) OPERATOR ACTION: install the distribution bubblewrap package on the Azure host, then re-run
+       one pre-push and record whether census-precheck reports measured counts; (b) a code option for the second
+       blocker, filed as its own task if the operator wants it; (c) leave both and rely on preflight-author plus CI,
+       with the cost in rounds stated from the ledger. No gate, skip or advisory changes in this task.
+    4. "## Operator decision" — the one question for the operator, with the evidence for each answer.
+  acceptance:
+    - claim: "the record states the host's measured sandbox state with its method"
+      proof: "grep: ## Measured state in docs/forensics/pre-push-census-sandbox-on-the-azure-host.md"
+    - claim: "the record explains the reader-census sandbox refusal separately from bwrap"
+      proof: "grep: ## Second blocker: reader census in the sandbox in docs/forensics/pre-push-census-sandbox-on-the-azure-host.md"
+    - claim: "the record names the host install as an operator action and asks one decision"
+      proof: "grep: ## Operator decision in docs/forensics/pre-push-census-sandbox-on-the-azure-host.md"
+  falsifier: |
+    At origin/main docs/forensics/pre-push-census-sandbox-on-the-azure-host.md does not exist, so all three grep proofs
+    read 0. A record that leaves out a section fails that section's proof.
+  note: |
+    Installing a host package is an OPERATOR ACTION; no worker or builder installs it. After the operator acts, the
+    effect is one pre-push log whose census-precheck line reports measured counts instead of "skipped, NOT passed".
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.99
+    reasons:
+      - "high-risk verdict at confidence 0.99 — on the change's description/files alone, no diff was read — Acceptance criterion 3 explicitly requires asking an operator decision about installing a host package; the supplied escalation rule classifies operator-only decisions HIGH.; on the change's description/files alone, no diff was read — The declared scope is one forensic document, and the filed note reserves package installation to the operator; this verdict concerns the explicit decision requirement."
+    judged_at: "2026-10-20T16:30:44.103Z"
+    pin: "9cb9e867188022a780496c44116b5be3fa8178a2770354861936d07bf07be612"

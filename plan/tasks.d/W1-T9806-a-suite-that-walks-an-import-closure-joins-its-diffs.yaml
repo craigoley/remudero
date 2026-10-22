@@ -16,7 +16,7 @@
     - test/baked-supervisor-inputs.test.ts
     - test/a-busy-primary-reaches-its-image-recycle.test.ts
     - test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator ruling 2026-10-16: a baked-closure join is caught BEFORE the PR opens; this is the catch
   attempts: 0
   rationale: |

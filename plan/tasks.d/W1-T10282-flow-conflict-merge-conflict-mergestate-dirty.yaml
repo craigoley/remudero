@@ -1,0 +1,40 @@
+- id: W1-T10282
+  title: A conflict repair measures its pending main merge and escalates an exact-head design handoff
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  priority: 1.33
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: flow-blocker:conflict:merge conflict (mergeState dirty)
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts
+    - test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts
+    - test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
+  acceptance:
+    - claim: a pending main merge is measured against the prospective merged base while branch-owned census growth remains visible
+      proof: "unit test: a pending main merge gives the census its prospective merged base without hiding branch edits"
+    - claim: an exact-head terminal design handoff escalates once before another fix admission while live workers and newer heads keep their ordinary route
+      proof: "unit test: the sweep escalates an exact-head design handoff before admitting another fix"
+    - claim: the existing design/scope fixture uses a full immutable head and completed identity-bound round while preserving operator-amended contract adoption without another fix admission
+      proof: "unit test: design-hold fixture preserves approved amendments without spending fix admission"
+  note: "Operator approved the exact measured companion specification on 2026-10-21. Ordinary validation and all hosted, security, native-review and normal merge gates remain required. No failed-head publication, CI-first waiver, capacity override, manual merge or host change."
+  rationale: "OBSERVED 2026-10-20/21. #13121 at 10b5d544 repeatedly reports conflict dispatch, then stands down at rung.needs_design on its 17:54Z same-head handoff. The original snapshot worktree is retired; its worker report alone was not treated as a proof. An owned real-Git replay on main 0c4dc060 independently reproduced the pending-main census baseline mismatch: one native regression failed at the prospective-base assertion, with no skipped/cancelled tests. The two-line prototype passes all 11 snapshot/async controls. Current writeFixCensusSnapshotSteps ignores MERGE_HEAD, and runFixRung reuses any same-task/head fix.needs_design before spawning. The sweep currently charges a repair admission for that terminal result. #13039 is a distinct capacity-wait control; #13173 is a completed normal-repair control. No shared fleet-wide cause is asserted. All six open head trees were read and their snapshot/design-cache code matched main. This replaces the old hours-based diagnosis with a bounded, measured repair; the prior high-risk escalation remains intact until this exact amendment is explicitly released."
+  band_meaning: span
+  budget_usd: 5
+  design: "Reuse the existing host Git snapshot path and Git merge-base against the prospective parents of a prepared merge; preserve ordinary no-merge behavior and branch-owned changes. Do not commit the merge early, change a bound, replace a census, or exclude a path. Project a valid exact-task/PR/head terminal NEEDS_DESIGN handoff into the existing deduplicated escalation route before fix capacity is charged. Preserve live-claim/in-flight priority; other-head, other-task, malformed and unresolved evidence must not authorize a write or invent a successful repair. An escalation is an actionable human decision, never a green check. Keep the native rung stand-down and all CI, security, semantic review, cost, ownership and merge gates. Do not automatically reinterpret a worker design request as authority to change a specification. The existing manual takeover rule applies only after an observed exhausted/escalated disposition and no live owner. Preserve the existing ordinary base-adoption path when protected main contains an answered contract revision: remember the handoff revision, adopt main once before fix admission, defer without write capability, and keep unavailable or changing reads closed. The existing design/scope fixture must model full SHA and task/run/host/PID/round/PR identity; update its obsolete offered-one-more-round expectation to zero admissions. Keep all amendment, dedup, scope-hold and real-rung receipt assertions."
+  falsifier: "Remove only the prospective-base calculation: the owned pending-main regression must fail while its ordinary unmerged and branch-growth controls remain. Remove only design-handoff projection: the real sweep regression must attempt fix admission instead of the expected exact-head escalation. Restore each fix and rerun. Include live-worker and newer-head controls."
+  risk_ruling:
+    verdict: high
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Operator explicitly approved the measured companion package at exact pin a7b789896585687c0ae8849d2e6b9e336f58704551dc2a4287ecf4d65c358012: Approve both bounded amendments (Recommended)"
+      - Bounded existing-fixture compatibility scope only. Preserve strict negative controls and all ordinary author, hosted, security, native-review and merge gates; no CI-first publication, capacity override, manual merge or host change.
+    judged_at: 2026-10-21T14:20:08.782815+00:00
+    pin: a7b789896585687c0ae8849d2e6b9e336f58704551dc2a4287ecf4d65c358012

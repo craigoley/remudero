@@ -1,0 +1,166 @@
+- id: W1-T10269
+  title: "A REVIEWER REGRESSION HEALS ITSELF — core measures its own review outcome mix against its history, and when a merge breaks the reviewer it keeps reviewing from origin/main with that merge reverted and opens the revert PR, instead of waiting for fix PRs that only the broken reviewer can pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern — the review lane detects and routes around its own regression
+  band_meaning: span
+  budget_usd: 40.00
+  priority: 1
+  status: merged
+  attempts: 0
+  origin: "operator session 2026-10-20: reviewer outage after #12954 — 'let's solve root causes, not work around them'"
+  plan_refs: [W1-T228, W1-T3723, W1-T3735, W1-T4469, W1-T6403, W1-T4387, W1-T4623, W1-T10270, W1-T10271]
+  files:
+    - src/lib/reviewer-health.ts
+    - src/lib/main-health-rung.ts
+    - src/lib/review.ts
+    - src/run-task.ts
+    - test/review/a-reviewer-regression-heals-itself.test.ts
+  rationale: |
+    READ on origin/main 04ed915a7 (2026-10-20). Ledger figures are from the core ledger union
+    (~/rmd-state2/state archives 10-16..10-20 plus the live file, deduplicated).
+
+    WHAT BROKE. #12954 (8b37a0a1b, "fix(review): refuse incomplete required semantic evaluation")
+    merged at 01:15Z with green CI. It broke production review in two ways.
+      - reviewCommand (src/run-task.ts:23313-23340) now returns 2 with
+        `review.semantic_setup_refused head-task-metadata-unavailable` whenever a shard has no
+        budget_usd. Before, the same `review.reviewer.skipped` row (1-13 per 6 h on 10-16..10-19)
+        was followed by a normal review.
+      - parseReviewerVerdicts (src/lib/review.ts:7225) records only FAIL, and PASS stays undefined.
+        requiredSemanticRefusal (src/lib/required-semantic-review.ts:9) treats any undefined as
+        `required-semantic-incomplete-verdicts`. So every all-PASS review is withheld.
+
+    MEASURED OUTCOME MIX, code PRs, per 6 h:
+      - 10-16..10-19: 9-48 `review.posted` per window; 0 withheld with reviewer success; 0 setup refusals.
+      - 10-20 00-06Z: 17 posted (all before 01:25Z); 103 withheld with reviewer_outcome=success; 101 refused.
+      - 10-20 06-12Z: 2 posted; 114 withheld; 245 refused.
+      - 10-20 12-14Z: 0 posted; 52 withheld; 33 refused.
+    All 271 `review.semantic_incomplete` rows carry `reviewer_outcome=success`. 40 PRs were
+    affected; #13028 alone was retried 142 times.
+
+    THE REGRESSION WENT LIVE BEFORE ANY BOOT. The first withheld row is at 01:17:40Z. The daemon
+    was still on boot head fd79a2f9c, which is pre-#12954 (its next boot was 01:52Z on 2a30bf7ad).
+    The stale daemon routed the review through buildFreshTreeReviewRunner (run-task.ts:1756),
+    which runs `rmd review` from a tree at origin/main. `review.ran_from_fresh_tree` at 01:17:50Z
+    reads origin_main_sha 8b37a0a1b and exit_code 2. So a detector keyed on `daemon.boot`
+    head_sha alone would have named the wrong code. The code that judged is either the boot head
+    (in-process) or the fresh tree's origin/main sha. Today `review.semantic_incomplete` and
+    `review.semantic_setup_refused` record neither. `review.posted` does record it, in
+    `reviewer_code_provenance.codeSha`. The last healthy posted code review ran on 9ef6326d1
+    (01:24:40Z, PR-12996), the parent of 8b37a0a1b.
+
+    WHY NOTHING RECOVERED.
+      - The fixes exist: #13025 for verdict parsing, #13107 for budget defaults. Both are code PRs,
+        so they need the broken reviewer to pass them.
+      - main-health and main-repair (src/lib/main-health-rung.ts, openMainRepairRevertPr at
+        run-task.ts:50720) watch only CI reds on main. A reviewer that withholds is not red on main.
+      - Nothing compares the reviewer's outcome mix with its own history.
+
+    WHY THE HEALTHY REVIEWER MUST BE origin/main PLUS A PATCH, NOT AN OLD HEAD OR ENGINE.
+    MEASURED LIVE 2026-10-20 by the operator session: running the reviewer from #13025's head
+    (eb65ce2) computed `success` and then WITHHELD the post. The W1-T228 guard said
+    "reviewer code eb65ce2cfb2c is materially behind origin/main 04ed915a77de; withholding a
+    terminal verdict". An engine tree from the engines store (src/lib/engine-tree.ts;
+    state/engines/<hash> holds 6444b9041 from 00:30Z) is behind in the same way. It would be
+    refused the same way, and it should be: W1-T228 protects against judging with stale code. By
+    contrast, reviewerMainAdvance (src/lib/self-sync.ts:793) reads a commit whose merge-base with
+    origin/main IS origin/main as `fresh` (:807). So a tree at origin/main with one revert commit
+    on top satisfies W1-T228 without weakening it.
+  design: |
+    1. OUTCOME MIX PER REVIEWER CODE SHA (src/lib/reviewer-health.ts, new).
+       - Every terminal review row records `reviewer_code_sha`: review.posted,
+         review.semantic_incomplete, review.semantic_setup_refused and review.reviewer.skipped.
+         It is the HEAD the judging process loaded: the boot head in-process, the tree's sha in a
+         fresh-tree child.
+       - The daemon keeps per-sha counts incrementally in state/reviewer-health.json. The classes
+         are: posted, withheld with reviewer success, withheld with reviewer failure, and
+         setup-refused. Counts are updated as rows are appended, never by re-scanning the ledger
+         (core memory ruling 10-10).
+       - The baseline is seeded once by one bounded, streaming read of the ledger union at first
+         boot. After that it is the pooled counts of the shas that preceded the current one.
+       - The signal is the share of code-PR review attempts that ended "not posted, though the
+         reviewer ran or was refused by setup": withheld with reviewer success, plus setup-refused.
+       - Withheld with reviewer failure (spawn_error, openweight_error) is provider health, not
+         reviewer code. It is counted but does not open this incident.
+       - A departure is judged the way src/lib/model-drift.ts judges drift. The current sha's
+         Wilson interval and the baseline's interval are compared at a family alpha, using
+         wilsonInterval and upperNormalQuantile. There is no count, rate or time constant. A thin
+         sample reads `insufficient`, never healthy.
+    2. THE INCIDENT. On departure, open one reviewer-regression incident (`reviewer.regression_opened`).
+       - It names the boot head current at onset (`daemon.boot` head_sha) and the regressed reviewer
+         code sha, which may differ (see the rationale).
+       - It names the last healthy reviewer code sha: the newest sha whose outcomes sat inside the
+         baseline.
+       - It names the offending merge: the first first-parent merge in healthy..regressed whose
+         diff is review-material. Use the existing reviewAdvanceIsMaterial,
+         runTaskAdvanceTouchesReviewPath and REVIEW_PATH_SYMBOLS_IN_RUN_TASK
+         (src/lib/self-sync.ts:865-1078), widened to the src/lib modules the review path imports.
+         #12954 added src/lib/required-semantic-review.ts, which REVIEW_MATERIAL_ADVANCE_PATHS does
+         not list. In this incident run-task.ts's review-path hunks still named it.
+       - It is raised through escalate.ts as an assigned issue. Remudero Issues are the alert channel.
+    3. (a) A HEALED REVIEWER, BUILT FROM CURRENT origin/main. While the incident is open, every
+       review routes to a healed tree, never to an old head or an engine tree.
+       - The healed tree is a detached tree at origin/main with `git revert --no-edit <offending>`
+         committed on top. It is cut through the fresh-tree helper (prepareFreshOriginMainTree,
+         run-task.ts:1808, with its own prefix) and run with spawnRmdReviewForFreshTree.
+       - It is rebuilt whenever origin/main moves, so its merge-base with origin/main is always
+         origin/main. W1-T228's guard therefore reads it `fresh` with no new exemption: no
+         freshness check is skipped or loosened.
+       - If the revert no longer applies cleanly, the healed reviewer may instead be origin/main
+         merged with a fix PR. That happens only by an explicit operator choice naming the PR
+         (`rmd reviewer-heal --with-pr <n>`). A healed tree built from a PR's head never reviews
+         that same PR: it is judged by the revert-built tree, or escalated. Otherwise the conflict
+         is escalated, and reviews fall back to today's path, which is unchanged.
+       - Every row the healed reviewer writes carries `incident_id` and `reviewer_code_sha` (the
+         healed commit), so posted verdicts stay attributable.
+    4. (b) THE REVERT PR. Open one revert PR of the offending merge through the existing
+       openMainRepairRevertPr path. Extend MainRepairRevertRequest
+       (src/lib/main-health-rung.ts:379) with a reviewer-regression reason, so the body names the
+       outcome-mix evidence instead of failing checks. It goes through ordinary CI, review and
+       branch protection. Its review runs on the healed tree, which is exactly its own merge
+       result. A conflicting revert is ledgered `main-repair.revert_refused` with its paths, and
+       the healed reviewer still covers (a).
+    5. CLOSE. The incident closes when the CURRENT reviewer's outcomes return to the baseline
+       interval. The current reviewer is the origin/main code.
+       - Before the revert merges, the current reviewer runs in shadow (no status, no publication)
+         beside the healed one. It does so only while its reviewer code sha has no judgment yet,
+         so shadow spend stops as soon as a sha is judged.
+       - Once origin/main contains a revert or fix, the healed patch is empty. The healed tree IS
+         origin/main and its own posted outcomes decide.
+       - On close: `reviewer.regression_closed`, the issue is closed, the revert PR is closed with
+         a comment if a fix made it unnecessary, and routing returns to the normal path.
+    Tests go in the new file test/review/a-reviewer-regression-heals-itself.test.ts, with `test(` titles
+    exactly as in the proofs below. Use injected clock, ledger, git and spawn seams. Build git
+    fixtures with gitRepo(), not raw git init (the fixture-copy census counts names). The fixture
+    replays the 10-20 shape:
+      - a baseline of posted code reviews across several shas with zero withheld-with-success;
+      - an in-process boot head that predates the offending merge, while fresh-tree reviews at the
+        offending sha produce withheld-with-success and setup-refused rows;
+      - a non-review merge between healthy and offending, which must not be blamed.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/review/a-reviewer-regression-heals-itself.test.ts"
+    - claim: "the 10-20 shape opens one incident naming the boot head, the regressed reviewer code sha, the last healthy sha and the review-material merge, not the earlier non-review merge"
+      proof: 'grep: test("W1-T10269: the 10-20 outcome shape opens a reviewer-regression incident naming the offending merge" in test/review/a-reviewer-regression-heals-itself.test.ts'
+    - claim: "an outcome mix inside the measured baseline opens nothing, and a thin sample reads insufficient, not healthy"
+      proof: 'grep: test("W1-T10269: an outcome mix inside the baseline opens no incident" in test/review/a-reviewer-regression-heals-itself.test.ts'
+    - claim: "while open, reviews run from origin/main with the offending merge reverted on top, W1-T228 reads that tree fresh and publishes, and no old head or engine tree is ever the reviewer"
+      proof: 'grep: test("W1-T10269: the healed reviewer is origin/main plus the revert and W1-T228 reads it fresh" in test/review/a-reviewer-regression-heals-itself.test.ts'
+    - claim: "the healed tree is rebuilt when origin/main moves, and a non-applying revert escalates rather than falling back to an old head"
+      proof: 'grep: test("W1-T10269: the healed reviewer follows origin/main and escalates a conflicting revert" in test/review/a-reviewer-regression-heals-itself.test.ts'
+    - claim: "one revert PR of the offending merge is opened through the main-repair revert path with the outcome-mix evidence"
+      proof: 'grep: test("W1-T10269: the incident opens one revert PR of the offending merge" in test/review/a-reviewer-regression-heals-itself.test.ts'
+    - claim: "the incident closes when the current reviewer's outcomes return to the baseline interval, and routing returns to normal"
+      proof: 'grep: test("W1-T10269: the incident closes when the current reviewer returns to baseline" in test/review/a-reviewer-regression-heals-itself.test.ts'
+    - claim: "the daemon's review path calls the reviewer-health evaluation from run-task.ts"
+      proof: 'grep: evaluateReviewerHealth( in src/run-task.ts'
+  falsifier: |
+    Key the detector on daemon.boot head_sha alone. The fixture's onset rows come from a fresh
+    tree at the offending sha while the boot head predates it, so the first test names the wrong
+    code. Build the healed reviewer from the last healthy sha or an engine tree, as the obvious
+    fallback would. W1-T228 then reads it stale and withholds, and the healed-reviewer test fails,
+    as the live run from eb65ce2 did. Use a fixed withheld-rate threshold. A baseline that already
+    carries some withholds then opens on noise, and the second test fails.

@@ -1,0 +1,32 @@
+- id: W1-T10145
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — reader.agreement.unavailable landed 4 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10145 — 0 reader.agreement.unavailable rows in 3 d (it
+  # had 4 in the 7 d before filing); the symptom has stopped.
+  attempts: 0
+  author_class: machine
+  origin: "scout:reader.agreement.unavailable"
+  files:
+    - test/scout-reader-agreement-unavailable.test.ts
+  acceptance:
+    - claim: "reader.agreement.unavailable stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10145: reader.agreement.unavailable no longer recurs\" in test/scout-reader-agreement-unavailable.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step reader.agreement.unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 3 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The filing reports four recurring ledger rows but supplies no row details or diagnosed cause; its instruction to locate the emitter first leaves the finding unverifiable from the supplied evidence.; on the change's description/files alone, no diff was read — Acceptance requires fixing the cause, yet the declared scope contains only a new test file and the sole grep proof checks for a test declaration, not whether the cause is fixed or recurrence stops."
+    judged_at: "2026-10-18T12:36:36.918Z"
+    pin: "9fd0e5b523f318b8a92d233be13f5455c05f1ee85175dc1d25cd2992bacbb075"

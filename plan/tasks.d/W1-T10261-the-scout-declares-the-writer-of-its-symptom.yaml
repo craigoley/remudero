@@ -1,0 +1,48 @@
+- id: W1-T10261
+  title: "The scout declares the code that writes a symptom, so its builds can fix the cause"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  priority: 1
+  status: merged
+  attempts: 0
+  origin: "operator session 2026-10-20: red-PR stall triage (#13039)"
+  plan_refs: [W1-T5454, W1-T9265]
+  files:
+    - src/lib/scout-gardener.ts
+    - test/the-scout-declares-the-writer-of-its-symptom.test.ts
+  rationale: |
+    OBSERVED 2026-10-20. When a symptom's ledger rows name no file, scoutShard
+    (scout-gardener.ts:212-218) files `files: [testPath]` alone and tells the builder to
+    "locate the code that writes this step first". A build is confined to declared paths
+    plus test/, so it can only add a failing test. W1-T9265's build, #13039, did exactly that.
+    Its fix round then needed src/lib/scout-gardener.ts through NEEDS_SCOPE and has stalled
+    since 03:46Z. On main today, 46 of the 48 scout-filed tasks are queued with that single
+    test file. The only scout task ever merged declared 3 files. Every one of the 46 will
+    meet the same scope wall when it builds.
+  design: |
+    1. When the rows name no file, locate the step's writers at filing time with the
+       scout's existing read-only repo access. These are the tracked src/ and scripts/ files
+       that contain the step name as a string literal (the quoted step, e.g. "inbox.draft_escalated").
+       Rank them by occurrence and declare the strongest few ahead of the scout test. The
+       test stays last, so isScoutDraftShape still holds. The filing stays MACHINE-AUTHORED
+       and goes to the machine-filing judge exactly as today. If no writer is found, file
+       as today. Never invent a path.
+    2. Re-derive the queued, unbuilt scout drafts that declare only their test. Each one
+       gets the same writer lookup. Its record is rewritten through the scout's own plan PR,
+       at verify: human, so the judge re-rules it. Never touch a task with an open run-<id>
+       PR. Fix nothing in the drafts themselves.
+    No thresholds and no new ledger step names.
+  acceptance:
+    - claim: "a symptom whose rows name no file is filed with the source file that writes its step"
+      proof: 'grep: test("W1-T10261: a recon scout draft declares the file that writes its step" in test/the-scout-declares-the-writer-of-its-symptom.test.ts'
+    - claim: "the scout test stays last and a symptom with no locatable writer files exactly as before"
+      proof: 'grep: test("W1-T10261: a scout draft with no locatable writer keeps its test-only shape" in test/the-scout-declares-the-writer-of-its-symptom.test.ts'
+    - claim: "queued test-only scout drafts are re-derived and parked for re-judgment"
+      proof: 'grep: test("W1-T10261: queued test-only scout drafts gain their writer and return to the judge" in test/the-scout-declares-the-writer-of-its-symptom.test.ts'
+  falsifier: |
+    Remove the writer lookup. The first test must see `files: [test/...]` alone for
+    inbox.draft_escalated.

@@ -1,0 +1,56 @@
+- id: W1-T10263
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts cost 13 PR minute(s) across 7 round(s) on 7 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.38
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts"
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/check-test-test-the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts"
+      proof: "grep: test(\"W1-T10263: check:test:test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts is prevented, not retried\" in test/daemon/check-test-test-the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts cost 13 PR minute(s) (seven-day half-life) across 7 fix round(s) on 7 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/daemon.ts: test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts imports it
+    - test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts: named by the failing check
+    - the rounds name a failing test: test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13092 (https://github.com/craigoley/remudero/pull/13092) at 2026-10-20T11:23:23.432Z: ci-log round — coverage-shard (3/8): DAEMON WIRING: the production runOne supplies a material freshness handoff only after an origin advance; coverage-shard (2/8): test/the-daemon-restarts-for-freshne
+        failing tests: DAEMON WIRING: the production runOne supplies a material freshness handoff only after an origin advance; freshness scoring: the daemon's own code is full weight, other runtime paths the floor, unreadable fails toward restarting; ["a tracked edit that a second reading still sees escalates on that reading","W1-T9864: a new test file carries no location-relative specifier","W1-T4945: a change to the daemon own loop still drains and restarts while busy","freshness scoring: the daemon's own code is full weight, other runtime paths the floor, unreadable fails toward restarting"]; R-50: every job in every PR-firing workflow declares a positive timeout-minutes; W1-T7851: a restart withheld by a dirty tree is named once per new sha, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes
+        log excerpt:
+          | async Test.run (node:internal/test_runner/test:1409:7)
+          |     async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+          |   ...
+          | # duration_ms 9058.107086
+          | test-judge: NODE --TEST RUN FAILED (status 1): # fail 1. 1/1 file(s) reported, # tests 5, # fail 1. Last test started: test/daemon-external-wait-freshness.test.ts > DAEMON WIRING: the production runOne supplies a material freshness handoff only after an origin advance.
+          | FLAKE-RETRY: retry ALSO failed — DAEMON WIRING: the production runOne supplies a material freshness handoff only after an origin advance
+          | - W1-T4404 affected-suite sel
+    - PR #11051 at 2026-10-12T10:39:58Z: hand fix PR #11051: src/lib/daemon.ts; minutes are the pass median proxy (5.946327777777777), not measured repair time
+    - PR #10741 at 2026-10-10T22:38:39Z: hand fix PR #10741: src/lib/daemon.ts; minutes are the pass median proxy (5.946327777777777), not measured repair time
+    - PR #10747 at 2026-10-10T21:28:35Z: hand fix PR #10747: src/lib/daemon.ts, src/lib/deploy-judge.ts; minutes are the pass median proxy (5.946327777777777), not measured repair time
+    - PR #10638 at 2026-10-10T15:34:51Z: hand fix PR #10638: src/lib/daemon.ts; minutes are the pass median proxy (5.946327777777777), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
+    reasons:
+      - "The declared files are src/lib/daemon.ts and a new test file. The description shows no contact with secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The acceptance is a grep-verifiable test name, so the finding can be checked. The filing is evidence-backed, citing 5 distinct PRs."
+      - "The family's record is mixed (39 merged, 58 declined) and daemon.ts is core code, which lowers confidence slightly. CI and review still gate the PR, and no actual-change view was supplied."
+    judged_at: "2026-10-22T03:34:01.542Z"
+    pin: "64d90748f87ccf940b7e58615c50b4e9cb81d947d7270d415434a987035e30d8"

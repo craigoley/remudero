@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { anchoredFixOutcome, decideFixOutcomeAction } from "../src/lib/fix-outcome.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
@@ -261,14 +261,95 @@ test("W1-T5532: the default base probe runs a failing test at the fetched main t
   symlinkSync(join(process.cwd(), "node_modules"), join(f.repo.dir, "node_modules"), "dir");
   mkdirSync(join(f.repo.dir, "test/setup"));
   writeFileSync(join(f.repo.dir, "test/setup/tmp-hygiene.ts"), "export {};\n");
-  writeFileSync(join(f.repo.dir, "package.json"), '{"type":"module"}\n');
+  // The probe must borrow an install built from the same inputs as its fixture checkout.
+  const installRoot = dirname(realpathSync(join(f.repo.dir, "node_modules")));
+  for (const name of ["package.json", "package-lock.json"]) {
+    copyFileSync(join(installRoot, name), join(f.repo.dir, name));
+  }
   writeFileSync(join(f.repo.dir, "test/existing.test.ts"), 'import { test } from "node:test"; import assert from "node:assert/strict"; test("broken main", () => assert.equal(1, 2));\n');
-  f.repo.git("add", "package.json", "test/existing.test.ts", "test/setup/tmp-hygiene.ts");
+  f.repo.git("add", "package.json", "package-lock.json", "test/existing.test.ts", "test/setup/tmp-hygiene.ts");
   f.repo.git("commit", "-qm", "broken main");
   f.run.ciFailures = [{ name: "ci", logTail: "not ok - test/existing.test.ts" }];
   const result = await runFixRung(f.run);
   assert.equal(result.strikes, 0, JSON.stringify(f.rows.filter((r) => /base_reproduction|base_red/.test(r.step))));
+  const reproduction = f.rows.find((r) => r.step === "sweep.base_reproduction");
+  assert.equal(reproduction?.setup_error, undefined);
+  assert.equal(reproduction?.verdict, "reproduced");
+  assert.deepEqual((reproduction?.files as { file: string; outcome: string }[]).map(({ file, outcome }) => ({ file, outcome })),
+    [{ file: "test/existing.test.ts", outcome: "fails" }]);
   const refund = f.rows.find((r) => r.step === "fix.strike_refunded");
   assert.equal(refund?.reason, "worker-base-red-verified");
   assert.equal(refund?.main_sha, f.repo.git("rev-parse", "HEAD"));
+});
+
+test("PR-13121: a refused commit's FIXED claim lands on fix.done as NOT_LANDED", async () => {
+  const idle = fixture("REPORT\nFIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(ci): repair");
+  await runFixRung(idle.run);
+  const done = idle.rows.find((r) => r.step === "fix.done");
+  assert.equal(done?.subtype, "commit_refused");
+  assert.equal(done?.fix_outcome, "NOT_LANDED");
+  assert.equal(done?.worker_fix_outcome, "FIXED");
+  const landed = fixture("REPORT\nFIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(src): repair");
+  landed.setEdit(() => writeFileSync(join(landed.repo.dir, "src/fix.ts"), "fixed source\n"));
+  await runFixRung(landed.run);
+  assert.equal(landed.rows.find((r) => r.step === "fix.done")?.fix_outcome, "FIXED", "control: a landed FIXED stays FIXED");
+});
+
+test("PR-13121: a NEEDS_DESIGN stand-down escalates once per head and names the issue on every pass", async () => {
+  const design = fixture("REPORT\nFIX_OUTCOME: NEEDS_DESIGN the harness must commit the merge");
+  const url = "https://github.com/acme/remudero/issues/77";
+  let creates = 0;
+  let fail = true;
+  design.run.deps.issues = { listOpen: () => [], comment: () => {}, create: () => {
+    creates++;
+    if (fail) throw new Error("issue surface unavailable");
+    return url;
+  } };
+  await runFixRung(design.run);
+  const undelivered = await runFixRung(design.run);
+  assert.equal(undelivered.outcome, "needs_design");
+  assert.equal(undelivered.issueUrl, undefined);
+  const stands = () => design.rows.filter((r) => r.step === "fix.stood_down" && r.site === "rung.needs_design");
+  assert.match(String(stands()[0]!.error), /issue surface unavailable/);
+  fail = false;
+  assert.equal((await runFixRung(design.run)).issueUrl, url);
+  assert.equal((await runFixRung(design.run)).issueUrl, url);
+  assert.equal(creates, 2, "one failed delivery, then one issue for this head");
+  assert.deepEqual(stands().map((r) => r.issue_url), [undefined, url, url]);
+  assert.equal(design.counts().spawns, 1, "no stand-down spends a worker");
+});
+
+
+test("a fix review uses the actual checkout matching the head CI judged", async () => {
+  for (const kind of ["matching", "foreign", "unreadable", "aligned-refresh"] as const) {
+    const f = fixture("REPORT\nFIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(tests): repair source");
+    let reviews = 0;
+    let judgedHead = "";
+    f.setEdit(() => writeFileSync(join(f.repo.dir, "src/fix.ts"), "fixed source\n"));
+    f.run.deps.runReview = async () => { reviews++; return { ...f.run.initialReview, state: "success", headSha: judgedHead }; };
+    f.run.deps.readHeadShaForProvenance = () => f.repo.git("rev-parse", "HEAD");
+    f.run.deps.waitForCiGreen = async () => {
+      judgedHead = f.repo.git("rev-parse", "HEAD");
+      if (kind === "foreign" || kind === "aligned-refresh") {
+        judgedHead = f.repo.git("commit-tree", `${judgedHead}^{tree}`, "-p", judgedHead, "-m", "a different actor refreshed the head");
+        if (kind === "aligned-refresh") f.repo.git("update-ref", "HEAD", judgedHead);
+      }
+      if (kind === "unreadable") f.run.reviewBase.headCheckoutDir = join(f.repo.dir, "absent-review-checkout");
+      return { state: "green", sha: judgedHead };
+    };
+    try {
+      const result = await runFixRung(f.run);
+      const safe = kind === "matching" || kind === "aligned-refresh";
+      assert.equal(reviews, safe ? 1 : 0, kind);
+      assert.equal(result.outcome, safe ? "fixed" : "stood_down", kind);
+      assert.equal(f.counts().pushes, 1, "the already-landed repair remains intact");
+      if (!safe) {
+        const row = f.rows.find(row => row.step === "fix.stood_down" && row.site === "rung.post_ci_review_source");
+        assert.equal(row?.ci_head_sha, judgedHead);
+        assert.equal(typeof row?.reason, "string");
+        if (kind === "unreadable") assert.equal(typeof row?.checkout_error, "string");
+        else assert.notEqual(row?.checkout_head_sha, judgedHead);
+      }
+    } finally { f.repo.cleanup(); }
+  }
 });

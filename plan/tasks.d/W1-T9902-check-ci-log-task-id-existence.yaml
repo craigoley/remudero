@@ -6,8 +6,10 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1.19
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9902 — 0 task-id-existence rounds or red heads in 3 d;
+  # the symptom has stopped.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:task-id-existence"

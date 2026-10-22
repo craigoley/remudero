@@ -1,0 +1,94 @@
+- id: W1-T10250
+  title: "THE CONSERVATIVE LEXER REFUSES EVERY TYPED GENERATOR, SO A PR TOUCHING ANY OF 23 SOURCE FILES RUNS ALL 3,837 SUITES — since #12850 (2026-10-19) src/lib/test-impact-map.ts `scanSource` throws `lexical context unknown` at a generator's return-type colon (`function* f(...): Steps<T> {`) and at any `for`/`if`/`while`/`switch`/`catch` inside a generator body; src/run-task.ts line 18547 is the first one, so every run-task.ts PR full-falls-back in preflight-author and cannot finish inside its 5,400 s bound on the Azure host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which generator text the conservative scanner accepts; the full fallback for genuinely ambiguous text is unchanged
+  band_meaning: span
+  origin: "coordinator brief file1020 item 1 (2026-10-20); reported independently by the W1-T10046 builder (logs-8864/10046-preflight*.log) and the memory-gate hand-fix builder (logs-8864/memgate-preflight-5ca84dc.log); reproduced read-only on origin/main 4c83ace0f before filing"
+  plan_refs: [W1-T6158, W1-T6083, W1-T9953, W1-T10046]
+  files:
+    - src/lib/test-impact-map.ts
+    - test/ci/suites/a-typed-generator-is-lexed-not-refused.test.ts
+    - test/the-literal-masker-parses-a-nested-template-substitution.test.ts
+  # refusal-amendment (W1-T10250, run W1-T10250-1792521487833, 2026-10-21T15:05:15.932Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T10250: a filed proof already passes at the merge base, so branch run-W1-T10250-1792521487833 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
+  status: queued
+  priority: 1  # every PR that touches run-task.ts (or 22 other src files) pays a full-suite author run it cannot finish on the Azure host
+  attempts: 0
+  rationale: |
+    OBSERVED in preflight-author output (author selection line, method: the run's own receipt):
+    - logs-8864/10046-preflight.log: "author selection: full-fallback, 3837 suite(s)"; reason "the selector could not
+      read its input — lexical context unknown at line 18519 after )".
+    - logs-8864/memgate-preflight-5ca84dc.log (base a56576c3c): "full-fallback, 3840 suite(s)"; reason
+      'changed-symbols "src/run-task.ts": lexical context unknown at line 18521 after )'.
+    - Both builders report that the full run cannot finish inside preflight-author's 5,400 s heavy-run bound on this
+      host (OBSERVED by them; this filing did not re-run it).
+    REPRODUCED 2026-10-20 on origin/main 4c83ace0f (method: `maskLiterals(stripComments(src, { keepLines: true,
+    conservative: true }), { conservative: true })`, the exact call in affected-suites.ts `changedSymbols`, over a
+    `git archive` of src/, niced):
+    - 23 of 626 src/**/*.ts files throw. src/run-task.ts throws at line 18547, "after )".
+    - The construct at 18543-18547 is `function* writeFixCensusSnapshotSteps(` ... `): Steps<string | undefined> {`
+      (added by #11920, W1-T9550, 2026-10-15). Minimal repro: `function* g(\n a: string,\n): Steps<string> {\n yield 1;\n}`
+      throws "lexical context unknown at line 3 after )"; the same text without `*` lexes; `function* g(a) { yield 1; }`
+      lexes; `async function* g(a: string): AsyncGenerator<string> {` throws at line 1.
+    - TWO THROWS, ONE AFTER THE OTHER. (A) `if (conservative && functionBody === true && c === ":") throw unknown()`
+      fires on the return-type colon. With (A) disabled in a scratch copy, all 23 files then throw at (B): the
+      identifier branch's `generator === true && CONTROL_KEYWORDS.test(word)` fires on the first `for`/`if`/`catch`/...
+      inside a generator body (src/lib/read-model-db.ts line 647 `iterate: function* (...params) { ... for (;;) {` hits
+      (B) directly). With both disabled the scratch copy lexes 626 of 626. So fixing (A) alone leaves run-task.ts in
+      full fallback.
+    - REGRESSION, not a standing gap: the pre-#12850 test-impact-map.ts (31c2f6048^) lexes 626 of 626 of the same files.
+      #12850 ("attribute template substitutions to real source symbols", 31c2f6048, merged 2026-10-19T00:39Z) added
+      the conservative mode and both throws. #12980 (b17a64b94) only named the file in the message.
+    - WHY CI DID NOT CATCH IT: test/the-literal-masker-parses-a-nested-template-substitution.test.ts already walks the
+      whole corpus in strict mode and PRINTS its unknowns (logs-8864/memgate-literal-masker-5ca84dc.log lists 52:
+      23 src, 6 scripts, 23 test), but it asserts only `completed + unknowns.length === paths.length`, so an unknown
+      is a report, never a failure.
+    The 23 src files: arm-auto-merge, board-snapshot-cache, branch-reaper, closing-reference-guard,
+    contributor-admission, daemon, escalate, feedback-landing, fleet-lane, gardener, git-push, host-resource-gardener,
+    inbox-replay, ledger-union, open-prs-rest, plan-pr-merge-safety, read-model-db, task-id-release, test-slot,
+    tick-read-worker, tool-step-signature, worker (all src/lib/) and src/run-task.ts.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and the plan trees of every open PR head (25 open PRs,
+    2026-10-20 11:40Z) for "lexical context unknown", maskLiterals, strictUnknowns and generator; W1-T6158 (merged)
+    is the nested-template parse, W1-T9953 (merged) runs a full-fallback selection in parts, neither lexes generators.
+  design: |
+    1. `scanSource` conservative mode accepts a TypeScript return-type annotation between a generator's parameter
+       list and its body brace (declaration, expression and `async function*` forms), scanning it as type text: no
+       regex literal and no `yield` can start there, and `<`/`>`/`{`/`}` nesting inside the type is tracked so an
+       object type does not open the body. Plain functions are unchanged.
+    2. Inside a generator body, a control keyword (`if`, `while`, `for`, `with`, `switch`, `catch`) followed by `(`
+       is a statement head as anywhere else. Keep refusing only what is really ambiguous there: the existing
+       `yield`-then-slash cases and the cases the corpus test's own assertions name (`await / liveCall() /g;`,
+       `if (ready) {} /\`/.test(value);`) must still throw `lexical context unknown`.
+    3. Legacy (non-conservative) output stays byte-identical: the corpus test's five legacy comparisons per file
+       must still be zero mismatches.
+    4. OPERATOR DECISION (do not decide it in the build): whether the corpus test then REFUSES any src/**/*.ts
+       unknown instead of printing it. Proposed: yes, since a silent unknown in src/ costs every PR touching that
+       file a full fallback. If ruled no, leave that test's assertions unchanged and drop it from the diff.
+    5. TESTS in test/ci/suites/a-typed-generator-is-lexed-not-refused.test.ts (folder from `rmd test-place` on a stub
+       importing test-impact-map.ts and affected-suites.ts; re-run it on the real file), `test(` titles verbatim as in
+       the proofs. Drive `changedSymbols` with a one-hunk diff inside a typed generator, using an in-memory readFile.
+  acceptance:
+    - claim: "a generator with a TypeScript return type lexes in conservative mode, in declaration, expression and async forms"
+      proof: "unit test: W1-T10250: a generator with a TypeScript return type lexes in conservative mode"
+    - claim: "a control keyword inside a generator body lexes in conservative mode"
+      proof: "unit test: W1-T10250: a control keyword inside a generator body lexes in conservative mode"
+    - claim: "a one-hunk diff inside a typed generator names its enclosing symbol instead of throwing into the full fallback"
+      proof: "unit test: W1-T10250: a change inside a typed generator selects by symbol, not the full fallback"
+    - claim: "an ambiguous slash after yield still throws lexical context unknown"
+      proof: "unit test: W1-T10250: an ambiguous slash after yield is still refused"
+      kind: guard
+  falsifier: |
+    At origin/main the first three tests throw "lexical context unknown" (repro above: `function* g(): T {` throws at
+    the colon; `function* g() { for (;;) {} }` throws at `for`), so they fail. Delete only the return-type handling and
+    the first and third fail again; delete only the control-keyword handling and the second and third fail again. The
+    guard passes on both sides; it exists so the fix cannot simply stop refusing.
+  note: |
+    EFFECT, measured after merge: a preflight-author run on a branch whose only src change is in src/run-task.ts prints
+    "author selection: affected-narrow" (not full-fallback) in its first lines; and re-running the corpus walk above
+    over origin/main's src/ reports 0 of 626 unknown. Builders must not re-time the 5,400 s bound; it is unchanged.

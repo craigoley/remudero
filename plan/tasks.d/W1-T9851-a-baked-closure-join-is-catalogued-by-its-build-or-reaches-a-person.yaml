@@ -14,7 +14,7 @@
     - src/lib/baked-closure-catalog.ts
     - src/run-task.ts
     - test/a-baked-closure-join-is-catalogued-by-its-build-or-reaches-a-person.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator ruling 2026-10-16: three PRs joined the baked closure in three days (#11703, #12058, #12289), and each needed a hand push
   attempts: 0
   rationale: |

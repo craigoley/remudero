@@ -1,0 +1,63 @@
+- id: W1-T10345
+  title: "A `Remudero-Task: PR-<m>` TRAILER ON PR n (m ≠ n) NEVER KEYS PR n's REVIEWS OR ESCALATIONS AS PR-<m> — #13305's body carried `Remudero-Task: PR-13121`, so from 06:02Z to 10:28Z on 2026-10-21 its 537 PR-attributed rows were keyed PR-13121, and stage-stall escalation #13320 (08:11Z), opened for #13305, carries task id PR-13121, which the escalation reconciler reads as PR #13121"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which task id a PR's synthetic PR-<m> trailer yields when m is not the PR's own number; a real task trailer and a PR's own PR-<n> are unchanged
+  band_meaning: span
+  origin: "coordinator brief f1021b item 8 (2026-10-21), from the #13305 root-cause builder (logs-8864/s13305-*), named as an operator decision in PR #13355's body with the recommendation to file it"
+  plan_refs: [W1-T453, W1-T2624, W1-T2846, W1-T3505, W1-T5839]
+  files:
+    - src/lib/tick-read-worker.ts
+    - test/review/a-foreign-pr-trailer-never-names-another-prs-task.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger on host remudero (rmd-state2, read-only; rotations from 2026-10-17T22:33Z plus the live file,
+    newest row 2026-10-21T10:31Z):
+    - From 2026-10-21T05:00Z, rows with task_id PR-13121 name pull/13305 537 times and pull/13121 (merged 04:06Z) twice:
+      157 `sweep.review_admitted`, 156 `review.reviewer.skipped`, 120 `sweep.disposed`, 82
+      `review.semantic_setup_refused`, 4 `sweep.update_branch.attempted`, among others.
+    - 08:11:04Z `escalation.issue_opened` #13320, class MANUAL, cause stage-stall, summary "PR …/pull/13305 needs a
+      clarification — PR stage stalled: #13305 …", triage_subject.taskId `PR-13121`.
+    - The #13305 builder (logs-8864/s13305-rc-body.md, PR #13355): the escalation reconciler reads a `PR-<n>` task id as
+      "PR #n", so #13320's referent reads as #13121, not #13305; PR #13318 (commit trailer PR-13039) and #13287 had no
+      body trailer and were keyed by their own numbers.
+    READ at origin/main 2107c092e, re-read at f5789c9da after #13355 merged (symbols, not lines):
+    - `resolveReviewTaskId` and `resolveOpenPrTaskId` (src/lib/tick-read-worker.ts) take the body's `Remudero-Task:`
+      trailer first (`reviewTaskIdFromBody`), whatever it names.
+    - Readers that treat `PR-<n>` as a PR number: the synthetic-id arm near `/^PR-(\d+)$/` in
+      src/lib/tick-read-worker.ts, src/lib/retro.ts, src/lib/verdict-calibration.ts, src/lib/head-rehome.ts and
+      src/run-task.ts. Each turns a foreign PR-<m> into the wrong PR.
+    - PR #13355 (merged 2026-10-21T13:43Z, commit 03e4f4ac7) gives a synthetic `PR-<n>` id bounded untasked review
+      defaults (`usesUntaskedReviewMetadata`); it does not change WHICH id a foreign trailer yields, so a foreign
+      PR-<m> is now reviewed, but still under PR-<m>'s key.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d and every open PR head's plan tree (PR #13355's head 6015137bf included) for
+    resolveReviewTaskId, resolveOpenPrTaskId and reviewTaskIdFromBody: the hits are merged tasks that built them.
+  design: |
+    1. In `resolveReviewTaskId` and `resolveOpenPrTaskId`, a body trailer of the form `PR-<m>` whose m is not the PR's
+       own number is ignored: the PR resolves as if it carried no trailer (its run-branch fallback, or untasked). The
+       PR's own `PR-<n>` and every real task trailer keep today's result. Both resolvers take the PR number from the
+       view they already hold; no new read.
+    2. The `/^PR-(\d+)$/` readers above need no change: they read the id these resolvers produce (the review key, the
+       open-PR view's `taskId`, the escalation subject). If the builder finds a reader that parses the body trailer on
+       its own, it routes that reader through the resolver and widens `files:` by amendment, never silently.
+    3. The commit-trailer rule is unchanged: the head-identity gate still requires the trailer on a hand-fix branch's
+       commits; only the review/board identity ignores a foreign PR-<m>.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/review/a-foreign-pr-trailer-never-names-another-prs-task.test.ts"
+    - claim: "a PR whose body trailer names another PR's synthetic id resolves to its own identity on the review and board paths (the #13305 shape)"
+      proof: "grep: W1-T10345: a foreign PR trailer resolves to the PR's own identity in test/review/a-foreign-pr-trailer-never-names-another-prs-task.test.ts"
+    - claim: "a PR's own PR-<n> trailer and a real task trailer resolve exactly as before"
+      proof: "grep: W1-T10345: an own PR trailer and a real task trailer resolve as before in test/review/a-foreign-pr-trailer-never-names-another-prs-task.test.ts"
+  falsifier: |
+    Remove the own-number check and the #13305-shaped fixture (PR 13305, body `Remudero-Task: PR-13121`) resolves to
+    PR-13121 again. Ignore every PR-<n> trailer and the own-trailer test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger: rows whose task_id is `PR-<m>` while their pr_url or pr_number
+    names a different PR. Healthy shape: none.

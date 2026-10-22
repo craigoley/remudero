@@ -54,16 +54,16 @@ interface CallerRecord {
 const RECORDS: readonly CallerRecord[] = [
   {
     file: "src/lib/affected-suites.ts", helper: "readAffectedSuitesInput", via: ["readAffectedSuitesInput", "readAffectedSuitesInputAsync"],
-    callers: ["scripts/preflight-author.mjs", "scripts/select-affected-suites.mjs", "scripts/test-tier-manifest.mjs", "src/lib/ci-escalation-judge.ts", "src/lib/ci-parity.ts", "src/lib/selector-shadow-gardener.ts", "src/run-task.ts"],
+    callers: ["scripts/preflight-author.mjs", "scripts/select-affected-suites.mjs", "scripts/test-tier-manifest.mjs", "src/cli/commands/daemon.ts", "src/lib/ci-escalation-judge.ts", "src/lib/ci-parity.ts", "src/lib/selector-shadow-gardener.ts", "src/run-task.ts"],
     tree: "WORKTREE: async reads take the worker worktree from coveragePrecheck and the daemon checkout from the CI judge; synchronous reads and the remaining callers take repo or harness roots", decision: "leaf",
   },
   {
-    file: "src/lib/containment.ts", helper: "defaultExecutor", via: ["probeContainment"], callers: ["src/run-task.ts"],
+    file: "src/lib/containment.ts", helper: "defaultExecutor", via: ["probeContainment"], callers: ["src/cli/commands/run-task-verb.ts", "src/run-task.ts"],
     tree: "CHECKOUT: defaultExecutor git-inits the <root>/tmp/containment-probe-<token>/cwd it mkdirs itself", decision: "CHECKOUT",
   },
   {
     file: "src/lib/disk-artifact-reclaim.ts", helper: "defaultCountDirtyFiles", via: ["sweepReclaimableArtifacts"],
-    callers: ["src/lib/daemon.ts", "src/run-task.ts"],
+    callers: ["src/cli/commands/daemon.ts", "src/lib/daemon.ts"],
     tree: "WORKTREE: any .git-holding directory beside the managed root, a worktree included (daemon.ts runs the seam run-task.ts binds)",
     decision: "leaf",
   },
@@ -74,7 +74,7 @@ const RECORDS: readonly CallerRecord[] = [
   },
   {
     file: "src/lib/paired-trial.ts", helper: "gitProbe", via: ["sealedPairedAttemptDispatcher", "probeSealedIsolation"],
-    callers: ["src/lib/skill-eval-command.ts", "src/run-task.ts"],
+    callers: ["src/cli/commands/run-task-verb.ts", "src/lib/skill-eval-command.ts", "src/run-task.ts"],
     tree: "WORKTREE: the sealed attempt tree a worker just ran in (and the fleet clone it was cut from; both callers pass <root>/repos/<repo>)",
     decision: "leaf",
   },
@@ -95,7 +95,7 @@ const RECORDS: readonly CallerRecord[] = [
   },
   {
     file: "src/lib/status.ts", helper: "buildCommitTrailerIndex", via: ["buildCommitTrailerIndex", "buildGitLogSupersessionSearch"],
-    callers: ["src/lib/tick-read-worker.ts", "src/run-task.ts"],
+    callers: ["src/cli/commands/daemon.ts", "src/lib/tick-read-worker.ts", "src/run-task.ts"],
     tree: "CHECKOUT: the process cwd, run-task.ts's repoRoot or <root>/repos/<repo>, or the tick read's checkoutRoot (the daemon's checkout); buildGitLogSupersessionSearch is unwired",
     decision: "CHECKOUT",
   },

@@ -1,0 +1,68 @@
+- id: W1-T10299
+  title: "A RUN'S START-UP PRUNE REMOVES LIVE WORKTREES — at 18:07:18Z on 10-20 run W1-T10029's run child force-removed the worktree of the automated retro RETRO-1792517376313, which had synthesized at 17:49Z and never wrote its preflight row, plus the W1-T10265 and W1-T9851 worktrees and five run-* branches, 28 minutes after the daemon's reaper had KEPT all three as `live-pid`; investigate which liveness each pruner trusts and how often a live worktree is lost"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: low  # an investigation record; no prune, reap or lock behaviour changes in this task
+  priority: 1  # it destroys live work: a retro lost its whole preflight hour
+  origin: "coordinator brief file1020c item 12 (2026-10-20); core ledger rows (read-only) and PR #13226's builder (logs-8864/retro-*)"
+  plan_refs: [W1-T208, W1-T378, W1-T1036, W1-T9855, W1-T4547, W1-T10298]
+  files:
+    - docs/forensics/live-worktrees-pruned-by-a-run-start.md
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger (read-only; rotations named 2026-10-19/20 plus live, newest row 2026-10-20T22:00:59Z):
+    - 17:29:45Z RETRO-1792517376313 starts (`skill.staged`); 17:48:59Z `retro.synthesized`; 17:49:03Z
+      `orientation.regenerated`, its last row. No `retro.preflight_passed` or `retro.preflight_failed` follows; the
+      day's two other retros each wrote one, after ~3,600 s.
+    - 17:39:48Z `worktree.reaped` (actor daemon, pid 125, run DAEMON-1792515203010) keeps run-RETRO-1792517376313,
+      run-W1-T10265-1792515408406, run-W1-T9408-1792516351760 and run-W1-T9851-1792515407955, each with reason
+      `live-pid`.
+    - 18:07:18.666Z `worktree.prune` (actor run_child, ledger pid 9055, run W1-T10029-1792519418355, lane run-task,
+      `skipped: []`) removes /home/node/Remudero/worktrees/run-RETRO-1792517376313, run-W1-T10265-1792515408406 and
+      run-W1-T9851-1792515407955, and branches run-DAEMON-1792515203010, run-RETRO-1792517376313,
+      run-W1-T10265-1792515408406, run-W1-T9408-1792516351760 and run-W1-T9851-1792515407955. W1-T10029's run had
+      started at 18:05:27Z.
+    - W1-T10265 and W1-T9851 had opened their PRs at 17:46:32Z and 17:49:59Z (W1-T10265 then `verdict pr_open_yield`),
+      so whether THEIR worktrees were still in use is part of the question; the retro's was (INFERRED from the missing
+      preflight row).
+    - Frequency: 182 `worktree.prune` rows in the window, 51 of them removing at least one worktree (30 on 10-19,
+      21 on 10-20); by actor/lane: run_child/run-task 30, daemon/daemon 15, daemon/approve 3, daemon/triage 1,
+      daemon/run-task 1, unknown/triage 1. How many removed a LIVE worktree is not yet known.
+    READ at origin/main c89ef695b (symbols, not lines):
+    - src/lib/worker.ts `pruneStaleRuns` force-removes every registered `run-*` worktree under the worktrees root unless
+      its sibling run.lock names a pid `isPidAlive` accepts; a lockless worktree is protected only by `graceMs`
+      (`pruneGraceMs`, 120,000 ms in plan/policy.yaml). It then deletes every remaining local `run-*` branch.
+    - `writeRunLock` has one caller (the run-task path in src/run-task.ts). The retro's worktree comes from
+      `addLaneWorktree` (src/run-task.ts) on a `run-RETRO-*` branch, and nothing writes a run.lock for it.
+    - `pruneStaleRuns` runs at the start of every run-task run and of several lanes (six call sites, plan/policy.yaml's
+      own comment), and `isPidAlive` checks a pid in the CALLER's pid namespace.
+    HYPOTHESES (INFERRED, to test): H1, a lane worktree with no run.lock is protected for only 120 s, so any run start
+    after that removes a running retro; H2, a run.lock written by a run child names a pid the pruning run child cannot
+    see as alive (namespace or sandbox), while the daemon's reaper, which kept them, judges liveness another way; H3,
+    the run-* branch deletion takes live branches whatever the worktree guard decided.
+    NOT COVERED ELSEWHERE: W1-T9855 (queued) refuses a worktree whose node_modules a prune removed, the symptom, not the
+    prune; W1-T4547 asserts plan-tree cleanliness. Swept origin/main plan/tasks.d and the open PR heads' plan trees for
+    pruneStaleRuns, worktree.prune, run.lock and writeRunLock: no shard investigates live prunes.
+  design: |
+    Write docs/forensics/live-worktrees-pruned-by-a-run-start.md with these sections (headings verbatim):
+    1. "## Incidents" — every `worktree.prune` row since 2026-10-14 that removed a worktree, joined to that worktree's own
+       run: its last ledger row before and after the prune, its verdict, and whether a later row shows it still working.
+       State the window, the corpus's newest ts, and a positive control (the 18:07:18Z row must be found).
+    2. "## Liveness by pruner" — for each pruner (the run-start `pruneStaleRuns` sites, the daemon's reaper), what it
+       reads to call a worktree live, quoted by symbol, and which of H1-H3 the incidents support, with the row that rules
+       out each other one.
+    3. "## Remedy proposal" — the smallest change that makes every pruner judge liveness the same way (for example, every
+       lane worktree writes a run.lock, or one shared liveness predicate), filed as its own implement task with a
+       falsifier built from the 18:07:18Z sequence. No prune behaviour changes in this task.
+  acceptance:
+    - claim: "the record lists every prune that removed a worktree since 10-14, joined to its run, with a positive control"
+      proof: "grep: ## Incidents in docs/forensics/live-worktrees-pruned-by-a-run-start.md"
+    - claim: "the record names what each pruner reads as live and which hypothesis the incidents support"
+      proof: "grep: ## Liveness by pruner in docs/forensics/live-worktrees-pruned-by-a-run-start.md"
+    - claim: "the record proposes one liveness rule for every pruner"
+      proof: "grep: ## Remedy proposal in docs/forensics/live-worktrees-pruned-by-a-run-start.md"
+  falsifier: |
+    At origin/main docs/forensics/live-worktrees-pruned-by-a-run-start.md does not exist, so all three grep proofs read 0.

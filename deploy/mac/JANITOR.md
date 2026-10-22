@@ -16,6 +16,93 @@ the identical layout under an alternate absolute root for testing.
 
 Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 
+The temporary cleaner appends `/usr/sbin:/sbin` to the caller's PATH so cron can
+find macOS `lsof`; it never changes caller precedence or adds user package bins.
+Dependency-health diagnostics use Python's standard library, already required by
+the generated-cache helper, rather than requiring Node on cron's PATH. Unknown
+probe results still retain data and never trigger dependency installation.
+
+The six-hour floor covers both modification and kernel change time in generic
+temporary-file pruning and whole temporary/session-scratch retirement, not just
+TSX caches. Restoring old mtime does not make a newly changed file eligible.
+Before pruning old regular leaves from a mixed-age scratch tree, the cleaner
+checks the enclosing tree's process/CWD/open-file activity and rechecks it at
+each deletion boundary. Activity or an unavailable probe retains the tree.
+
+The same leaf policy now covers `~/Remudero/.session-scratch`, including loose
+regular files at its root. Each leaf needs six hours of both mtime and ctime
+inactivity; a recent sibling retains the container. Credentials, Git checkouts,
+symlinks, special files, scheduled logs and patch/diff/rej/orig evidence retain
+their direct-child tree. Wholly idle safe directories still retire together.
+Old empty directories are removed under the same guards; a directory whose
+ctime changed during leaf removal waits until a later pass. The summary reports
+session scratch files and directories separately, with decision receipts.
+
+The account janitor also reclaims physical, account-owned direct children named
+`~/.cache/remudero-*` after the entire tree has been idle for six hours. It keeps
+`~/.cache/remudero`, its own lock, every `*.lock` name, and trees containing Git
+metadata, bundles, locks, symlinks, foreign owners or special files. A receipt
+identifies store-fill caches as historical/external with an unverified creator:
+the checked-in core store-fill fixture uses temporary storage. A leaking creator
+must be identified and fixed separately.
+
+With no account npm/npx process, `~/.npm/_cacache/content-v2` and `~/.npm/_npx`
+release old regular leaves after fresh activity/ownership/structure checks.
+The janitor runs `npm cache verify --cache "$HOME/.npm"` after content pruning.
+When npm is absent from cron's PATH, the existing whole-artifact policy applies
+instead, requiring every entry (including the index) to be idle. Worker-home
+cache handling and the six-hour minimum remain unchanged.
+
+Before probing idle checkouts, the janitor can normalize relative alternates or
+replace a dangling entry with a known same-home lender containing HEAD. It saves
+`objects/info/alternates.pre-repair` without overwriting earlier evidence, then
+checks HEAD and `git fsck --connectivity-only --no-reflogs <HEAD>`. Failed probes
+restore the original bytes and record `repair-reverted`; successful repairs
+record `repaired`. Missing lenders, live paths, partial clones and uncertain
+ownership retain the checkout. Dry runs only describe a repair. Ordinary
+publication and preservation checks still decide any later retirement.
+
+`janitor-free-samples.tsv` beside the decision receipt keeps the last 200 pass
+samples of timestamp/free bytes. A declining fitted trend projected to fill the
+disk within three observed pass intervals produces one `low-space-report:`
+block; inside one interval is critical. Stable/growing free space and insufficient
+samples do not page by a fixed GiB floor. The existing EMERGENCY line and author
+preflight reserve retain their thresholds.
+
+The report uses one bounded `du -xsk` observation per visible home child and known
+root, under the existing 45-second inspection ceiling. Seen bytes sum only home
+children, avoiding double-counting nested known roots. It includes swap from
+`sysctl vm.swapusage`, `unaccounted = used - seen - swap`, and the operator's
+action in other accounts and system areas this account cannot read. Incomplete
+measurements remain labeled unknown/incomplete. It reports preservation's state;
+when disabled it computes a read-only dry-run count/bytes with the installed
+helper's default selection and lender guards. This estimate precedes preservation
+checks and creates no config, archive, stamp or checkout changes. Preserve-retire
+remains opt-in. Report rows use the `low-space-report` reason code; new successful
+cache and scratch removals use `removed`.
+
+## Preventing new validation growth
+
+The `scripts/preflight-author.mjs` CLI checks Mac workspace and TMPDIR capacity
+before starting author work, then checks freshly after slot waiting and before
+each static/test phase. Both volumes must retain the existing 20-GiB local
+coverage reserve, and a bounded native pressure read must report normal. Warning,
+critical, unknown or unavailable readings return **NOT_RUN / exit 3**, not a test
+pass. Help and dry-run remain available. Linux/hosted admission is unchanged.
+This is a fresh pre-start observation, not a cross-account capacity reservation
+or a guarantee against other jobs starting concurrently. It never kills jobs,
+changes Janitor retention, deletes swap or dependencies, or weakens hosted gates.
+Older author receipts are not proof of a refused invocation. Existing running
+jobs and older checkouts are not modified; use the updated checkout for new runs.
+
+Apple's public XNU source maps its internal pressure enum to userspace dispatch
+flags for `kern.memorystatus_vm_pressure_level`: 1 is normal, 2 warning and 4
+critical. Do not confuse these with the internal 0-through-4 enum:
+<https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus_notify.c>.
+RSS alone also omits compressed memory; use Activity Monitor's pressure and swap
+observations when investigating a capacity refusal:
+<https://support.apple.com/guide/activity-monitor/view-memory-usage-actmntr1004/mac>.
+
 The installer also installs `cache-reclaim.py` and `retire-legacy-sweeper.py` in
 both layouts. `--retire-legacy-sweeper` is an explicit additional installer option,
 composable with `--shared`. It disables future launch admission only for the
@@ -24,6 +111,9 @@ and executable (an explicit `Program` must equal `/bin/zsh`), ownership and
 historical script hash. The plist is retained with a disabled
 suffix. It never stops a running process, changes cron entries, or retires an
 unknown/replaced job. Ordinary code-only installation does not change schedules.
+Retirement verification accepts the exact `disabled` token printed by macOS 27
+and the older `true` spelling. Unknown, enabled or duplicate job rows remain
+unverified, with the original plist retained.
 
 The scan includes `~/Remudero`, nested disposable checkouts below the protected
 operator checkout `~/Remudero/remudero`, `~/rmd-work`, and temporary roots.
@@ -64,6 +154,11 @@ unrecognized contents stay protected. Each file needs six hours of both mtime
 and ctime inactivity, with fresh process/CWD/open-file checks before removal.
 Cache roots and sibling fixtures/source/state stay in place. Delegated cache
 counts are logged separately from workspace-removal counts.
+Owned numeric `<pid>.pipe` Unix sockets are recognized as TSX IPC endpoints and
+retained, not deleted or treated as cache files. Their mere presence does not
+hide otherwise eligible old regular cache entries. The existing whole-cache
+live/open checks still hold a cache with a live endpoint. Foreign, linked,
+non-socket `.pipe` entries and all other unknown data retain the whole cache.
 
 The regular janitor additionally inspects this account's `.codex/work-artifacts`
 for exact ignored package duplicates and `.next/cache/turbopack` compiler data.
@@ -81,6 +176,45 @@ any incomplete/unreadable reference root never clears a candidate for removal.
 All original reference roots and depth limits remain in scope. A cheap root
 observation can only KEEP a recent, foreign or flagged target; only when every
 candidate is already kept can the reference phase be unnecessary.
+Completed directory namespaces are authenticated in a private checkpoint capped
+at 16 MiB. Prefix-coded paths and implicit LRU order avoid repeating long absolute
+paths. Loading bounds expanded path text as well as encoded bytes; eviction
+rebases the first remaining record. Old writer/format scopes cold-reset. Only
+namespace observations are reused: current directories/symlinks, age, activity,
+payload identity and deletion guards are checked again. No scan limit increases.
+An authenticated candidate cursor resumes at a budget-interrupted candidate
+instead of repeatedly spending the pass on the same prefix. It only rotates
+inspection order after a fresh complete reference census; it never caches
+eligibility, KEEP conclusions or dependency anchors. Every resumed attempt
+rechecks the six-hour and activity guards, and a completed round clears the hint.
+
+An inaccessible physical reference subtree can be inspected by an explicitly
+configured, read-only peer account. The optional file
+`~/.local/state/remudero/cache-reference-peers.json` must be an owner-private
+0600 regular file below physical, same-owner, non-writable-by-others parents.
+It is a JSON array of `{ "uid": <subtree owner UID>, "argv": [<absolute program>, ...] }`.
+An operator may use an existing authorized SSH connection whose fixed remote
+command is `python3 '<installed helper path>/cache-reclaim.py' --reference-probe`.
+Arguments are executed without a local shell; requests go over stdin, never into
+the remote command string. Installation does not create credentials, authorize
+SSH keys, configure sudo, widen filesystem permissions or assume reciprocal
+account access. Missing configuration/authentication remains a typed hold.
+
+The peer endpoint accepts only owned physical subtrees in its existing reference
+roots and bounded request limits. It reads metadata and symlinks, not source or
+package contents, and creates no locks, checkpoints or cleanup stages. A nonce,
+request digest, exact writer generation, UID and sealed root identity bind its
+reply; entry/read/time costs consume the caller's remaining budget. Unknown,
+incomplete, oversized, changed or failed replies never clear a candidate.
+Permission errors while resolving a symlink's referent are not treated as an
+unresolved non-reference: the peer returns that link for strict resolution by
+the caller using its own access. If neither account can resolve it, cleanup
+still holds. Resolving a known link pins and revalidates each physical path
+edge (inode, type, permissions and ownership), without treating unrelated
+sibling creation in an ancestor as a changed link. Enumerating a reference
+namespace still seals its complete directory identity, and every symlink edge
+is revalidated. This supplements the full census; it does not bypass process,
+CWD/open-file, six-hour, Git, duplicate-payload or retained-evidence protections.
 Duplicate package removal requires equal complete byte/mode/symlink namespaces
 and an unchanged full payload anchor retained in place. Unique `.vite` results
 and `.rmd-dependency-seed.json` receipts remain at their original paths. Source,
@@ -144,9 +278,82 @@ not prove a unique skipped-byte total or complete discovery. Cache-helper
 decisions also enter the receipt; partial/unverified removals remain informational
 with an explicit uncertainty reason, not completed removals. A Git-unknown
 hold needs its original object store restored or an operator-reviewed recovery;
-an unpublished hold needs its work deliberately published, not forced cleanup.
+an unpublished hold needs its work deliberately published, not forced cleanup,
+unless the account opts in to the preserve-then-retire phase below.
 
 Azure installs the shared guard through `deploy/install-host-units.sh` and records
 the same receipts. Broad temp globs route Git-containing units through these
 guards instead of recursively deleting them. Older orphan archives never expire
 automatically: they may contain the only surviving unpublished work.
+
+## Preserve-then-retire (opt-in per account)
+
+The holds above are permanent on their own: an account that is never cleaned by hand
+accumulates unpublished, dirty and ignored checkouts until the disk is full. On
+2026-10-20 one Mac account reached 0 GiB free with about 46 GiB of such checkouts and
+bare origins, and every janitor pass reported `removed=0`.
+
+`preserve-retire.py` runs as the last phase of every pass. It does nothing until the
+account writes an owner-private (0600) `~/.local/state/remudero/preserve-retire.json`
+below private parents, for example `{"enabled": true, "idle_hours": 24, "retain_days": 7}`.
+It scans `~/Remudero`, `~/rmd-work`, `~/.codex/work-artifacts`,
+`~/Developer/remudero-operator-worktrees`, every `~/Developer/remudero-operator-recovered-worktrees-*`
+and every `~/Downloads/remudero-*` folder (never other `Developer` or `Downloads` content or
+protected roots), at most once every `interval_hours` (default 6). A `roots` entry with `*`
+names every folder it matches.
+
+A checkout, standalone clone or bare repository is a candidate when nothing in it
+(dependencies included, its own Git metadata excluded) changed in `idle_hours` by
+mtime or ctime, its HEAD did not move, no command line names it, and no open file or
+cwd is inside it. For each candidate it saves, under `~/Remudero-preserved/<path>@<UTC>`:
+a bundle of every commit not in published `main` (detached HEAD, tags and stash
+included), verified in the source or a published base; the `git diff --binary HEAD`
+patch; a tarball of untracked and ignored files without `node_modules`, `coverage`,
+`dist`, `.turbo` and `.next`; every ref in `refs.txt`; and `MANIFEST.txt` with restore
+steps. "Published" means the first-parent history of each published remote's current
+`main` (fresh `git ls-remote`), or a cached `origin/main` of a published remote.
+
+Every candidate is preserved before any is deleted, and the keep set is recomputed
+afterwards, so a borrower whose copy failed keeps its object lender. A clone or bare
+repository is deleted only when no other account can enter the home (mode and ACL)
+and a complete borrower census of the home found no kept borrower. These are held
+for a person and never retired: unreadable history (missing worktree Git dir or
+alternate object store), a locked worktree, an untracked file over `max_untracked_mb`
+(default 50), a foreign owner, and any failed probe. Each candidate is checked again
+for activity just before removal. Worktrees go through `git worktree remove --force`,
+then `git worktree prune`. Copies older than `retain_days` are expired; folders the
+phase did not stamp are never touched. After expiry, unpublished work exists nowhere
+else, so set `retain_days` to how long you might want it back.
+
+The same pass then does housekeeping that changes no history. On 2026-10-21 one
+clone held 8.6 GiB in 1,640 packs (repeated fetches with automatic gc off) that repacked
+to 111 MiB, and agents had left 16 GB of JSON and log dumps beside their checkouts:
+
+- A repository under the roots with `repack_min_packs` (default 50) or more packs is
+  repacked with `git repack -a -d -l --keep-unreachable`, kept or active ones included:
+  no object is dropped, and borrowed objects stay with their lender.
+- Outside any repository, a `.json`, `.jsonl`, `.ndjson`, `.log`, `.lcov` or `.info`
+  file of at least `dump_min_mb` (default 5) idle for `idle_hours` and not open is
+  gzipped beside itself after a full read-back; its modification time is kept. A dump in
+  either form unchanged for `dump_retain_days` (default 14) is deleted.
+- Outside any repository, an idle, unopened `node_modules` is removed, and so are
+  `coverage`, `.turbo` and `.next` beside a `package.json`; elsewhere those names may be
+  fixture data. Symlinked folders are never followed.
+
+The janitor also runs `~/.local/bin/remudero-dependencies sweep --apply` on every apply
+pass when that tool is installed (see `deploy/DEPENDENCY-SEEDS.md`).
+
+The janitor's human log now rotates at 16 MiB, keeping one previous generation.
+
+The final `=== done:` line counts successful artifact removals, published worktree
+removals and preservation retirements together in `removed`. The
+`preservation-status`, `preservation-retired`, `preservation-held` and
+`preservation-planned` fields expose the last phase separately. A failed helper or
+unreadable terminal summary reports unknown counts and `removed-complete=no`;
+`removed` then includes only confirmed earlier removals. Disabled and throttled
+passes report zero retirements, with held repositories unknown because no scan ran.
+
+`reclaimed-scope=legacy` makes the existing byte estimate's scope explicit: it
+excludes the preservation phase. The `free=before->afterGiB` readings cover the
+whole pass and can also reflect concurrent writers. `planned` retains its legacy
+scope; `preservation-planned` is separate and can overlap with those dry-run plans.

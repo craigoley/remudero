@@ -1,10 +1,12 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
+import { TICK_READ_MAX_AGE_MS } from "./read-plane.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
@@ -206,6 +208,20 @@ function titleClauses(tail: string): string[] | undefined {
 export function fitDependabotTitle(title: string, body: string): DependabotTitleFit {
   if (!overHeaderLimit(title)) return { kind: "fits" };
   const prefix = CONVENTIONAL_TITLE_PREFIX_RE.exec(title)?.[0] ?? "";
+  const pin = actionShaPinSummary(title);
+  if (pin) {
+    // The body retains both full pins. A display abbreviation must never replace the
+    // only exact identity evidence consumed by isActionShaPinOnlyProposal.
+    const retained = body.split("\n").filter((line) => DEPENDABOT_SUMMARY_LINE_RE.test(line))
+      .some((line) => {
+        const summary = actionShaPinSummary(line);
+        return summary?.action === pin.action && summary.fromSha === pin.fromSha && summary.toSha === pin.toSha;
+      });
+    if (!retained) return { kind: "unfittable", reason: "the body does not retain the action and both full SHA pins" };
+    const fitted = `${prefix}bump ${pin.action} to ${pin.toSha.slice(0, 12)}`;
+    if (overHeaderLimit(fitted)) return { kind: "unfittable", reason: "the action identity alone exceeds the title limit" };
+    return { kind: "fitted", title: fitted };
+  }
   const rest = title.slice(prefix.length).replace(/\s+/g, " ").trim();
   const single = SINGLE_BUMP_RE.exec(rest), group = single ? null : GROUP_BUMP_RE.exec(rest);
   const clauses = single ?? group ? titleClauses(rest.slice((single ?? group)![0].length)) : undefined;
@@ -655,12 +671,28 @@ export async function readSelectedDepReviewChecks(
   const record = (value: unknown): Record<string, unknown> | undefined =>
     value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
   const timestamp = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
-  const rows = (value: unknown, key: string): Record<string, unknown>[] | undefined => {
-    const body = record(value);
-    if (body === undefined) return undefined;
-    const list = body[key];
-    if (!Array.isArray(list) || !Number.isSafeInteger(body.total_count) || body.total_count !== list.length || !list.every(row => record(row) !== undefined)) return undefined;
-    return list;
+  const rows = async (args: string[], key: string, bound?: (body: Record<string, unknown>) => boolean): Promise<Record<string, unknown>[] | undefined> => {
+    // GitHub caps a requested REST page at 100 rows. The first declared total bounds
+    // this walk; any changing, short or overlapping population remains unknown.
+    const pageSize = 100, endpoint = new URL(args[1], "https://api.github.com/");
+    endpoint.searchParams.set("per_page", String(pageSize));
+    let total: number | undefined;
+    const all: Record<string, unknown>[] = [], seen = new Set<unknown>();
+    for (let page = 1; total === undefined || all.length < total; page++) {
+      endpoint.searchParams.set("page", String(page));
+      const body = record(await read([args[0], endpoint.pathname.slice(1) + endpoint.search, ...args.slice(2)]));
+      if (!body || !Number.isSafeInteger(body.total_count) || (body.total_count as number) < 0 || (bound && !bound(body))) return undefined;
+      total ??= body.total_count as number;
+      const list = body[key];
+      if (body.total_count !== total || !Array.isArray(list) || list.length !== Math.min(pageSize, total - all.length) ||
+          !list.every(row => record(row) !== undefined)) return undefined;
+      for (const row of list as Record<string, unknown>[]) {
+        if (seen.has(row.id)) return undefined;
+        seen.add(row.id);
+        all.push(row);
+      }
+    }
+    return all;
   };
   const pull = (value: unknown) => {
     const p = record(value), head = record(p?.head), repository = record(record(p?.base)?.repo);
@@ -679,17 +711,16 @@ export async function readSelectedDepReviewChecks(
     stage = "check_runs";
     const args = checkRunsRestArgs(owner, repo, target.headSha);
     args[1] += "&filter=all";
-    const checks = rows(await read(args), "check_runs");
+    const checks = await rows(args, "check_runs");
     if (!checks || new Set(checks.map(c => c.id)).size !== checks.length || checks.some(c => !id(c.id) || c.head_sha !== target.headSha ||
       typeof c.name !== "string" || !c.name || typeof c.status !== "string" || !timestamp(c.started_at) ||
       (c.conclusion != null && typeof c.conclusion !== "string") || (c.completed_at != null && !timestamp(c.completed_at)))) return unknown("check_runs_incomplete_or_unbound");
     stage = "commit_statuses";
-    const statusBody = await read(combinedStatusRestArgs(owner, repo, target.headSha));
-    const statuses = rows(statusBody, "statuses");
-    if (record(statusBody)?.sha !== target.headSha || !statuses || statuses.some(s => !id(s.id) || typeof s.context !== "string" || !s.context ||
+    const statuses = await rows(combinedStatusRestArgs(owner, repo, target.headSha), "statuses", body => body.sha === target.headSha);
+    if (!statuses || statuses.some(s => !id(s.id) || typeof s.context !== "string" || !s.context ||
       typeof s.state !== "string" || !timestamp(s.created_at) || (s.updated_at != null && !timestamp(s.updated_at)))) return unknown("commit_statuses_incomplete_or_unbound");
     stage = "workflow_runs";
-    const workflows = rows(await read(runsForHeadRestArgs(owner, repo, target.headSha)), "workflow_runs");
+    const workflows = await rows(runsForHeadRestArgs(owner, repo, target.headSha), "workflow_runs");
     if (!workflows || new Set(workflows.map(r => r.id)).size !== workflows.length || workflows.some(r => !id(r.id) || !id(r.workflow_id) ||
       !id(r.check_suite_id) || !id(r.run_attempt) || r.head_sha !== target.headSha)) return unknown("workflow_runs_incomplete_or_unbound");
     const rollup = rollupFromRest(checks as Parameters<typeof rollupFromRest>[0], statuses as Parameters<typeof rollupFromRest>[1], workflows as NonNullable<Parameters<typeof rollupFromRest>[2]>);
@@ -968,6 +999,23 @@ export function buildDepReviewArmUnreachableEscalation(args: {
   };
 }
 
+function refreshEscalationLines(refresh: DependabotRefreshRecord): string[] {
+  const at = fixedClock(refresh.requestedAtMs).iso();
+  if (refresh.updateFailed) {
+    return [
+      `Refresh attempted: the guarded update-branch of this head was refused or does not apply at ${at} (${refresh.cause}): ${refresh.updateError ?? "no reason given"}.`,
+      ...(refresh.reply === undefined ? [] : [`Dependabot refused the earlier \`${refresh.command}\`: "${refresh.reply}".`]),
+    ];
+  }
+  if (refresh.via === "update-branch") {
+    return [`Refresh requested: the guarded update-branch was applied to this head at ${at} (${refresh.cause}).`];
+  }
+  if (refresh.answer === "refused") {
+    return [`Refresh refused: Dependabot answered \`${refresh.command}\` (posted ${at}, ${refresh.cause}) with "${refresh.reply ?? ""}".`];
+  }
+  return [`Refresh requested: \`${refresh.command}\` was posted for this head at ${at} (${refresh.cause}), and Dependabot has not produced a new head.`];
+}
+
 export function buildDepReviewEscalation(args: {
   prUrl: string;
   prNumber: number;
@@ -988,10 +1036,7 @@ export function buildDepReviewEscalation(args: {
         `Dependabot PR ${args.prUrl} is held on head ${args.hold.headSha}.`,
         `Blocker: required check(s) not green: ${args.hold.redChecks.join(", ")}.`,
         ...(args.hold.advisoryRed?.length ? [`Advisory red, not holding (still visible on the PR): ${args.hold.advisoryRed.join(", ")}.`] : []),
-        ...(refresh === undefined ? [] : [
-          `Refresh requested: \`${refresh.command}\` was posted for this head at ` +
-            `${fixedClock(refresh.requestedAtMs).iso()} (${refresh.cause}), and Dependabot has not produced a new head.`,
-        ]),
+        ...(refresh === undefined ? [] : refreshEscalationLines(refresh)),
         `Owner: repository operator. Inspect the failed check logs, rerun transient failures,`,
         `or repair the dependency/CI failure and ask Dependabot to rebase or recreate the PR.`,
         `Do not override failing checks. Green checks resume deterministic review and auto-merge;`,
@@ -1118,6 +1163,47 @@ export interface DependabotRefreshRecord {
   requestedAtMs: number;
   /** False only between the write-ahead record and a comment that has not yet returned. */
   delivered: boolean;
+  /** W1-T9994 — Dependabot's reply refused the command: `delivered` means POSTED, never ANSWERED. */
+  answer?: "refused";
+  answeredAtMs?: number;
+  /** The refusal reply's first line, quoted by the escalation. */
+  reply?: string;
+  /** W1-T9994 — the base refresh went through the guarded REST update-branch, not a command. */
+  via?: "update-branch";
+  /** The update-branch was refused or does not apply; the record then escalates once. */
+  updateFailed?: boolean;
+  updateError?: string;
+  issueUrl?: string;
+}
+
+// ── W1-T9994 — Dependabot refuses the fleet's commands ("Sorry, only users with push access can use that
+// command", #11968 at 20:45:17Z), yet a posted command read `delivered: true` for hours. The answer is read.
+
+/** The wording Dependabot answers a command from a commenter without push access, seeded with #11968's reply. */
+export const DEPENDABOT_REFUSAL_WORDING = "only users with push access can use that command";
+export const DEPENDABOT_UPDATE_BRANCH_COMMAND = "update-branch";
+
+/** The fields of one REST issue comment a command answer reads. */
+export interface DependabotIssueComment {
+  user?: { login?: string } | null;
+  created_at?: string;
+  body?: string;
+}
+
+export type DependabotCommandAnswer = { kind: "refused"; reply: string } | { kind: "none" };
+
+/** Pure: Dependabot's refusal among the issue comments created at or after `sinceMs`, else `none`. */
+export function dependabotCommandAnswer(comments: readonly DependabotIssueComment[], sinceMs: number): DependabotCommandAnswer {
+  const sinceSecond = Math.floor(sinceMs / 1000) * 1000; // GitHub stamps whole seconds; the request is stamped in ms
+  for (const comment of comments) {
+    const created = Date.parse(comment.created_at ?? "");
+    if (!Number.isFinite(created) || created < sinceSecond) continue;
+    const login = comment.user?.login;
+    if (login === undefined || !isDependabotAuthor({ login })) continue;
+    const body = comment.body ?? "";
+    if (body.toLowerCase().includes(DEPENDABOT_REFUSAL_WORDING)) return { kind: "refused", reply: body.split("\n")[0].trim() };
+  }
+  return { kind: "none" };
 }
 
 /** `wait`: main also fails this check, so a refresh would only inherit it. `request`: main's red has
@@ -1187,58 +1273,110 @@ function readRefreshState(statePath: string, headSha: string): DepReviewHoldStat
   return state;
 }
 
-export type DependabotRefreshOutcome = "requested" | "unanswered" | "failed" | "none";
+export type DependabotRefreshOutcome = "requested" | "unanswered" | "refused" | "escalated" | "failed" | "none";
 
 /** Runs after {@link reconcileDepReviewHold} on the same pass and state file. Acts only on a
- *  `hold` with red checks: a hold on pending checks has nothing to refresh. */
-export function reconcileDependabotRefresh(args: {
+ *  `hold` with red checks: a hold on pending checks has nothing to refresh.
+ *
+ *  W1-T9994: a base refresh goes through the guarded REST update-branch (`expected_head_sha`), never a
+ *  command Dependabot refuses from this identity. An earlier command record is answered by reading
+ *  Dependabot's reply once per pass; a refusal is ledgered and stops pinning the head. Only a refused
+ *  update-branch escalates, once, quoting the reply. */
+export async function reconcileDependabotRefresh(args: {
   statePath: string;
   prNumber: number;
   headSha: string;
   result: DepReviewResult;
   cause: DependabotRefreshCause | undefined;
-  commits: readonly DependabotHeadCommit[] | undefined;
   nowMs: number;
-  comment: (body: string) => void;
+  updateBranch: (expectedHeadSha: string) => Promise<{ ok: boolean; error?: string }>;
+  readComments: (sinceIso: string) => Promise<readonly DependabotIssueComment[]>;
+  escalate: (refresh: DependabotRefreshRecord) => string | null | undefined;
   log: (step: string, extra: Record<string, unknown>) => void;
-}): DependabotRefreshOutcome {
+}): Promise<DependabotRefreshOutcome> {
   if (args.result.decision !== "hold" || args.result.redChecks.length === 0) return "none";
   const state = readRefreshState(args.statePath, args.headSha);
   const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  const at = { pr_number: args.prNumber, head_sha: args.headSha };
+
+  const escalateOnce = (record: DependabotRefreshRecord): DependabotRefreshOutcome => {
+    if (record.issueUrl !== undefined) return "escalated";
+    let issueUrl: string | null | undefined;
+    try {
+      issueUrl = args.escalate(record);
+    } catch (error) {
+      args.log("dep-review.refresh_failed", { ...at, action: "escalate", error: String((error as Error)?.message ?? error) });
+      return "failed";
+    }
+    if (!issueUrl) return "failed";
+    record.issueUrl = issueUrl;
+    save();
+    args.log("dep-review.refresh_escalated", { ...at, cause: record.cause, issue_url: issueUrl,
+      ...(record.reply === undefined ? {} : { reply: record.reply }), ...(record.updateError === undefined ? {} : { error: record.updateError }) });
+    return "escalated";
+  };
+
+  const refreshByUpdateBranch = async (record: DependabotRefreshRecord): Promise<DependabotRefreshOutcome> => {
+    const outcome = await (async (): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        return await args.updateBranch(args.headSha);
+      } catch (error) {
+        return { ok: false, error: String((error as Error)?.message ?? error) };
+      }
+    })();
+    if (outcome.ok) {
+      record.via = "update-branch";
+      record.delivered = true;
+      save();
+      args.log("dep-review.refresh_requested", { ...at, command: record.command, via: "update-branch", cause: record.cause,
+        edited_head: false, red_checks: args.result.redChecks });
+      return "requested";
+    }
+    record.updateFailed = true;
+    record.updateError = outcome.error ?? "update-branch did not apply";
+    save();
+    args.log("dep-review.refresh_failed", { ...at, command: record.command, via: "update-branch", cause: record.cause, error: record.updateError });
+    return escalateOnce(record);
+  };
+
   const prior = state.refreshes?.find((r) => r.headSha === args.headSha);
   if (prior !== undefined) {
+    if (prior.updateFailed) return escalateOnce(prior);
+    if (prior.command === DEPENDABOT_UPDATE_BRANCH_COMMAND && prior.via === undefined) return await refreshByUpdateBranch(prior);
+    const read = prior.answer === undefined && prior.via === undefined && prior.delivered
+      ? await (async (): Promise<{ answer?: DependabotCommandAnswer; error?: string }> => {
+        try {
+          return { answer: dependabotCommandAnswer(await args.readComments(fixedClock(prior.requestedAtMs).iso()), prior.requestedAtMs) };
+        } catch (error) {
+          return { error: String((error as Error)?.message ?? error) };
+        }
+      })()
+      : {};
+    const readError = read.error;
+    if (read.answer?.kind === "refused") {
+      prior.answer = "refused";
+      prior.answeredAtMs = args.nowMs;
+      prior.reply = read.answer.reply;
+      save();
+      args.log("dep-review.refresh_refused", { ...at, command: prior.command, cause: prior.cause, reply: read.answer.reply,
+        requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs });
+    }
+    if (prior.answer === "refused") return prior.via === undefined ? await refreshByUpdateBranch(prior) : "refused";
     args.log("dep-review.refresh_unanswered", {
-      pr_number: args.prNumber, head_sha: args.headSha, command: prior.command, cause: prior.cause, delivered: prior.delivered,
+      ...at, command: prior.command, cause: prior.cause, delivered: prior.delivered,
       requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs,
-      red_checks: args.result.redChecks,
+      red_checks: args.result.redChecks, ...(readError === undefined ? {} : { answer_read_error: readError }),
     });
     return "unanswered";
   }
   if (args.cause === undefined) return "none";
   const record: DependabotRefreshRecord = {
-    headSha: args.headSha, command: dependabotRefreshCommand(args.commits), cause: args.cause,
+    headSha: args.headSha, command: DEPENDABOT_UPDATE_BRANCH_COMMAND, cause: args.cause,
     requestedAtMs: args.nowMs, delivered: false,
   };
   state.refreshes = [...(state.refreshes ?? []), record];
   save();
-  try {
-    args.comment(record.command);
-  } catch (error) {
-    state.refreshes = state.refreshes.filter((r) => r !== record);
-    save();
-    args.log("dep-review.refresh_failed", {
-      pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
-      error: String((error as Error)?.message ?? error),
-    });
-    return "failed";
-  }
-  record.delivered = true;
-  save();
-  args.log("dep-review.refresh_requested", {
-    pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
-    edited_head: record.command === DEPENDABOT_RECREATE_COMMAND, red_checks: args.result.redChecks,
-  });
-  return "requested";
+  return await refreshByUpdateBranch(record);
 }
 
 
@@ -1261,6 +1399,7 @@ export function dependabotStaleEventVerdict(input: {
 export const LIVE_READING_RERUN_CHECKS: ReadonlyArray<{ check: string; workflow: string }> = [
   { check: "commitlint", workflow: ".github/workflows/pr-title-lint.yml" },
   { check: "ci-gate", workflow: ".github/workflows/ci.yml" },
+  { check: "ci-gate", workflow: ".github/workflows/ci-gate.yml" },
 ];
 
 export function isLiveReadingCheck(check: string): boolean {
@@ -1533,6 +1672,69 @@ interface DependabotOwnRedRecord {
 interface DependabotOwnRedProposal { feedbackId: string; submissionKey: string; bumps: string[]; prNumbers: number[]; filedAtMs: number }
 
 const OWN_RED_PROPOSALS_FILE = "own-red-proposals.json";
+
+export interface DepReviewRepairSnapshot {
+  owner: string;
+  repo: string;
+  asOfMs: number;
+  prs: readonly {
+    prNumber: number;
+    headSha?: string;
+    headRefName?: string;
+    createdAt?: string;
+    checksState: "green" | "red" | "pending" | "none";
+  }[];
+}
+
+/** PRIMARY CONTROL: the operator's stuck-PR horizon; it changes ordering, never admission or spend. */
+export const DEPENDABOT_STUCK_PR_AGE_MS = 60 * 60 * 1000;
+
+/** Reorder existing eligible feedback only. Registry, per-head repair state and a fresh OPEN
+ * PR snapshot must agree; prose never grants priority. Unknown evidence preserves FIFO. */
+export async function prioritizeDepReviewRepairs(
+  candidates: readonly string[], stateRoot: string, snapshot: DepReviewRepairSnapshot | undefined, nowMs: number,
+  log: (step: string, extra: Record<string, unknown>) => void = () => {},
+): Promise<string[]> {
+  const ordinary = [...candidates];
+  const recordEvent = (step: string, extra: Record<string, unknown>) => {
+    try { log(step, extra); } catch { /* Priority telemetry cannot change the eligible queue or admit a run. */ }
+  };
+  if (!snapshot || !Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ||
+      nowMs < snapshot.asOfMs || nowMs - snapshot.asOfMs > TICK_READ_MAX_AGE_MS ||
+      !/^[\w.-]+$/.test(snapshot.owner) || !/^[\w.-]+$/.test(snapshot.repo)) return ordinary;
+  const oldReds = snapshot.prs.filter(pr => Number.isSafeInteger(pr.prNumber) && pr.prNumber > 0 &&
+    pr.headRefName?.startsWith("dependabot/") && pr.checksState === "red" &&
+    Number.isFinite(Date.parse(pr.createdAt ?? "")) && nowMs - Date.parse(pr.createdAt!) >= DEPENDABOT_STUCK_PR_AGE_MS);
+  if (oldReds.length === 0) return ordinary;
+  const dir = join(stateRoot, "dep-review-holds", snapshot.owner, snapshot.repo);
+  try {
+    const registry: unknown = JSON.parse(await readFile(join(dir, OWN_RED_PROPOSALS_FILE), "utf8"));
+    const proposals = (registry as { proposals?: unknown } | null)?.proposals;
+    if (!Array.isArray(proposals)) throw new Error("invalid dependency repair registry");
+    const priority = new Map<string, number>();
+    for (const pr of oldReds) {
+      if (!proposals.some(p => p && candidates.includes(p.feedbackId) &&
+          Array.isArray(p.prNumbers) && p.prNumbers.includes(pr.prNumber))) continue;
+      const state: unknown = JSON.parse(await readFile(join(dir, `PR${pr.prNumber}.json`), "utf8"));
+      const record = (state as { ownRed?: unknown } | null)?.ownRed;
+      if (!isOwnRedRecord(record) || record.headSha !== pr.headSha || !record.feedbackId ||
+          !candidates.includes(record.feedbackId)) continue;
+      const bumps = record.bumps.map(ownRedBumpKey);
+      const linked = proposals.some(p => p && p.feedbackId === record.feedbackId &&
+        Array.isArray(p.prNumbers) && p.prNumbers.includes(pr.prNumber) && Array.isArray(p.bumps) &&
+        bumps.length > 0 && bumps.every(b => p.bumps.includes(b)));
+      if (!linked) continue;
+      const created = Date.parse(pr.createdAt!);
+      priority.set(record.feedbackId, Math.min(priority.get(record.feedbackId) ?? created, created));
+    }
+    const ranked = ordinary.filter(id => priority.has(id)).sort((a, b) => priority.get(a)! - priority.get(b)!);
+    if (ranked.length > 0) recordEvent("auto_triage.repair_priority", { feedback_ids: ranked, snapshot_as_of_ms: snapshot.asOfMs });
+    return [...ranked, ...ordinary.filter(id => !priority.has(id))];
+  } catch (error) {
+    recordEvent("auto_triage.repair_priority_unavailable", { reason: String(error) });
+    return ordinary;
+  }
+}
 
 function ownRedBumpKey(b: DependabotOwnRedBump): string {
   return `${b.dependency.trim().toLowerCase()}@${b.toVersion}`;

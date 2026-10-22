@@ -16,8 +16,9 @@ import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot
 import { deriveTaskReferent, parseProposalRegistryResult, pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { buildInboxDismissalAudit, inboxDismissalReceipts } from "./inbox-dismissal-audit.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, lapseInboxKeeps, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
 import { projectWhyMeFeedback, type WhyMeFeedback } from "./inbox-why-me.js";
+import { writeVerdictReceipts } from "./inbox-verdict-receipts.js";
 import { readSnapshotCursor, snapshotCursor } from "./read-page.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
@@ -148,6 +149,9 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   recordInboxFirstSeen(stateDir, proposals.map((p) => p.id), fixedClock(now).iso());
   // W1-T8831: a proposal that left the registry drops its archive/snooze mark. An empty registry read prunes nothing: it may be a torn read.
   if (!deps.inboxSourceIdentity && proposals.length > 0) pruneInboxTriage(stateDir, proposals.map((p) => p.id));
+  lapseInboxKeeps(stateDir, classified);
+  // A decline outlives the live ledger's per-step carry cap: the receipts of every proposal still registered are kept.
+  if (classified.verdictReceipts && proposals.length > 0) writeVerdictReceipts(stateDir, classified.verdictReceipts, proposals.map((p) => p.id));
   // The pass's own instant judges every snooze, so the persisted stores say which are still ahead and the view reads no clock.
   const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now });
   const sourceThreads = readAllThreads({ threadStorePath: join(stateDir, "inbox-threads.jsonl") });
@@ -170,7 +174,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const changed = identity !== memo.identity;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
   const generatedAt = fixedClock(written ? now : memo.writtenAtMs!).iso();
-  const bodies = inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot), inboxStoreSource(generatedAt), content.snapshotKey);
+  const bodies = inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot, { content, scope }), inboxStoreSource(generatedAt), content.snapshotKey);
   if (written) {
     writePersistedInbox(stateDir, content, now);
     writeClassificationSnapshot(stateDir, classifications, fixedClock(now), inboxClassificationEvidence(classified));
@@ -194,7 +198,7 @@ const INBOX_STORE_SOURCE = `inbox-store:${INBOX_VIEW_INSTANCE}`;
 function inboxStoreSource(generatedAt: string, state: ViewSource["state"] = "fresh"): ViewSource {
   return { name: INBOX_STORE_SOURCE, asOf: generatedAt, state };
 }
-export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed"] as const;
+export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed", "kept"] as const;
 export type InboxViewSection = (typeof INBOX_VIEW_SECTIONS)[number];
 
 type Lanes = ReturnType<typeof inboxLanes>;
@@ -254,6 +258,7 @@ export function inboxViewBodies(lanes: Lanes, source: ViewSource, snapshotKey?: 
  * `timing`; otherwise it pages the last classification GET /v1/inbox's memo holds.
  */
 export function inboxLegacyView(deps: PanelGraphDeps, clock = systemClock): ViewDefinition<InboxViewData> {
+  let paged: { lanes: Lanes; asOf: string | null; snapshotKey?: string; bodies: Map<string, InboxViewBody> } | undefined;
   return {
     name: INBOX_VIEW_NAME,
     version: INBOX_VIEW_VERSION,
@@ -300,7 +305,12 @@ export function inboxLegacyView(deps: PanelGraphDeps, clock = systemClock): View
       const source = read
         ? inboxStoreSource(read.generatedAt, clock.now() - Date.parse(read.generatedAt) > INBOX_STALE_AFTER_MS ? "stale" : "fresh")
         : inboxStoreSource(clock.iso());
-      const body = inboxViewBodies(inboxLanes(classified, deps.inboxRoot), source, cursor?.snapshotKey).find((b) => b.key === viewKey(params));
+      const lanes = read?.lanes() ?? inboxLanes(classified, deps.inboxRoot);
+      if (!paged || paged.lanes !== lanes || paged.asOf !== source.asOf || paged.snapshotKey !== cursor?.snapshotKey) {
+        paged = { lanes, asOf: source.asOf, snapshotKey: cursor?.snapshotKey,
+          bodies: new Map(inboxViewBodies(lanes, source, cursor?.snapshotKey).map(body => [body.key, body])) };
+      }
+      const body = paged.bodies.get(viewKey(params));
       return body ? { data: body.data, sources: body.sources } : { error: `no such page: ${viewKey(params)}` };
     },
   };

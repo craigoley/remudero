@@ -18,7 +18,7 @@ import { resolveDaemonTarget } from "../src/run-task.js";
  */
 
 const dEnv = { selfOwner: "craigoley", selfRepo: "remudero", repoRoot: "/repo", reposDir: "/root/repos" };
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/daemon.ts", import.meta.url)), "utf8");
 
 function extractFunctionBody(src: string, signature: string): string {
   const start = src.indexOf(signature);
@@ -67,7 +67,7 @@ test("daemonCommand: the retro / auto-triage / github-posture hooks are gated on
   );
   assert.match(
     body,
-    /const autoTriageHooks = target\.isSelf \? buildAutoTriageDaemonHooks\(/,
+    /const autoTriageHooks = target\.isSelf \? \(deps\.buildAutoTriageHooks \?\? buildAutoTriageDaemonHooks\)\(/,
     "the auto-triage hooks must still be gated on target.isSelf",
   );
   assert.match(

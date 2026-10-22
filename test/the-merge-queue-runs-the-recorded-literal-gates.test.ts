@@ -54,6 +54,7 @@ function eventContext(event: "merge_group" | "pull_request"): Ctx {
     "github.sha": event === "merge_group" ? GROUP_SHA : "5e5e000000000000000000000000000000000000",
     "github.event.merge_group.base_sha": event === "merge_group" ? QUEUE_BASE : undefined,
     "github.event.pull_request.head.sha": event === "pull_request" ? PR_HEAD : undefined,
+    "github.event.pull_request.base.sha": event === "pull_request" ? QUEUE_BASE : undefined,
   };
 }
 
@@ -72,18 +73,28 @@ function value(raw: string, ctx: Ctx): string {
   return raw.replace(/\$\{\{\s*([\s\S]*?)\s*\}\}/g, (_, expr: string) => expr.split("||").map((part) => operand(part, ctx)).find((v) => v !== "") ?? "");
 }
 
-/** An `if:` condition: `always()`, `false`, or `a == 'b'` terms joined by `||`. Anything else throws. */
+/** An `if:` condition: `always()`, `false`, or `a == 'b'` or `a != 'b'` terms joined by `||`. Anything else throws. */
 function condition(raw: string | boolean | undefined, ctx: Ctx): boolean {
   if (raw === undefined) return true;
   if (raw === false) return false;
   const expr = unwrap(String(raw));
   if (expr === "always()") return true;
   return expr.split("||").some((term) => {
-    const eq = /^(.*?)==(.*)$/.exec(term.trim());
-    assert.ok(eq, `unsupported if: term '${term.trim()}'`);
-    return operand(eq[1]!, ctx) === operand(eq[2]!, ctx);
+    const comparison = /^(.*?)(==|!=)(.*)$/.exec(term.trim());
+    assert.ok(comparison, `unsupported if: term '${term.trim()}'`);
+    const equal = operand(comparison[1]!, ctx) === operand(comparison[3]!, ctx);
+    return comparison[2] === "==" ? equal : !equal;
   });
 }
+
+test("merge queue expression fixture preserves absent evidence and rejects unsupported syntax", () => {
+  const expression = "steps.dependency-evidence.outputs.digest != ''";
+  assert.equal(condition(expression, {}), false);
+  assert.equal(condition(expression, { "steps.dependency-evidence.outputs.digest": "sealed-digest" }), true);
+  assert.equal(condition("steps.report.outcome == 'success'", { "steps.report.outcome": "success" }), true);
+  assert.equal(condition("steps.report.outcome == 'success'", {}), false);
+  assert.throws(() => condition("steps.report.outcome >= 'success'", {}), /unsupported if/);
+});
 
 // One stub for every tool the job shells out to: it records "<tool> <argv>" (and, for npm, a
 // non-empty BASE_SHA beside it), answers the three calls whose stdout a step reads, and exits 1 for
@@ -93,6 +104,8 @@ tool="$(basename "$0")"
 echo "$tool $*" >> "$CALL_LOG"
 if [ "$tool" = npm ] && [ -n "\${BASE_SHA:-}" ]; then echo "env BASE_SHA=$BASE_SHA" >> "$CALL_LOG"; fi
 case "$tool $*" in
+  "git rev-parse --verify ${QUEUE_BASE}^{commit}"|"git rev-parse --verify HEAD^1^{commit}") echo "${QUEUE_BASE}" ;;
+  "git archive "*) exit 1 ;; # The modeled missing archive fails explicitly on BSD and GNU tar.
   *diff-class.mjs*) echo SOURCE ;;
   *containment-diff-trigger.ts*) echo "matched=false" >> "$GITHUB_OUTPUT" ;;
   *bundled-gate-report.mjs*) echo "$2" ;;
@@ -101,12 +114,12 @@ case "$tool $*" in *"\${FAIL_ON:-@never@}"*) exit 1 ;; esac
 exit 0
 `;
 
-type JobRun = { ran: boolean; calls: Map<string, string[]>; outcomes: Map<string, string>; failures: string[] };
+type JobRun = { ran: boolean; calls: Map<string, string[]>; outcomes: Map<string, string>; failures: string[]; exportedEnv: Record<string, string> };
 
 /** Runs the commitlint job for `event`: its job `if:`, then each step's `if:`, env and real body. */
 function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcomes: Record<string, string | undefined> = {}): JobRun {
   const ctx = eventContext(event);
-  const result: JobRun = { ran: condition(JOB.if, ctx), calls: new Map(), outcomes: new Map(), failures: [] };
+  const result: JobRun = { ran: condition(JOB.if, ctx), calls: new Map(), outcomes: new Map(), failures: [], exportedEnv: {} };
   if (!result.ran) return result;
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5522-`));
   ctx["runner.temp"] = dir;
@@ -140,8 +153,10 @@ function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcom
     if (!step.run) return;
     const log = join(dir, `calls-${index}.log`);
     const output = join(dir, `output-${index}.txt`);
+    const environment = join(dir, `environment-${index}.txt`);
     writeFileSync(log, "");
     writeFileSync(output, "");
+    writeFileSync(environment, "");
     writeFileSync(join(dir, `step-${index}.sh`), step.run);
     const stepEnv = Object.fromEntries(Object.entries(step.env ?? {}).map(([k, v]) => [k, value(String(v), ctx)]));
     const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", join(dir, `step-${index}.sh`)], {
@@ -155,6 +170,7 @@ function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcom
         GITHUB_EVENT_NAME: event,
         GITHUB_REPOSITORY: "o/r",
         GITHUB_OUTPUT: output,
+        GITHUB_ENV: environment,
         RUNNER_TEMP: dir,
         ...(event === "pull_request" ? { GITHUB_BASE_REF: "main", GITHUB_HEAD_REF: "run-x" } : {}),
         ...jobEnv,
@@ -170,10 +186,31 @@ function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcom
       const kv = /^([\w-]+)=(.*)$/.exec(line);
       if (kv) ctx[`steps.${key}.outputs.${kv[1]}`] = kv[2];
     }
+    for (const line of readFileSync(environment, "utf8").split("\n")) {
+      const kv = /^([\w-]+)=(.*)$/.exec(line);
+      if (kv) { jobEnv[kv[1]!] = kv[2]!; result.exportedEnv[kv[1]!] = kv[2]!; }
+    }
     ctx[`steps.${key}.outcome`] = result.outcomes.get(key);
   });
   return result;
 }
+
+test("merge queue revision failure remains unavailable before any archive attempt", () => {
+  const run = runJob("merge_group", "git rev-parse");
+  assert.deepEqual(run.failures, []);
+  assert.deepEqual(run.calls.get("dependency-evidence"), [`git rev-parse --verify ${QUEUE_BASE}^{commit}`],
+    "the fixture failure injection must stop revision resolution before archive execution");
+  assert.match(run.exportedEnv.RMD_CI_DEPENDENCY_EVIDENCE ?? "", /unavailable\.json$/);
+});
+
+test("merge queue fixture executes the unavailable producer without inventing evidence", () => {
+  const run = runJob("merge_group");
+  assert.deepEqual(run.failures, []);
+  assert.equal(run.outcomes.get("dependency-evidence"), "success", "the workflow deliberately preserves UNKNOWN when its producer cannot run");
+  assert.match(run.exportedEnv.RMD_CI_DEPENDENCY_EVIDENCE ?? "", /unavailable\.json$/);
+  assert.equal(run.exportedEnv.RMD_CI_DEPENDENCY_DIGEST, undefined);
+  assert.equal(run.exportedEnv.RMD_CI_DEPENDENCY_PRODUCER_SHA, undefined);
+});
 
 /** The reporter's `report "<name>" ...` lines, each with the step ids whose outcome it reads. */
 function reportLines(): Array<{ name: string; steps: string[] }> {
@@ -196,7 +233,7 @@ function reportLines(): Array<{ name: string; steps: string[] }> {
 
 /** Every check run the reporter posted, as [name, head_sha]. */
 function posted(run: JobRun): Array<[string, string]> {
-  const reporterKey = `#${JOB.steps!.length - 1}`;
+  const reporterKey = JOB.steps!.at(-1)!.id ?? `#${JOB.steps!.length - 1}`;
   return (run.calls.get(reporterKey) ?? [])
     .filter((c) => c.startsWith("gh api ") && c.includes("/check-runs"))
     .map((c) => {
@@ -209,6 +246,7 @@ function posted(run: JobRun): Array<[string, string]> {
 // The argv each base-reading or PR-scoped step reaches today on pull_request, recorded verbatim.
 const PR_ARGV: Record<string, string[]> = {
   install: ["npm ci"],
+  "dependency-evidence": [`git rev-parse --verify ${QUEUE_BASE}^{commit}`, "git rev-parse --verify HEAD^1^{commit}", `git archive ${QUEUE_BASE}`],
   classify: ["git diff --name-only HEAD^1...HEAD", "node scripts/diff-class.mjs --changed-files changed-files.txt"],
   "rule-checks": ["node --import tsx scripts/list-rule-suites.mjs --run"],
   "leak-grep": ["leak-grep.sh "],
@@ -218,7 +256,7 @@ const PR_ARGV: Record<string, string[]> = {
   "jscpd-gate": ["npm run --silent jscpd"],
   claims: ["npm run --silent claims"],
   "assertion-discrimination": ["npm run --silent assertion-discrimination"],
-  "lint-plan": ["npm run --silent lint-plan -- --base HEAD^1"],
+  "lint-plan": ["node --import tsx --input-type=module - HEAD^1"],
   depcruise: ["npm run --silent depcruise"],
   "cycle-ratchet": ["npm run --silent cycle-ratchet"],
   "containment-probe": ["git diff --name-only HEAD^1...HEAD", "node --import tsx .github/scripts/containment-diff-trigger.ts changed-files.txt"],
@@ -242,7 +280,8 @@ test("W1-T5522: a group commit runs the ratchets against the queue base", () => 
   // The five gates the claim names reach the queue base, never HEAD^1 or a live origin/main.
   assert.deepEqual(at("comment-load-ratchet"), [`npm run --silent comment-load-signal -- --base ${QUEUE_BASE}`]);
   assert.deepEqual(at("baseline-monotonic"), [`node scripts/baseline-monotonic-check.mjs --base ${QUEUE_BASE}`]);
-  assert.deepEqual(at("lint-plan"), [`npm run --silent lint-plan -- --base ${QUEUE_BASE}`]);
+  assert.deepEqual(at("lint-plan"), [`node --import tsx --input-type=module - ${QUEUE_BASE}`]);
+  assert.deepEqual(at("dependency-evidence"), [`git rev-parse --verify ${QUEUE_BASE}^{commit}`, `git archive ${QUEUE_BASE}`], "the simulated source archive is absent and the producer must retain UNKNOWN");
   assert.deepEqual(at("task-id-existence"), [`node scripts/task-id-existence-check.mjs --base ${QUEUE_BASE}`]);
   assert.deepEqual(at("source-size"), [`npm run --silent source-size-signal -- --base ${QUEUE_BASE}`]);
   // The diff-reading steps and the CLAUDE.md net-byte comparand read it too.
@@ -278,7 +317,7 @@ test("W1-T5522: the pull_request steps are unchanged and the PR-only steps skip"
   for (const [id, argv] of Object.entries(PR_ARGV)) assert.deepEqual(pr.calls.get(id), argv, id);
   assert.deepEqual(
     [...pr.calls.keys()].filter((k) => !k.startsWith("#")).sort(),
-    Object.keys(PR_ARGV).sort(),
+    [...Object.keys(PR_ARGV), "report-gates"].sort(),
     "every id'd step is pinned above",
   );
   for (const [name, sha] of posted(pr)) assert.equal(sha, PR_HEAD, `${name} still posts on the PR head`);
@@ -291,12 +330,12 @@ test("W1-T5522: the pull_request steps are unchanged and the PR-only steps skip"
   assert.ok(!(group.calls.get("task-id-existence") ?? []).some((c) => c.includes("--require-open-prs")));
   const promptPost = posted(group).filter(([name]) => name === "prompt-surface-gate");
   assert.equal(promptPost.length, 1, "the skipped gate still posts");
-  const promptCall = group.calls.get(`#${JOB.steps!.length - 1}`)!.find((c) => c.includes("name=prompt-surface-gate"))!;
+  const promptCall = group.calls.get(JOB.steps!.at(-1)!.id ?? `#${JOB.steps!.length - 1}`)!.find((c) => c.includes("name=prompt-surface-gate"))!;
   assert.match(promptCall, /conclusion=success/);
   // The title lint left this job (W1-T5695): nothing here posts `commitlint`, on either event.
   assert.ok(!reportLines().some((l) => l.name === "commitlint"));
   // The merge_group arms leave every OTHER step's argv identical to pull_request.
-  const rebased = new Set(["classify", "claude-md-budget-ratchet", "lint-plan", "containment-probe", "prompt-surface-gate", "task-id-existence", "source-size", "comment-load-ratchet", "expiring-fixture-census", "baseline-monotonic"]);
+  const rebased = new Set(["dependency-evidence", "classify", "claude-md-budget-ratchet", "lint-plan", "containment-probe", "prompt-surface-gate", "task-id-existence", "source-size", "comment-load-ratchet", "expiring-fixture-census", "baseline-monotonic"]);
   for (const [id, argv] of Object.entries(PR_ARGV)) if (!rebased.has(id)) assert.deepEqual(group.calls.get(id), argv, id);
 });
 
@@ -304,7 +343,7 @@ test("merge-group reporter refuses an unavailable action setup outcome in the ex
   for (const id of ["checkout", "setup-node"]) {
     const group = runJob("merge_group", "", { [id]: undefined });
     assert.deepEqual(group.failures, [], "the shell steps succeeded, not the unavailable action setup");
-    const posts = group.calls.get(`#${JOB.steps!.length - 1}`)!.filter((call) => call.includes("/check-runs"));
+    const posts = group.calls.get(JOB.steps!.at(-1)!.id ?? `#${JOB.steps!.length - 1}`)!.filter((call) => call.includes("/check-runs"));
     assert.ok(posts.length > 0, "positive control: the real reporter posted gate checks");
     for (const post of posts) {
       assert.match(post, /conclusion=failure/);
@@ -355,7 +394,7 @@ test("W1-T5522: a red comment-load ratchet on the group commit fails the gate", 
   const red = runJob("merge_group", "comment-load-signal");
   assert.equal(red.outcomes.get("comment-load-ratchet"), "failure");
   const conclusions = new Map(
-    red.calls.get(`#${JOB.steps!.length - 1}`)!.map((c) => [/-f name=(\S+)/.exec(c)?.[1], /conclusion=(\w+)/.exec(c)?.[1]]),
+    red.calls.get(JOB.steps!.at(-1)!.id ?? `#${JOB.steps!.length - 1}`)!.map((c) => [/-f name=(\S+)/.exec(c)?.[1], /conclusion=(\w+)/.exec(c)?.[1]]),
   );
   assert.equal(conclusions.get("comment-load-ratchet"), "failure");
   // ...and the merge-group gate, every other required check green, refuses it by name.

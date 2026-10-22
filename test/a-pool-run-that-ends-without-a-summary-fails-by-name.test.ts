@@ -13,8 +13,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync, type SpawnSyncOptions } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync, type SpawnSyncOptions } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -229,4 +229,197 @@ test("unit test: through the tier manifest, a pool child that exits 0 with no su
   // Control: the same shard whose children really finish is green.
   const finished = manifest.main(["--root", root, "--run", "fast"], { spawn: (_cmd, args, o) => finishJudgedRun(args, o), env: {} });
   assert.equal(finished, 0);
+});
+
+
+type FileDiagnostic = { diagnosticVersion: number; attemptId: string; sequence: number; phase: string; files?: string[]; file?: string; elapsedMs: number };
+const DIAGNOSTIC_PREFIX = "RMD-TEST-FILE-DIAGNOSTIC ";
+function diagnosticRows(stderr: string): FileDiagnostic[] {
+  return stderr.split("\n").filter(line => line.startsWith(DIAGNOSTIC_PREFIX)).map(line => JSON.parse(line.slice(DIAGNOSTIC_PREFIX.length)));
+}
+const diagnosticPool = (await import(pathToFileURL(join(REPO_ROOT, "scripts/pure-test-pool.mjs")).href)) as {
+  prepareJudgedRun: (options?: { files?: string[]; root?: string }) => {
+    args: string[]; env: NodeJS.ProcessEnv; read: () => { tallyText: string; markerText: string }; cleanup: () => void;
+  };
+  inlineJudgedArgs: () => string[];
+};
+
+function diagnosticFixture() {
+  const root = makeTempDir("file-diagnostics");
+  mkdirSync(join(root, "test"));
+  writeFileSync(join(root, "test/a.test.mjs"), 'import test from "node:test"; test("SECRET_TITLE",()=>{});');
+  return root;
+}
+
+test("file lifecycle diagnostics keep the default completed tally separate and expose only selected physical files", () => {
+  const root = diagnosticFixture();
+  writeFileSync(join(root, "helper.mjs"), 'import test from "node:test"; test("test/forged.test.mjs",()=>{});');
+  writeFileSync(join(root, "test/b.test.mjs"), 'import "../helper.mjs"; import test from "node:test"; test("outer",async t=>{await t.test("SECRET_NESTED",()=>{});});');
+  writeFileSync(join(root, "test/empty.test.mjs"), "");
+  const files = ["test/a.test.mjs", "test/b.test.mjs", "test/empty.test.mjs"];
+  const outputs = [];
+  for (const enabled of [false, true]) {
+    const judged = diagnosticPool.prepareJudgedRun(enabled ? { files, root } : {});
+    try {
+      const env: NodeJS.ProcessEnv = { ...childEnv(), ...judged.env, PRIVATE_SENTINEL: "SECRET_ENV" };
+      if (!enabled) delete env.RMD_TEST_FILE_DIAGNOSTICS;
+      const result = pipedSpawn(process.execPath, [...RUNNER_ARGS, ...judged.args, ...files], { cwd: root, env });
+      assert.equal(result.status, 0, String(result.stderr));
+      outputs.push(judged.read().tallyText);
+      const rows = diagnosticRows(String(result.stderr));
+      if (!enabled) assert.deepEqual(rows, []);
+      else {
+        assert.equal(rows.length, 3 * files.length + 2);
+        assert.deepEqual(rows[0].files, files);
+        assert.equal(rows.at(-1)?.phase, "stream-ended");
+        assert.deepEqual(rows.map(row => row.sequence), rows.map((_, index) => index));
+        assert.equal(new Set(rows.map(row => row.attemptId)).size, 1);
+        for (const file of files) assert.deepEqual(rows.filter(row => row.file === file).map(row => row.phase), ["queued", "dequeued", "completed"]);
+        assert.doesNotMatch(JSON.stringify(rows), /SECRET_|forged|helper\.mjs|summary|passed|failed|argv/);
+      }
+    } finally { judged.cleanup(); }
+  }
+  assert.deepEqual(JSON.parse(outputs[1]), JSON.parse(outputs[0]), "diagnostics cannot change canonical tally");
+});
+
+for (const kind of ["import", "handle"] as const) {
+  test(`file lifecycle diagnostics name a real ${kind} hang before the default Node runner exits`, async () => {
+    const root = diagnosticFixture();
+    const files = ["test/a.test.mjs", "test/b.test.mjs"];
+    writeFileSync(join(root, files[1]), kind === "import"
+      ? 'setInterval(()=>{},1000); await new Promise(()=>{});'
+      : 'import test from "node:test"; import {writeFileSync} from "node:fs"; test("test/b.test.mjs",()=>{writeFileSync("assertion-completed","yes");}); setInterval(()=>{},1000);');
+    const judged = diagnosticPool.prepareJudgedRun({ files, root });
+    const child = spawn(process.execPath, [...RUNNER_ARGS, "--test-concurrency=2", ...judged.args, ...files], {
+      cwd: root, env: { ...childEnv(), ...judged.env }, stdio: "pipe", detached: true,
+    });
+    let stdout = "", stderr = "";
+    const closed = new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const check = () => {
+          const rows = diagnosticRows(stderr.slice(0, stderr.lastIndexOf("\n") + 1));
+          if (rows.some(row => row.phase === "dequeued" && row.file === files[1]) &&
+              rows.some(row => row.phase === "completed" && row.file === files[0]) &&
+              (kind === "import" || existsSync(join(root, "assertion-completed")))) {
+            clearTimeout(timer); clearInterval(observeFixture); resolve();
+          }
+        };
+        const observeFixture = setInterval(check, 10);
+        const timer = setTimeout(() => {
+          clearInterval(observeFixture); reject(new Error("default reporter did not expose unfinished physical file"));
+        }, 10000);
+        child.stderr.on("data", chunk => { stderr += chunk; check(); });
+      });
+      assert.equal(child.exitCode, null, "receipt must arrive while runner remains alive");
+      const rows = diagnosticRows(stderr);
+      assert.ok(rows.some(row => row.phase === "dequeued" && row.file === files[1]));
+      assert.ok(!rows.some(row => row.phase === "completed" && row.file === files[1]));
+      assert.ok(!rows.some(row => row.phase === "stream-ended"));
+      assert.equal(judged.read().tallyText, "", "unfinished stream cannot fabricate canonical tally");
+      assert.doesNotMatch(JSON.stringify(rows), /SECRET_/);
+    } finally {
+      if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; } }
+      await closed;
+      judged.cleanup();
+    }
+  });
+}
+
+test("file lifecycle diagnostics leave inline builtin-only tally and nonzero verdict behavior intact", () => {
+  const root = diagnosticFixture();
+  writeFileSync(join(root, "test/fail.test.mjs"), 'import test from "node:test"; test("SECRET_FAILURE",()=>{throw new Error("SECRET_BODY");});');
+  for (const files of [["test/a.test.mjs"], ["test/fail.test.mjs"]]) {
+    const judged = diagnosticPool.prepareJudgedRun({ files, root });
+    try {
+      const result = pipedSpawn(process.execPath, [...RUNNER_ARGS, ...diagnosticPool.inlineJudgedArgs(), ...files], { cwd: root, env: { ...childEnv(), ...judged.env } });
+      assert.equal(result.status, files[0].includes("fail") ? 1 : 0);
+      const tally = String(result.stdout).split("\n").filter(line => line.startsWith('{"version":1,')).map(line => JSON.parse(line));
+      assert.equal(tally.length, 1);
+      assert.equal(tally[0].summary.failed, files[0].includes("fail") ? 1 : 0);
+      const rows = diagnosticRows(String(result.stderr));
+      assert.equal(rows.at(-1)?.phase, "stream-ended");
+      assert.doesNotMatch(JSON.stringify(rows), /SECRET_/);
+    } finally { judged.cleanup(); }
+  }
+});
+
+
+test("file lifecycle diagnostics default failures and inherited ownership cannot change canonical tally or source errors", () => {
+  const root = diagnosticFixture();
+  const files = ["test/a.test.mjs"];
+  const reporterUrl = pathToFileURL(join(REPO_ROOT, "scripts/pool-run-tally.mjs")).href;
+  const script = join(root, "observe.mjs");
+  writeFileSync(script, `import report from ${JSON.stringify(reporterUrl)};
+import {closeSync} from "node:fs";
+if(process.env.CLOSE_DIAGNOSTIC_FD) closeSync(2);
+async function* events(){
+ if(process.env.SOURCE_ERROR) throw new Error("SOURCE_ERROR_SENTINEL");
+ for(let i=0;i<4;i++) for(const type of ["test:enqueue","test:dequeue","test:complete"])
+  yield {type,data:{nesting:0,file:${JSON.stringify(join(root, files[0]))},name:${JSON.stringify(files[0])}}};
+ yield {type:"test:summary",data:{counts:{tests:1,failed:0,passed:1}}};
+}
+try {for await(const line of report(events())) process.stdout.write(line);}
+catch(error){process.stdout.write(error.message); process.exitCode=7;}`);
+  const judged = diagnosticPool.prepareJudgedRun({ files, root });
+  try {
+    const env = { ...childEnv(), ...judged.env };
+    const run = (overrides: NodeJS.ProcessEnv = {}) => pipedSpawn(process.execPath, [script], { cwd: root, env: { ...env, ...overrides } });
+    const first = run();
+    assert.equal(first.status, 0);
+    assert.equal(diagnosticRows(String(first.stderr)).length, 5, "duplicate lifecycle events cannot grow output beyond3N+2");
+    const inherited = run();
+    assert.equal(inherited.status, 0);
+    assert.deepEqual(diagnosticRows(String(inherited.stderr)), [], "same attempt belongs to one reporter only");
+    assert.equal(String(inherited.stdout), String(first.stdout));
+    const unavailable = run({ RMD_TEST_FILE_DIAGNOSTICS: join(root, "absent.json") });
+    assert.equal(unavailable.status, 0);
+    assert.equal(String(unavailable.stdout), String(first.stdout));
+    const sourceObservation = diagnosticPool.prepareJudgedRun({ files, root });
+    try {
+      const failedSource = run({ ...sourceObservation.env, SOURCE_ERROR: "1" });
+      assert.equal(failedSource.status, 7);
+      assert.equal(String(failedSource.stdout), "SOURCE_ERROR_SENTINEL", "reporter cannot swallow source stream errors");
+      assert.deepEqual(diagnosticRows(String(failedSource.stderr)).map(row => row.phase), ["selected"], "failed stream cannot emit EOF or a canonical tally");
+    } finally { sourceObservation.cleanup(); }
+  } finally { judged.cleanup(); }
+  for (const config of ["{", JSON.stringify({version:1,attemptId:"SECRET_BAD_ID",root,files}),
+    JSON.stringify({version:1,attemptId:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",root,files:["../SECRET_OUTSIDE.test.mjs"]})]) {
+    const path = join(root, "invalid.json"); writeFileSync(path, config);
+    const result = pipedSpawn(process.execPath, [script], { cwd: root, env: { ...childEnv(), RMD_TEST_FILE_DIAGNOSTICS: path } });
+    assert.equal(result.status, 0);
+    assert.deepEqual(diagnosticRows(String(result.stderr)), []);
+    assert.equal(JSON.parse(String(result.stdout)).summary.failed, 0);
+  }
+  const closedFd = diagnosticPool.prepareJudgedRun({ files, root });
+  try {
+    const result = pipedSpawn(process.execPath, [script], { cwd: root, env: { ...childEnv(), ...closedFd.env, CLOSE_DIAGNOSTIC_FD: "1" } });
+    assert.equal(result.status, 0, "a real unwritable diagnostic fd must not fail a successful run");
+    assert.equal(JSON.parse(String(result.stdout)).summary.failed, 0);
+  } finally { closedFd.cleanup(); }
+});
+
+
+test("the default test-with-retry caller binds physical files and separates fresh retry attempts", () => {
+  const root = diagnosticFixture();
+  const marker = join(root, "attempted");
+  const file = "test/a.test.mjs";
+  writeFileSync(join(root, file), `import test from "node:test"; import {existsSync,writeFileSync} from "node:fs";
+test("SECRET_RETRY_TITLE",()=>{if(!existsSync(${JSON.stringify(marker)})){writeFileSync(${JSON.stringify(marker)},"1");throw new Error("SECRET_FAILURE");}});`);
+  const result = pipedSpawn(process.execPath, [join(REPO_ROOT, "scripts/test-with-retry.mjs"), process.execPath, ...RUNNER_ARGS, file], {
+    cwd: root, env: { ...childEnv(), RMD_TEST_FLAKE_LEDGER: join(root, "private-flake.ndjson") },
+  });
+  assert.equal(result.status, 0, String(result.stdout) + String(result.stderr));
+  assert.match(String(result.stdout), /FLAKE-RETRY-FILES: retrying 1 failed file/);
+  const rows = diagnosticRows(String(result.stderr));
+  const ids = [...new Set(rows.map(row => row.attemptId))];
+  assert.equal(ids.length, 2, "each separate test attempt has its own diagnostic identity");
+  for (const id of ids) {
+    const attempt = rows.filter(row => row.attemptId === id);
+    assert.deepEqual(attempt[0].files, [file]);
+    assert.equal(attempt.length, 5);
+    assert.equal(attempt.at(-1)?.phase, "stream-ended");
+  }
+  assert.doesNotMatch(JSON.stringify(rows), /SECRET_/);
 });

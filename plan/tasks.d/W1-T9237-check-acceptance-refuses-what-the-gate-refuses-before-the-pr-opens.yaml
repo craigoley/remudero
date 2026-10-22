@@ -13,8 +13,8 @@
   files:
     - src/run-task.ts
     - test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts
-  status: queued
-  priority: 2  # every hand filing; each miss costs a red required check and a body edit after the push
+  status: merged
+  priority: 1  # every hand PR; each miss costs a red required check, and on an unfiled PR a human escalation (#13218)
   attempts: 0
   rationale: |
     REPRODUCED 2026-10-13 on origin/main 6732a7690. A body file with one criterion,
@@ -36,6 +36,14 @@
     W1-T3675, the gate side; no head more) and for plan-only + acceptance-author-gate + absent (11 shards on main, none
     about check-acceptance). The open-PR re-check filed beside this task judges a STORED body at a later push; this one
     judges the local body before the PR exists. Control: `acceptance-author-gate` reads 93 shards on main and every head.
+    AMENDED 2026-10-21, the same gap on a second refusal (#13218, an unfiled hand PR). Its criterion 1 was
+    `grep: exec node --enable-source-maps "\$RMD_MAIN_BUNDLE" in bin/rmd`. `rmd check-acceptance` on GitHub's stored body
+    printed "OK — the parser resolves exactly what was written" (2026-10-20T21:25Z); the gate refused it as proof-shape:
+    "target `bin/rmd` names no file" (`grepProofTargetNamesNoFile`, src/lib/review.ts: an extensionless file is refused
+    by design). REPRODUCED 2026-10-21 by running scripts/acceptance-author-gate.mjs on that body at head 2f835beef. On an
+    unfiled PR the body is the only contract, the metadata route found no cure, and the PR waited on needs-human
+    issues #13219 and #13246. Design 1 already covers this refusal, since `authorTimeProofShapeRefusal` runs
+    `parseWhitelistedProof`; the extensionless-file criterion pins it.
   design: |
     1. ONE PREDICATE, NEVER TWO. On the untrailered arm (criteria from the body block), `checkAcceptanceCommand` calls the
        gate's own `authorTimeProofShapeRefusal` path (export it, or a thin exported wrapper, from
@@ -56,9 +64,11 @@
       proof: 'grep: test("W1-T9237: a filing body that copies its task build proof is named as such" in test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts'
     - claim: "a filing body whose grep proofs name the filed shard still passes"
       proof: 'grep: test("W1-T9237: a filing body proving its shard still passes" in test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts'
+    - claim: "a body whose grep proof targets an extensionless file (bin/rmd, #13218) is refused with the gate's proof-shape defect and exit 1"
+      proof: 'grep: test("W1-T9237: a body grep proof naming an extensionless file is refused before the PR opens" in test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts'
     - claim: "the new test file passes"
       proof: "unit test: test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts"
   falsifier: |
-    Remove the call to the gate's body-proof checks: the first test reads OK and exit 0. Refuse every proof on a plan-only
-    diff: the third test fails. Drop the filing-case message: the second test finds the generic target-missing text
-    without the build-proof remedy.
+    Remove the call to the gate's body-proof checks: the first test and the extensionless-file test read OK and exit 0.
+    Refuse every proof on a plan-only diff: the third test fails. Drop the filing-case message: the second test finds
+    the generic target-missing text without the build-proof remedy.

@@ -1,0 +1,126 @@
+- id: W1-T10160
+  title: "Machine-filing judge attempts retain their own monetary producer evidence without inventing prices"
+  repo: remudero
+  depends_on: [W1-T9658]
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  priority: 1.3
+  status: queued
+  attempts: 0
+  origin: "console-gardener-telemetry:default-machine-filing-producer-2026-10-18"
+  plan_refs: [W1-T2383, W1-T8484, W1-T8667, W1-T9494, W1-T9658, W1-T9045]
+  files:
+    - src/run-task.ts
+    - src/lib/spend-rows.ts
+    - src/lib/ledger-steps.ts
+    - test/the-machine-filing-judge-releases-or-escalates.test.ts
+    - test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts
+  rationale: |
+    OBSERVED current-generation retained exposure, not an invoice or proof of all SDK calls:
+    the complete controlled 2026-10-18T12:11:46.145Z–13:12:23.813Z union opened the selected
+    archive and live file, accepted 10224 rows, and had zero unread or malformed inputs.
+    It observed 92 worker.assignment, 92 worker.attempt and 393 garden parent controls.
+    Thirteen assignment-linked machine-judge calls had same-generation parent evidence.
+    Separately, its 68 spendRoleOf-produced rows (including legacy role inference) contained
+    no linked repository-gardener producer. Forty carried a nonnegative price and 28 did
+    not. This is no evidence that gardeners spent zero, nor that all 68 rows were invoices.
+    Native default capture at 12:53:49 independently joined 13 actual machine-judge attempts,
+    eight reported prices and five unknown prices, while the monetary fold correctly kept
+    totalUsd and pricedSubtotalUsd null/correlation_not_available. Cached publication is a
+    separate stale-snapshot defect and must not be confused with this producer omission.
+
+    SOURCE at f3501ab0650a06404cdc6a7d253735bbdfabaaf2:
+    productionMachineFilingJudgePorts constructs realRiskJudge without a spend collector or
+    caller-owned monetary log. This path bypasses runRiskJudge, which emits the existing
+    risk_judge.decision monetary producer. Its benchmark spawn emits assignment/attempt
+    evidence; those receipts intentionally are not additional monetary production.
+    W1-T2383 supplies a different orchestrator's spend. W1-T9658 explicitly preserves money
+    and supplies call coverage only. W1-T9494 propagates parent metadata, not missing producers.
+    W1-T9045 owns calibration/ruling learning, not this monetary write boundary. Do not rebuild
+    those tasks or turn worker.attempt into produced spend globally.
+
+    SUBJECT control at 13:36:20Z read current main and all seven captured-open, currently
+    advertised remote head trees, from 430 advertised branches. Each had 110 broad subject
+    matches with W1-T2383/W1-T9658 controls; no changed subject shard or implementation-path
+    overlap. Caller-specific scope reconciliation found no existing machine-filing monetary
+    producer task. This excludes unpublished and later work; refresh before implementation.
+    Durable audit: console-next-2026-10-11.vddqtI/local/gardener-judge-price-subject-1792330580401.json.
+  design: |
+    Record this caller's existing real worker results at their owning boundary; make no extra
+    model/provider request and change no judgment, retry, mount, prompt, permission or budget.
+    Prefer one bounded, explicitly owned monetary receipt per actual spawn attempt, not a
+    shared accumulator reused across judgments. Reuse benchmarkWorkerAttemptResources and the
+    existing worker accounting/attribution helpers rather than promoting numeric placeholders.
+    Preserve provider, billing mode, reported monetary price and distinct notional price.
+    An absent result, unavailable price, Codex zero placeholder, no-spawn/cache path, admission
+    refusal or throw without measured usage stays explicit unknown/not-started, never measured
+    free or a fabricated successful zero. A genuinely reported zero remains distinguishable.
+
+    Successful, malformed/retried, failed and interrupted attempts must retain what was actually
+    reported without changing the returned ruling or whether later attempts run. Emit a dedicated
+    machine-judge producer identity if no semantically appropriate existing producer owns it;
+    do not emit a synthetic risk_judge.decision implying the dispatch orchestrator ran. Register
+    the real cost-bearing step in the canonical spend and ledger-step inventories. Preserve
+    exact assignment/run/task and bounded gardener parent attribution in the private ledger.
+    No prompts, result text, child environments, credentials or unbounded labels enter this row.
+    Retain log-before-result ordering needed to account a paid malformed attempt, and prevent
+    instrumentation failure from replacing the actual judgment outcome.
+
+    The collector continues using its existing ONE union scan and exact parent/scope/fingerprint
+    controls. Count each owned producer once across plain/gzip/live overlap. Assignment/attempt
+    restatements and terminal verdicts cannot add a second dollar. Do not infer old parentage,
+    turn known-priced subtotal into a complete total, relabel subscription notional as invoices,
+    change existing producer totals, or make request-time HTTP reads scan ledgers. Existing
+    call-coverage counts and the 64-KiB/identity/garden bounds remain unchanged.
+
+    Tests must drive productionMachineFilingJudgePorts with the real default judgment composition
+    and private default ledger writer/collector; fake only the provider result, never make a
+    live paid call. Include multiple consecutive judgments and malformed retries to expose a
+    cumulative shared-collector bug, failed and unstarted attempts, API/subscription/unknown
+    billing, real zero versus unknown, replay and wrong-parent/generation controls. Remove only
+    the new producer forwarding: calls still exist but the monetary join must fail. Promoting
+    worker.attempt globally must fail the no-double-count control. Restore source and require
+    real physical/TAP, caller/census, same-head instrumented diff coverage, full native author,
+    stored canonical acceptance, governed review and current-head CI before normal merge.
+    Verify source merge, loaded adoption, fresh cached API and signed-in UI separately; no
+    service recycle, safety/limit changes, gardener activation or deployment is authorized here.
+  acceptance:
+    - claim: "the default machine-filing composition records each actually executed attempt exactly once"
+      proof: "unit test: W1-T10160: default machine-filing judge emits one owned producer per real attempt"
+    - claim: "failed retried unknown-price and unstarted paths preserve accounting and judgment semantics"
+      proof: "unit test: W1-T10160: retries failures and missing prices preserve monetary evidence"
+    - claim: "default gardener collection joins only canonical owned producers across replay and scope boundaries"
+      proof: "unit test: W1-T10160: default gardener capture joins machine-judge cost without double counting"
+    - claim: "instrumentation cannot change a ruling retry mount permissions or provider execution"
+      proof: "unit test: W1-T10160: price telemetry cannot alter a ruling or spawn policy"
+  falsifier: |
+    Remove only producer forwarding, leaving the real private parent/assignment/attempt corpus
+    intact: monetary producer/join assertions fail while call coverage survives. Reuse one
+    accumulating collector across judgments: the second judgment must fail exact-once amounts.
+    Promote worker.attempt to monetary production or coerce unknown to zero: replay/price controls
+    fail. Restore all source and retain genuine failure/pass receipts on the committed tree.
+  note: |
+    Native reservation refs/rmd-id/W1-T10160 is held by this filing branch; never delete or reuse
+    it if publication is delayed. Machine-authored proposal, not an operator approval or model
+    risk verdict. verify: human retains the existing governed filing judgment boundary until an
+    actual permitted ruling authorizes automated execution. Do not fabricate a ruling pin or
+    create an extra operator Inbox question merely because the author has not run that judgment.
+    The operator explicitly approved this exact telemetry-only filing and implementation scope
+    in the console follow-up chat on 2026-10-18: already-executed machine-filing attempts' reported
+    cost and billing mode, explicit unknown prices, and receipt deduplication. No extra calls or
+    retries, providers, budgets, permissions, service settings or gates are authorized to change.
+    This is operator approval, not a model verdict; the native release and pinned ruling remain
+    separate workflow steps and must retain their actual receipts before publication.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Released by the operator through native rmd approve W1-T10160 after direct approval of the exact existing-call telemetry scope: reported cost and billing mode, explicit unknown prices and deduplication; no added calls/retries/providers/budgets/permissions/services or relaxed review/CI gates."
+    judged_at: "2026-10-18T19:33:41.008Z"
+    pin: "0d5cff903d7295af97500b398a14929887c40ceb9d0c041f700775290c0cbf55"

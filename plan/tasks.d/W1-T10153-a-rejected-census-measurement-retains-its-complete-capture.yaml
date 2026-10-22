@@ -1,0 +1,78 @@
+- id: W1-T10153
+  title: A rejected census measurement retains its complete capture until qualified disposition
+  repo: remudero
+  depends_on: [W1-T10094]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator-authorized validation followthrough 2026-10-18: complete evidence is not qualification"
+  plan_refs: [W1-T9919, W1-T10094, W1-T9796]
+  files: [scripts/census-precheck.mjs, test/census-reader-runtime-calibration.test.ts, test/a-rejected-census-measurement-retains-its-complete-capture.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED on main 19935605997: runCensusChild deletes every outputComplete capture
+    before runCensusSuitesViaChild decides qualification. That later decision can reject
+    changed context, a changed case inventory, an invalid duration, a derived-budget
+    overrun or an unsuccessful result. An outer complete author capture does not restore
+    the deleted child's stdout, stderr and native receipt. One W9796 author run refused
+    on a measured-budget overrun; its exact unchanged base comparison did not reproduce
+    that refusal. Its cause and the deleted measurement's assertion outcome stay UNKNOWN.
+    This is a custody-order defect, not evidence that the bound should change.
+    W10094 owns INCOMPLETE capture survival across producer exit and explicitly keeps
+    complete cleanup unchanged. This separate task waits for its real merge and reuses
+    its retention contract, rather than competing with that task or the W9919 guard owner.
+  design: |
+    1. Keep real child evidence until the maintained reader has made its qualification
+       decision. Delete complete accepted evidence through the existing healthy cleanup;
+       retain only the actual rejected or unqualified measurement and its native metadata.
+       Preserve the original calibration, context, inventory and duration observations.
+       Register retention through W10094's ONE shared contract so the actual tmp-hygiene
+       producer-exit sweep cannot remove evidence the production decision says it retained.
+       Do not create a second retention registry, an inbox scanner or a blanket temp hold.
+    2. Bound ownership to this reader's own capture directory. Do not publish raw capture
+       bytes or paths into public comments. Missing, unreadable, replaced or unwriteable
+       evidence is an explicit custody UNKNOWN, never a test pass or permission to proceed.
+       A real rejected qualification remains rejected with its original reason. Receipt
+       completeness, test success, timing qualification and author verdict stay distinct.
+    3. Prove post-producer-exit custody with the real child/default capture transport and
+       maintained tsx/tmp-hygiene preload, not a mocked filesystem existence check alone.
+       Exercise complete-child context, inventory and timing refusals plus failed/missing
+       results; accepted complete and explicitly retained incomplete controls must retain
+       their respective cleanup/custody behavior. Cover each new default IO and catch arm.
+       Tests may deterministically drive refusal inputs; they must not retag that replay
+       as the historical overrun's cause or use real long waits to obtain a lucky verdict.
+    4. Delete the actual production retention forwarding to fail the fresh-process proof,
+       then restore exact source to pass. Clean only expected owned diagnostic fixtures;
+       retain unexpected failure evidence. Source-map every changed supported source SF.
+       Register a-rejected-census-measurement-retains-its-complete-capture.test.ts
+       in PRECHECK_PARITY with its actual source triggers.
+    5. Fresh merged trailer/run-branch credit, ALL OPEN subject blobs, package selector and
+       ordinary ownership precede build/publication. Respect W9919/W10094 ownership and
+       merge order. Any newly required out-of-scope edit needs a normally merged companion
+       first. Commit before shipped-slot tests; reconcile every native failure on that
+       run's actual unchanged pinned base. Verify canonical stored proofs and normal
+       current-head hosted CI/review/merge. Never retry an unchanged refused author tree.
+    6. No timing, calibration, admission, worker, retry, scanner, baseline or gate change
+       or waiver. No source primitive rename to evade a detector. All registry/admission
+       remains opt-in SHADOW ONLY with independent owner/admin override and trusted flow.
+       No schedule, worker stop, deployment, live policy/config/credential/settings/infra
+       change or external closure. This source repair does not diagnose the old refusal.
+  acceptance:
+    - claim: Complete rejected measurement evidence survives its actual producer exit
+      proof: 'unit test: a rejected complete census measurement survives producer exit'
+    - claim: Accepted complete cleanup and retained incomplete custody remain independent
+      proof: 'unit test: census qualification custody preserves healthy and incomplete controls'
+    - claim: Missing or unreadable custody never changes a refused result into a pass
+      proof: 'unit test: complete census custody failures remain unknown without admission changes'
+    - claim: Actual decision-boundary retention is load-bearing rather than metadata decoration
+      proof: 'unit test: rejected census measurement retention forwarding is load-bearing'
+  falsifier: |
+    At base the capture is already gone when a later qualification decision rejects it.
+    A fresh-process real-child test must see that loss despite a complete outer receipt.
+    Removing the actual production forwarding must restore the semantic failure; restoring
+    it must pass while the accepted complete capture is still cleaned. No time bound moves.

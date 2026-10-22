@@ -1,0 +1,56 @@
+- id: W1-T10422
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts cost 9.9 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.57
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts"
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/check-test-test-w1-t4025-adaptive-lifetime-dispatch-flow-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts"
+      proof: "grep: test(\"W1-T10422: check:test:test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts is prevented, not retried\" in test/daemon/check-test-test-w1-t4025-adaptive-lifetime-dispatch-flow-test-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts cost 9.9 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/daemon.ts: test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts imports it
+    - test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts: named by the failing check
+    - the rounds name a failing test: test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12825 (https://github.com/craigoley/remudero/pull/12825) at 2026-10-18T20:17:48.004Z: ci-log round — coverage-shard (8/8): test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts
+        failing tests: W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame, unit test: W1-T4025 lifetime signal remains observable without a terminal cap; unit test: W1-T4025 lifetime signal remains observable without a terminal cap
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame, unit test: W1-T4025 lifetime signal remains observable without a terminal cap
+          | not ok 3 - unit test: W1-T4025 lifetime signal remains observable without a terminal cap
+          |   ---
+          |   duration_ms: 20.468279
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts:82:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     the signal remains observable for adaptive routing
+          |     + actual - expected
+          | 
+          |       [
+          | 
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The supplied evidence establishes one failing round and its cost, but provides no root-cause diagnosis or specified corrective mechanism for the proposed daemon change.; on the change's description/files alone, no diff was read — Acceptance checks for a test-title string with grep; that proof alone cannot verify the claimed prevention or self-healing of the failing round. The gates explicitly require escalation when the finding cannot be verified from what is shown."
+    judged_at: "2026-10-22T17:52:40.530Z"
+    pin: "1aee22f05057273ff0ab02c9aa82acaa4a7c56775012e00a564e8b9bf0eaba6c"

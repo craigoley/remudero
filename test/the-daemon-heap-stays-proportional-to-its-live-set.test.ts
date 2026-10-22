@@ -88,7 +88,7 @@ test("applyDaemonMemoryPolicy sets the growth flag and strips only the heap ceil
   const result = applyDaemonMemoryPolicy({ ...DEFAULT_DAEMON_MEMORY_POLICY, heapGrowingPercent: 40 }, { setFlags: (f) => flags.push(f), env });
   assert.deepEqual(flags, ["--heap-growing-percent=40"]);
   assert.equal(env.NODE_OPTIONS, "--enable-source-maps");
-  assert.deepEqual(result, { heap_growing_percent: 40, node_options_before: "--max-old-space-size=8192 --enable-source-maps", node_options_children: "--enable-source-maps" });
+  assert.deepEqual(result, { heap_growing_percent: 40, child_node_args: ["--heap-growing-percent=40"], node_options_before: "--max-old-space-size=8192 --enable-source-maps", node_options_children: "--enable-source-maps" });
 
   const only: NodeJS.ProcessEnv = { NODE_OPTIONS: "--max-old-space-size=8192" };
   applyDaemonMemoryPolicy(DEFAULT_DAEMON_MEMORY_POLICY, { setFlags: () => {}, env: only });
@@ -96,6 +96,25 @@ test("applyDaemonMemoryPolicy sets the growth flag and strips only the heap ceil
 
   assert.equal(withoutHeapCeiling("--max_old_space_size=4096 --max-old-space-size 8192 --trace-warnings"), "--trace-warnings");
   assert.equal(withoutHeapCeiling(undefined), undefined);
+});
+
+test("operator ruling 2026-10-19: the memory policy row names the malloc tuning, and children keep the semi-space flag", () => {
+  const env: NodeJS.ProcessEnv = {
+    NODE_OPTIONS: "--max-old-space-size=8192 --max-semi-space-size=16",
+    GLIBC_TUNABLES: "glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072",
+  };
+  const result = applyDaemonMemoryPolicy(DEFAULT_DAEMON_MEMORY_POLICY, { setFlags: () => {}, env });
+  assert.equal(env.NODE_OPTIONS, "--max-semi-space-size=16", "only the heap ceiling leaves the children's NODE_OPTIONS");
+  assert.deepEqual(result, {
+    heap_growing_percent: DEFAULT_DAEMON_MEMORY_POLICY.heapGrowingPercent,
+    child_node_args: [`--heap-growing-percent=${DEFAULT_DAEMON_MEMORY_POLICY.heapGrowingPercent}`],
+    node_options_before: "--max-old-space-size=8192 --max-semi-space-size=16",
+    node_options_children: "--max-semi-space-size=16",
+    glibc_tunables: "glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072",
+  });
+  assert.equal(env.GLIBC_TUNABLES, "glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072", "the tuning is recorded, never removed");
+  const none = applyDaemonMemoryPolicy(DEFAULT_DAEMON_MEMORY_POLICY, { setFlags: () => {}, env: {} });
+  assert.equal("glibc_tunables" in none, false, "a launch that set none records none, never an empty string");
 });
 
 test("a child spawned after the entry no longer carries the 8192 MB ceiling, while the daemon keeps its own", () => {
@@ -200,6 +219,7 @@ test("the daemon loop drains and restarts on the cgroup share while V8's own lim
   const flags: string[] = [];
   let idles = 0;
   const reading: DaemonMemoryReading = { rss_bytes: 3.9 * GB, swap_bytes: 1.5 * GB, budget_bytes: HIGH, budget_source: "memory.high" };
+  let readings = 0;
   try {
     const summary = await runDaemon(loadPlan(planPath), {
       refreshMerged: () => () => false,
@@ -210,14 +230,17 @@ test("the daemon loop drains and restarts on the cgroup share while V8's own lim
         if (++idles > 5) throw new Error("five idle ticks and no restart");
       },
       heapStatistics: () => ({ used_heap_size: 1.2 * GB, heap_size_limit: 8 * GB }),
-      memoryGovernor: createDaemonMemoryGovernor({ read: () => reading, setFlags: (f) => flags.push(f) }),
+      memoryGovernor: createDaemonMemoryGovernor({
+        read: () => ++readings === 1 ? { ...reading, rss_bytes: 0.2 * HIGH, swap_bytes: 0 } : reading,
+        setFlags: (f) => flags.push(f),
+      }),
       log: (step, extra = {}) => rows.push({ step, extra }),
     }, { pollIntervalMs: 1 });
     assert.equal(summary.stopReason, "heap_pressure");
     assert.match(String(summary.stopDetail), /of the container's memory\.high/);
     assert.deepEqual(flags, ["--heap-growing-percent=10"], "the tightest factor was tried first");
     const pressure = rows.filter((r) => r.step === "daemon.memory_pressure").map((r) => r.extra.tier);
-    assert.deepEqual(pressure, ["tighten", "restart"]);
+    assert.deepEqual(pressure, ["clear", "tighten", "restart"], "the first unchanged clear decision is observable too");
     const exit = rows.find((r) => r.step === "daemon.heap_pressure_exit");
     assert.equal(exit?.extra.basis, "cgroup_share");
     assert.equal(exit?.extra.budget_bytes, HIGH);

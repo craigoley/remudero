@@ -277,6 +277,8 @@ export interface TestSlotHolder {
   ownerUid?: number;
   /** Sticky once work uses a marker: withdrawing a cadence must not restore parent-pid-only recovery. */
   workIdentity?: "reservation-marker-v1";
+  /** Scope observed before publication (dedicated: only our group and our own ancestors); shared or unproven never ends. */
+  cgroupScope?: { path: string; dedicated: boolean; reason?: string };
 }
 
 /** Identity a complete run monitor must name in its terminal evidence. */
@@ -334,16 +336,97 @@ export interface ReservedTreeProbeHost {
   hostname?: () => string;
   list?: () => string[];
   read?: (path: string) => string;
+  readCgroup?: (path: string) => string;
 }
 
 const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code));
+const dedicatedScopePath = (path: unknown): path is string => typeof path === "string" &&
+  /^\/(?:[^/\0\n]+\/)*[^/\0\n]+\.scope$/.test(path) && !path.split("/").some(part => part === "." || part === "..");
+
+/**
+ * Record our cgroup v2 membership. A scope is dedicated when every member is in our process group or is one of our
+ * own ancestors: a builder's `systemd-run --scope timeout … job.sh` puts the wrapper `timeout`s (each takes a new
+ * group) and the job script in the scope with the owner (W1-T10251). Any other member makes the scope shared.
+ */
+export function readTestSlotCgroup(host: ReservedTreeProbeHost = {}): TestSlotHolder["cgroupScope"] {
+  if ((host.platform ?? process.platform) !== "linux") return undefined;
+  const read = host.read ?? ((path: string) => readFileSync(path, "utf8"));
+  const readCgroup = host.readCgroup ?? read;
+  const statFields = (raw: string): string[] | undefined => raw.includes(") ") ? raw.slice(raw.lastIndexOf(") ") + 2).trim().split(/\s+/) : undefined;
+  let path = "";
+  try {
+    path = /^0::([^\n]+)$/m.exec(read("/proc/self/cgroup"))?.[1] ?? "";
+    if (!dedicatedScopePath(path)) return { path, dedicated: false, reason: "not a dedicated cgroup v2 scope" };
+    const self = statFields(read("/proc/self/stat"));
+    const group = self?.[2];
+    if (!/^[1-9][0-9]*$/.test(group ?? "")) throw new Error("owner process group unproven");
+    const members = readCgroup(`/sys/fs/cgroup${path}/cgroup.procs`).trim().split(/\s+/);
+    if (!members.includes(String(process.pid))) throw new Error("scope does not contain this owner");
+    let ancestors: Set<string> | undefined;
+    const ancestorsOfOwner = (): Set<string> => {
+      const chain = new Set<string>();
+      // The parent chain ends at pid 0; an unreadable link throws below, which records the scope as unproven.
+      for (let parent = self?.[1]; parent !== undefined && /^[1-9][0-9]*$/.test(parent) && !chain.has(parent);) {
+        chain.add(parent);
+        parent = statFields(read(`/proc/${parent}/stat`))?.[1];
+      }
+      return chain;
+    };
+    for (const pid of members) {
+      if (!/^[1-9][0-9]*$/.test(pid)) throw new Error("invalid scope member");
+      const member = statFields(read(`/proc/${pid}/stat`));
+      if (member?.[2] === group) continue;
+      if (member !== undefined && (ancestors ??= ancestorsOfOwner()).has(pid)) continue;
+      return { path, dedicated: false, reason: "scope contains another process group" };
+    }
+    return { path, dedicated: true };
+  } catch (error) {
+    return { path, dedicated: false, reason: `scope dedication unproven: ${String(error)}` };
+  }
+}
+
+function probeCgroupScope(held: TestSlotHolder, ownerStart: number, read: (path: string) => string,
+  readCgroup: (path: string) => string): ReservedTreeEvidence | undefined {
+  if (held.cgroupScope?.dedicated !== true || !dedicatedScopePath(held.cgroupScope.path)) return undefined;
+  const unknown = (reason: string): ReservedTreeEvidence => ({ state: "unknown", coverage: "cgroup-scope", reason });
+  try {
+    const raw = read(`/proc/${held.pid}/stat`);
+    const start = raw.slice(raw.lastIndexOf(") ") + 2).trim().split(/\s+/)[19];
+    if (!raw.includes(") ") || !/^[1-9][0-9]*$/.test(start ?? "")) return unknown("owner process start unreadable");
+    if (Number(start) === ownerStart) return { state: "live", coverage: "cgroup-scope", reason: "recorded owner is alive" };
+  } catch (error) {
+    if (!goneProcess(error)) {
+      const reason = `owner death unproven: ${String(error)}`;
+      return unknown(reason);
+    }
+  }
+  const scope = `/sys/fs/cgroup${held.cgroupScope.path}`;
+  let reason: string;
+  try {
+    const procs = readCgroup(`${scope}/cgroup.procs`).trim();
+    if (procs !== "") return { state: "live", coverage: "cgroup-scope", reason: "dedicated scope still holds processes" };
+    // populated covers descendant cgroups too; an empty parent's procs alone is insufficient.
+    const populated = /^populated ([01])$/m.exec(readCgroup(`${scope}/cgroup.events`))?.[1];
+    if (populated === "1") return { state: "live", coverage: "cgroup-scope", reason: "dedicated scope still holds descendant work" };
+    if (populated !== "0") return unknown("dedicated scope population unreadable");
+    reason = "owner gone and dedicated scope is empty";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      const reason = `scope quiescence unproven: ${String(error)}`;
+      return unknown(reason);
+    }
+    reason = "owner gone and dedicated scope is absent";
+  }
+  return { state: "ended", complete: true, coverage: "cgroup-scope", reason, reservation: testSlotReservationIdentity(held) };
+}
 
 /**
  * Exact-tree evidence for one reservation (W1-T9928). The tree is the recorded owner (pid + kernel start)
  * plus every process carrying this reservation's parent claim, which reparented and detached descendants
  * inherit. Seeing a marker proves live work; its absence cannot prove complete coverage: exec can
  * replace an environment, and a process can fork during a scan. Without an independent complete run
- * monitor this probe therefore returns `unknown`, never terminal evidence, when it sees no live work.
+ * monitor this probe returns `unknown` when it sees no live work. A recorded dedicated cgroup scope
+ * supplies complete coverage once the owner is gone and the scope is absent or unpopulated.
  */
 export function probeReservedTree(held: TestSlotHolder, host: ReservedTreeProbeHost = {}): ReservedTreeEvidence {
   const platform = host.platform ?? process.platform;
@@ -358,6 +441,8 @@ export function probeReservedTree(held: TestSlotHolder, host: ReservedTreeProbeH
   const ownerStart = Number(held.processStart!.slice("proc:".length));
   if (!Number.isSafeInteger(ownerStart) || ownerStart < 1) return unknown("invalid kernel process start");
   const read = host.read ?? ((path: string) => readFileSync(path, "utf8"));
+  const scopeEvidence = probeCgroupScope(held, ownerStart, read, host.readCgroup ?? read);
+  if (scopeEvidence && scopeEvidence.state !== "unknown") return scopeEvidence;
   let pids: string[];
   try { pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name)); }
   catch (error) { return unknown(`process table unreadable: ${String(error)}`); }
@@ -1018,6 +1103,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   const record = (): TestSlotHolder => ({
     pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: startedIso,
     heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency, pidNs: pidNamespace(), ownerUid: process.getuid?.(),
+    cgroupScope: readTestSlotCgroup({ platform: opts.platform }),
     ...(ownPeak() === undefined ? {} : { memoryBytes: ownPeak() }),
     ...(files ? { filePeaks: files } : {}), ...(privateWriter ? { ownershipProtocol: "private-capacity-v1" as const } : {}),
   });

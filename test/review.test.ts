@@ -9,6 +9,9 @@ import { fileURLToPath } from "node:url";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
+  reviewContractDigest,
+  reviewDecisionDigest,
+  reviewTaskNarrative,
   applyVerdictStability,
   buildReviewPrompt,
   cappedAnnotation,
@@ -63,6 +66,7 @@ import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
 // spawning the real CLI — matches the pattern test/isolation-wiring.test.ts
 // and test/mounts-wiring.test.ts already use for this exact file.
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskVerbSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 // ── Recorded fixtures (acceptance #2, the FALSIFIER) ────────────────────────
 // The verdict LOGIC is a PURE function so the falsifier is a unit fixture: a
@@ -382,7 +386,7 @@ test("a semantic PASS cannot rescue an unpasted proof (proof must be pasted, not
   assert.equal(v.state, "failure");
 });
 
-test("parseReviewerVerdicts: FAIL downgrades that index; PASS/absent stay undefined (advisory floor)", () => {
+test("parseReviewerVerdicts: FAIL downgrades; PASS is observed and absent stays undefined", () => {
   const text = [
     "REPORT",
     "REVIEW_VERDICT 1: PASS — proof pasted",
@@ -390,7 +394,7 @@ test("parseReviewerVerdicts: FAIL downgrades that index; PASS/absent stay undefi
     "posted remudero-review=failure",
   ].join("\n");
   const s = parseReviewerVerdicts(text, 3);
-  assert.deepEqual(s, [undefined, false, undefined]);
+  assert.deepEqual(s, [true, false, undefined]);
 });
 
 test("parseReviewerVerdicts: unparseable reviewer output leaves the floor untouched (all undefined)", () => {
@@ -2263,7 +2267,7 @@ test("W1-T229: an operator override arms a capped, NON-tdd:strict verdict too (t
 // explicit carve-out (W1-T205) trips this test instead of silently stalling every retro/
 // triage/plan/approve PR.
 test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/triage/plan/approve/dep-review) arm auto-merge directly, never through the raised decideAutoMergeArm/resolveAutoMergeArm floor — so the plan lane does not stall", () => {
-  const resolveCallCount = (runTaskSrc.match(/resolveAutoMergeArm\(/g) ?? []).length;
+  const resolveCallCount = [runTaskSrc, runTaskVerbSrc].reduce((count, source) => count + (source.match(/resolveAutoMergeArm\(/g) ?? []).length, 0);
   // Exactly one production call site: runTask's own "implement" flow, right before its
   // own direct armAutoMerge(...) call. Every OTHER armAutoMerge(...) call in the file
   // (retro/triage/plan/approve/dep-review/sweep) must NOT be preceded by a
@@ -3433,4 +3437,42 @@ test("W1-T1085: reviewCommand stops telling a plan-only PR it is uncertified and
   const codePr = (await runReviewCommandCapturing(false)).join("\n");
   assert.match(codePr, /CAPPED: not certified/);
   assert.match(codePr, /--override-capped-by/);
+});
+
+
+test("review task narrative binds the prompt and contract without changing legacy identities", () => {
+  const contract = {
+    taskId: "W1-NARRATIVE",
+    acceptance: [{ claim: "the cache is repaired", proof: "unit test: existing cache control" }],
+    declaredFiles: ["src/lib/cache.ts"], risk: "low" as const, budgetUsd: 1,
+    policyRevision: "fixture-policy", engineRevision: "fixture-engine",
+  };
+  const legacy = reviewContractDigest(contract);
+  assert.equal(legacy, "contract-v1:253a11734da6d4f71168fd20fc7e184f4b218dfe5693e228f17bb102e488c6bd");
+  assert.equal(reviewContractDigest({ ...contract, design: "", amendment: "" }), legacy);
+  const narrative = { design: "Preserve the original assertions.\nVerify publication failures.", amendment: "Only the two approved companions may change." };
+  assert.deepEqual(reviewTaskNarrative(narrative), narrative);
+  const amended = reviewContractDigest({ ...contract, ...narrative });
+  assert.notEqual(amended, legacy);
+  assert.notEqual(reviewContractDigest({ ...contract, ...narrative, amendment: "A different ruling." }), amended);
+  assert.notEqual(reviewContractDigest({ ...contract, design: narrative.design }), amended);
+  const decision = { headSha: "a".repeat(40), diff: "diff", report: "report", body: "body", acceptance: contract.acceptance, declaredFiles: contract.declaredFiles, policyRevision: "fixture-policy", engineRevision: "fixture-engine" };
+  const legacyDecision = reviewDecisionDigest(decision);
+  assert.equal(legacyDecision, "v2:5135a5ed1dcf2fac6eefebf2b9ee6c1e3359d30a61a03f1c26bc339ea4ec7802");
+  assert.equal(reviewDecisionDigest({ ...decision, design: "", amendment: "" }), legacyDecision);
+  const amendedDecision = reviewDecisionDigest({ ...decision, ...narrative });
+  assert.notEqual(amendedDecision, legacyDecision);
+  assert.notEqual(reviewDecisionDigest({ ...decision, ...narrative, amendment: "A different ruling." }), amendedDecision);
+
+  const input = { task: { id: contract.taskId, acceptance: contract.acceptance }, prUrl: "https://github.com/o/r/pull/1", owner: "o", repo: "r", headSha: "a".repeat(40) };
+  const prompt = buildReviewPrompt({ ...input, task: { ...input.task, ...narrative } });
+  assert.ok(prompt.includes(narrative.design));
+  assert.ok(prompt.includes(narrative.amendment));
+  assert.ok(!buildReviewPrompt(input).includes("AUTHORITATIVE TASK DESIGN AT THIS HEAD:"));
+  for (const invalid of [{ design: null }, { amendment: {} }, { narrativeUnavailable: true as const }]) {
+    assert.equal(reviewTaskNarrative(invalid), undefined);
+    assert.throws(() => reviewContractDigest({ ...contract, ...invalid }), /narrative is unavailable/);
+    assert.throws(() => reviewDecisionDigest({ ...decision, ...invalid }), /narrative is unavailable/);
+    assert.throws(() => buildReviewPrompt({ ...input, task: { ...input.task, ...invalid } }), /narrative is unavailable/);
+  }
 });

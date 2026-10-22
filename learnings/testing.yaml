@@ -93,7 +93,8 @@
 
 - id: position-is-presentation-not-identity
   subsystem: evidence
-  lifecycle: active
+  # knowledge gardener: retire position-is-presentation-not-identity
+  lifecycle: superseded
   files: []
   symbols: [mkdtemp]
   error_signatures: ["<file>:<line>", line number]

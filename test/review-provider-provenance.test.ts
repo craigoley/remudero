@@ -311,7 +311,8 @@ test("W1-T2594: the production review command resolves and ledgers provenance fo
 });
 
 test("W1-T2594: production ordering records only after ownership/push and before the next gate", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
+  const fixSource = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
 
   const implementStart = source.indexOf('say("implement worker")');
   const implementSnapshot = source.indexOf("const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath)", implementStart);
@@ -326,17 +327,19 @@ test("W1-T2594: production ordering records only after ownership/push and before
   const opened = source.indexOf('log("pr.opened"', ownership);
   assert.ok(implementEvidence < ownership && ownership < implementationClaim && implementationClaim < opened);
 
-  const fixSnapshot = source.indexOf("const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath)");
+  const fixSnapshot = fixSource.indexOf("const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath)");
+  const fixPushBase = fixSource.indexOf("const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;", fixSnapshot);
   // W1-T5682: the fix spawn is wrapped so predecessor transcripts are staged readable first; the wrapper
   // still awaits spawnFixWorkerBounded, so the ordering this test pins is unchanged.
-  const fixSpawn = source.indexOf("const spawnOutcome = await withPredecessorTranscriptCopies(fixArgs", fixSnapshot);
-  const fixEvidence = source.indexOf("const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath", fixSpawn);
-  const fixPush = source.indexOf("roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined)", fixEvidence);
-  const fixClaim = source.indexOf("recordHeadProviderAfterPush(", fixPush);
-  const fixCi = source.indexOf("deps.waitForCiGreen(opts.prUrl", fixPush);
+  const fixSpawn = fixSource.indexOf("const spawnOutcome = await withPredecessorTranscriptCopies(fixArgs", fixSnapshot);
+  const fixEvidence = fixSource.indexOf("const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath", fixSpawn);
+  const fixPush = fixSource.indexOf("roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined)", fixEvidence);
+  const fixClaim = fixSource.indexOf("recordHeadProviderAfterPush(", fixPush);
+  const fixCi = fixSource.indexOf("deps.waitForCiGreen(opts.prUrl", fixPush);
   assert.ok(
     fixSnapshot >= 0 &&
-      fixSnapshot < fixSpawn &&
+      fixSnapshot < fixPushBase &&
+      fixPushBase < fixSpawn &&
       fixSpawn < fixEvidence &&
       fixEvidence < fixPush &&
       fixPush < fixClaim &&

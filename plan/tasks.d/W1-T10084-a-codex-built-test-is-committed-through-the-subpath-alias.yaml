@@ -1,0 +1,86 @@
+- id: W1-T10084
+  title: "A CODEX-BUILT TEST IS COMMITTED THROUGH THE SUBPATH ALIAS — W1-T10064 rewrites an added test's `../src` imports inside `commitWorkerEdits`, but a Codex writer's edits are committed by `commitCodexWriterEdits` (src/lib/worker-provider.ts) with a bare `git add -A` + `git commit`, and the run's `harnessCommitForShellLessWorker` then returns early on `commitCount !== 0`, so no Codex-built test is ever rewritten; on 2026-10-17 Codex is the fleet's main writer capacity (Claude at its weekly limit, the cash cap spent)"
+  repo: remudero
+  depends_on: [W1-T10064]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the Codex harness commit applies the same added-test alias rewrite as commitWorkerEdits; what it stages, its refusal outcomes, the codemod and the census are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 session builder B55, from the W1-T10064 build (#12650, B52): the rewrite sits on one of the two harness commit paths"
+  plan_refs: [W1-T10064, W1-T10063, W1-T9864, W1-T6148, W1-T9667]
+  files:
+    - src/lib/added-test-alias-rewrite.ts
+    - src/run-task.ts
+    - src/lib/worker-provider.ts
+    - test/a-codex-built-test-is-committed-through-the-subpath-alias.test.ts
+  status: merged
+  priority: 1  # Codex carries most of today's builds, so most new tests still reach the W1-T9864 census unrewritten
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17: #12582, #12601, #12604 and #12600 went red on test/a-test-imports-through-the-subpath-alias.test.ts
+    ("W1-T9864: a new test file carries no location-relative specifier"). W1-T10064 (#12650, open) fixes it by rewriting an
+    added test's relative imports in `commitWorkerEdits`, and its shard reads that function as "the one harness commit both
+    lanes use". It is not the only one.
+    READ at origin/main bb7951805 and the #12650 head 25c409430 (symbols, not lines):
+    - src/lib/worker-provider.ts `commitCodexWriterEdits(cwd, text)` is the Codex writer's harness commit (W1-T6148). The
+      Codex spawn calls it when `codexHarnessCommits(args)` holds and the run did not error. It runs
+      `hostWorktreeGit(cwd, ["status", "--porcelain"])`, then `["add", "-A"]`, then `["commit", "-q", "-m", subject]`, and
+      returns `{ outcome: "committed", sha }`. It never calls `commitWorkerEdits` or any rewrite, and #12650 does not
+      touch worker-provider.ts (`git diff origin/main...25c409430 --stat`: src/run-task.ts and its test only).
+    - src/run-task.ts `harnessCommitForShellLessWorker` opens with
+      `if (!input.harnessOwnsGit || input.commitCount !== 0) return input.commitCount;`. After a Codex harness commit
+      `commitCount` is at least 1, so `commitWorkerEdits` (and #12650's `rewriteAddedTestImports` inside it) never runs for
+      a Codex-built implement run. The repair lanes (`landHarnessCommit`, W1-T9667) push the Codex commit as is.
+    - #12650's `rewriteAddedTestImports(repoDir, status, staged, runGit, rewrite)` and `aliasRewriteFields` are defined in
+      src/run-task.ts, which src/lib/worker-provider.ts cannot import (lib never imports the CLI module).
+    WHY NOW: Claude is at its weekly limit and the cash cap is spent, so Codex writers carry most of today's builds, and
+    every Codex-built PR with a new test still pays the CI round W1-T10064 exists to remove.
+    WHY THIS IS NOT ANOTHER TASK: W1-T10064 rewrites on the `commitWorkerEdits` path only. W1-T10063 makes the census
+    visible before a push. W1-T9865..W1-T9868 migrate existing tests. Swept origin/main plan/tasks.d for
+    commitCodexWriterEdits (W1-T8677, W1-T9667: an error event and the repair push, neither rewrites), rewriteAddedTestImports
+    and test-location-codemod, and the plan diffs of all 435 open heads (20:15Z): none rewrites on the Codex commit.
+  design: |
+    1. ONE SHARED HELPER, NOT A SECOND COPY. Move #12650's `rewriteAddedTestImports`, `TestAliasRewriter`,
+       `AddedTestAliasRewrite`, `aliasRewriteFields` and the `rewriteSource` import of scripts/test-location-codemod.mjs out
+       of src/run-task.ts into src/lib/added-test-alias-rewrite.ts. The `MERGE_HEAD` check it needs moves with it, or takes
+       a predicate argument. src/run-task.ts imports it from there and re-exports the names its tests import, so
+       `commitWorkerEdits` and W1-T10064's test are unchanged.
+    2. `commitCodexWriterEdits` reads `["status", "--porcelain", "-z", "--untracked-files=all"]`. When that is non-empty, it
+       calls the shared `rewriteAddedTestImports(cwd, status, <every path in that status>, <a runner over hostWorktreeGit(cwd, ...)>)`
+       before `["add", "-A"]`. The empty-status `nothing-to-commit` outcome is kept. Codex stages every change, so every
+       changed path is a candidate, and the helper still narrows to `??`/`A` test files under test/ absent from MERGE_HEAD.
+    3. The `committed` outcome carries `aliasRewrite` when it is non-empty. The Codex spawn already ledgers
+       `worker.output_truncated` through `appendLedger(ledgerPathFor(config), ...)` when `args.runId` is set. In the same
+       way it writes ONE `codex.harness_commit` row: run_id, task_id, outcome, sha, and `aliasRewriteFields(...)`. The
+       effect is then measurable off the ledger. Register the step wherever the ledger-step censuses require it.
+    4. A rewrite that throws is named in `alias_rewrite_failed`, and the commit proceeds with the file as the worker wrote
+       it, exactly as in W1-T10064. The census still judges it.
+    5. TESTS in test/a-codex-built-test-is-committed-through-the-subpath-alias.test.ts, with `test(` titles verbatim as in
+       the proofs. Each runs over a harness-cut temp worktree (the gitRepo() fixture plus the recorded worktree gitdir
+       `commitCodexWriterEdits` requires; read worker-provider's own tests for how they cut one):
+       (a) a Codex writer that added test/a.test.ts importing `../src/lib/x.js` produces a commit whose blob imports
+       `#src/lib/x.js`;
+       (b) an existing test that imports `../src` is committed byte-identical;
+       (c) `commitCodexWriterEdits` calls the shared `rewriteAddedTestImports(` itself; that call site is the third proof,
+       a grep of worker-provider.ts that reads 0 at base.
+  acceptance:
+    - claim: "a test file a Codex writer added is committed with its relative imports rewritten to the subpath aliases"
+      proof: 'grep: test("W1-T10084: a Codex-built test is committed through the subpath alias" in test/a-codex-built-test-is-committed-through-the-subpath-alias.test.ts'
+    - claim: "an existing test file is committed by the Codex harness exactly as the worker left it"
+      proof: 'grep: test("W1-T10084: the Codex harness commit never rewrites an existing test" in test/a-codex-built-test-is-committed-through-the-subpath-alias.test.ts'
+    - claim: "the Codex harness commit calls the one shared rewrite helper, not a copy"
+      proof: 'grep: rewriteAddedTestImports( in src/lib/worker-provider.ts'
+  falsifier: |
+    At origin/main (with W1-T10064 merged), `commitCodexWriterEdits` over a harness-cut temp worktree whose writer added
+    test/a.test.ts with `import { x } from "../src/lib/x.js"` commits that line unchanged, so test (a) fails. Rewriting every
+    changed test fails (b). Deleting the rewrite call gives `# fail N`, and restoring it gives `# fail 0`.
+  note: |
+    DEPENDS ON W1-T10064 (#12650), because the helper this moves is defined there. Build it after #12650 merges. If #12650
+    changes the helper's name or signature before merging, follow the merged shape and say so in the PR body.
+    OPERATOR DECISION already taken in W1-T10064: the harness may make this mechanical edit to files the worker created.
+    This task extends that decision to the Codex commit. It adds no new authority.
+    EFFECT, measured after merge: `codex.harness_commit` rows with `alias_rewritten`, and CI reds on "W1-T9864: a new test
+    file carries no location-relative specifier" on Codex-built heads. Healthy shape: none, except shapes listed in
+    alias_unresolved.

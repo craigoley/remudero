@@ -57,6 +57,11 @@ export interface ShardUnderJudgement {
   ageDays: number | null;
   /** Why `ageDays` is `null`, in words the operator reads; absent when the age was measured. */
   ageUnknownReason?: string;
+  /** Why this shard is being judged (W1-T8827). Absent reads as `"verify-human"`, the original
+   *  route before the adaptive lifetime-pressure path shared this judge. */
+  route?: "verify-human" | "lifetime-pressure";
+  /** Attributable dispatches, supplied by the `"lifetime-pressure"` route for its proposal text. */
+  attributableDispatches?: number;
   /** Whether every `depends_on` is merged — a shard blocked on unmerged work rarely needs a person YET. */
   depsAllMerged: boolean;
   /** Whether anything in `src/` cites this id — evidence the work landed under another shard. */
@@ -143,10 +148,60 @@ export function shardsNeedingJudgement(
   return shards.filter((s) => !isSettled(s, priorVerdicts));
 }
 
+/** The observed-state key a staged verify-human proposal states in its "Judge provenance" line, or undefined when
+ *  its summary carries none. A decline stamps this on its ledger row (W1-T10077), so the proposal's own text is the
+ *  one source and no second read of the plan is needed at the moment of the decline. */
+export function observedStateOfProposalSummary(summary: string): string | undefined {
+  return /observed_state=(\S+?)\.(?:\s|$)/.exec(summary)?.[1];
+}
+
+const DECLINE_STATE_SHAPE = /^([A-Za-z0-9-]+):deps=([01]):cited=([01])(:.*)?$/;
+
+/**
+ * The state a decline would be judged against NOW, in the shape it recorded: the recorded key with its dependency
+ * flag replaced by the current one. Only the dependency flag is re-read; `cited` and the why-me suffix are carried
+ * from the decline, because the classifier has the plan and the merge projection and not a grep of src/. A key of
+ * another shape (a custom `observationKey`) is undefined, which never lapses.
+ */
+export function currentDeclineState(recorded: string | undefined, depsAllMerged: boolean): string | undefined {
+  const m = recorded === undefined ? undefined : DECLINE_STATE_SHAPE.exec(recorded);
+  return m ? `${m[1]}:deps=${depsAllMerged ? 1 : 0}:cited=${m[3]}${m[4] ?? ""}` : undefined;
+}
+
+/**
+ * W1-T10077: does an operator's decline still hold? It holds until the state it was given on changes. A receipt
+ * with no recorded `observed_state` (every decline before this task) never lapses, and neither does one whose
+ * current state cannot be read. A lapse names, in words the operator reads, what changed since the decline.
+ */
+export function declineLapse(
+  receipt: { ts: string; observed_state?: string },
+  currentObservedState: string | undefined,
+  dependencies: readonly string[] = [],
+): { because: string } | undefined {
+  const recorded = receipt.observed_state;
+  if (!recorded || currentObservedState === undefined || recorded === currentObservedState) return undefined;
+  const day = receipt.ts.slice(0, 10);
+  const was = DECLINE_STATE_SHAPE.exec(recorded), now = DECLINE_STATE_SHAPE.exec(currentObservedState);
+  if (was && now && was[2] === "0" && now[2] === "1") {
+    const names = dependencies.length === 0 ? "its dependencies" : dependencies.join(" and ");
+    return { because: `${names} have merged since you declined this on ${day}` };
+  }
+  return { because: `what it was judged on changed since you declined this on ${day} (${recorded} is now ${currentObservedState})` };
+}
+
 /** `<n> days<suffix>`, or an unknown age stated as unknown with its reason — never as a number. */
 export function filingAgeText(shard: ShardUnderJudgement, suffix: string): string {
   if (shard.ageDays !== null) return `${shard.ageDays} days${suffix}`;
   return `an unknown number of days${suffix} (filing age unknown: ${shard.ageUnknownReason ?? "no filing date was read"})`;
+}
+
+/** The proposal's opening clause, said per route (W1-T8827): a lifetime-pressure item was sent
+ *  because its build kept failing, not because anyone filed it `verify: human`. */
+function proposalOpening(shard: ShardUnderJudgement): string {
+  if (shard.route === "lifetime-pressure") {
+    return `${shard.id} kept failing to build (${shard.attributableDispatches ?? 0} attempts over ${filingAgeText(shard, "")})`;
+  }
+  return `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")}`;
 }
 
 /** Render the judge's prompt. NOT the escalation judge's prompt reused: that one reasons about an
@@ -324,7 +379,7 @@ export function proposalFromJudgedShard(shard: ShardUnderJudgement, verdict: Ver
   return stampVerificationAsk({
     id: verifyHumanProposalId(shard),
     summary:
-      `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")} and a judge reads it as ` +
+      `${proposalOpening(shard)} and a judge reads it as ` +
       `still needing you:\n  ${verdict.reason}\n\n` +
       `${shard.title}\n\n` +
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
@@ -342,7 +397,7 @@ export function automationProposalFromJudgedShard(shard: ShardUnderJudgement, ve
   return {
     id: verifyHumanAutomationProposalId(shard),
     summary:
-      `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")} and a judge reads it as ` +
+      `${proposalOpening(shard)} and a judge reads it as ` +
       `safe to enter the self-improvement flow:\n  ${verdict.reason}\n\n` +
       `${shard.title}\n\n` +
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +

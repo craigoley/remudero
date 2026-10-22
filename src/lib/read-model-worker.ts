@@ -12,6 +12,7 @@
  * branch. The branch body is {@link runReadModelWorker}, named so a test can run it in-process,
  * where coverage is recorded.
  */
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -66,6 +67,7 @@ import {
   openReadModel,
   peekLease,
   quickCheckReadModel,
+  readReadModelTransactions,
   releaseLease,
   SOURCE_SNAPSHOT_DDL,
   withWriteTransaction,
@@ -77,11 +79,11 @@ import {
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
-import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds } from "./worker-heaps.js";
+import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
-import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
-import { startWorker } from "./child-entry-argv.js";
+import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
+import { forkWorkerEntry, startWorker, type WorkerEntryFork } from "./child-entry-argv.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
 /** The SSE publisher's cadence (design §1.1). */
@@ -105,9 +107,13 @@ export const READ_MODEL_CHECK_SHARE = 0.02;
  * short ticks and every lease is renewed on schedule between them.
  */
 export const READ_MODEL_PASS_SHARE = 0.5;
-/** BACKSTOP: the oracle thread's heap; a slice that outgrows it kills that thread, never serve's. */
+/** BACKSTOP: the oracle's heap, thread or child; a slice that outgrows it kills that runner, never serve. */
 export const READ_MODEL_ORACLE_HEAP_MB = 1_024;
 const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
+/** C5 (#13207): the argument that makes this module, started as a process, run one oracle slice and exit. */
+const READ_MODEL_ORACLE_CHILD_ARG = "--remudero-read-model-oracle-child";
+/** C5 (#13207): written as each oracle child exits: what it cost to start, and its peak resident size, all returned by its exit. */
+export const READ_MODEL_ORACLE_CHILD_STEP = "read_model.oracle_child_exited";
 /**
  * The share of each pass kept for view bodies, and of worker time they may take: a view that cost
  * `c` ms is not rebuilt for `c / share` ms. Measured on the host's core ledger as three instances,
@@ -243,7 +249,7 @@ export type ReadModelWorkerMessage =
   /** A key the slow lane's view no longer has (a page that emptied): serve forgets its body. */
   | { type: "drop"; view: string; key: string }
   /** Each source's latest reading, posted once per tick when one changed (`bodies`: per body, ledger included), so an unmoved body is judged by its last build. */
-  | { type: "sources"; sources: ViewSource[]; bodies?: Array<{ view: string; key: string; sources: ViewSource[] }> }
+  | { type: "sources"; sources: ViewSource[]; bodies?: Array<{ view: string; key: string; sources: ViewSource[] }>; ledgerReads?: Record<string, Record<string, string | null>> }
   /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
   | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number }
   /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
@@ -252,9 +258,9 @@ export type ReadModelWorkerMessage =
   | { type: "shadow_prepared"; request: ShadowRequest }
   /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
   | ThreadHeapsAnswer
-  | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds };
+  | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds; observedAt?: number };
 
-export type ReadModelViewHolds = Record<string, { rows: number; keptBytes: number }>;
+export type ReadModelViewHolds = Record<string, { rows?: number; keptBytes?: number; entries?: number; bytes?: number; unsized?: string; unit?: string; bytes_basis?: string }>;
 
 export interface ReadModelLaneMove {
   view?: string;
@@ -281,6 +287,8 @@ export interface ReadModelView {
   version: number;
   qualificationGeneration?: string;
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
+  /** The newest projected instant among the ledger rows this view reads, or null before its first input. */
+  ledgerReads?(db: ReadModelDb): string | null;
   /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
   prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
   stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
@@ -344,8 +352,9 @@ function newerReading(own: ViewSource, reading: ViewSource | undefined): ViewSou
 }
 
 /** A body's `ledger:` source by the rows its build read: once the projector holds newer rows it lags by their age, stale past the ledger budget. */
-export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS): ViewSource {
+export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS, reads?: string | null): ViewSource {
   const current = ledgerSource(state, now, staleMs);
+  if (reads !== undefined) return judgeLedgerReads(built, current, reads, now);
   const builtMs = built.asOf === null ? Number.NaN : Date.parse(built.asOf);
   const headMs = state.newestTs === null ? Number.NaN : Date.parse(state.newestTs);
   if (!Number.isFinite(builtMs) || !Number.isFinite(headMs) || headMs <= builtMs) return current;
@@ -660,6 +669,124 @@ interface ReadModelOracleData {
   escalationRepository?: string;
 }
 
+/** C5: the parent's execArgv with the oracle's own heap ceiling in place of any the parent carries. */
+export function oracleChildExecArgv(inherited: readonly string[]): string[] {
+  return [...inherited.filter((flag) => !/^--max[-_]old[-_]space[-_]size=/.test(flag)), `--max-old-space-size=${READ_MODEL_ORACLE_HEAP_MB}`];
+}
+
+type OracleChildMessage = { type?: string; id?: number; result?: OracleSliceResult; maxRssBytes?: number };
+
+/**
+ * C5: each slice runs in a short-lived CHILD PROCESS that exits when it has answered, so what the slice read and
+ * built returns to the OS, where a long-lived thread kept it between slices (serve.memory 10-19/20: the oracle
+ * thread's heap 115 MiB p50, 604 MiB max, while a slice runs ~4% of the time). Results, deaths and close keep
+ * {@link threadOracle}'s contract; each exit writes {@link READ_MODEL_ORACLE_CHILD_STEP} with what the slice cost.
+ */
+export function childOracle(opts: {
+  workerUrl?: URL;
+  escalationRepository?: string;
+  log: (step: string, extra: Record<string, unknown>) => void;
+  clock?: Clock;
+  fork?: typeof forkWorkerEntry;
+}): ReadModelOracle {
+  const clock = opts.clock ?? systemClock;
+  let seq = 0;
+  let running: ChildProcess | undefined;
+  let closed = false;
+  return {
+    run: (request, done) => {
+      const id = ++seq;
+      const started = clock.now();
+      let launched: WorkerEntryFork;
+      try {
+        launched = (opts.fork ?? forkWorkerEntry)(import.meta.url, [READ_MODEL_ORACLE_CHILD_ARG, opts.escalationRepository ?? ""],
+          { execArgv: oracleChildExecArgv(process.execArgv), serialization: "advanced", stdio: ["ignore", "inherit", "inherit", "ipc"] },
+          { override: opts.workerUrl });
+      } catch (error) {
+        const message = String((error as Error)?.message ?? error);
+        opts.log("read_model.oracle_failed", { error: message });
+        return done({ ok: false, error: `the oracle child could not start: ${message}`, leaseLost: false });
+      }
+      const { child } = launched;
+      running = child;
+      let answer: OracleChildMessage | undefined;
+      let readyMs: number | undefined;
+      let failure = "";
+      let finished = false;
+      const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
+        if (finished) return;
+        finished = true;
+        if (running === child) running = undefined;
+        if (closed) return;
+        if (!answer) done({ ok: false, error: `the oracle child exited with code ${code}${signal ? ` (${signal})` : ""}${failure}`, leaseLost: false, died: true });
+        opts.log(READ_MODEL_ORACLE_CHILD_STEP, {
+          instance: request.instance, outcome: !answer ? "died" : answer.result?.ok ? "ok" : "failed", code, signal, entry: launched.kind,
+          spawn_sync_ms: Math.round(launched.spawnSyncMs * 10) / 10, ready_ms: readyMs ?? null, wall_ms: clock.now() - started,
+          child_max_rss_bytes: answer?.maxRssBytes ?? null,
+        });
+      };
+      child.on("message", (msg: OracleChildMessage) => {
+        if (msg?.type === "ready") readyMs ??= clock.now() - started;
+        if (msg?.type !== "done" || msg.id !== id || answer) return;
+        answer = msg;
+        if (!closed) done(msg.result!);
+      });
+      child.on("error", (error) => {
+        failure = `: ${error.message}`;
+        opts.log("read_model.oracle_failed", { error: error.message });
+        // A child that never started has no exit to wait for.
+        if (child.pid === undefined) finish(null, null);
+      });
+      child.on("exit", finish);
+      child.send({ type: "check", id, request });
+    },
+    close: () => {
+      closed = true;
+      const child = running;
+      running = undefined;
+      child?.kill();
+    },
+  };
+}
+
+/**
+ * C5: this process's peak resident size since its exec, from VmHWM. Not getrusage's maxRSS: Linux carries a forked
+ * child's maxRSS over from its parent at the fork, so serve's gigabytes would read as the child's. Undefined where
+ * it cannot be read (no /proc), and the row then says null, never a guess.
+ */
+export function residentPeakBytes(statusPath = "/proc/self/status"): number | undefined {
+  try {
+    const kb = /^VmHWM:\s+(\d+) kB$/m.exec(readFileSync(statusPath, "utf8"))?.[1];
+    return kb === undefined ? undefined : Number(kb) * 1024;
+  } catch (error) {
+    // An unreadable status is an unknown peak (null on the row), never a slice that fails for want of a metric.
+    void error;
+    return undefined;
+  }
+}
+
+/**
+ * C5: an oracle child's body: answer one slice, with the child's peak resident size, then exit. A parent that goes
+ * away (its channel disconnects) wants no answer, so the child exits then too, never outliving its serve by a slice.
+ */
+export function runReadModelOracleChild(
+  proc: {
+    on(event: "message", run: (msg: { type?: string; id?: number; request?: OracleSliceRequest }) => void): unknown;
+    once(event: "disconnect", run: () => void): unknown;
+    send(message: unknown, sent: () => void): unknown;
+  },
+  escalationRepository: string,
+  exit: () => void,
+  clock: Clock = systemClock,
+): void {
+  runReadModelOracleWorker({
+    on: (event, run) => proc.on(event, run),
+    postMessage: (value) => void proc.send({ ...(value as object), maxRssBytes: residentPeakBytes() }, exit),
+  }, { kind: READ_MODEL_ORACLE_KIND, ...(escalationRepository ? { escalationRepository } : {}) }, clock);
+  proc.once("disconnect", exit);
+  proc.send({ type: "ready" }, () => {});
+}
+
 /** The oracle thread's body: attach to each store once, run each slice, post its result. */
 export function runReadModelOracleWorker(
   port: { on(event: "message", run: (msg: { type?: string; id?: number; request?: OracleSliceRequest }) => void): unknown; postMessage(value: unknown): void },
@@ -836,6 +963,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   let clocksMoved = false;
   const readings = new Map<string, { key: string; body: { view: string; key: string; sources: ViewSource[] } }>();
   const movedReadings = new Set<string>();
+  const ledgerReads = new Map<string, NonNullable<ReadModelView["ledgerReads"]>>();
+  let ledgerReadsKey = "{}";
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
   let deferredLoggedAt = Number.NEGATIVE_INFINITY;
   let heldLoggedAt = Number.NEGATIVE_INFINITY;
@@ -862,6 +991,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   /** Drops the connection, its projector and its lease; the next tick reopens the file by path. */
   function closeSlot(slot: Slot): void {
+    if (comparator && comparator.db === slot.db) { comparator.shadow.close(); comparator = undefined; }
     slot.db?.close();
     slot.db = undefined;
     slot.projector = undefined;
@@ -995,8 +1125,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * The watchdog: a tick that committed, or had nothing left to do, is progress. Outstanding work
-   * with no commit for {@link READ_MODEL_STALL_MS} ledgers the stall and reopens the store; the
+   * A commit or no outstanding work is progress. No commit for {@link READ_MODEL_STALL_MS} reopens the store;
    * same again without progress escalates through the oracle's path, once per episode.
    */
   function watchProgress(slot: Slot, now: number, outstanding: boolean): void {
@@ -1008,7 +1137,15 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const stall = (slot.stall ??= { since: now, generation, reopened: false, escalated: false });
     const stalledMs = now - stall.since;
-    const extra = { instance: slot.instance.name, stalledMs, generation, reason: slot.state.reason ?? "work outstanding" };
+    // Read sidecars only when emitting a tier, not on every hot-path tick. A missing path is unknown.
+    const emitting = (stalledMs >= READ_MODEL_STALL_MS && !stall.reopened) || (stalledMs >= 2 * READ_MODEL_STALL_MS && !stall.escalated);
+    let path = slot.db?.path;
+    if (emitting && !path) {
+      try { path = currentReadModelPath(opts.stateDir, slot.instance.name, LEDGER_PROJECTOR_SCHEMA_VERSION); }
+      catch { /* An unreadable pointer cannot establish a transaction inventory. */ }
+    }
+    const transactions = emitting ? readReadModelTransactions(path) : undefined;
+    const extra = { instance: slot.instance.name, stalledMs, generation, reason: slot.state.reason ?? "work outstanding", transactions };
     if (stalledMs >= READ_MODEL_STALL_MS && !stall.reopened) {
       stall.reopened = true;
       log("read_model.stalled", extra);
@@ -1019,7 +1156,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         class: "MANUAL",
         taskId: `READ-MODEL-${slot.instance.name.toUpperCase()}`,
         summary: `read model ${slot.instance.name} has stopped advancing`,
-        detail: `The projector has had work outstanding for ${Math.round(stalledMs / 1000)} s with no commit, and reopening its store did not help. Last reason: ${extra.reason}.`,
+        detail: `The projector has had work outstanding for ${Math.round(stalledMs / 1000)} s with no commit, and reopening its store did not help. Last reason: ${extra.reason}. Recorded transactions (lock ownership unverified): ${JSON.stringify(transactions)}.`,
         options: [
           { label: "rebuild the read model", detail: "Run `rmd read-model rebuild`; the views keep serving the old file until the new one passes its check.", kind: { type: "operator-only" } },
           { label: "restart serve", detail: "Recycle the serve container; the projector resumes from its checkpoints.", kind: { type: "operator-only" } },
@@ -1054,7 +1191,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const backoffMs = Math.min(tickMs * 2 ** slot.state.failures, READ_MODEL_MAX_BACKOFF_MS);
     slot.backoffUntil = now + backoffMs;
     slot.state.reason = `tick failed: ${(error as Error).message}`;
-    log("read_model.tick_failed", { instance: slot.instance.name, error: (error as Error).message, failures: slot.state.failures, backoffMs });
+    const transactions = (error as Error & { readModelTransactions?: unknown }).readModelTransactions;
+    log("read_model.tick_failed", { instance: slot.instance.name, error: (error as Error).message, failures: slot.state.failures, backoffMs, ...(transactions === undefined ? {} : { transactions }) });
   }
 
   /**
@@ -1317,12 +1455,18 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let live: ReadModelView | undefined;
     try {
       live = viewOf(unit);
+      if (live.ledgerReads) ledgerReads.set(view.name, live.ledgerReads);
       ready = live.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
       if (ready) {
         calls++;
+        const read = live.ledgerReads;
+        const readAsOf = read ? new Map(scoped.instances.map(({ state, db }) =>
+          [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? read(db) : null])) : undefined;
         for (const { key, data, sources } of live.materialize(scoped)) {
           yielded++;
-          publish(view.name, live.version, key, data, sources, generation, buildStartedMs, live.qualificationGeneration);
+          const stamped = readAsOf ? sources.map((source) => readAsOf.has(source.name)
+            ? { ...source, asOf: readAsOf.get(source.name)! } : source) : sources;
+          publish(view.name, live.version, key, data, stamped, generation, buildStartedMs, live.qualificationGeneration);
         }
       }
       succeeded = ready && yielded > 0;
@@ -1358,7 +1502,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       letGo(unit);
       reportHeld(true);
     }
-    if (viewsOnly && opts.lane && ready && live?.heldSizes) reportHolds(opts.lane);
+    if (viewsOnly && opts.lane && ready) reportHolds(opts.lane);
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
     const stages = unit.costMs > passMs ? live?.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
@@ -1409,9 +1553,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const holds: ReadModelViewHolds = {};
     for (const unit of units) {
       const made = isViewFactory(unit.view) ? unit.made : unit.view;
-      if (made?.heldSizes) Object.assign(holds, made.heldSizes());
+      if (made?.heldSizes) for (const [name, size] of Object.entries(made.heldSizes())) {
+        const key = unit.slot && name.includes(":") && !name.includes("@") ? `${name}@${unit.slot.instance.name}` : name;
+        holds[key] = size;
+      }
     }
-    opts.post({ type: "view_holds", lane, holds });
+    holds[`lane:${lane}`] = { entries: units.length, unit: "units", unsized: "unit bookkeeping retains view objects, DB handles and shared scheduling state; exclusive bytes unavailable" };
+    opts.post({ type: "view_holds", lane, holds, observedAt: clock.now() });
   }
   function reportHeld(moved = false): void {
     if (!viewsOnly || !opts.lane) return;
@@ -1437,7 +1585,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     seedUnitCosts();
     sweepDemand();
     const home = slots[0]?.db;
-    const shadow = home ? storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications) : undefined;
+    const shadow = home ? comparator?.db === home && slots[0]?.lease !== undefined ? comparator.shadow.readiness()
+      : storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications) : undefined;
     const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);
@@ -1481,11 +1630,16 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   const postState = (now: number): void => {
     reportViewBuilds();
-    if (clocksMoved || movedReadings.size > 0) {
+    const reads = Object.fromEntries([...ledgerReads].map(([view, read]) => [view,
+      Object.fromEntries(slots.map((slot) => [`${LEDGER_SOURCE_PREFIX}${slot.instance.name}`, slot.db ? read(slot.db) : null])),
+    ]));
+    const readsKey = JSON.stringify(reads);
+    if (clocksMoved || movedReadings.size > 0 || readsKey !== ledgerReadsKey) {
       clocksMoved = false;
+      ledgerReadsKey = readsKey;
       const bodies = [...movedReadings].map((id) => readings.get(id)!.body);
       movedReadings.clear();
-      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source), ...(bodies.length > 0 ? { bodies } : {}) });
+      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source), ...(bodies.length > 0 ? { bodies } : {}), ledgerReads: reads });
     }
     if (!viewsOnly) opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
   };
@@ -1799,7 +1953,7 @@ export interface ReadModelViewLane {
   want(view: string, key: string): void;
   /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
   read(path: string): void;
-  holdsOf(threadId: number): ThreadHolds | undefined;
+  holdsOf(threadId: number): ThreadHoldsSnapshot | undefined;
   close(): void;
 }
 
@@ -1819,7 +1973,7 @@ export function threadViews(opts: {
   const selectedRegistryIntent = copySelectedRegistryIntent(opts.data.selectedRegistryIntent);
   const clock = opts.clock ?? systemClock;
   let closed = false;
-  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHolds }
+  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHoldsSnapshot }
   const fast: Lane = { name: "fast", deaths: 0 };
   const heavy: Lane = { name: "heavy", deaths: 0 };
   const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
@@ -1843,7 +1997,15 @@ export function threadViews(opts: {
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
       if (msg.type === "view_holds") {
-        lane.holds = Object.fromEntries(Object.entries(msg.holds).map(([instance, held]) => [`board:${instance}`, { entries: held.rows, bytes: held.keptBytes }]));
+        const holds: ThreadHolds = {};
+        for (const [name, held] of Object.entries(msg.holds)) {
+          const legacy = held.entries === undefined && held.rows !== undefined;
+          const key = legacy && !name.includes(":") ? `board:${name}` : name;
+          const bytes = legacy ? held.keptBytes : held.bytes;
+          holds[key] = { entries: held.entries ?? held.rows ?? 1, ...(bytes === undefined ? { unsized: held.unsized ?? "holder bytes not measured" } : { bytes }),
+            ...(held.unit ? { unit: held.unit } : {}), ...(held.bytes_basis ? { bytes_basis: held.bytes_basis } : {}) };
+        }
+        lane.holds = { holds, observedAt: msg.observedAt };
         return;
       }
       if (msg.type === "shadow_prepared") {
@@ -1995,7 +2157,8 @@ export function runReadModelWorker(
           ...(repositoryFlow ? { repositoryFlow } : {}) } } : body) });
     });
   } });
-  const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
+  // C5: one short-lived child per slice, so a slice's memory leaves serve when it is done.
+  const oracleRunner = childOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
   const ticker = createReadModelTicker({
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,
     integrityCheck: threadIntegrityCheck(), ...(escalation ? { escalation } : {}),
@@ -2051,6 +2214,11 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === RE
 }
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_ORACLE_KIND && parentPort) {
   runReadModelOracleWorker(parentPort, workerData as ReadModelOracleData);
+}
+if (isMainThread && process.argv[2] === READ_MODEL_ORACLE_CHILD_ARG && process.send) {
+  runReadModelOracleChild({ on: (event, run) => process.on(event, run), once: (event, run) => process.once(event, run),
+    send: (message, sent) => process.send!(message, undefined, undefined, sent) },
+    process.argv[3] ?? "", () => process.exit(0));
 }
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_INTEGRITY_KIND && parentPort) {
   parentPort.postMessage(checkReadModelIntegrity((workerData as { request: IntegrityRequest }).request));
@@ -2193,6 +2361,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const instances = new Map<string, ReadModelInstanceState>();
   const sourceClocks = new Map<string, ViewSource>();
   const bodyReadings = new Map<string, ReadonlyMap<string, ViewSource>>();
+  const ledgerReads = new Map<string, Record<string, string | null>>();
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let at: number | undefined;
   const home = opts.instances[0]?.name ?? "core";
@@ -2366,6 +2535,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       bodyReadings.delete(readModelBodyKey(msg.view, msg.key));
     } else if (msg.type === "sources") {
       for (const source of msg.sources) sourceClocks.set(source.name, source);
+      for (const [view, reads] of Object.entries(msg.ledgerReads ?? {})) ledgerReads.set(view, reads);
       for (const body of msg.bodies ?? []) bodyReadings.set(readModelBodyKey(body.view, body.key), new Map(body.sources.map((source) => [source.name, source])));
     } else if (msg.type === "progress") {
       if (msg.phase === "opened") slowestOpenMs = Math.max(slowestOpenMs, msg.ms ?? 0);
@@ -2416,11 +2586,13 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
     judge: (sources, now, body) => sources.map((source) => {
-      const read = body ? newerReading(source, bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name)) : undefined;
+      const own = body ? bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name) : undefined;
+      const declaredReads = body ? ledgerReads.get(body.view)?.[source.name] : undefined;
+      const read = body ? (declaredReads !== undefined ? own ?? source : newerReading(source, own)) : undefined;
       if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
       const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
       const state = instances.get(instance);
-      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now) : ledgerSource(state, now);
+      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now, undefined, declaredReads) : ledgerSource(state, now);
       const committed = committedAt.get(instance);
       if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
         return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
@@ -2431,13 +2603,22 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       const again = loadCommittedViewBodies(opts.stateDir, home);
       committedAt = committedTickTimes(opts.stateDir, opts.instances);
       let replaced = 0;
+      let removed = 0;
+      if (again.reason === undefined) {
+        const committed = new Set(again.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
+        for (const key of bodies.keys()) if (!posted.has(key) && !committed.has(key)) {
+          bodies.delete(key);
+          bodyReadings.delete(key);
+          removed++;
+        }
+      }
       for (const entry of again.bodies) {
         const key = readModelBodyKey(entry.view, entry.key);
         if (posted.has(key) || bodies.get(key)?.etag === entry.etag) continue;
         bodies.set(key, entry);
         replaced++;
       }
-      opts.log?.("read_model.reloaded", { bodies: again.bodies.length, replaced, ...(again.reason ? { reason: again.reason } : {}) });
+      opts.log?.("read_model.reloaded", { bodies: again.bodies.length, replaced, removed, ...(again.reason ? { reason: again.reason } : {}) });
       return replaced;
     },
     switches: () => mainSwitches,

@@ -1,0 +1,67 @@
+- id: W1-T10381
+  title: "A FLEET CREDENTIAL STORE LEFT ON AN EXHAUSTED ACCOUNT IS NAMED AND ESCALATED — `healClaudeCredentialStore` (src/lib/worker-home.ts) replaces the store only when it is unusable by FILE SHAPE, so an exhausted-but-valid login is `usable` forever; on 2026-10-21 the operator moved the host login to a second account (~18:23Z, 43% weekly) while the fleet store stayed on the first (99%, API 429), and the fleet ran on the cash lane from ~22:00Z to 01:19Z on 10-22 with no row saying which account was measured"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: daemon.ts escalates, account-usage.ts reads identity; one concern, never copies a credential
+  band_meaning: span
+  origin: "operator ruling 2026-10-22 (P0): the fleet store never follows an account switch; detect and escalate, do not silently copy the owner lineage"
+  plan_refs: [W1-T6252, W1-T10380, W1-T249, W1-T3692]
+  files:
+    - src/lib/daemon.ts
+    - src/lib/account-usage.ts
+    - test/routing/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts
+  status: queued
+  priority: 1  # operator ruling 2026-10-22: P0
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: detect the divergence and tell the operator; never copy the owner's credential into
+    the store (shared OAuth lineage rotates both holders out, `seedClaudeFleetCredentials`' own comment).
+    READ at origin/main 32887fe4d (symbols, not lines):
+    - `healClaudeCredentialStore` returns early when `classifyWorkerCredentialFile` calls the store `usable`. That
+      verdict reads only the file's shape and expiry, so a valid login on an exhausted account is never healed, by
+      design. Healing is the wrong remedy here anyway.
+    - The daemon's headroom loop (src/lib/daemon.ts, the `daemon.headroom` row) logs window, percent_used and
+      limit_pct but no account. Its breach hook `onHeadroomBreach` fires once per episode and names no account.
+    - `readAccountUsageFile` (src/lib/account-usage.ts) already projects `oauthAccount` identity (email, uuid,
+      organization) out of a `.claude.json` without letting OAuth material escape. It reads only `~/.claude.json`,
+      never the store's own config dir.
+    OBSERVED (core ledger, read-only): the newest `daemon.headroom` row (2026-10-22T01:14:45Z) reads `weekly (all
+    models)` 99% over_ceiling with no account field. From 10-21T22:00Z, `worker.assignment` rows read claude
+    `below-reserve` with codex `unreadable` and cash selected. REPORTED by the operator session: the host login is
+    craigoley@gmail.com at 43% weekly, and the fleet store is craigoleyagent@gmail.com at 99% with API 429.
+    NOT COVERED ELSEWHERE: swept origin/main 32887fe4d plan/tasks.d and the plan trees of all 18 open PR heads for
+    healClaudeCredentialStore, seedClaudeFleetCredentials and fleet-auth: W1-T6252 (merged) built the store, and
+    W1-T6095 and W1-T990 (blocked) are different concerns.
+  design: |
+    1. NAME THE ACCOUNT. Read the identity of BOTH holders with the existing projection: the store's config dir
+       (`<store>/.claude.json`, or wherever the CLI keeps `oauthAccount` under `CLAUDE_CONFIG_DIR`) and the host's
+       `~/.claude.json`. Only identity fields leave the read. `daemon.headroom` gains `account`, the same redacted
+       label the account-usage projection renders, for the account whose usage the row measured.
+    2. DETECT THE DIVERGENCE. The fleet store's account is at or over the reserve (the reading the row already
+       makes), the host's account uuid DIFFERS, and the host's own cached usage (`cachedUsageUtilization` for that
+       uuid, already read by account-usage.ts) shows headroom under the same limit. That is one episode, keyed by
+       (store uuid, host uuid).
+    3. ESCALATE ONCE PER EPISODE through the existing breach notification path, naming both redacted labels, both
+       percentages and the remedy: sign the fleet in from the console (W1-T10380) or by hand. The episode clears when
+       the uuids match or the store's account drops under the reserve. Nothing is copied, renamed or deleted. An
+       unreadable identity on either side is written as `unknown`, never as a match.
+    4. No new config key, threshold or env var: the reserve is the one the headroom row already compares against.
+    5. Tests (new file, titles verbatim as in the proofs): different accounts with the store over the reserve and
+       the host under it escalate once, and a second pass in the same episode does not. Same uuid, a store under the
+       reserve, or an unreadable host identity do not escalate. The headroom row carries the redacted account label
+       and no token field. The store and host credential files are byte-identical after every case.
+  acceptance:
+    - claim: "a fleet store on an exhausted account while the host is on a different account with headroom escalates once per episode"
+      proof: "unit test: W1-T10381: a fleet store on an exhausted account beside a different host account escalates once"
+    - claim: "the headroom row names the measured account and no credential is ever copied"
+      proof: "unit test: W1-T10381: the headroom row names its account and both credential files are untouched"
+    - claim: "same account, store under reserve, or unreadable identity does not escalate"
+      proof: "unit test: W1-T10381: a matching, healthy or unreadable account pair does not escalate"
+  falsifier: |
+    Drop the divergence check and the first proof's escalation never fires. Compare by file shape alone
+    (`usable`), today's behaviour, and the observed 10-21 pair reads as healthy.
+  note: |
+    Reservation refs/rmd-id/W1-T10381 is held by filing branch file-1022-fleet-routing.

@@ -90,7 +90,7 @@ function ownRed(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 12267, prUrl: "https://github.com/o/r/pull/12267", taskId: "W1-T8879",
     headSha: "own-red-head", checksState: "red", reviewState: "pending", unmetCriteria: [],
-    priorStrikes: 0, autoMergeArmed: false, lastActivityAt: new Date(NOW).toISOString(),
+    priorStrikes: 1, autoMergeArmed: false, lastActivityAt: new Date(NOW).toISOString(),
     redRequiredChecks: ["ci"], ciFailures: [{ name: "ci", logTail: "assertion failed in this diff" }],
     ...over,
   };

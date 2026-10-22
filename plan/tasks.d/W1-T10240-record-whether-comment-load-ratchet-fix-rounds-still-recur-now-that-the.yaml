@@ -1,0 +1,25 @@
+- id: W1-T10240
+  title: "Record whether comment-load-ratchet fix rounds still recur now that the ratchet repair is wired, and withdraw this follow-up if they do not"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: merged
+  # backlog gardener: band=4 evidence=bbe5dc70eef6e981
+  attempts: 0
+  files:
+    - docs/ci-friction-remedies.md
+  acceptance:
+    - claim: "the remedies doc records the measured fix-round count for comment-load-ratchet since recordableRatchetRepairFor was wired at its sweep.ts call site, and states whether a further remedy is warranted"
+      proof: "grep: comment-load-ratchet recurrence since the ratchet repair wiring in docs/ci-friction-remedies.md"
+  origin: "followup:DAEMON-1792333224538:2026-10-18T14:46:56.848Z:0"
+  rationale: >-
+    From the 2026-10-18 follow-up on https://github.com/craigoley/remudero/pull/12776, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: wire the classifier into fix-round dispatch in `src/run-task.ts`.
+    The classifier currently has no caller, so it can't yet prevent the round the first acceptance
+    criterion requires. — from W1-T9399 (run DAEMON-1792333224538,
+    https://github.com/craigoley/remudero/pull/12776)

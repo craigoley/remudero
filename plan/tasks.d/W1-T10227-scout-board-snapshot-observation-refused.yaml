@@ -1,0 +1,38 @@
+- id: W1-T10227
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — board_snapshot.observation_refused landed 78 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:board_snapshot.observation_refused"
+  files:
+    - src/lib/board-snapshot-cache.ts
+    - test/board-snapshot-cache.test.ts
+    - test/gardeners/scout-board-snapshot-observation-refused.test.ts
+  acceptance:
+    - claim: "board_snapshot.observation_refused stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10227: board_snapshot.observation_refused no longer recurs\" in test/gardeners/scout-board-snapshot-observation-refused.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step board_snapshot.observation_refused carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 76 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve; exact two-companion repair scope separately approved 2026-10-22"
+    judged_at: "2026-10-22T11:00:52.621Z"
+    pin: "f19c9b139b1b7dd1f87429b182f79f9fbcc506b58878058cf50f5821143045ec"
+  amendment: |
+    2026-10-22 explicit operator approval in the stuck-PR recovery chat: add exactly
+    src/lib/board-snapshot-cache.ts and test/board-snapshot-cache.test.ts as companions.
+    Retire stale observation metadata only after successful snapshot publication.
+    Preserve failed-publication metadata, foreign-metadata identity refusals and their assertions.
+    Keep the original regression, acceptance criteria, falsifiers, budgets and gates unchanged.

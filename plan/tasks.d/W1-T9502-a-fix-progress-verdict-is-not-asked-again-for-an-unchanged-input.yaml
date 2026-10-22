@@ -10,8 +10,8 @@
   band_meaning: span
   origin: "operator session 2026-10-14: flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-14/RESULTS.txt, recommendation 5: #11559 held 369 of 1,244 red minutes); standing rulings: no hard fixed thresholds, machine work flows through an LLM judge"
   plan_refs: [W1-T7096, W1-T7243, W1-T7762, W1-T9297, W1-T9433, W1-T9498]
-  files: [src/lib/sweep.ts, test/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts]
-  status: queued
+  files: [src/lib/sweep.ts, src/lib/fix-progress-judge.ts, src/run-task.ts, test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts]
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
@@ -42,7 +42,8 @@
   design: |
     Operator rulings: no fixed threshold, age or count; the judge still rules on every new question.
     1. REUSE ON AN UNCHANGED KEY. Before spawning the judge, `askProgress` (and the other `judgeFixProgress` call
-       sites in the fix rung) look up the newest `fix.progress_judged` row in the pass's ledger lines with the same
+       automated repair judgment sites in src/lib/sweep.ts and the fix rung in src/run-task.ts) share one keyed lookup in src/lib/fix-progress-judge.ts over
+       the newest `fix.progress_judged` row in the caller's already-read ledger lines with the same
        pr_number, head_sha and input_key. A continue verdict, or a change-approach verdict with its approach, is
        reused as the decision; the judge is not spawned. Ledger `fix.progress_reused` {pr_number, head_sha, input_key,
        verdict, judged_at}.
@@ -50,15 +51,30 @@
        contract revision) finds no match and asks the judge, as today. An `unavailable` verdict is never reused. An
        escalate verdict keeps its existing latch.
     3. No time bound on reuse: the input is the whole question, and an unchanged question has an answer.
-    Tests go in the new file, with `test(` titles verbatim as in the proofs below, driving `runSweep` with a counting
+       The standalone diagnostic judge command is not an automatic repair caller and remains unchanged.
+    Tests go in the computed test/sweep/ folder, with `test(` titles verbatim as in the proofs below, driving `runSweep` with a counting
     fake judge and an admission that refuses, replaying #11559's 999a5dc head over three passes.
   acceptance:
     - claim: "the new test file passes"
-      proof: "unit test: test/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts"
+      proof: "unit test: test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts"
     - claim: "three passes on one head and input, each refused admission, spawn the judge once and ledger two reuses"
-      proof: 'grep: test("W1-T9502: an unchanged input reuses its ledgered verdict" in test/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts'
+      proof: 'grep: test("W1-T9502: an unchanged input reuses its ledgered verdict" in test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts'
     - claim: "a new head or a new red class asks the judge again, and an unavailable verdict is never reused"
-      proof: 'grep: test("W1-T9502: a changed input asks the judge again" in test/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts'
+      proof: 'grep: test("W1-T9502: a changed input asks the judge again" in test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts'
   falsifier: |
     Keep the per-pass memo alone: the three-pass replay spawns the judge three times and the first test fails. Reuse by
     PR number alone: the changed-head case reuses a stale verdict and the second test fails.
+  note: |
+    2026-10-19 operator-session scope/placement amendment only; no product implementation or task credit.
+    On captured main 785993b2d937ea9743576d087073e736c0b9f24d the production judge callers also live in
+    src/run-task.ts. The existing design already names those fix-rung callers; declaring them and the existing
+    fix-progress-judge module avoids either an out-of-scope implementation or repeated private lookup copies.
+    The maintained placement command maps the declared sweep import to test/sweep/, not the old flat test root.
+    Claims, reuse/invalidation semantics, unavailable/escalate boundaries, budget, risk and priority are unchanged.
+    Proof edits above change only that test path. This amendment lands separately before any W1-T9502 build.
+    At 20:40Z a positive-controlled advertisement had 36 dispatch refs and no W1-T9502 claim/run branch. At
+    20:47Z complete API merged-PR text and run-branch searches returned no exact task credit; two references
+    were plan filings, not builds. The known W1-T10185 build was the branch-search positive control.
+    An all-advertised-head subject sweep (435 heads, 429 distinct commit SHAs) found 191 matching plan records
+    and no added/changed subject record; W1-T4105/W1-T5654/W1-T9969/W1-T8141 controls were present. These
+    dated observations are not a permanent ownership grant; refresh before implementation and publication.

@@ -1,0 +1,74 @@
+- id: W1-T10408
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/console-parity-ratchet.test.ts:flaky cost 12.9 PR minute(s) across 3 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.43
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/console-parity-ratchet.test.ts:flaky"
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/ci-friction-remedy-077a3aef1f0368e1.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/console-parity-ratchet.test.ts:flaky"
+      proof: "grep: test(\"W1-T10408: check:test:test/console-parity-ratchet.test.ts:flaky is prevented, not retried\" in test/worker/run-task/ci-friction-remedy-077a3aef1f0368e1.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/console-parity-ratchet.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/console-parity-ratchet.test.ts:flaky cost 12.9 PR minute(s) (seven-day half-life) across 3 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/run-task.ts: test/console-parity-ratchet.test.ts imports it
+    - test/console-parity-ratchet.test.ts: named by the failing check
+    - the rounds name a failing test: test/console-parity-ratchet.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13416 (https://github.com/craigoley/remudero/pull/13416) at 2026-10-22T01:27:28.447Z: ci-log round — comment-load-ratchet: test/console-parity-ratchet.test.ts; claims: test/console-parity-ratchet.test.ts; rule-checks: test/console-parity-ratchet.test.ts
+        failing tests: W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/console-parity-ratchet.test.ts:1:3877
+          | ✖ W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped (97.763857ms)
+          |   AssertionError [ERR_ASSERTION]: every real COMMANDS verb needs a route or a CLI_ONLY reason — unmapped: review-replay
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'review-replay'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/console-parity-ratchet.test.ts:129:10)
+    - PR #13223 (https://github.com/craigoley/remudero/pull/13223) at 2026-10-21T21:13:24.806Z: ci-log round — comment-load-ratchet: test/console-parity-ratchet.test.ts; claims: test/console-parity-ratchet.test.ts; rule-checks: test/console-parity-ratchet.test.ts; coverage-shard (5/8): emissions
+        failing tests: W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped; emissionsCommand counts events out of a GZIPPED rotation, not just plain ones; no tracked source opens a draft pull request; a verb with no attributable prefix is still reported unmeasurable and never as dead; the report states how many verbs the registry declares beside how many it scanned
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/console-parity-ratchet.test.ts:1:3877
+          | ✖ W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped (104.56578ms)
+          |   AssertionError [ERR_ASSERTION]: every real COMMANDS verb needs a route or a CLI_ONLY reason — unmapped: keep, reply
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'keep',
+          |   +   'reply'
+          |   + ]
+          |   - []
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/run-task.ts and a new test file under test/worker/run-task/. Neither is in the categories the escalation rule names: secrets, credentials, auth, permissions, data or branch deletion, merge/deploy/review policy, or irreversible actions."
+      - "The task is filed as an implement task with auto verification and a grep acceptance on a test name. The description shows it targets a CI flake, a console-parity test failing on unmapped COMMANDS verbs (review-replay, keep, reply). That is ordinary test-hygiene work, and the PR still passes CI and review."
+      - "It asks for no operator-only decision. The remedy is measured afterward by the gardener, and a share that does not fall reopens the cause one rung up."
+      - "The family track record (39 merged, 58 declined, Beta mean 0.67) is mediocre, and no change view was supplied, so the actual scope is unverified. That keeps my confidence moderate rather than high. The failures shown look like a ratchet test catching new verbs, which may be correct behavior rather than a flake. This is a quality concern, not a danger one."
+    judged_at: "2026-10-22T13:17:04.517Z"
+    pin: "c6f189a2995e3aeade9edc8c959130c995b27dc2aa31d856d748a923507db3f0"

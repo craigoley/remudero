@@ -1,0 +1,30 @@
+- id: W1-T10144
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — retro.preflight_failed landed 5 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.9
+  status: merged
+  attempts: 0
+  author_class: machine
+  origin: "scout:retro.preflight_failed"
+  files:
+    - test/scout-retro-preflight-failed.test.ts
+  acceptance:
+    - claim: "retro.preflight_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10144: retro.preflight_failed no longer recurs\" in test/scout-retro-preflight-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step retro.preflight_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 4 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared files list contains only one new test file (test/scout-retro-preflight-failed.test.ts), and the description does not mention secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions.; on the change's description/files alone, no diff was read — The task is a recurring-symptom fix for a ledger step, and the acceptance is a grep-verifiable test title, so it can be verified from what is shown. It does not ask for an operator-only decision.; on the change's description/files alone, no diff was read — Mild concerns are that the scout family has 0 merged and 1 declined task, that the rows name no file so the real fix location is undeclared, and that the declared files may understate the actual change. CI and review still gate the PR, which keeps this from being HIGH."
+    judged_at: "2026-10-18T12:34:46.496Z"
+    pin: "c5e0eabe8dd1d668757c3ef08c7aaf085b4d4d0415b2597152f39ae7fc23679b"

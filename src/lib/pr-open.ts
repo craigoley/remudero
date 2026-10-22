@@ -8,7 +8,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { openPrsRestArgs, prFilesRestArgs, type RestPullRow } from "./open-prs-rest.js";
-import { loadPlan } from "./plan.js";
+import { loadPlan, type AcceptanceCriterion } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 import { taskIdFromRunBranch } from "./status.js";
@@ -166,9 +166,9 @@ export function defaultProofRunnerAsync(
   });
 }
 
-/** `stale-proof`: a filed proof already passes at the merge base, a plan defect only an operator amendment can
- *  repair (Rule 15 bars the worker). `branch-gap`: anything else, which a later build of the task can close. */
-export type PrOpenRefusalClass = "stale-proof" | "branch-gap";
+/** `stale-proof` needs a plan amendment; `branch-gap` can be repaired by a build.
+ *  `all-credited` has no remaining proof to execute and grants no new credit. */
+export type PrOpenRefusalClass = "stale-proof" | "branch-gap" | "all-credited";
 
 /** A `branch-gap` refusal whose only defect is a filed proof that ran and failed: the body is otherwise
  *  fully checked, so the opener can still open the finished work with that proof named as its fix target. */
@@ -342,14 +342,22 @@ function mergeBaseFor(repoRoot: string, baseRef: string): string {
     : reject(`cannot resolve merge base ${baseRef}: git returned no merge-base sha`);
 }
 
-/** The filed task's acceptance criteria, refusing a task the plan lacks or one with none. */
-function filedCriteria(taskId: string, repoRoot: string): { claim: string; proof: string }[] {
+/** The review contract's truthy credits are context; only the remaining criteria may execute. */
+function filedCriteria(taskId: string, repoRoot: string): { executable: AcceptanceCriterion[]; priorCredit: string } {
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const task = plan.tasks.find((candidate) => candidate.id === taskId);
   if (!task) return reject(`run branch names ${taskId}, but that task is absent from the filed plan`);
   const criteria = task.acceptance ?? [];
   if (criteria.length === 0) return reject(`${taskId} has no filed acceptance criteria to put in the PR body`);
-  return criteria;
+  const credited = criteria.filter((criterion) => criterion.satisfied_by);
+  const executable = criteria.filter((criterion) => !criterion.satisfied_by);
+  const priorCredit = credited.length === 0 ? "" : "## Prior acceptance credit\n\n" + credited.map((criterion) =>
+    `- ${JSON.stringify(criterion.claim)} (satisfied_by: ${JSON.stringify(criterion.satisfied_by)})`,
+  ).join("\n");
+  if (executable.length === 0) {
+    return reject(`${taskId} has no executable acceptance criteria; all criteria carry prior credit.\n\n${priorCredit}`, "all-credited");
+  }
+  return { executable, priorCredit };
 }
 
 const runnableProof = (proof: string, target?: SuiteRegistryTarget): boolean =>
@@ -386,14 +394,14 @@ export function openPullRequestChecked(
     return body;
   }
 
-  const criteria = filedCriteria(taskId, repoRoot);
+  const { executable: criteria, priorCredit } = filedCriteria(taskId, repoRoot);
 
   const existingTrailer = extractTaskTrailerId(body);
   if (existingTrailer !== undefined && existingTrailer !== taskId) {
     return reject(`run branch names ${taskId}, but the body trailer names ${existingTrailer}`);
   }
 
-  let checkedBody = body;
+  let checkedBody = priorCredit && !body.includes(priorCredit) ? `${priorCredit}\n\n${body}` : body;
   const diagnostics = acceptanceBlockDiagnostics(checkedBody);
   const bodyCriteria = parseAcceptanceBlock(checkedBody);
   if (!diagnostics.headerFound) {
@@ -462,7 +470,7 @@ export async function prerunPullRequestProofs(
   let criteria: { claim: string; proof: string }[];
   let mergeBase: string;
   try {
-    criteria = filedCriteria(taskId, repoRoot);
+    criteria = filedCriteria(taskId, repoRoot).executable;
     mergeBase = mergeBaseFor(repoRoot, baseRef);
   } catch (err) {
     // NOT A SUCCESS: a refusal here (no such task, no criteria, no merge base) is one the sync open

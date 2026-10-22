@@ -17,7 +17,7 @@ import { bodyContradictsDiff } from "../src/lib/review.js";
 // behaviour. Driving `runTask` to that line requires a real worker spawn, so an executing test is
 // not available here. The second and third tests DO execute real code.
 
-const SRC = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const SRC = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 test("recon-GK: the implementation review is fed the PR BODY, never the worker's chat text", () => {
   // The window between the CI-green gate and the runReview call — the site recon-GK identified.

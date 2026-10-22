@@ -205,7 +205,7 @@ test("W1-T1127: a fix dispatch whose own failure is swallowed no longer records 
 
 // ── acceptance 3/4 (the positive case): a dispatch that reaches the worker ──────────────────────
 
-function realRepoFixture(): { bare: string; root: string; bin: string; repo: string; branch: string; owner: string } {
+function realRepoFixture(): { bare: string; root: string; bin: string; repo: string; branch: string; owner: string; headSha: string } {
   const owner = "acme";
   const repo = "w1t1127-live-repo";
   const branch = "run-W1T1127FIX-1786500000000";
@@ -232,12 +232,13 @@ function realRepoFixture(): { bare: string; root: string; bin: string; repo: str
   execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
   execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
   execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
-  ghShim(bin, branch, "cafefeed77");
-  return { bare, root, bin, repo, branch, owner };
+  const headSha = git(repoDir, "rev-parse", `origin/${branch}`).trim();
+  ghShim(bin, branch, headSha);
+  return { bare, root, bin, repo, branch, owner, headSha };
 }
 
 test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly as it does today, and two passes over one unchanged head still dispatch only once", async () => {
-  const { bare, root, bin, repo, branch, owner } = realRepoFixture();
+  const { bare, root, bin, repo, branch, owner, headSha } = realRepoFixture();
   const savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
   try {
@@ -251,6 +252,7 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
       byId: new Map([[TASK, { id: TASK, title: "w1t1127 fixture" }]]),
     };
     let spawnCalls = 0;
+    let reviewCriteria: OpenPrView["unmetCriteria"] = [];
     const effects = buildSweepEffects({
       // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
       resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
@@ -263,6 +265,10 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
       log: log,
       policy: DEFAULT_SWEEP_POLICY,
       reviewRunner: undefined,
+      runReviewImpl: async () => ({ state: "failure", headSha,
+        criteria: reviewCriteria,
+        testTheater: false, summary: "fixture remedy remains", floorDegraded: false,
+        capped: false, keywordOnly: false, planOnly: false, reviewerOutcome: "failure" }),
       spawnImpl: async () => {
         spawnCalls += 1;
         return fakeWorker("REPORT\nw1t1127 fix applied\n");
@@ -273,12 +279,12 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
       prNumber: 77,
       prUrl: `https://github.com/${owner}/${repo}/pull/77`,
       taskId: TASK,
-      headSha: "cafefeed77",
-      // W1-T1282: a real (non-empty) failing check — `checksState: "red"` alone (this fixture's
-      // own default) now stands the rung down before any strike when `ciFailures` reads empty
-      // (the two-reader-split guard). This fixture is testing the DEDUP mechanism, not ci-log
-      // evidence content, so it needs a genuinely non-empty list to reach the worker at all.
-      ciFailures: [{ name: "ci", logTail: "build failed" }],
+      headSha,
+      // Exercise semantic repair: a no-op CI repair correctly selects its own rerun lane.
+      // The empty first review still permits one honest strike, then records its failure.
+      checksState: "green", reviewState: "failure", ciFailures: [],
+      unmetCriteria: [{ claim: "fixture remedy remains", proof: "unit test: fixture remedy",
+        met: false, reason: "repair remains", proof_exec: "not_executable" }],
     });
 
     const summary1 = await withLiveWritesAllowed(() =>
@@ -311,13 +317,19 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
     //
     // So the rung now genuinely CONCLUDES WITHOUT LANDING A NEW HEAD, which is exactly the shape
     // `fixRungStalledWithoutNewHead` is documented to re-arm on. The seed itself is unaffected and
-    // still asserted above: `sweep.disposed` carries head_sha "cafefeed77", the candidate's own.
+    // still asserted above: `sweep.disposed` carries the fixture commit head_sha, the candidate's own.
     // What is pinned below is the invariant that survives the transport — a stalled rung re-arms,
     // and the STRIKE CAP still bounds it — replacing exactly the bound the old assertion gave.
     const review1 = lines1.filter((l) => l.step === "fix.review");
     assert.equal(review1.length, 1, "the rung reached its own review row rather than throwing before it");
     assert.equal(review1[0].state, "failure", "and concluded non-success — the stalled shape the gate re-arms on");
 
+    // A remaining semantic criterion supplies actionable evidence for the next repair.
+    candidate.checksState = "green";
+    candidate.ciFailures = [];
+    candidate.reviewState = "failure";
+    candidate.unmetCriteria = reviewCriteria = [{ claim: "fixture remedy remains", proof: "unit test: fixture remedy",
+      met: false, reason: "repair remains", proof_exec: "not_executable" }];
     const summary2 = await withLiveWritesAllowed(() =>
       runSweep([candidate], { ...effects, ledgerPath, runId, log, dryRun: false }, DEFAULT_SWEEP_POLICY),
     );

@@ -31,10 +31,11 @@ import { DEFAULT_POLL_INTERVAL_MS, buildDefaultHeadroomPolicy, resolveHeadroomLi
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { DEFAULT_MAX } from "../src/lib/drain.js";
 import { generateLaunchdPlist } from "../src/lib/launchd.js";
+// @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED = loadPolicy(policyPath(REPO_ROOT));
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/daemon.ts", import.meta.url)), "utf8") + "\n" + readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 // ── review.ts: proof timeout ────────────────────────────────────────────────────────────
 

@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { setTimeout as waitForRegistryPoll } from "node:timers/promises";
 import { observeSelectedRegistrySync, selectedRegistryObserverInContext, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
 import { hostWorktreeGit } from "./worktree-git.js";
@@ -12,7 +13,7 @@ import fs from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
-import { missingDeclaredPaths, parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
+import { isPlacedTestPath, missingDeclaredPaths, placementImports, placementSubsystemMap, parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask, MINTED_TASK_ID_RE, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
@@ -33,6 +34,7 @@ import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
+import { placeTest } from "./test-placement.js";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
@@ -1753,7 +1755,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
     "Every files: path must exist in this checkout or origin/main: confirm with Glob before listing it.",
-    "A new file is either test/<task-title-slug>.test.ts or declared in design on its own CREATES: <path> line.",
+    "A new file is either test/<folder>/<task-title-slug>.test.ts, where <folder> is the folder placeTest computes from the src modules in files: (see `rmd test-place`; never directly under test/), or declared in design on its own CREATES: <path> line.",
     "A CREATES path is new-file scope only, never the call site of a call-site proof. Every proof must fail on main.",
     'Every acceptance `proof:` value MUST be double-quoted (for example, `proof: "grep: symbol in src/file.ts"`): a proof contains a colon and unquoted YAML is invalid.',
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
@@ -2176,13 +2178,28 @@ function draftCreatedPaths(task: import("./plan.js").Task): Set<string> {
   return new Set([...task.design?.matchAll(/^[ \t]*CREATES:[ \t]*(\S+)[ \t]*$/gm) ?? []].map((m) => m[1]));
 }
 
+/** W1-T9875: the path a draft's slug-named new test belongs at, computed by placeTest from the src modules it declares. */
+function draftExpectedTestPath(task: import("./plan.js").Task, slug: string): string {
+  const placed = placeTest({ imports: placementImports(task.files ?? []), name: slug, kind: "unit" }, placementSubsystemMap());
+  return `test/${placed.folder}/${slug}.test.ts`;
+}
+
 function draftMissingPathViolations(task: import("./plan.js").Task, facts: DraftRepoFacts): DraftLintViolation[] {
   const slug = draftShardSlug(task.title);
   const creates = draftCreatedPaths(task);
+  const expected = draftExpectedTestPath(task, slug);
   const missing = missingDeclaredPaths(task, { pathExists: facts.moduleExists, pathExistsAtBase: facts.pathExistsAtBase },
-    (path) => path === `test/${slug}.test.ts` || creates.has(path));
-  return missing.map((path) => ({ check: "draft-path-missing", severity: "block",
-    message: `${task.id}: files path ${JSON.stringify(path)} exists in neither the checkout nor origin/main; use an existing path, a slug-named test, or a CREATES: declaration` }));
+    (path) => path === expected || creates.has(path));
+  const out: DraftLintViolation[] = missing.map((path) => ({ check: "draft-path-missing", severity: "block",
+    message: `${task.id}: files path ${JSON.stringify(path)} exists in neither the checkout nor origin/main; use an existing path, the slug-named test at ${JSON.stringify(expected)}, or a CREATES: declaration` }));
+  // A NEW test lands in its computed folder, whether the slug names it or a CREATES: line does; an existing one keeps its path.
+  for (const path of task.files ?? []) {
+    if (!/^test\/[\w./-]+\.test\.[mc]?[jt]s$/.test(path) || isPlacedTestPath(path)) continue;
+    if (facts.moduleExists(path) || facts.pathExistsAtBase?.(path) === true) continue;
+    out.push({ check: "draft-test-unplaced", severity: "block",
+      message: `${task.id}: new test ${JSON.stringify(path)} sits directly under test/ or in a folder scripts/test-placement/subsystem-map.json does not name; a new test goes in the folder placeTest computes (here ${JSON.stringify(expected)}; \`rmd test-place\` prints it for an existing test)` });
+  }
+  return out;
 }
 
 /** W1-T9307: a call-site-shaped proof (`grep: <sym>( in src/<x>.ts`) must name a caller the tree HOLDS. A path absent from
@@ -2423,6 +2440,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               subtype: escalated.subtype,
               ...workerLedgerFields(escalated),
             });
+            lastWorker = escalated;
             const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"), proposal, currentPlanText);
             if (candidate) {
               parsed = composeDraftStamp(proposal.id, candidate, deps.clock);
@@ -2441,12 +2459,13 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         const refusal = lastWorker?.usageRefusal;
         // W1-T3350: the four ways a parse can fail are FOUR reasons, not one string, and the
         // counts ride alongside so a rate spike has a shape a reader can act on.
-        const failure = describeDraftParseFailure([lastWorker?.text ?? "", (lastWorker?.blocks ?? []).join("\n")].join("\n"));
+        const failure = describeDraftParseFailure([lastWorker?.text ?? "", (lastWorker?.blocks ?? []).join("\n")].filter(Boolean).join("\n"));
         const error = refusal
           ? `refused by the account before any output: ${refusal.matched}`
           : (failure.reason ?? "no FRAGMENT/STAMP markers in worker output");
         deps.log("inbox.draft_error", {
           proposal_id: proposal.id,
+          ...(lastWorker ? { provider: lastWorker.provider, model: draftWorkerModel(lastWorker), selection_assignment_id: lastWorker.selectionAssignmentId } : {}),
           error,
           fragments: failure.fragments,
           stamps: failure.stamps,
@@ -3079,14 +3098,15 @@ export function loadProposalRegistry(registryPath: string): Proposal[] {
 //
 // This is the ONLY sanctioned writer, so a fifth caller inherits the property. An O_EXCL lockfile serialises every
 // call ACROSS PROCESSES, which an in-process single-writer function cannot do, and the write lands via a temp file
-// plus `renameSync`. A live holder is POLLED, not refused as in drain-lock.ts, because every critical section takes
-// microseconds. STALENESS IS NEVER PID-LIVENESS ALONE, so {@link reclaimStaleLock} (W1-T289/W1-T368) conditions its
+// plus `renameSync`. Async holders may span awaited shard reads: async contenders yield, while synchronous callers
+// keep a bounded compatibility wait. STALENESS IS NEVER PID-LIVENESS ALONE, so {@link reclaimStaleLock} (W1-T289/W1-T368) conditions its
 // delete on the lock's on-disk identity and two reclaimers cannot both believe they hold it.
 
 export interface UpdateProposalRegistryOpts {
-  /** Throw if the lock cannot be acquired within this long (ms). Default 2000 — every critical section takes
-   *  microseconds, so a lock held after 2s means a crashed holder, not contention. */
+  /** Bounded synchronous compatibility wait (default 2000ms), not evidence that a holder is dead. */
   maxWaitMs?: number;
+  signal?: AbortSignal;
+  log?: (step: string, detail: Record<string, unknown>) => void;
   /** Poll interval while a live holder is waited out (ms). Default 20. */
   pollIntervalMs?: number;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
@@ -3126,6 +3146,52 @@ function defaultRegistryLockSleep(ms: number): void {
   execFileSync("sleep", [String(ms / 1000)]);
 }
 
+const ownedAsyncRegistryLocks = new Set<string>();
+
+/** A deadline keeps the words every earlier waiter threw, so an existing caller's diagnostic still reads. */
+function registryBusyMessage(outcome: string, lockPath: string, holder: RegistryLockInfo | undefined, budgetMs?: number): string {
+  const heldBy = `(held by pid ${holder?.pid ?? "unknown"})`;
+  return outcome === "deadline" && budgetMs !== undefined
+    ? `proposal registry deadline: timed out after ${budgetMs}ms waiting for ${lockPath} ${heldBy}`
+    : `proposal registry ${outcome}: ${lockPath} ${heldBy}`;
+}
+
+export class ProposalRegistryBusyError extends RmdError {
+  constructor(readonly outcome: "same-process-busy" | "cancelled" | "deadline", readonly lockPath: string,
+    readonly holder: RegistryLockInfo | undefined, budgetMs?: number) {
+    super("registry", GENERIC_EXIT_CODE, registryBusyMessage(outcome, lockPath, holder, budgetMs),
+      { outcome, lockPath, holder: holder ?? null });
+    this.name = "ProposalRegistryBusyError";
+  }
+}
+
+function registryWaitRefusal(opts: UpdateProposalRegistryOpts, outcome: ProposalRegistryBusyError["outcome"],
+  lockPath: string, holder?: RegistryLockInfo, budgetMs?: number): never {
+  opts.log?.("proposal_registry.lock_wait_refused", { outcome, lock_path: lockPath, holder: holder ?? null });
+  throw new ProposalRegistryBusyError(outcome, lockPath, holder, budgetMs);
+}
+
+/** Whether `lockPath` still names the lock this process created: the identity and the bytes come from ONE
+ *  descriptor, so they cannot describe two different files (CodeQL js/file-system-race). No symlink is followed. */
+function registryLockStillOurs(lockPath: string, ours: { dev: number; ino: number }, bytesMatch: (raw: string) => boolean): boolean {
+  const fd = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const current = fs.fstatSync(fd);
+    return current.dev === ours.dev && current.ino === ours.ino && bytesMatch(fs.readFileSync(fd, "utf8"));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function recordRegistryHold(registryPath: string, started: number, opts: UpdateProposalRegistryOpts): void {
+  try {
+    // One bounded observation, not a liveness oracle or a history store. Never used to reclaim a lock.
+    writeAtomic(`${registryPath}.lock-hold.json`, JSON.stringify({ held_ms: systemClock.now() - started }));
+  } catch (error) {
+    opts.log?.("proposal_registry.lock_measurement_unavailable", { reason: String(error) });
+  }
+}
+
 /** Read-modify-write `registryPath`, guarded against the hazards this section's header describes. `update` sees the
  *  CURRENT proposals, re-read under the lock; returning `null` skips the write. */
 export function updateProposalRegistry(
@@ -3135,6 +3201,7 @@ export function updateProposalRegistry(
 ): Proposal[] | null {
   const lockPath = `${registryPath}.lock`;
   const maxWaitMs = opts.maxWaitMs ?? 2000;
+  if (!Number.isFinite(maxWaitMs) || maxWaitMs < 0) throw new Error("synchronous proposal registry wait must be finite");
   const pollIntervalMs = opts.pollIntervalMs ?? 20;
   const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const sleep = opts.sleep ?? defaultRegistryLockSleep;
@@ -3160,6 +3227,11 @@ export function updateProposalRegistry(
         beforeDelete: opts.__beforeReclaimDelete,
       });
       if (result.outcome === "live") {
+        // Only locally owned async acquisitions are known to need this event loop to release.
+        // A lock merely naming our pid (including another thread) retains the bounded compatibility wait.
+        if (result.holder.pid === process.pid && ownedAsyncRegistryLocks.has(resolvePath(lockPath))) {
+          registryWaitRefusal(opts, "same-process-busy", lockPath, result.holder);
+        }
         if (Date.now() >= deadline) {
           throw new Error(`updateProposalRegistry: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${result.holder.pid})`);
         }
@@ -3170,7 +3242,17 @@ export function updateProposalRegistry(
     }
   }
 
+  // No hold is recorded here: only an async holder spans awaited reads, and the default synchronous writers keep
+  // their exact on-disk footprint (the registry and its shard directory, nothing else).
   try {
+    return updateLockedProposalRegistry(registryPath, update);
+  } finally {
+    try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
+  }
+}
+
+/** Shared by both acquisition paths: one parser, shard population and atomic writer, always under the same lock. */
+function updateLockedProposalRegistry(registryPath: string, update: (current: Proposal[]) => Proposal[] | null): Proposal[] | null {
     // W1-T2490: `current` is the SHARD-MERGED population, read under this SAME lock. `shards` is kept so the write
     // half below knows, per id, whether it already lives in its own file.
     const shardDir = proposalShardDir(registryPath);
@@ -3231,12 +3313,21 @@ export function updateProposalRegistry(
     fs.writeFileSync(tmpPath, JSON.stringify({ proposals: next }, null, 2), "utf8");
     fs.renameSync(tmpPath, registryPath);
     return next;
+}
+
+/** A finite caller budget or a caller-owned terminal cancellation signal is mandatory; no implicit infinite wait. */
+export async function updateProposalRegistryAsync(registryPath: string, update: (current: Proposal[]) => Proposal[] | null,
+  opts: UpdateProposalRegistryOpts): Promise<Proposal[] | null> {
+  if ((opts.maxWaitMs === undefined && !opts.signal) ||
+      (opts.maxWaitMs !== undefined && (!Number.isFinite(opts.maxWaitMs) || opts.maxWaitMs < 0))) {
+    throw new Error("asynchronous proposal registry update requires a finite budget or owned cancellation signal");
+  }
+  const release = await acquireProposalRegistryLockAsync(registryPath, opts);
+  try {
+    if (opts.signal?.aborted) registryWaitRefusal(opts, "cancelled", `${registryPath}.lock`);
+    return updateLockedProposalRegistry(registryPath, update);
   } finally {
-    try {
-      fs.unlinkSync(lockPath);
-    } catch {
-      // already gone — idempotent
-    }
+    await release();
   }
 }
 
@@ -3297,19 +3388,49 @@ async function readFileIfExistsAsync(path: string): Promise<string | undefined> 
 /** {@link updateProposalRegistry}'s lock, awaiting between polls; resolves to its release. */
 async function acquireProposalRegistryLockAsync(registryPath: string, opts: UpdateProposalRegistryOpts = {}): Promise<() => Promise<void>> {
   const lockPath = `${registryPath}.lock`;
-  const maxWaitMs = opts.maxWaitMs ?? 2000;
+  const maxWaitMs = opts.maxWaitMs ?? (opts.signal ? Infinity : 2000);
   const pollIntervalMs = opts.pollIntervalMs ?? 20;
   const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
   await fs.promises.mkdir(dirname(lockPath), { recursive: true });
   const deadline = systemClock.now() + maxWaitMs;
+  let holder: RegistryLockInfo | undefined;
+  let reportedIdentity: string | undefined;
+  let measurement: { held_ms: number } | undefined;
+  let measurementState: { kind: "missing" | "observed" | "unreadable" };
+  try {
+    const value = JSON.parse(await fs.promises.readFile(`${registryPath}.lock-hold.json`, "utf8"));
+    if (!Number.isFinite(value.held_ms) || value.held_ms < 0) throw new Error("invalid hold measurement");
+    measurement = value;
+    measurementState = { kind: "observed" };
+  } catch (error) {
+    measurementState = { kind: isEnoent(error) ? "missing" : "unreadable" };
+  }
+  const waitingAt = systemClock.now();
+  const check = () => {
+    if (opts.signal?.aborted) registryWaitRefusal(opts, "cancelled", lockPath, holder);
+    if (systemClock.now() >= deadline) registryWaitRefusal(opts, "deadline", lockPath, holder, maxWaitMs);
+  };
+  let acquired!: { dev: number; ino: number; contents: string };
   for (;;) {
+    check();
     try {
       const handle = await fs.promises.open(lockPath, "wx");
+      const identity = fs.fstatSync(handle.fd);
+      const contents = JSON.stringify({ pid: process.pid, host: hostname(), startedAt: systemClock.iso() });
       try {
-        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), startedAt: systemClock.iso() }));
-      } finally {
-        await handle.close();
+        try { await handle.writeFile(contents); }
+        finally { await handle.close(); }
+      } catch (error) {
+        // A failed publication is ours to clean only if the pathname still names our descriptor's file.
+        // A reclaimer's replacement is not ours, even when writing the original lock failed.
+        try {
+          if (registryLockStillOurs(lockPath, identity, raw => raw === "" || raw === contents)) fs.unlinkSync(lockPath);
+        } catch (cleanup) {
+          opts.log?.("proposal_registry.lock_creation_cleanup_failed", { lock_path: lockPath, reason: String(cleanup) });
+        }
+        throw error;
       }
+      acquired = { dev: identity.dev, ino: identity.ino, contents };
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
@@ -3320,20 +3441,41 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
         beforeDelete: opts.__beforeReclaimDelete,
       });
       if (result.outcome === "live") {
-        if (systemClock.now() >= deadline) {
-          throw new Error(`pruneOrphanedDraftsAsync: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${result.holder.pid})`);
+        holder = result.holder;
+        check();
+        const identity = JSON.stringify(holder);
+        if (identity !== reportedIdentity && (!measurement || systemClock.now() - waitingAt > measurement.held_ms)) {
+          opts.log?.(measurement ? "proposal_registry.lock_wait_long" : "proposal_registry.lock_measurement_unavailable",
+            { lock_path: lockPath, holder, measurement: measurementState.kind, observed_hold_ms: measurement?.held_ms ?? null });
+          reportedIdentity = identity;
         }
-        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+        try {
+          await waitForRegistryPoll(Math.min(pollIntervalMs, deadline - systemClock.now()), undefined, { signal: opts.signal });
+        } catch (error) {
+          if (opts.signal?.aborted !== true) throw error;
+          check();
+        }
       }
     }
   }
-  return async () => {
+  const started = systemClock.now();
+  const ownedPath = resolvePath(lockPath);
+  ownedAsyncRegistryLocks.add(ownedPath);
+  const release = async () => {
     try {
-      await fs.promises.unlink(lockPath);
-    } catch {
-      // already gone — idempotent
+      recordRegistryHold(registryPath, started, opts);
+    } finally {
+      ownedAsyncRegistryLocks.delete(ownedPath);
+      try {
+        if (registryLockStillOurs(lockPath, acquired, raw => raw === acquired.contents)) fs.unlinkSync(lockPath);
+      } catch (error) {
+        if (!isEnoent(error)) opts.log?.("proposal_registry.lock_release_unavailable", { lock_path: lockPath, reason: String(error) });
+      }
     }
   };
+  // Cancellation/deadline can arrive during async open/write/close. Do not run the update afterwards.
+  try { check(); } catch (error) { await release(); throw error; }
+  return release;
 }
 
 /** W1-T9443: {@link pruneOrphanedDrafts} with every read awaited. Only an orphan takes the lock, and it looks again

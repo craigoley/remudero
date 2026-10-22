@@ -1,0 +1,74 @@
+- id: W1-T10154
+  title: A test title path cannot override its structured failure location
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator-authorized queue followthrough 2026-10-18: PR12703 and W10129 attribution"
+  plan_refs: [W1-T9056, W1-T9057, W1-T9059, W1-T5380, W1-T10129]
+  files: [src/lib/ci-friction-gardener.ts, test/ci/parity/a-test-title-path-is-not-its-failure-location.test.ts, test/a-ci-friction-filing-carries-the-rounds-it-was-priced-on.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED in a deterministic read-only production-function replay on main 19935605997:
+    ciFailureLedgerEntry given the real W108/R42 positive-control title mentioning
+    test/classify.test.ts and a structured location naming
+    test/mutation-trigger-covers-its-own-command.test.ts emits signature test/classify.test.ts.
+    Keeping the same location but removing that title reference emits the actual location.
+    testRunnerFailureSignature searches named titles for any test path before it consults
+    the runner's diagnostic block. W10129 consequently proposes classify.ts from evidence
+    whose actual failing assertions concern mutation-trigger registration and exact sets.
+    Recurrence and an imported source module are not root-cause proof. W9056 keys a round by
+    its failing test; W9057 carries titles/excerpts and W9059 locates an owner from that key.
+    This task corrects the observed signature boundary, not those tasks' separate contracts.
+  design: |
+    1. Attribute a runner failure from its own structured location or actual file-wrapper
+       failure, not an arbitrary path inside its human-readable title, assertion message,
+       expected/actual text, passing output or a neighboring test's diagnostic block.
+       Associate evidence with the same failure block. Preserve original titles/excerpts
+       and source provenance. Conflicting, truncated or absent location evidence remains
+       explicit non-file/unknown evidence; never invent a source owner or a passing result.
+       Preserve supported TAP/spec forms, timestamped logs and existing pool/timeout cases.
+    2. Replay PR12703's literal title/location pair through ciFailureLedgerEntry and the
+       real round/cause-key consumer. A neutral-title positive control must produce the
+       same actual failing-file key. Cover multiple blocks, nested tests, repeated summaries,
+       quoted paths, real file-wrapper failures and healthy logs containing scary text.
+       A known direct-source owner remains independently discoverable; a test that merely
+       reads configuration must not be assigned an unrelated imported source by guessing.
+    3. Keep historical ledger rows immutable. Do not retroactively turn a legacy ambiguous
+       signature into a certified failure location or rewrite W10129's evidence, task id,
+       scope, acceptance or risk ruling. Its separate operator dispatch hold is released
+       only through owner review of current evidence and normal governance. Do not build
+       classify.ts merely because that parked record exists.
+    4. Delete the actual parser correction: the real-path/title disagreement must fail;
+       restore it to pass. Cover current defaults and each new catch. Commit before verified
+       tests through shipped host slots and mapped coverage with the changed source SF.
+       Refresh merged trailer/run-branch credit, every OPEN head subject, selector and
+       ordinary claim before build/publication. Reconcile new native failures against the
+       actual pinned unchanged base; verify canonical stored proofs and normal hosted gates.
+    5. This is a bounded correction of an observed attribution defect, not a class-wide
+       repair policy, new daemon scanner, global trusted-PR hold, automatic refile/retirement,
+       budget/retry/gate/baseline change or scanner waiver. Reuse existing off-loop gardeners
+       and comparable recurrence windows; report changed cause keys and missing joins rather
+       than claiming improvement from zero matches. Preserve original per-PR dispositions.
+       Registry/admission remains opt-in SHADOW ONLY and the human owner/admin override
+       remains independent. No schedules, worker stops, production activation or live config.
+  acceptance:
+    - claim: A title mentioning another test cannot override its actual diagnostic location
+      proof: 'unit test: a title path cannot override the same failure diagnostic location'
+    - claim: Real ledger entries and priced cause keys retain the correct failing-file identity
+      proof: 'unit test: runner location survives the actual friction ledger and cause consumers'
+    - claim: Ambiguous and missing evidence never invents ownership or a passing result
+      proof: 'unit test: ambiguous runner locations retain unknown evidence without guessed owners'
+    - claim: The parser correction is load-bearing and historical ledger data stays immutable
+      proof: 'unit test: failure location attribution is load-bearing without rewriting history'
+  falsifier: |
+    Feed the current production parser the W108/R42 failing title that mentions classify.test.ts
+    with the diagnostic location in mutation-trigger-covers-its-own-command.test.ts: the wrong
+    signature wins. The same location with a neutral title is the positive control. Deleting
+    the actual correction must restore that disagreement, not merely remove a test marker.

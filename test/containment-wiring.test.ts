@@ -13,7 +13,7 @@ import { ProviderCapacityBlockedError } from "../src/lib/worker-provider.js";
 import { IsolationError } from "../src/lib/isolation.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 // ── The containment preflight is WIRED into the run path (mirrors
 // test/isolation-wiring.test.ts's checks for the isolation preflight) ───────

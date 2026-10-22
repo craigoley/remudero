@@ -433,7 +433,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/serve.ts": 3,
   "src/lib/skill.ts": 4,
   "src/lib/status-board.ts": 5,
-  "src/lib/status.ts": 6,
+  "src/lib/status.ts": 5,
   "src/lib/task-id-reservation.ts": 1,
   "src/lib/task-linter.ts": 1,
   "src/lib/trace.ts": 1,
@@ -441,7 +441,8 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/worker-containment.ts": 5,
   "src/lib/worker-home.ts": 3,
   "src/lib/worker.ts": 11,
-  "src/run-task.ts": 49,
+  "src/run-task.ts": 43,
+  "src/cli/commands/run-task-verb.ts": 4,
   "src/spike.ts": 1,
 };
 
@@ -470,9 +471,9 @@ const BASELINE_CONFLATOR_SITES: ConflatorSite[] = [
   // a `//` line comment. The string-aware scanner shows them, so they are recorded as existing sites.
   { file: "src/lib/ci-parity.ts", text: "!Number.isSafeInteger(holder?.pid)" },
   { file: "src/run-task.ts", text: "!v?.headRefOid" },
-  { file: "src/run-task.ts", text: "!parseReport(fullText(impl))?.prUrl" },
-  { file: "src/run-task.ts", text: "!parseReport(fullText(impl))?.prUrl" },
-  { file: "src/run-task.ts", text: "!parseReport(fullText(impl))?.prUrl" },
+  { file: "src/cli/commands/run-task-verb.ts", text: "!parseReport(fullText(impl))?.prUrl" },
+  { file: "src/cli/commands/run-task-verb.ts", text: "!parseReport(fullText(impl))?.prUrl" },
+  { file: "src/cli/commands/run-task-verb.ts", text: "!parseReport(fullText(impl))?.prUrl" },
   { file: "src/spike.ts", text: "!!report?.prUrl" },
 ];
 

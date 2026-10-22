@@ -1,0 +1,66 @@
+- id: W1-T10314
+  title: "A METADATA-ONLY ESCALATION NEVER FREEZES A FIX STRIKE FOR A CODE RED IT NEVER NAMED — #13218's body-proof escalations (#13219, #13246) asked only about acceptance-author-gate, and from 21:42Z on 2026-10-20 every ci-log strike aimed at its red coverage shards stood down on them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — whether an open metadata-only escalation stands down a strike whose red set it never named; every other escalation keeps today's stand-down
+  band_meaning: blast-radius
+  origin: "operator instruction 2026-10-21 (stuck-PR brief): \"Fix 13008, 13039, 13121, 13218 while you wait … and resolve their root causes so they won't get stuck in the future\""
+  plan_refs: [W1-T2799, W1-T3579, W1-T5544, W1-T8167, W1-T9585]
+  files:
+    - src/run-task.ts
+    - test/inbox/a-metadata-escalation-never-freezes-a-fix-for-a-red-it-never-named.test.ts
+  status: queued
+  priority: 1  # a code red behind a body question waits for a human who was never asked about it
+  attempts: 0
+  rationale: |
+    READ on origin/main 29fcf05fd. Symbols, not lines.
+    THE INCIDENT, from the core ledger on host remudero (rmd-state2), 2026-10-20/21. #13218 (run-unfiled-1792514519658)
+    went red at 660d92c on acceptance-author-gate (an extensionless `grep:` target) AND on coverage-shard (1,2,4,5,6,8/8)
+    plus coverage-ratchet (a real coverage-report crash the fix lane could repair). At 21:13:21Z the metadata route
+    (`repairPrMetadata`, src/run-task.ts) found no deterministic body cure and the sweep's metadata-only arm
+    (src/lib/sweep.ts, `metadataOnlyRed`) escalated BLOCKED issue #13219, summary "metadata-only required checks
+    acceptance-author-gate need title/body repair", cause `ci`. On later passes the same arm found the prior repair row,
+    released the wait, and fell through to the ci-log strike for the whole red set. Each strike then wrote `fix.stood_down`:
+    "a needs-human escalation for this exact (task, PR, head …, cause) is ALREADY OPEN" (21:42:42Z, 23:02:28Z, 23:29:38Z
+    on 660d92c; 23:41:23Z, 23:43:41Z, 23:53:16Z on 7ed190c against its successor #13246). The coverage reds were never
+    attempted; the PR waited on a human whose question named only the body.
+    MEASURED, core ledger 2026-10-14T00:08Z..2026-10-21T01:17Z (gz and live, 1188 stand-down and escalation rows): 84
+    `fix.stood_down` rows cite an open escalation; 44 of them cite a metadata-only one, across #12582 (W1-T9043, 16),
+    #12695 (W1-T10095, 10), #12982 (2) and #13218 (16). #12582 had the same shape: coverage-shard (3/8) red beside
+    acceptance-author-gate at e110b5e, and its strikes stood down on #12584. #12695's red set was the gate alone, which
+    is the stand-down working as intended. Control: the same query finds 14 stalled-stage and 8 cancelled-twice
+    stand-downs, so it reads every escalation kind.
+    WHY IT IS A DEFECT. `openEscalationStandDownReason` (src/run-task.ts) matches on (task, PR, head, cause), and every CI
+    escalation shares cause `ci`. The stand-down exists so a strike does not re-ask a question someone is answering
+    (W1-T2799). A metadata-only escalation asks about the title or body of the checks it names; a strike at a code red it
+    never named asks nothing of that person.
+    NOT COVERED ELSEWHERE. W1-T9585 (queued) re-admits a strike past a STALLED-STAGE escalation and keeps every
+    question-shaped escalation's stand-down, this one included. W1-T5544 routes a fleet head's stale-proof body red to
+    proof repair; it does not touch the stand-down.
+  design: |
+    1. `openEscalationStandDownReason` gains the red check names the strike targets (`redCheckNames`, src/lib/sweep.ts,
+       already computed at the call site in `fixRungStandDownReason`). When the candidate is a metadata-only escalation,
+       recognised from its own summary ("metadata-only required checks <names> need title/body repair", the text the
+       sweep's metadata arm writes, read from the issue body the way `escalationHeadSha` reads its head, never a second
+       copy of that text), and the strike's red set holds a check the summary does not name, it returns undefined.
+    2. A strike whose red set is only the named metadata checks keeps today's stand-down, and so does every other
+       escalation kind, including W1-T3579's contract-revision rule and the conflict-cause clearance.
+    3. The issue stays open; the metadata wait and its progress-judge release are unchanged. src/run-task.ts sits at its
+       comment-load ceiling (W1-T9332), so the change adds no comment lines there beyond what it removes.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/inbox/a-metadata-escalation-never-freezes-a-fix-for-a-red-it-never-named.test.ts"
+    - claim: "an open metadata-only escalation naming acceptance-author-gate no longer stands down a strike whose reds include a coverage shard (the #13218 shape)"
+      proof: "grep: W1-T10314: a metadata escalation lets a strike at an unnamed code red run in test/inbox/a-metadata-escalation-never-freezes-a-fix-for-a-red-it-never-named.test.ts"
+    - claim: "the same escalation still stands down a strike whose only red is the check it named"
+      proof: "grep: W1-T10314: a metadata escalation still stands down a strike at the check it named in test/inbox/a-metadata-escalation-never-freezes-a-fix-for-a-red-it-never-named.test.ts"
+  falsifier: |
+    Remove the metadata-only arm and the #13218-shaped fixture returns the "ALREADY OPEN and awaiting a human" stand-down
+    again. Apply the arm whatever the red set and the named-check test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger: `fix.stood_down` rows that cite an open metadata-only escalation
+    while the preceding `sweep.disposed` row names a non-metadata red at the same head. Healthy shape: none.

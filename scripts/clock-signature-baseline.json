@@ -1,4 +1,9 @@
 {
+  "src/cli/commands/daemon.ts": {
+    "legacy": 1,
+    "dateNow": 2,
+    "newDate": 1
+  },
   "src/lib/account-usage.ts": {
     "legacy": 1,
     "dateNow": 0,
@@ -415,13 +420,18 @@
     "newDate": 1
   },
   "src/run-task.ts": {
-    "legacy": 22,
-    "dateNow": 51,
-    "newDate": 38
+    "legacy": 20,
+    "dateNow": 48,
+    "newDate": 32
   },
   "src/spike.ts": {
     "legacy": 0,
     "dateNow": 1,
     "newDate": 1
+  },
+  "src/cli/commands/run-task-verb.ts": {
+    "legacy": 1,
+    "dateNow": 1,
+    "newDate": 5
   }
 }

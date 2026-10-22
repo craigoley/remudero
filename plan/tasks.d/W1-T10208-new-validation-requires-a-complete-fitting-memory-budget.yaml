@@ -1,0 +1,126 @@
+- id: W1-T10208
+  title: "New validation requires complete fitting memory evidence before admission has start effects"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  author_class: machine
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  priority: 1.2
+  status: merged
+  attempts: 0
+  origin: "operator-console-follow-up:guarded-validation-extension-2026-10-19"
+  plan_refs: [W1-T7094, W1-T7095, W1-T8230, W1-T8472, W1-T9951, W1-T9483]
+  files:
+    - src/lib/host-memory-admission.ts
+    - src/lib/host-memory-shadow.ts
+    - src/lib/host-memory-learning.ts
+    - test/an-enforced-memory-budget-waits-in-priority-order.test.ts
+    - test/a-test-run-inside-a-worker-tree-reserves-its-own-memory.test.ts
+  rationale: |
+    OBSERVED 2026-10-19, not a claim of one memory root cause: one approved bounded kernel read
+    saw CONSTRAINT_MEMCG kill Node MainThread PID 923451 at 12:46:39 UTC. An exact unprivileged
+    container mapping joined that cgroup to the core daemon. Its subsequently restarted cgroup
+    had zero OOM events and Docker OOMKilled=false; those new-generation counters do not erase
+    the historical kill. The victim's role and total OOM-time working set remain unknown.
+    Separate earlier evidence observed a 938-file test family and a 4.66-GiB occupied tmpfs;
+    those observations do not establish this victim's ownership or sole causation.
+
+    SOURCE at bcd27c00e943ca732e404bfdf886df3f43e68ebb: realCoverageRun and other parent
+    test/proof/push launchers have accounting and other guards but no host-memory admission
+    await. The approved 40-suite narrow-precheck repair is not a RAM budget or qualification of
+    these other populations. A shared safe decision contract must precede the parent wiring.
+
+    awaitMemoryAdmission deliberately preserves worker progress through named error admission,
+    uncertainty, nothing-to-wait-for, aged and own-tail outcomes. Even a fits verdict can carry
+    independent uncertainty. Treating kind=admitted or fits alone as validation readiness would
+    contradict the new-start wait-or-refuse promise. A post-return check is too late: reservation
+    publication and PSI start accounting already occurred. Existing worker behavior is not a bug
+    to remove in this task.
+
+    SUBJECT inventory at 13:31 UTC counted every one of nine captured-open advertised PR heads
+    against main from 434 advertised branches, with W1-T7094/W1-T9951 and W1-T9658/W1-T2383 positive
+    controls. Main had 743 broad memory/admission subject files; no open head added or changed
+    those subject records or host-memory-admission.ts. Other parent slices overlap the owners
+    of PR 12894 in run-task.ts and PR 12933 in git-push.ts; they are not included here. This is a
+    snapshot, not unpublished-work absence or implementation ownership clearance; refresh later.
+  design: |
+    Add a validation-only typed entry point backed by the SAME maintained evaluator, queue,
+    priority/aging order, lock, backoff and reservation ports. Leave awaitMemoryAdmission's
+    existing signature, outcomes, worker/garden policy and legacy tiers unchanged. No parallel
+    admission loop, post-return snapshot reread, withLock interception, new threshold or model
+    switch. This task supplies the shared prerequisite, NOT parent wiring or class activation.
+
+    Inside the locked evaluation, BEFORE opening/publishing a reservation, marking a PSI start,
+    updating rung state or emitting an admission, distinguish a supported complete fitting budget
+    from unavailable evidence. Name the essential host/container generation and pressure inputs,
+    host-scope ledger and ownership/walk completeness, serve/daemon allowance and actual class
+    measurement basis. An optional typed basis may be carried from existing native measurements;
+    do not infer it from a numeric estimate, median, prior, zero placeholder or an absent field.
+    Do not change the existing estimator or turn synthetic fixture records into live evidence.
+
+    A complete supported fit may publish one visible own handle atomically, with the normal
+    estimate/visibility checks. Known measured shortfall with accounted live work uses the
+    existing ranked async wait and original cancellation/deadline. Error, missing/reset/partial
+    essential evidence, incomplete fits and non-fit legacy escape tiers return an explicit
+    validation-only not-started/unavailable result, never accepted, undefined, skipped or PASS.
+    A measured shortfall with no accounted work to wait for refuses rather than claiming ready.
+    Existing worker positive controls retain their current named escape behavior unchanged.
+
+    Shadow/off, hosted CI and non-daemon callers retain their existing behavior and must not be
+    described as enforced budget qualification. Abort races settle only this start's unbound own
+    handle through the native lifecycle; never release a foreign or live tree, rewrite ownership,
+    reclaim a claim from age, double-charge nested work or forward daemon authority into a
+    sandbox. Add no provider/model call, retry, credential, permission, threshold, hard limit,
+    spending setting, service operation or hosted-gate change.
+
+    Drive real maintained default lock/publication/read catch paths using private stores and
+    harmless local children, not all-fake tests. Contrast new validation with the existing worker
+    semantics; test missing basis, generous-but-incomplete fits, errors before/after publication,
+    no-work shortfall, ranked wait then fit, publication/visibility/estimate refusal, cancellation
+    and held-descendant controls. No running production worker or ledger is a fixture.
+
+    Qualify the committed head with physical whole-file summaries, caller/census checks, type
+    checks, instrumented same-head full diff coverage, production-removal falsifiers, normal
+    author/review/current-head hosted gates. Representative calibration of the actual parent
+    test/check-proof/push shapes and separate reviewed parent wiring remain required before the
+    approved NEW-class activation. This foundation changes no classModes or live setting and is
+    not evidence that Azure's memory root cause or the console's data problems are resolved.
+  acceptance:
+    - claim: "new validation cannot promote legacy worker escape outcomes to readiness"
+      proof: "unit test: W1-T10208: new validation never promotes a legacy memory escape to ready"
+    - claim: "a fitting but incomplete or unmeasured budget refuses before publication or start accounting"
+      proof: "unit test: W1-T10208: an incomplete fit has no validation admission effects"
+    - claim: "a qualified fit uses one visible handle after normal ranked waiting while worker semantics stay unchanged"
+      proof: "unit test: W1-T10208: validation waits then publishes once without changing worker progress"
+    - claim: "cancellation and publication failures cannot release unrelated work or claim an unstarted test passed"
+      proof: "unit test: W1-T10208: validation refusal settles only its own unstarted handle"
+  falsifier: |
+    Freeze the tests and remove only the new locked validation strategy: its no-publication and
+    not-started assertions fail while legacy worker controls still pass. Separately accept an
+    error/incomplete fit or republish a second handle: exact functional assertions fail. Restore
+    exact production bytes and rerun the fixed condition with complete native output. A loader,
+    infrastructure, capacity or missing-test refusal is not a behavioral falsifier or a PASS.
+  note: |
+    Native rmd next-task-id atomically reserved this actual id on origin for
+    codex/validation-memory-admission-20261019 on 2026-10-19. Do not delete/reuse a delayed or
+    contested reservation. Machine-authored plan-only filing; implementation, dispatch ownership,
+    review, calibration, activation and observed live benefit remain separate obligations.
+    The operator directly approved the guarded NEW parent test/check-proof/pre-push extension
+    in this console follow-up chat on 2026-10-19, conditional on representative calibration,
+    reviewed code, green merge and native safety checks. Preserve existing work, claims, limits,
+    thresholds, fairness, credentials, providers and hosted gates. This records actual scope
+    authority, not a model risk verdict or a fabricated native task release. verify:human remains
+    until the maintained workflow records the actual operator ruling and its pin. No activation
+    or service recycle is authorized by publishing this foundation shard.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Actual native rmd approve W1-T10208 recorded the operator approval on 2026-10-19 for the shared validation-memory prerequisite. New parent test/check-proof/pre-push enforcement remains conditional on representative calibration, separately reviewed parent wiring, green merge and native safety checks. No worker policy, running work, claim, threshold, hard limit, hosted gate, provider, permission or service change is authorized by this filing."
+    judged_at: "2026-10-19T13:55:36.142Z"
+    pin: "689b7a7130bfdf910dcfdebc2902d2f959039d40abe41818bfb30982cea799d5"

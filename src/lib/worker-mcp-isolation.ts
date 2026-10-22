@@ -3,6 +3,22 @@ import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { WorkerInitSummary } from "./worker-init-summary.js";
 
 export type WorkerMcpIsolation = "repo-knowledge-only";
+export interface WorkerPluginInventory {
+  state: "observed" | "unknown";
+  plugins: string[] | null;
+  skills: string[] | null;
+  agents: string[] | null;
+  plugin_error_count: number | null;
+}
+
+/** Census only: incomplete evidence stays unknown, with any safely observed names retained. */
+export function workerPluginInventory(summary: WorkerInitSummary | undefined): WorkerPluginInventory {
+  const evidence = [summary?.pluginNames, summary?.skillNames, summary?.agentNames];
+  const names = evidence.map(entry => entry && entry.state !== "unavailable" ? entry.names : null);
+  return { state: evidence.every(entry => entry?.state === "observed") ? "observed" : "unknown",
+    plugins: names[0], skills: names[1], agents: names[2], plugin_error_count: summary?.pluginErrorCount ?? null };
+}
+
 /** PRIMARY CONTROL: the approved repository toolkit, not a network/filesystem permission boundary. */
 const REPO_TOOLS = new Set(["Read", "Write", "Edit", "Grep", "Glob", "Bash"]);
 export const ISOLATED_KNOWLEDGE_TOOL = "mcp__knowledge__rule";
@@ -55,6 +71,8 @@ export interface WorkerMcpIsolationEvidence {
   configured: true;
   inventory: "observed-only" | "unknown" | "violated";
   reason: "approved-name-inventory" | "incomplete-inventory" | "unexpected-capability" | "expected-knowledge-missing";
+  /** The worker's own result subtype, kept when an unknown or violated inventory denies success credit (W1-T9573). */
+  original_subtype?: string;
 }
 
 /** Name inventory is not execution/permission proof, even when complete. Missingness never means empty. */
@@ -137,4 +155,23 @@ export function workerMcpExposure(summary: WorkerInitSummary | undefined, allowe
   }
   if (summary?.state !== "observed") return { state: "unknown", tools: [], servers: [], rejected_server_entries: 0 };
   return undefined;
+}
+
+/** The subtype a run takes when an MCP rule denies it success credit. */
+export const MCP_DENIED_SUBTYPE = "error_mcp_exposure" as const;
+
+/**
+ * W1-T9573: THE ONE RULE both MCP denials share — the opt-in isolation's unknown/violated inventory and the default
+ * boundary's exposure. `isError` alone is not enough: run-task grades `{isError: true, subtype: "success"}` as clean, so
+ * the subtype moves too, and the worker's own subtype is kept on `evidence`. When a second denial fires on one run, it
+ * records the FIRST denial's `original_subtype`, never `error_mcp_exposure`.
+ */
+export function denyMcpSuccessCredit(
+  result: { isError: boolean; subtype: string; mcpIsolation?: { original_subtype?: string } },
+  evidence: { original_subtype?: string },
+): void {
+  evidence.original_subtype = result.subtype === MCP_DENIED_SUBTYPE
+    ? result.mcpIsolation?.original_subtype ?? result.subtype : result.subtype;
+  result.isError = true;
+  result.subtype = MCP_DENIED_SUBTYPE;
 }

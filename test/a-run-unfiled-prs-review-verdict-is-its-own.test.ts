@@ -15,7 +15,7 @@ import { DEFAULT_RISK, type Plan, type Task } from "../src/lib/plan.js";
 import { ownDiffDigestFromCompareFiles } from "../src/lib/open-prs-rest.js";
 import type { Config } from "../src/lib/config.js";
 import { armAutoMergeDetailed } from "../src/lib/arm-auto-merge.js";
-import { parseAcceptanceBlock, priorReviewVerdictFromLedger, reviewContractDigest, reviewInputDigest, reviewLedgerKeyFor } from "../src/lib/review.js";
+import { parseAcceptanceBlock, priorReviewVerdictFromLedger, reviewTaskNarrative, reviewContractDigest, reviewInputDigest, reviewLedgerKeyFor } from "../src/lib/review.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, reviewReuseVerdict } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildOpenPrViews, buildOpenPrViewsAsync, UNTASKED_REVIEW_BUDGET_USD, resolveReviewTaskId, reviewAttemptsForInput, reviewCommand, runReview } from "../src/run-task.js";
@@ -223,6 +223,7 @@ test("the arm gate reads the older run-unfiled PR's own verdict, not another PR'
     branch?: string;
     body?: string;
     reviewedBody?: string;
+    reviewedNarrative?: { design?: string; amendment?: string };
     task?: Task;
     semantic?: boolean;
     compare?: "throws" | "malformed" | "changed" | "moved-base";
@@ -233,6 +234,7 @@ test("the arm gate reads the older run-unfiled PR's own verdict, not another PR'
     const key = options.task?.id ?? "PR-5714";
     const reviewedContractDigest = reviewContractDigest({
       taskId: key,
+      ...(options.reviewedNarrative ?? reviewTaskNarrative(options.task ?? {})),
       acceptance: options.task?.acceptance ?? parseAcceptanceBlock(options.reviewedBody ?? BODY),
       declaredFiles: options.task?.files,
       risk: options.task?.risk ?? (options.semantic ? DEFAULT_RISK : undefined),
@@ -347,4 +349,23 @@ test("the arm gate reads the older run-unfiled PR's own verdict, not another PR'
       } finally { f.cleanup(); }
     }
   });
+
+  test("sweep contract producer invalidates reuse when an operator amendment changes", () => {
+    const task = { id: "W1-T5714", acceptance: [{ claim: "the filed contract", proof: "grep: filed in src/example.ts" }], files: ["src/example.ts"], risk: "medium", budget_usd: 6, design: "Preserve the assertions.", amendment: "First ruling." } as Task;
+    for (const changed of [false, true]) {
+      const f = fixture({ task: { ...task, amendment: changed ? "Second ruling." : task.amendment }, reviewedNarrative: { design: task.design, amendment: task.amendment }, body: `${BODY}\nRemudero-Task: ${task.id}` });
+      try {
+        const [view] = buildOpenPrViews("o", "r", f.ledgerPath, f.deps);
+        assert.equal(reviewReuseVerdict(view).kind, changed ? "full-review" : "reuse");
+        assert.equal(view.currentContractDigest === f.reviewedContractDigest, !changed);
+      } finally { f.cleanup(); }
+    }
+    const f = fixture({ task: { ...task, narrativeUnavailable: true }, body: `${BODY}\nRemudero-Task: ${task.id}`, reviewedNarrative: { design: task.design } });
+    try {
+      const [view] = buildOpenPrViews("o", "r", f.ledgerPath, f.deps);
+      assert.equal(view.currentContractDigest, undefined);
+      assert.equal(reviewReuseVerdict(view).kind, "full-review");
+    } finally { f.cleanup(); }
+  });
+
 }

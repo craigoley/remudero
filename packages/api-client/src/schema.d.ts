@@ -690,6 +690,8 @@ export interface components {
       archived?: number;
       /** W1-T8831 -- items snoozed past the slow lane's last pass; counted here and in no other lane. */
       snoozed?: number;
+      /** Items held by a keep decision while their observed state is unchanged. */
+      kept?: number;
       needsYou: {
         ready: number;
         drafting: number;
@@ -712,6 +714,8 @@ export interface components {
       /** W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`. */
       snoozed?: (InboxViewItem)[];
       needsYou?: InboxNeedsYou;
+      /** Items held by a keep decision; each carries keptAt and its original lane. */
+      kept?: (InboxViewItem)[];
       counts: InboxCounts;
       page?: ReadPage;
       staleness?: ConsoleResponseStaleness;
@@ -2401,6 +2405,13 @@ export interface components {
       authUrl: string | null;
       expiresAt: string;
       reason?: string;
+      /** W1-T10380: a redacted label for the account a completed Claude login now runs the fleet on. Never a token, an email in full, or a credential path. */
+      accountLabel?: string;
+    };
+    ProviderAuthCodeRequest: {
+      sessionId: string;
+      /** The authorization code the provider's page showed, pasted once. Never logged and never echoed in a projection. */
+      code: string;
     };
     ProviderAuthStartRequest: {
       provider: "claude" | "codex";
@@ -2675,6 +2686,9 @@ export interface components {
       lastCompletedAt: string | null;
       lastSuccessAt: string | null;
       lastFailureAt: string | null;
+      /** The median time from a completed pass to the first ask of the next one, carried across restarts. */
+      dueIntervalMedianMs: number | null;
+      dueIntervalSamples: number;
     };
     /** Bounded registered off-loop gardener receipts. Counters cover this daemon run only. Completed means process exit zero, not a measured improvement. Host/fleet scope is not attributed to a repository. Missing cost or outcome attribution is never zero. */
     GardenersResult: {
@@ -3728,8 +3742,28 @@ export interface components {
       kind: string;
       name: string;
     };
+    /** Snapshot-owned attention from the SAME validated persisted census as this lane item, not live thread coherence or write authority. Observed requires complete matching public scope and key; unknown omits attention and identity. Partial/missing/invalid evidence stays unknown. Lane counts are unchanged; countSemantics does not certify current human decisions. */
+    InboxSnapshotAttention: ({
+      state: "observed";
+      coverage: "complete";
+      countSemantics: "observed_snapshot_not_verified";
+      /** Exact public repository of an observed snapshot. */
+      repository: string;
+      /** Exact public instance of an observed snapshot. */
+      instance: string;
+      snapshotKey: string;
+      attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
+      waitingOn: "operator" | "daemon";
+    }) | ({
+      state: "unknown";
+      coverage: "partial" | "unavailable";
+      countSemantics: "observed_snapshot_not_verified";
+    });
     /** One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section, unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem. */
     InboxViewItem: {
+      snapshotAttention?: InboxSnapshotAttention;
+      /** Why the previous keep decision lapsed after a material state change. */
+      keptChanged?: string;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -3763,6 +3797,8 @@ export interface components {
           proposalId: string;
         };
       };
+      /** When the operator recorded the current keep decision; present in the kept section. */
+      keptAt?: string;
       /** W1-T8831 -- when the operator archived this item (RFC 3339 UTC); present while archived, in the `archived` section only. */
       archivedAt?: string;
       /** W1-T8831 -- when this item's snooze ends (RFC 3339 UTC); present while snoozed, in the `snoozed` section only. */
@@ -3790,7 +3826,7 @@ export interface components {
       data: {
         /** One completed classification, reused by every section, continuation and attention census. */
         snapshotKey?: string;
-        section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet" | "archived" | "snoozed";
+        section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet" | "archived" | "snoozed" | "kept";
         items: (InboxViewItem)[];
         counts: InboxCounts;
         page: ViewPage;
@@ -4594,6 +4630,9 @@ export interface components {
     };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
+      snapshotAttention?: InboxSnapshotAttention;
+      /** Why the previous keep decision lapsed after a material state change. */
+      keptChanged?: string;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4614,6 +4653,9 @@ export interface components {
     };
     /** One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's `InboxDraftingItem`). */
     InboxDraftingItem: {
+      snapshotAttention?: InboxSnapshotAttention;
+      /** Why the previous keep decision lapsed after a material state change. */
+      keptChanged?: string;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4632,6 +4674,9 @@ export interface components {
     };
     /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      snapshotAttention?: InboxSnapshotAttention;
+      /** Why the previous keep decision lapsed after a material state change. */
+      keptChanged?: string;
       retirement?: InboxRetirement;
       needsTriageReason?: string;
       from?: InboxSender;
@@ -4665,6 +4710,9 @@ export interface components {
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {
+      snapshotAttention?: InboxSnapshotAttention;
+      /** Why the previous keep decision lapsed after a material state change. */
+      keptChanged?: string;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4690,6 +4738,7 @@ export interface components {
     };
     /** W1-T4086/W1-T4089: one fleet-owned proposal with the lane it sits in and the fleet lane's latest decision, when it has made one (src/lib/panel-graph.ts's `InboxFleetItem`). */
     InboxFleetItem: {
+      snapshotAttention?: InboxSnapshotAttention;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4721,6 +4770,8 @@ export interface components {
       archived?: (InboxViewItem)[];
       /** W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`. */
       snoozed?: (InboxViewItem)[];
+      /** Items held by a keep decision; each carries keptAt and its original lane. */
+      kept?: (InboxViewItem)[];
       counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
       /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
@@ -4793,11 +4844,37 @@ export interface components {
       /** The daemon wrote last and the read mark is behind that message. */
       unread: boolean;
     };
+    /** Classification evidence, not the HTTP read time or permission to write. Partial coverage never establishes a complete empty Inbox. */
+    InboxThreadListSource: {
+      state: "fresh" | "stale";
+      completeness: "complete" | "partial";
+      classifiedAt: string;
+      /** Null when the classification was not confirmed current. */
+      verifiedAt: string | null;
+      ageMs: number;
+      builtAt: string;
+      refreshError?: string;
+    };
+    /** Continuation over one exact threadListKey; terminal coverage requires unique rows totaling total. A prefix is not a verified complete list. */
+    InboxThreadListPage: {
+      total: number;
+      /** Opaque generation/scope/representation-bound continuation; absent only at the end. */
+      nextCursor?: string;
+    };
     /** GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity. */
     InboxThreadsResult: {
       planSource?: PlanSource;
+      source?: InboxThreadListSource;
+      /** Present with opt-in pages. Binds semantic classification/items, stored messages, marks, public scope and representation, not verification clocks. Not the proposal classification snapshot key. */
+      threadListKey?: string;
+      page?: InboxThreadListPage;
       threads: (InboxThreadSummary)[];
     };
+    InstanceInboxThreadsResult: (InboxThreadsResult) & ({
+      repository: string;
+      instance: string;
+      contract: "read-write" | "read-only";
+    });
     InboxAttentionCensusSourceState: "observed" | "partial" | "unavailable";
     InboxAttentionCensusFact: {
       source: string;
@@ -5188,6 +5265,21 @@ export interface components {
       proposalId: string;
       /** The operator's feedback, captured verbatim; must be non-blank. */
       feedback: string;
+    };
+    /** Record the observed state as a keep decision, or clear it with kept false. */
+    InboxKeepRequest: {
+      proposalId: string;
+      /** Optional operator reason recorded verbatim. */
+      reason?: string;
+      /** False clears the decision immediately. */
+      kept?: boolean;
+    };
+    InboxKeepResult: {
+      ok: true;
+      proposalId: string;
+      kept: boolean;
+      /** Present while kept; repeating an unchanged decision preserves its instant. */
+      keptAt?: string;
     };
     /** POST /v1/inbox/archive's body (src/lib/panel-graph.ts's `validateArchiveProposal`). */
     InboxArchiveRequest: {
@@ -5604,6 +5696,16 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+    patch: {
+      responses: {
+          "200": ProviderAuthProjection;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
         };
     };
   };
@@ -7113,8 +7215,11 @@ export interface paths {
     get: {
       responses: {
           "200": InboxThreadsResult;
+          "400": undefined;
           "401": Error;
           "403": Error;
+          "409": undefined;
+          "413": undefined;
           "500": InboxRefusal;
           "503": InboxRefusal;
         };
@@ -7192,6 +7297,21 @@ export interface paths {
         };
     };
   };
+  "/v1/i/{instance}/inbox/threads": {
+    get: {
+      responses: {
+          "200": InstanceInboxThreadsResult;
+          "400": undefined;
+          "401": Error;
+          "403": Error;
+          "409": undefined;
+          "413": undefined;
+          "500": undefined;
+          "502": undefined;
+          "503": undefined;
+        };
+    };
+  };
   "/v1/i/{instance}/inbox/attention-census": {
     get: {
       responses: {
@@ -7256,6 +7376,18 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/keep": {
+    post: {
+      responses: {
+          "200": InboxKeepResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+          "409": InboxRefusal;
         };
     };
   };

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { dirname, isAbsolute, join, relative } from "node:path";
 
 /** One ESM link failure a base-side proof run printed: `importer` names `name` from `specifier`, which lacks it. */
@@ -23,7 +23,8 @@ export function missingExportGaps(output: string): MissingExportGap[] | undefine
     if (!errorHeadlineRe.test(line)) continue;
     const m = missingExportRe.exec(line);
     if (!m || importer === undefined) return undefined;
-    gaps.push({ importer, specifier: m[1]!, name: m[2]! });
+    // Node's TAP reporter escapes a leading hash; do not reinterpret other escapes.
+    gaps.push({ importer, specifier: m[1]!.replace(/^\\#/, "#"), name: m[2]! });
   }
   return gaps.length > 0 ? gaps : undefined;
 }
@@ -34,12 +35,51 @@ function sourceCandidates(path: string): string[] {
   return [path];
 }
 
-function readModule(root: string, repoPath: string): { path: string; text: string } | undefined {
+async function readConfinedFile(root: string, repoPath: string, maxBytes?: number): Promise<ProofFileObservation> {
+  const observed = await observeProofFileInside(root, repoPath);
+  return observed.state === "read" && maxBytes !== undefined && Buffer.byteLength(observed.text) > maxBytes
+    ? { state: "unavailable", reason: "package metadata exceeds its read bound" } : observed;
+}
+
+async function readModule(root: string, repoPath: string): Promise<{ path: string; text: string } | undefined> {
   for (const candidate of sourceCandidates(repoPath)) {
-    const full = join(root, candidate);
-    if (existsSync(full)) return { path: candidate, text: readFileSync(full, "utf8") };
+    const observed = await readConfinedFile(root, candidate);
+    if (observed.state === "absent") continue;
+    return observed.state === "read" ? { path: candidate, text: observed.text } : undefined;
   }
   return undefined;
+}
+
+/** Only one unconditional, local mapping in the nearest package scope is attestable here.
+ * Conditional/ambiguous/changed maps remain UNKNOWN rather than guessing Node's resolution. */
+async function subpathModule(root: string, importerRel: string, specifier: string): Promise<{ path: string; binding: string } | undefined> {
+  if (!specifier.startsWith("#") || /[\\%?\0]/.test(specifier) || specifier.split("/").includes("..")) return undefined;
+  for (let scope = dirname(importerRel);; scope = dirname(scope)) {
+    const observed = await readConfinedFile(root, join(scope, "package.json"), 65536);
+    if (observed.state === "unavailable") return undefined;
+    if (observed.state === "read") {
+      const packageText = observed.text;
+      const imports: unknown = JSON.parse(packageText).imports;
+      if (typeof imports !== "object" || imports === null || Array.isArray(imports)) return undefined;
+      const matches = Object.entries(imports).flatMap<{ key: string; target: unknown; middle: string | undefined }>(([key, target]) => {
+        const pieces = key.split("*");
+        if (pieces.length === 1) return key === specifier ? [{ key, target, middle: undefined }] : [];
+        if (pieces.length !== 2 || !specifier.startsWith(pieces[0]!) || !specifier.endsWith(pieces[1]!) ||
+            specifier.length < pieces[0]!.length + pieces[1]!.length) return [];
+        return [{ key, target, middle: specifier.slice(pieces[0]!.length, specifier.length - pieces[1]!.length) }];
+      });
+      if (matches.length !== 1) return undefined;
+      const { key, target, middle } = matches[0]!;
+      if (typeof target !== "string" || !target.startsWith("./") || /[\\%?#\0]/.test(target) ||
+          target.split("/").includes("..") || target.split("*").length > (middle === undefined ? 1 : 2)) return undefined;
+      const mapped = middle === undefined ? target : target.replaceAll("*", middle);
+      if (mapped.includes("*")) return undefined;
+      const path = join(scope, mapped);
+      if (path.startsWith("..") || isAbsolute(path)) return undefined;
+      return { path, binding: JSON.stringify([scope, key, target]) };
+    }
+    if (scope === ".") return undefined;
+  }
 }
 
 function escapeRegExp(s: string): string {
@@ -59,24 +99,35 @@ function declaresExport(text: string, name: string): boolean {
 /** The reason a base-side proof run that could not LOAD is nonetheless a genuine miss, or `undefined`. True only when
  *  every failure is a missing named export whose module exists at the base WITHOUT that export (and with no
  *  `export *` that could supply it) and exports it at the head: the base simply lacks code this diff adds. Anything
- *  unproven — a relative path outside either tree, an unreadable module, a wildcard re-export — stays undefined, so
+ *  unproven — an escaped path, unreadable module, wildcard re-export, or anything other than an unchanged
+ *  unconditional local subpath binding in the nearest package scope — stays undefined, so
  *  the caller keeps its fail-closed base_unknown. */
-export function baseLacksPrAddedExports(output: string, baseCwd: string, headCwd: string): string | undefined {
+export async function baseLacksPrAddedExports(output: string, baseCwd: string, headCwd: string): Promise<string | undefined> {
+  try {
   const gaps = missingExportGaps(output);
   if (gaps === undefined) return undefined;
   const named: string[] = [];
   for (const gap of gaps) {
-    if (!isAbsolute(gap.importer) || !gap.specifier.startsWith(".")) return undefined;
+    if (!isAbsolute(gap.importer)) return undefined;
     const importerRel = relative(baseCwd, gap.importer);
     if (importerRel.startsWith("..") || isAbsolute(importerRel)) return undefined;
-    const moduleRel = join(dirname(importerRel), gap.specifier);
+    const baseMapping = gap.specifier.startsWith("#") ? await subpathModule(baseCwd, importerRel, gap.specifier) : undefined;
+    const headMapping = gap.specifier.startsWith("#") ? await subpathModule(headCwd, importerRel, gap.specifier) : undefined;
+    if (gap.specifier.startsWith("#") && (baseMapping === undefined || headMapping === undefined ||
+        baseMapping.binding !== headMapping.binding || baseMapping.path !== headMapping.path)) return undefined;
+    if (!gap.specifier.startsWith(".") && baseMapping === undefined) return undefined;
+    const moduleRel = baseMapping?.path ?? join(dirname(importerRel), gap.specifier);
     if (moduleRel.startsWith("..")) return undefined;
-    const base = readModule(baseCwd, moduleRel);
-    const head = readModule(headCwd, moduleRel);
+    const base = await readModule(baseCwd, moduleRel);
+    const head = await readModule(headCwd, moduleRel);
     if (base === undefined || head === undefined) return undefined;
     if (/export\s*\*\s*from/.test(base.text) || declaresExport(base.text, gap.name)) return undefined;
     if (!declaresExport(head.text, gap.name)) return undefined;
     named.push(`${gap.name} (${base.path})`);
   }
   return `base lacks export(s) ${named.join(", ")} that the PR adds — the test cannot link there, a genuine miss`;
+  } catch {
+    // Unreadable/invalid package or source bytes are not absence or a measured export gap.
+    return undefined;
+  }
 }

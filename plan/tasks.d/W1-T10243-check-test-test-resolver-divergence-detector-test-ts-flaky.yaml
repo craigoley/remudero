@@ -1,0 +1,57 @@
+- id: W1-T10243
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/resolver-divergence-detector.test.ts:flaky cost 14 PR minute(s) across 6 round(s) on 6 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.37
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/resolver-divergence-detector.test.ts:flaky"
+  files:
+    - src/lib/plan.ts
+    - test/plan/check-test-test-resolver-divergence-detector-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/resolver-divergence-detector.test.ts:flaky"
+      proof: "grep: test(\"W1-T10243: check:test:test/resolver-divergence-detector.test.ts:flaky is prevented, not retried\" in test/plan/check-test-test-resolver-divergence-detector-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/resolver-divergence-detector.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/resolver-divergence-detector.test.ts:flaky cost 14 PR minute(s) (seven-day half-life) across 6 fix round(s) on 6 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/plan.ts: test/resolver-divergence-detector.test.ts imports it
+    - test/resolver-divergence-detector.test.ts: named by the failing check
+    - the rounds name a failing test: test/resolver-divergence-detector.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12780 (https://github.com/craigoley/remudero/pull/12780) at 2026-10-18T15:11:23.606Z: ci-log round — coverage-shard (2/8): pool defect: test/b.test.ts leaks into test/c.test.ts; coverage-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts; coverage-shard (5/8): test/reso
+        failing tests: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — the head-bound resolver has exactly the review command and W1-T3557 fix-rung contract paths
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+          | not ok 1 - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+          |   ---
+          |   duration_ms: 115.146545
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:240:1'
+          |   failureType: 'testCodeFailure'
+          | 
+    - PR #10501 at 2026-10-09T23:18:23Z: hand fix PR #10501: src/lib/flow-gardener.ts, src/lib/hot-file-gardener.ts, src/lib/plan.ts; minutes are the pass median proxy (5.952125), not measured repair time
+    - PR #9700 at 2026-10-06T21:59:22Z: hand fix PR #9700: src/lib/plan.ts; minutes are the pass median proxy (5.952125), not measured repair time
+    - PR #9057 at 2026-10-04T07:28:48.785Z: ci-log round — coverage-shard (8/8): test/resolver-divergence-detector.test.ts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/lib/plan.ts and a new test file under test/plan/. Both are ordinary source and test paths. Nothing in the description or files touches secrets, credentials, auth, permissions, merge/deploy/review policy, or data deletion."
+      - "The task is a machine-filed flaky-test remedy from the ci-friction gardener. The acceptance criterion is a grep proof for a named test in the new test file, which can be verified automatically. It requires no operator decision such as priority, budget or policy."
+      - "The family track record (39 merged, 58 declined, Beta mean 0.66) is mixed but not alarming. Any PR still passes CI and review. The evidence shows the gardener measures the result after merge and reopens the cause if the share does not fall."
+      - "One caution is that the cited recent failures name different tests (e.g., the ledger-step test and W1-T9864 tests), so the remedy may not address the root cause. That is an effectiveness concern rather than a danger. The plan.ts edit is a shared library file, but it has been hand-fixed before in the cited PRs."
+    judged_at: "2026-10-22T03:33:45.815Z"
+    pin: "2f6e7cb275035b186e9298825032e2664325bffd739e864b7d98232df2a667ec"

@@ -59,6 +59,8 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "main.repair.pr_unreadable": A_LANE_RUN_ID,
   "main-repair.pr_opened": A_LANE_RUN_ID,
   "main-repair.revert_pr_opened": A_LANE_RUN_ID,
+  // W1-T10269: a reviewer-health shadow's would-be terminal, under the review's review-PR run id and renamed shadow.*.
+  "review.shadow_verdict": A_LANE_RUN_ID,
   "main-repair.ratchet_pr_opened": A_LANE_RUN_ID,
   "main-repair.ratchet_pr_superseded": A_LANE_RUN_ID,
   "main-repair.ratchet_standing": A_LANE_RUN_ID,
@@ -67,6 +69,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.capped_host_gap_rereview": A_LANE_RUN_ID, // W1-T7837: a sweep-lane row; its run_id is the sweep pass
   "sweep.review_host_gap_rereview": A_LANE_RUN_ID, // W1-T7850: a sweep-lane row; its run_id is the sweep pass
   "sweep.stale_body_rereview": A_LANE_RUN_ID, // W1-T9124: queued under the sweep pass's run_id
+  "sweep.own_task_record.refresh": A_LANE_RUN_ID, // W1-T9232: the once-per-PR branch refresh, under the sweep pass's run_id
   "sweep.armed_body_guarded": A_LANE_RUN_ID, // a sweep-lane row: an armed PR's edited body re-guarded
   "sweep.armed_stalled": A_LANE_RUN_ID,
   "sweep.check_requeued": A_LANE_RUN_ID,
@@ -154,6 +157,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "review.cannot_evaluate_escalated": AFTER_PR_OPENED,
   "review.reviewer_freshness_unreadable_at_start": A_LANE_RUN_ID, // rmd review's own review-PR run id
   "review.skipped_closed_before_review": A_LANE_RUN_ID, // rmd review's own review-PR run id
+  "review.reviewer.skipped": A_LANE_RUN_ID, // W1-T9232: the own-task-record-missing skip, under rmd review's review-PR run id
   "review.diff_local_fallback": AFTER_PR_OPENED,
   "review.diff_unreadable": AFTER_PR_OPENED,
   "review.finding": AFTER_PR_OPENED,

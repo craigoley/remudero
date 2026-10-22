@@ -1,0 +1,69 @@
+- id: W1-T10334
+  title: "AN UNREADABLE PLAN-FILING READ NEVER DEMOTES A HEAD ALREADY PROVEN PLAN-ONLY TO A CODE PR — `classifyPlanFiling` answers `isPlanFiling: false` for an `unreadable` file read, so plan-only #13008 at the same head 846276ed2 flipped from \"plan-only PR is red … the code-fix lane cannot stage\" to \"ci-log fix, strike 1/2\" after each of its 8 unreadable reads on 2026-10-20, and the fix lane spent 5 admission attempts on a PR it cannot touch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, what an unreadable file read means for a head already classified from a complete read; a head never read complete keeps today's code-PR fallback
+  band_meaning: blast-radius
+  origin: "coordinator brief f1021b item 3 (2026-10-21), from the #13008 builder's ledger read (logs-8864/s13008-*, RESUME-1019 10-21 ~01:30Z)"
+  plan_refs: [W1-T4002, W1-T3505, W1-T9820, W1-T9824, W1-T5118]
+  files:
+    - src/lib/tick-read-worker.ts
+    - test/github/an-unreadable-plan-filing-read-keeps-its-proven-head.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger on host remudero (rmd-state2, read-only; rotations from 2026-10-17T22:33Z plus the live file,
+    newest row 2026-10-21T10:31Z):
+    - #13008 (plan-only filing, head 846276ed2 throughout): `sweep.plan_filing_classified` source `github-files` 24
+      times and `unreadable` 8 times (04:51Z, 05:12Z, 09:38Z, 10:28Z, 15:11Z, 16:57Z, 20:01Z, 20:42Z on 10-20). After
+      every github-files read the pass disposed it `refused-escalate` "plan-only PR is red on … the code-fix lane cannot
+      stage outside a plan filing"; within two minutes of each unreadable read it disposed it `blocked-fixable` own-red
+      "required checks red — ci-log fix". The fix lane then charged 5 `sweep.fix_capacity` admissions (05:16Z, 10:35Z,
+      15:15Z, 17:24Z, 20:16Z); the two admitted (05:16Z, 20:16Z) built a `sweep.fix.synthetic_task` and stood down on
+      open issue #13058.
+    - Fleet-wide in the same window, 1,551 classification transitions: not-plan-only 870, unreadable 391, github-files
+      266, emitter-ledger 24. Positive control: the query reads #13008's known github-files rows.
+    READ at origin/main 16f4c28fc (symbols, not lines):
+    - `classifyPlanFiling` (src/lib/tick-read-worker.ts): `if (!files || files.state === "unreadable") return
+      { isPlanFiling: false, source: "unreadable" }`. The view builder also defaults a PR with no classification to that
+      same value.
+    - `hydratePlanFilingFilesSteps` (src/lib/open-prs-rest.ts) caches complete reads per PR and head, but a pass past its
+      miss cap (`per-pass-cap`), a failed fetch or a fresh cache reads `unreadable` (W1-T9820, W1-T9824 bound how many).
+      A PR diff at a fixed head is fixed, so a complete read of that head stays true.
+    - `createPlanFilingClassificationTelemetry` (src/run-task.ts) already writes one `sweep.plan_filing_classified` row
+      per (PR, head, source) transition, so the positive classification for a head is on the ledger.
+    INFERRED: each daemon read path keeps its own cache, so a read path whose cache never saw the head reads it
+    unreadable under the cap while another path had it complete; the task does not need that confirmed to fix the
+    fallback.
+    NOT COVERED ELSEWHERE: W1-T9820 (merged) orders the per-pass reads and W1-T9824 (queued) learns the read bound; both
+    reduce how often a read is unreadable, neither changes what an unreadable read means. Swept origin/main
+    plan/tasks.d and every open PR head's plan tree for classifyPlanFiling, plan_filing_classified and unreadable plan
+    filing: no shard covers it.
+  design: |
+    1. An `unreadable` observation for a PR head whose plan-only classification was already proven from a positive
+       source (emitter-ledger or github-files) for that SAME head sha keeps that classification. The proof comes from a
+       read the process already has (a cache entry, or the `sweep.plan_filing_classified` rows the pass already holds);
+       it is never a new GitHub request.
+    2. A head with no positive proof keeps today's result. An unreadable read never PROMOTES a PR to plan-only, and a
+       proof for an older head never carries to a new head.
+    3. The kept classification records that it was carried, for example a `carried_from` field on the transition row
+       (the existing `sweep.plan_filing_classified` step, no new step), so W1-T4002's receipts still trust only proven
+       sources.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/github/an-unreadable-plan-filing-read-keeps-its-proven-head.test.ts"
+    - claim: "an unreadable read of a head already proven plan-only by github-files keeps it plan-only (the #13008 shape)"
+      proof: "grep: W1-T10334: an unreadable read keeps a head proven plan-only in test/github/an-unreadable-plan-filing-read-keeps-its-proven-head.test.ts"
+    - claim: "an unreadable read of a head never proven, or proven only at an older head, still reads as not a plan filing"
+      proof: "grep: W1-T10334: an unreadable read of an unproven head is still not a plan filing in test/github/an-unreadable-plan-filing-read-keeps-its-proven-head.test.ts"
+  falsifier: |
+    Remove the carry and the #13008-shaped fixture (github-files at head H, then unreadable at H) classifies the PR as a
+    code PR again. Carry a proof across heads and the older-head test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger: for heads with a github-files or emitter-ledger transition, the
+    count of later `sweep.disposed` rows at that head that dispatch or admit a ci-log fix. Healthy shape: none.

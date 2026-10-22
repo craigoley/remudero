@@ -1,0 +1,43 @@
+- id: W1-T10158
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:Analyze (javascript-typescript) cost 16.8 PR minute(s) across 6 round(s) on 5 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10158 — 0 'Analyze (javascript-typescript)' rounds in
+  # 3 d. It also declares .github/workflows/codeql.yml, a security gate covered by the same 2026-10-16 no-
+  # weakening ruling. Retire.
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:Analyze (javascript-typescript)"
+  files:
+    - .github/workflows/codeql.yml
+    - test/check-analyze-javascript-typescript.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:Analyze (javascript-typescript)"
+      proof: "grep: test(\"W1-T10158: check:Analyze (javascript-typescript) is prevented, not retried\" in test/check-analyze-javascript-typescript.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:Analyze (javascript-typescript)'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:Analyze (javascript-typescript) cost 16.8 PR minute(s) across 6 red run(s) within the measured window on 5 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/codeql.yml: declares job analyze for Analyze (javascript-typescript)
+
+    RECENT ROUNDS (newest first):
+    - (none recorded)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/codeql.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-18T20:43:37.011Z"
+    pin: "b32a8e615b07d4f379dd6a8ab31aeaf15f5f2ab43a053d62cfd8a75bfc587061"

@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { pauseFilePath } from "../src/lib/fleet-control.js";
 import { createLedgerProjector, LEDGER_PROJECTOR_SCHEMA_VERSION, ledgerLineIdentity, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease, openReadModel, READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
+import { acquireLease, flushReadModelTransactions, openReadModel, READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
 import {
   createReadModelTicker,
   ledgerSource,
@@ -47,11 +47,56 @@ const SILENT_WORKER = new URL("data:text/javascript,setInterval(() => {}, 1000)"
 
 type TestCtx = { after: (fn: () => void) => void };
 
-function scratch(t: TestCtx, kind: string): string {
+const scratchDirs: string[] = [];
+
+async function removeSettledScratch(dir: string, flush = flushReadModelTransactions): Promise<void> {
+  // Closing SQLite queues diagnostic publication; it does not synchronously stop that writer.
+  await flush();
+  rmSync(dir, { recursive: true, force: true });
+}
+
+// Per-test after hooks release their DBs/tickers first. Only then may the file remove fixtures;
+// otherwise a late diagnostic publication can recreate a deleted root or race rmSync (ENOTEMPTY).
+after(async () => {
+  for (const dir of scratchDirs) await removeSettledScratch(dir);
+});
+
+function scratch(_t: TestCtx, kind: string): string {
   const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  scratchDirs.push(dir);
   return dir;
 }
+
+test("repositories fixture cleanup settles the real transaction writer before removing its scratch root", async (t) => {
+  const root = scratch(t, "repositories-cleanup");
+  const db = openReadModel({ stateDir: join(root, "state"), instance: "core", schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION });
+  db.close();
+  await removeSettledScratch(root);
+  assert.equal(existsSync(root), false);
+  await flushReadModelTransactions();
+  assert.equal(existsSync(root), false, "an acknowledged closed writer must not resurrect the removed fixture");
+});
+
+test("repositories fixture cleanup keeps scratch until the publication barrier resolves", async (t) => {
+  const root = scratch(t, "repositories-cleanup-barrier");
+  let entered = false;
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const retired = removeSettledScratch(root, async () => {
+    entered = true;
+    await pending;
+  });
+  try {
+    assert(entered, "cleanup must enter the publication barrier");
+    assert(existsSync(root), "cleanup must not remove state while publication can still write");
+    release();
+    await retired;
+    assert(!existsSync(root));
+  } finally {
+    release();
+    await retired;
+  }
+});
 
 function iso(msAgo: number): string {
   return new Date(NOW - msAgo).toISOString();

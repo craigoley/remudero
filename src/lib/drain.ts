@@ -12,7 +12,7 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
-import { releasedTaskIds, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
+import { RELEASE_LEDGER_STEP, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
   partitionByFileOverlap,
@@ -21,9 +21,9 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { taskIdFromRunBranch } from "./status.js";
-import { isRecordTask } from "./task-linter.js";
+import { isRecordTask, taskRulingPin } from "./task-linter.js";
 import type { OpenSiblingBuild, StatusProjection } from "./status.js";
-import { measuredDispatchValue, type DispatchValueContext } from "./dispatch-value.js";
+import { measuredDispatchValue, redealFanoutOver, stridePassInputs, type DispatchValueContext } from "./dispatch-value.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
@@ -203,8 +203,9 @@ export function stillBlockedByPushedRunBranch(
   orphan?: OrphanRunBranchEvidence,
 ): boolean {
   if (pushedRunBranches === undefined || !pushedRunBranches.has(taskId)) return false;
-  if (closedUnmergedRunBranches?.has(taskId)) return false;
-  const refsForTask = pushedRunRefs.filter((r) => r.taskId === taskId);
+  // A closed older PR says nothing about a newly pushed sibling of the same task.
+  const refsForTask = pushedRunRefs.filter((r) => r.taskId === taskId &&
+    (closedUnmergedRunBranches === undefined || !closedUnmergedRunBranches.has(r.ref)));
   return unmatchedRunRefsRemainBlocking(refsForTask, planOnlyReceipts, orphan);
 }
 
@@ -242,23 +243,23 @@ export function logPlanOnlyRunBranchException(
   }
 }
 
-/** Task ids whose `run-<id>-<epochMs>` branch belongs to a CLOSED AND UNMERGED pull request, parsed
+/** Exact `run-<id>-<epochMs>` refs belonging to a CLOSED AND UNMERGED pull request, parsed
  *  from one batched, paginated `pulls?state=closed` sweep (W1-T1207). INVARIANT: only this one state
  *  is named — GitHub deletes a MERGED PR's head so it never reaches {@link runBranchTaskIds}'s sweep,
  *  and an OPEN or DRAFT PR is work in flight that must keep blocking. Rows are `<head-ref>\t<unmerged>`
  *  with `unmerged` the literal `"true"`; anything else is skipped rather than thrown. */
 // Why: why a merged head self-clears and an open one must not (W1-T1207) — docs/forensics/drain.md.
-export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySet<string> {
-  const ids = new Set<string>();
+export function closedUnmergedRunBranchRefs(closedPrRows: string): ReadonlySet<string> {
+  const refs = new Set<string>();
   for (const rawLine of closedPrRows.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
     const [ref, unmerged] = line.split("\t");
     if (!ref || unmerged !== "true") continue;
     const id = taskIdFromRunBranch(ref);
-    if (id !== undefined) ids.add(id);
+    if (id !== undefined) refs.add(ref);
   }
-  return ids;
+  return refs;
 }
 
 /** W1-T8514: the measurements behind a reservation's release. Every figure is a measured run length. */
@@ -296,6 +297,9 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   /** W1-T3412: already-proved, pure ranking evidence. Omitted means historic priority/scope/id
    * ordering exactly; neither the selector nor {@link compareDispatch} may read history itself. */
   dispatchValueContext?: DispatchValueContext;
+  /** W1-T10028: the eligible tasks in the order the selector used, and the context whose slots were dealt over
+   * them. Observation only; a reader of the pick (the `dispatch.pick_scored` row) reads rank and pass from here. */
+  onEligibleOrdered?: (ordered: readonly Task[], context: DispatchValueContext | undefined) => void;
   /** Returns the open PR number for a task whose latest PR is currently OPEN. */
   isOpenPr?: OpenPrCheck;
   /** Tasks holding a pending pre-PR handoff receipt (daemon.ts `pendingWorkerBoundaryHandoffs`): a run of each
@@ -434,8 +438,8 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   /** W1-T534: true when a `run-<taskId>-<epochMs>` branch already exists on origin. INVARIANT: this
    *  AUGMENTS `isOpenPr` and never replaces it — `isOpenPr` reads a projection re-derived once per
    *  drain TICK, so a PR opened, or a branch merely pushed ahead of its PR, is invisible to it. The
-   *  two cover disjoint windows. Build the closure from ONE {@link runBranchTaskIds} sweep per pass:
-   *  `sweep.has(id) && !closedUnmerged.has(id)`, subtracting {@link closedUnmergedRunBranchTaskIds}.
+   *  two cover disjoint windows. Build the closure from ONE run-ref sweep per pass using
+   *  {@link stillBlockedByPushedRunBranch}; {@link closedUnmergedRunBranchRefs} releases exact refs only.
    *  W1-T1207 said this probe must gain no age bound; that stands for AGE ALONE. A ref is released
    *  only on a PROVEN no-PR read at its exact sha plus age plus no live run
    *  ({@link orphanRunBranchReleased}): 12 such orphans refused 372 dispatches in 23h (2026-09-30). */
@@ -540,15 +544,12 @@ function observeOpenSibling(t: Task, opts: NextRunnableOpts): void {
 }
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
-  opts.beginSelectionPass?.();
-  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
-    if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
-    // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
-    // is returned unchanged, so it is structurally incapable of changing the answer.
-    observeOpenSibling(t, opts);
-    return t;
-  }
-  return undefined;
+  const t = dispatchEligibleCandidates(plan, isMerged, opts, true)[0];
+  if (t === undefined) return undefined;
+  // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
+  // is returned unchanged, so it is structurally incapable of changing the answer.
+  observeOpenSibling(t, opts);
+  return t;
 }
 
 /** Why the eligibility filter declined a task, first-match — see {@link tallyDispatchFilters}.
@@ -818,13 +819,24 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
 
 /** The dispatcher's exact eligibility pass, before its disjoint lane packing. A read-only
  *  frontier needs membership for every task, not an N-lane pack of all N candidates. */
-function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts): Task[] {
+function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts, headOnly = false): Task[] {
   opts.beginSelectionPass?.();
+  // W1-T10028: eligibility is walked ONCE (its callbacks write rows and tallies, and the live read is not free),
+  // in the pre-pass order; the fan-out slots are then dealt over the eligible set only and that set is re-sorted.
+  // A head-only caller stops at the first eligible task when there are no fan-out slots to redeal (the
+  // pre-existing early exit, which keeps later tasks' callbacks silent) and nobody observes the full order.
+  const stopAtFirst = headOnly && stridePassInputs(opts.dispatchValueContext) === undefined && opts.onEligibleOrdered === undefined;
   const eligible: Task[] = [];
   for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
-    if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
+    if (isDispatchEligible(plan, t, isMerged, opts)) {
+      eligible.push(t);
+      if (stopAtFirst) break;
+    }
   }
-  return eligible;
+  const context = redealFanoutOver(opts.dispatchValueContext, new Set(eligible.map((t) => t.id)));
+  const ordered = dispatchOrder(eligible, context, opts.resumableTaskIds);
+  opts.onEligibleOrdered?.(ordered, context);
+  return ordered;
 }
 
 /** Every eligible id through the SAME predicate and filter callbacks as the dispatcher, without
@@ -1474,6 +1486,9 @@ export interface DrainDeps extends TaskPreconditionOptions {
    *  wires the real reader). ABSENT = today's behaviour exactly, an empty released set — a door
    *  that is never opened, never a wall that comes down. */
   readLedgerLines?: () => readonly string[];
+  /** W1-T10348 — the operator releases kept in state/operator-releases.json, where rotation cannot shed
+   *  them. A seam like `readLedgerLines`; absent, only the ledger's rows release. */
+  readDurableReleases?: () => ReadonlySet<string>;
   /** The in-flight guard (W1-T80): the OPEN PR number for a task, re-derived from the SAME
    *  projection `refreshMerged` just built, never a second GitHub read path. Optional. */
   isOpenPr?: OpenPrCheck;
@@ -1504,7 +1519,7 @@ export interface DrainDeps extends TaskPreconditionOptions {
   readPushedRunBranches?: () => string;
   /** W1-T1207/W1-T3722: raw `pulls?state=closed` rows for the same run-branch sweep above — one
    *  batched read for the initial selection and refreshed after non-merged work, parsed by
-   *  {@link closedUnmergedRunBranchTaskIds} into the set the
+   *  {@link closedUnmergedRunBranchRefs} into the set the
    *  caller subtracts from `readPushedRunBranches`' blocking set. INVARIANT: this FAILS TOWARD STILL
    *  BLOCKING, the opposite of `readPushedRunBranches`' own fail-open — a throw degrades to `""`, an
    *  empty exclusion set, so every pushed branch keeps blocking. A false block delays one task; a
@@ -1612,10 +1627,87 @@ export interface DrainDeps extends TaskPreconditionOptions {
  * NO READER WIRED MEANS AN EMPTY SET, never a throw and never an open door: a caller that has not
  * opted in behaves exactly as it did before this task.
  */
-export function resolveReleasedIds(deps: Pick<DrainDeps, "readLedgerLines">): ReadonlySet<string> {
-  const read = deps.readLedgerLines;
-  if (!read) return new Set<string>();
-  return releasedTaskIds(read());
+export function resolveReleasedIds(deps: ReleaseReaders, plan?: Plan): ReadonlySet<string> {
+  return resolveReleases(deps, plan).ids;
+}
+
+/** W1-T10348: the two release records every admission site reads, as seams (this module keeps no `fs`). */
+export type ReleaseReaders = Pick<DrainDeps, "readLedgerLines" | "readDurableReleases">;
+
+export type ReleaseAuthor = "operator" | "machine";
+
+/** W1-T10348: what one pass's release read resolved, honoured and set aside alike, so a filter can name either. */
+export interface ReleaseResolution {
+  /** The releases dispatch honours. */
+  ids: ReadonlySet<string>;
+  /** Who released each id read, honoured or set aside. */
+  authors: ReadonlyMap<string, ReleaseAuthor>;
+  /** Machine releases set aside because the record carries a current-pin `escalate` ruling. */
+  setAside: ReadonlySet<string>;
+  /** Why operator-releases.json could not be read; the ledger's releases still stand. */
+  durableUnreadable?: string;
+  /** Why the ledger could not be read; the durable releases still stand. */
+  ledgerUnreadable?: string;
+}
+
+/**
+ * W1-T10348 — THE ONE RELEASE RESOLVER every admission site shares (daemon tick, lane refill, console
+ * kick, `rmd drain`, the run child). It unions the ledger's `ratify.approved` rows with the durable
+ * operator-releases.json, so a release that ledger rotation shed is still honoured.
+ *
+ * WHICH RELEASES COUNT. An operator release (a row without `author_class: machine`, or an id in the
+ * durable file) is honoured as written. A machine release is honoured unless the record carries a
+ * current-pin risk ruling of `action: escalate`: that escalation went to a person (operator ruling
+ * 2026-09-29), and a second machine judge may not overrule it. Such an id lands in `setAside`. With no
+ * plan to read the ruling from, a machine release cannot be checked, so it is set aside too.
+ */
+export function resolveReleases(deps: ReleaseReaders, plan?: Plan): ReleaseResolution {
+  const authors = new Map<string, ReleaseAuthor>();
+  let ledgerUnreadable: string | undefined;
+  try {
+    for (const [id, author] of releaseAuthorsFromLedger(deps.readLedgerLines?.() ?? [])) authors.set(id, author);
+  } catch (e) {
+    // the ledger unreadable: it releases nothing (the safe direction), and the tick names the reason.
+    ledgerUnreadable = String((e as Error)?.message ?? e);
+  }
+  let durableUnreadable: string | undefined;
+  try {
+    for (const id of deps.readDurableReleases?.() ?? []) authors.set(id, "operator");
+  } catch (e) {
+    // operator-releases.json unreadable: it releases nothing (the safe direction), and the tick names the reason.
+    durableUnreadable = String((e as Error)?.message ?? e);
+  }
+  const ids = new Set<string>();
+  const setAside = new Set<string>();
+  for (const [id, author] of authors) {
+    const t = plan?.byId.get(id);
+    const escalated = plan === undefined || (t?.risk_ruling?.action === "escalate" && t.risk_ruling.pin === taskRulingPin(t));
+    if (author === "machine" && escalated) setAside.add(id);
+    else ids.add(id);
+  }
+  return {
+    ids, authors, setAside,
+    ...(durableUnreadable !== undefined ? { durableUnreadable } : {}),
+    ...(ledgerUnreadable !== undefined ? { ledgerUnreadable } : {}),
+  };
+}
+
+/** Each released id's author from its `ratify.approved` rows: an operator row outranks a machine one for the same task. */
+export function releaseAuthorsFromLedger(lines: readonly string[]): Map<string, ReleaseAuthor> {
+  const out = new Map<string, ReleaseAuthor>();
+  for (const line of lines) {
+    if (!line.includes(RELEASE_LEDGER_STEP)) continue; // cheap reject before the parse
+    let row: { step?: unknown; task_id?: unknown; author_class?: unknown };
+    try {
+      row = JSON.parse(line) as typeof row;
+    } catch {
+      continue; // an unparseable line releases nothing — the safe direction
+    }
+    if (row.step !== RELEASE_LEDGER_STEP || typeof row.task_id !== "string" || !row.task_id) continue;
+    if (row.author_class !== "machine") out.set(row.task_id, "operator");
+    else if (!out.has(row.task_id)) out.set(row.task_id, "machine");
+  }
+  return out;
 }
 
 /**
@@ -1657,7 +1749,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const max = opts.max ?? DEFAULT_MAX;
   const log = deps.log ?? (() => {});
   // W1-T3216: ONCE, here at the pass boundary — see resolveReleasedIds' doc for why not per task.
-  const releasedIds = resolveReleasedIds(deps);
+  const releasedIds = resolveReleasedIds(deps, plan);
   const attempted: string[] = [];
   const merged: string[] = [];
   /** Non-merged, non-halting outcomes (NON_HALTING_VERDICTS) — recorded, never credited. */
@@ -1719,7 +1811,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     pushedRunBranches = raw !== undefined ? runBranchTaskIds(raw) : undefined;
     pushedRunRefs = raw !== undefined ? parsePushedRunRefs(raw) : [];
     closedUnmergedRunBranches = deps.readClosedRunBranchPrs
-      ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
+      ? closedUnmergedRunBranchRefs(deps.readClosedRunBranchPrs())
       : undefined;
     planOnlyReceipts = deps.readPlanOnlyRunBranchReceipts?.() ?? [];
     orphanEvidence = deps.readOrphanRunBranchEvidence?.();
@@ -2168,7 +2260,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // W1-T3216: the lane pass has its OWN boundary — resolved here, exactly once, for the same
   // reason runDrain does it: deps.readLedgerLines is real I/O and must not enter the per-task
   // filter. Both passes must answer the same task the same way, so neither may skip this.
-  const releasedIds = resolveReleasedIds(deps);
+  const releasedIds = resolveReleasedIds(deps, plan);
   const laneCount = Math.max(1, opts.laneCount ?? 1);
   const max = opts.max ?? DEFAULT_MAX;
   const log = deps.log ?? (() => {});
@@ -2246,7 +2338,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     pushedRunBranches = raw !== undefined ? runBranchTaskIds(raw) : undefined;
     pushedRunRefs = raw !== undefined ? parsePushedRunRefs(raw) : [];
     closedUnmergedRunBranches = deps.readClosedRunBranchPrs
-      ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
+      ? closedUnmergedRunBranchRefs(deps.readClosedRunBranchPrs())
       : undefined;
     planOnlyReceipts = deps.readPlanOnlyRunBranchReceipts?.() ?? [];
     orphanEvidence = deps.readOrphanRunBranchEvidence?.();

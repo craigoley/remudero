@@ -1,0 +1,32 @@
+- id: W1-T10150
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — serve.plan_reload_failed landed 2 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10150 — 0 serve.plan_reload_failed rows in 3 d (it had
+  # 2 in the 7 d before filing); the symptom has stopped.
+  attempts: 0
+  author_class: machine
+  origin: "scout:serve.plan_reload_failed"
+  files:
+    - test/scout-serve-plan-reload-failed.test.ts
+  acceptance:
+    - claim: "serve.plan_reload_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10150: serve.plan_reload_failed no longer recurs\" in test/scout-serve-plan-reload-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step serve.plan_reload_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 1 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared file list is only a single new test file (test/scout-serve-plan-reload-failed.test.ts), which shows no touch on secrets, auth, permissions, deletion, merge/deploy/infra/review policy, or irreversible actions.; on the change's description/files alone, no diff was read — The task asks for no operator-only decision (priorities, budget, policy); it is a fix-the-cause implement task with a grep-verifiable acceptance test, and its PR still passes CI and review.; on the change's description/files alone, no diff was read — Concerns that keep confidence moderate: the rationale states the rows name no file, so the real fix location is unknown and the actual fix may touch files beyond the declared one; the scout family has 0 merged and 1 declined (Beta mean 0.33); no bounded change view was supplied. These are quality signals, not the escalation categories listed in the rule."
+    judged_at: "2026-10-18T12:47:18.065Z"
+    pin: "276460824955662629c6baa217214ffa7a2342516b4e0cef2093d7a96db4e9c5"

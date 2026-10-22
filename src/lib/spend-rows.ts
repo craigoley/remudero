@@ -43,6 +43,7 @@ export const SPEND_STEP_ROLES: Readonly<Record<string, SpendRole>> = {
   "retro.synthesized": "produced",
   "retro.preflight_repair": "produced",
   "risk_judge.decision": "produced",
+  "machine_judge.attempt_spend": "produced",
   "ci_judge.spend": "produced",
   "containment.probe": "produced",
   "isolation.probe": "produced",

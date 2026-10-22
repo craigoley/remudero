@@ -6,12 +6,12 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 8.00
-  risk: medium  # Rule 19: one concern — the fix round's failure excerpt names the failing test, not annotation noise
+  risk: high  # Rule 19 span: widened to run-task, sweep, tick-read-worker by a scope amendment for #13324
   band_meaning: blast-radius
   origin: "operator session 2026-10-14 PR-queue review: why #11559 (W1-T3956) round 1 fixed the wrong file"
   plan_refs: [W1-T8038, W1-T76, W1-T1227, W1-T3956]
-  files: [src/run-task.ts, test/a-fixture-annotation-never-stands-in-for-the-failing-test.test.ts]
-  status: queued
+  files: [src/run-task.ts, test/a-fixture-annotation-never-stands-in-for-the-failing-test.test.ts, "src/lib/sweep.ts", "src/lib/tick-read-worker.ts"]
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

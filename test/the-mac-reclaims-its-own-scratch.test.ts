@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,20 @@ import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "deploy", "mac", "tmp-reclaim.sh");
+
+test("the temporary cleaner preserves caller precedence and finds system safety tools under cron", () => {
+  // Execute only the maintained setup, before any discovery, locks or removal can run.
+  const setup = readFileSync(SCRIPT, "utf8").split("APPLY=0")[0];
+  assert.ok(setup.includes("set -u"));
+  const command = setup + '\nprintf "PATH=%s\\n" "$PATH"\n' +
+    (process.platform === "darwin" ? 'command -v lsof\n' : 'command -v id\n');
+  for (const path of ["/usr/bin:/bin", "/fixture-first:/usr/bin:/bin"]) {
+    const r = spawnSync("/bin/bash", ["-c", command], { encoding: "utf8", env: { PATH: path } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`PATH=${path}:/usr/sbin:/sbin\n`));
+    if (process.platform === "darwin") assert.ok(r.stdout.includes("/usr/sbin/lsof\n"));
+  }
+});
 // The script judges age with `find -mmin`, against the OS clock a child reads — one
 // scripts/clock-shift.mjs cannot move — so the stamps `age()` touches are dated from that same
 // clock, a real `date`, never from this process's `Date.now()`.
@@ -58,6 +72,9 @@ function fixture(): Fixture {
   // A fixture can backdate mtime, not kernel ctime. Positive cases use that
   // same age for ctime; the real-find metadata control below supplies no shim.
   writeFileSync(join(bin, "tsx-find-age"), `#!/bin/bash\nargs=(); for arg; do if [ "$arg" = -cmin ]; then args+=(-mmin); else args+=("$arg"); fi; done\nexec '${find}' "\${args[@]}"\n`, { mode: 0o755 });
+  // Generic positive fixtures also simulate old ctime; explicit native controls
+  // opt out of the fixture shim. Production has no age/ctime override.
+  writeFileSync(join(bin, "find"), `#!/bin/bash\nif [ "\${FIXTURE_REAL_CTIME:-0}" = 1 ]; then exec '${find}' "$@"; fi\nargs=(); for arg; do if [ "$arg" = -cmin ]; then args+=(-mmin); else args+=("$arg"); fi; done\nexec '${find}' "\${args[@]}"\n`, { mode: 0o755 });
   writeFileSync(cron, "");
   writeFileSync(join(bin, "crontab"), "#!/bin/bash\n[ \"$1\" = \"-l\" ] || exit 2\n/bin/cat " + JSON.stringify(cron) + "\n", { mode: 0o755 });
   writeFileSync(cwds, "");
@@ -192,6 +209,39 @@ test("nested TSX discovery retains active, Git-owned, seed, linked and unrecogni
   } finally { rmSync(fx.base, { recursive: true, force: true }); }
 });
 
+test("nested TSX cleanup preserves owned IPC sockets without letting them hide eligible old cache files", () => {
+  for (const mode of ['idle-socket', 'live-socket', 'regular-pipe-impostor', 'linked-pipe']) {
+    const fx = fixture();
+    try {
+      const job = join(fx.root, 'job'); const cache = join(job, 'tsx-501');
+      mkdirSync(cache, {recursive: true});
+      // A sibling Git fixture prevents generic whole-job retirement, as in real job TMPDIRs.
+      mkdirSync(join(job, 'source', '.git'), {recursive: true});
+      const old = join(cache, `17920-${'f'.repeat(40)}`), young = join(cache, `17920-${'e'.repeat(40)}`);
+      writeFileSync(old, 'compiled cache'); writeFileSync(young, 'fresh cache');
+      const ipc = join(cache, '123.pipe');
+      if (mode === 'regular-pipe-impostor') writeFileSync(ipc, 'not an IPC socket');
+      else if (mode === 'linked-pipe') symlinkSync(old, ipc);
+      else {
+        // Bind a short relative path to respect macOS's Unix-socket path limit.
+        const r = spawnSync(process.execPath, ['-e',
+          'const s=require("node:net").createServer();s.listen("123.pipe",()=>process.exit(0));'],
+          {cwd: cache, encoding: 'utf8', timeout: 5000});
+        assert.equal(r.status, 0, r.stderr); assert.ok(lstatSync(ipc).isSocket());
+      }
+      age(job, HOURS_AGO(8)); age(young, HOURS_AGO(5));
+      if (mode === 'live-socket') writeFileSync(fx.open, realpathSync(ipc) + '\n');
+      const {out} = reclaim(fx, 40);
+      assert.ok(existsSync(ipc), 'IPC sockets and unrecognized entries are never removed: ' + out);
+      assert.ok(existsSync(young));
+      assert.equal(existsSync(old), mode !== 'idle-socket', mode + ': ' + out);
+      if (mode === 'idle-socket') assert.match(out, /pruned tsx cache files=1/);
+      else if (mode === 'live-socket') assert.match(out, /open file or lsof scan uncertain/);
+      else assert.match(out, /TSX discovery contains unrecognized/);
+    } finally {rmSync(fx.base, {recursive: true, force: true});}
+  }
+});
+
 test("real kernel ctime protects backdated TSX cache files on scheduled discovery", () => {
   const fx = fixture();
   try {
@@ -199,10 +249,63 @@ test("real kernel ctime protects backdated TSX cache files on scheduled discover
     mkdirSync(cache, { recursive: true }); mkdirSync(join(job, "fixture", ".git"), { recursive: true });
     const file = join(cache, `17920-${"d".repeat(40)}`); writeFileSync(file, "recent metadata");
     age(job, HOURS_AGO(12));
-    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_TSX_FIND: "find" });
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_TSX_FIND: "find", FIXTURE_REAL_CTIME: "1" });
     assert.ok(existsSync(file), out);
     assert.doesNotMatch(out, /pruned tsx cache files=/);
   } finally { rmSync(fx.base, { recursive: true, force: true }); }
+});
+
+test("real kernel ctime protects backdated generic temp files, tree leaves and session scratch", () => {
+  const fx = fixture();
+  try {
+    const loose = join(fx.root, "backdated.json");
+    const tree = join(fx.root, "backdated-tree");
+    const mixed = join(fx.root, "mixed-tree");
+    const session = join(fx.sessions, "backdated-session");
+    for (const dir of [tree, mixed, session]) {
+      mkdirSync(join(dir, "deep"), {recursive: true});
+      writeFileSync(join(dir, "deep", "old.json"), "recently restored diagnostic\n");
+      age(dir, HOURS_AGO(12));
+    }
+    writeFileSync(loose, "recently restored loose file\n");age(loose, HOURS_AGO(12));
+    writeFileSync(join(mixed, "current.json"), "current work\n");
+    const {out} = reclaim(fx, 0, true, {FIXTURE_REAL_CTIME: "1"});
+    assert.ok(existsSync(loose), "old mtime cannot release a file with recent kernel ctime: " + out);
+    for (const dir of [tree, mixed, session]) {
+      assert.equal(readFileSync(join(dir, "deep", "old.json"), "utf8"), "recently restored diagnostic\n", dir + out);
+    }
+    assert.doesNotMatch(out, /deleted old nested file:|deleted old session scratch directory/);
+  } finally {rmSync(fx.base, {recursive: true, force: true});}
+});
+
+test("a live enclosing scratch tree protects closed old leaves in deeper directories", () => {
+  const fx = fixture();
+  try {
+    const active = join(fx.root, "active-scratch");
+    const leaf = join(active, "deep", "old-diagnostic.json");
+    mkdirSync(dirname(leaf), {recursive: true});writeFileSync(leaf, "retain active work\n");
+    age(active, HOURS_AGO(12));
+    writeFileSync(join(active, "current.json"), "a current run\n");
+    writeFileSync(fx.cwds, realpathSync(active) + "\n");
+    const {out,report} = reclaim(fx, 0);
+    assert.equal(readFileSync(leaf, "utf8"), "retain active work\n", out);
+    assert.match(report, /process working directory is inside path.*active-scratch/);
+  } finally {rmSync(fx.base, {recursive: true, force: true});}
+});
+
+test("a scratch tree becoming live during sizing cancels nested pruning at the final boundary", () => {
+  const fx = fixture();
+  try {
+    const active = join(fx.root, "becomes-active");
+    const leaf = join(active, "deep", "old-diagnostic.json");
+    mkdirSync(dirname(leaf), {recursive: true});writeFileSync(leaf, "retain new active reader\n");
+    age(active, HOURS_AGO(12));writeFileSync(join(active, "current.json"), "current run\n");
+    const du = sh(fx.base, "sh", "-c", "command -v du").trim();
+    writeFileSync(join(fx.bin, "du"), `#!/bin/bash\nif [ "\${@: -1}" = ${JSON.stringify(leaf)} ]; then printf '%s\\n' ${JSON.stringify(realpathSync(active))} > ${JSON.stringify(fx.cwds)}; fi\nexec '${du}' "$@"\n`, {mode: 0o755});
+    const {out,report} = reclaim(fx, 0);
+    assert.equal(readFileSync(leaf, "utf8"), "retain new active reader\n", out);
+    assert.match(report, /process working directory is inside path.*becomes-active/);
+  } finally {rmSync(fx.base, {recursive: true, force: true});}
 });
 
 test("real lsof preserves a held nested cache while an idle historical cache is pruned", () => {
@@ -362,6 +465,46 @@ test("six-hour session scratch cleanup removes only wholly old, unheld, non-Git 
     }
   } finally {
     rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
+test("whole temporary entries are requalified after sizing before removal", () => {
+  for (const activation of ["cwd", "recent-content", "ctime-only"]) {
+    const fx = fixture();
+    try {
+      const tree = join(realpathSync(fx.root), "whole-candidate");
+      mkdirSync(tree);
+      writeFileSync(join(tree, "old-output.txt"), "retain when activity starts during sizing\n");
+      age(tree, HOURS_AGO(8));
+      const du = sh(fx.base, "sh", "-c", "command -v du").trim();
+      const stamp = join(fx.base, "old-stamp");
+      const sized = join(fx.base, "sizing-finished");
+      const oldFile = join(tree, "old-output.txt");
+      const oldMtime = lstatSync(oldFile).mtimeMs;
+      if (activation === "ctime-only") {
+        writeFileSync(stamp, "reference mtime\n"); sh(fx.base, "touch", "-r", oldFile, stamp);
+        const nativeFind = sh(fx.base, "sh", "-c", "command -v find").trim();
+        // Only initial old metadata is simulated. After du mutates and restores
+        // mtime, the final boundary uses the real kernel ctime via native find.
+        const shim = readFileSync(join(fx.bin, "find"), "utf8");
+        writeFileSync(join(fx.bin, "find"), shim.replace("#!/bin/bash\n",
+          `#!/bin/bash\nif [ -f ${JSON.stringify(sized)} ]; then exec '${nativeFind}' "$@"; fi\n`));
+      }
+      const activate = activation === "cwd"
+        ? `printf '%s\\n' ${JSON.stringify(tree)} > ${JSON.stringify(fx.cwds)}`
+        : activation === "recent-content"
+          ? `printf 'new work\\n' > ${JSON.stringify(join(tree, "fresh.txt"))}`
+          : `printf 'changed during sizing\\n' > ${JSON.stringify(oldFile)}; /usr/bin/touch -r ${JSON.stringify(stamp)} ${JSON.stringify(oldFile)} ${JSON.stringify(tree)}; /usr/bin/touch ${JSON.stringify(sized)}`;
+      writeFileSync(join(fx.bin, "du"), `#!/bin/bash\ncase "\${@: -1}" in ./whole-candidate) ${activate} ;; esac\nexec '${du}' "$@"\n`, { mode: 0o755 });
+      const { out } = reclaim(fx, 40);
+      assert.ok(existsSync(join(tree, "old-output.txt")), activation + ": " + out);
+      if (activation === "cwd") assert.match(out, /process working directory is inside path/);
+      else if (activation === "recent-content") assert.ok(existsSync(join(tree, "fresh.txt")), out);
+      else {
+        assert.equal(readFileSync(oldFile, "utf8"), "changed during sizing\n");
+        assert.equal(lstatSync(oldFile).mtimeMs, oldMtime, "mtime was restored; only real ctime protects the entry");
+      }
+    } finally { rmSync(fx.base, { recursive: true, force: true }); }
   }
 });
 

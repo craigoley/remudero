@@ -1,0 +1,57 @@
+- id: W1-T10312
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/repositories-from-the-read-model.test.ts:flaky cost 13 PR minute(s) across 3 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.39
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/repositories-from-the-read-model.test.ts:flaky"
+  files:
+    - src/lib/clock.ts
+    - test/infra/check-test-test-repositories-from-the-read-model-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/repositories-from-the-read-model.test.ts:flaky"
+      proof: "grep: test(\"W1-T10312: check:test:test/repositories-from-the-read-model.test.ts:flaky is prevented, not retried\" in test/infra/check-test-test-repositories-from-the-read-model-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/repositories-from-the-read-model.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/repositories-from-the-read-model.test.ts:flaky cost 13 PR minute(s) (seven-day half-life) across 3 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/clock.ts: test/repositories-from-the-read-model.test.ts imports it
+    - test/repositories-from-the-read-model.test.ts: named by the failing check
+    - the rounds name a failing test: test/repositories-from-the-read-model.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13122 (https://github.com/craigoley/remudero/pull/13122) at 2026-10-20T13:47:26.807Z: ci-log round — test-slow-shard (2/2): test/repositories-from-the-read-model.test.ts
+        failing tests: with its DB on the scratch disk the read-model repositories view still reads the sources serve published to the state disk
+        log excerpt:
+          | not ok 2349 - with its DB on the scratch disk the read-model repositories view still reads the sources serve published to the state disk
+          |   ---
+          |   duration_ms: 41.997233
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/repositories-from-the-read-model.test.ts:13:4835'
+          |   failureType: 'hookFailed'
+          |   error: "ENOTEMPTY, Directory not empty: /tmp/rmd-repositories-rm-NF8a9z '/tmp/rmd-repositories-rm-NF8a9z'"
+          |   code: 'ENOTEMPTY'
+          |   stack: |-
+          |     rmSync (node:fs:1282:18)
+          |     TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/repositories-from-the-read-model.test.ts:52:1
+    - PR #11985 at 2026-10-15T13:10:00Z: hand fix PR #11985: src/lib/clock.ts, src/lib/github-app.ts, src/lib/worktree-git.ts; minutes are the pass median proxy (5.946438888888888), not measured repair time
+    - PR #10833 at 2026-10-11T10:51:46.822Z: ci-log round — coverage-shard (2/8): test/repositories-from-the-read-model.test.ts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.224Z"
+    pin: "6172b0ccfc9b26055e1582291bbe33f980536ef1fe1dae39b57f86d9a96f96b3"

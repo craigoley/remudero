@@ -45,7 +45,7 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
   ["src/lib/git-push.ts", "worktreePushExecAsync"],
   ["src/run-task.ts", "commitWorkerEdits"],
   ["src/run-task.ts", "appendTaskTrailerToCommit"],
-  ["src/run-task.ts", "irreversibleSignalForWorktree"],
+  ["src/cli/commands/run-task-verb.ts", "irreversibleSignalForWorktree"],
   ["src/run-task.ts", "pushFixRound"],
   ["src/lib/worker.ts", "stampRunWorktreeAssignment"],
   // W1-T6122: the WORKER/REVIEWER sites outside run-task.ts.
@@ -111,6 +111,12 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
  * resolved every caller-chosen tree at its callers. Exact in both directions, so it only shrinks.
  */
 export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: string }>> = {
+  "src/cli/commands/daemon.ts": {
+    count: 3,
+    reason:
+      "CHECKOUT (W1-T6135): daemonCommand's 3 sites moved with it, still classed in RUN_TASK_WIDENED_SITES in " +
+      "test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
+  },
   "src/lib/benchmark-aa-readiness.ts": { count: 1, reason: "CHECKOUT: deriveRuntimePins reads the harness checkout it runs from (-C cwd)" },
   "src/lib/benchmark-run.ts": { count: 1, reason: "CHECKOUT: executingHarnessRevision reads the harness checkout (-C cwd)" },
   "src/lib/branch-reaper.ts": { count: 5, reason: "CHECKOUT: the reaper's injected exec(\"git\", …) steps run in the managed checkout" },
@@ -239,8 +245,12 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "readLocalOriginRefHead, defaultCountBehind and ensureWorktreeConfigEnabled (2), which read/configure " +
       "the managed source checkout (-C repoDir)",
   },
+  "src/cli/commands/run-task-verb.ts": {
+    count: 1,
+    reason: "CHECKOUT (W1-T6135): refreshManagedCheckout moved unchanged from run-task.ts; its git helper reads the managed repoDir, still classed in RUN_TASK_WIDENED_SITES in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
+  },
   "src/run-task.ts": {
-    count: 70,
+    count: 65,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",

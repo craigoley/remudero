@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { aggregateCacheHitTotals, deriveKnowledgeBudgetCap, measureKnowledgeBudgetPressure, TRIVIAL_DROPPED_WEIGHT_CHARS, type CacheHitTokens, type KnowledgeBudgetDerivation } from "./digest.js";
@@ -306,6 +307,7 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   // gatherRuns' pr_url fallback.
   "report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
   "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
+  "review.semantic_setup_refused", "review.semantic_incomplete", "review.replay_input",
   "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
   // capDerivation: the knowledge-budget pressure, and the cache-hit mix's call rows.
   "learnings.injected", "review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized",
@@ -374,7 +376,9 @@ export function measurementWorkerOptions(execArgv: readonly string[]): { resourc
 }
 
 /** A worker failure refuses this measurement; it never falls back to reading on the event loop. */
-export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = new URL(import.meta.url)): Promise<T> {
+/** bundlemain: a bundled daemon starts this worker from its own worker bundle (bundledWorkerUrl); a tsx parent from
+ *  this module's URL, as before. Its .ts source cannot load in a worker of a bundled main, which has no tsx loader. */
+export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = bundledWorkerUrl(import.meta.url)): Promise<T> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(workerUrl, { workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, ...measurementWorkerOptions(process.execArgv) });
     worker.once("message", (reply: MeasurementReply) => {

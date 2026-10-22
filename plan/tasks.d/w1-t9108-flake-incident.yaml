@@ -25,12 +25,10 @@
     Retry outcomes: 4 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
   risk_ruling:
-    verdict: "low"
+    verdict: "operator"
     action: proceed
-    confidence: 0.93
+    confidence: 1
     reasons:
-      - "The filed scope declares one existing test file and requires a cause fix plus a regression test that forces the failing order, with unit test and grep proofs."
-      - "The rationale cites four distinct unrelated PR failures, four recoveries on retry, and specific CI runs with a stated evidence source."
-      - "The supplied scope requests no sensitive access, destructive action, policy change, or operator-only decision; the family track record reports seven merged tasks and zero declined."
-    judged_at: "2026-10-13T14:43:56.902Z"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:31:46.728Z"
     pin: "be0fbf74c68f7540b0dfdd549beff3fee75c1643ff0341cf3a9c1acf4f00a811"

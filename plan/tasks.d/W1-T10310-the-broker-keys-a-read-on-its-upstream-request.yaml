@@ -1,0 +1,111 @@
+- id: W1-T10310
+  title: "THE READ BROKER'S CACHE KEY IS THE ARGV, NOT THE REQUEST — two `--jq` filters on one URL each go upstream, while two different queries in one `-F query=@file` path, or one `repos/{owner}/{repo}` URL read from two repositories, share one entry and the second caller gets the first caller's answer; key on the request gh sends, and let gh itself filter the shared body"
+  repo: remudero
+  depends_on: [W1-T10279]  # fixes the key W1-T10279 (#13204) built; the write rule it relies on landed in #13248
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern, what one brokered read is keyed and cached on; pacing, routing and writes are unchanged
+  band_meaning: span
+  priority: 1  # operator-2026-10-21: every Mac session now reads through the broker; two of the three cases serve a WRONG answer today
+  status: merged
+  attempts: 0
+  origin: "operator session 2026-10-20: an agent measured two reads of one URL with different --jq going upstream twice"
+  plan_refs: [W1-T10279, W1-T10302, W1-T3275]
+  files:
+    - src/lib/gh-read-broker.ts
+    - test/github/the-broker-keys-a-read-on-its-upstream-request.test.ts
+  rationale: |
+    READ 2026-10-21 at origin/main 0c4dc0601 (after #13248, the one write classifier), on the Mac as craigoleyagent.
+    THE KEY. src/lib/gh-read-broker.ts `GhReadBroker.readOnce` hashes
+    `[login, host, c.kind, c.kind === "api-rest" ? "" : request.repo ?? request.cwd ?? "", keyed]`, where `keyed` is
+    `c.upstreamArgs` (the argv minus `-i`) for an `api-rest` read and the client's full `request.args` otherwise.
+    `classifyGhBrokerRead` makes any `gh api` read with `opaqueOutput` (from `parseGhApiArgv` in
+    src/lib/github-transport.ts: `--jq`, `--template`, `--cache`, `--paginate`, `--slurp`), fields or `--input` an
+    `opaque` read. Three faults follow, each MEASURED through the live broker:
+    (a) THE FILTER IS IN THE KEY. On 2026-10-20 an agent read one URL twice, 9 s apart, with two `--jq` filters: broker
+        log keys e693d58d1327 (23:27:11Z) and 4374aca2991a (23:27:19Z), both `upstream-200`. A filtered read is also
+        keyed on its cwd (`request.cwd`), so the same filtered read from two worktrees is two entries, and it never
+        shares the raw read's ETag entry (`c.kind` differs).
+    (b) FILE CONTENTS ARE NOT IN THE KEY. A typed field `-F k=@path` and `--input path` are keyed by the PATH. A
+        `gh api` call with fields and no method is a POST and a write (`ghArgvIsWrite`), so this bites GraphQL reads
+        and explicit `-X GET` reads. Reproduced 2026-10-21 00:34:56Z: `rmd gh -- api graphql -F query=@q.graphql`
+        with `query{viewer{login}}`, then the file rewritten to `query{rateLimit{limit}}` and read again 3 s later.
+        Both logged key 5d53d1ec4514; the second was `hit-fresh` and printed `{"data":{"viewer":{"login":"cao825"}}}`,
+        the answer to the first query. A wrong answer, not a wasted call.
+    (c) PLACEHOLDERS ARE NOT RESOLVED BEFORE KEYING. gh fills `{owner}`, `{repo}` and `{branch}` in the endpoint and
+        in `-F` values from the repository of the directory it runs in (`gh api --help`). An `api-rest` key drops the
+        cwd entirely. Reproduced 2026-10-21 00:37:59Z: `rmd gh -- api 'repos/{owner}/{repo}'` in a scratch repo whose
+        origin is craigoley/remudero-console, then the same read in a craigoley/remudero worktree. Both logged key
+        bb048e76bb15; the second was `hit-fresh` and printed `craigoley/remudero-console`. Also a wrong answer.
+        Related: `request.repo` (the client's `-R` or GH_REPO, from `resolvePorcelainRepo`) is in the key, but
+        `defaultGhUpstreamExec` runs gh with only `cwd`, so a client's GH_REPO never reaches the upstream gh.
+    HOW gh FILTERS, MEASURED 2026-10-21 with gh 2.92.0. gh applies `--jq` itself, with its built-in gojq (`gh help
+    formatting`: "The jq utility does not need to be installed"). It has no command that filters a local file.
+    - System jq is NOT a faithful stand-in. One `gh api rate_limit` body filtered by gh and by jq-1.8.1
+      (/opt/homebrew/bin/jq) differed: gh printed `.resources.core` as `{"limit":5000,"remaining":4951,"reset":…,
+      "used":49}` (keys sorted, as gojq documents), jq kept GitHub's order `{"limit":5000,"used":49,…}`; and gh
+      printed the literal `1.0` as `1`, jq as `1.0`.
+    - gh's OWN response cache is faithful. `gh api rate_limit --cache 300s --jq .rate.limit` (00:34:26Z) wrote one
+      entry under ~/.cache/gh/ad/5e/…, a raw HTTP response. `--cache 300s --jq .resources.search` 3 s later printed
+      its filtered answer in 38 ms (broker `upstream_ms`) against 266 ms for the first, and that entry's mtime did not
+      change: gh served the second FILTER from the first call's cached body, with no network call. gh keys that cache
+      on the request, not on the output flags.
+    - `--template` (Go templates with gh's own helpers) has no faithful outside implementation at all.
+    OVERLAP SWEEP 2026-10-21: plan/tasks.d holds two broker shards. W1-T10279 built the broker. W1-T10302 (queued, P1)
+    shares its pacer across Mac accounts and touches src/lib/gh-read-broker.ts, but not the key or the cache entry.
+    The 5 open PRs (#13008, #13039, #13121, #13218, #13223) touch neither file. No shard or PR changes the key.
+  design: |
+    No fixed bounds: freshness stays what GitHub advertises (`maxAgeMs`, `opaqueFreshMs`), as W1-T10279 built it.
+    1. KEY ON THE REQUEST gh WILL SEND. For a `gh api` read the key is the login, the host and the request: method,
+       endpoint, `-H`/`-p` headers, the field list, and `--paginate`/`--slurp` (they change which requests go out).
+       - Output-only flags are NOT in it: `-q`/`--jq`, `-t`/`--template`, `-i`/`--include`, `--cache`, `--silent`,
+         `--verbose`.
+       - A typed field `-F k=@path` and `--input path` contribute a sha256 of the file's bytes, read in `request.cwd`
+         as gh would open it (the same resolution `readGhLocalFile` uses in src/lib/github-transport.ts). An
+         unreadable file is not cached: the read is a passthrough and gh reports the error itself.
+       - A read naming stdin (`@-`, `--input -`) is not brokered at all: the broker cannot see the client's stdin.
+         `rmd gh` runs it directly, as it runs a write.
+       - When the endpoint or a field holds `{owner}`, `{repo}` or `{branch}`, the key adds what gh resolves them
+         from, read locally with git and no network: the cwd repository's remote URLs and their `gh-resolved`
+         marks, and the current branch for `{branch}`. A client's GH_REPO is both keyed and passed to the upstream
+         gh, so the request that runs is the request that was keyed.
+       Porcelain reads keep today's key: their `--json` field set is part of the request, and gh has no cache for them.
+    2. ONE RAW BODY, FILTERED BY gh ITSELF. Never by system jq (measured unfaithful above).
+       - The upstream run of a filtered `gh api` read gets `--cache <the entry's remaining freshness>` and an
+         XDG_CACHE_HOME the broker owns, one directory per request key. The first filtered read fetches. A later read
+         of the same request with another filter runs gh against that directory, and gh answers from its own cache.
+       - The broker counts that as served without upstream, never as an upstream call. It tells a replay from a fetch
+         exactly, not by timing: for example, the `x-github-request-id` of the `-i` header block equals the stored one.
+         The pacer records only real fetches.
+       - The broker owns that directory: it counts toward the cache's share of free disk, is dropped with its entry on
+         eviction, and is dropped on a subject invalidation, so a `gh pr edit` is never answered from gh's cache.
+       - A conditional request (If-None-Match) never goes through gh's cache, so a 304 is never stored there as a body.
+       - Two reads of one request in flight coalesce on the request key. A waiter with a different filter runs its own
+         local gh pass once the fetch lands.
+       - FALLBACK, decided by measurement. If the installed gh does not answer a second filter from its cache, the
+         filter stays in the key (today's behaviour), and `rmd gh-broker status` says so. Never substitute jq.
+    3. MEASURED. The per-request log gains the request key and whether gh served the filter locally, so
+       `status --since` shows filtered reads that cost no upstream call.
+    Tests go in test/github/the-broker-keys-a-read-on-its-upstream-request.test.ts, with the injected
+    `GhUpstreamExec`, clock and temp directories. The fake gh models gh's `--cache` as measured above. No real gh and
+    no network.
+  acceptance:
+    - claim: "two reads of one URL with different --jq filters make one upstream call, and each caller gets its own filter's output"
+      proof: 'grep: test("W1-T10310: two filters on one request make one upstream call" in test/github/the-broker-keys-a-read-on-its-upstream-request.test.ts'
+    - claim: "two reads of one -F query=@file path with different contents make two upstream calls, and the second gets its own query's answer"
+      proof: 'grep: test("W1-T10310: a query file is keyed by its contents" in test/github/the-broker-keys-a-read-on-its-upstream-request.test.ts'
+    - claim: "one placeholder endpoint read from two repositories makes two upstream calls and is never served across them"
+      proof: 'grep: test("W1-T10310: a placeholder endpoint is keyed by the repository it resolves to" in test/github/the-broker-keys-a-read-on-its-upstream-request.test.ts'
+    - claim: "a read naming stdin is not brokered, and an invalidated subject is never answered from gh's own cache"
+      proof: 'grep: test("W1-T10310: stdin reads go direct and invalidation clears the gh cache" in test/github/the-broker-keys-a-read-on-its-upstream-request.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/github/the-broker-keys-a-read-on-its-upstream-request.test.ts"
+  falsifier: |
+    Keep the argv as the key: the two filters make two upstream calls and the first test fails.
+    Key a field file by its path: the second read is hit-fresh with the first query's answer and the second test fails.
+    Drop the repository from a placeholder read's key: the second repository gets the first one's answer and the
+    third test fails.
+    Leave gh's cache directory in place on invalidation: the read after a write replays the stale body and the fourth
+    test fails.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDispatchValueContext } from "../src/lib/dispatch-value.js";
+import { buildDispatchValueContext, dispatchUrgency } from "../src/lib/dispatch-value.js";
 import { dispatchOrder, nextRunnable, runnableCandidates } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { daemonCommand, dispatchValueContextForSelection, readDispatchFilingSnapshot } from "../src/run-task.js";
@@ -92,7 +92,13 @@ test("W1-T4064: open fanout adds impact and measured cost per merge changes the 
   const peer = task("W1-T1");
   const dates = new Map([...filed, [child.id, NOW - DAY], [peer.id, NOW - DAY]]);
   const context = calibrate([parent, child, peer], history, dates);
-  assert.equal(context.costOfDelayByTaskId!.get(parent.id), 2 * context.costOfDelayByTaskId!.get(peer.id)!);
+  const own = context.costOfDelayInputsByTaskId!.get(parent.id)!;
+  const childInputs = context.costOfDelayInputsByTaskId!.get(child.id)!;
+  const dependentValue = dispatchUrgency(1, childInputs.filing_age_ms / childInputs.median_wait_ms);
+  assert.equal(own.dependent_value, dependentValue);
+  assert.ok(context.costOfDelayByTaskId!.get(parent.id)! > context.costOfDelayByTaskId!.get(peer.id)!);
+  const expected = context.costOfDelayByTaskId!.get(peer.id)! * (own.urgency + dependentValue) / own.urgency;
+  assert.ok(Math.abs(context.costOfDelayByTaskId!.get(parent.id)! - expected) < expected * 1e-12);
   const expensive = history.map(row => row.cost_usd === undefined ? row : { ...row, cost_usd: 4 });
   const expensiveContext = calibrate([parent, child, peer], expensive, dates);
   assert.equal(expensiveContext.costOfDelayByTaskId!.get(parent.id), context.costOfDelayByTaskId!.get(parent.id)! / 2);
@@ -100,8 +106,10 @@ test("W1-T4064: open fanout adds impact and measured cost per merge changes the 
 
 test("W1-T4064: duplicate archive starts consume one slot and old slots survive the class window", () => {
   const selected = { step: "run.start", task_id: fresh.id, run_id: "selected", ts: new Date(NOW - 14 * DAY).toISOString() };
-  const a = calibrate([old, fresh], [...history, selected]);
-  const b = calibrate([old, fresh], [...history, selected, selected]);
+  // W1-T8166: a lone old start is a proven orphan and spends no stride; this run did dispatch, so it owns a row.
+  const worked = { step: "worker.spawn", task_id: fresh.id, run_id: "selected", ts: new Date(NOW - 14 * DAY + 1000).toISOString() };
+  const a = calibrate([old, fresh], [...history, selected, worked]);
+  const b = calibrate([old, fresh], [...history, selected, worked, selected, worked]);
   const initial = calibrate([old, fresh]);
   assert.equal(a.stridePassByTaskId!.get(fresh.id), 2 * initial.stridePassByTaskId!.get(fresh.id)!);
   assert.deepEqual([...a.stridePassByTaskId!], [...b.stridePassByTaskId!]);
@@ -330,7 +338,9 @@ test("a run no worker tried spends no dispatch stride", () => {
 
 test("a worker's own failure and an unfinished run still spend a dispatch stride", () => {
   const workerFailed = runOf(interrupted.id, `${interrupted.id}-worker`, { verdict: "no_pr", reason: "no-diff" });
-  const unfinished = runOf(interrupted.id, `${interrupted.id}-running`, undefined);
+  // W1-T8166: an unfinished run that wrote a row past its start was dispatched; a lone start is an orphan.
+  const unfinished = [...runOf(interrupted.id, `${interrupted.id}-running`, undefined),
+    { step: "worker.spawn", task_id: interrupted.id, run_id: `${interrupted.id}-running`, ts: new Date(NOW - DAY + 30_000).toISOString() }];
   const after = calibrate([interrupted, peer], [...history, ...nonWorkerRuns, ...workerFailed, ...unfinished], peerDates);
   assert.equal(consumed(after, interrupted.id), 2);
   assert.equal(dispatchOrder([interrupted, peer], after)[0].id, peer.id);

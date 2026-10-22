@@ -1,0 +1,62 @@
+- id: W1-T10134
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:security-merge-policy cost 20.5 PR minute(s) across 6 round(s) on 5 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10134 — Live (10 security-merge-policy rounds in 3 d,
+  # last 10-21 13:42), but the remedy edits src/lib/code-scanning-merge-adapter.mjs, the security merge gate.
+  # 'Never spend a fix round on it' risks weakening a security gate. NOTE: the verify-human cadence already
+  # MACHINE-RELEASED it on 10-19 while the risk judge says high/escalate; consider retiring it so it does not
+  # build.
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:security-merge-policy"
+  files:
+    - src/lib/code-scanning-merge-adapter.mjs
+    - test/check-ci-log-security-merge-policy.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:security-merge-policy"
+      proof: "grep: test(\"W1-T10134: check:ci-log:security-merge-policy is prevented, not retried\" in test/check-ci-log-security-merge-policy.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:security-merge-policy's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:security-merge-policy cost 20.5 PR minute(s) (seven-day half-life) across 6 fix round(s) on 5 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/code-scanning-merge-adapter.mjs: names "security-merge-policy" (1 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #12570 (https://github.com/craigoley/remudero/pull/12570) at 2026-10-17T13:45:03.775Z: ci-log round — coverage-ratchet: diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/e; CodeQL; Scan; security-merge-policy
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/test-slot-mutation.ts:141
+          |   - src/lib/test-slot-mutation.ts:183
+          |   - src/lib/test-slot-mutation.ts:184
+          |   - src/lib/test-slot-mutation.ts:185
+          |   - src/lib/test-slot-mutation.ts:186
+          |   - src/lib/test-slot-mutation.ts:198
+          |   - src/lib/test-slot-mutation.ts:199
+          |   - src/lib/test-slot-mutation.ts:213
+          |   - src/lib/test-slot-mutation.ts:214
+          |   - src/lib/test-slot-
+    - PR #12390 (https://github.com/craigoley/remudero/pull/12390) at 2026-10-17T00:20:35.972Z: ci-log round — Scan; coverage-shard (5/8): test/the-defuse-lane-sees-a-wire-name-stamp.test.ts; security-merge-policy
+        failing tests: leaf, W1-T6036: the census pins both renames against their mapping sources; W1-T6036: the census pins both renames against their mapping sources
+        log excerpt:
+          | Path does not exist: semgrep.sarif
+    - PR #11725 (https://github.com/craigoley/remudero/pull/11725) at 2026-10-14T17:54:56.340Z: ci-log round — security-merge-policy
+        failing tests: CENSUS: the shipped baseline covers every measured file, and no other
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The record proposes preventing security-merge-policy fix rounds through src/lib/code-scanning-merge-adapter.mjs, but specifies no mechanism demonstrating that security merge enforcement remains intact.; on the change's description/files alone, no diff was read — The cited rounds show different failures, including uncovered lines, missing semgrep.sarif, and a baseline census failure; recurrence and cost do not establish a shared cause.; on the change's description/files alone, no diff was read — The acceptance proof checks for test-title text using grep; it does not verify self-healing or preservation of merge policy. The supplied evidence cannot verify the proposed remedy."
+    judged_at: "2026-10-18T10:55:42.318Z"
+    pin: "82be27bb7d22402e9676fbceba8c9d399bcca2bad8406aa58a7f57d90d279159"

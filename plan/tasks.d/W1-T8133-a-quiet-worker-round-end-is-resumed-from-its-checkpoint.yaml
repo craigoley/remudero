@@ -5,13 +5,13 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 11.50
   risk: high  # Rule 19: one concern — a checkpoint pushed by a quiet-worker round end is restored by the next run
   band_meaning: span
   origin: "operator approval 2026-10-11: follow-ups from the recycle-stall fix (hand PR #10925)"
   plan_refs: [W1-T7807, W1-T7697, W1-T7747, W1-T7806, W1-T8008, W1-T4662]
   files: [src/lib/daemon.ts, test/a-quiet-worker-round-end-is-resumed-from-its-checkpoint.test.ts]
-  status: queued
+  status: merged
   priority: 3  # operator 2026-10-11: zero quiet_worker_round_ended verdicts on 10-11; restart-churn work goes first
   attempts: 0
   rationale: |

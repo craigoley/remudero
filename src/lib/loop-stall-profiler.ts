@@ -17,6 +17,7 @@
  * each top self frame's nearest script CALLER from the profile's node tree, and ranks the callers themselves.
  * IT CANNOT TAKE DOWN THE LOOP IT WATCHES: any inspector or watchdog failure writes
  * `daemon.loop_stall_profile_failed` with its reason and disables the watchdog for the boot.
+ * W1-T10074: serve runs the same profiler under its own step names ({@link LoopStallProfilerOptions.steps}).
  *
  * A V8 LIMIT: a frame on-stack-replaced BEFORE the profile began has its samples credited to its caller.
  * A spin that keeps calling functions is named correctly, which is the shape of a scanner spin.
@@ -359,7 +360,21 @@ try {
 }
 `;
 
+/** The two rows a profiler writes: the stall's profile, and the failure that disabled it for the boot. */
+export interface LoopStallSteps {
+  profile: string;
+  failed: string;
+}
+
+/** The daemon's rows, the default. */
+export const DAEMON_LOOP_STALL_STEPS: LoopStallSteps = {
+  profile: "daemon.loop_stall_profile",
+  failed: "daemon.loop_stall_profile_failed",
+};
+
 export interface LoopStallProfilerOptions {
+  /** W1-T10074: the step names its rows carry; absent, {@link DAEMON_LOOP_STALL_STEPS}. */
+  steps?: LoopStallSteps;
   /** The synchronous spawn time since the previous call: one heartbeat's share of W1-T7745's window. */
   takeSyncSpawnMs?: () => number;
   /** Seam: start the watchdog from its source. Defaults to an eval worker that does not hold the process open. */
@@ -380,6 +395,7 @@ interface ProfileMessage { kind: "profile"; beat: number; silent_ms: number; unp
 type WatchdogMessage = { kind: "ready" } | { kind: "failed"; reason: string } | ProfileMessage;
 
 export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): LoopStallProfiler {
+  const steps = options.steps ?? DAEMON_LOOP_STALL_STEPS;
   const shared = new Int32Array(new SharedArrayBuffer(4 * Int32Array.BYTES_PER_ELEMENT));
   const lags: number[] = [];
   const beats = new Map<number, { lagMs: number; syncSpawnMs: number }>();
@@ -403,7 +419,7 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
     if (off) return;
     halt();
     try {
-      sink?.("daemon.loop_stall_profile_failed", { reason: reason.slice(0, 200) });
+      sink?.(steps.failed, { reason: reason.slice(0, 200) });
     } catch (error) {
       // Reason: the row is the only record of this failure; a throwing logger loses it, never the loop.
       void error;
@@ -429,7 +445,7 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
     const closing = beats.get(message.beat + 1);
     const lagMs = Math.round(closing?.lagMs ?? message.silent_ms);
     const syncSpawnMs = Math.round(closing?.syncSpawnMs ?? 0);
-    sink?.("daemon.loop_stall_profile", {
+    sink?.(steps.profile, {
       lag_ms: lagMs,
       sync_spawn_ms: syncSpawnMs,
       unattributed_ms: Math.max(0, lagMs - syncSpawnMs),

@@ -1,14 +1,21 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { boundChildByLoopTime, childLoopBound, execFileLoopBounded } from "./loop-bounded-child.js";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { accessSync, constants as fsConstants, mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  accessSync, constants as fsConstants, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
+import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
+import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
 /** PRIMARY CONTROL: every GitHub CLI invocation gets a wall-clock ceiling unless a caller narrows it. */
@@ -140,12 +147,72 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
   );
 }
 
+// ── W1-T10279 — A LIVE MAC BROKER TAKES THE READ INSTEAD OF THE FLOOR ───────────────────────────
+//
+// When the account's GitHub read broker (src/lib/gh-read-broker.ts) is live, a read goes to it and the
+// 180 s floor is not applied here: the broker paces every session's reads from GitHub's own headers.
+// Writes and the budget probe never move. With no live broker every path below is unchanged, which is
+// every host but an operator's Mac.
+
+/** W1-T10279: one `gh` run for the Mac read broker's upstream calls, as a direct call would make it,
+ *  answering its stdout, stderr and exit code rather than throwing — the broker paces and caches
+ *  on all three. It lives here because this module owns every `gh` spawn (gh-transport census). */
+export function ghRunForBroker(args: string[], opts: { cwd?: string; maxBuffer: number }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve) => {
+    execFile("gh", args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: opts.maxBuffer, timeout: DEFAULT_GH_CALL_TIMEOUT_MS }, (err, stdout, stderr) => {
+      const code = (err as { code?: unknown } | null)?.code;
+      resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), exitCode: err ? (typeof code === "number" ? code : 1) : 0 });
+    });
+  });
+}
+
+/** The broker socket for this read, or `undefined` for today's direct, floored path. A write by
+ *  {@link ghArgvIsWrite}, judged in the directory the call runs in (`cwd`), is never brokered. */
+function ghBrokerSocketFor(args: readonly string[], env: NodeJS.ProcessEnv | undefined, cwd?: string): string | undefined {
+  if (ghArgvIsWrite(args, { cwd }) || ghArgvIsCadenceExempt(args)) return undefined;
+  return ghBrokerRouteFor(env ?? process.env);
+}
+
+/** The broker class this process reads as, in W1-T10271's priority order (see {@link ghBrokerClassForActor}). */
+function ghBrokerClassOf(env: NodeJS.ProcessEnv | undefined): GhBrokerClass {
+  return ghBrokerClassForActor(ghReadActorResolver(env ?? process.env));
+}
+
+/** A brokered failure shaped like the `execFile` error a direct `gh` would have thrown. */
+function ghBrokerExecError(args: readonly string[], result: GhBrokerResult): Error {
+  return Object.assign(new Error(`Command failed: gh ${args.join(" ")}\n${result.stderr}`), {
+    status: result.exitCode,
+    code: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  });
+}
+
+/** The ASYNC read through a live broker: its stdout, or `undefined` when no broker took the read. */
+async function ghBrokeredAsync(args: readonly string[], readOpts: GhJsonReadOptions = {}): Promise<string | undefined> {
+  const socket = ghBrokerSocketFor(args, undefined);
+  if (socket === undefined) return undefined;
+  let result: GhBrokerResult;
+  try {
+    result = await brokerGhRead(socket, args, { class: ghBrokerClassOf(undefined), ...(readOpts.fresh === true ? { fresh: true } : {}) });
+  } catch {
+    // The broker went away between the liveness read and the request: take the direct path, paced
+    // by the floor as before, rather than fail a read the direct path could still make.
+    return undefined;
+  }
+  if (result.exitCode !== 0) throw ghBrokerExecError(args, result);
+  return result.stdout;
+}
+
 export function ghExec(args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExec(args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
-  // W1-T3297: this overload always spawns the real `gh`, so the cadence floor always applies.
-  applyGhReadCadence(args);
-  return ghExecFile("gh", args, opts) as string | Buffer;
+  // W1-T10279: with a live broker the same one spawn runs the broker client in place of `gh`, unfloored.
+  const socket = ghBrokerSocketFor(args, opts.env, typeof opts.cwd === "string" ? opts.cwd : undefined);
+  // W1-T3297: otherwise this overload spawns the real `gh`, so the cadence floor applies.
+  if (socket === undefined) applyGhReadCadence(args);
+  const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args, ghBrokerClassOf(opts.env));
+  return ghExecFile(spawned.file, spawned.args, opts) as string | Buffer;
 }
 
 export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
@@ -166,13 +233,16 @@ export function ghJson(
 ): unknown {
   // W1-T3297: an injected `exec` reaches no network, so pacing it would spend a shared window
   // on a call that never touched the limiter.
-  if (exec === execFileSync) {
-    refuseSentinelGhToken("gh", args, undefined);
-    applyGhReadCadence(args);
-  }
   const isApiCall = args[0] === "api";
   const execArgs = isApiCall ? [...args, "-i"] : args;
-  const out = exec("gh", execArgs, {
+  let spawned = { file: "gh", args: execArgs };
+  if (exec === execFileSync) {
+    refuseSentinelGhToken("gh", args, undefined);
+    const socket = ghBrokerSocketFor(execArgs, undefined);
+    if (socket === undefined) applyGhReadCadence(args);
+    else spawned = ghBrokerClientSpawn(socket, execArgs, ghBrokerClassOf(undefined));
+  }
+  const out = exec(spawned.file, spawned.args, {
     encoding: "utf8",
     maxBuffer: DEFAULT_GH_MAX_BUFFER,
     timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
@@ -292,22 +362,26 @@ function parseGhJsonBody(args: string[], body: string): unknown {
   }
 }
 
+/** An explicit revalidation request; omitted preserves normal broker caching. */
+export interface GhJsonReadOptions { fresh?: true; }
+
 export async function ghJsonAsync(
   args: string[],
   execAsync: typeof execFileAsync = execFileAsync,
   /** W1-T6591: {@link ghJson}'s rate-limit reading, from the response headers of an `api` read. */
   onRateLimit?: (reading: GhRateLimitReading) => void,
+  readOpts: GhJsonReadOptions = {},
 ): Promise<unknown> {
   const withHeaders = onRateLimit !== undefined && args[0] === "api";
   const execArgs = withHeaders ? [...args, "-i"] : args;
-  const stdout = await ghStdoutAsync(args, execArgs, execAsync);
+  const stdout = await ghStdoutAsync(args, execArgs, execAsync, readOpts);
   if (!withHeaders) return parseGhJsonBody(args, stdout);
   const { headers, body } = splitGhHeaderBlock(stdout, args.includes("--slurp"));
   onRateLimit(parseGhRateLimitHeaders(headers));
   return parseGhJsonBody(args, body);
 }
 
-async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: typeof execFileAsync): Promise<string> {
+async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: typeof execFileAsync, readOpts: GhJsonReadOptions = {}): Promise<string> {
   const run = async (): Promise<string> => (await withGhKillEscalation(
     execAsync("gh", execArgs, {
       encoding: "utf8",
@@ -320,7 +394,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
   // Injected executors are test/offline seams and may have independent side effects, so only the
   // real `gh` transport participates in production single-flight coalescing.
   if (execAsync !== execFileAsync) return run();
-  const key = ghArgsAreCoalescibleRead(args) ? JSON.stringify(execArgs) : undefined;
+  const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
@@ -328,6 +402,8 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
     // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
     refuseSentinelGhToken("gh", args, undefined);
+    const brokered = await ghBrokeredAsync(execArgs, readOpts);
+    if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     return run();
   })();
@@ -363,6 +439,8 @@ export async function ghTextAsync(
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     refuseSentinelGhToken("gh", args, undefined);
+    const brokered = await ghBrokeredAsync(args);
+    if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     return read();
   })();
@@ -389,6 +467,12 @@ export async function ghLinesAsync(
 ): Promise<void> {
   const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
   refuseSentinelGhToken("gh", args, undefined);
+  const brokered = await ghBrokeredAsync(args);
+  if (brokered !== undefined) {
+    // The broker answers whole; the lines are still handed over one at a time, as `onLine` expects.
+    for (const line of brokered.split("\n")) onLine(line);
+    return;
+  }
   await applyGhReadCadenceAsync(args);
   const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
   // Not spawn's own `timeout`: a child that never started never exits, and that timer then holds the process open.
@@ -784,11 +868,113 @@ export function ghSecondaryLimitRefusal(operation: string, bucket: string = GH_R
   };
 }
 
-/** WRITE-SHAPED argv, mirroring `hooks/deny-floor.sh` rule 9's own classifier. A write is what the
- *  fleet does when it has something to say and is self-limiting; pacing one stalls a dispatch. */
-export function ghArgvIsWrite(args: readonly string[]): boolean {
+/** The `gh api` flags that take a value, as gh's own `api` command defines them. */
+const GH_API_FLAGS_WITH_VALUE = new Set(["-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field", "--input",
+  "-q", "--jq", "-t", "--template", "-p", "--preview", "--hostname", "--cache"]);
+const GH_API_SHORT_FLAGS_WITH_VALUE = new Set(["-X", "-H", "-f", "-F", "-q", "-t", "-p"]);
+
+/** One `-f`/`--raw-field` (`typed: false`) or `-F`/`--field` (`typed: true`) as `key=value`. */
+export interface GhApiField {
+  typed: boolean;
+  key: string;
+  value: string;
+}
+
+/** A `gh api` argv, parsed the way gh's own flag parser reads it. */
+export interface GhApiArgv {
+  endpoint: string | undefined;
+  /** The explicit -X/--method, upper-cased; `undefined` when none was given. */
+  explicitMethod: string | undefined;
+  /** The method gh sends: the explicit one, else POST when any field or --input is given, else GET. */
+  method: string;
+  fields: GhApiField[];
+  /** The --input file (`-` is stdin). */
+  input: string | undefined;
+  /** --jq, --template, --cache, --paginate or --slurp: the output is not one HTTP response body. */
+  opaqueOutput: boolean;
+}
+
+/** PURE: `args` (starting with `api`) as gh parses them, including `--name=value`, `-XPOST` and `-fkey=v`. */
+export function parseGhApiArgv(args: readonly string[]): GhApiArgv {
+  let endpoint: string | undefined;
+  let explicitMethod: string | undefined;
+  let input: string | undefined;
+  let opaqueOutput = false;
+  const fields: GhApiField[] = [];
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i];
+    let name = arg;
+    let value: string | undefined;
+    if (arg.startsWith("--") && arg.includes("=")) {
+      name = arg.slice(0, arg.indexOf("="));
+      value = arg.slice(arg.indexOf("=") + 1);
+    } else if (!arg.startsWith("--") && arg.length > 2 && GH_API_SHORT_FLAGS_WITH_VALUE.has(arg.slice(0, 2))) {
+      name = arg.slice(0, 2);
+      value = arg.slice(2).replace(/^=/, "");
+    }
+    if (GH_API_FLAGS_WITH_VALUE.has(name)) {
+      if (value === undefined) {
+        value = args[i + 1] ?? "";
+        i += 1;
+      }
+      if (name === "-X" || name === "--method") explicitMethod = value.toUpperCase();
+      else if (name === "-f" || name === "--raw-field" || name === "-F" || name === "--field") {
+        const eq = value.indexOf("=");
+        fields.push({ typed: name === "-F" || name === "--field", key: eq < 0 ? value : value.slice(0, eq), value: eq < 0 ? "" : value.slice(eq + 1) });
+      } else if (name === "--input") input = value;
+      else if (name === "-q" || name === "--jq" || name === "-t" || name === "--template" || name === "--cache") opaqueOutput = true;
+    } else if (arg === "--paginate" || arg === "--slurp") opaqueOutput = true;
+    else if (!arg.startsWith("-") && endpoint === undefined) endpoint = arg;
+  }
+  const method = explicitMethod ?? (fields.length > 0 || input !== undefined ? "POST" : "GET");
+  return { endpoint, explicitMethod, method, fields, input, opaqueOutput };
+}
+
+/** A local file's text, or `undefined` when it is stdin (`-`) or cannot be read. No network. */
+function readGhLocalFile(path: string, cwd: string | undefined): string | undefined {
+  if (path === "-" || path === "") return undefined;
+  try {
+    return readFileSync(isAbsolute(path) || cwd === undefined ? path : join(cwd, path), "utf8");
+  } catch {
+    // Unreadable is not "no mutation": the caller counts an unknown query as a write, the safe direction.
+    return undefined;
+  }
+}
+
+/** Could this GraphQL query text be a mutation? Unknown (unreadable) or empty text counts as one. */
+function ghGraphqlTextMayMutate(text: string | undefined): boolean {
+  return text === undefined || text.trim() === "" || /\bmutation\b/.test(text);
+}
+
+/**
+ * THE ONE WRITE RULE for a `gh` call, mirroring gh's own method rule. Every path that decides "write or
+ * read" derives from this: the transport's floor and broker routing, `rmd gh` (ghCommand), the broker's
+ * own refusal (classifyGhBrokerRead), and `hooks/deny-floor.sh` rule 10, which mirrors it in shell.
+ *
+ *   * `gh api`: the method is the explicit -X/--method, else POST when any -f/--raw-field/-F/--field/
+ *     --input is present, else GET. A non-GET/HEAD call is a write.
+ *   * `gh api graphql` is always POSTed, so it is a READ only when its query provably is not a mutation.
+ *     A query named as a local file (`-F query=@file`, or `--input file` with no query field) is read here
+ *     to decide, with no network; an unreadable, stdin or empty query is a WRITE: the safe direction, sent
+ *     straight to gh, never brokered or cached. An explicit non-GET/HEAD method is a write regardless.
+ *   * Porcelain: the verbs that change something.
+ *
+ * After W1-T10279 (#13204) the transport saw a write only with an explicit method, so a `-f body=x` POST
+ * and a `-f query='mutation …'` went to the read broker, which refused them, and the write failed.
+ * `cwd` resolves a relative query file where gh runs it; it defaults to this process's own.
+ */
+export function ghArgvIsWrite(args: readonly string[], opts: { cwd?: string } = {}): boolean {
+  if (args[0] === "api") {
+    const api = parseGhApiArgv(args);
+    if (api.explicitMethod !== undefined && api.explicitMethod !== "GET" && api.explicitMethod !== "HEAD") return true;
+    if (api.endpoint === "graphql") {
+      const queries = api.fields.filter((f) => f.key === "query");
+      if (queries.length === 0) return ghGraphqlTextMayMutate(api.input === undefined ? undefined : readGhLocalFile(api.input, opts.cwd));
+      return queries.some((q) => ghGraphqlTextMayMutate(q.typed && q.value.startsWith("@") ? readGhLocalFile(q.value.slice(1), opts.cwd) : q.value));
+    }
+    return api.method !== "GET" && api.method !== "HEAD";
+  }
   const joined = args.join(" ");
-  if (/(?:^|\s)(?:-X|--method)\s+(?:POST|PATCH|PUT|DELETE)\b/i.test(joined)) return true;
   if (/^(?:pr|issue)\s+(?:create|merge|edit|close|reopen|comment|review|ready|lock|unlock)\b/.test(joined)) return true;
   return /^(?:run\s+(?:rerun|cancel|delete)|workflow\s+(?:run|enable|disable)|release\s+(?:create|edit|delete)|label\s+(?:create|edit|delete)|secret\s+set)\b/.test(
     joined,
@@ -948,15 +1134,214 @@ export function readGhReadCadenceStampMs(path: string | undefined): number | und
   }
 }
 
-/** Records an ALLOWED read. Never throws: an unwritable cache root must not block work. */
-export function stampGhRead(path: string | undefined): void {
+/** Records an ALLOWED read. Never throws: an unwritable cache root must not block work.
+ *
+ *  W1-T10271: `text` is what the read leaves in the file — empty, exactly as the hook's `: >` leaves
+ *  it, for a read that counts against a gated window, or {@link ghAdvisoryStampText} for a daemon's
+ *  advisory read. `atMs` sets the mtime on the caller's clock, defaulting to the cadence clock so
+ *  a shifted clock cannot turn a fresh stamp into an undecidable future read. */
+export function stampGhRead(path: string | undefined, text = "", atMs?: number): void {
   if (path === undefined) return;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, "");
+    writeFileSync(path, text);
+    const stampMs = atMs ?? systemClock.now();
+    utimesSync(path, stampMs / 1000, stampMs / 1000);
   } catch {
     // FAIL OPEN (design (v)): losing the stamp costs pacing accuracy, never the call itself.
   }
+}
+
+/** A stamp file's text, or `undefined` when it is absent or unreadable — never a throw. */
+export function readGhStampText(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined;
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    // FAIL OPEN (design (v)): an absent and an unreadable stamp both read as "no text", which every
+    // caller treats as an unmarked read — the conservative side, since it COUNTS against the floor.
+    return undefined;
+  }
+}
+
+// ── W1-T10271 — A WAITING GH READ GETS A FAIR TURN ──────────────────────────────────────────────
+//
+// OBSERVED 2026-10-20: an operator's `rmd review` in core, with RMD_GH_TRANSPORT_FLOOR=wait, waited
+// 30 min and never got a slot. The wait was measured from the NEWEST stamp, and core's advisory reads
+// restamp it about three times a second (median 2.94 req/s from `daemon.quota` deltas, 10-18..10-20),
+// so a 180 s quiet stretch never came. The floor exists to space INVOCATIONS (see DEFAULT_GH_READ_BURST);
+// the daemon's sweeps are paced by GhCallPacer and the shared gap. Counting them against a gated
+// caller's window served neither limiter. Two rules, one limiter:
+//   * every read still waits the shared gap after the NEWEST stamp, which the hook shares;
+//   * a gated first read (enforce or wait) is floored from the newest read that COUNTS: an admitted
+//     gated read (`<stamp>.gated`), a burst read, or a session's hook-paced read. A daemon's advisory
+//     read marks the shared stamp's text and CARRIES the last counted read forward, so overwriting a
+//     hook's `: >` cannot erase it.
+// A gated read that must wait takes a FIFO ticket, operators first, and sleeps OUTSIDE the lock; the
+// first reader that finds a due head ticket yields it one shared gap, so the slot is reserved.
+
+const GH_ADVISORY_STAMP_MARK = "advisory";
+
+/** The text a daemon's advisory read leaves: the mark, and the newest counted read it replaced. */
+export function ghAdvisoryStampText(countedMs: number | undefined): string {
+  return `${GH_ADVISORY_STAMP_MARK} ${countedMs ?? ""}\n`;
+}
+
+/** The newest read on a stamp that counts against a gated window: its mtime, unless its text marks an
+ *  advisory read, which counts only the read it carried forward (none when it carried nothing). */
+export function ghCountedStampMs(ms: number | undefined, text: string | undefined): number | undefined {
+  if (ms === undefined) return undefined;
+  const marked = /^advisory(?:[ \t]+([0-9]+))?/.exec(text ?? "");
+  if (marked === null) return ms;
+  return marked[1] === undefined ? undefined : Number(marked[1]);
+}
+
+export function ghGatedStampPath(stampPath: string): string {
+  return `${stampPath}.gated`;
+}
+
+/** The gated stamp's cumulative admission count; an absent or garbled stamp reads 0. */
+function ghGatedCount(text: string | undefined): number {
+  const n = Number((text ?? "").trim());
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+/** One waiting gated read's place in the queue. Times are on the waiter's clock, in the file. */
+export interface GhReadTicket {
+  id: string;
+  /** 0 serves first: operators and unknown callers. 1: daemon, run_child, worker and service callers. */
+  rank: number;
+  actor: string;
+  seq: number;
+  pid: number;
+  host: string;
+  createdMs: number;
+  refreshedMs: number;
+  /** A reader has already given this ticket its reserved slot; nobody yields to it again. */
+  yielded: boolean;
+}
+
+export function ghReadTicketDir(stampPath: string): string {
+  return `${stampPath}.tickets`;
+}
+
+/** W1-T10271's priority order, which W1-T10279's broker reuses: a person, or a caller nobody can name,
+ *  ahead of the automation that can always try again next tick. `actor` is a ledger actor (ledger.ts). */
+export function ghReadTicketRank(actor: string): number {
+  return actor === "daemon" || actor === "run_child" || actor === "worker" || actor === "service" || actor === "host_automation" ? 1 : 0;
+}
+
+/** W1-T10279: the Mac read broker's class for a ledger actor, in the same order: a worker is an agent;
+ *  any other automation is background; an operator, or a caller nobody can name, is interactive. */
+export function ghBrokerClassForActor(actor: string): GhBrokerClass {
+  if (actor === "worker") return "agent";
+  return ghReadTicketRank(actor) === 0 ? "interactive" : "background";
+}
+
+function compareGhReadTickets(a: GhReadTicket, b: GhReadTicket): number {
+  return a.rank - b.rank || a.seq - b.seq || a.createdMs - b.createdMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+function parseGhReadTicket(id: string, raw: string): GhReadTicket | undefined {
+  try {
+    const t = JSON.parse(raw) as Partial<GhReadTicket>;
+    if (typeof t.rank !== "number" || typeof t.seq !== "number" || typeof t.pid !== "number" ||
+      typeof t.createdMs !== "number" || typeof t.refreshedMs !== "number" || typeof t.host !== "string") return undefined;
+    return { ...t, id, yielded: t.yielded === true } as GhReadTicket;
+  } catch {
+    // A garbled ticket is not a ticket: the caller removes it, so it can never block the queue.
+    return undefined;
+  }
+}
+
+/** The queue in serving order. A garbled ticket is removed: it can never be served, only block. */
+export function readGhReadTickets(stampPath: string): GhReadTicket[] {
+  const dir = ghReadTicketDir(stampPath);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    // No queue directory is the normal case (nobody is waiting); an unreadable one fails open the
+    // same way, because a queue nobody can read cannot hold anyone's turn.
+    return [];
+  }
+  const tickets: GhReadTicket[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const id = name.slice(0, -".json".length);
+    const ticket = parseGhReadTicket(id, readGhStampText(join(dir, name)) ?? "");
+    if (ticket) tickets.push(ticket);
+    else removeGhReadTicket(stampPath, id);
+  }
+  return tickets.sort(compareGhReadTickets);
+}
+
+/** Written whole and renamed into place, so a reader never sees half a ticket. */
+export function writeGhReadTicket(stampPath: string, ticket: GhReadTicket): void {
+  const dir = ghReadTicketDir(stampPath);
+  try {
+    mkdirSync(dir, { recursive: true });
+    const tmp = join(dir, `.${ticket.id}.${process.pid}.tmp`);
+    const { id: _id, ...body } = ticket;
+    writeFileSync(tmp, JSON.stringify(body));
+    renameSync(tmp, join(dir, `${ticket.id}.json`));
+  } catch {
+    // FAIL OPEN: an unwritable queue costs ordering, never the read.
+  }
+}
+
+function removeGhReadTicket(stampPath: string, id: string): void {
+  try {
+    rmSync(join(ghReadTicketDir(stampPath), `${id}.json`), { force: true });
+  } catch {
+    // Already gone, or unwritable: either way it no longer holds anyone up that we can help.
+  }
+}
+
+/** Who is asking, for a waiting ticket's priority. The CLI installs ledger.ts's `deriveLedgerActor` at
+ *  startup: this module cannot import the ledger without closing an import ring through config. */
+let ghReadActorResolver: (env: NodeJS.ProcessEnv) => string = () => "unknown";
+
+export function setGhReadActorResolver(resolve: (env: NodeJS.ProcessEnv) => string): void {
+  ghReadActorResolver = resolve;
+}
+
+/** Process-local counts since the previous {@link takeGhReadCadenceTally}; the gated admissions are
+ *  read from the shared `.gated` stamp instead, because they happen in OTHER processes. */
+const ghReadCadenceCounts = { advisory: 0, enforce: 0, wait: 0, slotsYielded: 0 };
+const ghGatedCountSeen = new Map<string, number>();
+
+export interface GhReadCadenceTally {
+  reads_stamped: { advisory: number; enforce: number; wait: number };
+  gated_admitted: number;
+  slots_yielded: number;
+}
+
+/** W1-T10271: what `daemon.quota` reports per poll — this process's stamped reads by mode and slots it
+ *  yielded, and every process's admitted gated reads — each since the previous call, then reset. */
+export function takeGhReadCadenceTally(
+  env: NodeJS.ProcessEnv = process.env,
+  readText: (path: string | undefined) => string | undefined = readGhStampText,
+): GhReadCadenceTally {
+  const path = ghReadCadenceStampPath(env);
+  let gatedAdmitted = 0;
+  if (path !== undefined) {
+    const count = ghGatedCount(readText(ghGatedStampPath(path)));
+    const previous = ghGatedCountSeen.get(path);
+    // A first poll has no previous one to count from; a count that went DOWN was reset, so all of it is new.
+    if (previous !== undefined) gatedAdmitted = count >= previous ? count - previous : count;
+    ghGatedCountSeen.set(path, count);
+  }
+  const tally: GhReadCadenceTally = {
+    reads_stamped: { advisory: ghReadCadenceCounts.advisory, enforce: ghReadCadenceCounts.enforce, wait: ghReadCadenceCounts.wait },
+    gated_admitted: gatedAdmitted,
+    slots_yielded: ghReadCadenceCounts.slotsYielded,
+  };
+  ghReadCadenceCounts.advisory = 0;
+  ghReadCadenceCounts.enforce = 0;
+  ghReadCadenceCounts.wait = 0;
+  ghReadCadenceCounts.slotsYielded = 0;
+  return tally;
 }
 
 /** ENFORCE MODE ONLY. Distinct from a rate-limit refusal: nothing was spent and nothing failed —
@@ -966,20 +1351,24 @@ export class GhReadCadenceRefusal extends RmdError {
   readonly windowS: number;
   readonly bucket: string;
   readonly burstRemaining: number;
-  constructor(decision: GhReadCadenceDecision, bucket: string, burstRemaining = 0) {
+  constructor(decision: GhReadCadenceDecision, bucket: string, burstRemaining = 0, queuedAhead = 0) {
     const waitS = Math.max(0, decision.windowS - (decision.ageS ?? 0));
     super(
       "usage",
       1,
       `gh read cadence floor: a read-shaped call ${decision.ageS}s after the last one on the ${bucket} limiter ` +
         `(floor ${decision.windowS}s, W1-T3297) — this limit counts cadence, not volume, so a full budget says nothing. ` +
+        (queuedAhead > 0
+          ? `${queuedAhead} waiting gated read(s) are queued ahead of it (W1-T10271), so an enforced read cannot take ` +
+            `their slot: re-run with RMD_GH_TRANSPORT_FLOOR=wait to take a turn. `
+          : "") +
         // THE RECOVERY RIDES ON THE REFUSAL. Without it the operator sees a stack trace and no way
         // forward, and the obvious guess — re-running — SPENDS another read and re-stamps the
         // window, so trying harder makes it strictly worse. Both exits are named here instead.
         `This is the FIRST read of this invocation, so no burst applies: wait ${waitS}s, or re-run ` +
         `with RMD_GH_TRANSPORT_FLOOR=advisory to pace rather than refuse. Re-running sooner spends ` +
         `another read and restarts the ${decision.windowS}s window.`,
-      { ageS: decision.ageS ?? 0, windowS: decision.windowS, bucket, waitS, burstRemaining },
+      { ageS: decision.ageS ?? 0, windowS: decision.windowS, bucket, waitS, burstRemaining, queuedAhead },
     );
     this.burstRemaining = burstRemaining;
     this.name = "GhReadCadenceRefusal";
@@ -995,7 +1384,18 @@ export interface GhReadCadenceDeps {
   // test/clock-signature-census.test.ts tracks.
   nowMs?(): number;
   readStampMs?(path: string | undefined): number | undefined;
-  stamp?(path: string | undefined): void;
+  /** W1-T10271: `text` and `atMs` as {@link stampGhRead} takes them. */
+  stamp?(path: string | undefined, text?: string, atMs?: number): void;
+  /** W1-T10271: a stamp file's text, which says whether its read counts against a gated window. */
+  readStampText?(path: string | undefined): string | undefined;
+  /** W1-T10271: writes `<stamp>.gated` for an admitted gated read; {@link stampGhRead} by default. */
+  stampGated?(path: string | undefined, text?: string, atMs?: number): void;
+  /** W1-T10271: the process this read is made from — its own stamps, and its ticket. */
+  pid?: number;
+  /** W1-T10271: the ledger actor whose priority a ticket carries; {@link setGhReadActorResolver}'s by default. */
+  actor?(): string;
+  /** W1-T10271: whether a ticket's process on THIS host is still alive. */
+  pidAlive?(pid: number): boolean;
   sleepSync?(ms: number): void;
   /** W1-T4970: {@link applyGhReadCadenceAsync}'s awaited wait for the shared gap and the lock;
    *  defaults to a real timer. The sync path ignores it and uses `sleepSync`. */
@@ -1031,6 +1431,13 @@ const ghCadenceOwnStampMs = new Map<string, number>();
 function tryGhCadenceLock(lockPath: string, startedAt: number): "locked" | "reclaimed" | "wait" | "give-up" {
   try {
     mkdirSync(lockPath);
+    try {
+      // W1-T10271: the lock's age is judged on systemClock below, so it is stamped on that clock too.
+      const now = systemClock.now();
+      utimesSync(lockPath, now / 1000, now / 1000);
+    } catch {
+      // A lock whose mtime could not be set still serialises; only its stale bound reads the kernel time.
+    }
     return "locked";
   } catch {
     try {
@@ -1079,18 +1486,29 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
 }
 
 /** Async reads queue before the file lock; sync reads consult this queue to avoid blocking
- *  the event loop an async holder needs to release its lock. */
+ *  the event loop an async holder needs to release its lock. W1-T10271: a waiting async read stays in
+ *  this in-process queue for its whole wait, so the process's reads keep their order, while it holds
+ *  the cross-process FILE lock only for each short turn. */
 const ghCadenceAsyncQueue = new Map<string, Promise<void>>();
 
-/** The async twin of {@link withGhCadenceLock}: the same lock, attempts and bound, but every wait
- *  is awaited, so the event loop keeps running while a sibling holds the lock. */
-async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) => Promise<void>, fn: () => Promise<T>): Promise<T> {
+async function withGhCadenceQueueAsync<T>(stampPath: string, fn: () => Promise<T>): Promise<T> {
   const prior = ghCadenceAsyncQueue.get(stampPath) ?? Promise.resolve();
   let leave!: () => void;
   const mine = new Promise<void>((resolve) => (leave = resolve));
   const tail = prior.then(() => mine);
   ghCadenceAsyncQueue.set(stampPath, tail);
   await prior;
+  try {
+    return await fn();
+  } finally {
+    leave();
+    if (ghCadenceAsyncQueue.get(stampPath) === tail) ghCadenceAsyncQueue.delete(stampPath);
+  }
+}
+
+/** The async twin of {@link withGhCadenceLock}: the same lock, attempts and bound, but every wait
+ *  is awaited, so the event loop keeps running while a sibling holds the lock. */
+async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) => Promise<void>, fn: () => Promise<T>): Promise<T> {
   const lockPath = `${stampPath}.lock`;
   const startedAt = systemClock.now();
   let locked = false;
@@ -1110,8 +1528,6 @@ async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) 
     return await fn();
   } finally {
     releaseGhCadenceLock(lockPath, locked);
-    leave();
-    if (ghCadenceAsyncQueue.get(stampPath) === tail) ghCadenceAsyncQueue.delete(stampPath);
   }
 }
 
@@ -1120,16 +1536,24 @@ export function resetGhCadenceAdvisoryForTest(): void {
   ghCadenceAsyncContentionAdvisoryEmitted = false;
 }
 
-/** One read's cadence, shared by the sync and async paths: the decision, and the shared-gap
- *  arithmetic and stamp that run inside the lock. Only the WAITING differs between the two. */
+/** One read's cadence, shared by the sync and async paths: the decision, its turn in the queue, and
+ *  the shared-gap arithmetic and stamp that run inside the lock. Only the WAITING differs. */
 interface GhReadCadencePlan {
   evaluate(): GhReadCadenceDecision;
+  /** Inside the lock, after `evaluate`: how long to wait OUTSIDE the lock before the next turn, or 0
+   *  when this read may go — a waiter's floor and queue, or another reader's reserved-slot yield. */
+  turnRemainingMs(): number;
+  /** A waiter's remaining floor, re-read after the in-lock gap sleep; 0 for every other read. */
   floorWaitRemainingMs(): number;
+  /** Whether `evaluate` found this read must wait at all (its floor, or a queue ahead of it). */
+  mustWait(): boolean;
   /** `undefined`: writes, budget probes, and calls without a usable cache path need no shared
    *  coordination, so no lock, gap or stamp. */
   coordinatedStampPath: string | undefined;
   sharedGapRemainingMs(stampPath: string): number;
   stampAfterGap(stampPath: string): void;
+  /** Removes this read's ticket: an admitted, refused or interrupted waiter never holds the queue. */
+  leaveQueue(): void;
 }
 
 function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): GhReadCadencePlan {
@@ -1137,19 +1561,71 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   const bucket = deps.bucketOverride ?? ghArgvBucketHint(args);
   const stampPath = ghReadCadenceStampPath(env, bucket);
   const readStampMs = deps.readStampMs ?? readGhReadCadenceStampMs;
+  const readStampText = deps.readStampText ?? readGhStampText;
   const stamp = deps.stamp ?? stampGhRead;
+  const stampGated = deps.stampGated ?? stampGhRead;
   const now = deps.nowMs ?? systemClock.now;
+  const pid = deps.pid ?? process.pid;
+  const pidAlive = deps.pidAlive ?? defaultIsPidAlive;
+  const ownKey = (path: string) => `${path}\0${pid}`;
   const isWrite = ghArgvIsWrite(args);
   const isExempt = ghArgvIsCadenceExempt(args);
   const cooldown = env.RMD_GH_COOLDOWN_S;
   const windowS = cooldown !== undefined && /^[0-9]+$/.test(cooldown) ? Number(cooldown) : DEFAULT_GH_READ_CADENCE_S;
+  const windowMs = windowS * 1000;
+  const sharedReadGapMs = resolveGhSharedReadGapMs(env);
+  let mode = resolveGhTransportFloorMode(env);
+  /** An invocation's first read under enforce or wait: floored from the counted stamps; stamps `.gated`. */
+  let gatedFirst = false;
+  /** A gated first read in wait mode that must wait: its floor, or a ticket queued ahead of it. */
+  let waiter = false;
   let floorWaitMs = 0;
+  let ticket: GhReadTicket | undefined;
+  let actor: string | undefined;
+
+  const callerActor = (): string => (actor ??= deps.actor?.() ?? ghReadActorResolver(env));
+  /** The newest read that counts against a gated window: the gated stamp, or a shared stamp that is
+   *  not a daemon's advisory read (whose text carries the counted read it replaced instead). */
+  const countedFloorMs = (): number | undefined => {
+    const shared = ghCountedStampMs(readStampMs(stampPath), readStampText(stampPath));
+    const gated = stampPath === undefined ? undefined : readStampMs(ghGatedStampPath(stampPath));
+    if (shared === undefined) return gated;
+    return gated === undefined ? shared : Math.max(shared, gated);
+  };
+  const floorRemainingAt = (nowMs: number): number => {
+    const lastReadMs = countedFloorMs();
+    const decision = ghReadCadenceDecision({ isWrite, isExempt, nowMs, lastReadMs, mode: "wait", windowS });
+    return decision.paced ? Math.max(0, windowMs - Math.max(0, nowMs - (lastReadMs ?? nowMs))) : 0;
+  };
+  /** The queue, with every ticket whose process is gone, or that nobody refreshed for a window plus the
+   *  lock-stale bound, reclaimed. A pid is judged only on its own host: another container's pid
+   *  namespace says nothing here, so a foreign ticket ages out instead. */
+  const liveTickets = (nowMs: number): GhReadTicket[] => {
+    if (stampPath === undefined) return [];
+    const host = hostname();
+    return readGhReadTickets(stampPath).filter((t) => {
+      if (t.id === ticket?.id) return true;
+      const dead = nowMs - t.refreshedMs > windowMs + GH_CADENCE_LOCK_STALE_MS || (sameHost(t.host, host) && !pidAlive(t.pid));
+      if (dead) removeGhReadTicket(stampPath, t.id);
+      return !dead;
+    });
+  };
+  /** Tickets served before this read: those that outrank its ticket, or, before it has one, every
+   *  ticket of its own priority or better — a newcomer joins the back of its class. */
+  const queuedAhead = (tickets: GhReadTicket[]): GhReadTicket[] => {
+    const rank = ghReadTicketRank(callerActor());
+    return tickets.filter((t) => t.id !== ticket?.id && (ticket ? compareGhReadTickets(t, ticket) < 0 : t.rank <= rank));
+  };
+  const warnLine = (line: string) => (deps.warn ?? ((l: string) => void process.stderr.write(`${l}\n`)))(line);
+
   const evaluate = (): GhReadCadenceDecision => {
     // Read at evaluation, not planning: an async read may wait in the lock queue meanwhile.
     const burstAllowed = !isWrite && !isExempt && (ghReadBurstScope?.remaining ?? 0) > 0;
-    const mode = resolveGhTransportFloorMode(env);
+    mode = resolveGhTransportFloorMode(env);
     const nowMs = now();
-    const lastReadMs = readStampMs(stampPath);
+    gatedFirst = !isWrite && !isExempt && !burstAllowed && mode !== "advisory";
+    // An advisory read gates nothing; its notice still reports the cadence from the NEWEST stamp.
+    const lastReadMs = gatedFirst ? countedFloorMs() : readStampMs(stampPath);
     const decision = ghReadCadenceDecision({
       isWrite,
       isExempt,
@@ -1158,25 +1634,29 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
       mode,
       windowS,
     });
-    floorWaitMs = decision.paced && !burstAllowed && mode === "wait"
-      ? Math.max(0, decision.windowS * 1000 - Math.max(0, nowMs - (lastReadMs ?? nowMs)))
-      : 0;
+    const ahead = gatedFirst && windowS > 0 ? queuedAhead(liveTickets(nowMs)).length : 0;
+    waiter = gatedFirst && mode === "wait" && (decision.paced || ahead > 0);
+    floorWaitMs = waiter && decision.paced ? Math.max(0, decision.windowS * 1000 - Math.max(0, nowMs - (lastReadMs ?? nowMs))) : 0;
     // SPEND THE BURST BEFORE REFUSING. A read inside an invocation the floor has already admitted is
     // part of that one burst, not a new one, so it is allowed and the stamp is still refreshed below
     // — the NEXT invocation is therefore gated from this read, not from the first of the burst.
     if (burstAllowed && ghReadBurstScope) ghReadBurstScope.remaining -= 1;
     else if (!decision.allow) throw new GhReadCadenceRefusal(decision, bucket ?? "core", 0);
+    // W1-T10271: an enforced read never waits, so it cannot take a turn — and taking the slot a queued
+    // waiter is due would restart that waiter's whole window.
+    else if (gatedFirst && mode === "enforce" && ahead > 0) throw new GhReadCadenceRefusal(decision, bucket ?? "core", 0, ahead);
     // GRANTED ONLY BY AN ADMITTED, GATED READ, AND ONLY INSIDE AN OPEN SCOPE. An exempt call
     // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
     // that would otherwise be refused.
-    else if (!isWrite && !isExempt && ghReadBurstScope && floorWaitMs === 0) ghReadBurstScope.remaining = ghReadBurst(env);
-    if (floorWaitMs > 0) {
-      const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
-      warn(`gh read cadence (wait, W1-T7957): waiting ${floorWaitMs / 1000}s for the ${decision.windowS}s floor on ${stampPath}`);
+    else if (!isWrite && !isExempt && ghReadBurstScope && !waiter) ghReadBurstScope.remaining = ghReadBurst(env);
+    if (waiter) {
+      warnLine(
+        `gh read cadence (wait, W1-T7957): waiting ${floorWaitMs / 1000}s for the ${decision.windowS}s floor on ${stampPath}` +
+          (ahead > 0 ? `, behind ${ahead} queued gated read(s) (W1-T10271)` : ""),
+      );
     } else if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
       ghCadenceAdvisoryEmitted = true;
-      const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
-      warn(
+      warnLine(
         `gh read cadence (advisory, W1-T3297): a read ${decision.ageS}s after the last on the ${bucket ?? "core"} ` +
           `limiter, under the ${decision.windowS}s floor. Set RMD_GH_TRANSPORT_FLOOR=enforce to refuse instead.`,
       );
@@ -1184,38 +1664,104 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     return decision;
   };
 
-  const sharedReadGapMs = resolveGhSharedReadGapMs(env);
+  const leaveQueue = () => {
+    if (ticket === undefined || stampPath === undefined) return;
+    removeGhReadTicket(stampPath, ticket.id);
+    ticket = undefined;
+  };
+
   return {
     evaluate,
-    floorWaitRemainingMs: () => {
-      if (floorWaitMs === 0) return 0;
+    turnRemainingMs: () => {
+      if (stampPath === undefined) return 0;
       const nowMs = now();
-      const lastReadMs = readStampMs(stampPath);
-      const decision = ghReadCadenceDecision({ isWrite, isExempt, nowMs, lastReadMs, mode: "wait", windowS });
-      return decision.paced
-        ? Math.max(0, windowS * 1000 - Math.max(0, nowMs - (lastReadMs ?? nowMs)))
-        : 0;
+      if (waiter) {
+        const tickets = liveTickets(nowMs);
+        const floor = floorRemainingAt(nowMs);
+        const ahead = queuedAhead(tickets);
+        if (floor === 0 && ahead.length === 0) return 0;
+        // Take a ticket, or refresh ours so no reader reclaims it as stale. A reclaimed ticket is written
+        // back with its own sequence, so the waiter keeps its place; a yield already given stays given.
+        const mine = ticket;
+        const onDisk = mine === undefined ? undefined : tickets.find((t) => t.id === mine.id);
+        ticket = mine === undefined
+          ? {
+            id: `${pid}-${nowMs}-${randomUUID().slice(0, 8)}`, rank: ghReadTicketRank(callerActor()), actor: callerActor(),
+            seq: tickets.reduce((max, t) => Math.max(max, t.seq), 0) + 1, pid, host: hostname(),
+            createdMs: nowMs, refreshedMs: nowMs, yielded: false,
+          }
+          : { ...mine, refreshedMs: nowMs, yielded: onDisk?.yielded ?? mine.yielded };
+        writeGhReadTicket(stampPath, ticket);
+        // Behind a due head, look again after one shared gap: the head takes its slot within it.
+        return floor > 0 ? floor : Math.max(sharedReadGapMs, GH_CADENCE_LOCK_WAIT_MS);
+      }
+      // THE RESERVED SLOT. The first reader to find a due head ticket gives it one shared gap, outside the
+      // lock, so the waiter takes the next slot. Marked on the ticket: nobody yields to it twice.
+      if (sharedReadGapMs === 0) return 0;
+      const head = liveTickets(nowMs)[0];
+      if (head === undefined || head.yielded || floorRemainingAt(nowMs) > 0) return 0;
+      writeGhReadTicket(stampPath, { ...head, yielded: true });
+      ghReadCadenceCounts.slotsYielded += 1;
+      return sharedReadGapMs;
     },
+    floorWaitRemainingMs: () => (waiter ? floorRemainingAt(now()) : 0),
+    mustWait: () => waiter,
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
     sharedGapRemainingMs: (path) => {
       // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
       // shared gap still protects the secondary limiter across sibling processes without making a
       // normal sweep self-refuse after its first read.
       const latest = readStampMs(path);
-      const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(path) === latest;
+      const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(ownKey(path)) === latest;
       const elapsed = latest === undefined ? undefined : now() - latest;
-      const gapMs = ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
-      return Math.max(floorWaitMs, gapMs);
+      return ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
     },
     stampAfterGap: (path) => {
       // Stamp only after the gap so a concurrent process observes the completed transport slot.
-      stamp(path);
-      if (floorWaitMs > 0 && ghReadBurstScope) ghReadBurstScope.remaining = ghReadBurst(env);
+      const nowMs = now();
+      const advisory = mode === "advisory";
+      stamp(path, advisory ? ghAdvisoryStampText(ghCountedStampMs(readStampMs(path), readStampText(path))) : "", nowMs);
+      ghReadCadenceCounts[mode] += 1;
+      if (gatedFirst) {
+        const gatedPath = ghGatedStampPath(path);
+        stampGated(gatedPath, `${ghGatedCount(readStampText(gatedPath)) + 1}\n`, nowMs);
+      }
+      leaveQueue();
+      if (waiter && ghReadBurstScope) ghReadBurstScope.remaining = ghReadBurst(env);
       const stampedAt = readStampMs(path);
-      if (stampedAt === undefined) ghCadenceOwnStampMs.delete(path);
-      else ghCadenceOwnStampMs.set(path, stampedAt);
+      if (stampedAt === undefined) ghCadenceOwnStampMs.delete(ownKey(path));
+      else ghCadenceOwnStampMs.set(ownKey(path), stampedAt);
     },
+    leaveQueue,
   };
+}
+
+/** One turn inside the lock, shared by both paths: 0 when the read was stamped, else how long to wait
+ *  outside the lock first. `gapSleep` is the only difference: a blocking wait, or an awaited timer. */
+function ghReadCadenceTurn(plan: GhReadCadencePlan, stampPath: string, gapSleep: (ms: number) => void): number;
+function ghReadCadenceTurn(plan: GhReadCadencePlan, stampPath: string, gapSleep: (ms: number) => Promise<void>): Promise<number>;
+function ghReadCadenceTurn(
+  plan: GhReadCadencePlan,
+  stampPath: string,
+  gapSleep: (ms: number) => void | Promise<void>,
+): number | Promise<number> {
+  const turn = plan.turnRemainingMs();
+  if (turn > 0) return turn;
+  const finish = (): number => {
+    // The shared lock can fail open or be reclaimed during the gap. A newer gated read still
+    // owns the floor, so recheck before granting this invocation its read and burst.
+    const floor = plan.floorWaitRemainingMs();
+    if (floor > 0) return floor;
+    plan.stampAfterGap(stampPath);
+    return 0;
+  };
+  const gap = plan.sharedGapRemainingMs(stampPath);
+  if (gap === 0) {
+    plan.stampAfterGap(stampPath);
+    return 0;
+  }
+  const slept = gapSleep(gap);
+  return slept instanceof Promise ? slept.then(finish) : finish();
 }
 
 /**
@@ -1227,6 +1773,10 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
  *
  * FAIL OPEN EVERYWHERE (design (v)). Every io path below already swallows its own errors, and the
  * pure decision treats an undecidable stamp as "allow", so the worst case is no pacing at all.
+ *
+ * W1-T10271: a read that must wait sleeps OUTSIDE the lock and takes the lock again for each turn.
+ * Sleeping inside it made every sibling give up after GH_CADENCE_LOCK_MAX_WAIT_MS, fail open and
+ * restamp, which is how the waiter's window kept restarting.
  */
 export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps = {}): GhReadCadenceDecision {
   const plan = planGhReadCadence(args, deps);
@@ -1243,31 +1793,33 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     }
     const decision = plan.evaluate();
     // A sync wait would block the async holder's event loop; refuse rather than skip the floor.
-    if (plan.floorWaitRemainingMs() > 0) {
+    if (plan.mustWait()) {
       throw new GhReadCadenceRefusal(decision, deps.bucketOverride ?? ghArgvBucketHint(args) ?? "core", 0);
     }
     plan.stampAfterGap(stampPath);
     return decision;
   }
   const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
-  return withGhCadenceLock(stampPath, sleepSync, () => {
-    const decision = plan.evaluate();
-    let remaining = plan.sharedGapRemainingMs(stampPath);
-    while (remaining > 0) {
-      sleepSync(remaining);
-      // The shared lock can fail open or be reclaimed during a long wait. A newer stamp
-      // still owns the floor, so recheck before granting this invocation its read and burst.
-      remaining = plan.floorWaitRemainingMs();
-    }
-    plan.stampAfterGap(stampPath);
-    return decision;
-  });
+  let decision: GhReadCadenceDecision | undefined;
+  try {
+    let waitMs: number;
+    do {
+      waitMs = withGhCadenceLock(stampPath, sleepSync, () => {
+        decision ??= plan.evaluate();
+        return ghReadCadenceTurn(plan, stampPath, sleepSync);
+      });
+      if (waitMs > 0) sleepSync(waitMs);
+    } while (waitMs > 0);
+    return decision!;
+  } finally {
+    plan.leaveQueue();
+  }
 }
 
 /**
- * W1-T4970 — THE ASYNC TWIN, applied by `ghJsonAsync`/`ghTextAsync`. Same lock, decision, gap and
- * stamp as {@link applyGhReadCadence}; the shared gap and the lock wait are AWAITED timers instead
- * of `Atomics.wait`, so an async read no longer freezes the daemon's event loop while it waits.
+ * W1-T4970 — THE ASYNC TWIN, applied by `ghJsonAsync`/`ghTextAsync`. Same lock, decision, queue, gap
+ * and stamp as {@link applyGhReadCadence}; every wait is an AWAITED timer instead of `Atomics.wait`,
+ * so an async read never freezes the daemon's event loop while it waits.
  */
 export async function applyGhReadCadenceAsync(
   args: readonly string[],
@@ -1277,15 +1829,21 @@ export async function applyGhReadCadenceAsync(
   const stampPath = plan.coordinatedStampPath;
   if (stampPath === undefined) return plan.evaluate();
   const sleep = deps.sleep ?? defaultTimerSleep;
-  return await withGhCadenceLockAsync(stampPath, sleep, async () => {
-    const decision = plan.evaluate();
-    let remaining = plan.sharedGapRemainingMs(stampPath);
-    while (remaining > 0) {
-      await sleep(remaining);
-      remaining = plan.floorWaitRemainingMs();
+  return await withGhCadenceQueueAsync(stampPath, async () => {
+    let decision: GhReadCadenceDecision | undefined;
+    try {
+      let waitMs: number;
+      do {
+        waitMs = await withGhCadenceLockAsync(stampPath, sleep, async () => {
+          decision ??= plan.evaluate();
+          return await ghReadCadenceTurn(plan, stampPath, sleep);
+        });
+        if (waitMs > 0) await sleep(waitMs);
+      } while (waitMs > 0);
+      return decision!;
+    } finally {
+      plan.leaveQueue();
     }
-    plan.stampAfterGap(stampPath);
-    return decision;
   });
 }
 

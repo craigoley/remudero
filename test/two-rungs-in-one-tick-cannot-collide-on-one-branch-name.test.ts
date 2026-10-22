@@ -134,7 +134,8 @@ test("acceptance (1,5): two rungs minted in the SAME millisecond get DISTINCT wo
 });
 
 test("acceptance (2): retro/triage/plan each carry the per-rung component (nextLaneEpochMs) — regression guard against reintroducing bare Date.now() at any ONE of those three sites", () => {
-  const src = readFileSync(join(repoRoot, "src", "run-task.ts"), "utf8");
+  const src = readFileSync(join(repoRoot, "src", "run-task.ts"), "utf8") + "\n" +
+    readFileSync(join(repoRoot, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   // The retro lane has no other per-instance id, so its whole fix IS this line.
   const retroMints = src.match(/const runId = `RETRO-\$\{[^}]*\}`;/g) ?? [];
   assert.equal(retroMints.length, 1, `expected exactly one retro runId mint, found ${retroMints.length}`);

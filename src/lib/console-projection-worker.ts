@@ -9,6 +9,7 @@
  * builds the same projection synchronously.
  */
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
 import { listFeedback, type FeedbackEntry } from "./feedback.js";
 import type { Plan } from "./plan.js";
 import { threadStrictPlan } from "./thread-plan.js";
@@ -95,7 +96,7 @@ export function startConsoleProjectionWorker(options: { workerUrl?: URL } = {}):
 
   const ensure = (): Worker => {
     if (worker) return worker;
-    const spawned = new Worker(options.workerUrl ?? new URL(import.meta.url), {
+    const spawned = new Worker(options.workerUrl ?? bundledWorkerUrl(import.meta.url), {
       workerData: { kind: CONSOLE_PROJECTION_WORKER_KIND },
     });
     spawned.on("message", (msg: { id: number; outcome: FeedbackProjectionOutcome }) => {

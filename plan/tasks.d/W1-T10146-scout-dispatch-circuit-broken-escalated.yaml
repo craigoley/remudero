@@ -1,0 +1,32 @@
+- id: W1-T10146
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — dispatch.circuit_broken.escalated landed 3 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10146 — 0 dispatch.circuit_broken.escalated rows in 3
+  # d (it had 3 in the 7 d before filing); the symptom has stopped.
+  attempts: 0
+  author_class: machine
+  origin: "scout:dispatch.circuit_broken.escalated"
+  files:
+    - test/scout-dispatch-circuit-broken-escalated.test.ts
+  acceptance:
+    - claim: "dispatch.circuit_broken.escalated stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10146: dispatch.circuit_broken.escalated no longer recurs\" in test/scout-dispatch-circuit-broken-escalated.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step dispatch.circuit_broken.escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 2 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The record reports three escalation rows but supplies no underlying row evidence or diagnosed cause; the finding that these represent a defect requiring repair cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The acceptance proof only greps for a test declaration in a proposed new file; it does not demonstrate that the cause is fixed or recurrence stops."
+    judged_at: "2026-10-18T12:41:54.124Z"
+    pin: "44b9a9cb34470c856f238033b1ed4830b92ef9006f42b2c5fe477db8f12a6d48"

@@ -13,7 +13,7 @@
   files:
     - src/lib/source-text-readers.ts
     - test/a-git-pathspec-passed-through-a-helper-is-placed.test.ts
-  status: queued
+  status: merged
   priority: 1  # four PRs in one day paid a CI round on a census the pre-push run was blind to
   attempts: 0
   rationale: |

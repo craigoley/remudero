@@ -5,7 +5,8 @@ import { classificationSnapshotKey } from "./read-page.js";
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { ledgerProposalVerdicts, deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
+import { proposalVerdictsWithReceipts, readVerdictReceipts } from "./inbox-verdict-receipts.js";
+import { deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
@@ -373,7 +374,7 @@ function validateDecision(x: unknown): ThreadDecision | null {
   return { action: o.action as ThreadDecision["action"], reply: o.reply.trim(), ...(typeof o.note === "string" && o.note.trim() ? { note: o.note.trim() } : {}) };
 }
 
-/** The deterministic reading used when no model writer is available or its answer is unusable. */
+/** The existing deterministic reading when no interpreter is configured. */
 export function keywordDecision(replyText: string): ThreadDecision {
   const t = replyText.toLowerCase();
   if (/\b(bring it back|restore|undo|reopen)\b/.test(t)) return { action: "restore", reply: "" };
@@ -381,6 +382,25 @@ export function keywordDecision(replyText: string): ThreadDecision {
   if (/\b(change|instead|rather|edit|redraft|rewrite)\b/.test(t)) return { action: "edit", reply: "", note: replyText };
   if (/\b(yes|approve|go ahead|do it|ship it|file it|looks good|lgtm)\b/.test(t)) return { action: "approve", reply: "" };
   return { action: "question", reply: "" };
+}
+
+/** Failed interpretation only admits a complete positive command, never an incidental keyword. */
+function unmistakableFallbackCommand(replyText: string): ThreadDecision | null {
+  const command = replyText.trim().toLowerCase().replace(/\s+/g, " ").replace(/^please /, "").replace(/[.!]+$/, "");
+  if (command.includes("?")) return null;
+  if (/^(?:bring it back|undo|(?:restore|reopen)(?: (?:it|this(?: item| proposal)?))?)$/.test(command)) {
+    return { action: "restore", reply: "" };
+  }
+  if (/^(?:(?:decline|reject)(?: (?:it|this(?: item| proposal)?))?|drop (?:it|this)|close it|not needed|no thanks)$/.test(command)) {
+    return { action: "decline", reply: "", note: replyText };
+  }
+  if (/^(?:change|edit|redraft|rewrite)(?: (?:it|this(?: item| proposal)?))?(?: (?:with|to) .+)?$/.test(command)) {
+    return { action: "edit", reply: "", note: replyText };
+  }
+  if (/^(?:yes|approve|go ahead|do it|ship it|file it|looks good|lgtm)$/.test(command)) {
+    return { action: "approve", reply: "" };
+  }
+  return null;
 }
 
 /** The plain reply written for each action when the writer's own text is missing or not plain. */
@@ -425,8 +445,12 @@ async function decideFor(ctx: ThreadDecisionContext, deps: InboxResponderDeps): 
       // deliberate: a writer outage falls back to the keyword reading below, never to silence.
       decision = null;
     }
+    if (decision) return decision;
+    // An unavailable interpreter cannot infer intent from quoted, negated or incidental words.
+    return unmistakableFallbackCommand(ctx.replyText)
+      ?? { action: "question", reply: "I couldn't interpret your reply just now. Nothing was changed. Try sending it again, or use the buttons." };
   }
-  return decision ?? keywordDecision(ctx.replyText);
+  return keywordDecision(ctx.replyText);
 }
 
 /** Answer ONE thread whose last message is the operator's. Returns the action taken, or
@@ -438,7 +462,8 @@ export async function answerThread(threadId: string, deps: InboxResponderDeps): 
   if (all.status === "unresolved") throw new Error(all.reason);
   const stored = all.threads.get(threadId) ?? [];
   const last = stored[stored.length - 1];
-  if (!last || last.role !== "reply") return undefined;
+  // Action events already record an executed operation, not new input for the reply decider.
+  if (!last || last.role !== "reply" || hasThreadEvent(last.extra)) return undefined;
   const item = deps.readItems().find((i) => i.proposalId === proposalId);
   if (!item) return undefined;
 
@@ -537,7 +562,7 @@ export function registryThreadItems(stateDir: string, ledgerPath: string): Inbox
   const proposals = parseProposalRegistry(existsSync(`${stateDir}/inbox-proposals.json`) ? readFileSync(`${stateDir}/inbox-proposals.json`, "utf8") : undefined);
   const plainStore = readPlainStore(plainStorePath(stateDir));
   const lines = readLedgerLines(ledgerPath);
-  const verdicts = ledgerProposalVerdicts(lines);
+  const verdicts = proposalVerdictsWithReceipts(lines, readVerdictReceipts(stateDir));
   return proposals
     .filter((p) => inboxOwner(p) === "operator")
     .map((p) => ({
@@ -581,6 +606,7 @@ export function realThreadDecider(opts: {
   return async (ctx) => {
     const args = buildDecisionSummarySpawnArgs({ input: { context: "" }, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const result = await spawn({ ...args, prompt: buildThreadDecisionPrompt(ctx) });
+    if (result.isError) return null;
     const match = /\{[\s\S]*\}/.exec(result.text);
     if (!match) return null;
     try {

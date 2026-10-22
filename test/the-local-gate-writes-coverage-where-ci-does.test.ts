@@ -17,17 +17,128 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
 import { CI_PARITY_TABLE, coverageScratchDir } from "../src/lib/ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+// BACKSTOP only: readiness is a positive child acknowledgment, never elapsed sleep.
+const PROBE_READY_BACKSTOP_MS = 20_000;
+const PROBE_CLOSE_BACKSTOP_MS = 5_000;
+type ProbeOwner = { root: string; groups: Set<number> };
+
+function countCoverageScratch(dir: string): number {
+  try {
+    return readdirSync(dir).filter((entry) => entry.startsWith("node-coverage-")).length;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error; // unreadable/not-a-directory is UNKNOWN, never an empty measurement
+  }
+}
+
+function probeGroupGone(pid: number): boolean {
+  try { process.kill(-pid, 0); return false; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+    throw error;
+  }
+}
+
+function disposeProbe(owner: ProbeOwner): void {
+  assert.equal(owner.groups.size, 0, `keep fixture evidence until its owned groups close: ${owner.root}`);
+  rmSync(owner.root, { recursive: true, force: true });
+}
+
+async function killReadyCoverageProbe(owner: ProbeOwner, env: NodeJS.ProcessEnv, options: {
+  waitForRelease?: boolean;
+  earlyExit?: boolean;
+  afterStarted?: (release: () => void) => void;
+} = {}): Promise<void> {
+  const nonce = randomUUID(), spec = join(owner.root, `probe-${nonce}.test.mjs`);
+  const startedPath = join(owner.root, `started-${nonce}.json`), readyPath = join(owner.root, `ready-${nonce}.json`);
+  const releasePath = join(owner.root, `release-${nonce}`);
+  writeFileSync(spec, options.earlyExit
+    ? 'process.stderr.write("intentional-before-ready\\n"); process.exitCode = 7;\n'
+    : `import test from "node:test";
+import { existsSync, renameSync, writeFileSync } from "node:fs";
+const witness = { nonce: process.env.RMD_PROBE_NONCE, pid: process.pid };
+const publish = path => {
+  writeFileSync(path + ".next", JSON.stringify(witness), { flag: "wx" });
+  renameSync(path + ".next", path);
+};
+publish(process.env.RMD_PROBE_STARTED);
+test("slow", async () => {
+  const expiry = setTimeout(() => process.exit(9), 30000);
+  if (process.env.RMD_PROBE_WAIT_RELEASE === "1") {
+    while (!existsSync(process.env.RMD_PROBE_RELEASE)) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  publish(process.env.RMD_PROBE_READY);
+  await new Promise(resolve => setTimeout(resolve, 30000));
+  clearTimeout(expiry);
+});\n`);
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env,
+    RMD_PROBE_NONCE: nonce, RMD_PROBE_STARTED: startedPath, RMD_PROBE_READY: readyPath,
+    RMD_PROBE_RELEASE: releasePath, RMD_PROBE_WAIT_RELEASE: options.waitForRelease ? "1" : "0" };
+  delete childEnv.NODE_TEST_CONTEXT;
+  // Node's copyProcessEnvToEnv checks OWN-PROPERTY presence, so undefined suppresses
+  // reinjection without replacing a caller's explicit named-coverage control.
+  if (!("NODE_V8_COVERAGE" in env)) childEnv.NODE_V8_COVERAGE = undefined;
+  const child = spawn(process.execPath, ["--experimental-test-coverage", "--test-coverage-exclude=test/**", "--test", "--test-reporter=tap", spec], {
+    cwd: owner.root, env: childEnv, detached: true, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let closed = false, output = "", fault: Error | undefined;
+  child.once("close", () => { closed = true; });
+  child.once("error", error => { fault = error; });
+  const collect = (chunk: Buffer) => {
+    if (output.length + chunk.length > 8192) fault = new Error("coverage probe output exceeded its bound");
+    output = (output + chunk.toString()).slice(0, 8192);
+  };
+  child.stdout.on("data", collect); child.stderr.on("data", collect);
+  if (child.pid !== undefined) owner.groups.add(child.pid);
+  const wait = async (predicate: () => boolean, bound: number, reason: string): Promise<void> => {
+    const end = performance.now() + bound;
+    while (!predicate() && performance.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(predicate(), `${reason}; code=${child.exitCode} signal=${child.signalCode}\n${output}`);
+  };
+  try {
+    assert.ok(child.pid, "control: the real coverage runner spawned");
+    let acknowledgedStart = false;
+    // BEGIN positive readiness barrier — the controlled-release regression removes this block.
+    await wait(() => {
+      if (fault) throw fault;
+      if (closed) throw new Error(`coverage probe exited before readiness; code=${child.exitCode}\n${output}`);
+      if (!acknowledgedStart && existsSync(startedPath)) {
+        const started = JSON.parse(readFileSync(startedPath, "utf8"));
+        assert.equal(started.nonce, nonce); assert.ok(Number.isSafeInteger(started.pid) && started.pid > 0);
+        acknowledgedStart = true;
+        options.afterStarted?.(() => writeFileSync(releasePath, nonce, { flag: "wx" }));
+      }
+      if (!existsSync(readyPath)) return false;
+      const ready = JSON.parse(readFileSync(readyPath, "utf8"));
+      assert.equal(ready.nonce, nonce); assert.ok(Number.isSafeInteger(ready.pid) && ready.pid > 0);
+      return true;
+    }, PROBE_READY_BACKSTOP_MS, "coverage probe did not acknowledge readiness");
+    // END positive readiness barrier
+    assert.equal(closed, false, "the acknowledged runner is still live before deliberate cancellation");
+  } finally {
+    if (child.pid !== undefined) {
+      // This group was exclusively created above. Kill the whole group, not merely
+      // the test-runner leader; its worker can otherwise survive for thirty seconds.
+      if (!probeGroupGone(child.pid)) process.kill(-child.pid, "SIGKILL");
+      await wait(() => closed && probeGroupGone(child.pid!), PROBE_CLOSE_BACKSTOP_MS,
+        "owned coverage probe group/stdio did not close");
+      owner.groups.delete(child.pid);
+    }
+  }
+}
 
 function recordingSpawn(calls: { args: string[]; env?: NodeJS.ProcessEnv }[]): PreflightSpawn {
   return (file, args, opts) => {
@@ -117,54 +228,53 @@ test("END TO END: a KILLED run leaks its scratch where TMPDIR points, not into t
   // which measurably does NOT relocate the scratch.
   const root = mkdtempSync(join(tmpdir(), "rmd-cov-scratch-"));
   const scratch = join(root, "scratch");
-  const spec = join(root, "probe.test.mjs");
+  const owner: ProbeOwner = { root, groups: new Set() };
   mkdirSync(scratch, { recursive: true });
-  // A .mjs probe so the child needs no loader: a .ts spec would die on parse before the runner
-  // ever allocated the scratch this measures, and the count would read 0 for the wrong reason.
-  writeFileSync(spec, 'import test from "node:test";\ntest("slow", async () => { await new Promise((r) => setTimeout(r, 30000)); });\n');
-  const countIn = (dir: string): number => {
-    try {
-      return readdirSync(dir).filter((e) => e.startsWith("node-coverage-")).length;
-    } catch {
-      return 0; // absent directory ⇒ nothing was written there, which is the answer this asks
-    }
-  };
-  const killedRun = async (env: NodeJS.ProcessEnv): Promise<void> => {
-    // STRIP THE PARENT RUNNER'S OWN MARKERS. This file itself runs under `node --test`, which
-    // exports `NODE_TEST_CONTEXT` (and, under a coverage run, `NODE_V8_COVERAGE`). Inherited, they
-    // make the child behave as a nested subtest reporter rather than a fresh runner, and it then
-    // allocates no scratch at all — the count reads 0 for a reason unrelated to what is measured.
-    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env };
-    delete childEnv.NODE_TEST_CONTEXT;
-    // W1-T2732: `delete` is a no-op -- node force-injects NODE_V8_COVERAGE into spawned children
-    // regardless of the env option, so blank it instead. A caller-supplied NODE_V8_COVERAGE (the
-    // `named` control below) is left exactly as given -- that value is the thing being measured.
-    if (!("NODE_V8_COVERAGE" in env)) childEnv.NODE_V8_COVERAGE = undefined;
-    const child = spawn(process.execPath, ["--experimental-test-coverage", "--test-coverage-exclude=test/**", "--test", "--test-reporter=tap", spec], {
-      cwd: root,
-      env: childEnv,
-      stdio: "ignore",
-    });
-    // The exit listener is attached BEFORE the kill: SIGKILL is immediate, and a listener added
-    // afterwards can miss the event entirely and hang the test on a promise that never settles.
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    await new Promise((r) => setTimeout(r, 2500));
-    child.kill("SIGKILL");
-    await exited;
-  };
   try {
-    await killedRun({ TMPDIR: scratch });
-    assert.equal(countIn(scratch), 1, "the killed run's scratch is where TMPDIR pointed");
+    await killReadyCoverageProbe(owner, { TMPDIR: scratch });
+    assert.equal(countCoverageScratch(scratch), 1, "the killed run's scratch is where TMPDIR pointed");
 
     // THE CONTROL, and the reason this test exists: the same kill with NODE_V8_COVERAGE naming a
     // directory does NOT put the scratch there — the runner overrides it for its children.
     const named = join(root, "named-by-node-v8-coverage");
     rmSync(scratch, { recursive: true, force: true });
     mkdirSync(scratch, { recursive: true });
-    await killedRun({ TMPDIR: scratch, NODE_V8_COVERAGE: named });
-    assert.equal(countIn(named), 0, "NODE_V8_COVERAGE does not relocate the runner's own scratch");
-    assert.equal(countIn(scratch), 1, "TMPDIR still decides where it lands");
+    await killReadyCoverageProbe(owner, { TMPDIR: scratch, NODE_V8_COVERAGE: named });
+    assert.equal(countCoverageScratch(named), 0, "NODE_V8_COVERAGE does not relocate the runner's own scratch");
+    assert.equal(countCoverageScratch(scratch), 1, "TMPDIR still decides where it lands");
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    disposeProbe(owner);
   }
+});
+
+test("coverage scratch probe waits for controlled readiness before killing its owned group", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cov-ready-")), scratch = join(root, "scratch");
+  const owner: ProbeOwner = { root, groups: new Set() }; mkdirSync(scratch);
+  let released = false;
+  try {
+    await killReadyCoverageProbe(owner, { TMPDIR: scratch }, { waitForRelease: true,
+      afterStarted: release => { assert.equal(released, false); released = true; release(); } });
+    assert.equal(released, true, "the real child must reach the controlled startup barrier");
+    assert.equal(owner.groups.size, 0, "all owned group members and stdio are closed");
+    assert.equal(countCoverageScratch(scratch), 1, "a positive acknowledged run leaves its abnormal-exit scratch");
+  } finally { disposeProbe(owner); }
+});
+
+test("coverage scratch probe reports a real early exit instead of an empty location measurement", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cov-early-")), scratch = join(root, "scratch");
+  const owner: ProbeOwner = { root, groups: new Set() }; mkdirSync(scratch);
+  try {
+    await assert.rejects(killReadyCoverageProbe(owner, { TMPDIR: scratch }, { earlyExit: true }),
+      /exited before readiness[\s\S]*intentional-before-ready/);
+    assert.equal(owner.groups.size, 0, "the failed startup also closes every owned process");
+  } finally { disposeProbe(owner); }
+});
+
+test("coverage scratch discovery preserves read errors instead of reporting zero", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cov-read-")), file = join(root, "not-a-directory");
+  try {
+    assert.equal(countCoverageScratch(join(root, "absent")), 0);
+    writeFileSync(file, "positive unreadable-directory control");
+    assert.throws(() => countCoverageScratch(file), { code: "ENOTDIR" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -52,12 +52,11 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
-
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { assertInspected } from "#test/helpers/inspected-population.js";
 
 // ──────────────────────────────────────── the detector ────────────────────────────────────────
 
@@ -202,6 +201,17 @@ function trackedTestFiles(root: string): string[] {
     .filter((p) => /^test\/.*\.test\.ts$/.test(p));
 }
 
+function independentlyCountTests(root: string): number {
+  // Filesystem traversal is independent of the index listing under test. Remove untracked
+  // files (including ignored scratch) to compare the same tracked-file population.
+  const untracked = new Set(execFileSync("git", ["-C", root, "ls-files", "--others", "-z", "--", "test"],
+    { encoding: "utf8" }).split("\0"));
+  return readdirSync(join(root, "test"), { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".test.ts"))
+    .filter((entry) => !untracked.has(join(entry.parentPath, entry.name).slice(root.length + 1).split("\\").join("/")))
+    .length;
+}
+
 function scanRepo(root: string, files: string[]): UnsafeCountAssertion[] {
   const violations: UnsafeCountAssertion[] = [];
   for (const file of files) {
@@ -344,7 +354,7 @@ test("the #3331-versus-#3335 shape (a shared table counted in one test, enumerat
 
 test("scanning the live, git-tracked test/ tree is not vacuous (it walks a real, sizeable corpus) and reports zero unsafe count assertions -- measured at sha 7e86a241, 886 tracked test/**/*.test.ts files, no pre-existing hit to grandfather", () => {
   const files = trackedTestFiles(REPO_ROOT);
-  assert.ok(files.length > 500, `expected a real test/ corpus, not an empty or synthetic one -- got ${files.length} files`);
+  assertInspected("count-assertion test corpus", files.length, independentlyCountTests(REPO_ROOT));
 
   const violations = scanRepo(REPO_ROOT, files);
   assert.equal(violations.length, 0, `unexpected unsafe count assertion(s) -- re-derive rather than trust this: ${JSON.stringify(violations)}`);

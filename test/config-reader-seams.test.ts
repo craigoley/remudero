@@ -85,7 +85,7 @@ const ALLOWED: ReadonlyArray<{ file: string; symbol: string; reason: string }> =
       "passing tests and a green review.",
   },
   {
-    file: "src/run-task.ts",
+    file: "src/cli/commands/daemon.ts",
     symbol: "daemonCommandPolicy",
     reason:
       "daemonCommand's pollIntervalMs + headroom curve. MEASURED SAFE (recon-EJ): poisoning " +
@@ -390,6 +390,8 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
 
   const files = [...new Set(readers.map((r) => r.file))].sort();
   assert.deepEqual(files, [
+    "src/cli/commands/daemon.ts",
+    "src/cli/commands/run-task-verb.ts",
     "src/lib/account-usage.ts",
     "src/lib/check-proof.ts",
     "src/lib/launchd.ts",

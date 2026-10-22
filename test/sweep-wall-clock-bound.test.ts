@@ -116,19 +116,38 @@ test("W1-T1044: the tick after an abandoned sweep reaches dispatch", async () =>
   const plan = fixturePlanWithOneRunnableTask();
   const dispatched: string[] = [];
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  // W1-T4998: the tick no longer waits for the sweep, and a `max_reached` exit does not await the
+  // background pass either, so the daemon can return before the bound timer logs the abandonment.
+  // A fixed `setTimeout(30)` in the run only outlasted the 20ms bound by a 10ms margin, which a
+  // loaded runner can erase. The run therefore holds until the abandonment is OBSERVED, capped so a
+  // sweep that never abandons fails the assertion below instead of hanging the file.
+  let observeAbandonment!: () => void;
+  const abandonmentObserved = new Promise<void>((resolve) => {
+    observeAbandonment = resolve;
+  });
   const s = await runDaemon(
     plan,
     {
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => {
         dispatched.push(id);
-        // W1-T4998: the tick no longer waits for the sweep, so the run outlasts the bound itself.
-        await new Promise((r) => setTimeout(r, 30));
+        let capTimer: ReturnType<typeof setTimeout> | undefined;
+        const cap = new Promise<void>((resolve) => {
+          capTimer = setTimeout(resolve, 5000);
+        });
+        try {
+          await Promise.race([abandonmentObserved, cap]);
+        } finally {
+          clearTimeout(capTimer);
+        }
         return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" };
       },
       sleep: REAL_SLEEP,
       sweep: () => new Promise<void>(() => {}), // same never-returning occupant as above
-      log: (step, extra = {}) => lines.push({ step, extra }),
+      log: (step, extra = {}) => {
+        lines.push({ step, extra });
+        if (step === "daemon.sweep.abandoned") observeAbandonment();
+      },
     },
     { max: 1, pollIntervalMs: 30, sweepWallClockBoundMs: 20 },
   );

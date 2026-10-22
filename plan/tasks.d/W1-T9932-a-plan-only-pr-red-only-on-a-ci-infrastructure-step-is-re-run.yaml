@@ -14,7 +14,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts
-  status: queued
+  status: merged
   priority: 1  # every plan-only filing that meets one artifact-service transient sits red until a person re-runs it
   attempts: 0
   rationale: |

@@ -281,6 +281,14 @@ done
 case "$MAX_OLD_SPACE_MB" in ''|*[!0-9]*) echo "install-host-units: FATAL — RMD_NODE_MAX_OLD_SPACE_MB must be an integer, got '${MAX_OLD_SPACE_MB}'." >&2; exit 2 ;; esac
 case "$STATE_DIR" in /*) : ;; *) echo "install-host-units: FATAL — RMD_STATE_DIR must be absolute, got '${STATE_DIR}'." >&2; exit 2 ;; esac
 
+# OPERATOR RULING 2026-10-19: the daemon's NODE_OPTIONS carries the ruled memory flags beside its heap
+# ceiling, merged by the same deploy/resource-policy.sh function a recycle applies to the NODE_OPTIONS
+# it carries over, so a launcher-created container and a recycled one start alike. Rendered here, so a
+# changed flag is launcher drift that the watchdog tick's units check converges.
+# shellcheck source=deploy/resource-policy.sh
+. "${SCRIPT_DIR}/resource-policy.sh"
+DAEMON_NODE_OPTIONS="$(resource_policy_node_options "--max-old-space-size=${MAX_OLD_SPACE_MB}")"
+
 # The install root installs only what main holds: a hand edit there went live unmerged on 2026-10-01
 # and blocked deploy-run. No optional locks, so a sudo run never writes a root-owned index.
 if [ "$MODE" = "install" ] && [ -d "${STATE_DIR}/daemon-install" ] && \
@@ -510,7 +518,7 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
   src/lib/fs-race-safe.ts src/lib/host-identity.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
   src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/loop-bounded-child.ts
-  src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
+  src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/state-backup-engine-links.ts src/lib/worker-containment.ts)
 
 # W1-T6249 -- A REFRESH DEFERRED ONLY ON ACTIVE WORK STILL ASKS deploy-run. Busy ticks ended at
 # `|| exit 0` before deploy-run, so core's image recycle starved for hours on 2026-10-07; deploy-run
@@ -1470,6 +1478,19 @@ read_progress_verdict
 note_progress_verdict
 if hold_revive_on_verdict; then exit 0; fi
 
+# A watchdog revival creates the same build container as recycle-container.sh. Without its
+# resource-policy arguments, exhausting Docker's restart budget silently loses every cgroup
+# limit. Prefer current policy; keep an installed copy for a cold/missing checkout, like scratch.
+RESOURCE_POLICY_LIB="\$CHECKOUT/deploy/resource-policy.sh"
+[ -r "\$RESOURCE_POLICY_LIB" ] || RESOURCE_POLICY_LIB="${BIN_DIR}/rmd-resource-policy"
+if [ ! -r "\$RESOURCE_POLICY_LIB" ]; then
+  echo "rmd-relaunch: FATAL -- resource policy unreadable at \$RESOURCE_POLICY_LIB; refusing an ungoverned revival." >&2
+  exit 1
+fi
+. "\$RESOURCE_POLICY_LIB"
+resource_policy_build_args '${CONTAINER_NAME}'
+echo "rmd-relaunch: resource policy from \$RESOURCE_POLICY_LIB -- \$RESOURCE_POLICY_NOTE"
+
 # W1-T9627 -- THE DEAD CONTAINER'S LAST WORDS ARE KEPT BEFORE \`docker rm -f\` DELETES THEM. On
 # 2026-10-15 every revive removed a container that had died in deploy/entrypoint.sh about a second
 # in, so the only copy of "cannot check out main" went with it, 25 times. Its bounded log tail
@@ -1555,8 +1576,10 @@ $(render_instance_name_env)
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
+# Its memory flags and GLIBC_TUNABLES (in the build args) are operator ruling 2026-10-19.
 docker run -d --name ${CONTAINER_NAME} \\
   --restart=on-failure:5 \\
+  "\${RESOURCE_POLICY_BUILD_ARGS[@]}" \\
   --cap-drop ALL \\
   --security-opt seccomp=unconfined \\
   --security-opt apparmor=unconfined \\
@@ -1565,7 +1588,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -e GH_APP_ID=${GH_APP_ID_V} \\
   -e GH_APP_INSTALLATION_ID=${GH_APP_INST_V} \\
   -e GH_APP_PRIVATE_KEY_PATH=${GH_APP_KEY_SHELL} \\
-  -e NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_MB} \\
+  -e "NODE_OPTIONS=${DAEMON_NODE_OPTIONS}" \\
   -e RMD_RESTART_THROTTLE_S=120 \\
   -e RMD_FRESHNESS_RESTART_MAX=100 \\
   -e RMD_OPENWEIGHT_API_KEY \\
@@ -1768,11 +1791,13 @@ effective_directives() {
 }
 
 render_scratch_lib() { cat "${SCRIPT_DIR}/scratch-mounts.sh"; }
+render_resource_policy_lib() { cat "${SCRIPT_DIR}/resource-policy.sh"; }
 
 # path : renderer : mode
 UNITS="
 ${LAUNCHER}:render_launcher:0755
 ${BIN_DIR}/rmd-scratch-mounts:render_scratch_lib:0755
+${BIN_DIR}/rmd-resource-policy:render_resource_policy_lib:0755
 ${UNIT_DIR}/${SERVICE_UNIT_NAME}:render_fleet_service:0644
 ${UNIT_DIR}/${WATCHDOG_SERVICE_NAME}:render_watchdog_service:0644
 ${UNIT_DIR}/${WATCHDOG_TIMER_NAME}:render_watchdog_timer:0644

@@ -1,0 +1,30 @@
+- id: W1-T10229
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — inbox.recommendation_refused landed 43 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.86
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:inbox.recommendation_refused"
+  files:
+    - test/gardeners/scout-inbox-recommendation-refused.test.ts
+  acceptance:
+    - claim: "inbox.recommendation_refused stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10229: inbox.recommendation_refused no longer recurs\" in test/gardeners/scout-inbox-recommendation-refused.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step inbox.recommendation_refused carries a failure shape and landed rows in both halves of the trailing 7 days: 7 in the older half, 36 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.223Z"
+    pin: "16c09f9d3b15a2b49cbc14611537fb02b156a93238caa48505717dd8cc633bb8"

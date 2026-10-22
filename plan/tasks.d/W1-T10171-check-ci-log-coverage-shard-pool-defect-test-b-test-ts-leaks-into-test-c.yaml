@@ -1,0 +1,108 @@
+- id: W1-T10171
+  title: "A PASSING TEST'S FIXTURE POOL DEFECT LINE IS READ AS THE SHARD'S FAILURE — the fast-tier SIGKILL-deadline test prints 'leaking file: test/b.test.ts (first failing alongside it: test/c.test.ts)' into every CI log that runs it, and ciFailureSignature and deterministicTimeoutSignature take that line over the runner's own not ok"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.18
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts"
+  principles: {tdd: strict}
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - src/lib/sweep.ts
+    - scripts/test-tier-manifest.mjs
+    - test/gardeners/a-fixture-pool-defect-line-is-never-a-shards-failure.test.ts
+    - test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts
+  acceptance:
+    - claim: "a real log holding a passing test's fixture POOL DEFECT block and a runner not ok signs as the runner's failing test, not as a pool defect"
+      proof: 'grep: test("W1-T10171: a fixture POOL DEFECT line beside a runner not ok signs as the runner failing test" in test/gardeners/a-fixture-pool-defect-line-is-never-a-shards-failure.test.ts'
+    - claim: "a cancelled shard whose only pool lines are a passing test's fixture output is re-queued, not judged a deterministic pool defect"
+      proof: 'grep: test("W1-T10171: a cancelled shard whose only POOL DEFECT line is test fixture output is re-queued" in test/gardeners/a-fixture-pool-defect-line-is-never-a-shards-failure.test.ts'
+    - claim: "the fast-tier SIGKILL-deadline test's fixture pool run writes no pure-test-pool line to the real stderr"
+      proof: 'grep: test("W1-T10171: a fast-tier fixture run sends its pool lines to its log sink, never the process stderr" in test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts'
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1; REWRITTEN 2026-10-21 by an operator-approved hand investigation to the proven cause. The filed scope (.github/workflows/ci.yml) was never involved. After its build merges, the gardener measures this cause's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    PROVEN 2026-10-21, read-only (the ci-friction gardener filed this against ci.yml; the cause is elsewhere).
+
+    THE SIGNATURE IS FIXTURE TEXT. Neither test/b.test.ts nor test/c.test.ts exists on main. The line
+    "pure-test-pool: POOL DEFECT — every pooled file passes isolated but the pool failed; leaking file:
+    test/b.test.ts (first failing alongside it: test/c.test.ts) after 5 probe(s)" is printed by the PASSING
+    test "W1-T9426: the fast tier hands every locate probe a SIGKILL deadline"
+    (test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts). It runs tiers.main(["--run", "fast"])
+    over fixtures a/b/c/d with a fake pool that fails whenever b and c share it, and
+    scripts/test-tier-manifest.mjs calls runShardWithPool with no `log`, so pure-test-pool's default
+    console.error writes every locate probe and the POOL DEFECT verdict into the real CI log. Reproduced on
+    main c8a55054a: a targeted run of that one test prints the line on stderr.
+
+    TWO READERS TAKE IT AS THE SHARD'S FAILURE.
+    - src/lib/ci-friction-gardener.ts: ciFailureSignature calls poolOrTimeoutSignature FIRST, and its first
+      arm matches any "pure-test-pool: POOL DEFECT ... leaking file:" line anywhere in the tail, before the
+      runner's own `not ok` is read. Every unrelated red in a shard that ran this test is signed
+      "pool defect: test/b.test.ts leaks into test/c.test.ts", and the gardener prices those rounds to it.
+    - src/lib/sweep.ts: deterministicTimeoutSignature has the same first arm. A shard CANCELLED at its ceiling
+      whose log carries the fixture line returns "pool defect: test/b.test.ts leaks", so W1-T8040 judges it
+      deterministic and it is NOT re-queued (reproduced on main with the fixture line plus a cancel line).
+
+    EXAMPLE. #12892's round at 2026-10-19T10:36:02Z (head 777f705, coverage-shard (8/8), job 117963751028):
+    the only real failure is route-wiring's `not ok 2631 - every declared write route is either
+    wiring-tested here or listed as explicit debt` (location test/route-wiring.test.ts:480:1, log line
+    22852); the fix.dispatch row's `tests` even names it, tail_source "log". The fixture block sits at log
+    lines 4767-4794, printed twice: once plain and once as a `# pure-test-pool: ...` TAP diagnostic. Main's
+    ciFailureSignature over that whole log still returns "pool defect: test/b.test.ts leaks into
+    test/c.test.ts".
+
+    MEASURED. 21 distinct fix rounds (fix.dispatch round_id) on 19 PRs carry this signature, from
+    2026-10-17T02:30Z to 2026-10-21T14:56:43Z: #12489 #12523 #12575 #12639 #12667 #12773 #12780 #12787 #12817
+    #12821 #12830 #12892 #12904 #12968 #13043 #13121 #13223 #13316 #13324 (bounded zgrep of the 89 archives
+    from 10-17 on plus the live file). The gardener priced 37.8 PR-minutes over 9 of them. The sweep half is
+    live too: sweep.check_requeue.skipped at 2026-10-21T12:13:04Z, #13338 coverage-shard (2/8), reason
+    "deterministic-timeout", signature "pool defect: test/b.test.ts leaks" — a cancelled shard left
+    un-requeued on a fixture line.
+
+    WHY #13324 (W1-T9434, c8a55054a) DID NOT FIX IT. #13324 decides which SOURCE becomes a failure's tail: a
+    readable log's `not ok` now wins over annotations a passing test printed. These rounds were already
+    tail_source "log"; the misreading is inside the log, in the signature arms above, which #13324 did not
+    touch. W1-T10154 (#12957) changed only how those arms strip timestamps.
+
+    RULE 25. scripts/test-tier-manifest.mjs is not on review.ts's INSTRUMENT_SURFACE, and rule 25 is advisory
+    since 2026-09-10, so the src guard and the instrument fix ride as one task.
+  design: |
+    1. Signature arms (ci-friction-gardener.ts poolOrTimeoutSignature, sweep.ts deterministicTimeoutSignature):
+       a POOL DEFECT line counts only when it is the shard runner's own verdict, never a line a test printed.
+       Signals observed in job 117963751028: the fixture lines are echoed a second time as `# pure-test-pool:`
+       TAP diagnostics, and the leaker/victim they name are files the shard never ran and that no `not ok`
+       in the log belongs to. Choose the discriminator from the real log shape; the two existing real-defect
+       fixtures (see falsifier) must keep their signatures. When the POOL DEFECT line is a test's output,
+       the ordinary arms decide: the runner's named failing test, or for a cancelled shard no deterministic
+       signature, so W1-T1223's one bounded requeue applies.
+    2. Instrument: scripts/test-tier-manifest.mjs's main accepts a `log` sink in its injected options and
+       passes it to runShardWithPool (default unchanged: console.error); the SIGKILL-deadline test passes
+       one and asserts nothing reached process stderr.
+    Tests: 1-2 in test/gardeners/a-fixture-pool-defect-line-is-never-a-shards-failure.test.ts using the job
+    117963751028 shape (the doubled fixture block from lines 4767-4794 inside passing subtests, then the
+    route-wiring `not ok` with its location block; for 2, the same block with no `not ok` and a
+    "The operation was canceled." line). 3 in the SIGKILL-deadline test's own file. Titles verbatim as in the
+    proofs.
+  falsifier: |
+    On main: ciFailureSignature over the job 117963751028 shape returns "pool defect: test/b.test.ts leaks into
+    test/c.test.ts"; deterministicTimeoutSignature over the fixture block plus a cancel line returns
+    "pool defect: test/b.test.ts leaks"; a targeted run of "W1-T9426: the fast tier hands every locate probe a
+    SIGKILL deadline" prints the POOL DEFECT line on stderr. Each of the three new tests is red there.
+    GUARDS (must stay green, unchanged): test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts
+    "W1-T8038: a pool defect names its leaking and victim files in the signature" (the-leaker/the-victim log
+    still signs "pool defect: test/the-leaker.test.ts leaks into test/the-victim.test.ts"), and
+    test/a-deterministic-shard-timeout-is-not-re-queued.test.ts "W1-T8040: the signature names a pool defect
+    and a runner failure before the ceiling".
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.221Z"
+    pin: "b3ecb6ec4cc46269bdbd4a478a71a416387c2dc59f775bd632a7ff0978fa5040"

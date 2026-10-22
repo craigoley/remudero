@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname,join} from 'node:path';
 import {test} from 'node:test';
 import {parse} from 'yaml';
 import {ghShim} from './helpers/gh-shim.js';
+import {ghStubPath} from './helpers/gh-stub.js';
 // @ts-expect-error — trusted metadata producer is plain ESM outside tsconfig roots.
-import {runSecurityMergeProducer} from '../scripts/security-merge-producer.mjs';
+import {runSecurityMergeProducer,createSecurityMetadataReader} from '../scripts/security-merge-producer.mjs';
 const head='a'.repeat(40),base='b'.repeat(40);
 const repository={full_name:'craigoley/remudero'};
 test('trusted security producer covers fork and Dependabot metadata without executing their code',async()=>{
@@ -91,4 +92,54 @@ test('security producer delivery succeeds for published UNKNOWN and blocked deci
  env.GITHUB_EVENT_NAME='merge_group';
  writeFileSync(eventPath,JSON.stringify({repository,merge_group:{head_sha:head}}));
  verify('unknown','error');
+});
+
+
+test('security metadata reads bound truncated CLI recovery without retrying permanent or malformed evidence',async()=>{
+ const path=`repos/craigoley/remudero/commits/${head}/pulls?per_page=100`;
+ for(const kind of ['transient','persistent','permanent','other-json','malformed-output','signalled'] as const){
+  const calls:any[]=[];const waits:number[]=[];
+  const failure=Object.assign(Error('metadata unavailable'),{status:kind==='signalled'?null:1,
+   stderr:kind==='permanent'?'HTTP 403':kind==='other-json'?'invalid character in JSON':'unexpected end of JSON input\n'});
+  const read=createSecurityMetadataReader({exec:(command:string,args:string[],options:any)=>{
+   calls.push({command,args:[...args],options});
+   if(kind==='malformed-output')return '{';
+   if(kind==='transient'&&calls.length===2)return '[{"number":1}]';
+   throw failure;
+  },wait:async(ms:number)=>{waits.push(ms);}});
+  if(kind==='transient')assert.deepEqual(await read(path),[{number:1}]);
+  else await assert.rejects(()=>read(path),kind==='malformed-output'?SyntaxError:(error:unknown)=>error===failure);
+  assert.equal(calls.length,kind==='persistent'?4:kind==='transient'?2:1,kind);
+  assert.deepEqual(waits,kind==='persistent'?[1000,2000,4000]:kind==='transient'?[1000]:[],kind);
+  assert.ok(calls.every(call=>JSON.stringify(call)===JSON.stringify(calls[0])), 'retry keeps every argv and transport limit');
+  assert.deepEqual(calls[0].args,['api','--method','GET',path]);
+ }
+});
+
+test('security producer CLI recovers a truncated association read and publishes only its exact-head decision',t=>{
+ const dir=mkdtempSync(join(tmpdir(),'rmd-security-read-retry-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ const eventPath=join(dir,'event.json'),log=join(dir,'calls.jsonl'),marker=join(dir,'failed-once');
+ writeFileSync(eventPath,JSON.stringify({repository,workflow_run:{name:'CodeQL',head_sha:head}}));
+ const shim=ghShim([{when:'POST',stdout:'{}'},
+  {when:'/commits/'+head+'/pulls?',stdout:JSON.stringify([{number:1,state:'open',head:{sha:head}}])},
+  {when:'/files?',stdout:JSON.stringify([{filename:'docs/a.md'}])},
+  {when:'GET',stdout:JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1})}],{command:'security-metadata-answer'});
+ t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
+ const answer=join(shim.dir,'security-metadata-answer');
+ const wrapper=ghStubPath(`#!/usr/bin/env node
+const fs=require('node:fs'),{spawnSync}=require('node:child_process');
+const args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(args)+'\\n');
+if(!fs.existsSync(${JSON.stringify(marker)})){fs.writeFileSync(${JSON.stringify(marker)},'failed');process.stderr.write('unexpected end of JSON input\\n');process.exit(1);}
+const child=spawnSync(${JSON.stringify(answer)},args,{encoding:'utf8'});process.stdout.write(child.stdout||'');process.stderr.write(child.stderr||'');process.exit(child.status??1);
+`);
+ t.after(()=>rmSync(dirname(wrapper),{recursive:true,force:true}));
+ const child=spawnSync(process.execPath,[new URL('../scripts/security-merge-producer.mjs',import.meta.url).pathname],{
+  encoding:'utf8',timeout:15000,env:{...process.env,PATH:wrapper+':'+process.env.PATH,GH_TOKEN:'',
+   GITHUB_EVENT_PATH:eventPath,GITHUB_EVENT_NAME:'workflow_run',GITHUB_RUN_ID:'1'}});
+ assert.equal(child.status,0,child.stderr||child.stdout);
+ const result=JSON.parse(child.stdout).results[0];assert.equal(result.headSha,head);
+ assert.equal(result.decision.state,'not-applicable');assert.equal(result.published,true);
+ const calls=readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+ assert.deepEqual(calls[0],calls[1],'only the same association read is repeated');
+ assert.equal(calls.filter(call=>call.includes('POST')).length,1,'status writes retain their single attempt');
 });

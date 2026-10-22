@@ -21,6 +21,11 @@ import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import { evaluateCensusPrecheck, main } from "../scripts/census-precheck.mjs";
 
+// @ts-ignore executable module has no declaration file.
+import { qualifiedRunTaskLayoutSplit, houseLiteralCounts } from "../scripts/house-layout-census.mjs";
+// @ts-ignore executable module has no declaration file.
+import { evaluateCommentLoadRatchet } from "../scripts/comment-load-ratchet.mjs";
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 type Tree = Record<string, string>;
@@ -95,10 +100,11 @@ function installHook(dir: string): void {
     "fixture-copy-census.mjs",
     "house-layout-census.mjs",
     "deps-interface-census.mjs",
+    "test-repo-root-codemod.mjs",
   ]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }
-  for (const lib of ["argv.mjs", "git.mjs", "author-step-capture.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs"]) {
+  for (const lib of ["argv.mjs", "git.mjs", "author-step-capture.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs", "repo-root.mjs", "retained-fixtures.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", "lib", lib), join(dir, "scripts", "lib", lib));
   }
   writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
@@ -186,4 +192,82 @@ test("a repo with no src directory at all is measured as zero sites, never as co
   repo.git("add", "-A");
   repo.git("commit", "--quiet", "-m", "the change");
   assert.equal(main(["--root", repo.dir, "--base", "main"]), 0);
+});
+
+const RUN_TASK_LAYOUT_SPLIT = { old: "src/run-task.ts", moved: "src/cli/commands/run-task-verb.ts" } as const;
+const RUN_TASK_LAYOUT_SPLIT_LITERALS = ["plan/tasks.d", "MASTER-PLAN.md", ".remudero/", "learnings/"] as const;
+
+function remainingHouseLayoutViolations(
+  violations: Array<{ path: string; comments: number; baseline: number; overage: number }>,
+  qualifiedSplit: Readonly<Record<string, number>>,
+): Array<{ path: string; comments: number; baseline: number; overage: number }> {
+  return violations.filter(v => v.comments - (qualifiedSplit[v.path] ?? 0) > v.baseline);
+}
+
+function runTaskLayoutSplitFixture() {
+  const once = RUN_TASK_LAYOUT_SPLIT_LITERALS.join("\n");
+  const base = new Map<string, string>([[RUN_TASK_LAYOUT_SPLIT.old, once + "\n" + once]]);
+  const current = new Map<string, string>([[RUN_TASK_LAYOUT_SPLIT.old, once], [RUN_TASK_LAYOUT_SPLIT.moved, once]]);
+  const verdict = () => {
+    const counts = houseLiteralCounts(current.values());
+    const baseline = houseLiteralCounts(base.values());
+    const physical = evaluateCommentLoadRatchet(counts, baseline);
+    return remainingHouseLayoutViolations(physical.violations, qualifiedRunTaskLayoutSplit(base, current));
+  };
+  return { base, current, once, verdict };
+}
+
+test("W1-T9332 proposed layout split: exact pair conserves occurrences and relieves only its one physical duplicate", () => {
+  const f = runTaskLayoutSplitFixture();
+  assert.deepEqual(qualifiedRunTaskLayoutSplit(f.base, f.current), Object.fromEntries(RUN_TASK_LAYOUT_SPLIT_LITERALS.map(literal => [literal, 1])));
+  assert.deepEqual(f.verdict(), []);
+});
+
+test("W1-T9332 proposed layout split: an extra occurrence in the pair is refused", () => {
+  const f = runTaskLayoutSplitFixture();
+  f.current.set(RUN_TASK_LAYOUT_SPLIT.moved, f.once + "\nMASTER-PLAN.md");
+  assert.deepEqual(f.verdict().map(v => v.path), ["MASTER-PLAN.md"]);
+});
+
+test("W1-T9332 proposed layout split: a third file still contributes an unrelieved physical duplicate", () => {
+  const f = runTaskLayoutSplitFixture();
+  f.current.set("src/third-owner.ts", "MASTER-PLAN.md");
+  assert.deepEqual(f.verdict().map(v => v.path), ["MASTER-PLAN.md"]);
+});
+
+test("W1-T9332 proposed layout split: an unapproved token gets no relief", () => {
+  const f = runTaskLayoutSplitFixture();
+  const futureLiteral = "future-house-token/";
+  const physical = evaluateCommentLoadRatchet({ [futureLiteral]: 1 }, { [futureLiteral]: 0 });
+  assert.deepEqual(remainingHouseLayoutViolations(physical.violations, qualifiedRunTaskLayoutSplit(f.base, f.current)).map(v => v.path), [futureLiteral]);
+});
+
+test("W1-T9332 proposed layout split: missing original merge-base owner is refused", () => {
+  const f = runTaskLayoutSplitFixture();
+  f.base.clear();
+  assert.equal(f.verdict().length, 4);
+});
+
+test("W1-T9332 proposed layout split: a moved owner already present at merge base is refused", () => {
+  const f = runTaskLayoutSplitFixture();
+  f.base.set(RUN_TASK_LAYOUT_SPLIT.moved, "no house literal");
+  assert.equal(f.verdict().length, 4);
+});
+
+
+test("W1-T9332 structural split: shared qualifier and real pre-push agree, and added occurrences still refuse", () => {
+  const f = runTaskLayoutSplitFixture();
+  const base = Object.fromEntries(f.base);
+  const head = Object.fromEntries(f.current);
+  assert.deepEqual(f.verdict(), []);
+  assert.deepEqual(evaluate(head, base), []);
+  const accepted = pushFixture(base, head)();
+  assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
+  assert.match(accepted.stdout + accepted.stderr, /census-precheck: OK/);
+  assert.match(accepted.stdout + accepted.stderr, /W1-T9332 qualified structural split/);
+  const extra = { ...head, [RUN_TASK_LAYOUT_SPLIT.moved]: f.once + "\nMASTER-PLAN.md" };
+  assert.equal(evaluate(extra, base).length, 1);
+  const refused = pushFixture(base, extra)();
+  assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /house-layout: MASTER-PLAN\.md now in 2 non-test src files, up from 1/);
 });

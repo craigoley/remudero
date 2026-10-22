@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { judgeReview, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
+import { judgeReview, resolvePlanCriteriaAtHeadAsync, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
 
 // ── W1-T2432: "A BUILD IS UNJUDGEABLE UNTIL THE REVIEWER's OWN CONTAINER RESTARTS PAST ITS
 // SHARD" ──────────────────────────────────────────────────────────────────────────────────────
@@ -220,4 +220,25 @@ test("a plan that fails to load at headSha is a named divergence, never a silent
   assert.deepEqual(resolved.criteria, []);
   assert.equal(resolved.divergence?.taskId, "W1-T1");
   assert.match(resolved.divergence?.reason ?? "", /duplicate task id/);
+});
+
+
+test("review task narrative resolves at the immutable head in both resolver paths", async () => {
+  const { dir, commit } = gitPlanRepo();
+  const path = join(dir, "plan", "tasks.yaml");
+  const body = TRAILERED_BODY("W1-T1");
+  const write = (amendment: string) => writeFileSync(path, task("W1-T1", ["the thing works"]) + '\n  design: "Preserve all original assertions."\n  amendment: ' + amendment + "\n");
+  try {
+    write(JSON.stringify("First approved ruling."));
+    const first = commit("first ruling");
+    write(JSON.stringify("Later approved ruling."));
+    const later = commit("later ruling");
+    write("{invalid: narrative}");
+    const invalid = commit("malformed narrative");
+    for (const resolve of [resolvePlanCriteriaAtHead, resolvePlanCriteriaAtHeadAsync]) {
+      assert.deepEqual((await resolve(body, dir, "plan/tasks.yaml", first)).taskNarrative, { design: "Preserve all original assertions.", amendment: "First approved ruling." });
+      assert.equal((await resolve(body, dir, "plan/tasks.yaml", later)).taskNarrative?.amendment, "Later approved ruling.");
+      assert.equal((await resolve(body, dir, "plan/tasks.yaml", invalid)).taskNarrative?.narrativeUnavailable, true);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

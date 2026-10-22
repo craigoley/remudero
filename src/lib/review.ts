@@ -1,7 +1,8 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { boundChildByLoopTime } from "./loop-bounded-child.js";
+import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { refreshInstallationToken, type RefreshOptions } from "./github-app.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
@@ -10,13 +11,14 @@ import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
 import { createRequire } from "node:module";
-import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
+import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
@@ -91,7 +93,7 @@ export function reviewInputDigest(
 
 export const REVIEW_DECISION_POLICY_REVISION = "review-policy-v1";
 
-export interface ReviewDecisionDigestInput {
+export interface ReviewDecisionDigestInput extends ReviewTaskNarrativeInput {
   headSha: string;
   diff: string;
   report: string;
@@ -110,6 +112,8 @@ export interface ReviewDecisionDigestInput {
 
 /** Content address of every material input to one review decision; model output is excluded. */
 export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
+  const narrative = reviewTaskNarrative(input);
+  if (narrative === undefined) throw new Error("review task narrative is unavailable");
   const acceptance = input.acceptance.map((c) => ({
     claim: c.claim,
     proof: c.proof,
@@ -136,13 +140,30 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     declaredFiles: input.declaredFiles ?? [],
     ...(input.ownership !== undefined ? { ownership: input.ownership.map((finding) => finding.kind === "unknown"
       ? { id: finding.id, file: finding.file, kind: finding.kind } : finding) } : {}),
+    ...narrative,
   });
   return `v2:${createHash("sha256").update(encoded, "utf8").update(PROOF_LOAD_REVISION).digest("hex")}`;
 }
 
+/** Head-resolved task prose; malformed narrative must remain distinguishable from absence. */
+export interface ReviewTaskNarrativeInput {
+  design?: unknown;
+  amendment?: unknown;
+  narrativeUnavailable?: true;
+}
+
+/** Only the task narrative resolved at the reviewed head may constrain its review. */
+export function reviewTaskNarrative(task: ReviewTaskNarrativeInput): { design?: string; amendment?: string } | undefined {
+  if (task.narrativeUnavailable || [task.design, task.amendment].some(value => value !== undefined && typeof value !== "string")) return undefined;
+  return {
+    ...(typeof task.design === "string" && task.design.length > 0 ? { design: task.design } : {}),
+    ...(typeof task.amendment === "string" && task.amendment.length > 0 ? { amendment: task.amendment } : {}),
+  };
+}
+
 /** Stable identity of the reviewer contract, independent of a PR head, diff, or prose report.
  * Reuse may only carry a verdict across a base move when this identity is unchanged. */
-export interface ReviewContractDigestInput {
+export interface ReviewContractDigestInput extends ReviewTaskNarrativeInput {
   taskId: string;
   acceptance: readonly AcceptanceCriterion[];
   declaredFiles?: readonly string[];
@@ -153,6 +174,8 @@ export interface ReviewContractDigestInput {
 }
 
 export function reviewContractDigest(input: ReviewContractDigestInput): string {
+  const narrative = reviewTaskNarrative(input);
+  if (narrative === undefined) throw new Error("review task narrative is unavailable");
   const acceptance = input.acceptance.map((criterion) => ({
     claim: criterion.claim,
     proof: criterion.proof,
@@ -169,6 +192,7 @@ export function reviewContractDigest(input: ReviewContractDigestInput): string {
     budgetUsd: input.budgetUsd ?? null,
     policyRevision: input.policyRevision ?? REVIEW_DECISION_POLICY_REVISION,
     engineRevision,
+    ...narrative,
   });
   return `contract-v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
@@ -428,7 +452,7 @@ export interface CriterionVerdict {
   /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
    *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
   proofFailureOutput?: string;
-  /** The output tail alone of an `executed_fail` proof (see {@link recordFailureTail}); absent for a pass. */
+  /** The redacted output tail of an executed failure or unevaluable proof; absent for a pass. */
   failureTail?: string;
   /** See {@link ProofSkipReason}. Absent when the proof executed. */
   proof_skip?: ProofSkipReason;
@@ -527,6 +551,9 @@ export interface ReviewEvidence {
   execProof?: ProofExecutor;
   /** Async runner used by the daemon's review path. Audit callers can keep the synchronous seam. */
   asyncExecProof?: AsyncProofExecutor;
+  /** Already-observed form corrections only. The synchronous fold never spawns a file reader. */
+  proofFormCorrections?: ReadonlyMap<string, string | undefined>;
+  missingExportNotes?: ReadonlyMap<string, string | undefined>;
   /** The task's DECLARED `files:` scope (W1-T322) — read ONLY for the INVERSE-SCOPE advisory, the direction {@link
    *  "../run-task.js".scopeGuardOutOfScopeFiles} cannot see: that guard flags a diff touching an UNDECLARED file, this
    *  flags a declared file the diff never touched. Advisory only; absent ⇒ it never fires. */
@@ -1737,9 +1764,9 @@ const PROOF_SANDBOX_ETC = [
   "/etc/fonts",
 ] as const;
 
-/** How this process runs proof children: under bwrap, or UNSANDBOXED with the named reason — the reason is what
- *  {@link ReviewVerdict.proofSandboxDegraded} records, so a degraded review is never silently read as a sandboxed one. */
-export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "unsandboxed"; reason: string };
+/** Proof children use bwrap or an explicitly degraded runtime; unavailable private storage refuses execution.
+ *  {@link ReviewVerdict.proofSandboxDegraded} records the degraded reason, never silently claiming containment. */
+export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "unsandboxed"; reason: string } | { mode: "unavailable"; reason: string };
 
 /** A sandbox that could not start for THIS proof. {@link judgeCriterion} grades it `not_executable`, never a pass and
  *  never `executed_fail`: the proof's code was not run, so nothing was learned about the criterion. */
@@ -1800,6 +1827,7 @@ export function probeProofSandbox(
     });
     return { mode: "bwrap", binary: PROOF_SANDBOX_BINARY };
   } catch (error) {
+    if (error instanceof ProofSandboxUnavailableError) return { mode: "unavailable", reason: error.sandboxReason };
     return {
       mode: "unsandboxed",
       reason: `bwrap cannot start on this Linux host (${spawnFailureText(error)}); ran with a throwaway HOME and the env allowlist only`,
@@ -1809,10 +1837,12 @@ export function probeProofSandbox(
   }
 }
 
-/** The process's memoised {@link probeProofSandbox} answer. */
+/** Memoise assessed runtime answers; a transient storage refusal must remain retryable. */
 export function proofSandboxStatus(): ProofSandboxStatus {
-  proofSandboxMemo ??= probeProofSandbox();
-  return proofSandboxMemo;
+  if (proofSandboxMemo !== undefined) return proofSandboxMemo;
+  const status = probeProofSandbox();
+  if (status.mode !== "unavailable") proofSandboxMemo = status;
+  return status;
 }
 
 /** A path's real location, or `undefined` when nothing is there to mount or mask. */
@@ -2002,6 +2032,24 @@ export function proofMaskedGitConfig(sharedConfig: string): string {
   return `[remote "origin"]\n\turl = "${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
 }
 
+function privateProofTmp(home: string): string {
+  const path = join(home, ".rmd-private-tmp");
+  try {
+    try { mkdirSync(path, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW, 0o600);
+    try {
+      const stat = fstatSync(fd);
+      if (stat.uid !== process.geteuid?.() || (stat.mode & 0o777) !== 0o700) throw Error("the temporary tree is not private to this uid");
+      const type = statfsSync(process.platform === "linux" ? `/proc/self/fd/${fd}` : path, { bigint: true }).type;
+      if (type === 0x01021994n || type === 0x858458f6n) throw Error("the temporary tree is RAM-backed, not disk-backed");
+      return path;
+    } finally { closeSync(fd); }
+  } catch (error) {
+    throw new ProofSandboxUnavailableError(`private disk /tmp unavailable: ${String((error as Error)?.message ?? error).slice(0, 180)}`);
+  }
+}
+
 /** Bubblewrap arguments, ending in `--`, for one proof child. Writable: the checkout, its throwaway HOME and its
  *  worktree gitdir. Read-only: the runtime, the git common dir (its `config`, which can carry a token-bearing remote,
  *  masked by a file carrying only its credential-free origin url), the node_modules link targets and the browser
@@ -2012,6 +2060,8 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   const cwd = realpathSync(input.cwd);
   const home = realpathSync(input.home);
   if (cwd === "/" || home === "/") throw new ProofSandboxUnavailableError("refusing / as a writable sandbox bind");
+  // Already writable through HOME; its owner removes it on success, error and timeout. Never a shared cache.
+  const scratch = privateProofTmp(home);
   const runtime: string[] = PROOF_SANDBOX_RUNTIME_ROOTS.filter((p) => existsSync(p));
   const binds: { path: string; writable: boolean }[] = [];
   const nodePrefix = dirname(dirname(realpathSync(input.execPath ?? process.execPath)));
@@ -2047,6 +2097,9 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   }
   const key = env.GH_APP_PRIVATE_KEY_PATH ? realpathIfPresent(env.GH_APP_PRIVATE_KEY_PATH) : undefined;
   if (key !== undefined && binds.some((b) => isWithin(key, b.path))) masks.push({ from: "/dev/null", path: key });
+  if (binds.some(b => !b.writable && isWithin(b.path, scratch)) || masks.some(m => isWithin(m.path, scratch))) {
+    throw new ProofSandboxUnavailableError("private disk /tmp overlaps a protected bind or credential mask");
+  }
   const dirs = new Set<string>();
   for (const { path } of binds) {
     for (let current = dirname(path); current !== dirname(current); current = dirname(current)) dirs.add(current);
@@ -2062,7 +2115,7 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
     ...runtime.flatMap((path) => ["--ro-bind", path, path]),
     "--proc", "/proc",
     "--dev", "/dev",
-    "--tmpfs", "/tmp",
+    "--bind", scratch, "/tmp",
     ...createDirs.flatMap((path) => ["--dir", path]),
     ...binds.flatMap(({ path, writable }) => [writable ? "--bind" : "--ro-bind", path, path]),
     ...masks.flatMap(({ from, path }) => ["--ro-bind", from, path]),
@@ -2097,12 +2150,13 @@ function prepareProofChild(command: string, args: readonly string[], cwd: string
   const home = makeTempDir("proof-home");
   const cleanup = () => rmSync(home, { recursive: true, force: true });
   const env = proofChildEnv(home);
-  const status = proofSandboxStatus();
-  if (status.mode !== "bwrap") {
-    unsandboxedProofSpawns += 1;
-    return { ...child, env, cleanup };
-  }
   try {
+    const status = proofSandboxStatus();
+    if (status.mode === "unavailable") throw new ProofSandboxUnavailableError(status.reason);
+    if (status.mode !== "bwrap") {
+      unsandboxedProofSpawns += 1;
+      return { ...child, env, cleanup };
+    }
     const sandbox = proofSandboxArgv({ cwd, home });
     return {
       file: status.binary,
@@ -2174,6 +2228,11 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
   try {
     if (child.startCheck) startCheckSync(child, cwd);
     return spawnPreparedProofSync(child, cwd, timeoutMs);
+  } catch (error) {
+    // Piped stderr also rides execFileSync's message. Keep that public diagnostic bounded/redacted;
+    // retain the original stdout/stderr fields for the existing classifier and failure-tail formatter.
+    if (error instanceof Error) error.message = proofFailureTail(error.message);
+    throw error;
   } finally {
     child.cleanup();
   }
@@ -2183,7 +2242,7 @@ function spawnPreparedProofSync(child: PreparedProofChild, cwd: string, timeoutM
   return execFileSync(child.file, child.args, {
     cwd,
     env: { ...child.env, NODE_V8_COVERAGE: undefined },
-    stdio: ["ignore", "pipe", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
     timeout: timeoutMs,
     // W1-T3266: SIGKILL, NOT THE SIGTERM DEFAULT, AND THE DIFFERENCE IS A SIX-HOUR OUTAGE. The
     // `timeout` above only ASKS a child to die; one inside a synchronous cpu loop never turns its
@@ -2359,7 +2418,10 @@ function checkoutRunnerPath(whitelisted: WhitelistedProof, cwd: string): string 
 
 function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly string[], cwd: string): readonly string[] {
   const runner = checkoutRunnerPath(whitelisted, cwd);
-  return runner === undefined ? args : [runner, ...args.slice(1)];
+  if (runner === undefined) return args;
+  const rooted = [runner, ...args.slice(1)];
+  // Vite bundles config into node_modules/.vite-temp; a shared proof install is mounted read-only.
+  return lstatSync(join(cwd, "node_modules")).isSymbolicLink() ? [...rooted, "--configLoader", "native"] : rooted;
 }
 
 /** Refresh a reviewer-owned checkout once after measured module-load failure. Worktrees link the
@@ -3579,6 +3641,9 @@ export function vitestNameFilteredOutcome(stdout: string, stderr = ""): ProofRes
 /** PR-head checkout a criterion's proof may be executed against (W1-T65). */
 export interface ProofExecContext {
   cwd: string;
+  /** Source observed by the bounded async review path, not an unverified report string. */
+  proofFormCorrections?: ReadonlyMap<string, string | undefined>;
+  missingExportNotes?: ReadonlyMap<string, string | undefined>;
   exec?: ProofExecutor;
   /** (W1-T3525) mirrors {@link ReviewEvidence.target} — threaded into {@link parseWhitelistedProof} so
    *  a `unit test:` proof resolves against the SAME registered target every other consumer would, never
@@ -3748,6 +3813,7 @@ function classifyBaseProofOutcome(
   addedTestFiles?: ReadonlySet<string>,
   headCwd?: string,
   onMissingExport?: (note: string) => void,
+  missingExportNotes?: ReadonlyMap<string, string | undefined>,
 ): "stale" | "discriminates" | "base_unknown" | "base_unreadable" {
   const target = grepProofTargetPath(whitelisted);
   if (target !== undefined && baseUnreadablePaths?.has(target)) return "base_unreadable";
@@ -3773,7 +3839,7 @@ function classifyBaseProofOutcome(
     const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
     const note =
       whitelisted.kind === "test" && headCwd !== undefined && typeof loadOutput === "string"
-        ? baseLacksPrAddedExports(loadOutput, baseCwd, headCwd)
+        ? missingExportNotes?.get(JSON.stringify([baseCwd, headCwd, loadOutput]))
         : undefined;
     if (note === undefined) return "base_unknown";
     onMissingExport?.(note);
@@ -3813,16 +3879,9 @@ function proofFormText(s: string): string {
   return s.replace(/[\\`]/g, "").replace(/\s+/g, " ").trim();
 }
 
-/** A target file's text, or `undefined` when it is absent, unreadable, or resolves outside `root` (R-18). */
-function readTargetInside(root: string, target: string): string | undefined {
-  try {
-    const realRoot = realpathSync(root);
-    const real = realpathSync(join(realRoot, target));
-    if (!real.startsWith(realRoot + pathSep) || !statSync(real).isFile()) return undefined;
-    return readFileSync(real, "utf8");
-  } catch {
-    return undefined; // deliberate: absent and unreadable both mean "no literal here", never a manufactured match
-  }
+/** Descriptor-bound read/absence. Unreadable or escaped is UNKNOWN, never absent. */
+async function readTargetInside(root: string, target: string): Promise<ProofFileObservation> {
+  return observeProofFileInside(root, target);
 }
 
 function literalPresent(text: string, pattern: string, target: string): boolean {
@@ -3832,16 +3891,16 @@ function literalPresent(text: string, pattern: string, target: string): boolean 
 }
 
 /** Why a failed dialect grep is a proof-form error rather than a missing change, or `undefined`. */
-export function proofFormCorrection(proof: string, execCtx: ProofExecContext): string | undefined {
+export async function proofFormCorrection(proof: string, execCtx: ProofExecContext): Promise<string | undefined> {
   const w = parseWhitelistedProof(proof, execCtx.target);
   const target = w ? dialectGrepTargetPath(w) : undefined;
   if (!w || target === undefined || execCtx.baseCwd === undefined || execCtx.baseUnreadablePaths?.has(target)) return undefined;
   const pattern = w.args[2];
   if (proofFormText(pattern).length < PROOF_FORM_MIN_NEEDLE) return undefined;
-  const head = readTargetInside(execCtx.cwd, target);
-  if (head === undefined || !literalPresent(head, pattern, target)) return undefined;
-  const base = execCtx.addedTestFiles?.has(target) ? undefined : readTargetInside(execCtx.baseCwd, target);
-  if (base !== undefined && literalPresent(base, pattern, target)) return undefined;
+  const head = await readTargetInside(execCtx.cwd, target);
+  if (head.state !== 'read' || !literalPresent(head.text, pattern, target)) return undefined;
+  const base = execCtx.addedTestFiles?.has(target) ? {state:'absent' as const,reason:'test path added by this committed diff'} : await readTargetInside(execCtx.baseCwd, target);
+  if (base.state === 'unavailable' || base.state === 'read' && literalPresent(base.text, pattern, target)) return undefined;
   return (
     `grep (${w.label}) matched nothing as written, but its text IS in ${target} at head and absent at the merge-base ` +
     "once backslash escapes, backticks and line wraps are ignored — a proof-form error, not a missing change; " +
@@ -4065,7 +4124,7 @@ export function judgeCriterion(
                 execCtx.baseCwd !== undefined
                   ? classifyBaseProofOutcome(baseProofFor(criterion.proof, whitelisted, headResolution, execCtx.baseCwd, execCtx.target), exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles, execCtx.cwd, (note) => {
                       missingExportNote = note;
-                    })
+                    }, execCtx.missingExportNotes)
                   : undefined;
               if (baseOutcome === "base_unreadable") {
                 // The base tree exists and siblings were checked against it, but THIS proof's base blob never arrived,
@@ -4188,6 +4247,7 @@ export function judgeCriterion(
             proofExec = "cannot_evaluate";
             proofSkip = "cannot-load";
             loadError = e.loadError;
+            failureTail = proofFailureTail(e.loadOutput ?? "") || "(the proof printed nothing)";
             met = false;
             reason = `proof cannot-evaluate: test files failed to load after one toolchain refresh (${e.loadError})`;
           } else if (e instanceof ProofCwdMissingError) {
@@ -4250,7 +4310,7 @@ export function judgeCriterion(
     proofSkip = "no-exec-context";
   }
 
-  const proofForm = proofExec === "executed_fail" && execCtx ? proofFormCorrection(criterion.proof, execCtx) : undefined;
+  const proofForm = proofExec === "executed_fail" ? execCtx?.proofFormCorrections?.get(criterion.proof) : undefined;
   if (proofForm !== undefined) {
     proofExec = "not_executable";
     proofSkip = "proof-form";
@@ -4286,7 +4346,8 @@ export function judgeCriterion(
   return {
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
     ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}),
-    ...(proofExec === "executed_fail" && failureTail ? { failureTail } : {}), floorMet, holdout: !!criterion.holdout,
+    ...(proofExec === "executed_fail" || proofExec === "cannot_evaluate"
+      ? { failureTail: failureTail || "(the proof printed nothing)" } : {}), floorMet, holdout: !!criterion.holdout,
   };
 }
 
@@ -5383,7 +5444,9 @@ export interface ProofExecutionMemo {
 export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
   // Two maps rather than one sentinel-bearing map: a cached THROW and a cached "no-match" must not be distinguishable
   // only by a value that could itself be a legitimate result.
-  const returned = new Map<string, ReturnType<ProofExecutor>>();
+  const returned = new Map<string, {
+    outcome: ReturnType<ProofExecutor>; failureOutput?: string; failureTail?: string;
+  }>();
   const thrown = new Map<string, unknown>();
   let uniqueRuns = 0;
   let reuses = 0;
@@ -5399,12 +5462,15 @@ export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
       }
       if (returned.has(key)) {
         reuses += 1;
-        return returned.get(key) as ReturnType<ProofExecutor>;
+        const prior = returned.get(key)!;
+        whitelisted.failureOutput = prior.failureOutput;
+        whitelisted.failureTail = prior.failureTail;
+        return prior.outcome;
       }
       uniqueRuns += 1;
       try {
         const outcome = exec(whitelisted, cwd);
-        returned.set(key, outcome);
+        returned.set(key, { outcome, failureOutput: whitelisted.failureOutput, failureTail: whitelisted.failureTail });
         return outcome;
       } catch (e) {
         thrown.set(key, e);
@@ -5444,6 +5510,8 @@ export function judgeReview(
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
         cwd: evidence.headCheckoutDir,
+        proofFormCorrections: evidence.proofFormCorrections,
+        missingExportNotes: evidence.missingExportNotes,
         exec: proofMemo?.exec,
         target: evidence.target,
         baseCwd: evidence.baseCheckoutDir,
@@ -5729,12 +5797,14 @@ export async function judgeReviewAsync(
     | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string }
     | { error: unknown };
   const observed = new Map<string, Observation>();
+  const proofFormCorrections = new Map<string, string | undefined>();
+  const missingExportNotes = new Map<string, string | undefined>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
   const asyncExec: AsyncProofExecutor = evidence.asyncExecProof ??
     (evidence.execProof ? async (w, cwd) => evidence.execProof!(w, cwd) : execWhitelistedProofAsync);
   // The first fold requests head runs. A passing head may request a base run in the next fold.
   // No proof is launched until the existing judge asks for it, preserving filing carve-outs.
-  for (let pass = 0; pass <= criteria.length * 2 + 1; pass++) {
+  for (let pass = 0; pass <= criteria.length * 3 + 1; pass++) {
     const pending = new Map<string, { whitelisted: WhitelistedProof; cwd: string }>();
     const replay: ProofExecutor = (whitelisted, cwd) => {
       const key = keyOf(whitelisted, cwd);
@@ -5750,8 +5820,9 @@ export async function judgeReviewAsync(
       pending.set(key, { whitelisted, cwd });
       throw new Error("async proof observation pending");
     };
-    const verdict = judgeReview(criteria, { ...evidence, execProof: replay });
-    if (pending.size === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
+    const verdict = judgeReview(criteria, { ...evidence, execProof: replay, proofFormCorrections, missingExportNotes });
+    const pendingForms = verdict.criteria.filter(c => c.proof_exec === "executed_fail" && !proofFormCorrections.has(c.proof));
+    if (pending.size === 0 && pendingForms.length === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
     for (const [key, { whitelisted, cwd }] of pending) {
       try {
         const outcome = await asyncExec(whitelisted, cwd);
@@ -5762,7 +5833,20 @@ export async function judgeReviewAsync(
       } catch (error) {
         // Preserve this exact proof error for the next deterministic verdict fold.
         observed.set(key, { error });
+        const output = (error as { loadOutput?: unknown })?.loadOutput;
+        if (whitelisted.kind === "test" && cwd === evidence.baseCheckoutDir && typeof output === "string") {
+          const noteKey = JSON.stringify([cwd, evidence.headCheckoutDir, output]);
+          if (!missingExportNotes.has(noteKey)) missingExportNotes.set(noteKey,
+            await baseLacksPrAddedExports(output, cwd, evidence.headCheckoutDir));
+        }
       }
+    }
+    for (const criterion of pendingForms) {
+      if (proofFormCorrections.has(criterion.proof)) continue;
+      proofFormCorrections.set(criterion.proof, await proofFormCorrection(criterion.proof, {
+        cwd: evidence.headCheckoutDir, target: evidence.target, baseCwd: evidence.baseCheckoutDir,
+        baseUnreadablePaths: evidence.baseUnreadablePaths, addedTestFiles: evidence.addedTestFiles,
+      }));
     }
   }
   throw new Error("async proof observations did not converge");
@@ -6389,6 +6473,119 @@ export interface ReviewStatusEntry {
    * authenticating credential rather than the request body. `undefined` only if GitHub's response is malformed, and
    * treated the same as a mismatched login. */
   posterLogin?: string;
+  posterType?: string;
+}
+
+export function reviewStatusEntryFromCombined(payload: unknown): ReviewStatusEntry | undefined {
+  const raw = payload as {
+    statuses?: Array<{ context?: string; state?: string; creator?: { login?: string; type?: string } }>;
+  };
+  if (!raw || !Array.isArray(raw.statuses) || raw.statuses.some(entry => !entry || typeof entry.context !== "string")) {
+    throw new Error("combined commit status has no readable statuses array");
+  }
+  const entry = raw.statuses.find(entry => entry.context === REVIEW_CONTEXT);
+  if (!entry) return undefined;
+  const state = entry.state === "error" ? "failure" : entry.state;
+  if (state !== "success" && state !== "pending" && state !== "failure") throw new Error("unrecognized remudero-review state");
+  return { state, posterLogin: entry.creator?.login, posterType: entry.creator?.type };
+}
+
+export async function readReviewStatusEntry(owner: string, repo: string, sha: string,
+  fetch: GhApiFetcher = (args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit),
+): Promise<ReviewStatusEntry | undefined> {
+  return reviewStatusEntryFromCombined(await fetch(combinedStatusRestArgs(owner, repo, sha)));
+}
+
+export interface ReviewReplayPublisherEvidence {
+  requiredAppId: number | null;
+  trustedLogin?: string;
+  posterLogin?: string;
+  publisherAppId?: number;
+  publishingAppId?: number;
+  source: "required-app" | "trusted-login" | "legacy";
+}
+
+let nativeReviewPublisher: { tokenDigest: string; appId: number; expiresAtMs: number } | undefined;
+const publisherTokenDigest = (token: string) => createHash("sha256").update(token).digest("hex");
+
+/** Retain proof from the existing native exchange, bound to its exact token, without logging credentials. */
+export async function refreshReviewPublisherToken(opts: RefreshOptions = {}): ReturnType<typeof refreshInstallationToken> {
+  const env = opts.env ?? process.env;
+  const appId = Number(opts.appId ?? env.GH_APP_ID);
+  const result = await refreshInstallationToken(opts);
+  if (result.ok && env === process.env && env.GH_TOKEN && Number.isSafeInteger(appId) && appId > 0) {
+    nativeReviewPublisher = { tokenDigest: publisherTokenDigest(env.GH_TOKEN), appId, expiresAtMs: result.expiresAtMs! };
+  }
+  return result;
+}
+
+async function replayPublisher(
+  opts: PostReviewStatusGuardedOpts,
+  lifecycle: PrLifecycleState,
+  entry: ReviewStatusEntry | undefined,
+): Promise<{ trusted: boolean; canPublish: boolean; evidence: ReviewReplayPublisherEvidence }> {
+  const fetch = opts.fetchPublisher ?? ghJsonAsync;
+  let snapshot: RequiredStatusChecksSnapshot | undefined;
+  // status.ts's graph reaches review; load its existing reader only after both modules initialized.
+  const statusModule = "./status.js";
+  const { readRequiredStatusCheckContextsAsync } = await import(statusModule);
+  const binding = await readRequiredStatusCheckContextsAsync(opts.owner, opts.repo, encodeURIComponent(lifecycle.baseRef ?? "main"), async (args: string[]) => {
+    const raw = await fetch(args);
+    snapshot = raw as RequiredStatusChecksSnapshot;
+    return JSON.stringify(raw);
+  });
+  if (binding.kind === "unreadable") throw new Error(`required publisher source unreadable: ${binding.reason}`);
+  if (!snapshot || (snapshot.contexts !== undefined && (!Array.isArray(snapshot.contexts) ||
+      snapshot.contexts.some(context => typeof context !== "string"))) || !Array.isArray(snapshot.checks) || snapshot.checks.some(check =>
+    !check || typeof check.context !== "string" || !check.context.trim() ||
+    (check.app_id !== null && (!Number.isSafeInteger(check.app_id) || check.app_id <= 0)))) {
+    throw new Error("required publisher source malformed: checks must carry explicit App IDs or null");
+  }
+  const checks = snapshot.checks.filter(check => check.context === REVIEW_CONTEXT);
+  if (checks.length > 1 || (snapshot.contexts?.includes(REVIEW_CONTEXT) && checks.length === 0)) {
+    throw new Error("required publisher source malformed: ambiguous review binding");
+  }
+  const requiredAppId = checks.length && !unpinnedRequiredContexts(snapshot).includes(REVIEW_CONTEXT) ? checks[0].app_id : null;
+  const trustedLogin = process.env[REVIEWER_IDENTITY_ENV]?.trim();
+  const evidence: ReviewReplayPublisherEvidence = {
+    requiredAppId, ...(entry?.posterLogin ? { posterLogin: entry.posterLogin } : {}),
+    ...(requiredAppId === null && trustedLogin ? { trustedLogin } : {}),
+    source: requiredAppId !== null ? "required-app" : trustedLogin ? "trusted-login" : "legacy",
+  };
+  if (entry && (typeof entry.posterLogin !== "string" || !entry.posterLogin.trim() ||
+      (entry.posterType !== "Bot" && entry.posterType !== "User"))) {
+    throw new Error("live review publisher creator is unknown or malformed");
+  }
+  if (requiredAppId !== null) {
+    let trusted = false;
+    const slug = entry?.posterType === "Bot" && /^([a-z0-9-]+)\[bot\]$/i.exec(entry.posterLogin!);
+    if (slug) {
+      const app = await fetch(["api", `apps/${slug[1]}`]) as { id?: number; slug?: string };
+      if (!app || !Number.isSafeInteger(app.id) || app.id! <= 0 || typeof app.slug !== "string" || app.slug.toLowerCase() !== slug[1].toLowerCase()) {
+        throw new Error("live review publisher App metadata is malformed");
+      }
+      evidence.publisherAppId = app.id;
+      trusted = app.id === requiredAppId && resolveReviewProvenance(entry, `${app.slug}[bot]`) !== "absent";
+    }
+    const token = process.env[REVIEWER_TOKEN_ENV] || process.env.GH_TOKEN;
+    const canPublish = nativeReviewPublisher !== undefined && token !== undefined &&
+      nativeReviewPublisher.tokenDigest === publisherTokenDigest(token) && nativeReviewPublisher.appId === requiredAppId &&
+      nativeReviewPublisher.expiresAtMs > systemClock.now();
+    if (canPublish) evidence.publishingAppId = nativeReviewPublisher!.appId;
+    return { trusted, canPublish, evidence };
+  }
+  const trusted = entry !== undefined && (!trustedLogin || resolveReviewProvenance(entry, trustedLogin) !== "absent");
+  // An unpinned legacy repository retains its established posting semantics. A configured identity
+  // must instead be authenticated by the exact credential the existing status poster will use.
+  let canPublish = !trustedLogin;
+  if (trustedLogin && (!trusted || entry?.state === "pending")) {
+    const token = process.env[REVIEWER_TOKEN_ENV];
+    const env = token ? { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token } : process.env;
+    const user = await ghJsonAsync(["api", "user"], (file, args, options) =>
+      execFileLoopBounded(file, args, { ...options, env })) as { login?: string };
+    canPublish = resolveReviewProvenance({ state: "success", posterLogin: user.login }, trustedLogin) === "success";
+  }
+  return { trusted, canPublish, evidence };
 }
 
 /** THE PROVENANCE GATE (acceptance criteria 1-3). Resolve what a fetched `remudero-review` status ACTUALLY proves,
@@ -6940,7 +7137,7 @@ export function failSummary(
 // ── The fresh-context reviewer prompt (read-only + gh, never edits) ─────────
 
 export interface ReviewPromptInput {
-  task: { id: string; acceptance?: AcceptanceCriterion[] };
+  task: { id: string; acceptance?: AcceptanceCriterion[] } & ReviewTaskNarrativeInput;
   prUrl: string;
   owner: string;
   repo: string;
@@ -6957,6 +7154,8 @@ export interface ReviewPromptInput {
  * alone; when a proof names an executable check it receives an already-materialised disposable PR-head checkout and
  * RUNS it, verdicting on the OBSERVED result. It never edits the PR's code or changes the head sha it judges. */
 export function buildReviewPrompt(input: ReviewPromptInput): string {
+  const narrative = reviewTaskNarrative(input.task);
+  if (narrative === undefined) throw new Error("review task narrative is unavailable");
   const criteria = (input.task.acceptance ?? [])
     .map((c, i) => `  ${i + 1}. CLAIM: ${c.claim}\n     PROOF: ${c.proof}`)
     .join("\n");
@@ -6977,6 +7176,13 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `DECLARED PATHS: ${declaredFiles}`,
     `CHANGED PATHS: ${changedFiles}`,
     `WIDENED PATHS (changed but not declared): ${widenedFiles}`,
+    ...(narrative.design ? ["", "AUTHORITATIVE TASK DESIGN AT THIS HEAD:", narrative.design] : []),
+    ...(narrative.amendment ? ["", "AUTHORITATIVE TASK AMENDMENT AT THIS HEAD:", narrative.amendment] : []),
+    ...(narrative.design || narrative.amendment ? [
+      "Honor these constraints when judging the stated criteria. A passing proof does not",
+      "substantiate a claim if its implementation violates an explicit preservation constraint.",
+      "Name the affected criterion, exact constraint and changed behavior; do not invent criteria.",
+    ] : []),
     ``,
     `Do this:`,
     `1. Read the PR diff:            gh pr diff ${input.prUrl}`,
@@ -7058,20 +7264,22 @@ export function reviewerVerdictContract(count: number): string {
 
 /** (W1-T2263) Widened off the original bare verdict-line pattern with a trailing capture group for whatever the
  *  reviewer wrote after the token, SAME LINE ONLY — the character class excludes `\r`/`\n`, so a clause can never span
- *  lines by construction. {@link parseReviewerVerdicts} still reads only groups 1 and 2, so its return is
- *  byte-identical; {@link parseReviewerVerdictClauses} reads group 3. One regex, two readers. */
+ *  lines by construction. {@link parseReviewerVerdicts} reads groups 1 and 2 for observed verdicts;
+ *  {@link parseReviewerVerdictClauses} reads group 3. One regex, two readers. */
 const REVIEW_VERDICT_LINE_RE = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL)\b([^\r\n]*)/gi;
 
 /** Parse the reviewer's `REVIEW_VERDICT <n>: PASS|FAIL` lines into a semantic array index-aligned to the criteria.
- *  `FAIL` ⇒ `false`, forcing that criterion to fail; `PASS` or absent ⇒ `undefined`, deferring to the mechanical
- *  floor. Advisory and downgrade-only, so unparseable output yields an all-`undefined` array, fail-closed. */
+ *  `FAIL` is `false`, an observed `PASS` is `true`, and missing output remains `undefined`. The required
+ *  semantic-completion gate must distinguish a real PASS from missing evidence. Certification is still
+ *  downgrade-only: judgeCriterion consults only `semantic === false`, so true never rescues a failed floor. */
 export function parseReviewerVerdicts(text: string, count: number): (boolean | undefined)[] {
   const semantic: (boolean | undefined)[] = new Array(count).fill(undefined);
   for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
     const n = Number(m[1]) - 1;
     if (n < 0 || n >= count) continue;
-    // Only ever record a downgrade; a PASS leaves the floor to decide.
+    // A witnessed FAIL wins even if a later line says PASS. Presence is not certification.
     if (m[2].toUpperCase() === "FAIL") semantic[n] = false;
+    else if (semantic[n] !== false) semantic[n] = true;
   }
   return semantic;
 }
@@ -7602,6 +7810,7 @@ export interface PlanCriteriaAtHeadResult {
   /** Routing/spend metadata from the same task record at the same head as {@link criteria}. */
   taskRisk?: TaskRisk;
   taskBudgetUsd?: number;
+  taskNarrative?: ReviewTaskNarrativeInput;
   source?: string;
   divergence?: PlanCriteriaAtHeadDivergence;
 }
@@ -7695,6 +7904,13 @@ function planCriteriaAtHeadResult(
     taskDeclaredFiles: t?.files,
     taskRisk: t?.risk,
     taskBudgetUsd: t?.budget_usd,
+    ...(t && (t.design !== undefined || t.amendment !== undefined || t.narrativeUnavailable) ? {
+      taskNarrative: {
+        ...(t.design === undefined ? {} : { design: t.design }),
+        ...(t.amendment === undefined ? {} : { amendment: t.amendment }),
+        ...(t.narrativeUnavailable ? { narrativeUnavailable: true as const } : {}),
+      },
+    } : {}),
     source: criteria.length
       ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` + (identity ? ` — read: ${identity}` : "")
       : undefined,
@@ -8593,6 +8809,11 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * {@link INSTRUMENT_SURFACE_EXCLUSIONS} plus
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
+  "^plan/credit-overrides\\.yaml$",
+  "^scripts/lib/ci-dependency-evidence\\.mjs$",
+  "^scripts/preflight-author\\.mjs$",
+  "^scripts/calibrate-author-runtime\\.mjs$",
+  "^scripts/lib/author-step-capture\\.mjs$",
   "^src/lib/review\\.ts$",
   "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
@@ -8665,6 +8886,10 @@ const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
  * found eleven), where widening what refuses a PR must be
  * measured against real merged diffs first. */
 export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
+  "docs/docs-index.json":
+    "Generated document inventory (paths, titles, summaries and search hints), not validation rule logic. " +
+    "scripts/generate-docs-index.mjs --check and --check-paths still enforce freshness and path consistency; " +
+    "this exact data classification exempts neither the generator nor another JSON file or executable.",
   // ── verified non-instrument: content/data a gate validates, not the rule that validates it ──
   "openapi/daemon.yaml":
     "the daemon's API schema (content) — scripts/generate-api-client.mjs is the enforcement logic and is tracked below",
@@ -8894,6 +9119,9 @@ export const ENFORCEMENT_DATA_EXCLUSIONS: Readonly<Record<string, string>> = {
   "plan/seeds/inbox-recommendations-2026-10-13.json":
     "W1-T8950's operator-session recommendations, imported once as the inbox items' suggested decisions; " +
     "no gate reads them, and every action they suggest still goes through the inbox route's own tier and auth",
+  "plan/seeds/test-restructure-2026-10-16/subsystem-map.json":
+    "the test-restructure design seed (W1-T9874): src/lib/test-placement.ts reads its COMMITTED COPY " +
+    "scripts/test-placement/subsystem-map.json, matched here only by shared basename; no gate reads the seed",
 };
 
 /** The enforcement-data paths a changed-file list touches, in diff order (W1-T427) — the OBSERVED EVIDENCE named on
@@ -10351,6 +10579,7 @@ export function assessPendingReviewOwner(
 export interface PrLifecycleState {
   merged: boolean;
   closed: boolean;
+  baseRef?: string;
   /** Content address of the live head+body returned by the SAME single-PR REST read. Optional
    *  only for legacy/injected callers that can observe lifecycle but not the review subject. */
   reviewInputDigest?: string;
@@ -10388,6 +10617,7 @@ export function fetchPrLifecycle(
   const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
   const state = prStateFromRest(row);
   const headSha = row.head?.sha;
+  const baseRef = (row.base as { ref?: unknown } | undefined)?.ref;
   const currentInput =
     (row.state === "open" || row.state === "closed") &&
     typeof headSha === "string" &&
@@ -10398,8 +10628,24 @@ export function fetchPrLifecycle(
   return {
     merged: state === "MERGED",
     closed: state === "CLOSED",
+    ...(typeof baseRef === "string" && baseRef ? { baseRef } : {}),
     ...(currentInput !== undefined ? { reviewInputDigest: currentInput } : {}),
   };
+}
+
+/** Retry only the fresh read; every successful response still faces the existing publication guards. */
+async function readReviewLifecycle(fetch: PostReviewStatusGuardedOpts["fetchLifecycle"]): Promise<PrLifecycleState> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return fetch();
+    } catch (error) {
+      const waitMs = POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (attempt - 1);
+      // Pacing and longer server-requested waits retain their existing outer recovery owner.
+      if (classifyFailure({ text: ghErrorText(error) }) !== "transient" || classifyGhLimitFailure(error) !== undefined ||
+          attempt >= POST_REVIEW_STATUS_MAX_ATTEMPTS || (defaultGhRetryAfterSeconds(error) ?? 0) * 1000 > waitMs) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
 }
 
 // ── W1-T2419: the PR-review channel is append-only, unlike the status row above ────────────────
@@ -10756,7 +11002,9 @@ export interface PostReviewStatusGuardedOpts {
   fetchLifecycle: () => PrLifecycleState;
   /** Latest GitHub commit status for this context, read inside the lock on a decision replay.
    * A later pending claim can replace the status even though the ledger's terminal decision remains final. */
-  fetchCurrentStatus?: () => PostableReviewState | undefined;
+  fetchCurrentStatus?: () => PostableReviewState | ReviewStatusEntry | undefined;
+  fetchCurrentStatusEntry?: () => ReviewStatusEntry | undefined | Promise<ReviewStatusEntry | undefined>;
+  fetchPublisher?: GhApiFetcher;
   /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a TRANSIENT gh error
    *  internally (rule (iv) above). May return a Promise, as the default does, or `void`. */
   post?: (o: {
@@ -10782,6 +11030,7 @@ export interface PostReviewStatusGuardedResult {
   conflict?: boolean;
   replayed?: boolean;
   effectiveState?: ReviewState;
+  publisherEvidence?: ReviewReplayPublisherEvidence;
   /** Present only when `posted` is false — either {@link decideReviewStatusPost} refused the write (see
    * `review.post_refused`), or the post itself failed after retries or as a permanent error (`review.post_failed`). */
   reason?: string;
@@ -10858,18 +11107,21 @@ export async function postReviewStatusGuarded(
       opts.prUrl !== undefined && opts.reviewInputDigest !== undefined
         ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl, opts.sha, opts.reviewInputDigest)
         : lastPostedReviewStatusFromLedger(lines, opts.taskId);
-    const lifecycle = opts.fetchLifecycle();
+    const lifecycle = await readReviewLifecycle(opts.fetchLifecycle);
     const priorDecision = opts.prUrl !== undefined && opts.reviewDecisionDigest !== undefined
       ? lastReviewDecisionTerminal(lines, opts.taskId, opts.prUrl, opts.reviewDecisionDigest)
       : undefined;
     const replacingDegradedTerminal = opts.reopenedDegradedTerminal === true && priorDecision !== undefined &&
       isReopenableDegradedTerminal(priorDecision, true);
+    let publisherEvidence: ReviewReplayPublisherEvidence | undefined;
     const withholdReplay = (reason: string): PostReviewStatusGuardedResult => {
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused",
         head_sha: opts.sha, attempted_state: opts.state, evidence: opts.evidence, reason,
         ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
         ...(opts.reviewDecisionDigest !== undefined ? { review_decision_digest: opts.reviewDecisionDigest } : {}),
+        ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+        ...(publisherEvidence ? { status_publisher: publisherEvidence } : {}),
       });
       return { posted: false, reason };
     };
@@ -10880,10 +11132,21 @@ export async function postReviewStatusGuarded(
           reason: "cannot-evaluate hold cannot overwrite a terminal verdict for the same review decision" };
       }
       if (priorDecision.state === opts.state) {
-        if (opts.fetchCurrentStatus) {
+        const guarded = decideReviewStatusPost({ headSha: opts.sha, state: opts.state, evidence: opts.evidence,
+          reviewInputDigest: opts.reviewInputDigest }, prior, lifecycle);
+        if (!guarded.post) return withholdReplay(guarded.reason);
+        {
           let current: PostableReviewState | undefined;
           try {
-            current = opts.fetchCurrentStatus();
+            const raw = await (opts.fetchCurrentStatusEntry ? opts.fetchCurrentStatusEntry() : opts.fetchCurrentStatus
+              ? opts.fetchCurrentStatus() : readReviewStatusEntry(opts.owner, opts.repo, opts.sha));
+            const entry = typeof raw === "string" ? { state: raw } : raw;
+            const publisher = await replayPublisher(opts, lifecycle, entry);
+            publisherEvidence = publisher.evidence;
+            if (publisher.trusted) current = entry?.state;
+            if ((!publisher.trusted || current === "pending" || current === undefined) && !publisher.canPublish) {
+              return withholdReplay(`required review publisher mismatch: live '${entry?.posterLogin ?? "absent"}', required ${publisher.evidence.requiredAppId ?? publisher.evidence.trustedLogin ?? "legacy publisher"}; current credential is not an authorized publisher`);
+            }
           } catch (error) {
             return withholdReplay(`could not verify the live remudero-review status: ${String(error)}`);
           }
@@ -10892,7 +11155,7 @@ export async function postReviewStatusGuarded(
             return withholdReplay(`live remudero-review is ${current} while the final decision is ${priorDecision.state}; refusing to overwrite a conflicting terminal status`);
           }
         }
-        if (!restoreTerminal) return { posted: false, replayed: true, effectiveState: priorDecision.state, reason: "terminal verdict already exists for this review decision" };
+        if (!restoreTerminal) return { posted: false, replayed: true, effectiveState: priorDecision.state, publisherEvidence, reason: "terminal verdict already exists for this review decision" };
       }
       if (!restoreTerminal) {
         const reason = `contradictory ${opts.state} attempted after terminal ${priorDecision.state} for review decision ${opts.reviewDecisionDigest}`;
@@ -10929,7 +11192,7 @@ export async function postReviewStatusGuarded(
         return { posted: false, conflict: true, effectiveState: "failure", reason };
       }
     }
-    const decision = restoreTerminal ? { post: true as const } : decideReviewStatusPost(
+    const decision = decideReviewStatusPost(
       {
         headSha: opts.sha,
         state: opts.state,
@@ -11009,7 +11272,7 @@ export async function postReviewStatusGuarded(
         pr_url: opts.prUrl, head_sha: opts.sha, issue_url: issueUrl,
       });
     }
-    return { posted: true };
+    return { posted: true, ...(publisherEvidence ? { publisherEvidence } : {}) };
   } finally {
     handle.release();
   }
@@ -11086,7 +11349,7 @@ export interface PostReviewPendingResult {
  * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
  * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
-  const lifecycle = opts.fetchLifecycle();
+  const lifecycle = await readReviewLifecycle(opts.fetchLifecycle);
   if (lifecycle.merged || lifecycle.closed) {
     const closed = lifecycle.merged ? "merged" : "closed";
     const reason = `pr_${closed}`;

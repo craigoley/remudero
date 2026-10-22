@@ -12,7 +12,8 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { observeWhyMeFeedback, validWhyMeFeedback, type WhyMeFeedback } from "./inbox-why-me.js";
 import { validInboxDismissalAudit, type InboxDismissalAudit } from "./inbox-dismissal-audit.js";
 
-import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
+import { declinedWithReceipts } from "./inbox-verdict-receipts.js";
+import { isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { AttentionCensus, AttentionJudgment } from "./inbox-responder.js";
 import { classificationSnapshotKey } from "./read-page.js";
@@ -173,7 +174,7 @@ export interface PersistedInbox extends PersistedInboxContent {
   generatedAt: string;
 }
 
-function validInboxSnapshot(value: Partial<PersistedInbox>): boolean {
+export function validInboxSnapshot(value: Partial<PersistedInbox>): boolean {
   if (value.snapshotKey === undefined && value.attentionCensus === undefined) return true;
   const census = value.attentionCensus;
   const scope = value.snapshotScope;
@@ -467,6 +468,7 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, re
   const generatedMs = snapshot.generatedAt === null ? Number.NaN : Date.parse(snapshot.generatedAt);
   const age = Number.isFinite(generatedMs) ? { classificationAgeMs: now - generatedMs } : {};
   const ledger = readLedger(deps.ledgerPath);
+  const isDeclined = declinedWithReceipts(ledger as never, deps.stateDir);
   const store = readFleetLaneStore(deps.stateDir);
   const proposals = parseProposalRegistry(readJson(`${deps.stateDir}/inbox-proposals.json`));
   const drafts = parseDraftCache(readJson(`${deps.stateDir}/inbox-drafts.json`));
@@ -491,7 +493,7 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, re
       OPEN_STATES.has(states[p.id] ?? "") &&
       !existsSync(fleetLaneOffPath(deps.stateDir, inboxKind(p.id))) &&
       !isRatifiedInLedger(ledger as never, p.id) &&
-      declinedReasonInLedger(ledger as never, p.id) === undefined &&
+      isDeclined(p.id) === undefined &&
       !decidedIds.has(p.id),
   );
 

@@ -1,0 +1,35 @@
+- id: W1-T10016
+  title: "THE scan-pr / osv-scan GATE REFUSED 1 PULL REQUEST IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10016 — The lesson is derived from #12305, whose
+  # repair added the GHSA-84m7 OSV ignore (osv-scanner.toml) that the operator REVERTED in #12342 (no security-
+  # gate waivers). Teaching that repair as guidance would encode a waiver. Machine-released on 10-20; retire
+  # before it builds.
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:12305:scan-pr / osv-scan"
+  ci_learning_prs: [12305]
+  files:
+    - learnings/ci.d/ci-learning-12305-scan-pr-osv-scan.yaml
+  acceptance:
+    - claim: "the lane that trips the scan-pr / osv-scan gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:12305:scan-pr / osv-scan in learnings/ci.d/ci-learning-12305-scan-pr-osv-scan.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:12305:scan-pr / osv-scan. The scan-pr / osv-scan gate went red on #12305 and was repaired; the repair touched .github/semgrep/osv-scanner.toml, test/semgrep-native-install.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.8
+    reasons:
+      - "The change declares a single new file, learnings/ci.d/ci-learning-12305-scan-pr-osv-scan.yaml, which is a learnings entry. This is guidance text and does not touch secrets, auth, deploy, merge policy, or deletions."
+      - "The ci-learning family has a strong track record (31 merged, 1 declined, Beta mean 0.94), and the task follows the established pattern of filing one learnings entry per gate failure."
+      - "The note says \"MACHINE-AUTHORED AND PARKED\", and the PR still goes through CI and review. The absence of the file at base is expected for a new-file addition. The acceptance criterion is a grep check that can be verified."
+      - "The note's \"Recommended action: unclear\" is a mild caveat, but the remedy surface is limited to learnings/*.yaml, so the blast radius stays small."
+      - "the judge said proceed, but W1-T10016: at verify: auto lint-plan's machine-filing admission refuses it (task W1-T10016 declares file path(s) that exist in neither the checkout nor the base tree: learnings/ci.d/ci-learning-12305-scan-pr-osv-scan.yaml)"
+    judged_at: "2026-10-20T00:43:18.023Z"
+    pin: "473ed05603b8a7848dfa014f0674c189232875442c12f98ca9db438dd81ee0c0"
