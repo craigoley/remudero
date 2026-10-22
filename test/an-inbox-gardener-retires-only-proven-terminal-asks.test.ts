@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test, { type TestContext } from "node:test";
 import fs from "node:fs";
 import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, renameSync } from "node:fs";
@@ -6,6 +7,8 @@ import { gzipSync } from "node:zlib";
 import { hostname } from "node:os";
 import { gitRepo } from "./helpers/git-repo.js";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "./helpers/repo-root.js";
 import type { AddressInfo } from "node:net";
 import { fixedClock } from "../src/lib/clock.js";
 import { readPersistedInbox, triageFleetLane } from "../src/lib/fleet-lane.js";
@@ -30,7 +33,17 @@ import { refreshInboxClassification } from "../src/lib/inbox-view.js";
 type T = Parameters<typeof world>[0];
 const TASK = "W1-T1200", ID = `proof-debt:${TASK}`;
 async function fixture(t: T, count = 1, native = false) {
-  const w = await world(t, { native });
+  const cleanups: Array<() => void | Promise<void>> = [];
+  const owned: T = { after(cleanup) { cleanups.push(cleanup); } };
+  t.after(async () => {
+    const failures: unknown[] = [];
+    for (const cleanup of cleanups.reverse()) {
+      try { await cleanup(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "inbox fixture cleanup failed");
+  });
+  const w = await world(owned, { native });
   let now = Date.now();
   const scope: InboxGardenerScope = { repository: w.repository, instance: w.instance, root: w.root };
   const ids = Array.from({ length: count }, (_, i) => `W1-T${1200 + i}`);
@@ -64,7 +77,7 @@ async function fixture(t: T, count = 1, native = false) {
     authorize(req) { return req.headers.authorization === "Bearer alice" ? { scopes: new Set(["read", "write"]), tier: "low", actor: "operator:alice" } : undefined; } }],
     routes: mountInstanceInboxRoutes({ instance: w.instance, repository: w.repository, stateDir: w.state, routes: restoreSources }) });
   await new Promise<void>(resolve => restoreServer.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise<void>(resolve => restoreServer.close(() => resolve())));
+  owned.after(() => new Promise<void>(resolve => restoreServer.close(() => resolve())));
   const restore = async (input: Record<string, unknown>, token = "alice") => {
     const res = await fetch(`http://127.0.0.1:${(restoreServer.address() as AddressInfo).port}/v1/i/core/inbox/retirement-restore`, { method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(input) });
@@ -72,6 +85,33 @@ async function fixture(t: T, count = 1, native = false) {
   };
   return { ...w, scope, ids, mergedIds, ports, run, store, source, githubCalls, restore, mismatch: (value: boolean) => { mismatchQualifier = value; }, onRestoreAdmit: (hook?: () => void) => { restoreAdmitHook = hook; }, advance: () => { now += 1000; }, now: () => now };
 }
+
+test("inbox fixture cleanup closes its servers even when directory removal fails", () => {
+  const injection = `import fs from "node:fs";
+    import { basename } from "node:path";
+    import { syncBuiltinESMExports } from "node:module";
+    const remove = fs.rmSync; let fired = false;
+    fs.rmSync = (path, options) => {
+      if (!fired && typeof path === "string" && basename(path).startsWith("rmd-why-me-")) {
+        fired = true;
+        throw Object.assign(new Error("controlled root cleanup failure"), { code: "ENOTEMPTY" });
+      }
+      return remove(path, options);
+    };
+    syncBuiltinESMExports();`;
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, ["--experimental-test-isolation=none", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
+    "--import", `data:text/javascript,${encodeURIComponent(injection)}`, "--test", "--test-reporter=tap",
+    "--test-name-pattern=^the inbox gardener retires a proven terminal ask once and can restore it$", fileURLToPath(import.meta.url)],
+    { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 10_000 });
+  assert.ifError(child.error);
+  assert.equal(child.status, 1, child.stderr);
+  assert.match(child.stdout, /failureType: 'hookFailed'/);
+  assert.match(child.stdout, /controlled root cleanup failure/);
+  assert.match(child.stdout, /# tests 1\b/);
+  assert.match(child.stdout, /# fail 1\b/);
+});
 
 test("the inbox gardener retires a proven terminal ask once and can restore it", async t => {
   const f = await fixture(t), original = f.source().snapshotKey!;
