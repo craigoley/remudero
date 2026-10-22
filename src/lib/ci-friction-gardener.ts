@@ -459,11 +459,36 @@ export function ciFailureSignature(logTail: string): string | undefined {
 const CI_RUNNER_TIMEOUT_LINE =
   /exceeded the maximum execution time|The (?:operation|job|run) was canceled|received a shutdown signal|SHARD HANG\W+the matrix was cancelled/i;
 
+/** W1-T10171: a runner's own word that one test finished — a TAP test point or a spec result. */
+const CI_TEST_POINT = /^(?:not )?ok \d+ - |^[✔✖] /;
+
+/** W1-T10171: `bodies` with every `pure-test-pool:` line a TEST printed blanked (sweep.ts states it
+ *  twice, as it does the timeout line). The runner prints its POOL DEFECT verdict after every test run
+ *  it streams has ended, so a POOL DEFECT line that any test point follows was a test's output (the fast
+ *  tier's leak-locate fixture writes one into every log that runs it), and so is every pool line since
+ *  the test point before it. */
+function withoutTestPrintedPoolLines(bodies: readonly string[]): string[] {
+  const out = [...bodies];
+  let followed = false;
+  let printed = false;
+  for (let i = bodies.length - 1; i >= 0; i -= 1) {
+    const b = bodies[i]!;
+    if (CI_TEST_POINT.test(b)) {
+      followed = true;
+      printed = false;
+    } else {
+      if (followed && /^pure-test-pool: POOL DEFECT\b/.test(b)) printed = true;
+      if (printed && b.startsWith("pure-test-pool:")) out[i] = "";
+    }
+  }
+  return out;
+}
+
 /** W1-T8038: the signature of a pool defect, a pooled failure that passes isolated, or a job killed at
  *  its ceiling — the shapes whose red names no test on its own. `undefined` when the tail is none of them
  *  (or is a timeout that nevertheless names a real failing test), so the ordinary arms decide. */
 export function poolOrTimeoutSignature(lines: readonly string[]): string | undefined {
-  const bodies = lines.map((l) => stripLogTimestamp(l).trim());
+  const bodies = withoutTestPrintedPoolLines(lines.map((l) => stripLogTimestamp(l).trim()));
   const defect = bodies.map((b) => /^pure-test-pool: POOL DEFECT\b.*?leaking file: (not isolated to one file|\S+)(?: \(first failing alongside it: ([^)]+)\))?/.exec(b)).find((m) => m);
   if (defect) {
     const leaker = defect[1]!;
