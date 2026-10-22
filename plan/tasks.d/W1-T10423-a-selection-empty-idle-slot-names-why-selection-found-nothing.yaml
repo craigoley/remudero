@@ -1,0 +1,37 @@
+- id: W1-T10423
+  title: "A selection_empty IDLE SLOT NAMES WHY SELECTION FOUND NOTHING — incident c9de468bdb48 fired idle-capacity:selection_empty with dispatchable=3 and hold `selection_empty:unnamed` (no reason, no setter); record the selection's own refusal reason so the incident names the hold"
+  repo: remudero
+  depends_on: [W1-T8235, W1-T8238]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#incident-c9de468bdb4888a8"
+  plan_refs: [W1-T8235, W1-T8238]
+  files: [src/lib/idle-lane-accounting.ts, src/lib/idle-capacity-detector.ts, src/lib/daemon.ts, test/a-selection-empty-idle-slot-names-why-selection-found-nothing.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Rule 19 span: one integration test must carry the daemon's selection refusal through idle-lane accounting into the detector's incident; no subsystem alone can satisfy that invariant.
+    Incident c9de468bdb48 (core, 2026-10-15 04:12Z onward, 29-41 slot-minutes, dispatchable=3) fired
+    idle-capacity:selection_empty with hold "selection_empty:unnamed" and setter "unrecorded".
+    idle-capacity-detector.ts falls back to `${cause}:unnamed` when the sample carries no hold reason, and
+    idleLaneCauseOf returns selection_empty whenever selection ran and returned nothing, without recording why
+    (e.g. no disjoint runnable task, file overlap with in-flight lanes, dependency or budget gates). The detector
+    works as designed (W1-T8238) but the finding cannot be acted on: a person must read the ledger to learn why
+    three dispatchable tasks were not selected.
+  design: |
+    1. When candidate selection returns empty while dispatchable > 0, daemon.ts records the selection's own
+       refusal reason (the same text behind `no disjoint runnable task...` or the per-candidate skip reasons,
+       summarised by count per reason) on the idle sample as the hold reason.
+    2. idle-lane-accounting.ts carries that reason into `lane.idle_changed` / `holds`, and the detector uses it as
+       `hold=` instead of `selection_empty:unnamed`. `:unnamed` remains only when selection truly recorded nothing.
+    3. No new threshold; detection logic is unchanged.
+  acceptance:
+    - claim: "one integration test exercises daemon selection returning empty with dispatchable candidates and a concrete refusal, carries that refusal through idle-lane accounting, and asserts the detector incident reports the same hold reason instead of selection_empty:unnamed"
+      proof: "unit test: test/a-selection-empty-idle-slot-names-why-selection-found-nothing.test.ts"
+  falsifier: |
+    Leave the sample without a reason: the detector still reports hold=selection_empty:unnamed and the test fails.
