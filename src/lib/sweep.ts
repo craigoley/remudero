@@ -5628,20 +5628,21 @@ async function applyCiTimeoutRefresh(
   return `${head}; base refresh requested, a new head re-runs them — no requeue or fix strike`;
 }
 
-/** W1-T5939: during an Actions incident, hold a red that is only cancelled (W1-T2430's fold) or
- *  never-started (W1-T5921) checks; returns the stand-down reason, or undefined to proceed. */
+/** During an Actions incident, hold cancelled/never-started reds and an already-proven
+ *  terminal-run pinned job; returns the stand-down reason, or undefined to proceed. */
 async function applyActionsIncidentHold(
   deps: SweepDeps,
   pr: OpenPrView,
   hold: ActionsIncidentHoldRecord | undefined,
   readIncident: () => Promise<ActionsIncident>,
   now: number,
+  pinnedJob?: { name: string; jobId: string },
 ): Promise<string | undefined> {
-  if (!deps.readActionsStatusSummary || !isBlockedCi(pr)) return undefined;
+  if (!deps.readActionsStatusSummary || (!pinnedJob && !isBlockedCi(pr))) return undefined;
   const cancelled = pr.cancelledRequiredChecks ?? [];
   const failures = pr.ciFailures ?? [];
   const timeout = classifyCiTimeoutNoVerdict(failures, pr.redRequiredChecks ?? [], cancelled.map((c) => c.name));
-  if (!timeout && (cancelled.length === 0 || failures.some((f) => !cancelled.some((c) => c.name === f.name)))) return undefined;
+  if (!pinnedJob && !timeout && (cancelled.length === 0 || failures.some((f) => !cancelled.some((c) => c.name === f.name)))) return undefined;
   const incident = await readIncident();
   const decision = actionsIncidentHoldDecision(incident, hold, now);
   if (decision === "proceed") return undefined;
@@ -5656,9 +5657,11 @@ async function applyActionsIncidentHold(
   }
   if (!hold) {
     appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_HOLD_STEP, held_at_ms: now,
+      ...(pinnedJob ? { pinned_job: pinnedJob } : {}),
       cancelled_checks: cancelled.map((c) => ({ name: c.name, run_attempt: c.runAttempt ?? null })), not_ready_checks: timeout?.notReady ?? [] });
   }
-  return `GitHub Actions ${incident.state}: ${incident.detail} — a red of cancelled or never-started checks is held; no requeue, fix strike or escalation`;
+  const subject = pinnedJob ? `a terminal run's pinned job "${pinnedJob.name}"` : "a red of cancelled or never-started checks";
+  return `GitHub Actions ${incident.state}: ${incident.detail} — ${subject} is held; no requeue, fix strike or escalation`;
 }
 
 /** W1-T2671/W1-T2789 — the two independently-observed facts required before a red branch may be
@@ -20726,6 +20729,14 @@ export async function runSweep(
               const pinnedJob = pr.checksState === "pending" && reason.startsWith(STALLED_RUN_REASON_PREFIX) && deps.requeueCheck
                 ? stalledRunPinnedJob(pr.workflowRuns) : undefined;
               if (pinnedJob) {
+                const incidentHold = await applyActionsIncidentHold(
+                  deps, pr, incidentHolds.holds.get(`${pr.prNumber}@${pr.headSha}`), readActionsIncident, now, pinnedJob);
+                if (incidentHold) {
+                  incidentHeldPrs.add(pr.prNumber);
+                  acted = false;
+                  standDownReason = incidentHold;
+                  break;
+                }
                 const key = `${pr.headSha}@${pinnedJob.name}`;
                 const named = `pinned job "${pinnedJob.name}" (id ${pinnedJob.jobId})`;
                 let followUp: string | undefined;
