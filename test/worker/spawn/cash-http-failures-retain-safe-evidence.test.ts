@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:https";
+import { connect, createServer as createTcpServer, type Socket } from "node:net";
 import { promisify } from "node:util";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -333,6 +334,35 @@ test("cash default native fetch and timer qualify local TLS429 continuation and 
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert.ok(address && typeof address !== "string");
+  const sockets = new Set<Socket>();
+  const bodyGates: { receivedAt: number; releasedAt?: number }[] = [];
+  // Hold the first TLS bytes BEFORE handshake; pausing secureConnection is too late.
+  const proxy = createTcpServer(client => {
+    const upstream = connect(address.port, "127.0.0.1");
+    sockets.add(client); sockets.add(upstream);
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
+    upstream.pipe(client);
+    let release: ReturnType<typeof setTimeout> | undefined;
+    client.once("close", () => {
+      clearTimeout(release); upstream.destroy(); sockets.delete(client);
+    });
+    upstream.once("close", () => { client.destroy(); sockets.delete(upstream); });
+    if (mode !== "body") { client.pipe(upstream); return; }
+    client.once("data", firstTlsBytes => {
+      client.pause();
+      const gate = { receivedAt: performance.now() } as { receivedAt: number; releasedAt?: number };
+      bodyGates.push(gate);
+      release = setTimeout(() => {
+        if (client.destroyed || upstream.destroyed) return;
+        gate.releasedAt = performance.now();
+        upstream.write(firstTlsBytes);
+        client.pipe(upstream);
+      }, 80);
+    });
+  });
+  await new Promise<void>(resolve => proxy.listen(0, "127.0.0.1", resolve));
+  const proxyAddress = proxy.address(); assert.ok(proxyAddress && typeof proxyAddress !== "string");
   const source = pathToFileURL(join(REPO_ROOT, "src", "lib", "worker-provider.ts")).href;
   const script = `const {spawnOpenWeightWorker}=await import(${JSON.stringify(source)});
     const result=await spawnOpenWeightWorker({cwd:process.argv[1],workerHome:process.argv[1],prompt:'native fixture',tools:[],maxTurns:2,
@@ -342,7 +372,7 @@ test("cash default native fetch and timer qualify local TLS429 continuation and 
   try {
     const invoke = async (timeout: number) => {
       const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script,
-        f.dir, `https://127.0.0.1:${address.port}/`, String(timeout)], {
+        f.dir, `https://127.0.0.1:${proxyAddress.port}/`, String(timeout)], {
         cwd: REPO_ROOT,
         env: { ...process.env, NODE_EXTRA_CA_CERTS: cert }, timeout: 15_000,
       });
@@ -351,10 +381,15 @@ test("cash default native fetch and timer qualify local TLS429 continuation and 
     const success = await invoke(1000);
     assert.equal(success.isError, false, success.stderr); assert.equal(success.text, "native-qualified"); assert.equal(calls, 2);
     mode = "body";
-    const refused = await invoke(40);
+    const refused = await invoke(1000);
     assert.equal(refused.isError, true); assert.match(refused.stderr, /timed out|timeout/i);
+    t.diagnostic(JSON.stringify({ nativeRequestCount: calls, tlsSetupHeldMs: bodyGates.map(gate => gate.releasedAt === undefined ? null : gate.releasedAt - gate.receivedAt) }));
     assert.equal(calls, 3, "stalled native response body produces no extra POST");
+    assert.ok(bodyGates.some(gate => gate.releasedAt !== undefined && gate.releasedAt - gate.receivedAt > 40),
+      "healthy verified TLS setup exceeds the old40ms window before the stalled response body");
   } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve, reject) => proxy.close(error => error ? reject(error) : resolve()));
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
