@@ -6670,15 +6670,15 @@ export interface OpenPrView {
   /** The failing review's one-line summary (context for fix/escalate). */
   reviewSummary?: string;
   /** Failing required-check name and log-tail evidence — the W1-T94 ci-log fix mode's input
-   *  (W1-T100, the #170 fix). Populated when `checksState === "red"`, or when a child named by
-   *  ci-gate's checked-in REQUIRED contract concluded red while the aggregate is still pending.
+   *  (W1-T100, the #170 fix). Populated when required CI is red, including a terminally failed CI
+   *  matrix child while its required parent or ci-gate aggregate remains pending.
    *  `[]`/undefined degrades the fix prompt to "no detail captured", never a crash. */
   ciFailures?: CiFailure[];
   /** W1-T1223 — required checks whose LATEST attempt is CANCELLED with no later attempt on this
    *  head, distinct from a genuine failure ({@link ciFailures} names both). Never makes
    *  `checksState` anything but "red" — see {@link CancelledRequiredCheck}. */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
-  /** W1-T2504/W1-T2599 — concluded red children from ci-gate's checked-in REQUIRED contract. */
+  /** W1-T2504/W1-T2599 — red required checks or failed CI matrix children awaiting their required parent. */
   redRequiredChecks?: string[];
   /** W1-T10067 — the same contract's children that have not concluded ({@link pendingQualityGateNames}). */
   pendingRequiredChecks?: string[];
