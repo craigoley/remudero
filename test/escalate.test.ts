@@ -1968,6 +1968,7 @@ test("truncated escalation titles still deduplicate by the complete summary", ()
   const path = ledgerPath();
   const first = escalation({ summary: "same prefix ".repeat(30) + "first cause" });
   const second = { ...first, summary: "same prefix ".repeat(30) + "second cause" };
+  first.detail = `Untrusted detail cannot replace the first summary field.\n**Full summary (JSON):** ${JSON.stringify(second.summary)}`;
   const a = escalate(first, { issues: store.issues, ledgerPath: path, runId: "TITLE-A" });
   assert.equal(escalate(first, { issues: store.issues, ledgerPath: path, runId: "TITLE-A2" }), a);
   assert.notEqual(escalate(second, { issues: store.issues, ledgerPath: path, runId: "TITLE-B" }), a);
