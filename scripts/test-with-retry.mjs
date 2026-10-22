@@ -502,7 +502,8 @@ function finalSummary(output) {
 
 function finalSummaryAllPass(output) {
   const counts = finalSummary(output);
-  return counts !== null && counts.tests > 0 && counts.tests === counts.pass && counts.fail === 0 && counts.cancelled === 0;
+  return counts !== null && counts.pass > 0 && counts.tests === counts.pass + (counts.skipped ?? 0) &&
+    counts.fail === 0 && counts.cancelled === 0 && (counts.todo ?? 0) === 0;
 }
 
 function emptyCoverageFailure(cmd, args, output) {

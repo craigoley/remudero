@@ -125,6 +125,10 @@ usage:
   rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]   # An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.
   rmd note <id> <text...>   # Record an operator guidance note against a task or proposal, for the weekly feedback docket.
   rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
+  rmd reply <threadId> --text "<text>" [--intent-id <id>]   # Reply on an operator inbox thread.
+  rmd archive <proposalId> [--unarchive]   # Set an inbox item aside, or undo its archive.
+  rmd snooze <proposalId> --until <RFC3339-UTC>|--wake   # Hide an inbox item until a UTC instant, or wake it now.
+  rmd keep <proposalId> [--reason "<text>"] [--unkeep]   # Record the current observation as kept, or undo that decision.
 
 An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits
 NON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.
@@ -1239,3 +1243,43 @@ rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]
 ```
 
 the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range ("2-3"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range
+
+### `rmd reply`
+
+Reply on an operator inbox thread.
+
+```
+rmd reply <threadId> --text "<text>" [--intent-id <id>]
+```
+
+Reply on an operator inbox thread. Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.
+
+### `rmd archive`
+
+Set an inbox item aside, or undo its archive.
+
+```
+rmd archive <proposalId> [--unarchive]
+```
+
+Set an inbox item aside, or undo its archive. Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.
+
+### `rmd snooze`
+
+Hide an inbox item until a UTC instant, or wake it now.
+
+```
+rmd snooze <proposalId> --until <RFC3339-UTC>|--wake
+```
+
+Hide an inbox item until a UTC instant, or wake it now. Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.
+
+### `rmd keep`
+
+Record the current observation as kept, or undo that decision.
+
+```
+rmd keep <proposalId> [--reason "<text>"] [--unkeep]
+```
+
+Record the current observation as kept, or undo that decision. Acts directly on config.root state and records origin rmd-cli. Exit 0 recorded, 1 refused, 2 invalid usage.
