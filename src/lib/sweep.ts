@@ -7098,7 +7098,16 @@ export function cancelledRequiredCheckNames(
 
 const qualityGate = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): RollupCheckEntry[] => dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && ([...(requiredCheckNames ?? [])].includes(c.name ?? "") || [...(requiredCheckNames ?? [])].includes(c.context ?? ""))));
 const rollupState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => qualityGate(rollup, requiredCheckNames).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown"); // W1-T2504
+export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => {
+  const required = [...(requiredCheckNames ?? [])];
+  const red = qualityGate(rollup, required).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown");
+  if (red.length > 0 || !required.includes("ci")) return red;
+  const latest = dedupeRollupByLatestAttempt(rollup ?? []);
+  const parent = latest.find((c) => (c.name ?? c.context) === "ci");
+  if (parent && REQUIRED_CHECK_OK.has(rollupState(parent))) return red;
+  const family = CI_MATRIX_AGGREGATORS.find((entry) => entry.aggregator === "ci");
+  return latest.flatMap((c) => c.name !== undefined && family?.constituent.test(c.name) && rollupState(c) === "FAILURE" ? [c.name] : []);
+}; // W1-T2504
 
 /** W1-T10067: the required checks {@link redQualityGateNames} reads that have not concluded on this head —
  *  registered and still running, or not yet registered at all. Sorted. */
