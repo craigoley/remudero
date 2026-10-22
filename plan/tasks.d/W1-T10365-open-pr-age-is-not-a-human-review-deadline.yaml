@@ -1,0 +1,86 @@
+- id: W1-T10365
+  title: "Open PR age does not invent a pending human review or an overdue decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  author_class: machine
+  principles: {tdd: strict}
+  origin: "operator:console-inbox-age-only-source-fidelity-20261021"
+  plan_refs: [W1-T4086, W1-T8926, W1-T8829]
+  files:
+    - src/lib/inbox-plain.ts
+    - test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts
+  rationale: |
+    Rule 19: prove the real source-to-message boundary, including cached writer output, rather
+    than testing only a replacement template. The signed-in core Inbox on October21 displayed
+    board-review:stale:#13008 as an overdue review needing a decision. The producer's actual
+    diagnoseBoardFindings reads BoardItem.ageHours, documented as hours since the PR opened.
+    It does not measure pending human review age or establish a human deadline. The current
+    board-review fallback similarly changes "has sat open" into "waiting for review".
+    Its stored writer message passes the current shape/style checker, so a template-only fix
+    would leave the existing factual error visible. That PR's governed review passes while
+    its remaining CI repair is machine/owner work; this does not mean the open PR is resolved.
+    The operator selected fleet-owned information unless an explicit human decision is blocked.
+    This task is only the independently safe factual-wording slice of that policy. Ownership
+    and readable historical-thread compatibility remain a separate coordinated follow-up.
+    Existing W1-T4086 ownership, W1-T8926 plain-language checks and referent retirement retain
+    their credit. A complete actual open-head subject sweep counted 453 advertised branches,
+    11 captured-open heads and 90 positive main matches; broad verb/CI/filing overlaps are
+    different work and no captured open head owns either exact implementation path.
+  design: |
+    For the known board-review age finding, state only the source's observed open-PR age and
+    that age alone does not establish an operator review obligation. Do not invent a waiting
+    review, an overdue person, a review deadline, authorization or a resolved PR. A missing or
+    malformed age remains explicitly unknown; do not coerce it to zero or guess from a clock.
+    Extend the existing source-conditioned checker to refuse unsupported review/deadline
+    framing in a model-written or cached age-only message. Exercise the real plainInboxMessage
+    read-time stored-message path with an otherwise valid current fingerprint: the bad cached
+    card must fall back to the factual template without changing its original stored bytes.
+    Preserve the existing retry limit and no-writer fallback; add no model calls, bulk store
+    rewrite, global fingerprint/version bump, backfill schedule or provider behavior change.
+    Explicit board-review escalation questions remain intact, including unreadable questions
+    which must remain conservative rather than being declared automatic or resolved. Preserve
+    all existing non-board templates, source/style checks, option intents and action authority.
+    Test truthful open-age cards, misleading review-wait/deadline cards, malformed/absent age,
+    current cached cards, failing/no writer and explicit/unreadable escalation controls.
+    Change only the two declared existing files. Do not alter inboxOwner, thread membership,
+    reply/approve permissions, referent retirement, original evidence, registry or triage state.
+    Merely classifying a record as fleet-owned currently removes it from operator thread routes;
+    that separate history-compatible policy implementation must coordinate with W1-T10079's
+    owner, not silently ride this repair. No item is closed and no Inbox gardener is activated.
+    Use the actual operator decision through native release/ruling, never a model verdict.
+    Require complete physical-suite TAP, literal canonical proof/base discrimination, real
+    source-only delete/restore falsifiers, caller/census and same-head source-positive coverage,
+    committed-tree author validation, stored-body verification, governed review and hosted CI.
+    Retain honest capacity refusals. No CI infrastructure, Azure memory, service, deployment,
+    provider, spending, credential, permission, guard or claim-recovery changes are included.
+  acceptance:
+    - claim: "The default age-only template states open PR age without asserting a human review deadline"
+      proof: "unit test: W1-T10365: open PR age is not a review deadline"
+    - claim: "The real cached message path refuses an invented review obligation without rewriting history"
+      proof: "unit test: W1-T10365: cached age-only cards cannot invent a human review"
+    - claim: "Explicit and unreadable escalations retain their questions and conservative fallback behavior"
+      proof: "unit test: W1-T10365: explicit review escalations retain their questions"
+  falsifier: |
+    In an owned disposable clone keep all tests identical and remove only the age-conditioned
+    factual template/check changes. The open-age and current-cached-message regressions must
+    fail while explicit/unreadable escalation and existing non-board controls still pass.
+    Restore only source and require complete passing TAP, with no skipped or cancelled cases.
+  note: |
+    Native reservation refs/rmd-id/W1-T10365 belongs to this filing branch; never recycle it.
+    The operator approved the product policy in this chat, not a model judgment or deployment.
+    verify: human retains native release/ruling until that actual decision is recorded.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The operator selected fleet-owned information unless an explicit human decision is blocked and authorized follow-up filing and implementation. Native rmd approve W1-T10365 records the actual decision, not a model verdict. This task is only the narrow source-faithful wording/checker slice: open-PR age must not invent a waiting human review or review deadline; cached original history remains unchanged. Only inbox-plain and the existing factual-language test are in scope. Owner classification, historical-thread compatibility, explicit/unreadable escalations, action authority and every review/CI gate are preserved; no extra model calls, retries, global backfill, gardener activation, item closure, permissions, providers, spending, CI infrastructure, Azure memory, services or deployment."
+    judged_at: "2026-10-21T19:27:34.519Z"
+    pin: "1199ae56b43582d3db855e484b5c7097153614d938d6c2f254c0fd55a9ab2de8"

@@ -16,6 +16,9 @@
     - src/lib/panel-graph.ts
     - src/run-task.ts
     - docs/operator-guide.md
+    - docs/cli-reference.md
+    - scripts/console-parity-ratchet.mjs
+    - test/help-renders-a-summary-not-a-paragraph.test.ts
     - test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts
   status: queued
   priority: 1  # operator 2026-10-17: an agent recording the operator's decisions has no sanctioned way to act
@@ -35,13 +38,23 @@
     1. One verb table (in inbox-verdict-command.ts) lists each inbox verb the console offers: approve, decline,
        restore, reframe, reply, archive, snooze, keep, with its HTTP path, tier, input fields and the function that
        performs it. The HTTP routes, the rmd commands and the MCP tools are generated from it, so they cannot drift.
-    2. New commands: rmd archive <proposalId> [--undo], rmd snooze <proposalId> --until <RFC 3339 UTC>|--wake,
-       rmd keep <proposalId> [--reason <text>] [--undo]. Each acts on this checkout's config.root state directly,
+    2. New commands: rmd archive <proposalId> [--unarchive], rmd snooze <proposalId> --until <RFC 3339 UTC>|--wake,
+       rmd keep <proposalId> [--reason <text>] [--unkeep]. Each acts on this checkout's config.root state directly,
        as rmd decline does, and appends the same ledger row the route does, with origin rmd-cli.
     3. rmd mcp --enable-write exposes one tool per verb from the table, each posting to the route with the token
        the MCP server already reads, at the verb's own tier; the approve verb stays out of MCP (it files a task).
     4. A table test fails when a verb the console can be served (inbox-plain.ts optionAction) has no CLI or MCP path.
     5. TESTS in test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts, test( titles verbatim as below.
+    6. Bounded companions for the operator ruling recorded on PR #13223 on 2026-10-21:
+       - In scripts/console-parity-ratchet.mjs, add exactly the ROUTE_MATCH rows
+         keep: "POST /v1/inbox/keep" and reply: "POST /v1/inbox/thread/reply", plus one comment line.
+         Change nothing else in that file. CLI_ONLY and scripts/console-parity-baseline.json are unchanged.
+       - Make the four new COMMANDS names (reply, archive, snooze, keep) literal in the already declared
+         src/run-task.ts so deriveCliVerbs and the verb census see the existing commands.
+       - Update the existing command inventory in test/help-renders-a-summary-not-a-paragraph.test.ts,
+         add the existing guide's verb rows, and regenerate docs/cli-reference.md with npm run cli-reference.
+       - Use --unarchive and --unkeep as above; do not change scripts/no-draft-pull-request-census.mjs.
+         This records the existing flag ruling, not a change to the verbs' actions, tiers or ledger rows.
   acceptance:
     - claim: "every verb the console is served has a route, a command and an MCP tool from one table"
       proof: 'grep: W1-T10079: every verb the console is served has a route, a command and an MCP tool from one table in test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts'

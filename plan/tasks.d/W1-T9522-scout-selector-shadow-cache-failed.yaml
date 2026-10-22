@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 3.5
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9522 — 0 selector-shadow.cache_failed rows in 3 d (it
+  # had 9 in the 7 d before filing); the symptom has stopped.
   attempts: 0
   author_class: machine
   origin: "scout:selector-shadow.cache_failed"

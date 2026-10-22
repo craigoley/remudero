@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.34
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10277 — 0 rounds and 0 flake retries in 3 d for the-
+  # inbox-is-classified-once-per-change.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/the-inbox-is-classified-once-per-change.test.ts:flaky"

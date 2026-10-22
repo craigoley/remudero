@@ -6,8 +6,12 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1.35
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10242 — Live (148 matches in 3 d), but coverage-
+  # ratchet is an aggregator/reporter gate (CI_AGGREGATOR_FAMILIES) and the declared remedy surface is ci.yml; a
+  # remedy that prevents its rounds would loosen a CI gate. Its cost (14.7 PR-min over 64 rounds) is small per
+  # round.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:coverage-ratchet"

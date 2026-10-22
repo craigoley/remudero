@@ -6,8 +6,13 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9002 — Live (52 coverage-shard rounds/red heads in 3
+  # d, last 10-21 13:42) and the costliest cause (1908.8 PR-min), but the cause is a coarse check family whose
+  # only declared owner is ci.yml; the rounds are many distinct failing tests, so a ci.yml edit that stops the
+  # rounds would hide failures. Re-file per test/signature (the gardener already splits several, e.g. W1-T10171)
+  # instead of approving a gate-workflow edit.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:coverage-shard"

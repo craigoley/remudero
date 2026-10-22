@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — the implement push acts on the coverage precheck's own narrow verdict; spans the narrow pass, its push site and their test
   band_meaning: span
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "ci-friction:check:ci-log:coverage-ratchet"
   plan_refs: [W1-T4797, W1-T9483, W1-T9653, W1-T4810, W1-T4656, W1-T10269]

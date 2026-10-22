@@ -5,8 +5,10 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.82
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9266 — 0 selector-shadow.gardener_failed rows in 3 d
+  # (it had 50 in the 7 d before filing); the symptom has stopped.
   attempts: 0
   author_class: machine
   origin: "scout:selector-shadow.gardener_failed"

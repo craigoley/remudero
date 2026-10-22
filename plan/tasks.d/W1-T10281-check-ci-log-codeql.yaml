@@ -5,8 +5,11 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.35
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T10281 — Live (11 CodeQL rounds in 3 d), but those
+  # rounds are CodeQL alerts ('UNTRUSTED SCANNER EVIDENCE'). A remedy that stops fix rounds on security findings
+  # risks suppressing them. NOTE: machine-released on 10-21.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:codeql"
