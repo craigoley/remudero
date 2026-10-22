@@ -172,7 +172,8 @@ esac
     const steps: string[] = [];
     const providerErrors: string[] = [];
     let providerInvoked = false;
-    const verdict = await runReview({
+    let providerInvocations = 0;
+    const reviewArgs: Parameters<typeof runReview>[0] = {
       owner: "o",
       repo: "r",
       prUrl: "https://github.com/o/r/pull/1",
@@ -202,6 +203,7 @@ esac
         assert.ok(workerArgs.prompt.includes("Preserve all original behavioral assertions."));
         assert.ok(workerArgs.prompt.includes("Only the approved companions may change."));
         providerInvoked = true;
+        providerInvocations++;
         throw new Error("provider unavailable fixture");
       }),
       headCheckoutDir: REPO_ROOT,
@@ -209,7 +211,8 @@ esac
       runId: "REVIEW-PROVIDER-UNAVAILABLE",
       arm: () => { steps.push("arm-effect"); return "armed"; },
       disarm: () => { steps.push("disarm-effect"); return "not-armed"; },
-    });
+    };
+    const verdict = await runReview(reviewArgs);
 
     assert.equal(providerInvoked, true, "the fixture must reach the injected worker boundary: " + providerErrors.join("; "));
     assert.ok(steps.includes("review.reviewer.error"), "the semantic failure must be explicit");
@@ -221,6 +224,14 @@ esac
       assert.ok(!steps.includes("arm-effect") && !steps.includes("disarm-effect"));
     }
     assert.equal(verdict.reviewerOutcome, "spawn_error");
+    if (required) {
+      const changed = await runReview({ ...reviewArgs,
+        task: { ...reviewArgs.task, amendment: String(reviewArgs.task.amendment) + "\nPreserve the original assertions." },
+        runId: "REVIEW-AMENDMENT-CHANGED",
+      });
+      assert.notEqual(changed.reviewDecisionDigest, verdict.reviewDecisionDigest, "the actual decision producer must bind the changed amendment at the same PR head");
+      assert.equal(providerInvocations, 2);
+    }
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });

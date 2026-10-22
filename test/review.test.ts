@@ -10,6 +10,7 @@ import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
   reviewContractDigest,
+  reviewDecisionDigest,
   reviewTaskNarrative,
   applyVerdictStability,
   buildReviewPrompt,
@@ -3455,6 +3456,14 @@ test("review task narrative binds the prompt and contract without changing legac
   assert.notEqual(amended, legacy);
   assert.notEqual(reviewContractDigest({ ...contract, ...narrative, amendment: "A different ruling." }), amended);
   assert.notEqual(reviewContractDigest({ ...contract, design: narrative.design }), amended);
+  const decision = { headSha: "a".repeat(40), diff: "diff", report: "report", body: "body", acceptance: contract.acceptance, declaredFiles: contract.declaredFiles, policyRevision: "fixture-policy", engineRevision: "fixture-engine" };
+  const legacyDecision = reviewDecisionDigest(decision);
+  assert.equal(legacyDecision, "v2:5135a5ed1dcf2fac6eefebf2b9ee6c1e3359d30a61a03f1c26bc339ea4ec7802");
+  assert.equal(reviewDecisionDigest({ ...decision, design: "", amendment: "" }), legacyDecision);
+  const amendedDecision = reviewDecisionDigest({ ...decision, ...narrative });
+  assert.notEqual(amendedDecision, legacyDecision);
+  assert.notEqual(reviewDecisionDigest({ ...decision, ...narrative, amendment: "A different ruling." }), amendedDecision);
+
   const input = { task: { id: contract.taskId, acceptance: contract.acceptance }, prUrl: "https://github.com/o/r/pull/1", owner: "o", repo: "r", headSha: "a".repeat(40) };
   const prompt = buildReviewPrompt({ ...input, task: { ...input.task, ...narrative } });
   assert.ok(prompt.includes(narrative.design));
@@ -3463,6 +3472,7 @@ test("review task narrative binds the prompt and contract without changing legac
   for (const invalid of [{ design: null }, { amendment: {} }, { narrativeUnavailable: true as const }]) {
     assert.equal(reviewTaskNarrative(invalid), undefined);
     assert.throws(() => reviewContractDigest({ ...contract, ...invalid }), /narrative is unavailable/);
+    assert.throws(() => reviewDecisionDigest({ ...decision, ...invalid }), /narrative is unavailable/);
     assert.throws(() => buildReviewPrompt({ ...input, task: { ...input.task, ...invalid } }), /narrative is unavailable/);
   }
 });

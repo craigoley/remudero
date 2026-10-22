@@ -93,7 +93,7 @@ export function reviewInputDigest(
 
 export const REVIEW_DECISION_POLICY_REVISION = "review-policy-v1";
 
-export interface ReviewDecisionDigestInput {
+export interface ReviewDecisionDigestInput extends ReviewTaskNarrativeInput {
   headSha: string;
   diff: string;
   report: string;
@@ -112,6 +112,8 @@ export interface ReviewDecisionDigestInput {
 
 /** Content address of every material input to one review decision; model output is excluded. */
 export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
+  const narrative = reviewTaskNarrative(input);
+  if (narrative === undefined) throw new Error("review task narrative is unavailable");
   const acceptance = input.acceptance.map((c) => ({
     claim: c.claim,
     proof: c.proof,
@@ -138,6 +140,7 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     declaredFiles: input.declaredFiles ?? [],
     ...(input.ownership !== undefined ? { ownership: input.ownership.map((finding) => finding.kind === "unknown"
       ? { id: finding.id, file: finding.file, kind: finding.kind } : finding) } : {}),
+    ...narrative,
   });
   return `v2:${createHash("sha256").update(encoded, "utf8").update(PROOF_LOAD_REVISION).digest("hex")}`;
 }
