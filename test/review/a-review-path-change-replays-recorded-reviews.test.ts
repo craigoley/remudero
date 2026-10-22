@@ -80,6 +80,21 @@ test("W1-T10270: an empty, incomplete or hand-edited sample fails the replay", (
   assert.throws(() => replayReviewSample({ ...sample, header: { ...sample.header, classes: ["posted", "withheld", "refused"] } }), /class/);
 });
 
+test("W1-T10270: a sample row with a malformed input shape is rejected as an invalid replay input", () => {
+  const sample = derive([row(input())]);
+  const malformed: Array<Record<string, unknown>> = [
+    { verdict_lines: ["the reviewer wrote prose, not a verdict line"] },
+    { stage: "other" },
+    { criteria_count: -1 },
+    { budget_present: "yes" },
+  ];
+  for (const patch of malformed) {
+    const bad = { ...sample.rows[0], input: { ...sample.rows[0]!.input, ...patch } };
+    const text = [sample.header, bad].map(r => JSON.stringify(r)).join("\n") + "\n";
+    assert.throws(() => parseReviewReplaySample(text), /invalid review replay input/);
+  }
+});
+
 test("W1-T10270: the sample is refreshed from the ledger and excludes regressed reviewer shas", () => {
   const a = row(input());
   const b = row(input({ reviewer_outcome: "spawn_error" }));
