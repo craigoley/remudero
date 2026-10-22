@@ -628,6 +628,122 @@ export function readAccountUsageFile(path: string = join(homedir(), ".claude.jso
 }
 
 /**
+ * A label that tells two accounts apart without printing either address: the first two and last two
+ * characters of the local part, then the domain (`craigoley@gmail.com` → `cr***ey@gmail.com`). Short
+ * local parts keep one character. No identity at all reads `unknown`, never an empty string or a match.
+ */
+export function redactedAccountLabel(input: AccountUsageInput | undefined): string {
+  const email = input?.email;
+  if (email === undefined) return "unknown";
+  const at = email.indexOf("@");
+  if (at < 1) return "unknown";
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  if (local.length <= 4) return `${local.slice(0, 1)}***${domain}`;
+  return `${local.slice(0, 2)}***${local.slice(-2)}${domain}`;
+}
+
+/** The two holders of a login: the fleet's credential store (`CLAUDE_CONFIG_DIR`) and the host's own. */
+export interface FleetAccountPair {
+  store: AccountUsageInput;
+  host: AccountUsageInput;
+}
+
+/** Read both identities with {@link readAccountUsageFile}, so only identity and usage fields leave. The
+ *  store's `.claude.json` sits inside its config dir; nothing is copied, renamed or written. */
+export function readFleetAccountPair(storeDir: string, hostPath?: string): FleetAccountPair {
+  return { store: readAccountUsageFile(join(storeDir, ".claude.json")), host: readAccountUsageFile(hostPath) };
+}
+
+/** The store-side reading the headroom row already made: the window at or over its reserve. */
+export interface FleetStoreReading {
+  window: string;
+  percentUsed: number;
+  limitPct: number;
+}
+
+/** One escalation: a store stuck on an exhausted account while the host is on another with headroom. */
+export interface FleetAccountDivergence {
+  /** `<store uuid>|<host uuid>` — the episode key. Never rendered; it is not a credential. */
+  key: string;
+  storeAccount: string;
+  hostAccount: string;
+  window: string;
+  storePercentUsed: number;
+  hostPercentUsed: number;
+  limitPct: number;
+  remedy: string;
+}
+
+/** Why a pair did or did not diverge. `unknown` is any unreadable identity or unusable host usage,
+ *  never read as a match; `host-exhausted` is two accounts both over the reserve. */
+export type FleetAccountVerdict =
+  | { state: "diverged"; divergence: FleetAccountDivergence }
+  | { state: "matching" | "unknown" | "host-exhausted" };
+
+/** The remedy the escalation names. The store never follows a host login switch, and is never copied. */
+export const FLEET_ACCOUNT_REMEDY =
+  "sign the fleet in on the host account from the console (W1-T10380) or by hand; no credential is copied";
+
+/** PURE. The caller has already established that the store is at or over its reserve. */
+export function judgeFleetAccountDivergence(
+  pair: FleetAccountPair | undefined,
+  store: FleetStoreReading,
+  nowMs: number,
+): FleetAccountVerdict {
+  if (!pair || pair.store.unreadable || pair.host.unreadable) return { state: "unknown" };
+  const storeUuid = pair.store.uuid;
+  const hostUuid = pair.host.uuid;
+  if (storeUuid === undefined || hostUuid === undefined) return { state: "unknown" };
+  if (storeUuid === hostUuid) return { state: "matching" };
+  // The host's own cache must be fresh and describe the host's account, or its headroom is unknown.
+  if (usageUnknownReason(pair.host, nowMs) !== undefined) return { state: "unknown" };
+  const hostWindow = /5h|session/i.test(store.window) ? pair.host.fiveHour : pair.host.sevenDay;
+  const hostPercentUsed = hostWindow?.percentUsed;
+  if (hostPercentUsed === undefined) return { state: "unknown" };
+  if (hostPercentUsed >= store.limitPct) return { state: "host-exhausted" };
+  return {
+    state: "diverged",
+    divergence: {
+      key: `${storeUuid}|${hostUuid}`,
+      storeAccount: redactedAccountLabel(pair.store),
+      hostAccount: redactedAccountLabel(pair.host),
+      window: store.window,
+      storePercentUsed: store.percentUsed,
+      hostPercentUsed,
+      limitPct: store.limitPct,
+      remedy: FLEET_ACCOUNT_REMEDY,
+    },
+  };
+}
+
+/** One in-process episode latch over {@link judgeFleetAccountDivergence}. */
+export interface FleetAccountEpisode {
+  /** The divergence to escalate THIS pass, or `undefined` (already escalated, or nothing diverged).
+   *  `store: null` is a store under its reserve. */
+  observe(pair: FleetAccountPair | undefined, store: FleetStoreReading | null, nowMs: number): FleetAccountDivergence | undefined;
+}
+
+/** The episode is keyed by (store uuid, host uuid) and clears when the uuids match or the store drops
+ *  under the reserve. An unknown or host-exhausted pass neither escalates nor clears it. */
+export function createFleetAccountEpisode(): FleetAccountEpisode {
+  let active: string | undefined;
+  return {
+    observe(pair, store, nowMs) {
+      if (store === null) {
+        active = undefined;
+        return undefined;
+      }
+      const verdict = judgeFleetAccountDivergence(pair, store, nowMs);
+      if (verdict.state === "matching") active = undefined;
+      if (verdict.state !== "diverged" || verdict.divergence.key === active) return undefined;
+      active = verdict.divergence.key;
+      return verdict.divergence;
+    },
+  };
+}
+
+/**
  * {@link buildAccountUsageRoute}'s dependencies — every edge injectable, same shape as
  * {@link import("./daemon-health.js").DaemonHealthDeps}. `root` is the repo/workspace root for
  * `resolveDailyCostCeiling`'s `state/` override lookup; `policy` is the same `deps.policy ??`
