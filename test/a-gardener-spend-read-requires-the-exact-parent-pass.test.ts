@@ -36,6 +36,7 @@ const parent = { ts: at, step: "garden.lifecycle", name: "config", passId, repos
   daemon_run_id: "daemon-1", phase: "completed", exit: 0 };
 const child = { ts: at, step: "implement.done", run_id: "child", task_id: "task", total_cost_usd: 2,
   gardener_origin: origin };
+
 async function captured(t: { after(fn: () => void): void }, rows: unknown[], scope = "repository") {
   const { captureGardenerSpendSource, foldGardenerSpend } = await loadSpend();
   const dir = makeTempDir("gardener-spend-receipts");
@@ -46,6 +47,23 @@ async function captured(t: { after(fn: () => void): void }, rows: unknown[], sco
   writeFileSync(join(dir, "ledger.ndjson"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   return { dir, spend: foldGardenerSpend(await captureGardenerSpendSource(dir), repository, at) };
 }
+
+test("W1-T10160: owned machine-judge receipts preserve partial money and reported zero", async t => {
+  const producer = { ...child, step: "machine_judge.attempt_spend", total_cost_usd: 0.25, billing_mode: "api" };
+  const restated = [{ ...child, step: "worker.attempt", total_cost_usd: 99 },
+    { ...child, step: "verdict", total_cost_usd: 99 }];
+  const known = await captured(t, [parent, producer, ...restated]);
+  assert.equal(known.spend.totalUsd, 0.25);
+  for (const zero of [true, false]) {
+    const row = { ...producer, total_cost_usd: zero ? 0 : undefined,
+      provider: zero ? "cash" : "codex", billing_mode: zero ? "api" : "subscription",
+      ...(zero ? {} : { notional_cost_usd: 5 }) };
+    const { spend } = await captured(t, [parent, producer, { ...row, run_id: "second-attempt" }, ...restated]);
+    assert.equal(spend.pricedSubtotalUsd, 0.25);
+    assert.equal(spend.totalUsd, zero ? 0.25 : null);
+    assert.deepEqual(spend.counts, { priced: zero ? 2 : 1, unpriced: zero ? 0 : 1, unlinked: 0 });
+  }
+});
 
 test("W1-T9658: default gardener capture observes unpriced assigned calls", async t => {
   const assignment = { ts: at, step: "worker.assignment", run_id: "assigned-child", task_id: "judge",

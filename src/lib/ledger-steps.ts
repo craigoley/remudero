@@ -82,6 +82,12 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "machine_judge.attempt_spend",
+    meaning: "One machine-filing judge attempt's own reported monetary evidence, before parsing. Unknown prices and unstarted calls stay unknown; subscription notional is separate and no figure is an invoice. Assignment and attempt receipts do not produce additional spend.",
+    writer: ["productionMachineFilingJudgePorts"],
+    outcomes: ["result", "failed", "not-started"],
+  },
+  {
     step: "sweep.update_branch.pending_guard",
     meaning: "The actual sweep selector declined the pending input head that would win with only its pending-CI guard removed. This is snapshot decision evidence; no saved run, CPU time or cash is established.",
     writer: ["runSweep"],
