@@ -1,0 +1,31 @@
+- id: W1-T10413
+  title: "Adoption scan reports reversibilityFactor as having no caller although run-task-verb.ts calls it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/measurement-cadence.ts
+    - test/gardeners/adoption-scan-finds-reversibilityfactor-caller.test.ts
+  design: |
+    CREATES: test/gardeners/adoption-scan-finds-reversibilityfactor-caller.test.ts
+    The adoption report (measurement-cadence) says reversibilityFactor in src/lib/risk-score.ts has no reference outside its definition. On main src/cli/commands/run-task-verb.ts imports it and calls it in diffIsClassifiedIrreversible, and src/run-task.ts imports run-task-verb. First reproduce the finding with scanUnadoptedSymbols over a fixture tree mirroring that import chain (src/run-task.ts imports src/cli/commands/run-task-verb.ts which imports a src/lib export and calls it). Name the cause (import parsing of the `type` modifier inside braces, reachability from src/run-task.ts, or a stale report), fix it in src/lib/measurement-cadence.ts, and keep every genuine no-caller finding. If main already clears the finding, the test pins that and the task closes with the proof.
+    DISCRIMINATION: the test file does not exist at the merge base, so both named proofs fail there (no such test) and pass only on a head that carries this test file; the second proof is the control that keeps a genuine no-caller export reported, so a fix that silences every finding fails it.
+  acceptance:
+    - claim: "A src/lib export called from a module that src/run-task.ts reaches through src/cli/commands, with a `type` modifier inside the import braces, is not reported as symbol-no-caller"
+      proof: "unit test: adoption scan finds the reversibilityFactor caller reached through src/cli/commands"
+    - claim: "An export with no reference outside its own file is still reported as symbol-no-caller"
+      proof: "unit test: adoption scan still reports an export that nothing calls"
+  origin: "adoption:symbol-no-caller:src/lib/risk-score.ts:reversibilityFactor"
+  rationale: >-
+    From the 2026-10-22 proposal on
+    adoption:symbol-no-caller:src/lib/risk-score.ts:reversibilityFactor, ratified via rmd approve:
+  
+    adoption-debt: "reversibilityFactor" (symbol-no-caller) in src/lib/risk-score.ts has shipped
+    since 2026-07-16T17:41:59-04:00 with no adopter found — no reference to `reversibilityFactor`
+    outside its own definition in src/lib/risk-score.ts (rmd measurement-cadence's adoption
+    report).
