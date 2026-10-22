@@ -13867,6 +13867,17 @@ function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<str
   return incompletePromiseHarvestFromLedger(pr, lines) ? { ...pr, reviewPendingOwnerDead: true } : pr;
 }
 
+function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrView {
+  const key = reviewOutcomeKeyForPr(pr);
+  const attemptedAt = prior.reviewFreshnessRefusals.get(key)?.attemptedAt ??
+    prior.reviewHostGapRefusals.get(key)?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
+  const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
+  // Only a completed refusal on this exact input after this pending post proves its owner finished.
+  return pr.reviewState === "pending" && attemptedAt !== undefined &&
+    Number.isFinite(pendingSince) && attemptedAt >= pendingSince
+    ? { ...pr, reviewPendingOwnerDead: true } : pr;
+}
+
 /** W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, named so the cost is chosen rather than discovered,
  *  and carried verbatim into the PR's own reason. THIS TABLE NAMES A COST; IT DECIDES NOTHING — by
  *  the time it is read the guarded call has ALREADY been refused. */
@@ -18338,18 +18349,9 @@ export async function runSweep(
     if (pr.planResequenceHeld !== undefined) {
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
-    const freshnessRefusal = prior.reviewFreshnessRefusals.get(reviewOutcomeKeyForPr(pr));
-    const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
-    // A refusal on this exact input after the current pending post proves its owner
-    // finished. An older refusal cannot preempt a newer review in flight.
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const timedOutReadAt = prior.reviewTimedOutReadRefusals.get(reviewOutcomeKeyForPr(pr));
-    const refusalAttemptedAt = freshnessRefusal?.attemptedAt ?? hostGapRefusal?.attemptedAt ?? timedOutReadAt;
-    const refusedCurrentPending = pr.reviewState === "pending" &&
-      refusalAttemptedAt !== undefined && Number.isFinite(pendingSince) &&
-      refusalAttemptedAt >= pendingSince;
     const harvestIncomplete = incompletePromiseHarvestFromLedger(pr, ledgerLines);
-    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : promiseHarvestRetryView(pr, ledgerLines);
+    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines);
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -21977,6 +21979,7 @@ export async function runSweepLightPass(
   const selectionLedgerLines = readLedger(deps.ledgerPath);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
+  openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
   const freshnessBackoffs = new Set<string>();
   for (const pr of openPrs) {
     const key = reviewOutcomeKeyForPr(pr);
