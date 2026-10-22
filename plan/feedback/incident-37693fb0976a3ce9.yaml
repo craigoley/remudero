@@ -1,0 +1,28 @@
+id: incident-37693fb0976a3ce9
+ts: 2026-10-22T17:11:23.359Z
+raw: >-
+  Incident 37693fb0976a: invariant reconcile.ci
+
+  First seen: 2026-10-22T16:18:15.595Z
+
+  Last seen: 2026-10-22T16:18:15.595Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - main-tripwire.yml run covering main commit 5741f1bf39a264f45af290903f38cf6857f99af4: gap persists after its repair attempt (5741f1bf39a264f45af290903f38cf6857f99af4:main-tripwire.yml)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#37693fb0976a3ce9a84b4ddc1371d3af3861800cdf85f99c8f0d67f4b577284e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
