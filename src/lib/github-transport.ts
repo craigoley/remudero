@@ -189,12 +189,12 @@ function ghBrokerExecError(args: readonly string[], result: GhBrokerResult): Err
 }
 
 /** The ASYNC read through a live broker: its stdout, or `undefined` when no broker took the read. */
-async function ghBrokeredAsync(args: readonly string[]): Promise<string | undefined> {
+async function ghBrokeredAsync(args: readonly string[], readOpts: GhJsonReadOptions = {}): Promise<string | undefined> {
   const socket = ghBrokerSocketFor(args, undefined);
   if (socket === undefined) return undefined;
   let result: GhBrokerResult;
   try {
-    result = await brokerGhRead(socket, args, { class: ghBrokerClassOf(undefined) });
+    result = await brokerGhRead(socket, args, { class: ghBrokerClassOf(undefined), ...(readOpts.fresh === true ? { fresh: true } : {}) });
   } catch {
     // The broker went away between the liveness read and the request: take the direct path, paced
     // by the floor as before, rather than fail a read the direct path could still make.
@@ -362,22 +362,26 @@ function parseGhJsonBody(args: string[], body: string): unknown {
   }
 }
 
+/** An explicit revalidation request; omitted preserves normal broker caching. */
+export interface GhJsonReadOptions { fresh?: true; }
+
 export async function ghJsonAsync(
   args: string[],
   execAsync: typeof execFileAsync = execFileAsync,
   /** W1-T6591: {@link ghJson}'s rate-limit reading, from the response headers of an `api` read. */
   onRateLimit?: (reading: GhRateLimitReading) => void,
+  readOpts: GhJsonReadOptions = {},
 ): Promise<unknown> {
   const withHeaders = onRateLimit !== undefined && args[0] === "api";
   const execArgs = withHeaders ? [...args, "-i"] : args;
-  const stdout = await ghStdoutAsync(args, execArgs, execAsync);
+  const stdout = await ghStdoutAsync(args, execArgs, execAsync, readOpts);
   if (!withHeaders) return parseGhJsonBody(args, stdout);
   const { headers, body } = splitGhHeaderBlock(stdout, args.includes("--slurp"));
   onRateLimit(parseGhRateLimitHeaders(headers));
   return parseGhJsonBody(args, body);
 }
 
-async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: typeof execFileAsync): Promise<string> {
+async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: typeof execFileAsync, readOpts: GhJsonReadOptions = {}): Promise<string> {
   const run = async (): Promise<string> => (await withGhKillEscalation(
     execAsync("gh", execArgs, {
       encoding: "utf8",
@@ -390,7 +394,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
   // Injected executors are test/offline seams and may have independent side effects, so only the
   // real `gh` transport participates in production single-flight coalescing.
   if (execAsync !== execFileAsync) return run();
-  const key = ghArgsAreCoalescibleRead(args) ? JSON.stringify(execArgs) : undefined;
+  const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
@@ -398,7 +402,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
     // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
     refuseSentinelGhToken("gh", args, undefined);
-    const brokered = await ghBrokeredAsync(execArgs);
+    const brokered = await ghBrokeredAsync(execArgs, readOpts);
     if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     return run();

@@ -1,3 +1,4 @@
+import type { DependencyMainIdentity } from "./dependency-main-identity.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
@@ -87,7 +88,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
@@ -203,7 +204,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -1583,7 +1584,7 @@ export interface BuildSweepEffectsDeps {
   fixSupersededPollMsOverride?: number;
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
-  readJsonImpl?: (args: string[]) => Promise<unknown>;
+  readJsonImpl?: (args: string[], readOpts?: GhJsonReadOptions) => Promise<unknown>;
   fleetDeployStateImpl?: DeployStateReader;
   fleetDeploySensorsImpl?: DeployStateReader["deploy"];
   /** Shared pacer; omitted for the existing immediate CLI/test mode. */
@@ -1921,6 +1922,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "arm",
   "readArmFacts",
   "close",
+  "withDependencyCloseFence",
   "dispatchFix",
   // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
   // spent and the caller has wired it (see planCappedRepair, classify.ts).
@@ -2078,6 +2080,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "arm"
   | "readArmFacts"
   | "close"
+  | "withDependencyCloseFence"
   | "headRehome"
   | "dispatchFix"
   | "dispatchPlanOnlyRepair"
@@ -2169,7 +2172,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixSupersededPollMsOverride,
     reclaimWorkerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reclaimWorkerImpl"]>>("reclaimWorkerImpl"),
     disarmImpl = disarmAutoMerge,
-    readJsonImpl = ghJsonAsync,
+    readJsonImpl = (args, readOpts) => ghJsonAsync(args, undefined, undefined, readOpts),
     pacer,
     fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
@@ -2917,6 +2920,30 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return { quiet: choice === "trailer", reason: `activity judge chose ${choice}: ${JSON.stringify(result.distribution)}` };
       },
     }),
+
+    withDependencyCloseFence: async (pr, close) => {
+      const proof = pr.dependencyMainIdentity;
+      if (proof?.state !== "identical" || proof.headSha !== pr.headSha || !pr.headRefName)
+        return { closed: false, reason: "dependency identity missing or unbound" };
+      let claim: InflightLockHandle | undefined;
+      try {
+        // Strict mode never inspects, reaps or steals a foreign inode, even a malformed one.
+        claim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, pr.headRefName), { run_id: runId, reclaim: false });
+        const main = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/main`], { fresh: true }) as { sha?: unknown } | undefined;
+        const live = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`], { fresh: true }) as {
+          state?: unknown; merged?: unknown; draft?: unknown; head?: { sha?: unknown; ref?: unknown }; base?: { ref?: unknown; sha?: unknown };
+          user?: { login?: unknown }; changed_files?: unknown;
+        } | undefined;
+        if (main?.sha !== proof.mainSha || live?.state !== "open" || live.merged !== false || live.draft !== false ||
+            live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" || live.base.sha !== proof.mainSha ||
+            typeof live.user?.login !== "string" || !isDependabotAuthor({ login: live.user.login }) || live.changed_files !== proof.files.length)
+          return { closed: false, reason: "fresh dependency close lifecycle/head/main evidence changed or unavailable" };
+        await close();
+        return { closed: true };
+      } catch (error) {
+        return { closed: false, reason: `dependency close claim or fresh read/effect refused: ${String(error)}` };
+      } finally { claim?.release(); }
+    },
 
     close: (pr, reason) => {
       try {
@@ -6619,8 +6646,9 @@ export interface OpenPrView {
   taskExistsOnMain?: boolean;
   /** Task ids whose plan records this PR added. Used only to refuse missing-trailer self-credit. */
   introducedTaskIds?: readonly string[];
-  /** This PR's changed paths, when already observed by the gateway. */
+  /** Observed PR paths; dependencyMainIdentity separately binds whole-path Git blob/mode identity to exact head and pinned main. */
   changedFiles?: readonly string[];
+  dependencyMainIdentity?: DependencyMainIdentity;
   /** The branch-derived task's declared files, when already observed from its main-plan record. */
   taskDeclaredFiles?: readonly string[];
   /** Observed: is GitHub auto-merge already armed on this PR? */
@@ -13306,8 +13334,9 @@ export interface SweepDeps {
    *  where {@link extractRefusal} found a refusal, so an ordinary `no_pr` never reaches this and
    *  keeps its retry path. Called once per full pass; omitted, the sweep never looks. */
   draftRefusalAmendments?: (candidates: readonly RefusalCandidate[]) => Promise<readonly RefusalAmendmentResult[]>;
-  /** Close a superseded/abandoned PR with a stated reason. */
+  /** Close superseded/abandoned PRs with a reason; the dependency fence alone holds the existing branch mutex through fresh reads and close. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
+  withDependencyCloseFence?: (pr: OpenPrView, close: () => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold" or an incomplete/unknown result, which re-run next sweep because a red
@@ -18434,6 +18463,20 @@ export async function runSweep(
         continue;
       }
     }
+    const dependencyIdentity = pr.dependencyMainIdentity;
+    const dependencyMainSupersession = disposition !== "mergeable" && disposition !== "stale" &&
+      dependencyIdentity?.state === "identical" && dependencyIdentity.headSha === pr.headSha &&
+      pr.isDependabot === true && pr.isDraft !== true && pr.changedFiles !== undefined && pr.changedFiles.length > 0 &&
+      new Set(pr.changedFiles).size === pr.changedFiles.length &&
+      JSON.stringify([...pr.changedFiles].sort()) === JSON.stringify(dependencyIdentity.files.map(file => file.path).sort()) &&
+      automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
+      !(pr.ciFailures ?? []).some(failure => failure.name === "proof-discrimination") &&
+      staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS;
+    if (dependencyMainSupersession) {
+      staleProofCloses += 1;
+      reason = `superseded — every dependency file's regular mode and blob already match main ${dependencyIdentity.mainSha} at head ${pr.headSha}`;
+      disposition = "stale";
+    }
     const emptyDiffSupersession = emptyDiffSupersedes(pr, disposition) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS;
     if (emptyDiffSupersession) {
       staleProofCloses += 1;
@@ -20611,7 +20654,12 @@ export async function runSweep(
                   break;
                 }
               }
-              await deps.close(pr, reason);
+              if (dependencyMainSupersession) {
+                const fenced = await deps.withDependencyCloseFence?.(pr, async () => { await deps.close(pr, reason); });
+                acted = fenced?.closed === true;
+                if (!acted) standDownReason = fenced?.reason ?? "dependency close requires a strict fresh lifecycle/main/owner fence";
+                extraDisposedFields = { ...extraDisposedFields, dependency_main_identity: dependencyIdentity };
+              } else await deps.close(pr, reason);
               break;
             }
             case "refused-escalate":
