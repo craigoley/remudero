@@ -62,7 +62,7 @@ import {
   readBaseline as readCommentBaseline,
 } from "./comment-load-ratchet.mjs";
 import { DEPS_INTERFACE_BASELINE, DEPS_INTERFACE_CEILING_KEYS, depsInterfaceCounts } from "./deps-interface-census.mjs";
-import { HOUSE_LITERALS, houseLiteralCounts, listHouseLayoutSrcFiles } from "./house-layout-census.mjs";
+import { HOUSE_LITERALS, houseLiteralCounts, listHouseLayoutSrcFiles, qualifiedRunTaskLayoutSplit } from "./house-layout-census.mjs";
 import {
   FIXTURE_COPY_CENSUS_FILENAME,
   FIXTURE_COPY_SIGNATURES,
@@ -226,7 +226,7 @@ function srcTextsOnBothSides({ scoped, readHead, readBase, srcFiles = [] }) {
     if (text === null) baseTexts.delete(path);
     else baseTexts.set(path, text);
   }
-  return { head: [...headTexts.values()], base: [...baseTexts.values()] };
+  return { head: [...headTexts.values()], base: [...baseTexts.values()], headByPath: headTexts, baseByPath: baseTexts };
 }
 
 function houseLayoutViolations(input) {
@@ -235,10 +235,15 @@ function houseLayoutViolations(input) {
   const texts = srcTextsOnBothSides({ ...input, scoped });
   const head = houseLiteralCounts(texts.head);
   const base = houseLiteralCounts(texts.base);
-  return HOUSE_LITERALS.filter((literal) => caused(head[literal], base[literal], base[literal], base[literal])).map(
+  const split = qualifiedRunTaskLayoutSplit(texts.baseByPath, texts.headByPath);
+  for (const [literal, count] of Object.entries(split)) {
+    input.reportHouseLayoutSplit?.(`house-layout: W1-T9332 qualified structural split: ${literal} raw physical files ${head[literal]}, merge base ${base[literal]}; excluding ${count} conserved split duplicate`);
+  }
+  return HOUSE_LITERALS.filter((literal) => caused(head[literal] - (split[literal] ?? 0), base[literal], base[literal], base[literal])).map(
     (literal) =>
       `house-layout: ${literal} now in ${head[literal]} non-test src files, up from ${base[literal]} at the ` +
-      "merge base — resolve it through resolveRepoLayout (src/lib/repo-layout.ts)",
+      "merge base — resolve it through resolveRepoLayout (src/lib/repo-layout.ts)" +
+      (split[literal] ? " [W1-T9332 qualified structural split: one physical duplicate excluded]" : ""),
   );
 }
 
@@ -297,7 +302,7 @@ function testRepoRootViolations({ changed, readHead, readBase }) {
  * the merge base, or null when it does not exist there.
  *
  * @param {{ changed: string[], readHead: (p: string) => string | null, readBase: (p: string) => string | null,
- *   measuredFiles: string[], testFiles: string[] }} input
+ *   measuredFiles: string[], testFiles: string[], reportHouseLayoutSplit?: (line: string) => void }} input
  */
 export function evaluateCensusPrecheck(input) {
   return [
@@ -1568,6 +1573,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     };
     violations = evaluateCensusPrecheck({
       changed,
+      reportHouseLayoutSplit: (line) => console.log(line),
       ...readers,
       measuredFiles: snapshot ? censusSnapshotPaths(snapshot).filter((p) => MEASURED_ROOTS.some((dir) => p.startsWith(`${dir}/`))) : listMeasuredFiles(root),
       testFiles: listFixtureCopyFiles(root),

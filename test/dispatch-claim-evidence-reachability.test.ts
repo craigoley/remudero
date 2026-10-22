@@ -215,7 +215,7 @@ test("W1-T2446 ACCEPTANCE 2: a claim on a NOT-merged task is never touched by th
 
 // ── claim 3: no wall-clock expiry and no pacing is introduced on any path ──────────────────────
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 const dispatchClaimSrc = readFileSync(fileURLToPath(new URL("../src/lib/dispatch-claim.ts", import.meta.url)), "utf8");
 
 test("W1-T2446 ACCEPTANCE 3: the hoisted release reuses releaseDispatchClaim verbatim and introduces no clock read of any kind", () => {

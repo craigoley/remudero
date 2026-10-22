@@ -217,7 +217,8 @@ test("W1-T1219 (acceptance 3): sweepWallClockBoundMs's committed value AND bound
 
 test("W1-T1219 (acceptance 1, wiring): every real fix-rung-spawn call site in src/run-task.ts resolves its bound from fixSpawnWallClockBoundMs, never sweepWallClockBoundMs", () => {
   const src = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
-  const fixSpawnReads = (src.match(/loadDefaultPolicy\(\)\.values\.fixSpawnWallClockBoundMs/g) ?? []).length;
+  const runTaskVerbSrc = readFileSync(join(REPO_ROOT, "src/cli/commands/run-task-verb.ts"), "utf8");
+  const fixSpawnReads = [src, runTaskVerbSrc].reduce((count, source) => count + (source.match(/loadDefaultPolicy\(\)\.values\.fixSpawnWallClockBoundMs/g) ?? []).length, 0);
   assert.ok(
     fixSpawnReads >= 2,
     `expected at least the two known fix-rung-spawn call sites (runTask's opts.spawnWallClockBoundMs ` +
@@ -226,8 +227,8 @@ test("W1-T1219 (acceptance 1, wiring): every real fix-rung-spawn call site in sr
   );
   // The OLD, pre-split wiring — a fix-rung-spawn bound falling back to the SWEEP TICK's row —
   // must be genuinely gone, not merely supplemented.
-  assert.doesNotMatch(
-    src,
+  for (const source of [src, runTaskVerbSrc]) assert.doesNotMatch(
+    source,
     /spawnWallClockBoundMs(Override)? \?\? loadDefaultPolicy\(\)\.values\.sweepWallClockBoundMs/,
     "no fix-rung-spawn bound fallback may still read the sweep tick's row",
   );

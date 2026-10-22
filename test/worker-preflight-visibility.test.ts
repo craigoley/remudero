@@ -355,7 +355,7 @@ test("a worker that never ran preflight produces no notice, and the dispatch doe
 });
 
 test("MUTANT: the read is wired ONCE, and ABOVE every verdict branch that reclaims the worktree", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
 
   const call = "preflightFailureNotice(worktreePath)";
   assert.equal(src.split(call).length - 1, 1, "the substitution target must be UNIQUE or the mutant proves nothing");
