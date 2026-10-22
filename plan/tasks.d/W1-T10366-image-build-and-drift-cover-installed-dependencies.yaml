@@ -136,7 +136,7 @@
     action: proceed
     confidence: 1
     reasons:
-      - "released by the operator with rmd approve"
-      - "Craig Oley explicitly approved this exact 11-existing-file scope and a plan-only author NOT RUN/full-CI route on 2026-10-21; no production action or new hosted-author attempt"
-    judged_at: "2026-10-21T20:27:52.059Z"
-    pin: "87e2905eed0a5845c33aac9c1eecc7c20c2624916c6e6d595669298748873bea"
+      - "Craig Oley explicitly approved exactly the two additional existing caller-test companions in the 2026-10-22 stuck-PR recovery chat; the prior eleven-file implementation scope and its safeguards remain intact."
+      - "Preserve every original assertion, UNKNOWN behavior, expected commit identity, acceptance criterion, falsifier, budget, production setting and gate limit; the native fix worker retains ownership."
+    judged_at: "2026-10-22T02:19:43.958Z"
+    pin: "f28a6d4f72b7638ea7feb1163b0064894af7cedfd5250fe0594a02c803e14d71"
