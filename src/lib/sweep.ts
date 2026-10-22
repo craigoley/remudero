@@ -7030,14 +7030,16 @@ export function checksPendingSinceFromRollup(
  *  verdict rather than a bad one, so the job can be re-queued instead of a worker dispatched. */
 export interface CancelledRequiredCheck {
   name: string;
+  /** Failed posted gates whose exact head/run/attempt/job and own cancelled outcome bind to this producer. */
+  explainedFailures?: readonly { name: string; checkRunId: number }[];
   /** GitHub Actions job id, parsed by the real gateway from the rollup's URL or external id — the
    *  re-queue target is the JOB (design iv), never the workflow run. `undefined` when none could
    *  be read, and the real `requeueCheck` wiring then degrades to a named no-op. */
   jobId?: string;
   /** W1-T2431 — GitHub's OWN `run_attempt`, read off the SAME rollup {@link jobId} is parsed from:
    *  no new gateway, no new credential. A SURFACE the fleet does not write, so it counts an
-   *  operator's own re-run too. No producer sets it today — a WIDENING of the `true` case, never a
-   *  replacement that could narrow it. */
+   *  operator's own re-run too. An exact posted-gate cancellation link supplies its producer's
+   *  attempt; otherwise absent, preserving the ledger-derived retry bound. */
   runAttempt?: number;
 }
 
@@ -18481,6 +18483,12 @@ export async function runSweep(
         ...pr.cancelledRequiredChecks!.map(c => c.name),
       ], rollup));
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
+      const freshByName = new Map(dedupeRollupByLatestAttempt(rollup ?? []).map(c => [c.name ?? c.context, c]));
+      const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
+        .filter(alias => {
+          const latest = freshByName.get(alias.name);
+          return !latest || !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest));
+        }).map(alias => alias.name));
       const deterministicTimeouts = new Set<string>();
       const outcomes: string[] = [];
       let escalated = false;
@@ -18500,6 +18508,17 @@ export async function runSweep(
           continue;
         }
         if (deferred !== undefined) continue;
+        if (check.explainedFailures?.length) {
+          const producer = freshByName.get(check.name);
+          if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
+              (producer.status ?? "").toUpperCase() !== "COMPLETED" || checkJobId(producer) !== check.jobId || !check.explainedFailures.every(alias => {
+                const latest = freshByName.get(alias.name);
+                return latest !== undefined && latest.checkRunId === alias.checkRunId && rollupState(latest) === "FAILURE";
+              })) {
+            outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
+            continue;
+          }
+        }
         if (decision.requeue) {
           const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), rollup);
           if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
@@ -18519,7 +18538,10 @@ export async function runSweep(
       }
       // Only ci and ci-gate downstream of this cancelled shard are explained by cancellation.
       const genuine = [...fresh].filter(name => deterministicTimeouts.has(name) ||
-        (!cancelled.some(c => c.name === name) && name !== "ci-gate" &&
+        (!explained.has(name) && !cancelled.some(c => c.name === name &&
+          !(c.explainedFailures?.length && dedupeRollupByLatestAttempt(rollup ?? []).some(latest =>
+            (latest.name ?? latest.context) === name && REQUIRED_CHECK_FAIL.has(rollupState(latest)) &&
+            rollupState(latest) !== "CANCELLED"))) && name !== "ci-gate" &&
           !(name === "ci" && pr.cancelledRequiredChecks!.some(c => /^ci-shard \(\d+\/\d+\)$/.test(c.name)))));
       if (genuine.length === 0) {
         infrastructureBlockerByPr.set(pr.prNumber, escalated ? "escalated" : "awaiting-ci");
