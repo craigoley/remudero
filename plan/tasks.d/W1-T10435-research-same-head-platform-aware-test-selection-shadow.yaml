@@ -2,7 +2,7 @@
   title: Research same-head platform-aware test-selection shadows against a complete reference
   repo: remudero
   type: recon
-  verify: auto
+  verify: human
   depends_on: []
   plan_refs: [W1-T4439]
   priority: 99
@@ -10,10 +10,11 @@
   budget_usd: 4
   status: queued
   attempts: 0
-  author_class: machine
+  author_class: human
   origin: "operator archive disposition 2026-10-22; docket P09; native runner qualification remains separate"
   files: [docs/forensics/same-head-test-selection-shadow.md]
   rationale: |
+    Operator-directed filing and priority; parked for human verification, not an automatic research run.
     Narrow testing can reduce latency and storage only after missed-failure risk and completeness
     are measured. Existing selector-shadow miss tasks (including W1-T10356) repair particular edges;
     do not duplicate or take over those lanes. This low-priority recon specifies paired held-out

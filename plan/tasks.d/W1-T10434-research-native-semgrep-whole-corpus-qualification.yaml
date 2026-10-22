@@ -2,7 +2,7 @@
   title: Research an exact-head native Semgrep whole-corpus qualification and sanitized inventory contract
   repo: remudero
   type: recon
-  verify: auto
+  verify: human
   depends_on: []
   plan_refs: [W1-T9979]
   priority: 99
@@ -10,10 +10,11 @@
   budget_usd: 4
   status: queued
   attempts: 0
-  author_class: machine
+  author_class: human
   origin: "operator archive disposition 2026-10-22; docket C02 and scanner portion of P02"
   files: [docs/forensics/native-semgrep-corpus-qualification.md]
   rationale: |
+    Operator-directed filing and priority; parked for human verification, not an automatic research run.
     Native CE runtime compatibility, advisory Scan green, baseline scanning and whole-corpus
     qualification are distinct. Current source-runtime and engine controls do not establish complete
     repository coverage. This is a low-priority research/specification task, not another scanner repair

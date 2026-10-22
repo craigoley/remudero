@@ -2,7 +2,7 @@
   title: Research a default-off pinned terminal-evidence contract for vanished dedicated run scopes
   repo: remudero
   type: recon
-  verify: auto
+  verify: human
   depends_on: []
   plan_refs: [W1-T10251, W1-T9928]
   priority: 99
@@ -10,10 +10,11 @@
   budget_usd: 4
   status: queued
   attempts: 0
-  author_class: machine
+  author_class: human
   origin: "operator archive disposition 2026-10-22; docket P03/P03a/P06; contract ruling: require pinned terminal evidence"
   files: [docs/forensics/pinned-terminal-scope-contract.md]
   rationale: |
+    Operator-directed filing and priority; parked for human verification, not an automatic research run.
     Research and specification only, explicitly low priority. Current W1-T10251 intentionally accepts
     dedicated-scope disappearance; the operator selected a DIFFERENT default-off qualification contract,
     not a live change. A dead PID, an empty immediate cgroup.procs, or ENOENT alone must not be upgraded
