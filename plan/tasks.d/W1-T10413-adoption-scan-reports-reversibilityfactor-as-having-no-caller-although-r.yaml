@@ -14,6 +14,7 @@
   design: |
     CREATES: test/gardeners/adoption-scan-finds-reversibilityfactor-caller.test.ts
     The adoption report (measurement-cadence) says reversibilityFactor in src/lib/risk-score.ts has no reference outside its definition. On main src/cli/commands/run-task-verb.ts imports it and calls it in diffIsClassifiedIrreversible, and src/run-task.ts imports run-task-verb. First reproduce the finding with scanUnadoptedSymbols over a fixture tree mirroring that import chain (src/run-task.ts imports src/cli/commands/run-task-verb.ts which imports a src/lib export and calls it). Name the cause (import parsing of the `type` modifier inside braces, reachability from src/run-task.ts, or a stale report), fix it in src/lib/measurement-cadence.ts, and keep every genuine no-caller finding. If main already clears the finding, the test pins that and the task closes with the proof.
+    DISCRIMINATION: the test file does not exist at the merge base, so both named proofs fail there (no such test) and pass only on a head that carries this test file; the second proof is the control that keeps a genuine no-caller export reported, so a fix that silences every finding fails it.
   acceptance:
     - claim: "A src/lib export called from a module that src/run-task.ts reaches through src/cli/commands, with a `type` modifier inside the import braces, is not reported as symbol-no-caller"
       proof: "unit test: adoption scan finds the reversibilityFactor caller reached through src/cli/commands"
