@@ -1,0 +1,63 @@
+- id: W1-T10355
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:proof-discrimination cost 32.2 PR minute(s) across 14 round(s) on 9 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.22
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:proof-discrimination"
+  files:
+    - .github/workflows/proof-discrimination-gate.yml
+    - test/gardeners/check-proof-discrimination.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:proof-discrimination"
+      proof: "grep: test(\"W1-T10355: check:proof-discrimination is prevented, not retried\" in test/gardeners/check-proof-discrimination.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:proof-discrimination's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:proof-discrimination cost 32.2 PR minute(s) (seven-day half-life) across 14 fix round(s) on 9 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/proof-discrimination-gate.yml: declares job proof-discrimination for proof-discrimination
+
+    RECENT ROUNDS (newest first):
+    - PR #13282 at 2026-10-21T03:49:19.364Z: proof-discrimination round
+    - PR #12997 (https://github.com/craigoley/remudero/pull/12997) at 2026-10-20T15:49:08.295Z: proof-discrimination round
+        failing tests: PROPERTY no tracked src/**/*.ts file's bare-catch count exceeds its baseline
+    - PR #12575 (https://github.com/craigoley/remudero/pull/12575) at 2026-10-17T15:26:28.529Z: ci-log round — rule-checks: test/containment.test.ts; acceptance-author-gate; proof-discrimination; head-identity-gate
+        failing tests: test/containment.test.ts; test/docs-claims.test.ts
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/containment.test.ts:1:1
+          | ✖ test/containment.test.ts (856.81369ms)
+          |   'test failed'
+          | 
+          |   [docs-ws-stage-not-ws0-spike] README.md does not claim the repo is still the WS-0 spike, or that run-task.ts becomes real in WS-1 -- WS-1 closed 2026-07-15 and run-task.ts is real, dispatched code today.
+          |   plan_section: README.md#whats-here-today
+          |   assertion:    node --test --import tsx --test-name-pattern "README.md does not claim the repo currently contains the WS-0 spike" test/docs-claims.test.ts
+          |   exit code:    1
+          |   stdout: node:internal/modules/esm/resolve:272
+          |     throw new ER
+    - PR #10549 at 2026-10-10T03:19:27.060Z: ci-log round — proof-discrimination: proof-discrimination: FAIL — N proof(s) pass at both PR head and merge base (); they cannot establish this PR's work:
+    - PR #10373 (https://github.com/craigoley/remudero/pull/10373) at 2026-10-09T14:58:39.181Z: ci-log round — ci-shard (1/8); proof-discrimination
+        failing tests: test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments
+
+    WHAT THE LAST RUNG TRIED: W1-T5126 (a docs-only record, which changed no code path; its advice is under ci-friction:check:proof-discrimination in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/proof-discrimination-gate.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-22T03:29:10.227Z"
+    pin: "cd2c9466669ca9b4214dded150446e969f3e8e8a0411e54a2b0e5c5b3a3da307"

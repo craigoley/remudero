@@ -6,7 +6,8 @@
   verify: auto
   risk: low
   priority: 1.34
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "flow-blocker:plan-proof-unrunnable:plan-only PR is red on lint-plan, ci-shard (<n>/<n>)"
@@ -38,3 +39,14 @@
       - "A minor caution: the acceptance is a grep for a test name, which is weak, and the test file does not yet exist at base. Both are normal for a not-yet-built implement task and do not meet the HIGH criteria."
     judged_at: "2026-10-20T05:32:48.133Z"
     pin: "9ae2594d14778fdaf7bf74277078a606e086195497a383c8fa661f8f56a38f2a"
+  amendment: |
+    Operator disposition approved 2026-10-22: withdraw this label-only ownership remedy.
+    PR #13582 at d2b3e5d0de8f6ad01316d98fa0b023fe242d203f ignores the capability
+    argument and labels every plan-proof blocker plan-repair, including an unwired
+    repair lane. Its new test checks only that label and dispatches no remedy.
+    The preceding fc5f2e18 head failed four original owner tests in hosted and local replay.
+    The d2b3e5d head replaced those expectations instead of adding a repair action.
+    Preserve the original assertions and
+    the original task evidence as history; no gate changes or remedy credit.
+    A future remedy must identify a current per-PR dispatch failure and prove
+    actual repair or an honest held/unknown outcome, not replace owner NONE alone.

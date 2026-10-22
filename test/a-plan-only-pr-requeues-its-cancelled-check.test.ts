@@ -7,6 +7,7 @@ import {
   buildSweepEffects, CHECK_REQUEUE_DEFERRAL_BACKSTOP, runSweep, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { cancelledRequiredChecks, type RollupCheck } from "#src/lib/tick-read-worker.js";
 import type { OpenIssue } from "#src/lib/escalate.js";
 
 const SHARD = "ci-shard (8/8)";
@@ -34,6 +35,7 @@ function fixture() {
   const rows: Record<string, unknown>[] = [];
   const requeued: string[] = [];
   const rounds: number[] = [];
+  const armed: number[] = [];
   const issues: string[] = [];
   const open: OpenIssue[] = [];
   const effects = buildSweepEffects({
@@ -50,7 +52,7 @@ function fixture() {
     },
   } as unknown as Parameters<typeof buildSweepEffects>[0]);
   const deps: SweepDeps = {
-    arm: () => {}, close: () => {}, postReview: async () => {},
+    arm: pr => { armed.push(pr.prNumber); }, close: () => {}, postReview: async () => {},
     dispatchFix: () => assert.fail("cancellation must not dispatch a code worker"), escalate: () => {},
     requeueCheck: (_pr, check) => { requeued.push(check.name); return true; },
     escalateCancelledCheck: effects.escalateCancelledCheck,
@@ -68,7 +70,7 @@ function fixture() {
     await runSweep([pr, peer], { ...deps, ...over });
     return rows.filter(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber).at(-1);
   };
-  return { pass, rows, requeued, rounds, issues, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { pass, rows, requeued, rounds, armed, issues, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("W1-T10260: a plan-only PR re-runs its cancelled shard instead of a plan round", async () => {
@@ -151,5 +153,111 @@ test("W1-T10260: a deferred cancelled job keeps the requeue backstop on the plan
     assert.equal(f.issues.length, 1);
     assert.match(f.issues[0]!, /requeue refused/);
     assert.equal(disposed?.blocker, "escalated");
+  } finally { f.cleanup(); }
+});
+
+
+const PRODUCER = "light-gates";
+const PRODUCER_JOB = "119601912896";
+const PRODUCER_RUN = "39710957377";
+const PRODUCER_HEAD = "6f9313fb89989914f77dcd770b0cc490bb12a0e2";
+function producerRollup(): RollupCheck[] {
+  return [
+    { name: PRODUCER, headSha: PRODUCER_HEAD, status: "COMPLETED", conclusion: "CANCELLED",
+      detailsUrl: `https://github.com/craigoley/remudero/actions/runs/${PRODUCER_RUN}/job/${PRODUCER_JOB}`,
+      startedAt: new Date(NOW - 900000).toISOString() },
+    { name: "claims", checkRunId: 119606381286, headSha: PRODUCER_HEAD, status: "COMPLETED", conclusion: "FAILURE",
+      externalId: `run:${PRODUCER_RUN}:1:job:${PRODUCER_JOB}`,
+      outputSummary: "W1-T4399: reported by this job's claims step(s) (outcome(s): cancelled)",
+      startedAt: new Date(NOW - 1000).toISOString() },
+  ];
+}
+function producerView(rollup = producerRollup()) {
+  return view({ headSha: PRODUCER_HEAD, redRequiredChecks: [PRODUCER, "claims", "ci-gate"],
+    cancelledRequiredChecks: cancelledRequiredChecks(rollup, ["ci-gate"], PRODUCER_HEAD),
+    ciFailures: [{ name: PRODUCER, jobId: PRODUCER_JOB, conclusion: "CANCELLED", logTail: "The job has exceeded the maximum execution time of15m0s" },
+      { name: "claims", jobId: PRODUCER_JOB, conclusion: "FAILURE", logTail: "claims-check: OK -- all18 claim(s) hold.\nThe operation was canceled." },
+      { name: "ci-gate", conclusion: "FAILURE", logTail: "required checks failed" }] });
+}
+
+test("producer-linked cancelled claims defer live work and retry one physical job instead of a plan round", async () => {
+  for (const live of [true, false]) {
+    const f = fixture();
+    try {
+      const pr = producerView();
+      const disposed = await f.pass(pr, { liveCiRunForHead: () => live, readCiGateRollup: () => producerRollup() });
+      assert.deepEqual(f.requeued, live ? [] : [PRODUCER]);
+      assert.deepEqual(f.rounds, []);
+      assert.equal(disposed?.blocker, "awaiting-ci");
+      assert.equal(disposed?.disposition, "wait");
+      if (live) assert.match(String(disposed?.reason), /still live/);
+      assert.equal(pr.ciFailures?.find(failure => failure.name === "claims")?.conclusion, "FAILURE", "merge remains blocked");
+      assert.equal(f.rows.filter(row => row.step === "sweep.check_requeued").length, live ? 0 : 1);
+    } finally { f.cleanup(); }
+  }
+});
+
+test("producer-linked cancellation retains head-attempt retry bounds and fresh unknown or superseding work holds", async () => {
+  for (const mode of ["spent", "surface-spent", "unknown", "pending", "inconsistent-producer", "changed-job", "unknown-child", "admission", "dry"] as const) {
+    const f = fixture();
+    try {
+      const rollup = producerRollup();
+      if (mode === "surface-spent") rollup[1].externalId = `run:${PRODUCER_RUN}:2:job:${PRODUCER_JOB}`;
+      const pr = producerView(rollup);
+      if (mode === "spent") await f.pass(pr, { readCiGateRollup: () => rollup });
+      const fresh = rollup.map(row => ({ ...row }));
+      if (mode === "pending") fresh[0] = { ...fresh[0], conclusion: undefined, status: "IN_PROGRESS" };
+      if (mode === "inconsistent-producer") fresh[0].status = "IN_PROGRESS";
+      if (mode === "unknown-child") fresh[1].checkRunId = undefined;
+      if (mode === "changed-job") fresh[0].detailsUrl = `https://github.com/craigoley/remudero/actions/runs/${PRODUCER_RUN}/job/999`;
+      const disposed = await f.pass(pr, { readCiGateRollup: () => mode === "unknown" ? undefined : fresh,
+        ...(mode === "admission" ? { actionable: () => false } : {}), ...(mode === "dry" ? { dryRun: true } : {}) });
+      assert.deepEqual(f.rounds, []);
+      assert.equal(f.requeued.length, mode === "spent" ? 1 : 0);
+      assert.equal(f.armed.includes(pr.prNumber), false, "target cannot arm while its cancellation is unresolved");
+      if (mode === "spent" || mode === "surface-spent") assert.equal(disposed?.blocker, "escalated");
+      else if (mode !== "dry") assert.equal(disposed?.blocker, "awaiting-ci");
+    } finally { f.cleanup(); }
+  }
+});
+
+test("producer-linked cancellation cannot explain true constituent or unrelated failures", async () => {
+  for (const kind of ["own-failure", "unrelated", "new-producer-failure", "new-child-failure"] as const) {
+    const f = fixture();
+    try {
+      const rollup = producerRollup();
+      if (kind === "own-failure") rollup[1].outputSummary = "W1-T4399: reported by this job's claims step(s) (outcome(s): failure)";
+      const pr = producerView(rollup);
+      if (kind === "unrelated") {
+        pr.redRequiredChecks = [...pr.redRequiredChecks!, "lint-plan"];
+        pr.ciFailures = [...pr.ciFailures!, { name: "lint-plan", conclusion: "FAILURE", logTail: "invalid plan" }];
+      }
+      const fresh = rollup.map(row => ({ ...row }));
+      if (kind === "new-producer-failure") fresh[0].conclusion = "FAILURE";
+      if (kind === "new-child-failure") fresh[1].checkRunId = 999;
+      await f.pass(pr, { readCiGateRollup: () => kind === "unrelated" ? [...fresh, { name: "lint-plan", conclusion: "FAILURE" }] : fresh });
+      assert.deepEqual(f.rounds, [pr.prNumber]);
+      assert.equal(f.requeued.length, ["new-producer-failure", "new-child-failure"].includes(kind) ? 0 : 1);
+    } finally { f.cleanup(); }
+  }
+});
+
+
+test("several cancelled posted gates spend only their one physical producer retry", async () => {
+  const f = fixture();
+  try {
+    const rollup = producerRollup();
+    rollup.push({ ...rollup[1], name: "another-gate", checkRunId: 119606381287,
+      outputSummary: "W1-T4399: reported by this job's another-gate step(s) (outcome(s): cancelled)" });
+    const pr = producerView(rollup);
+    pr.redRequiredChecks = [...pr.redRequiredChecks!, "another-gate"];
+    pr.ciFailures = [...pr.ciFailures!, { name: "another-gate", jobId: PRODUCER_JOB, conclusion: "FAILURE", logTail: "The operation was canceled." }];
+    assert.equal(pr.cancelledRequiredChecks?.length, 1);
+    assert.equal(pr.cancelledRequiredChecks?.[0].explainedFailures?.length, 2);
+    const disposed = await f.pass(pr, { readCiGateRollup: () => rollup });
+    assert.deepEqual(f.requeued, [PRODUCER]);
+    assert.equal(f.rows.filter(row => row.step === "sweep.check_requeued").length, 1);
+    assert.deepEqual(f.rounds, []);
+    assert.equal(disposed?.blocker, "awaiting-ci");
   } finally { f.cleanup(); }
 });

@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,11 @@
       proof: "grep: test/the-scout-declares-the-writer-of-its-symptom\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/the-scout-declares-the-writer-of-its-symptom.test.ts for each recorded edge"
       proof: "grep: test/the-scout-declares-the-writer-of-its-symptom\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:31:39.861Z"
+    pin: "df194b0f485dbe1faf5f6f7bc2d9d77fbcf38c6731637048cd43d3e2550cc33c"

@@ -84,6 +84,7 @@ import {
 } from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
 import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
+import { createFleetAccountEpisode, redactedAccountLabel, type FleetAccountDivergence, type FleetAccountPair } from "./account-usage.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
@@ -120,8 +121,8 @@ import {
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { resolveReleasedIds, closedUnmergedRunBranchRefs } from "./drain.js";
+import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, type DispatchValueContext } from "./dispatch-value.js";
@@ -1280,6 +1281,9 @@ export interface DaemonDeps {
    *  the drain and is refused from the console. Same seam and same contract as `DrainDeps`'s.
    *  ABSENT = today's behaviour exactly, an empty released set. */
   readLedgerLines?: () => readonly string[];
+  /** W1-T10348 — the operator releases kept in state/operator-releases.json, which ledger rotation cannot
+   *  shed. Read with `readLedgerLines` once per tick by the shared release resolver. Absent = ledger only. */
+  readDurableReleases?: () => ReadonlySet<string>;
   /** Complete archive union for the boot-time restart estimates and sweep-bound seed (W1-T9632); unreadable disables holdouts. */
   readRestartHistory?: () => readonly string[];
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
@@ -1451,6 +1455,14 @@ export interface DaemonDeps {
     limitPct: number;
     resetsAt: string;
   }) => void | Promise<void>;
+  /** W1-T10381: the identities of the fleet credential store and the host login. Present, the
+   *  `daemon.headroom` row names the measured (store) account as a redacted `account`, and a store at
+   *  or over its reserve beside a different host account with headroom is one divergence episode.
+   *  Identity fields only; nothing is copied. A throw is ledgered, never fatal. */
+  readFleetAccounts?: () => FleetAccountPair | undefined;
+  /** Called at most once per (store uuid, host uuid) episode, on top of the `daemon.fleet_account_diverged`
+   *  row. A pure notification: the real command may add its own cross-boot ledger dedup. */
+  onFleetAccountDivergence?: (info: FleetAccountDivergence) => void | Promise<void>;
   /** Called at most once per park, on the tick the ceiling forces a blind dispatch — never per tick,
    *  which at a 60s poll would be a pager. Re-armed when the park ends. */
   onHeadroomParkCeiling?: (info: {
@@ -1930,6 +1942,32 @@ export function runBranchDispatchOpts(
     // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
     // row, which has three emitters and no reader.
     onSkipRunBranch: (t: Task) => log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+  };
+}
+
+/**
+ * W1-T10348 — A RELEASED TASK THAT DISPATCH FILTERS OUT IS NAMED. Wraps the tick's `onFiltered` (the idle
+ * tally, which is written only when the daemon is idle and caps its ids) so a released task, or a machine
+ * release set aside under a standing escalate ruling, writes `dispatch.released_filtered` with its reason.
+ * `named` is the daemon process's own set: a stable filter is named once, and a changed reason again.
+ */
+export function releasedFilteredLogger(
+  releases: ReleaseResolution,
+  named: Set<string>,
+  tally: (task: Task, reason: DispatchFilterReason) => void,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (task: Task, reason: DispatchFilterReason) => void {
+  return (task, reason) => {
+    tally(task, reason);
+    const setAside = releases.setAside.has(task.id);
+    if (!setAside && !releases.ids.has(task.id)) return;
+    const key = `${task.id}\u0000${reason}`;
+    if (named.has(key)) return;
+    named.add(key);
+    log("dispatch.released_filtered", {
+      task: task.id, reason, release_author: releases.authors.get(task.id) ?? "operator",
+      ...(setAside ? { set_aside: "current-pin escalate ruling" } : {}),
+    });
   };
 }
 
@@ -3814,6 +3852,8 @@ export async function runDaemon(
   // CALLBACK to the first observation of each task id this run; the predicate itself is still
   // consulted, and still excludes the task, every tick (P29(ii)).
   const circuitEscalated = new Set<string>();
+  // W1-T10348: each (task, reason) a released task was filtered under, so a stable filter is named once per process.
+  const releasedFilteredNamed = new Set<string>();
   const pauseHoldGovernorStates = new Map<string, PauseHoldGovernorState>();
   // W1-T4685: this run's own repeated-observation tracker — never a module-level singleton, so two
   // unrelated `runDaemon` calls in the same test process never share rows. Alongside (never instead
@@ -3855,6 +3895,7 @@ export async function runDaemon(
   // breach is read fresh every tick, so without this the hook would fire on every idle poll. Cleared
   // the moment a read reports the window back under the reserve (P34 (c), W1-T249).
   let headroomReserveEscalated = false;
+  const fleetAccountEpisode = createFleetAccountEpisode();
   // Disk headroom escalation dedup, threaded rather than redeclared into every ticker below so all three phases share
   // one latch for this run: a breach first observed mid-dispatch must not re-escalate the moment another phase
   // observes the same unresolved reading. Held as a mutable object because the ticker is a free function called fresh
@@ -6065,9 +6106,27 @@ export async function runDaemon(
         // nothing at all. Measured: no headroom line at all after the governor was armed on 2026-07-31.
         // Nothing about enforcement moved, only the under-ceiling silence. Forensics: docs/forensics/daemon.md.
         const reading = over ?? windows[0];
+        // W1-T10381: whose usage this row measured, and whether the host login has moved off it.
+        let fleetAccount: string | undefined;
+        let fleetDivergence: FleetAccountDivergence | undefined;
+        if (deps.readFleetAccounts) {
+          let pair: FleetAccountPair | undefined;
+          try {
+            pair = deps.readFleetAccounts();
+          } catch (e) {
+            log("daemon.fleet_account.unreadable", { error: String((e as Error)?.message ?? e) });
+          }
+          fleetAccount = redactedAccountLabel(pair?.store);
+          fleetDivergence = fleetAccountEpisode.observe(
+            pair,
+            over ? { window: over.window, percentUsed: over.percentUsed, limitPct: over.limitPct } : null,
+            daemonClock.now(),
+          );
+        }
         if (reading) {
           log("daemon.headroom", {
             ...(enforcingIdle ? { tick: ticks } : {}),
+            ...(fleetAccount !== undefined ? { account: fleetAccount } : {}),
             window: reading.window,
             percent_used: reading.percentUsed,
             limit_pct: reading.limitPct,
@@ -6079,6 +6138,23 @@ export async function runDaemon(
               ? {}
               : { note: "headroom governor disabled (ruling a4153e) — telemetry only, dispatch not gated" }),
           });
+        }
+        if (fleetDivergence) {
+          const row = fleetDivergence;
+          log("daemon.fleet_account_diverged", {
+            store_account: row.storeAccount,
+            host_account: row.hostAccount,
+            window: row.window,
+            store_percent_used: row.storePercentUsed,
+            host_percent_used: row.hostPercentUsed,
+            limit_pct: row.limitPct,
+            remedy: row.remedy,
+          });
+          try {
+            await deps.onFleetAccountDivergence?.(fleetDivergence);
+          } catch (e) {
+            log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+          }
         }
         if (enforcingIdle) {
           // Notify once per episode. Dispatch is already paused by this same branch, so the hook is a pure
@@ -6295,6 +6371,15 @@ export async function runDaemon(
     // by {@link assertRunnable} is cleared and its named reason ledgered, never silently dropped. The
     // first runnable kick becomes this cycle's task; others wait (fb-1784988460437-9daa9b).
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
+    // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
+    // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
+    const tickReleases = resolveReleases(deps, planForBatch);
+    if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
+      log("dispatch.releases_unreadable", {
+        ...(tickReleases.ledgerUnreadable !== undefined ? { ledger_error: tickReleases.ledgerUnreadable } : {}),
+        ...(tickReleases.durableUnreadable !== undefined ? { durable_error: tickReleases.durableUnreadable } : {}),
+      });
+    }
     let forcedNext: Task | undefined;
     let forcedKick: { taskId: string; origin: string } | undefined;
     if (deps.pendingKicks) {
@@ -6309,7 +6394,7 @@ export async function runDaemon(
         try {
           // W1-T3216: a console kick for an operator-RELEASED verify:human task must be admitted
           // here too, or the release works from the drain and is refused from the console.
-          assertRunnable(planForBatch, task, mergedTask, resolveReleasedIds(deps));
+          assertRunnable(planForBatch, task, mergedTask, tickReleases.ids);
         } catch (e) {
           refuse(e instanceof PlanError ? e.message : String((e as Error)?.message ?? e));
           continue;
@@ -6405,7 +6490,10 @@ export async function runDaemon(
       // The argument W1-T534 declared and nothing supplied — see `DrainDeps` for why the reader is
       // injected and the parse hoisted (W1-T916).
       ...runBranchDispatchOpts(runBranchStateThisTick, planOnlyReceiptsThisTick, log),
-      onFiltered: idleReasons.onFiltered,
+      onFiltered: releasedFilteredLogger(tickReleases, releasedFilteredNamed, idleReasons.onFiltered, log),
+      // W1-T10348: the daemon's selector never had a released set, so every released verify:human task
+      // was filed under verify-not-auto. The lane refill inherits it through its spread of this literal.
+      releasedIds: tickReleases.ids,
       // In-flight: a legible skip on console and ledger; the daemon keeps polling rather than treating an
       // open PR as a block (W1-T80).
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
@@ -6646,7 +6734,7 @@ export async function runDaemon(
         try {
           const openCount = deps.confirmedOpenPrCount();
           if (openCount === 0 && !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
-            const released = releasedTaskIds(deps.readLedgerLines());
+            const released = tickReleases.ids;
             const hasUnblockedTask = planForBatch.tasks.some((task) => {
               if (deps.isCreditIndeterminate!(task.id)) throw new Error(`credit unreadable: ${task.id}`);
               if (isMerged(task.id)) return false;

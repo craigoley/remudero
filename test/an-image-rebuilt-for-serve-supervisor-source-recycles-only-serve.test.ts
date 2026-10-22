@@ -86,8 +86,12 @@ test("W1-T9094: a build container ignores a serve-supervisor-only commit", () =>
         if (cmd === "docker") return `${IMAGE_SHA}\n`;
         if (cmd !== "git") throw new Error(`unexpected exec ${cmd}`);
         const gitArgs = args.slice(2); // drop `-C /repo`
-        // the playwright-core and worker-SDK readings walk the root lockfile; no such commit here
-        if (gitArgs.includes("package-lock.json") || gitArgs.includes("packages/worker-sdk/package.json")) return "";
+        // W1-T10366: the dependency fingerprint reads the root lockfile + manifest at the image sha
+        // and origin/main; both refs carry the same inputs here, so no dependency drift.
+        if (gitArgs[0] === "show") {
+          return String(gitArgs[1]).endsWith(":package-lock.json")
+            ? JSON.stringify({ lockfileVersion: 3, packages: { "": { name: "fixture" } } }) : "{}";
+        }
         return git(gitArgs);
       },
     });

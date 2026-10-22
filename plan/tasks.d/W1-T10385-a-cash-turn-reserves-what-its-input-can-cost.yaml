@@ -1,0 +1,65 @@
+- id: W1-T10385
+  title: "A CASH TURN RESERVES WHAT ITS INPUT CAN COST, NOT ITS BODY'S BYTE COUNT — `openWeightReservationUsd` (src/lib/worker-provider.ts) prices every request body BYTE as an input token at the reservation rate, so a later turn of a multi-turn run reserves $6.93-$14.40 (2026-10-22: \"committed $6.97 + $13.33 would exceed $10.00\") while a whole cash review costs a median $0.128; the worst-case reservation refuses work the cap could pay for"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # the reservation is the hard cash ceiling; the new estimate must stay an upper bound
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-10-22, item 6: investigate a better estimate than the worst-case reservation; investigation-first"
+  plan_refs: [W1-T3619, W1-T3666, W1-T3558, W1-T5451, W1-T10384]
+  files:
+    - src/lib/worker-provider.ts
+    - test/worker/spawn/a-cash-turn-reserves-what-its-input-can-cost.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: reserve less than worst case when evidence allows, without losing the ceiling.
+    READ at origin/main 32887fe4d (symbols, not lines):
+    - `openWeightReservationUsd` = (requestBodyBytes + extraInputTokens) x reservationInputUsdPerMillion +
+      OPENWEIGHT_MAX_COMPLETION_TOKENS (8,000) x outputUsdPerMillion. FOUNDRY_SONNET_PRICE reserves input at $4/M
+      against a $2/M list price.
+    - `spawnFoundryClaudeWorker` reserves once per request through `reserveOpenWeightBudget` with the WHOLE body's
+      byte length. A multi-turn worker resends the growing conversation, so turn n reserves for every byte of turns
+      1..n-1 again as if each byte were a fresh token.
+    OBSERVED (core ledger 10-21T08:49Z..10-22T01:20Z, read-only):
+    - The ten 10-22 `cash_allowance_exhausted` refusals wanted $0.13 to $14.40 per request.
+    - The refusal at 00:46:37Z wanted $13.33 (about 3.3 MB of body at $4/M) on that run's second request. The whole
+      run had cost $0.017.
+    - 38 billed cash review rows cost a median $0.128, p90 $0.88, max $1.48.
+    INFERRED: the worst case is unreachable for any turn after the first. The provider has already reported that
+    request's real input and output tokens, and only the appended bytes are new.
+    NOT COVERED ELSEWHERE: W1-T3619 (merged) passes prompt size to the selector, and W1-T3666 (merged) settles a
+    failed request. W1-T5451 (queued) raises the Foundry max_tokens, which makes this reservation larger, not
+    smaller. Swept origin/main 32887fe4d plan/tasks.d and all 18 open PR heads' plan trees for
+    openWeightReservationUsd and OPENWEIGHT_MAX_COMPLETION_TOKENS: no shard sizes the per-turn reservation.
+  design: |
+    1. MEASURE FIRST, IN THE PR BODY. Use the shared allowance file (`sharedCashAllowancePath`: per request
+       `reservedUsd`/`settledUsd`) and the retained ledger. Report per deployment the reserved/settled ratio for
+       first turns vs later turns, and how many refusals in the window a tighter later-turn bound would have
+       admitted. Mark it OBSERVED with its window. If the measurement does not show later turns dominating the
+       over-reservation, stop and report instead of building step 2.
+    2. A LATER TURN'S UPPER BOUND. When the same worker's previous request in this run settled with
+       provider-reported usage, size this request's input as previous input tokens + previous output tokens + this
+       request's APPENDED body bytes (bytes as tokens, today's per-byte bound, applied only to what is new), plus
+       `extraInputTokens`, priced at the same reservation rate and never above today's whole-body bound. The first
+       request, a request whose predecessor has no valid usage, or a body that is not an append of the previous one
+       (prefix mismatch), keeps today's whole-body bound.
+    3. The ceiling property is unchanged: committed + reservation <= cap is still checked before any byte is sent,
+       and settlement still reconciles to actual usage. No cap, price, rate or completion constant changes. No new
+       config key, threshold or env var.
+    4. Tests (new file, titles verbatim as in the proofs): a second turn that appends 2 KB to a 3 MB body reserves
+       from the first turn's reported usage plus 2 KB, not 3 MB. A first turn, a non-append body and a predecessor
+       without usage keep the whole-body bound. The new bound is never larger than today's.
+  acceptance:
+    - claim: "a later turn reserves from the previous turn's reported usage plus its appended bytes"
+      proof: "unit test: W1-T10385: a later cash turn reserves from reported usage plus appended bytes"
+    - claim: "a first turn, a non-append body or a missing usage keeps today's whole-body bound"
+      proof: "unit test: W1-T10385: without a reported predecessor the turn keeps the whole-body reservation"
+  falsifier: |
+    Price the second turn by whole-body bytes again, and the 3 MB fixture's reservation exceeds the test's $10
+    cap and is refused.
+  note: |
+    Reservation refs/rmd-id/W1-T10385 is held by filing branch file-1022-fleet-routing.

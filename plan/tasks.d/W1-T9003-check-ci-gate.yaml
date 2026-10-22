@@ -6,8 +6,11 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1.03
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-21 (gardener rulings page): retire W1-T9003 — 0 ci-gate rounds and 0 ci-gate red heads in 3
+  # d: ci-gate is an aggregator that W1-T9056 drops from a round once a producer check names the failure, so this
+  # cause no longer prices new rounds.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-gate"

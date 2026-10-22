@@ -1,3 +1,4 @@
+import { INBOX_VERBS, validatedInboxAction, type InboxVerbActions, type InboxVerbActor, type InboxVerbName, type InboxVerbRespond } from "./inbox-verdict-command.js";
 import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
 /**
  * lib/panel-graph.ts — the control panel's plan→task→PR graph and interactive plan adjustment
@@ -113,7 +114,7 @@ import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbo
 import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
-import { currentVerifyHumanRulings } from "./verify-human-judge.js";
+import { currentVerifyHumanRulings, currentDeclineState, declineLapse, observedStateOfProposalSummary } from "./verify-human-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
 import { readRecommendationStore, recommendationFor, recommendationStorePath, type RecommendationStore, type ServedRecommendation } from "./inbox-recommendation.js";
@@ -1801,6 +1802,8 @@ export interface InboxReadyItem extends InboxSender {
   recommendation?: ServedRecommendation;
   stampLine?: string;
   draftedTasks: InboxDraftedTask[];
+  /** W1-T10077: set when an operator's decline lapsed because the state it was given on changed; says what changed. */
+  reopenedBecause?: string;
 }
 
 /** One proposal currently mid-draft (W1-T193): an Architect worker is running for it right now.
@@ -1849,6 +1852,8 @@ export interface InboxNotReadyItem extends InboxSender {
   /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
   recommendation?: ServedRecommendation;
   reasons: PredicateFailure[];
+  /** W1-T10077: set when an operator's decline lapsed because the state it was given on changed; says what changed. */
+  reopenedBecause?: string;
   state?: "not_ready" | "deferred_with_trigger";
   trigger?: InboxClassification["trigger"];
   resolution?: { method: "POST"; path: "/v1/inbox/reframe"; fields: { proposalId: string } };
@@ -2012,7 +2017,28 @@ function prepareInboxPass(
   const fragmentMemo = inboxClassifyState(deps).fragments;
   beginFragmentPass(fragmentMemo);
 
+  // W1-T10077: the newest receipt per proposal, built once and only when a verify-human decline is looked at.
+  let newestReceipts: Map<string, VerdictReceipt> | undefined;
+  const newestReceiptOf = (proposalId: string): VerdictReceipt | undefined => {
+    if (newestReceipts === undefined) {
+      newestReceipts = new Map();
+      for (const r of mergeVerdictReceipts(verdictReceipts, ledgerLines.flatMap((row) => verdictReceiptOf(row) ?? []))) newestReceipts.set(r.task_id, r);
+    }
+    return newestReceipts.get(proposalId);
+  };
   const classifyOne = (proposal: Proposal): InboxClassification => {
+    const classified = classifyWith(proposal, verdicts.isDeclined);
+    const declinedTask = classified.state === "declined" ? /^verify-human:([A-Za-z0-9-]+)$/.exec(proposal.id)?.[1] : undefined;
+    const receipt = declinedTask ? newestReceiptOf(proposal.id) : undefined;
+    const task = declinedTask ? plan.byId.get(declinedTask) : undefined;
+    if (!receipt || receipt.step !== "panel.proposal_declined" || !task) return classified;
+    const deps = task.depends_on ?? [];
+    const depsAllMerged = deps.every((d) => { const t = plan.byId.get(d); return t !== undefined && isMerged(t); });
+    const lapse = declineLapse(receipt, currentDeclineState(receipt.observed_state, depsAllMerged), deps);
+    // Classified as it would have been before the decline, with the reason it came back.
+    return lapse ? { ...classifyWith(proposal, () => undefined), reopenedBecause: lapse.because } as InboxClassification : classified;
+  };
+  const classifyWith = (proposal: Proposal, isDeclined: (id: string) => string | undefined): InboxClassification => {
     const classification = classifyProposal(proposal, drafts[proposal.id], {
       retirement: p => lifecycle.state !== "absent" && (!lifecycleScope || lifecycleThreads?.status !== "ok")
         ? { unknown: "owned lifecycle or current operator thread evidence unavailable" }
@@ -2025,7 +2051,7 @@ function prepareInboxPass(
       // Every OTHER registry id: one shared set behind a view that excludes this proposal.
       openProposalIds: { has: (id) => id !== proposal.id && allIds.has(id) },
       isRatified: verdicts.isRatified,
-      isDeclined: verdicts.isDeclined,
+      isDeclined,
       // A release moves a task into the fleet only if the plan itself allows dispatch. A held
       // task can carry an old machine release row, but that row must not hide its human ask.
       isReleasedHumanTask: (taskId) => plan.byId.get(taskId)?.dispatch_hold !== true &&
@@ -2549,6 +2575,10 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     return recommendation ? { recommendation } : {};
   };
 
+  const reopened = (c: InboxClassification): { reopenedBecause?: string } => {
+    const why = (c as InboxClassification & { reopenedBecause?: unknown }).reopenedBecause;
+    return typeof why === "string" ? { reopenedBecause: why } : {};
+  };
   const allReady: InboxReadyItem[] = [];
   const allDrafting: InboxDraftingItem[] = [];
   const allNotReady: InboxNotReadyItem[] = [];
@@ -2564,6 +2594,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         summary: proposal.summary,
         plain: servedPlain(proposal, "ready"),
         ...recommended(proposal, "ready"),
+        ...reopened(classification),
         stampLine: classification.draft?.stampLine,
         draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
       });
@@ -2582,6 +2613,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
       allNotReady.push({
+        ...reopened(classification),
         ...(classification.retirement ? { retirement: classification.retirement } : {}),
         ...(classification.needsTriageReason ? { needsTriageReason: classification.needsTriageReason } : {}),
         ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "notReady"), ...recommended(proposal, "notReady"), reasons: classification.reasons,
@@ -3298,70 +3330,7 @@ export function inboxReplyAuditState(ledgerPath: string, replyId: string, messag
 /** POST /v1/inbox/thread/reply — the operator writes on a thread. LOW: it only adds a message; the
  *  daemon's responder decides what the reply means and may itself take only reversible actions. */
 export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
-  return {
-    method: "POST",
-    path: "/v1/inbox/thread/reply",
-    scope: "write",
-    // W1-T404: LOW — appends a message; a reply is an input, never a command (see inbox-responder.ts).
-    tier: "low",
-    handler: jsonAction(validateThreadReply, async (input, req, res) => {
-      const proposalId = proposalIdOfThread(input.threadId)!;
-      // The detail route and daemon responder both require a current operator-owned item.
-      // A syntactically valid but orphaned id must not receive a success receipt for a
-      // message the responder will silently have no item to answer.
-      const classified = await inboxRead(deps);
-      if (!classified) return void inboxNotReady(res);
-      if (!operatorThreadItems(deps, undefined, classified).some((item) => item.proposalId === proposalId && item.state !== "retired")) {
-        sendJson(res, 404, { error: "not_found", detail: "operator inbox thread is unavailable" });
-        return;
-      }
-      const operator = operatorName(req);
-      const actor = bearerTokenId(req);
-      const replyId = createHash("sha256").update(`${actor}\0${input.threadId}\0${input.intentId ?? randomUUID()}`).digest("hex");
-      const store = { threadStorePath: inboxThreadStorePath(deps.inboxRoot) };
-      const lockId = createHash("sha256").update(input.threadId).digest("hex");
-      try {
-        withInflightLock(join(dirname(store.threadStorePath), "reply-locks"), lockId, () => {
-          let stored: { kind: "appended" | "existing" | "conflict"; seq: number; ts?: number };
-          try {
-            stored = (deps.appendInboxReplyMessage ?? appendThreadReplyOnce)(inboxThreadIdentity(proposalId), input.text, replyId, store, operator ? { operator } : {});
-          } catch {
-            const check = readThread(input.threadId, store);
-            const prior = check.status === "ok" ? check.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId) : undefined;
-            if (!prior) {
-              sendJson(res, 503, { error: "reply_store_unavailable", delivery: check.status === "ok" ? "not_delivered" : "unverified", replyId });
-              return;
-            }
-            stored = { kind: prior.body === input.text ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
-          }
-          if (stored.kind === "conflict") {
-            sendJson(res, 409, { error: "reply_intent_conflict", delivery: "not_delivered", priorReplyId: replyId });
-            return;
-          }
-          clearInboxKeep(join(deps.inboxRoot, "state"), proposalId);
-          const priorAudit = stored.kind === "existing" ? inboxReplyAuditState(deps.ledgerPath, replyId, stored.ts) : "absent";
-          if (priorAudit === "unverified") {
-            sendJson(res, 200, { ok: true, delivery: "delivered", audit: "unverified", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: true });
-            return;
-          }
-          if (priorAudit === "absent") {
-            try {
-              (deps.appendInboxReplyAudit ?? appendPanelLedger)(deps.ledgerPath, "inbox.thread_replied", proposalId, actor, {
-                thread_id: input.threadId, reply_id: replyId, message_seq: stored.seq,
-              });
-            } catch {
-              sendJson(res, 200, { ok: true, delivery: "delivered", audit: "gap", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: stored.kind === "existing" });
-              return;
-            }
-          }
-          sendJson(res, 200, { ok: true, delivery: "delivered", audit: "recorded", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: stored.kind === "existing" });
-        }, { run_id: replyId });
-      } catch (error) {
-        if (!(error instanceof InflightLockError)) throw error;
-        sendJson(res, 409, { error: "reply_in_progress", delivery: "unverified", replyId });
-      }
-    }),
-  };
+  return buildInboxVerbRoute("reply", deps);
 }
 
 interface ThreadReadInput {
@@ -3530,44 +3499,7 @@ function validateApproveProposal(body: unknown): { error: string } | ApproveProp
  * {@link RatifyCliGateway.approve}. Ledgers `panel.proposal_approve_requested` immediately.
  */
 export function buildApproveProposalRoute(deps: PanelGraphDeps): Route {
-  return {
-    method: "POST",
-    path: "/v1/inbox/approve",
-    scope: "write",
-    // W1-T404: HIGH — moves code (hands off to a detached rmd spawn: ratify/merge).
-    tier: "high",
-    handler: jsonAction(validateApproveProposal, async (input, req, res) => {
-      const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
-      const retained = taskId ? await readRetainedHumanReleases(deps) : undefined;
-      const receipt = taskId ? retained?.receipts.get(taskId) : undefined;
-      if (receipt) {
-        sendJson(res, 409, { error: "not_ready", detail: `${input.proposalId} was already released; ${receipt}` });
-        return;
-      }
-      // The one call site among classifyAllProposals's consumers that hands off to an
-      // irreversible spawn, so it alone reads via loadPlanAtRef, "cannot be partial" (W1-T2220).
-      const { proposals, classifications } = classifyAllProposals(deps, (planPath) =>
-        loadPlanAtRef(deps.root, relative(deps.root, planPath)),
-      );
-      if (!proposals.some((p) => p.id === input.proposalId)) {
-        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
-        return;
-      }
-      const classification = classifications.find((c) => c.proposalId === input.proposalId);
-      if (!classification || classification.state !== "ready") {
-        sendJson(res, 409, {
-          error: "not_ready",
-          detail: classification ? refusalReason(classification) : `${input.proposalId}: classification unavailable`,
-        });
-        return;
-      }
-      const origin = bearerTokenId(req);
-      clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
-      appendPanelLedger(deps.ledgerPath, "panel.proposal_approve_requested", input.proposalId, origin, {});
-      deps.ratify.approve(input.proposalId);
-      sendJson(res, 200, { ok: true, proposalId: input.proposalId, started: true });
-    }),
-  };
+  return buildInboxVerbRoute("approve", deps);
 }
 
 interface ReframeProposalInput {
@@ -3589,25 +3521,7 @@ function validateReframeProposal(body: unknown): { error: string } | ReframeProp
  * precondition. Ledgers `panel.proposal_reframe_requested` (with the feedback text) immediately.
  */
 export function buildReframeProposalRoute(deps: PanelGraphDeps): Route {
-  return {
-    method: "POST",
-    path: "/v1/inbox/reframe",
-    scope: "write",
-    // W1-T404: LOW — bookkeeping, trivially reversible (feedback, no ratification).
-    tier: "low",
-    handler: jsonAction(validateReframeProposal, (input, req, res) => {
-      const { proposals } = classifyAllProposals(deps);
-      if (!proposals.some((p) => p.id === input.proposalId)) {
-        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
-        return;
-      }
-      const origin = bearerTokenId(req);
-      clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
-      appendPanelLedger(deps.ledgerPath, "panel.proposal_reframe_requested", input.proposalId, origin, { feedback: input.feedback });
-      deps.ratify.reframe(input.proposalId, input.feedback);
-      sendJson(res, 200, { ok: true, proposalId: input.proposalId, started: true });
-    }),
-  };
+  return buildInboxVerbRoute("reframe", deps);
 }
 
 // ── POST /v1/inbox/archive, POST /v1/inbox/snooze — set an item aside without deciding it (W1-T8831) ──
@@ -3642,34 +3556,7 @@ function validateSnoozeProposal(body: unknown): { error: string } | SnoozePropos
 
 /** Record the current observation as a reversible keep decision, or clear that decision. */
 export function buildKeepProposalRoute(deps: PanelGraphDeps): Route {
-  return {
-    method: "POST", path: "/v1/inbox/keep", scope: "write", tier: "low",
-    handler: jsonAction<{ proposalId: string; kept: boolean; reason?: string }>((body: unknown) => {
-      const id = validateApproveProposal(body);
-      if ("error" in id) return id;
-      const fields = body as Record<string, unknown>;
-      if (fields.kept !== undefined && typeof fields.kept !== "boolean") return { error: "kept must be a boolean" };
-      if (fields.reason !== undefined && typeof fields.reason !== "string") return { error: "reason must be a string" };
-      return { ...id, kept: fields.kept !== false, reason: fields.reason as string | undefined };
-    }, (input, req, res) => {
-      const classified = classifyAllProposals(deps);
-      const proposal = classified.proposals.find(p => p.id === input.proposalId);
-      if (!proposal) { sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
-      const classification = classified.classifications.find(c => c.proposalId === input.proposalId);
-      if (!classification || classification.state === "ratified" || classification.state === "declined" || classification.state === "retired") {
-        sendJson(res, 409, { error: "not_decidable", detail: "The proposal is no longer awaiting a decision." }); return;
-      }
-      const stateDir = join(deps.inboxRoot, "state");
-      const held = readTriage(stateDir);
-      const { keptAt, keptState: prior, keptChanged, ...rest } = held[input.proposalId] ?? {};
-      const observed = inboxKeptState(proposal, classification, plainInboxMessage(proposal, readPlainStore(plainStorePath(stateDir))));
-      const at = keptAt && prior && !keptChanged && !keptStateChange(prior, observed) ? keptAt : (deps.inboxClock ?? systemClock).iso();
-      const entry = input.kept ? { keptAt: at, keptState: observed } : rest;
-      putTriage(stateDir, held, input.proposalId, entry);
-      appendPanelLedger(deps.ledgerPath, "inbox.kept", input.proposalId, bearerTokenId(req), { kept: input.kept, keptState: observed, ...(input.reason === undefined ? {} : { reason: input.reason }) });
-      sendJson(res, 200, { ok: true, proposalId: input.proposalId, kept: input.kept, ...(input.kept ? { keptAt: at } : {}) });
-    }),
-  };
+  return buildInboxVerbRoute("keep", deps);
 }
 
 /**
@@ -3680,24 +3567,7 @@ export function buildKeepProposalRoute(deps: PanelGraphDeps): Route {
  * section from the slow lane's next pass.
  */
 export function buildArchiveProposalRoute(deps: PanelGraphDeps): Route {
-  return {
-    method: "POST",
-    path: "/v1/inbox/archive",
-    scope: "write",
-    // LOW: bookkeeping, trivially reversible, and it decides nothing.
-    tier: "low",
-    handler: jsonAction(validateArchiveProposal, (input, req, res) => {
-      const { proposals } = classifyAllProposals(deps);
-      if (!proposals.some((p) => p.id === input.proposalId)) {
-        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
-        return;
-      }
-      const clock = deps.inboxClock ?? systemClock;
-      const held = setInboxArchived(join(deps.inboxRoot, "state"), input.proposalId, input.archived, clock.iso());
-      appendPanelLedger(deps.ledgerPath, "inbox.archived", input.proposalId, bearerTokenId(req), { archived: input.archived });
-      sendJson(res, 200, { ok: true, proposalId: input.proposalId, archived: input.archived, ...(held?.archivedAt === undefined ? {} : { archivedAt: held.archivedAt }) });
-    }),
-  };
+  return buildInboxVerbRoute("archive", deps);
 }
 
 /**
@@ -3707,27 +3577,7 @@ export function buildArchiveProposalRoute(deps: PanelGraphDeps): Route {
  * ({@link nextInboxSnoozeWake} names when). Idempotent; ledgers `inbox.snoozed`.
  */
 export function buildSnoozeProposalRoute(deps: PanelGraphDeps): Route {
-  return {
-    method: "POST",
-    path: "/v1/inbox/snooze",
-    scope: "write",
-    tier: "low",
-    handler: jsonAction(validateSnoozeProposal, (input, req, res) => {
-      const { proposals } = classifyAllProposals(deps);
-      if (!proposals.some((p) => p.id === input.proposalId)) {
-        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
-        return;
-      }
-      const clock = deps.inboxClock ?? systemClock;
-      if (input.until !== null && Date.parse(input.until) <= clock.now()) {
-        sendJson(res, 400, { error: "invalid_request", detail: `until must be in the future (now is ${clock.iso()})` });
-        return;
-      }
-      const held = setInboxSnoozed(join(deps.inboxRoot, "state"), input.proposalId, input.until);
-      appendPanelLedger(deps.ledgerPath, "inbox.snoozed", input.proposalId, bearerTokenId(req), { until: input.until });
-      sendJson(res, 200, { ok: true, proposalId: input.proposalId, snoozedUntil: held?.snoozedUntil ?? null });
-    }),
-  };
+  return buildInboxVerbRoute("snooze", deps);
 }
 
 interface DeclineProposalInput {
@@ -3747,26 +3597,28 @@ function proposalVerdictResponse(
   kind: ProposalVerdictKind,
   deps: PanelGraphDeps,
   input: DeclineProposalInput,
-  req: IncomingMessage,
-  res: ServerResponse,
+  actor: InboxVerbActor,
+  respond: InboxVerbRespond,
 ): void {
   const { proposals, classifications } = classifyAllProposals(deps);
   const found = {
     exists: proposals.some((p) => p.id === input.proposalId),
     classification: classifications.find((c) => c.proposalId === input.proposalId),
   };
-  const origin = bearerTokenId(req);
+  const origin = actor.origin;
   const outcome = applyProposalVerdict(kind, input, found, (step, id, reason) => {
-    const row = appendPanelLedger(deps.ledgerPath, step, id, origin, { reason });
+    // W1-T10077: a decline of a verify-human proposal records the state it was given on, so a material change can re-open it.
+    const observedState = step === "panel.proposal_declined" ? observedStateOfProposalSummary(proposals.find((p) => p.id === id)?.summary ?? "") : undefined;
+    const row = appendPanelLedger(deps.ledgerPath, step, id, origin, { reason, ...(observedState ? { observed_state: observedState } : {}) });
     // W1-T9252: the operator's action also lands on the item's thread; a store fault never fails the verb.
     recordRowThreadEvents({ ...row, task_id: id, origin, reason }, [{ id }], { threadStorePath: inboxThreadStorePath(deps.inboxRoot) }, deps.logProjection);
   });
   if (!outcome.ok) {
-    sendJson(res, outcome.status, { error: outcome.error, detail: outcome.detail });
+    respond(outcome.status, { error: outcome.error, detail: outcome.detail });
     return;
   }
   clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
-  sendJson(res, 200, { ok: true, proposalId: input.proposalId, ...(kind === "decline" ? { declined: true } : { restored: true }) });
+  respond(200, { ok: true, proposalId: input.proposalId, ...(kind === "decline" ? { declined: true } : { restored: true }) });
 }
 
 /**
@@ -3782,28 +3634,14 @@ function proposalVerdictResponse(
  * Why: the P19-shaped silent-drop history this route closes — docs/forensics/panel-graph.md
  */
 export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
-  return {
-    method: "POST",
-    path: "/v1/inbox/decline",
-    scope: "write",
-    // W1-T404: LOW — bookkeeping, trivially reversible in effect (a ledger annotation; no
-    // plan/branch/PR is ever created for this route to have to undo).
-    tier: "low",
-    handler: jsonAction(validateDeclineProposal, (input, req, res) => proposalVerdictResponse("decline", deps, input, req, res)),
-  };
+  return buildInboxVerbRoute("decline", deps);
 }
 
 /** POST /v1/inbox/restore — W1-T3407, the reversal decline never had. Symmetric with it: same
  *  scope, LOW tier, 404. Refuses only a RATIFIED proposal (its task is already filed) and 409s one
  *  that is not declined. FALSIFIER: test/a-decline-can-be-taken-back.test.ts. */
 export function buildRestoreProposalRoute(deps: PanelGraphDeps): Route {
-  return {
-    method: "POST",
-    path: "/v1/inbox/restore",
-    scope: "write",
-    tier: "low",
-    handler: jsonAction(validateDeclineProposal, (input, req, res) => proposalVerdictResponse("restore", deps, input, req, res)),
-  };
+  return buildInboxVerbRoute("restore", deps);
 }
 
 // ── POST /v1/policy/daily-cost-ceiling, POST /v1/policy/daily-cost-ceiling/clear ────────────
@@ -3921,20 +3759,184 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
   ];
 }
 
+export function buildInboxVerbActions(deps: PanelGraphDeps): InboxVerbActions {
+  return {
+    approve: validatedInboxAction(validateApproveProposal, async (input, actor, respond) => {
+      const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
+      const retained = taskId ? await readRetainedHumanReleases(deps) : undefined;
+      const receipt = taskId ? retained?.receipts.get(taskId) : undefined;
+      if (receipt) {
+        respond(409, { error: "not_ready", detail: `${input.proposalId} was already released; ${receipt}` });
+        return;
+      }
+      // The one call site among classifyAllProposals's consumers that hands off to an
+      // irreversible spawn, so it alone reads via loadPlanAtRef, "cannot be partial" (W1-T2220).
+      const { proposals, classifications } = classifyAllProposals(deps, (planPath) =>
+        loadPlanAtRef(deps.root, relative(deps.root, planPath)),
+      );
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const classification = classifications.find((c) => c.proposalId === input.proposalId);
+      if (!classification || classification.state !== "ready") {
+        respond(409, {
+          error: "not_ready",
+          detail: classification ? refusalReason(classification) : `${input.proposalId}: classification unavailable`,
+        });
+        return;
+      }
+      const origin = actor.origin;
+      clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
+      appendPanelLedger(deps.ledgerPath, "panel.proposal_approve_requested", input.proposalId, origin, {});
+      deps.ratify.approve(input.proposalId);
+      respond(200, { ok: true, proposalId: input.proposalId, started: true });
+    }),
+    reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) => {
+      const { proposals } = classifyAllProposals(deps);
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const origin = actor.origin;
+      clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
+      appendPanelLedger(deps.ledgerPath, "panel.proposal_reframe_requested", input.proposalId, origin, { feedback: input.feedback });
+      deps.ratify.reframe(input.proposalId, input.feedback);
+      respond(200, { ok: true, proposalId: input.proposalId, started: true });
+    }),
+    keep: validatedInboxAction<{ proposalId: string; kept: boolean; reason?: string }>((body: unknown) => {
+      const id = validateApproveProposal(body);
+      if ("error" in id) return id;
+      const fields = body as Record<string, unknown>;
+      if (fields.kept !== undefined && typeof fields.kept !== "boolean") return { error: "kept must be a boolean" };
+      if (fields.reason !== undefined && typeof fields.reason !== "string") return { error: "reason must be a string" };
+      return { ...id, kept: fields.kept !== false, reason: fields.reason as string | undefined };
+    }, (input, actor, respond) => {
+      const classified = classifyAllProposals(deps);
+      const proposal = classified.proposals.find(p => p.id === input.proposalId);
+      if (!proposal) { respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
+      const classification = classified.classifications.find(c => c.proposalId === input.proposalId);
+      if (!classification || classification.state === "ratified" || classification.state === "declined" || classification.state === "retired") {
+        respond(409, { error: "not_decidable", detail: "The proposal is no longer awaiting a decision." }); return;
+      }
+      const stateDir = join(deps.inboxRoot, "state");
+      const held = readTriage(stateDir);
+      const { keptAt, keptState: prior, keptChanged, ...rest } = held[input.proposalId] ?? {};
+      const observed = inboxKeptState(proposal, classification, plainInboxMessage(proposal, readPlainStore(plainStorePath(stateDir))));
+      const at = keptAt && prior && !keptChanged && !keptStateChange(prior, observed) ? keptAt : (deps.inboxClock ?? systemClock).iso();
+      const entry = input.kept ? { keptAt: at, keptState: observed } : rest;
+      putTriage(stateDir, held, input.proposalId, entry);
+      appendPanelLedger(deps.ledgerPath, "inbox.kept", input.proposalId, actor.origin, { kept: input.kept, keptState: observed, ...(input.reason === undefined ? {} : { reason: input.reason }) });
+      respond(200, { ok: true, proposalId: input.proposalId, kept: input.kept, ...(input.kept ? { keptAt: at } : {}) });
+    }),
+    archive: validatedInboxAction(validateArchiveProposal, (input, actor, respond) => {
+      const { proposals } = classifyAllProposals(deps);
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const clock = deps.inboxClock ?? systemClock;
+      const held = setInboxArchived(join(deps.inboxRoot, "state"), input.proposalId, input.archived, clock.iso());
+      appendPanelLedger(deps.ledgerPath, "inbox.archived", input.proposalId, actor.origin, { archived: input.archived });
+      respond(200, { ok: true, proposalId: input.proposalId, archived: input.archived, ...(held?.archivedAt === undefined ? {} : { archivedAt: held.archivedAt }) });
+    }),
+    snooze: validatedInboxAction(validateSnoozeProposal, (input, actor, respond) => {
+      const { proposals } = classifyAllProposals(deps);
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const clock = deps.inboxClock ?? systemClock;
+      if (input.until !== null && Date.parse(input.until) <= clock.now()) {
+        respond(400, { error: "invalid_request", detail: `until must be in the future (now is ${clock.iso()})` });
+        return;
+      }
+      const held = setInboxSnoozed(join(deps.inboxRoot, "state"), input.proposalId, input.until);
+      appendPanelLedger(deps.ledgerPath, "inbox.snoozed", input.proposalId, actor.origin, { until: input.until });
+      respond(200, { ok: true, proposalId: input.proposalId, snoozedUntil: held?.snoozedUntil ?? null });
+    }),
+    decline: validatedInboxAction(validateDeclineProposal, (input, actor, respond) => proposalVerdictResponse("decline", deps, input, actor, respond)),
+    restore: validatedInboxAction(validateDeclineProposal, (input, actor, respond) => proposalVerdictResponse("restore", deps, input, actor, respond)),
+    reply: validatedInboxAction(validateThreadReply, async (input, caller, respond) => {
+      const proposalId = proposalIdOfThread(input.threadId)!;
+      // The detail route and daemon responder both require a current operator-owned item.
+      // A syntactically valid but orphaned id must not receive a success receipt for a
+      // message the responder will silently have no item to answer.
+      const classified = await inboxRead(deps);
+      if (!classified) return void respond(503, { error: "inbox_not_ready", detail: "serve's slow lane has not persisted an inbox classification yet" }, { "retry-after": "5" });
+      if (!operatorThreadItems(deps, undefined, classified).some((item) => item.proposalId === proposalId && item.state !== "retired")) {
+        respond(404, { error: "not_found", detail: "operator inbox thread is unavailable" });
+        return;
+      }
+      const operator = caller.operator;
+      const actor = caller.origin;
+      const replyId = createHash("sha256").update(`${actor}\0${input.threadId}\0${input.intentId ?? randomUUID()}`).digest("hex");
+      const store = { threadStorePath: inboxThreadStorePath(deps.inboxRoot) };
+      const lockId = createHash("sha256").update(input.threadId).digest("hex");
+      try {
+        withInflightLock(join(dirname(store.threadStorePath), "reply-locks"), lockId, () => {
+          let stored: { kind: "appended" | "existing" | "conflict"; seq: number; ts?: number };
+          try {
+            stored = (deps.appendInboxReplyMessage ?? appendThreadReplyOnce)(inboxThreadIdentity(proposalId), input.text, replyId, store, operator ? { operator } : {});
+          } catch {
+            const check = readThread(input.threadId, store);
+            const prior = check.status === "ok" ? check.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId) : undefined;
+            if (!prior) {
+              respond(503, { error: "reply_store_unavailable", delivery: check.status === "ok" ? "not_delivered" : "unverified", replyId });
+              return;
+            }
+            stored = { kind: prior.body === input.text ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
+          }
+          if (stored.kind === "conflict") {
+            respond(409, { error: "reply_intent_conflict", delivery: "not_delivered", priorReplyId: replyId });
+            return;
+          }
+          clearInboxKeep(join(deps.inboxRoot, "state"), proposalId);
+          const priorAudit = stored.kind === "existing" ? inboxReplyAuditState(deps.ledgerPath, replyId, stored.ts) : "absent";
+          if (priorAudit === "unverified") {
+            respond(200, { ok: true, delivery: "delivered", audit: "unverified", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: true });
+            return;
+          }
+          if (priorAudit === "absent") {
+            try {
+              (deps.appendInboxReplyAudit ?? appendPanelLedger)(deps.ledgerPath, "inbox.thread_replied", proposalId, actor, {
+                thread_id: input.threadId, reply_id: replyId, message_seq: stored.seq,
+              });
+            } catch {
+              respond(200, { ok: true, delivery: "delivered", audit: "gap", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: stored.kind === "existing" });
+              return;
+            }
+          }
+          respond(200, { ok: true, delivery: "delivered", audit: "recorded", replyId, threadId: input.threadId, waitingOn: "daemon", duplicate: stored.kind === "existing" });
+        }, { run_id: replyId });
+      } catch (error) {
+        if (!(error instanceof InflightLockError)) throw error;
+        respond(409, { error: "reply_in_progress", delivery: "unverified", replyId });
+      }
+    }),
+  };
+}
+
+function buildInboxVerbRoute(name: InboxVerbName, deps: PanelGraphDeps): Route {
+  const spec = INBOX_VERBS.find(verb => verb.name === name)!;
+  const actions = buildInboxVerbActions(deps);
+  return { method: "POST", path: spec.path, scope: "write", tier: spec.tier,
+    handler: jsonAction(body => ({ body }), ({ body }, req, res) =>
+      spec.perform(actions, body, { origin: bearerTokenId(req), operator: operatorName(req) },
+        (status, result, headers) => {
+          for (const [key, value] of Object.entries(headers ?? {})) res.setHeader(key, value);
+          sendJson(res, status, result);
+        })),
+  };
+}
+
 /** Write factories take only durable dependencies, so a process read snapshot cannot reach a mutation. */
 export function buildPanelWriteRoutes(deps: PanelGraphDeps): Route[] {
   return [
     buildSubmitFeedbackRoute(deps),
     buildPreviewFeedbackRoute(deps),
     buildProposalDecisionRoute(deps),
-    buildApproveProposalRoute(deps),
-    buildReframeProposalRoute(deps),
-    buildDeclineProposalRoute(deps),
-    buildRestoreProposalRoute(deps),
-    buildArchiveProposalRoute(deps),
-    buildSnoozeProposalRoute(deps),
-    buildKeepProposalRoute(deps),
-    buildInboxThreadReplyRoute(deps),
+    ...INBOX_VERBS.map(verb => buildInboxVerbRoute(verb.name, deps)),
     buildInboxThreadReadRoute(deps),
     buildSetDailyCostCeilingRoute(deps),
     buildClearDailyCostCeilingRoute(deps),

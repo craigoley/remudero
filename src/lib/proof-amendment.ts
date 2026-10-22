@@ -15,7 +15,7 @@
 //
 // OUT OF SCOPE: deciding when a capped review is fix-rung-actionable (sweep.ts, unchanged), the
 // lower-privilege human-flagging rung (`insertPlanRepairFlag`/`dispatchPlanOnlyRepair`, W1-T3390,
-// left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
+// left untouched), and a taskless PR, refused shard-not-found here (its body repair is W1-T10339).
 
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -26,7 +26,7 @@ import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
+import { execWhitelistedProof, INSTRUMENT_SURFACE, matchedLinesAreAllComments, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
@@ -143,6 +143,14 @@ function targetsPlanShard(whitelisted: WhitelistedProof, planShardPaths: Readonl
   return typeof target === "string" && planShardPaths.has(target);
 }
 
+/** The reviewer's comment-only downgrade reads the grep pattern against the target file's text (review.ts
+ *  `matchedLineCommentContext`); the same context here keeps a validated replacement from being capped again. */
+function grepCommentContext(parsed: WhitelistedProof, cwd: string): { pattern: string; fileText: string } | undefined {
+  const dialect = parsed.authorSelectedArgv !== true && parsed.args.length === 4 && parsed.args[0] === "-arn" && parsed.args[1] === "--";
+  const path = dialect ? join(cwd, parsed.args[3]!) : undefined;
+  return path !== undefined && existsSync(path) ? { pattern: parsed.args[2]!, fileText: readFileSync(path, "utf8") } : undefined;
+}
+
 export interface ProofAmendmentValidationInput {
   readonly headCwd: string;
   readonly baseCwd: string | undefined;
@@ -225,6 +233,12 @@ export function validateProofAmendmentProposal(
       return {
         ok: false,
         refusal: { reason: "not-discriminating", detail: `replacement does not pass at the implementation head: ${entry.newProof}` },
+      };
+    }
+    if (parsed.kind === "grep" && matchedLinesAreAllComments(parsed.matchedLines ?? [], grepCommentContext(parsed, input.headCwd))) {
+      return {
+        ok: false,
+        refusal: { reason: "not-discriminating", detail: `replacement matches only comment lines, which the reviewer caps: ${entry.newProof}` },
       };
     }
     if (input.baseCwd === undefined) {
@@ -584,6 +598,12 @@ export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "inel
  *  unable to finish (#12776). Every other instrument, including the mutation score floor, is still refused. */
 export const SCOPE_GRANTABLE_INSTRUMENTS: ReadonlySet<string> = new Set(["stryker.conf.json", "scripts/mutation-relevant-paths.json"]);
 
+/** An instrument no scope amendment grants (PR 13223): the fix lane escalates it once instead of re-asking. */
+export function isUngrantableInstrumentPath(path: string): boolean {
+  return !SCOPE_GRANTABLE_INSTRUMENTS.has(path) &&
+    (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path));
+}
+
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
   const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
   const build = request.kind === "build";
@@ -612,10 +632,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
       return refuse("invalid-path", path);
     }
     if (path.startsWith("plan/")) return refuse("plan-path", path);
-    if (!SCOPE_GRANTABLE_INSTRUMENTS.has(path) &&
-        (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path))) {
-      return refuse("instrument-path", path);
-    }
+    if (isUngrantableInstrumentPath(path)) return refuse("instrument-path", path);
     if (path.startsWith("test/")) return refuse("test-path", path);
     if (!request.changedPaths.includes(path)) return refuse("path-not-changed", path);
   }
@@ -649,10 +666,17 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   const additions = paths.filter((path) => !files.toJSON().includes(path));
   if (additions.length === 0) return refuse("already-declared", "all requested paths are already in files");
   const [start, end] = files.range;
+  const last = files.items.at(-1);
+  const scoutTest = isMap(task) && String(task.get("origin")).startsWith("scout:") && isScalar(last) &&
+    /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/.test(String(last.value)) ? last : undefined;
   let insert: number;
   let extra: string;
-  if (files.flow) {
-    const last = files.items.at(-1);
+  if (scoutTest) {
+    insert = files.flow ? scoutTest.range![0] : shard.text.lastIndexOf("\n", scoutTest.range![0]) + 1;
+    const indent = shard.text.slice(insert, scoutTest.range![0] - 2);
+    extra = files.flow ? `${additions.map((path) => JSON.stringify(path)).join(", ")}, `
+      : additions.map((path) => `${indent}- ${JSON.stringify(path)}\n`).join("");
+  } else if (files.flow) {
     insert = isScalar(last) ? last.range![1] : start + 1;
     extra = `${files.items.length > 0 ? ", " : ""}${additions.map((path) => JSON.stringify(path)).join(", ")}`;
   } else {
@@ -663,6 +687,14 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   }
   let text = shard.text.slice(0, insert) + extra + shard.text.slice(insert);
   if (parseDocument(text).errors.length > 0) return refuse("shard-drifted", "appending paths would invalidate the files sequence");
+  const reparked = isMap(task) && String(task.get("author_class")) === "machine";
+  if (reparked) {
+    const amended = parseDocument(text);
+    const index = (isSeq(amended.contents) ? amended.contents.items : []).findIndex(item => isMap(item) && String(item.get("id")) === request.taskId);
+    amended.setIn([index, "verify"], "human");
+    amended.deleteIn([index, "risk_ruling"]);
+    text = amended.toString({ lineWidth: 0 });
+  }
   // W1-T7959: lint what this writer writes BEFORE any worktree exists. Widening files: is the edit that
   // adds a subsystem, so Rule 19 sizing is the violation it produces by construction, and the linter's
   // own remedy for it (raise to risk:high) is applied; anything else new that blocks is refused.
@@ -694,19 +726,22 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     deps.gitAdd(wp, shard.path);
     const target = build ? "its build" : `#${request.prNumber}`;
     const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for ${target}`;
-    const sha = deps.gitCommit(wp, riskRaise
+    const reparkNote = reparked ? "\n\nSet verify: human and remove the stale risk ruling so the amended machine task returns to the judge." : "";
+    const sha = deps.gitCommit(wp, (riskRaise
       ? `${title}\n\nAppend validated worker paths to files and raise risk to high: the task linter counted ` +
         `${riskRaise.subsystems} (Rule 19 sizing). band_meaning: span is added only when none was declared.`
-      : `${title}\n\nAppend validated worker paths to files only.`);
+      : `${title}\n\nAppend validated worker paths to files.`) + reparkNote);
     deps.gitPush(wp, branch, sha);
     const created = deps.createPr({ title, head: branch, base: "main",
       body: (riskRaise
         ? `Scope amendment for ${target}. ${shard.path}'s files list changes and its risk is raised to high ` +
           `because the task linter counted ${riskRaise.subsystems} (Rule 19 sizing); band_meaning: span is added only when none was declared.\n\n`
-        : `Scope amendment for ${target}. Only ${shard.path}'s files list changes.\n\n`) +
+        : `Scope amendment for ${target}. ${reparked ? shard.path + "'s files list changes" : "Only " + shard.path + "'s files list changes"}.\n\n`) +
+        (reparked ? "Set verify: human and remove the stale risk ruling so the amended machine task returns to the judge.\n\n" : "") +
         renderAcceptanceBlock([...additions.map((path) => ({ claim: `files includes ${path}`,
           proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` })),
-          ...(riskRaise ? [{ claim: `risk is raised to high for ${riskRaise.subsystems}`, proof: `grep: ^ *risk: high in ${shard.path}` }] : [])]) });
+          ...(riskRaise ? [{ claim: `risk is raised to high for ${riskRaise.subsystems}`, proof: `grep: ^ *risk: high in ${shard.path}` }] : []),
+          ...(reparked ? [{ claim: "the amended machine task returns to the judge", proof: `grep: ^ *verify: human in ${shard.path}` }] : [])]) });
     deps.recordIdentity(key, { amendmentUrl: created.prUrl, amendmentNumber: created.prNumber, merged: false });
     return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
   } finally {

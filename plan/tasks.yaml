@@ -1,6 +1,7 @@
 # Remudero — plan/tasks.yaml (schema v1)
 # ratification-candidate: W1-T5071 — proof-debt:W1-T5071, 2026-10-14 proposal (W1-T9485).
 # The matching candidate is recorded in MASTER-PLAN.md's Banked queue.
+# After operator approval, follow ratification-audit: W1-T9485 there before completing the mapping.
 # WS-1: proto-runner → daemon. T1 is the LAST hand-built thing; T2+ land VIA the proto-runner (L1).
 # Prompts are pre-authored (G-2). STATUS IS DERIVED FROM GITHUB — this file is never machine-rewritten.
 #

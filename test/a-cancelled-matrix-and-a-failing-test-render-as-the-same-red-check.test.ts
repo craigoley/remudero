@@ -41,7 +41,7 @@ function collapseScript(job: string): string {
 function collapse(job: string, result: string): { status: number; out: string } {
   const r = spawnSync("bash", ["-c", collapseScript(job)], {
     encoding: "utf8",
-    env: { ...process.env, SHARD_RESULT: result },
+    env: { ...process.env, GATE_REPORT_REQUIRED: "true", GATE_REPORT_OUTCOME: "success", SHARD_RESULT: result },
   });
   return { status: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
 }

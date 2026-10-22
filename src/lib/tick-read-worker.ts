@@ -1,3 +1,4 @@
+import { hydrateDependencyMainIdentitiesSteps } from "./dependency-main-identity.js";
 /**
  * lib/tick-read-worker.ts — W1-T9722: the daemon's read-plane worker starts here, not from src/run-task.ts.
  *
@@ -41,7 +42,7 @@ import { systemClock } from "./clock.js";
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
+import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { DEFAULT_SWEEP_POLICY, RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
@@ -51,16 +52,25 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { reviewTaskIdFromBody } from "./report-commands.js";
 
-/** REST rollups preserve check-run order, so the raw response can supply external_id without
- * changing the shared REST mapper used by unrelated callers. */
+/** REST rollups preserve check-run order: retain external_id and the exact head/constituent
+ * outcome beside each row without changing the shared REST mapper's unrelated callers. */
 export function attachPostedGateIds<T extends object>(
   rollup: T[],
   response: unknown,
 ): T[] {
-  const runs = (response as { check_runs?: Array<{ external_id?: unknown }> } | undefined)?.check_runs;
+  const runs = (response as { check_runs?: Array<{ external_id?: unknown; head_sha?: unknown; output?: { summary?: unknown } }> } | undefined)?.check_runs;
   runs?.forEach((run, index) => {
     if (typeof run.external_id === "string" && rollup[index]) {
       (rollup[index] as T & { externalId?: string }).externalId = run.external_id;
+    }
+    if (rollup[index] && typeof run.head_sha === "string" && /^[a-f0-9]{40}$/.test(run.head_sha)) {
+      (rollup[index] as T & { headSha?: string }).headSha = run.head_sha;
+      const name = (rollup[index] as T & { name?: string }).name;
+      const summary = typeof name === "string"
+        ? `W1-T4399: reported by this job's ${name} step(s) (outcome(s): cancelled)` : undefined;
+      if (summary !== undefined && run.output?.summary === summary) {
+        (rollup[index] as T & { outputSummary?: string }).outputSummary = summary;
+      }
     }
   });
   return rollup;
@@ -609,6 +619,10 @@ export function buildBehindMainByPr(
 
 /** One rollup check entry as `gh pr list --json statusCheckRollup` returns it. */
 export interface RollupCheck {
+  /** Exact REST identity and posted constituent outcome; absent on unreadable/GraphQL-only rows. */
+  headSha?: string;
+  outputSummary?: string;
+  checkRunId?: number;
   __typename?: string;
   name?: string;
   context?: string;
@@ -635,6 +649,7 @@ export interface RawOpenPr {
   updatedAt: string;
   body: string;
   autoMergeRequest: unknown;
+  contributionOrigin?: OpenPrRest["contributionOrigin"];
   statusCheckRollup?: RollupCheck[];
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
@@ -1287,6 +1302,85 @@ export async function defaultCiJobLogRegionAsync(owner: string, repo: string, jo
   return reducer.finish();
 }
 
+// Delay only annotation lines until their TAP verdict; keep the rest of a large job streaming.
+function annotationLogReducer(annotations: NonNullable<CiFailure["annotations"]>, tailLines: number) {
+  const reducer = ciFailureRegionReducer(tailLines);
+  const retention = [gateVerdictRetention(), ruleSuitesRetention(), poolVerdictRetention(), testSummaryRetention()];
+  const frames: Array<{ indent: number; seen: Set<number>; lines: Set<string> }> = [];
+  const passed = new Set<number>();
+  const failed = new Set<number>();
+  const primary: string[] = [];
+  let inFailure = false;
+  let inSpecFailure = false;
+  let lastError: string | undefined;
+  let hasFailure = false;
+  const emit = (line: string) => {
+    const tap = CI_TAP_FAILURE_LINE.test(line);
+    const fail = /^\s*FAIL\b/.test(line) || CI_FAILING_TESTS_LINE.test(line.trim());
+    if (tap) inFailure = true;
+    if (CI_FAILING_TESTS_LINE.test(line.trim())) inSpecFailure = true;
+    if (CI_TEST_SUMMARY_LINE.test(line)) inSpecFailure = false;
+    if (tap || fail || inFailure || inSpecFailure) {
+      if (primary.length < Math.max(1, tailLines)) primary.push(line);
+    }
+    if (inFailure && CI_TAP_BLOCK_END_LINE.test(line)) inFailure = false;
+    if (line.startsWith("##[error]")) lastError = line;
+    if (tap || fail || (line.startsWith("##[error]") && !isBareExitCodeAnnotation(line.slice(9)))) hasFailure = true;
+    reducer.push(line);
+    for (const retainer of retention) retainer.push(line);
+  };
+  const close = (passing: boolean) => {
+    const frame = frames.pop()!;
+    for (const index of frame.seen) {
+      (passing ? passed : failed).add(index);
+      annotations[index].from_passing_test = passed.has(index) && !failed.has(index);
+    }
+    if (!passing) for (const line of frame.lines) {
+      emit(line);
+      if (primary.length < Math.max(1, tailLines)) primary.push(line);
+    }
+  };
+  return {
+    push(rawLine: string) {
+      const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
+      const start = /^(\s*)# Subtest:/.exec(line);
+      const verdict = /^(\s*)(not )?ok \d+ - /.exec(line);
+      if (start) {
+        while (frames.length && frames.at(-1)!.indent >= start[1].length) close(false);
+        frames.push({ indent: start[1].length, seen: new Set(), lines: new Set() });
+      }
+      if (verdict) {
+        while (frames.length && frames.at(-1)!.indent > verdict[1].length) close(false);
+        if (frames.at(-1)?.indent === verdict[1].length) close(verdict[2] === undefined);
+      }
+      const matches = annotations.flatMap((annotation, index) => line.includes(annotation.message) ? [index] : []);
+      const frame = frames.at(-1);
+      if (matches.length && frame) {
+        for (const index of matches) frame.seen.add(index);
+        frame.lines.add(line);
+        if (frame.lines.size > Math.max(1, tailLines)) frame.lines.delete(frame.lines.values().next().value!);
+      } else {
+        for (const index of matches) {
+          failed.add(index);
+          annotations[index].from_passing_test = false;
+        }
+        emit(line);
+      }
+    },
+    finish() {
+      while (frames.length) close(false);
+      // Step context can crowd a distant test out of the ordinary region. Keep that test first.
+      const region = primary.length ? [...primary, ...(lastError && !primary.includes(lastError) ? [lastError] : [])]
+        .slice(0, Math.max(1, tailLines)).join("\n") : reducer.finish();
+      return {
+        region: retention.reduceRight((text, retainer) => retainer.wrap(text),
+          retainGeneratorRemediesForRegion(reducer.finish(), region)),
+        hasFailure, lastError,
+      };
+    },
+  };
+}
+
 export function fetchCiFailures(
   owner: string,
   repo: string,
@@ -1351,11 +1445,13 @@ function* ciFailuresSteps(
     let annotationFallback: CiAnnotationFallback | undefined;
     let runnerTimeoutLines: string | undefined;
     let finalizeAnnotation: string | undefined;
+    let annotations: NonNullable<CiFailure["annotations"]> = [];
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
         annotationReads += 1;
         const messages = (yield* step(() => fetch.fetchAnnotations(owner, repo, jobId))).filter((m) => m.trim() !== "");
         const evidence = messages.filter((m) => !isBareExitCodeAnnotation(m));
+        annotations = evidence.map((message) => ({ message, from_passing_test: false }));
         const bareExitOnly = messages.length > 0 && evidence.length === 0;
         // W1-T8038: a job killed at its ceiling annotates only the runner's own timeout lines, which name no test.
         // They are kept, and the job log is read beside them below.
@@ -1399,11 +1495,28 @@ function* ciFailuresSteps(
     } else if (jobId) {
       annotationFallback = { outcome: "skipped-limit" };
     }
-    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code" || runnerTimeoutLines !== undefined ||
-        finalizeAnnotation !== undefined)) {
+    if (jobId) {
       try {
         const readRegion = fetch.readJobLogRegion;
-        if (readRegion) logTail = yield* step(() => readRegion(owner, repo, jobId, tailLines));
+        if (annotations.length > 0 && runnerTimeoutLines === undefined && finalizeAnnotation === undefined) {
+          const reducer = annotationLogReducer(annotations, tailLines);
+          if (readRegion) yield* step(() => ghLinesAsync(
+            ["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], (line) => reducer.push(line)));
+          else {
+            const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
+            for (const line of out.split("\n")) reducer.push(line);
+          }
+          const { region, hasFailure, lastError } = reducer.finish();
+          const evidence = annotations.filter((a) => !a.from_passing_test).map((a) => a.message);
+          if (!hasFailure && evidence.length) {
+            logTail = [...evidence, ...(lastError ? [lastError] : [])].join("\n");
+            tailSource = "annotations";
+          } else {
+            logTail = region;
+            tailSource = logTail.trim() ? "log" : undefined;
+          }
+          logUnavailable = logTail.trim() ? undefined : { kind: "empty-log" };
+        } else if (readRegion) logTail = yield* step(() => readRegion(owner, repo, jobId, tailLines));
         else {
           const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
           const extracted = extractCiFailureRegion(out, tailLines);
@@ -1424,7 +1537,7 @@ function* ciFailuresSteps(
           if (logTail.trim() === "") logTail = finalizeAnnotation;
           logUnavailable = undefined;
           tailSource = logTail === finalizeAnnotation ? "annotations" : "log";
-        } else {
+        } else if (annotations.length === 0) {
           logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
           if (logUnavailable === undefined) tailSource = "log";
         }
@@ -1447,9 +1560,15 @@ function* ciFailuresSteps(
           logTail = finalizeAnnotation;
           logUnavailable = undefined;
           tailSource = "annotations";
+        } else if (annotations.some((a) => !a.from_passing_test)) {
+          logTail = annotations.filter((a) => !a.from_passing_test).map((a) => a.message)
+            .join("\n").split("\n").slice(-tailLines).join("\n");
+          logUnavailable = undefined;
+          tailSource = "annotations";
         } else {
           logUnavailable = { kind: "fetch-failed", detail };
           logTail = "";
+          tailSource = undefined;
         }
       }
     }
@@ -1462,6 +1581,7 @@ function* ciFailuresSteps(
       ...(logUnavailable === undefined ? {} : { logUnavailable }),
       ...(tailSource ? { tailSource } : {}),
       ...(annotationFallback ? { annotationFallback } : {}),
+      ...(annotations.length ? { annotations } : {}),
     });
   }
   // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
@@ -1492,13 +1612,34 @@ function* ciFailuresSteps(
 export function cancelledRequiredChecks(
   rollup: RollupCheck[] | undefined,
   requiredContexts: string[] | undefined,
+  headSha?: string,
 ): CancelledRequiredCheck[] {
   const names = new Set(cancelledRequiredCheckNames(rollup, requiredContexts));
   if (names.size === 0) return [];
   const deduped = dedupeRollupByLatestAttempt(rollup ?? []);
   return deduped
     .filter((c) => names.has(c.name ?? c.context ?? "unknown"))
-    .map((c) => ({ name: c.name ?? c.context ?? "unknown", jobId: checkJobId(c) }));
+    .map((c) => {
+      const check: CancelledRequiredCheck = { name: c.name ?? c.context ?? "unknown", jobId: checkJobId(c) };
+      const producer = c.detailsUrl?.match(/\/actions\/runs\/([1-9]\d*)\/job\/([1-9]\d*)(?:[/?#]|$)/);
+      if (!headSha || !/^[a-f0-9]{40}$/.test(headSha) || c.headSha !== headSha || (c.status ?? "").toUpperCase() !== "COMPLETED" || !producer || producer[2] !== check.jobId) return check;
+      const aliases = deduped.flatMap(posted => {
+        const id = posted.externalId?.match(/^run:([1-9]\d*):([1-9]\d*):job:([1-9]\d*)$/);
+        const name = posted.name ?? posted.context;
+        if (!name || name === check.name || posted.headSha !== headSha || !id ||
+            id[1] !== producer[1] || id[3] !== check.jobId || checkJobId(posted) !== check.jobId ||
+            !Number.isSafeInteger(posted.checkRunId) || (posted.checkRunId ?? 0) <= 0 || !Number.isSafeInteger(Number(id[2])) ||
+            (posted.conclusion ?? posted.state ?? "").toUpperCase() !== "FAILURE" ||
+            (posted.status ?? "").toUpperCase() !== "COMPLETED" ||
+            posted.outputSummary !== `W1-T4399: reported by this job's ${name} step(s) (outcome(s): cancelled)`) return [];
+        return [{ name, attempt: Number(id[2]), checkRunId: posted.checkRunId! }];
+      });
+      if (aliases.length > 0 && new Set(aliases.map(a => a.attempt)).size === 1) {
+        check.explainedFailures = aliases.map(({ name, checkRunId }) => ({ name, checkRunId }));
+        check.runAttempt = aliases[0].attempt;
+      }
+      return check;
+    });
 }
 
 /**
@@ -1570,9 +1711,11 @@ export function resolveReviewTaskId(
   return taskIdFromRunBranch(headRefName);
 }
 
-/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review. */
+/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review.
+ *  A synthetic `PR-<n>` id (a hand-fix PR's trailer) names no shard either: it gets the defaults a trailerless PR
+ *  gets, on any branch, so the trailer can never cost a review (#13305: refused on every pass for 4.5 h). */
 export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
-  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL) return true;
+  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL || /^PR-[1-9]\d*$/.test(taskId)) return true;
   return taskIdFromRunBranch(headRefName) === taskId &&
     /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
 }
@@ -1936,6 +2079,7 @@ function openPrPlanIdentity(path: string): { kind: "readable"; identity: string 
 
 interface OpenPrViewReads {
   read: GhApiFetcher;
+  dependencyIdentityRead?: GhApiFetcher;
   openPrRows: () => unknown;
   ciFailures: (owner: string, repo: string, rollup: RollupCheck[] | undefined) => CiFailure[] | Promise<CiFailure[]>;
   requiredContexts: (owner: string, repo: string) => RequiredContextsRead | Promise<RequiredContextsRead>;
@@ -2042,6 +2186,7 @@ export function* openPrViewSteps(
   // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
   // without it enter the bounded REST hydrator; complete reads are cached by exact head.
   const emitterPlanFilings = new Map(raw.map((pr) => [pr.number, isPlanOnlyFilingPr(ledger, pr.url)]));
+  const planFilingFileCache = deps.planFilingFileCache ?? createPlanFilingFileCache();
   const planFilingFiles = yield* hydratePlanFilingFilesSteps(
     owner,
     repo,
@@ -2051,8 +2196,11 @@ export function* openPrViewSteps(
         number: pr.number, headRefOid: pr.headRefOid, nominated: resolveOpenPrTaskId(pr, false) === undefined,
       })),
     fetch,
-    deps.planFilingFileCache ?? createPlanFilingFileCache(),
+    planFilingFileCache,
     { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
+  );
+  const dependencyMainIdentities = yield* hydrateDependencyMainIdentitiesSteps(
+    owner, repo, raw, planFilingFiles, io.dependencyIdentityRead ?? fetch, planFilingFileCache,
   );
   const planFilingClassifications = new Map<number, PlanFilingClassification>();
   for (const pr of raw) {
@@ -2254,13 +2402,15 @@ export function* openPrViewSteps(
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
     const priorReviewForReuse = priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url);
-    const currentContractDigest = taskRecord?.acceptance?.length
+    const currentTaskNarrative = reviewTaskNarrative(taskRecord ?? {});
+    const currentContractDigest = taskRecord?.acceptance?.length && currentTaskNarrative !== undefined
       ? reviewContractDigest({
           taskId: taskRecord.id,
           acceptance: taskRecord.acceptance,
           declaredFiles: taskRecord.files,
           risk: taskRecord.risk,
           budgetUsd: taskRecord.budget_usd,
+          ...currentTaskNarrative,
         })
       : taskRecord
         ? undefined
@@ -2386,6 +2536,7 @@ export function* openPrViewSteps(
       taskExistsOnMain: taskId === undefined ? undefined : taskRecord !== undefined,
       introducedTaskIds: observedFiles === undefined ? undefined : introducedTaskIdsFromPlanPaths(observedFiles),
       changedFiles: observedFiles,
+      dependencyMainIdentity: dependencyMainIdentities.get(pr.number),
       taskDeclaredFiles: taskRecord?.files,
       // W1-T528: the operator's hold, straight off the SAME list row the enumeration already
       // fetched — no extra request, because `draft` rides on GitHub's `pull-request-simple`
@@ -2412,7 +2563,7 @@ export function* openPrViewSteps(
       // `runSweep` ACTS on a cancellation before the gate concludes red is a separate question
       // `isBlockedCi` still gates (lib/sweep.ts) — this only stops the data itself from being
       // thrown away while pending.
-      cancelledRequiredChecks: cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts),
+      cancelledRequiredChecks: cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts, pr.headRefOid),
       // W1-T176: only meaningful in the zero-runs shape post-review routes on;
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.
@@ -2528,9 +2679,11 @@ export function buildOpenPrViewsAsync(
     readRequiredContextsAsync?: (owner: string, repo: string) => Promise<RequiredContextsRead>;
   } = {},
 ): Promise<ClassifiedOpenPrView[]> {
-  const read: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  const transport: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  const read = transport;
   return runStepsAsync(openPrViewSteps(owner, repo, ledgerPath, deps, {
     read,
+    dependencyIdentityRead: (args, onRateLimit) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => transport(args, onRateLimit)),
     openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, read, deps.pacer),
     ciFailures: deps.fetchCiFailureEvidence ?? deps.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync,
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,

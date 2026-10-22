@@ -13,7 +13,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts
-  status: queued
+  status: merged
   priority: 1  # one dead owner blocks every author preflight on the host until a person moves a file
   attempts: 0
   rationale: |

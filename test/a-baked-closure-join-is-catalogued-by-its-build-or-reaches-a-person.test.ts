@@ -213,6 +213,8 @@ test("W1-T9851: a fix round whose scope need names a workflow escalates and requ
   assert.equal(f.asks.length, 1);
   for (const text of [workflow, "baked-closure-check", census, runtime, "BAKED_RUNTIME_SOURCE_PATHS"]) assert.ok(f.asks[0].includes(text), text);
   assert.equal(f.rows.find((row) => row.step === "fix.scope_amendment")?.outcome, "workflow-escalated");
+  assert.match(String(f.rows.find((row) => row.step === "fix.scope_amendment")?.contract_revision), /^[0-9a-f]{64}$/,
+    "the escalation records the task contract it stood on, so an amendment can release the hold (#13317)");
   assert.equal(f.repo.git("rev-parse", "HEAD"), f.headSha);
   await runFixRung(f.opts);
   assert.equal(f.asks.length, 1, "the same head and path set is delivered once");

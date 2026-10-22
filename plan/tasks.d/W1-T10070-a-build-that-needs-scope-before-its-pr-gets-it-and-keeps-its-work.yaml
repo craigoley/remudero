@@ -14,7 +14,7 @@
     - src/lib/proof-amendment.ts
     - src/run-task.ts
     - test/a-build-that-needs-scope-before-its-pr-gets-it.test.ts
-  status: queued
+  status: merged
   priority: 1  # without it, W1-T10026's stop turns a bare PR into a run that can never open one
   attempts: 0
   rationale: |

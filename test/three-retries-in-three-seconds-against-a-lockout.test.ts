@@ -37,7 +37,7 @@ function recorder() {
 }
 
 test("the production retry driver is given a backoff and no longer retries with zero delay", () => {
-  const src = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
+  const src = readFileSync(join(import.meta.dirname, "..", "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   assert.match(
     src,
     /runDiagnoseThenRetry\(\{[\s\S]{0,400}?sleep: \(ms\) => new Promise\(\(resolve\) => setTimeout\(resolve, ms\)\)/,

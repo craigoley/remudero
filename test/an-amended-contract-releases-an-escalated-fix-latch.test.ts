@@ -10,7 +10,7 @@ import {
   type SweepDeps,
   type UpdateBranchOutcome,
 } from "../src/lib/sweep.js";
-import { taskContractRevision } from "../src/lib/escalate.js";
+import { taskContractRevision, taskSemanticRevision } from "../src/lib/escalate.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 
@@ -141,7 +141,7 @@ describe("test/an-amended-contract-releases-an-escalated-fix-latch.test.ts", () 
   });
 
   test("production effects read the task contract revision from the pass's plan, re-reading one it lacks", () => {
-    const task = (proof: string) => ({ id: TASK, title: "t", files: ["lib/rmd-control.ts"],
+    const task = (proof: string) => ({ id: TASK, title: "t", design: "canonical design", amendment: proof, files: ["lib/rmd-control.ts"],
       acceptance: [{ claim: "renders core only", proof }] });
     const plan = (...tasks: ReturnType<typeof task>[]) =>
       ({ tasks, byId: new Map(tasks.map(t => [t.id, t])) }) as unknown as Plan;
@@ -157,11 +157,14 @@ describe("test/an-amended-contract-releases-an-escalated-fix-latch.test.ts", () 
     const amendedPass = effects(plan(task("grep: amended")));
     assert.equal(amendedPass.readTaskContractRevision?.(TASK), taskContractRevision(task("grep: amended")));
     assert.notEqual(amendedPass.readTaskContractRevision?.(TASK), taskContractRevision(task("grep: old")));
+    assert.equal(amendedPass.readTaskSemanticRevision?.(TASK), taskSemanticRevision(task("grep: amended")));
     assert.equal(reloads, 0, "a task the pass's plan holds is read from it");
 
     const stalePass = effects(plan());
     assert.equal(stalePass.readTaskContractRevision?.(TASK), taskContractRevision(task("grep: amended")));
     assert.equal(stalePass.readTaskContractRevision?.("CONSOLE-T0"), undefined);
+    assert.equal(stalePass.readTaskSemanticRevision?.(TASK), taskSemanticRevision(task("grep: amended")));
+    assert.equal(stalePass.readTaskSemanticRevision?.("CONSOLE-T0"), undefined);
     assert.equal(reloads, 1, "one re-read per cycle serves every missing task");
   });
 });

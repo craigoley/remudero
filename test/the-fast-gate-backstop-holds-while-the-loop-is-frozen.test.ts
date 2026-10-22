@@ -70,6 +70,57 @@ function writeStubGate(dir: string): string {
 
 const lastAlive = (dir: string, name: string): number => Number(readFileSync(join(dir, name), "utf8"));
 
+/** A runner can reach its deadline before the stub writes anything. Never poll a dead child forever. */
+async function waitForStartupMarker(marker: string, child: ReturnType<typeof spawn>, deadlineAt: number): Promise<void> {
+  let spawnError: Error | undefined;
+  const onError = (error: Error) => { spawnError = error; };
+  child.once("error", onError);
+  try {
+    while (!existsSync(marker)) {
+      if (spawnError) throw new Error(`startup marker ${marker}: child could not start: ${spawnError.message}`);
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`startup marker ${marker}: child exited before startup (code=${child.exitCode}, signal=${child.signalCode})`);
+      }
+      if (Date.now() >= deadlineAt + SLACK_MS) throw new Error(`startup marker ${marker}: runner deadline passed without startup`);
+      await sleep(25);
+    }
+  } catch (error) {
+    // This fixture owns the runner. Resume a stopped one so its ordinary TERM handler can reap its group.
+    child.kill("SIGCONT");
+    child.kill("SIGTERM");
+    throw error;
+  } finally {
+    child.off("error", onError);
+  }
+}
+
+/** Rescue only a broken wait, so reverting the fix fails the assertion instead of hanging the suite. */
+async function expectStartupFailure(child: ReturnType<typeof spawn>, marker: string, message: RegExp): Promise<void> {
+  let rescue: ReturnType<typeof setTimeout> | undefined;
+  let finished = false;
+  child.once("close", () => {
+    if (!finished) rescue = setTimeout(() => writeFileSync(marker, "test cleanup marker, not a startup receipt"), 100);
+  });
+  try {
+    await assert.rejects(waitForStartupMarker(marker, child, Date.now() + 60_000), message);
+  } finally {
+    finished = true;
+    clearTimeout(rescue);
+  }
+}
+
+test("startup marker wait fails fast when its real child exits before writing the marker", async () => {
+  const dir = scratch("startup-exit");
+  const child = spawn(process.execPath, ["-e", "process.exit(17)"], { stdio: "ignore" });
+  await expectStartupFailure(child, join(dir, "absent.alive"), /child exited before startup \(code=17, signal=null\)/);
+});
+
+test("startup marker wait fails fast when its real child cannot spawn", async () => {
+  const dir = scratch("startup-error");
+  const child = spawn(join(dir, "absent-command"), [], { stdio: "ignore" });
+  await expectStartupFailure(child, join(dir, "absent.alive"), /child could not start:.*ENOENT/);
+});
+
 /** W1-T9619: a stand-in sandbox (the gate is never run uncontained) that runs the command after `--` as a child. */
 function passThroughSandbox(dir: string): GateContain {
   const file = join(dir, "pass-through-sandbox");
@@ -208,7 +259,7 @@ test("W1-T9556: the runner passes a gate's own status through, and a runner told
   const stub = writeStubGate(dir);
   const child = runner(far, [stub]);
   const done = exit(child);
-  while (!existsSync(join(dir, "gc.alive"))) await sleep(25);
+  await waitForStartupMarker(join(dir, "gc.alive"), child, far);
   child.kill("SIGTERM");
   const stopped = await done;
   assert.equal(stopped.code, 128 + 15);
@@ -274,7 +325,7 @@ test("W1-T9556: coreutils timeout ends the gate group at the deadline even while
   let stderr = "";
   child.stderr!.on("data", (d) => (stderr += String(d)));
   const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
-  while (!existsSync(join(dir, "stub.alive"))) await sleep(25);
+  await waitForStartupMarker(join(dir, "stub.alive"), child, startedAt + DEADLINE_MS);
   // Stop the runner outright: its own deadline timer cannot run, so only `timeout` can end the group.
   child.kill("SIGSTOP");
   await sleep(FREEZE_MS);

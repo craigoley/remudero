@@ -19,6 +19,9 @@
     - test/a-cancelled-run-is-not-a-failing-check.test.ts
     - test/a-base-probe-that-contradicts-mains-green-ci-parks-no-pr.test.ts
     - test/a-blocked-task-with-no-disposition-is-reported.test.ts
+  # refusal-amendment (W1-T9865, run W1-T9865-1792339959918, 2026-10-21T15:13:10.429Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T9865: a filed proof already passes at the merge base, so branch run-W1-T9865-1792339959918 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 2
   attempts: 0

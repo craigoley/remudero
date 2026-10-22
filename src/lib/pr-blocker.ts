@@ -118,6 +118,13 @@ export function priorBlockersFromLedger(lines: readonly Record<string, unknown>[
   return byPr;
 }
 
+/** W1-T10266 — a plan-only PR red on a plan violation with no plan-repair lane able to act had owner NONE, so nothing
+ *  cleared it (#13008, 3.14 PR-hours). With a lane it is `plan-repair`; without one, the person who must repair the
+ *  plan is named (`operator`) rather than no one. Every other blocker keeps its table owner. */
+export function blockerOwner(blocker: PrBlocker, planRepairCapable: boolean): string {
+  return blocker === "plan-proof-unrunnable" && !planRepairCapable ? "operator" : PR_BLOCKER_OWNERS[blocker];
+}
+
 export function blockerFields(blocker: PrBlocker, prior: PriorBlocker | undefined, now: number,
   planRepairCapable = false, cause?: string) {
   const continues = prior?.blocker === blocker && prior.since !== undefined;

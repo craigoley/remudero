@@ -23,8 +23,10 @@ worker_lane=$confine_file_tools
 # Write/Edit/Read carry `file_path`. Fall back to raw input if jq is absent.
 if command -v jq >/dev/null 2>&1; then
   have_jq=1
-  cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""')"
-  path="$(printf '%s' "$input" | jq -r '.tool_input.file_path // ""')"
+  # W1-T10302: a Codex shell call names its command under tool_input.command (or .cmd for exec_command), and
+  # its tool_input is not always an object; an array is one argv. A Claude Bash call is unchanged by this.
+  cmd="$(printf '%s' "$input" | jq -r '(.tool_input | if type == "object" then (.command // .cmd // "") else "" end) | if type == "array" then join(" ") else tostring end')"
+  path="$(printf '%s' "$input" | jq -r '(.tool_input | if type == "object" then (.file_path // "") else "" end)')"
   hook_cwd="$(printf '%s' "$input" | jq -r '.cwd // ""')"
 else
   have_jq=0
@@ -34,7 +36,22 @@ else
 fi
 haystack="$cmd $path"
 
+# W1-T10302: RMD_DENY_FLOOR_ONLY=gh-read is how .codex/config.toml wires the operator's Codex sessions to this
+# floor. It judges ONLY the GitHub-read routing of rule 10 (and rule 7's refusal of a polling loop, so `rmd gh`
+# is no escape from it): the other rules encode the Claude session and fleet-worker contracts, and whether
+# they bind the operator's own Codex sessions is a separate operator decision. Every other refusal is skipped
+# under it; rule 10 and rule 7 refuse as they always do. Set inline in the hook command, so it IS in this env.
+deny_only="${RMD_DENY_FLOOR_ONLY:-}"
+# A file tool's payload carries the file's TEXT, which may merely mention a read command: not a shell call.
+if [ "$deny_only" = gh-read ] && [ "$have_jq" -eq 1 ]; then
+  case "$(printf '%s' "$input" | jq -r '.tool_name // ""')" in
+    apply_patch|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob) exit 0 ;;
+  esac
+fi
 deny() {
+  if [ "$deny_only" = gh-read ]; then
+    case "$1" in "inline polling loop"*) ;; *) return 0 ;; esac
+  fi
   printf 'deny-floor: blocked — %s\n' "$1" >&2
   exit 2
 }
@@ -60,9 +77,9 @@ invokes_gh() {
     | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
 
-# `rmd gh [--class c] [--fresh] -- <args>` runs `gh <args>`, so rules 2, 4, 5 and 10 all judge this text.
+# `rmd gh [--class c] [--client x] [--fresh] -- <args>` runs `gh <args>`, so rules 2, 4, 5 and 10 all judge this text.
 # Only rule 10 used to, and `rmd gh -- pr merge 1` passed rule 5 in a worker. rmd gh also refuses writes.
-gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
+gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--client[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
 
 # 1) a push whose DESTINATION is a default branch (main/master), judged per command SEGMENT (W1-T4588)
 #    by its PARSED refspecs (W1-T5352), never by substrings. Two loose greps -- a force flag anywhere
@@ -1410,6 +1427,107 @@ gh_segment_api_is_write() {  # $1 = one hr_tokens line; true when it runs a `gh 
   return 1
 }
 
+# EVERY gh RULE JUDGES THE ARGV gh RECEIVES (W1-T10311). Rules 2, 5 and 10 grep `gh_norm` with its quotes
+#    still in it, so a quote between the words changed the verdict. REPRODUCED at 7dfbbc15b: `gh 'pr' 'comment'
+#    1 -b x` was routed as a read, a worker's `gh pr 'merge' 1` and `gh 'auth' 'logout'` missed the merge and
+#    auth refusals, a worker's `gh api -XPUT …/pulls/1/merge` and `-X 'PUT'` passed rule 5, and `gh --version`
+#    was routed though it makes no GitHub call. gh never sees those quotes: the words `hr_tokens` splits are
+#    gh's argv. So each segment's argv (the words after its first `gh` or `*/gh` word, heredoc bodies and
+#    redirections left out) is classified once here, and rules 2, 5 and 10 read the result. Each rule KEEPS
+#    its raw-text grep too, so nothing it refused before passes. Bash only, as rule 16: with no jq `cmd` is
+#    the raw JSON, the argv is not parsed and every rule keeps just its raw-text grep (fail open as before).
+#    Rule 7 and `invokes_gh` are W1-T5670's and W1-T9281's, and are left alone.
+#    FALSIFIER: test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts.
+gh_av_local=0 gh_av_nonlocal=0 gh_av_auth_mut=0 gh_av_pr_merge=0 gh_av_api_merge=0
+gh_av_write=0 gh_av_exempt=0 gh_av_inv_num="" gh_av_inv_repo=""
+gh_argv_classify() {  # $@ = the words gh receives; folds this argv's verdicts into the gh_av_* totals
+  local w p1="" p2="" i1=0 at=0 np=0 endopts=0 skip=0 help=0 repo="" num="" redir=0
+  local -a av
+  av=()  # set, not just declared: bash 4+ under `set -u` calls a declared-only array unbound at ${#av[@]}
+  for w in "$@"; do
+    if [ "$redir" -eq 1 ]; then redir=0; continue; fi
+    case "$w" in
+      $'\036'*) continue ;;  # a heredoc body is not argv
+      *'>'|*'<'|'<<<') redir=1; continue ;;  # a redirection operator, and the word it takes
+      *'>'*|*'<'*) continue ;;  # a redirection with its target attached
+    esac
+    av[${#av[@]}]="$w"
+  done
+  for w in ${av[@]+"${av[@]}"}; do
+    at=$((at + 1))
+    if [ "$skip" -eq 1 ]; then skip=0; repo="$w"; continue; fi
+    if [ "$endopts" -eq 0 ]; then
+      case "$w" in
+        --) endopts=1; continue ;;
+        --help|--version) help=1; continue ;;
+        -R|--repo) skip=1; continue ;;
+        --repo=*) repo="${w#--repo=}"; continue ;;
+        -R?*) repo="${w#-R}"; continue ;;
+        -*) continue ;;
+      esac
+    fi
+    np=$((np + 1))
+    case "$np" in
+      1) p1="$w"; i1=$at ;;
+      2) p2="$w" ;;
+      *) case "$w" in '#'[0-9]*|[0-9]*) case "${w#\#}" in *[!0-9]*) ;; *) [ -n "$num" ] || num="${w#\#}" ;; esac ;; esac ;;
+    esac
+  done
+  case "$p1" in version|help) help=1 ;; esac
+  case "$p1 $p2" in
+    'auth login'|'auth logout'|'auth refresh'|'auth token'|'auth setup-git') gh_av_auth_mut=1 ;;
+    'api rate_limit'|'auth status') gh_av_exempt=1 ;;
+  esac
+  if [ "$p1" = api ]; then
+    if gh_api_is_write ${av[@]+"${av[@]:$i1}"}; then
+      gh_av_write=1
+      if printf '%s ' ${av[@]+"${av[@]:$i1}"} | grep -Eq 'repos/[^[:space:]]+/pulls/[0-9]+/merge([?[:space:]]|$)'; then gh_av_api_merge=1; fi
+    fi
+  fi
+  case "$p1 $p2" in
+    'pr merge') gh_av_pr_merge=1 ;;
+  esac
+  case "$p1 $p2" in
+    'pr '*|'issue '*)
+      case "$p2" in create|merge|edit|close|reopen|comment|review|ready|lock|unlock) gh_av_write=1 ;; *) p2="" ;; esac ;;
+    'run rerun'|'run cancel'|'run delete'|'workflow run'|'workflow enable'|'workflow disable'|'release create'|'release edit'|'release delete'|'label create'|'label edit'|'label delete'|'secret set') gh_av_write=1; num="" ;;
+    *) p2=""; num="" ;;
+  esac
+  # The invalidation's `<repo|*> <number>`: the first porcelain write on a pull request or issue that names one.
+  if [ -n "$p2" ] && [ -n "$num" ] && [ -z "$gh_av_inv_num" ]; then gh_av_inv_num="$num"; gh_av_inv_repo="$repo"; fi
+  if [ "$help" -eq 1 ]; then gh_av_local=$((gh_av_local + 1)); else gh_av_nonlocal=1; fi
+}
+gh_argv_scan() {  # $1 = one hr_tokens line; classifies the argv of its first `gh` or `*/gh` word
+  local -a t
+  local n i=1
+  IFS=$'\037' read -r -a t <<< "$1"
+  n=${#t[@]}
+  while [ "$i" -lt "$n" ]; do
+    case "${t[$i]}" in
+      gh|*/gh) gh_argv_classify ${t[@]+"${t[@]:$((i + 1))}"}; return 0 ;;
+    esac
+    i=$((i + 1))
+  done
+  return 0
+}
+if [ "$have_jq" -eq 1 ]; then
+  case "$gh_norm" in *gh*)
+    while IFS= read -r gh_seg; do gh_argv_scan "$gh_seg"; done < <(printf '%s\n' "$gh_norm" | hr_tokens) ;;
+  esac
+fi
+# Rule 2's argv half: `gh 'auth' 'logout'` is the call `gh auth logout` makes.
+if [ "$gh_av_auth_mut" -eq 1 ]; then
+  deny "gh auth mutation"
+fi
+# Rule 5's argv half (the worker lane only, as above): a quoted `pr merge`, and a `gh api` write to a merge
+# endpoint whose method gh_api_is_write reads, so `-XPUT`, `--method=PUT` and `-X 'PUT'` are all the PUT.
+if [ "$worker_lane" -eq 1 ] && [ "$gh_av_pr_merge" -eq 1 ]; then
+  deny "a worker may author or repair a PR, but only the orchestrator may merge or arm it"
+fi
+if [ "$worker_lane" -eq 1 ] && [ "$gh_av_api_merge" -eq 1 ]; then
+  deny "gh api PUT to a pull-request merge endpoint"
+fi
+
 # 4) POST a commit status via `gh api` (W1-T203 — THE FORGE ATTACK). `gh` runs
 #    outside the OS sandbox with the operator's own ambient credential, so any
 #    worker (implementer, reviewer, anything spawned) that can reach this floor
@@ -1445,9 +1563,19 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
   done < <(printf '%s\n' "$gh_norm" | hr_tokens)
   printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+(pr|issue)[[:space:]]+(create|merge|edit|close|reopen|comment|review|ready|lock|unlock)' && gh_is_write=1
   printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+(run[[:space:]]+(rerun|cancel|delete)|workflow[[:space:]]+(run|enable|disable)|release[[:space:]]+(create|edit|delete)|label[[:space:]]+(create|edit|delete)|secret[[:space:]]+set)' && gh_is_write=1
+  [ "$gh_av_write" -eq 1 ] && gh_is_write=1  # W1-T10311: the same list, on the argv gh receives
 
   gh_is_exempt=0
   printf '%s' "$gh_norm" | grep -Eq 'gh[[:space:]]+api[[:space:]]+rate_limit|gh[[:space:]]+auth[[:space:]]+status' && gh_is_exempt=1
+  [ "$gh_av_exempt" -eq 1 ] && gh_is_exempt=1
+  # W1-T10311: A LOCAL gh COMMAND IS NOT A READ. `gh --version`, `gh version`, `gh help …` and any argv with
+  # `--help` make no GitHub call, so they are neither routed nor floored. Only when EVERY gh the text shows
+  # is one: a `gh` the argv parse cannot see (inside a quoted string or a heredoc body) keeps today's verdict.
+  if [ "$gh_av_local" -gt 0 ] && [ "$gh_av_nonlocal" -eq 0 ]; then
+    gh_text_n="$(printf '%s\n' "$gh_norm" | grep -oE '(^|[^A-Za-z0-9_/.-])gh[[:space:]]' | wc -l | tr -dc '0-9' || true)"
+    case "$gh_text_n" in ''|*[!0-9]*) gh_text_n=999 ;; esac
+    [ "$gh_text_n" -le "$gh_av_local" ] && gh_is_exempt=1
+  fi
 
   gh_broker_dir="${RMD_GH_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/remudero/gh-broker"
   gh_broker_live=0
@@ -1467,6 +1595,10 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
   if [ "$gh_is_write" -eq 1 ] && [ -d "$gh_broker_dir" ]; then
     gh_inv_num="$(printf '%s' "$gh_norm" | sed -n -E 's/.*gh[[:space:]]+(pr|issue)[[:space:]]+[a-z]+[[:space:]]+#?([0-9]+).*/\2/p' | head -1)"
     gh_inv_repo="$(printf '%s' "$gh_norm" | sed -n -E 's/.*(-R|--repo)[[:space:]=]+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+).*/\2/p' | head -1)"
+    if [ -n "$gh_av_inv_num" ]; then  # W1-T10311: the argv's number and repo, so `gh pr 'comment' 1 -R 'o/r'` is `o/r 1`
+      gh_inv_num="$gh_av_inv_num"
+      gh_inv_repo="$gh_av_inv_repo"
+    fi
     if [ -z "$gh_inv_num" ]; then
       gh_inv_api="$(printf '%s' "$gh_norm" | sed -n -E 's/.*repos\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(pulls|issues)\/([0-9]+).*/\1 \3/p' | head -1)"
       gh_inv_repo="${gh_inv_api% *}"
@@ -1486,7 +1618,12 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
       [ "$have_jq" -eq 1 ] && gh_agent="$(printf '%s' "$input" | jq -r '.agent_id // .agent_type // ""' 2>/dev/null || true)"
       if [ "$worker_lane" -eq 1 ] || [ -n "$gh_agent" ]; then gh_class=agent; fi
       printf 'deny-floor: routed - a live GitHub read broker serves this account (W1-T10279).\n' >&2
-      printf '  Re-run the read as: rmd gh --class %s -- <same gh args>\n' "$gh_class" >&2
+      if [ "$deny_only" = gh-read ]; then
+        # W1-T10302: this floor was wired by .codex/config.toml, so the reader is Codex and the instruction names it.
+        printf '  Re-run the read as: rmd gh --class %s --client codex -- <same gh args>\n' "$gh_class" >&2
+      else
+        printf '  Re-run the read as: rmd gh --class %s -- <same gh args>\n' "$gh_class" >&2
+      fi
       printf '  It answers exactly as gh would, from cache when GitHub says the answer is fresh.\n' >&2
       exit 2
     fi

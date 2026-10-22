@@ -262,16 +262,17 @@ test("ghPrCreateFillCommand: no title given falls back to lastCommitSubject, the
 
 test("STRUCTURAL: every one of the four run-task.ts call sites still passes an explicit title into ghPrCreateFillCommand", () => {
   const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const runTaskVerbSrc = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   // The title position must be one of the two authored sources (W1-T327): the worktree's own
   // last-commit subject (implement/retro) or the harness-shaped commit header (triage/plan) —
   // never a bare literal and never omitted, which is what this pattern enforces structurally.
   // Implement builds through the awaited variant, so its proofs never spawnSync on the loop (W1-T6034).
   // Trailing proof/log options do not change the title position.
-  const callSites = [
-    ...src.matchAll(
+  const callSites = [src, runTaskVerbSrc].flatMap((source) => [
+    ...source.matchAll(
       /ghPrCreateFillCommand(?:Async)?\(worktreePath,\s*owner,\s*(?:task\.repo|repo),\s*branch,\s*(lastCommitSubject\(worktreePath\)|branchPrTitle\(worktreePath, task\)|commitMessage\.split\("\\n"\)\[0\])(?=\s*[,\)])/g,
     ),
-  ];
+  ]);
   assert.equal(callSites.length, 4, "exactly implement, retro, triage and plan build a create argv");
 });
 

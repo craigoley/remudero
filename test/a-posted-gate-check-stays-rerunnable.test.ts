@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { readFileSync } from "node:fs";
+import { ghJson } from "#src/lib/worker.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { checkJobId } from "../src/lib/sweep.js";
 import { buildOpenPrViews, buildSweepEffects, cancelledRequiredChecks, fetchCiFailures, fetchOpenPrsWithPostedIds } from "../src/run-task.js";
 
@@ -100,4 +102,76 @@ test("W1-T4438: a re-drive of a failed posted gate reruns its job", async () => 
   assert.equal(reporter?.env?.POSTING_RUN_ID, "${{ github.run_id }}");
   assert.equal(reporter?.env?.POSTING_RUN_ATTEMPT, "${{ github.run_attempt }}");
   assert.match(reporter?.run ?? "", /external_id=run:\$\{POSTING_RUN_ID\}:\$\{POSTING_RUN_ATTEMPT\}:job:\$\{POSTING_JOB_ID\}/);
+});
+
+
+const LINK_HEAD = "6f9313fb89989914f77dcd770b0cc490bb12a0e2";
+function linkedChecks() {
+  return [
+    { id: 119601912896, name: "light-gates", status: "completed", conclusion: "cancelled", head_sha: LINK_HEAD,
+      details_url: "https://github.com/owner/repo/actions/runs/39710957377/job/119601912896", started_at: "2026-10-22T02:21:49Z" },
+    { id: 119606381286, name: "claims", status: "completed", conclusion: "failure", head_sha: LINK_HEAD,
+      details_url: "https://github.com/owner/repo/runs/119606381286", external_id: "run:39710957377:1:job:119601912896",
+      started_at: "2026-10-22T02:36:53Z", output: { summary: "W1-T4399: reported by this job's claims step(s) (outcome(s): cancelled)" } },
+    { id: 119601900001, name: "claims", status: "completed", conclusion: "skipped", head_sha: LINK_HEAD,
+      details_url: "https://github.com/owner/repo/actions/runs/39710957377/job/119601900001", started_at: "2026-10-22T02:21:47Z" },
+  ];
+}
+
+test("the default REST transport binds cancelled posted claims to exactly one physical producer", () => {
+  const shim = ghShim([
+    { when: "/pulls?", stdout: JSON.stringify([{ number: 13501, html_url: "https://github.com/owner/repo/pull/13501", head: { ref: "run-unfiled-1", sha: LINK_HEAD }, updated_at: "2026-10-22T02:36:53Z" }]) },
+    { when: "/check-runs?", stdout: JSON.stringify({ check_runs: linkedChecks() }) },
+    { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
+  ], { kind: "cancelled-producer-rest" });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  try {
+    const prs = fetchOpenPrsWithPostedIds(OWNER, REPO, ghJson);
+    const checks = prs[0].statusCheckRollup;
+    const cancelled = cancelledRequiredChecks(checks, ["ci-gate"], LINK_HEAD);
+    assert.deepEqual(cancelled, [{ name: "light-gates", jobId: "119601912896", runAttempt: 1, explainedFailures: [{ name: "claims", checkRunId: 119606381286 }] }]);
+    assert.equal(checks?.find(c => c.name === "claims")?.conclusion?.toUpperCase(), "FAILURE", "cancellation explanation cannot make merge green");
+    assert.equal(shim.calls().length, 3, "the default really shells out for pulls/check-runs/status");
+    assert.ok(shim.calls().some(call => call.includes(`/commits/${LINK_HEAD}/check-runs?`)));
+  } finally { process.env.PATH = originalPath; }
+});
+
+test("posted cancellation evidence refuses wrong or missing heads, jobs, runs, attempts and constituent outcomes", () => {
+  const raw = linkedChecks();
+  const read = (checks = raw) => fetchOpenPrsWithPostedIds(OWNER, REPO, args => {
+    if (args[1].includes("/pulls?")) return [{ number: 13501, html_url: "https://github.com/owner/repo/pull/13501", head: { ref: "run-unfiled-1", sha: LINK_HEAD }, updated_at: "2026-10-22T02:36:53Z" }];
+    if (args[1].includes("/check-runs?")) return { check_runs: checks };
+    if (args[1].endsWith("/status")) return { statuses: [] };
+    throw Error("unexpected fixture route");
+  })[0].statusCheckRollup!;
+  for (const mutate of [
+    (checks: typeof raw) => { checks[0].head_sha = "a".repeat(40); },
+    (checks: typeof raw) => { checks[1].head_sha = "a".repeat(40); },
+    (checks: typeof raw) => { checks[1].head_sha = ""; },
+    (checks: typeof raw) => { checks[1].id = 0; },
+    (checks: typeof raw) => { checks[1].details_url = "https://github.com/owner/repo/actions/runs/39710957377/job/9"; },
+    (checks: typeof raw) => { checks[0].status = "in_progress"; },
+    (checks: typeof raw) => { checks[1].external_id = "job:119601912896"; },
+    (checks: typeof raw) => { checks[1].external_id = "run:9:1:job:119601912896"; },
+    (checks: typeof raw) => { checks[1].external_id = "run:39710957377:1:job:9"; },
+    (checks: typeof raw) => { checks[1].external_id = "run:39710957377:0:job:119601912896"; },
+    (checks: typeof raw) => { checks[1].external_id = "run:39710957377:9007199254740992:job:119601912896"; },
+    (checks: typeof raw) => { checks[1].output = { summary: "W1-T4399: reported by this job's claims step(s) (outcome(s): failure)" }; },
+    (checks: typeof raw) => { checks[1].output = { summary: "W1-T4399: reported by this job's different step(s) (outcome(s): cancelled)" }; },
+    (checks: typeof raw) => { checks[1].output = { summary: "" }; },
+    (checks: typeof raw) => { checks[1].output = { summary: "W1-T4399: reported by this job's claims step(s) (outcome(s): success cancelled)" }; },
+    (checks: typeof raw) => { checks[1].output = { summary: "W1-T4399: reported by this job's claims step(s) (outcome(s): failure cancelled)" }; },
+    (checks: typeof raw) => { checks[1].status = "in_progress"; },
+    (checks: typeof raw) => { checks[0].details_url = "https://github.com/owner/repo/runs/119601912896"; },
+    (checks: typeof raw) => { checks.push({ ...checks[1], name: "other", external_id: "run:39710957377:2:job:119601912896",
+      output: { summary: "W1-T4399: reported by this job's other step(s) (outcome(s): cancelled)" } }); },
+  ]) {
+    const checks = linkedChecks(); mutate(checks);
+    assert.equal(cancelledRequiredChecks(read(checks), ["ci-gate"], LINK_HEAD)[0]?.explainedFailures, undefined);
+  }
+  assert.equal(cancelledRequiredChecks(read(), ["ci-gate"])[0]?.explainedFailures, undefined, "unknown current head grants no explanation");
+  const privateOutput = linkedChecks();
+  privateOutput[1].output = { summary: "PRIVATE_OTHER_CHECK_OUTPUT" };
+  assert.equal(Object.hasOwn(read(privateOutput)[1], "outputSummary"), false, "unrelated check output is not retained in the cancellation read model");
 });

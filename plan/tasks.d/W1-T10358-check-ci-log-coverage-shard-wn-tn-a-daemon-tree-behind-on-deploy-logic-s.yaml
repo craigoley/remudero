@@ -1,0 +1,52 @@
+- id: W1-T10358
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard:wn-tn-a-daemon-tree-behind-on-deploy-logic-still-defers-nami cost 30.3 PR minute(s) across 5 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.24
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard:wn-tn-a-daemon-tree-behind-on-deploy-logic-still-defers-nami"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/check-ci-log-coverage-shard-wn-tn-a-daemon-tree-behind-on-deploy-logic-s.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-shard:wn-tn-a-daemon-tree-behind-on-deploy-logic-still-defers-nami"
+      proof: "grep: test(\"W1-T10358: check:ci-log:coverage-shard:wn-tn-a-daemon-tree-behind-on-deploy-logic-still-defers-nami is prevented, not retried\" in test/gardeners/check-ci-log-coverage-shard-wn-tn-a-daemon-tree-behind-on-deploy-logic-s.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard:wn-tn-a-daemon-tree-behind-on-deploy-logic-still-defers-nami's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard:wn-tn-a-daemon-tree-behind-on-deploy-logic-still-defers-nami cost 30.3 PR minute(s) (seven-day half-life) across 5 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet for coverage-shard
+
+    RECENT ROUNDS (newest first):
+    - PR #13317 (https://github.com/craigoley/remudero/pull/13317) at 2026-10-21T13:42:07.911Z: ci-log round — coverage-shard (7/8): ["WN-TN: a daemon tree behind on deploy logic still defers, naming the paths","the baked supervisor catalogs cover its a; CodeQL alert #910 (js/file-system-race):
+        failing tests: ["W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths","the baked supervisor catalogs cover its actual runtime import closure"]; W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths; the baked supervisor catalogs cover its actual runtime import closure
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — ["W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths","the baked supervisor catalogs cover its actual runtime import closure"]
+          | not ok 2 - W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths
+          |   ---
+          |   duration_ms: 2691.503342
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-busy-primary-reaches-its-image-recycle.test.ts:186:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     src/lib/state-backup-engine-links.ts is deploy logic: the busy tick must not ask deploy-run
+          |     + actual - expecte
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-22T03:29:10.227Z"
+    pin: "53f950caa13e6ec004310cde856fa7c9453ea644d89f27749ef029fccc916652"

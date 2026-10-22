@@ -77,6 +77,34 @@ regression views. Grouping reduces duplicate cards but never deletes ledger evid
 tied to a shipped artifact, regression requires newer evidence, and snooze ends on a named
 condition or new activity. W1-T3853 and W1-T3854 make these rules durable and source-labeled.
 
+## Release bake rule status (W1-T9662)
+
+As researched on 2026-10-21, the operator's **30‑minute bake** has a historical ruling,
+but whether it remains a current requirement is **unresolved**. W1-T4529's `origin` records
+the 2026-09-24 ruling: a healthy primary bakes a release for 30 minutes before fleet promotion.
+Its design requires no crash-loop flag and an unchanged restart count during that window;
+an unhealthy bake revokes the release instead.
+
+The implementation is retired, not delivered: W1-T4529 depends on retired W1-T4528's release
+tags, which depend on withdrawn W1-T4527's primary identity. See the corresponding shards in
+`plan/tasks.d/`. At the inspected checkout, `src/lib/release-tags.ts` and the proposed
+`test/the-primary-bakes-a-release-before-the-fleet.test.ts` are absent; `src/lib/deployer.ts`
+contains `runDeployCycle` but no `checkReleaseBake`. This is repository evidence, not a live
+deployment measurement.
+
+The [October 5 operator-authorized audit](https://github.com/craigoley/remudero/issues/8597#issuecomment-5998083081)
+explicitly preserves retirement/deferred-roadmap status and says revival requires a separate
+operator decision. Retirement of the implementation does not establish rescission of the
+policy. [Merged PR #12048](https://github.com/craigoley/remudero/pull/12048) ratified the research
+and conditional planning tasks on October 15; its body explicitly says W1-T9662 is not yet
+implemented. It supplies no reaffirmation or rescission of the original requirement.
+
+Disposition: keep the old chain retired. A current operator ruling affirming or rescinding
+the requirement remains necessary; the inspected records and GitHub discussion do not settle
+it. If reaffirmed, W1-T9663 calls for a fresh task with its own release-tag and primary-identity
+prerequisites, rather than revival of W1-T4529. No fleet promotion or runtime enforcement is
+claimed by this research.
+
 ## NET STATE
 
 ### CAPABILITY SNAPSHOT
@@ -5727,7 +5755,9 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    W2-T1.
 13. **A doc that DESCRIBES a mechanism is never proof the mechanism EXISTS.** Acceptance proofs must be
    OBSERVABLE SYSTEM STATE — `gh api` output, a status object, a grep of the call site, a passing test —
-   never a file that talks about it. PR #12 shipped `docs/review-gate.md`, passed CI, reported
+   never a file that talks about it. For a task whose deliverable is wiring,
+   wiring is not proved by a passing test; evidence of the production call site is required.
+   PR #12 shipped `docs/review-gate.md`, passed CI, reported
    `verdict=merged`, and did none of its job (protection unchanged, no status ever posted). [PR #12/#13]
 14. **Splitting a task can ORPHAN its call site — when you split, name the integration point explicitly
    as one side's deliverable.** T1C built the reviewer and T1D was to enforce it, but NEITHER owned
@@ -6104,6 +6134,13 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
   renderer and disposition state. The original daemon console was retired; this reservation
   carries the research forward without assuming the replacement console has the same defect.
 - ratification-candidate: W1-T5071 — proof-debt:W1-T5071, 2026-10-14 proposal (W1-T9485); matching candidate recorded in plan/tasks.yaml.
+- ratification-audit: W1-T9485 — follow-on guard for the W1-T5071 candidate.
+  After operator approval, record the operator-provided candidate-to-task mapping here and beside
+  the matching candidate in `plan/tasks.yaml`. Verify that each mapped W1-T ID has a real `- id:`
+  task record in `plan/tasks.yaml` or `plan/tasks.d/*.yaml`, and that both candidate entries name
+  the same IDs. Record the approval reference and checked task-record paths with the mapping.
+  Until approval and these checks are complete, keep the candidate pending; missing, ambiguous,
+  or placeholder IDs must not be treated as a completed mapping or dispatched as follow-on tasks.
 - Grill-me protocol as in-harness interactive intake (`rmd chat`) — post-WS-4.
 - Agent Teams as an optional worker sub-mode for parallel exploration inside one task.
 - **Beads import/export adapter** — tasks.yaml stays the schema-tight native substrate; Beads (23k★,

@@ -14,6 +14,7 @@
 
 import { globSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -299,11 +300,22 @@ const MARKER_MODULE = fileURLToPath(new URL("./pool-run-marker.mjs", import.meta
 const TALLY_REPORTER = fileURLToPath(new URL("./pool-run-tally.mjs", import.meta.url));
 
 /** The extra `node --test` arguments and env one judged run needs, and how to read what it left. */
-export function prepareJudgedRun({ makeDir = () => mkdtempSync(join(tmpdir(), "rmd-pool-run-")) } = {}) {
+export function prepareJudgedRun({ makeDir = () => mkdtempSync(join(tmpdir(), "rmd-pool-run-")), files, root = process.cwd() } = {}) {
   const dir = makeDir();
   const markerPath = join(dir, "marker.tsv");
   const tallyPath = join(dir, "tally.json");
   writeFileSync(markerPath, "");
+  const diagnosticEnv = {};
+  if (Array.isArray(files)) {
+    // Separate, opt-in observation input; never consumed by the completion judge.
+    try {
+      const diagnosticPath = join(dir, "file-diagnostics.json");
+      writeFileSync(diagnosticPath, JSON.stringify({ version: 1, attemptId: randomUUID(), root: realpathSync(root), files: files.map(file => realpathSync(resolve(root, file))) }));
+      diagnosticEnv.RMD_TEST_FILE_DIAGNOSTICS = diagnosticPath;
+    } catch {
+      // Observation availability cannot change the run's verdict or selection.
+    }
+  }
   const readOrEmpty = (path) => {
     try {
       return readFileSync(path, "utf8");
@@ -313,7 +325,7 @@ export function prepareJudgedRun({ makeDir = () => mkdtempSync(join(tmpdir(), "r
   };
   return {
     args: ["--import", pathToFileURL(MARKER_MODULE).href, `--test-reporter=${TALLY_REPORTER}`, `--test-reporter-destination=${tallyPath}`],
-    env: { [POOL_RUN_MARKER_ENV]: markerPath },
+    env: { [POOL_RUN_MARKER_ENV]: markerPath, ...diagnosticEnv },
     read: () => ({ tallyText: readOrEmpty(tallyPath), markerText: readOrEmpty(markerPath) }),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
@@ -471,7 +483,7 @@ export function unreportedFilesIn(output) {
  * {@link RUN_PAST_DEADLINE}.
  */
 export function spawnJudgedRun(files, { spawn, cwd, args, pool, quiet = false, role, prefix = "pure-test-pool", log = (line) => console.error(line), env = process.env, deadlineMs }) {
-  const judged = prepareJudgedRun();
+  const judged = prepareJudgedRun({ files, root: cwd });
   try {
     const result = spawn(process.execPath, [...args, ...judged.args, ...files], {
       cwd,

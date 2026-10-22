@@ -200,13 +200,16 @@ test("lostRaceEscalation: nothing reverts, reopens or force-pushes — every opt
   );
 });
 
+const entrypointSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskBodySrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
+
 test("STRUCTURAL: neither lost-race call site performs a revert, a reopen or a force-push", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const src = entrypointSrc;
   const idx = src.indexOf("export function lostRaceEscalation");
   assert.ok(idx > 0, "the helper must still exist under this name");
   // Every site that reacts to a lost race routes through this one helper, so proving the helper
   // and its call sites name no mutating verb is the whole surface.
-  for (const [, call] of [...src.matchAll(/lostRaceEscalation\(\{[\s\S]{0,700}?\}\)/g)].entries()) {
+  for (const [, call] of [entrypointSrc, runTaskBodySrc].flatMap((source) => [...source.matchAll(/lostRaceEscalation\(\{[\s\S]{0,700}?\}\)/g)]).entries()) {
     assert.doesNotMatch(String(call), /revert|reopen|force-push|--force/i, "a lost-race call site must not mutate");
   }
 });
@@ -248,20 +251,20 @@ test("mergeShaNow: reads merge_commit_sha off the single-PR REST row, and never 
 });
 
 test("STRUCTURAL: all THREE disarmAutoMerge call sites follow the outcome — none logs automerge.disarmed unconditionally", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const src = entrypointSrc;
   // The capped/irreversible branch disposes its awaited outcome directly. The risk-judge branch
   // goes through `riskJudgeDisarm`, which owns the same await + disposition behind the seam tested
   // behaviorally in test/the-sweeps-own-pushes-and-the-risk-judges-disarm-are-awaited.test.ts.
   // `withdrawArmIfVerdictRefuses` remains the third site, routed through its injectable deps.disarm.
-  const direct = [...src.matchAll(/disposeDisarm\(await disarmAutoMergeAsync\(prUrl\)/g)];
+  const direct = [...runTaskBodySrc.matchAll(/disposeDisarm\(await disarmAutoMergeAsync\(prUrl\)/g)];
   assert.equal(direct.length, 1, `expected the capped-refusal call site to dispose its awaited outcome, found ${direct.length}`);
   assert.match(
-    src,
-    /export async function riskJudgeDisarm\([\s\S]{0,500}?return disposeDisarm\(await disarm\(ctx\.prUrl\), ctx, disposition\);/,
+    runTaskBodySrc,
+    /async function riskJudgeDisarm\([\s\S]{0,700}?return disposeDisarm\(helperHost, await disarm\(ctx\.prUrl\), ctx, disposition\);/,
     "the risk-judge disarm seam awaits the injected operation and disposes its actual outcome",
   );
   assert.match(
-    src,
+    runTaskBodySrc,
     /escalate: async \(verdict, action\) => \{[\s\S]{0,1200}?await riskJudgeDisarm\(\{/,
     "risk escalation must await the shared disarm seam before it can continue",
   );
@@ -273,11 +276,11 @@ test("STRUCTURAL: all THREE disarmAutoMerge call sites follow the outcome — no
 
   // Every one of the three must CAPTURE the return — a bare `disarmAutoMerge(prUrl);` statement is
   // precisely the shape that let #2506 record a refused withdrawal as a completed one.
-  const bare = [...src.matchAll(/^\s*disarmAutoMerge\(prUrl\);\s*$/gm)];
+  const bare = [entrypointSrc, runTaskBodySrc].flatMap((source) => [...source.matchAll(/^\s*disarmAutoMerge\(prUrl\);\s*$/gm)]);
   assert.equal(bare.length, 0, `a bare disarmAutoMerge(...) statement discards the outcome (found ${bare.length})`);
 
   // And none may log the completed-withdrawal row without asking the predicate first.
-  const unconditional = [...src.matchAll(/log\(\s*"automerge\.disarmed"/g)];
+  const unconditional = [entrypointSrc, runTaskBodySrc].flatMap((source) => [...source.matchAll(/log\(\s*"automerge\.disarmed"/g)]);
   assert.equal(
     unconditional.length,
     0,
@@ -292,7 +295,7 @@ test("STRUCTURAL: all THREE disarmAutoMerge call sites follow the outcome — no
   // counting its declaration as a third "site" by coincidence. The two REAL call sites left in
   // run-task.ts are what this assertion actually protects; asserted directly instead.
   assert.equal(
-    [...src.matchAll(/disarmOutcomeWithdrawn\(/g)].length >= 2,
+    [entrypointSrc, runTaskBodySrc].flatMap((source) => [...source.matchAll(/disarmOutcomeWithdrawn\(/g)]).length >= 2,
     true,
     "each of the two run-task.ts call sites branches on the one shared predicate",
   );

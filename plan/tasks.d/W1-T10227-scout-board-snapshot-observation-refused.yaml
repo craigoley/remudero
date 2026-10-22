@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -11,6 +11,8 @@
   author_class: machine
   origin: "scout:board_snapshot.observation_refused"
   files:
+    - src/lib/board-snapshot-cache.ts
+    - test/board-snapshot-cache.test.ts
     - test/gardeners/scout-board-snapshot-observation-refused.test.ts
   acceptance:
     - claim: "board_snapshot.observation_refused stops recurring: its cause is fixed rather than its rows hidden"
@@ -21,10 +23,16 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "low"
-    action: escalate
-    confidence: 0.6
+    verdict: "operator"
+    action: proceed
+    confidence: 1
     reasons:
-      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared files list contains only a single new test file (test/gardeners/scout-board-snapshot-observation-refused.test.ts), which does not touch secrets, auth, deploy, merge policy, or deletion according to the description.; on the change's description/files alone, no diff was read — The filed task is an implement task that asks for fixing the cause of a recurring ledger symptom; nothing in the description requires an operator-only decision or an irreversible action.; on the change's description/files alone, no diff was read — Weaknesses are noted: the rows name no file, so the code location is unknown and the actual fix scope could grow beyond the declared file. The scout family has 0 merged and 1 declined (Beta mean 0.33). These are worth flagging, but the PR still passes CI and review, and the escalation rule's criteria are not met.; on the change's description/files alone, no diff was read — The acceptance is a grep for a test name, which is a weak check. This is a quality concern for the review stage, not an escalation criterion under the stated rule."
-    judged_at: "2026-10-20T05:32:57.855Z"
-    pin: "8ec01bc07aa37510be7db2a2a05e4cf7a93c53349573bf36fc62e8ffcf6e97dd"
+      - "released by the operator with rmd approve; exact two-companion repair scope separately approved 2026-10-22"
+    judged_at: "2026-10-22T11:00:52.621Z"
+    pin: "f19c9b139b1b7dd1f87429b182f79f9fbcc506b58878058cf50f5821143045ec"
+  amendment: |
+    2026-10-22 explicit operator approval in the stuck-PR recovery chat: add exactly
+    src/lib/board-snapshot-cache.ts and test/board-snapshot-cache.test.ts as companions.
+    Retire stale observation metadata only after successful snapshot publication.
+    Preserve failed-publication metadata, foreign-metadata identity refusals and their assertions.
+    Keep the original regression, acceptance criteria, falsifiers, budgets and gates unchanged.

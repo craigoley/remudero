@@ -1,0 +1,98 @@
+id: fb-dep-review-f9394ef2d35371e3
+ts: 2026-10-22T00:26:18.917Z
+raw: |-
+  Land the dependency bump(s) of Dependabot PR #13446, whose red is its own: chore(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.302 to 0.3.303
+
+  Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes.
+  A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest
+  allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:
+  tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked
+  SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.
+  Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries
+  their hunks, or Dependabot does once main carries the versions.
+
+  PR: https://github.com/craigoley/remudero/pull/13446
+  Head: c78bf3ec50f792546bd689055846e44b357bbe95
+  Bumps: @anthropic-ai/claude-agent-sdk 0.3.302 -> 0.3.303
+  Red checks: ci-gate, coverage-ratchet
+  Sibling Dependabot PRs folded in: none
+
+  Dependabot proposal body:
+
+  Bumps the npm-minor-and-patch group with 1 update in the / directory: [@anthropic-ai/claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-typescript).
+
+  Updates `@anthropic-ai/claude-agent-sdk` from 0.3.302 to 0.3.303
+  <details>
+  <summary>Release notes</summary>
+  <p><em>Sourced from <a href="https://github.com/anthropics/claude-agent-sdk-typescript/releases">@​anthropic-ai/claude-agent-sdk's releases</a>.</em></p>
+  <blockquote>
+  <h2>v0.3.303</h2>
+  <h2>What's changed</h2>
+  <ul>
+  <li>Updated to parity with Claude Code v2.1.303</li>
+  </ul>
+  <h2>Update</h2>
+  <pre lang="sh"><code>npm install @anthropic-ai/claude-agent-sdk@0.3.303
+  # or
+  yarn add @anthropic-ai/claude-agent-sdk@0.3.303
+  # or
+  pnpm add @anthropic-ai/claude-agent-sdk@0.3.303
+  # or
+  bun add @anthropic-ai/claude-agent-sdk@0.3.303
+  </code></pre>
+  </blockquote>
+  </details>
+  <details>
+  <summary>Changelog</summary>
+  <p><em>Sourced from <a href="https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md">@​anthropic-ai/claude-agent-sdk's changelog</a>.</em></p>
+  <blockquote>
+  <h2>0.3.303</h2>
+  <ul>
+  <li>Updated to parity with Claude Code v2.1.303</li>
+  </ul>
+  </blockquote>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/anthropics/claude-agent-sdk-typescript/commit/53464f259015a7f42a04b3d0be04063dfabebd9a"><code>53464f2</code></a> chore: Update CHANGELOG.md</li>
+  <li>See full diff in <a href="https://github.com/anthropics/claude-agent-sdk-typescript/compare/v0.3.302...v0.3.303">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+
+  [![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=@anthropic-ai/claude-agent-sdk&package-manager=npm_and_yarn&previous-version=0.3.302&new-version=0.3.303)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)
+
+  Dependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.
+
+  [//]: # (dependabot-automerge-start)
+  [//]: # (dependabot-automerge-end)
+
+  ---
+
+  <details>
+  <summary>Dependabot commands and options</summary>
+  <br />
+
+  You can trigger Dependabot actions by commenting on this PR:
+  - `@dependabot rebase` will rebase this PR
+  - `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it
+  - `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency
+  - `@dependabot ignore <dependency name> major version` will close this group update PR and stop Dependabot creating any more for the specific dependency's major version (unless you unignore this specific dependency's major version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name> minor version` will close this group update PR and stop Dependabot creating any more for the specific dependency's minor version (unless you unignore this specific dependency's minor version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name>` will close this group update PR and stop Dependabot creating any more for the specific dependency (unless you unignore this specific dependency or upgrade to it yourself)
+  - `@dependabot unignore <dependency name>` will remove all of the ignore conditions of the specified dependency
+  - `@dependabot unignore <dependency name> <ignore condition>` will remove the ignore condition of the specified dependency and ignore conditions
+
+
+  </details>
+attachments: []
+origin: repair#dep-review
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-agent-sdk@0.3.303
+thread_id: null

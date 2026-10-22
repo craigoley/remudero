@@ -12,3 +12,15 @@ export function readCiDependencyEvidence(path: string, expected: CiDependencyEvi
 };
 export function ciDependencyEvidenceForInvocation(argv: string[], env?: NodeJS.ProcessEnv, cwd?: string):
   ((task: Pick<Task, 'id'>) => DependencyMergeEvidence) | undefined;
+export interface CiDependencyProducerContext {
+  actions: boolean; repository: string; head: string; base: string; producerSha: string;
+  producerJob: string; runId: string; attempt: string; nowMs: number; checkout: string;
+}
+export function ciDependencyClosure(checkout: string, head: string, base: string): {
+  plan: import('../../src/lib/plan.js').Plan; taskIds: string[];
+  overrides: import('../../src/lib/status.js').CreditOverrideRow[];
+};
+export function produceCiDependencyEvidence(context: CiDependencyProducerContext, ports?: {
+  request?: (path: string) => unknown | Promise<unknown>;
+  closure?: typeof ciDependencyClosure; git?: (args: string[]) => string;
+}): Promise<{ bytes: string; digest: string; producerSha: string }>;

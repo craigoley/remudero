@@ -104,7 +104,12 @@ test("drift detection and the image build trigger watch at least the same paths"
   // IMAGE_BAKED_PATHS entry (see ROOT_LOCKFILE_PATH's own doc comment) — the workflow's own
   // content guard, not this pathspec, is what keeps an unrelated lockfile edit from building.
   for (const p of IMAGE_BAKED_PATHS) assert.ok(built.includes(p), `${p} must still start the workflow`);
-  assert.deepEqual([...built].sort(), [...IMAGE_BAKED_PATHS, ROOT_LOCKFILE_PATH].sort());
+  // W1-T10366: the dependency inputs the image recipe installs from (root manifest + workspace
+  // manifests) also start the workflow; its content guard decides whether they actually build.
+  assert.deepEqual(
+    [...built].sort(),
+    [...IMAGE_BAKED_PATHS, ROOT_LOCKFILE_PATH, "package.json", "packages/**/package.json"].sort(),
+  );
   for (const cli of ["deploy/package.json", "deploy/package-lock.json"]) assert.ok(IMAGE_BAKED_PATHS.includes(cli), cli);
 });
 
@@ -186,6 +191,12 @@ test("real deploy dependency probes recover expired ACR auth without conflating 
     const inspected: string[] = [];
     const refreshedRegistries: string[] = [];
     const execFile = (cmd: string, args: string[]): string => {
+      // W1-T10366: the dependency-input walk reads the root lockfile + manifest at NEWEST, a root commit.
+      if (cmd === "git" && args.includes("show")) {
+        return args[args.length - 1]!.endsWith("package-lock.json")
+          ? JSON.stringify({ lockfileVersion: 3, packages: { "": { name: "fixture" } } }) : "{}";
+      }
+      if (cmd === "git" && args.includes("--parents")) return `${NEWEST}\n`;
       if (cmd === "git" && args.includes("log")) return `${NEWEST}\n`;
       if (cmd === "az") { refreshedRegistries.push(args[3]!); return ""; }
       if (cmd === "docker" && args[0] === "manifest") {

@@ -142,6 +142,7 @@ import { changedTaskIds } from "../src/lib/task-linter.js";
 
 const FIXTURE_INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskVerbSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 /** An injected {@link PrHeadGateway} fixture — no `gh` exec, a fixed answer per PR url. */
 function fakeGateway(headRefName: string | undefined): PrHeadGateway {
@@ -760,8 +761,8 @@ test("renderReconPrompt: a read-time plan index renders a prompt orders of magni
 });
 
 test("wiring: the recon worker's spawn prompt is built via renderReconPrompt(planIndexBlock, ...), not a hardcoded literal", () => {
-  const reconIdx = runTaskSrc.indexOf('"recon worker"');
-  const promptCallIdx = runTaskSrc.indexOf("prompt: renderReconPrompt(planIndexBlock,");
+  const reconIdx = runTaskVerbSrc.indexOf('"recon worker"');
+  const promptCallIdx = runTaskVerbSrc.indexOf("prompt: renderReconPrompt(planIndexBlock,");
   assert.ok(reconIdx >= 0, "the recon worker section must exist");
   assert.ok(promptCallIdx > reconIdx, "the recon spawn must build its prompt via renderReconPrompt, after the recon worker say()");
 });
@@ -4952,7 +4953,7 @@ test("dispatchFixPreflightStandDown: a live OPEN read does NOT stand down and lo
 // both call the SAME `runTask`, so there is exactly one place to gate) ──────
 
 test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's blocked_review branch, one from the W1-T77 sweep real-wiring; no duplicated fix-dispatch logic", () => {
-  const dispatchSites = runTaskSrc.match(/await runFixRung\(/g) ?? [];
+  const dispatchSites = [runTaskSrc, runTaskVerbSrc].flatMap((source) => source.match(/await runFixRung\(/g) ?? []);
   // Two CALL sites, ONE implementation: (1) runTask's blocked_review branch (the
   // live-run path — drain + manual `rmd run-task` both reach it via the SAME
   // runTask), and (2) the W1-T77 level-triggered sweep's real wiring, which
@@ -4964,6 +4965,9 @@ test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's 
   // above already covers both entry points; grep confirms no second runTask.
   const runTaskDefs = runTaskSrc.match(/^async function runTask\(/gm) ?? [];
   assert.equal(runTaskDefs.length, 1, "there must be exactly one runTask implementation for both callers to share");
+  const implementations = runTaskVerbSrc.match(/^export async function runTask\(/gm) ?? [];
+  assert.equal(implementations.length, 1, "the extracted module must retain exactly one runTask implementation");
+  assert.match(extractFunctionBody(runTaskSrc, "async function runTask("), /return runTaskFromModule\(taskId, opts, runTaskCommandHost\(\)\);/, "the original entrypoint delegates both callers to the extracted implementation");
 });
 
 // ── W1-T192: the draft rung runs DAEMON-SIDE, not CLI-pull ─────────────────────────────────
@@ -5925,8 +5929,8 @@ test("the terminal blocked_review return (no fix rung) is gone — a failing rev
   // Before W1-T76: `if (review.state !== "success") { ... return {..., verdict: "blocked_review"}; }`
   // right after the review call, with NOTHING in between. Guard against that
   // shape reappearing (a regression that silences the rung).
-  assert.doesNotMatch(
-    runTaskSrc,
+  for (const source of [runTaskSrc, runTaskVerbSrc]) assert.doesNotMatch(
+    source,
     /if \(review\.state !== "success"\) \{\s*log\("verdict"/,
     "a failing review must route through runFixRung, never straight back to a blocked_review verdict",
   );
@@ -9158,6 +9162,8 @@ test("W1-T2564: the attempt-key migration runs ONCE per daemon start, not per po
 // same file — the #5571 coverage-shard break this placement exists to avoid repeating. ──
 
 test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung reaches its ordinary fresh semantic review without emitting fix.ci_not_green or spending a second strike", async () => {
+  const { gitRepo } = await import("./helpers/git-repo.js");
+  const source = gitRepo({ kind: "target-green-review-source" });
   const spawnCalls: SpawnWorkerArgs[] = [];
   const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
   const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
@@ -9165,6 +9171,8 @@ test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung r
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts(),
+    worktreePath: source.dir,
+    reviewBase: { ...fixRungBaseOpts().reviewBase, headCheckoutDir: source.dir },
     strikeCap: 2,
     initialReview: failing,
     deps: {
@@ -9176,7 +9184,7 @@ test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung r
       // The verdict the FIXED `waitForCiGreen` now returns for a console-shaped rollup —
       // console-ci/ci-gate/Vercel required and SUCCESS, remudero-review still pending, no context
       // named `ci` — carrying the sha it judged (CiGateOutcome, W1-T2804).
-      waitForCiGreen: async () => ({ state: "green" as const, sha: "consolesha1" }),
+      waitForCiGreen: async () => ({ state: "green" as const, sha: source.git("rev-parse", "HEAD") }),
       runReview: async () => passing,
       push: () => {},
       issues: fakeIssues([]),

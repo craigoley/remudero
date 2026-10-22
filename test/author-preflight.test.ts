@@ -613,6 +613,11 @@ test('author preflight retains large real failures privately while keeping termi
   assert.equal(JSON.parse(priorReceipt).headSha, receipt.headSha);
   assert.ok(result.stdout.length + result.stderr.length < 30000, 'full noisy TAP belongs in the durable logs, not a truncated terminal');
   assert.match(result.stdout, /not ok .*durable failure witness/);
+  assert.doesNotMatch(result.stdout + result.stderr, /^not ok \d+ - /m,
+    'replayed private failures must not impersonate the containing test run');
+  assert.doesNotMatch(result.stdout + result.stderr, /^# (?:tests|pass|fail) \d+$/m,
+    'private summary counts retain their author-step provenance');
+  assert.match(result.stdout, /\[author affected-tests failures\] not ok .*durable failure witness/);
   assert.match(result.stdout, /complete output:/);
   assert.equal(mod.main(['--dry-run'], { root: f.root }), 0);
   assert.equal(readFileSync(join(dirname(path), 'receipt.json'), 'utf8'), priorReceipt, 'a later run must not overwrite the failure receipt');

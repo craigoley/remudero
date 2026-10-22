@@ -1,5 +1,5 @@
 - id: W1-T10272
-  title: "Diagnose and close the inbox-response served-model evidence gap without inventing model identity"
+  title: "Audit inbox-response model evidence and add production-path regression coverage without inventing identity"
   repo: remudero
   depends_on: []
   type: implement
@@ -11,8 +11,6 @@
   origin: feedback#evidence-coverage-inbox-response-served-model
   plan_refs: ["§7B", "W1-T4580", "W1-T4650", "W1-T4707", "W1-T8374", "W1-T8947"]
   files:
-    - src/lib/inbox-responder.ts
-    - src/lib/benchmark-run.ts
     - test/inbox/inbox-responder-served-model.test.ts
   rationale: |
     Rule 19 / #588: one integration test must drive inbox-responder through benchmark-run and verify the same attempt receipt; isolated subsystem tests cannot prove this cross-file invariant.
@@ -38,6 +36,16 @@
     Preserve selection-assignment joins and each attempt's own model or reason. Repair an
     evidenced loss at this boundary; if the rows already retain legitimate provider reasons,
     document the measured explanation in the implementation PR rather than manufacture a fix.
+    The operator approved an audit-and-regression amendment on 2026-10-21 after the retained
+    core union for 2026-10-14T13:05:02.491Z through 2026-10-21T13:05:02.491Z showed five joined
+    attempts: three reported models and two named unreportable reasons, with no unexplained
+    omission in that sample. This does not explain the older 23/42 window or other repositories.
+    Deliver the bounded audit and new four-case regression artifact, not a production behavior
+    change. Keep the four runtime tests executable through answerThread, realThreadDecider,
+    benchmarkNonDispatchSpawn and the evidence reader with a controlled worker and private sink.
+    The canonical grep proofs establish added test coverage, not repaired runtime semantics:
+    the runtime integration suite must also actually run with four passes and zero skips or
+    cancellations. A unit proof passing on unchanged production is not a discriminating repair.
     Use the existing benchmark evidence reader to demonstrate that a real model is observed
     and an unreportable model is not falsely presented as observed. Report the legitimate
     unreportable population separately from unexplained missingness. Global changes to the
@@ -46,13 +54,22 @@
     The new integration test directly imports inbox-responder as its primary subject; use
     test-place to confirm its inbox/ placement from the final imports before implementation.
   acceptance:
-    - claim: "The inbox-response production receipt path retains the response's actual served model and assignment join, preserves a provider's named unreportable reason, and preserves evidence on failed attempts; the evidence reader counts only actual model identity as observed"
-      proof: "unit test: test/inbox/inbox-responder-served-model.test.ts"
+    - claim: "Add an executable integration regression asserting actual served-model identity and the assignment join through the production Inbox receipt path"
+      proof: 'grep: test("W1-T10272: an Inbox response retains its actual served model through the production receipt path" in test/inbox/inbox-responder-served-model.test.ts'
+    - claim: "Add an executable integration regression asserting named provider unreportability is retained without inventing observed identity"
+      proof: 'grep: test("W1-T10272: an Inbox response preserves named unreportability without inventing model identity" in test/inbox/inbox-responder-served-model.test.ts'
+    - claim: "Add an executable integration regression asserting failed results retain their own model evidence and failed attempt"
+      proof: 'grep: test("W1-T10272: a failed Inbox result retains its own served-model evidence and failed attempt" in test/inbox/inbox-responder-served-model.test.ts'
+    - claim: "Add an executable integration regression asserting a thrown worker leaves one joined failed attempt and no guessed model"
+      proof: 'grep: test("W1-T10272: an Inbox worker that throws after selection leaves one joined failure rather than a guessed model" in test/inbox/inbox-responder-served-model.test.ts'
   falsifier: |
     Supply a worker response naming a model different from the request and a separate response
     with only the provider's recognized unreportable reason. Dropping either value, echoing the
     requested model, or counting the reason as observed identity must fail the integration test.
-    Remove any receipt repair and show the regression fails before restoring it.
+    Remove only actual model/reason retention from the receipt producer in a disposable clone:
+    the same four tests must report field-loss failures, then pass after exact restoration.
+    Preserve both complete test summaries and identical test bytes; never manufacture a
+    production change merely to make unchanged behavior discriminate against its base.
   priority: 4
-  status: queued
+  status: merged
   attempts: 0

@@ -1,0 +1,133 @@
+- id: W1-T10343
+  title: "A FIX IS NOT DISPATCHED INTO AN ESCALATION THAT IS STILL OPEN, AND AN OPERATOR ANSWER RELEASES IT — the fix rung stands down at rung.strike whenever a needs-human issue for the same task, PR, head and cause is open, but the sweep never reads that before dispatching, so it re-dispatches every pass until the issue closes (85 futile dispatches, 2026-10-14..21); and an answer through POST /v1/questions/answer does not release the stand-down at all while the issue stays open"
+  repo: remudero
+  depends_on: []  # no semantic dependency: W1-T10339 (#13342, unmerged, so not nameable here) shares src/lib/sweep.ts's blocked-fixable arm but excludes rung.strike from its hold, so either may land first
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern, whether a fix is dispatched while the needs-human question it would re-ask is still open; escalation filing, dedup keys, issue closing and every other stand-down are unchanged
+  band_meaning: span
+  budget_usd: 10.00
+  priority: 1  # requested by the operator session 2026-10-21, as the rung.strike half of the W1-T10339 measurement
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-21: PR-13218 stood down at rung.strike 28 times across five heads while each head's needs-human issue was open"
+  plan_refs: [W1-T10339, W1-T10282, W1-T2799, W1-T3579, W1-T5908, W1-T4471, W1-T435, W1-T2752]
+  files:
+    - src/lib/escalate.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/sweep/a-fix-is-not-dispatched-into-an-open-escalation.test.ts
+  rationale: |
+    READ 2026-10-21 at origin/main 03cf4288f. Ledger read on host remudero (~/rmd-state2/state): live ledger.ndjson
+    plus every rotation from 2026-10-14 to 2026-10-21T10:49Z, deduplicated.
+    THE STAND-DOWN (W1-T2799, extended by W1-T3579 and W1-T5908).
+      - `runFixRung` (src/run-task.ts) calls `fixRungStandDownReason(..., "rung.strike", ...)` before every strike.
+      - Its sixth source is `openEscalation`. It builds the false-block `EscalationDedupKey`: class BLOCKED, task,
+        a summary carrying the PR URL, head, `escalationCause(conflicted, ciFailing)` and the task contract revision.
+      - It looks for that key with `findDuplicateEscalation`, which does a GitHub `listOpen(NEEDS_HUMAN_LABEL)` read
+        on every dispatch. `openEscalationStandDownReason` then stands the rung down when the open issue's
+        `**Head:**` line equals the current head.
+      - That stand-down is waived in three cases: the issue records a different contract revision (W1-T3579); the
+        conflict cause has cleared (W1-T5908, which also closes the issue); or the issue names no head at all.
+      - The row is `fix.stood_down` site `rung.strike`, with the reason "a needs-human escalation for this exact
+        (task, PR, head, cause) is ALREADY OPEN ... standing down until it is closed, the head moves, or the task
+        contract changes".
+    WHY THE SWEEP RE-DISPATCHES IT.
+      - src/lib/sweep.ts has no read of open escalations on the dispatch path. `SweepDeps` carries no issue list,
+        and `prior.escalated` holds only the sweep's own blocked-ambiguous escalations, keyed `pr@head`.
+      - `fixRungStalledWithoutNewHead` (W1-T1110) reads the `rung.strike` stand-down as an ended rung, so
+        `fixSeedRead` returns `ended`, the `blocked-fixable` dedup is false, and the next pass dispatches again.
+      - Each futile dispatch costs a seed, the light-pass capacity the sweep reserves for a fix, and one GitHub
+        issue-list read inside the rung, only to reach the same answer.
+      - Closing the issue is visible only on GitHub. When an operator closes it by hand, no ledger row is written.
+    AN ANSWER DOES NOT RELEASE IT.
+      - The operator answers a fix-ladder question through POST /v1/questions/answer, which writes the question
+        store. Since W1-T4471, the owner's issue replies are also carried there.
+      - The sweep reads that answer as `OpenPrView.pendingAnswer` (`operatorVerdictEvidence`, W1-T435) and hands it
+        to the rung as its constraint.
+      - But `openEscalationStandDownReason` takes no answer input, and nothing on the answer path closes the issue.
+        So while the issue stays open, an answered question still stands the rung down at that head.
+    MEASURED, 2026-10-14..10-21.
+      - 110 `rung.strike` "ALREADY OPEN" stand-downs fall into 25 (task, head, issue) groups, so 85 came after the
+        first. Every group pairs one head with that head's own issue.
+      - The largest groups: W1-T9043 16 at e110b5ef7 (#12584); W1-T9265 15 at 17e9cfff1 (#13281); W1-T10095 10
+        (#12698); W1-T10079 6 (#13299); W1-T9861 5; PR-12643 5; PR-12981 4.
+      - PR-13218 stood down 3 at 660d92c (#13219), 3 at 7ed190c (#13246), 12 at 2f835be (#13250), 9 at dd63fd7
+        (#13288) and 1 at bfda2ea (#13293).
+    A NEW HEAD RE-DISPATCHES, AND THAT IS CORRECT. The code decides it, and the data agrees.
+      - `openEscalationStandDownReason` returns no stand-down when the candidate issue's head differs from the
+        current head. Its doc says why: "A new push resumes it too, by moving the head out from under the key", and
+        a wrong guess must fail "toward fixing", because a new head may carry real new work.
+      - PR-13218's five heads each have their OWN issue, opened after a round ran at that head:
+        #13219 at 21:13Z, then stand-downs from 21:42Z; #13246 at 23:34Z, then stand-downs from 23:41Z; #13250 at
+        00:12Z, then from 00:42Z; #13288 at 03:24Z, then from 03:43Z; #13293 at 04:38Z, then 04:53Z.
+      - No stand-down in the window names an issue filed for a different head. So the rung did NOT keep standing
+        down at new heads under an old open issue. Each new head got one real round, the round re-asked, and only
+        then did the same-head loop start. This task keeps that.
+    REUSABLE PIECES.
+      - The matcher already exists, and the rung is its only caller on this path: `matchDuplicateEscalation` /
+        `findDuplicateEscalation`, `escalationHeadSha`, `escalationContractRevision` and `escalationCause` in
+        src/lib/escalate.ts; `clearedConflictEscalationCause` in src/lib/sweep.ts; `openEscalationStandDownReason`
+        in src/run-task.ts.
+      - The open-issue listing exists too: `listRetirableEscalationIssues(Async)` in src/lib/sweep.ts, used by the
+        escalation reconciler (tick-read-worker.ts) and the escalation-triage rung (run-task.ts).
+      - `buildSweepEffects` (src/lib/sweep.ts) already builds an issue gateway (`ghIssueGateway(owner, repo)`).
+    OVERLAP SWEEP 2026-10-21.
+      - W1-T10339 (#13342, not yet merged) changes the same `blocked-fixable` arm and `fixRungStalledWithoutNewHead`'s
+        reading of stand-downs. Its shard states that its hold does not apply at `rung.strike` and names this task.
+        The two meet in one file but not in behaviour, so either can land first and there is no depends_on.
+        Whichever builds second merges the other's sweep.ts change.
+      - W1-T10282 escalates a NEEDS_DESIGN hand-off. It never reads open issues, so there is no code overlap beyond
+        sweep.ts, which W1-T10339 already orders.
+      - No open PR touches openEscalationStandDownReason or the sweep's dispatch gate.
+  design: |
+    No fixed bounds. No dispatch while every input that could release the stand-down is unchanged.
+    1. ONE PREDICATE, MOVED TO src/lib/escalate.ts.
+       - `openEscalationStandDownReason` and the false-block key the rung builds move out of src/run-task.ts, so
+         the sweep and the rung evaluate the identical predicate, and probe and producer still cannot disagree.
+       - The rung calls the moved function unchanged in behaviour, except for item 3.
+    2. THE SWEEP READS OPEN ESCALATIONS ONCE PER PASS, AND HOLDS A PR WHOSE QUESTION IS STILL OPEN.
+       - `buildSweepEffects` wires a new optional `SweepDeps.readOpenEscalations`: one `listOpen(NEEDS_HUMAN_LABEL)`
+         read per pass, shared by every PR. It replaces the per-dispatch read for each PR it holds.
+       - In the `blocked-fixable` arm, before the pass reserves fix capacity for the PR and before `dispatchFix`,
+         the sweep builds the PR's false-block key and evaluates the moved predicate.
+       - A held PR records acted:false. The stand-down reason names the open issue's URL, and the PR is neither
+         charged capacity nor dispatched. No new escalation is filed, because the open issue IS the escalation.
+       - Releases are exactly the rung's own: the issue is no longer open; a different head; a different recorded
+         contract revision; a cleared conflict cause; or an operator answer (item 3).
+       - An unreadable list, or no wired dep, fails open to today's dispatch, and the rung decides as it does now.
+    3. AN OPERATOR ANSWER RELEASES IT, IN BOTH PLACES.
+       - When `pr.pendingAnswer` is present and not `spent`, the sweep does not hold the PR, and the rung does not
+         stand down at `rung.strike` for an open escalation. The round runs with the answer as its constraint.
+       - Once that round spends the answer, an unchanged open issue holds again.
+       - This is the same unspent-answer reading `strikeLadderDue` already uses.
+    4. A NEW HEAD STILL RE-DISPATCHES (rationale: the code's fail-toward-fixing rule, confirmed on PR-13218's five
+       heads). No change.
+    Tests go in test/sweep/a-fix-is-not-dispatched-into-an-open-escalation.test.ts (or the folder
+    `rmd test-place` computes). They use runSweep and runFixRung with an injected issue gateway, a ledger fixture
+    shaped from PR-13218's rows, and a fake dispatch. No real gh, worker or network.
+  acceptance:
+    - claim: "the sweep holds a blocked-fixable PR whose needs-human escalation for the same head and cause is open, without dispatching or reserving fix capacity, and names the issue"
+      proof: 'grep: test("W1-T10343: an open escalation holds the dispatch" in test/sweep/a-fix-is-not-dispatched-into-an-open-escalation.test.ts'
+    - claim: "closing the issue, a new head or a changed contract revision releases the sweep's hold on the next pass"
+      proof: 'grep: test("W1-T10343: a closed issue, a new head or an amended contract releases the hold" in test/sweep/a-fix-is-not-dispatched-into-an-open-escalation.test.ts'
+    - claim: "an unspent operator answer releases both the sweep's hold and the rung's rung.strike stand-down while the issue is still open"
+      proof: 'grep: test("W1-T10343: an operator answer releases an open escalation" in test/sweep/a-fix-is-not-dispatched-into-an-open-escalation.test.ts'
+    - claim: "the sweep and the fix rung evaluate one shared open-escalation predicate from src/lib/escalate.ts"
+      proof: 'grep: export function openEscalationStandDownReason( in src/lib/escalate.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/sweep/a-fix-is-not-dispatched-into-an-open-escalation.test.ts"
+  falsifier: |
+    Drop the sweep's read of open escalations: the held PR is dispatched again at the same head, and the first test
+    fails.
+    Hold on the issue's existence alone: a new head or an amended contract stays held, and the second test fails.
+    Leave the answer out of the predicate: the answered PR is held, or its rung stands down, and the third test
+    fails.
+    Keep the predicate in src/run-task.ts: the grep finds nothing.
+    Regression guards, kept by the same file:
+    - An unreadable issue list fails open to today's dispatch.
+    - An issue naming no head never holds.
+    - A spent answer holds again.
+    - W1-T5908's cleared conflict cause still releases and closes the issue.
+    - Stand-downs at other sites keep W1-T10339's reading.

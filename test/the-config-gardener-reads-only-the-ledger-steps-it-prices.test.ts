@@ -79,7 +79,7 @@ function corpus(): Array<Record<string, unknown>> {
   fallback(["cost.anomaly", "containment.probe", "isolation.probe", "risk_judge.decision", "budget.warning"], "cost_usd", 200);
   fallback(["report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
     "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
-    "review.semantic_setup_refused", "review.semantic_incomplete", "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
+    "review.semantic_setup_refused", "review.semantic_incomplete", "review.replay_input", "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
     "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error"], "pr_url", 300);
   for (const step of ["review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized", "retro.preflight_repair",
     "fix.done", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done"]) {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerHooks } from 'node:module';
@@ -10,9 +11,18 @@ registerHooks({ resolve(specifier, context, next) {
 } });
 const { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, materializeDependencySeed, observeDependencySeedReuse, sweepDependencySeeds } = await import('../src/lib/dependency-seeds.ts');
 
-export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync) {
-  // User lsof cannot rule out other accounts; seed pruning requires an administrator view.
-  if (uid !== 0) throw new Error('administrator open-file scan required');
+/** True when `seed` lies in a macOS home only its owner can enter (mode and ACL): no other
+ * non-root account can then hold a file open there, so the owner's own lsof is the complete view. */
+export function ownerOnlyHome(seed, uid, home = homedir(), exec = execFileSync, platform = process.platform) {
+  if (platform !== 'darwin' || !isAbsolute(home) || !resolve(seed).startsWith(home + '/')) return false;
+  const st = statSync(home);
+  if (st.uid !== uid || st.mode & 0o011) return false;
+  return !exec('/bin/ls', ['-led', home], { encoding: 'utf8' }).split('\n').slice(1).some(line => line.includes(' allow '));
+}
+
+export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync, ownerOnly = ownerOnlyHome) {
+  // User lsof cannot rule out other accounts unless none of them can enter the seed's home.
+  if (uid !== 0 && !ownerOnly(seed, uid)) throw new Error('administrator open-file scan required (or a seed store in an owner-only home)');
   try { return exec(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '+D', seed], { encoding: 'utf8', timeout: 30_000 }).trim().length > 0; }
   catch (error) { if (error.status === 1 && !error.stdout?.length && !error.stderr?.length) return false; throw error; }
 }

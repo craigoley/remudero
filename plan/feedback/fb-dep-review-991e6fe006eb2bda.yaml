@@ -1,0 +1,81 @@
+id: fb-dep-review-991e6fe006eb2bda
+ts: 2026-10-21T23:13:19.810Z
+raw: |-
+  Land the dependency bump(s) of Dependabot PR #13445, whose red is its own: chore(deps): bump @anthropic-ai/claude-code from 2.1.302 to 2.1.303 in /deploy
+
+  Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes.
+  A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest
+  allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:
+  tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked
+  SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.
+  Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries
+  their hunks, or Dependabot does once main carries the versions.
+
+  PR: https://github.com/craigoley/remudero/pull/13445
+  Head: 6c1571a5be12e4b7d88565a032b94ea6e11a78f1
+  Bumps: @anthropic-ai/claude-code 2.1.302 -> 2.1.303
+  Red checks: ci-gate, coverage-ratchet
+  Sibling Dependabot PRs folded in: none
+
+  Dependabot proposal body:
+
+  Bumps the image-cli-minor-and-patch group with 1 update in the /deploy directory: [@anthropic-ai/claude-code](https://github.com/anthropics/claude-code).
+
+  Updates `@anthropic-ai/claude-code` from 2.1.302 to 2.1.303
+  <details>
+  <summary>Release notes</summary>
+  <p><em>Sourced from <a href="https://github.com/anthropics/claude-code/releases">@​anthropic-ai/claude-code's releases</a>.</em></p>
+  <blockquote>
+  <h2>v2.1.303</h2>
+  <h2>What's changed</h2>
+  <ul>
+  <li>Bug fixes and reliability improvements</li>
+  </ul>
+  </blockquote>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/anthropics/claude-code/commit/ef7bfdca55d906929fe6b782025b93758c325074"><code>ef7bfdc</code></a> chore: Update CHANGELOG.md and feed.xml</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/dd6bee38458cc3e6dc5f2b16eca1f0f364619ad8"><code>dd6bee3</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/8a8dff6af07514630d2d4843c7005129633a66f5"><code>8a8dff6</code></a> chore: Update mods/</li>
+  <li>See full diff in <a href="https://github.com/anthropics/claude-code/compare/v2.1.302...v2.1.303">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+
+  [![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=@anthropic-ai/claude-code&package-manager=npm_and_yarn&previous-version=2.1.302&new-version=2.1.303)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)
+
+  Dependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.
+
+  [//]: # (dependabot-automerge-start)
+  [//]: # (dependabot-automerge-end)
+
+  ---
+
+  <details>
+  <summary>Dependabot commands and options</summary>
+  <br />
+
+  You can trigger Dependabot actions by commenting on this PR:
+  - `@dependabot rebase` will rebase this PR
+  - `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it
+  - `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency
+  - `@dependabot ignore <dependency name> major version` will close this group update PR and stop Dependabot creating any more for the specific dependency's major version (unless you unignore this specific dependency's major version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name> minor version` will close this group update PR and stop Dependabot creating any more for the specific dependency's minor version (unless you unignore this specific dependency's minor version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name>` will close this group update PR and stop Dependabot creating any more for the specific dependency (unless you unignore this specific dependency or upgrade to it yourself)
+  - `@dependabot unignore <dependency name>` will remove all of the ignore conditions of the specified dependency
+  - `@dependabot unignore <dependency name> <ignore condition>` will remove the ignore condition of the specified dependency and ignore conditions
+
+
+  </details>
+attachments: []
+origin: repair#dep-review
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-code@2.1.303
+thread_id: null
