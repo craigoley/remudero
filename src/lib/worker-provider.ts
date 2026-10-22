@@ -3732,7 +3732,7 @@ export interface OpenWeightSpawnArgs {
   /** Test-only override; production uses the global fetch implementation. */
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
-  streamObserver?: import("./worker.js").WorkerStreamObserver;
+  streamObserver?: CodexSpawnArgs["streamObserver"];
   /** The request deadline, defaulting to {@link OPENWEIGHT_REQUEST_TIMEOUT_MS}. A seam ONLY so a
    *  test can reach the aborted arm of the catch below: with the real 180s bound, covering it means
    *  a test that waits three minutes, and an uncovered catch arm is how a refusal quietly stops
@@ -4877,7 +4877,7 @@ export async function spawnFoundryClaudeWorker(
           throw new Error(`cash ${label} requested an undeclared or malformed tool`);
         }
         let result: unknown;
-        args.streamObserver?.({ kind: "tool-executing", tsMs: (args.clock ?? systemClock).now(), toolName: call.name });
+        args.streamObserver?.({ kind: "tool-executing", tsMs: (args.clock ?? systemClock).now(), text: `[tool_use: ${call.name}]` });
         try {
           result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck,
             { config, runId: args.runId, taskId: args.taskId, clock });
@@ -5110,7 +5110,7 @@ export async function spawnOpenWeightWorker(
           throw new Error("openweight response requested an undeclared tool");
         }
         args.signal?.throwIfAborted();
-        args.streamObserver?.({ kind: "tool-executing", tsMs: clock.now(), toolName: name });
+        args.streamObserver?.({ kind: "tool-executing", tsMs: clock.now(), text: `[tool_use: ${name}]` });
         let content: string;
         let toolFailed = false;
         try {

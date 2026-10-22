@@ -10,7 +10,8 @@ import { fixedClock } from "#src/lib/clock.js";
 import { OPENWEIGHT_ALLOWANCE_FILENAME, openWeightUsageUsd, openWeightReservationUsd, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { createCapabilityGrant, InMemoryCapabilityGrantStore } from "#src/lib/capability-grant.js";
 import { spawnWorker, WorkerAbandonedError } from "#src/lib/worker.js";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const requestId = "3a2c1a77-453a-4cad-9165-a6bb1cb26400";
@@ -228,7 +229,7 @@ test("cash native request deadline includes body consumption and a shared429 coo
 test("cash worker default watchdog and caller abort stop real adapter wait and body reads", async t => {
   for (const authority of ["watchdog", "caller"]) for (const phase of ["wait", "body"]) await t.test(`${authority} ${phase}`, async child => {
     const f = cashFixture(child), controller = new AbortController(); let calls = 0;
-    const settingsFile = fileURLToPath(new URL("../../../settings/worker.json", import.meta.url));
+    const settingsFile = join(REPO_ROOT, "settings", "worker.json");
     const timer = authority === "caller" ? setTimeout(() => controller.abort(Error("caller ended")), 30) : undefined;
     try {
       await assert.rejects(spawnWorker({ cwd: f.dir, settingsFile, permissionMode: "bypassPermissions", prompt: "bounded worker",
@@ -332,7 +333,7 @@ test("cash default native fetch and timer qualify local TLS429 continuation and 
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert.ok(address && typeof address !== "string");
-  const source = new URL("../../../src/lib/worker-provider.ts", import.meta.url).href;
+  const source = pathToFileURL(join(REPO_ROOT, "src", "lib", "worker-provider.ts")).href;
   const script = `const {spawnOpenWeightWorker}=await import(${JSON.stringify(source)});
     const result=await spawnOpenWeightWorker({cwd:process.argv[1],workerHome:process.argv[1],prompt:'native fixture',tools:[],maxTurns:2,
       requestTimeoutMs:Number(process.argv[3]),env:{RMD_OPENWEIGHT_API_KEY:'local-fixture'}},
@@ -342,7 +343,7 @@ test("cash default native fetch and timer qualify local TLS429 continuation and 
     const invoke = async (timeout: number) => {
       const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script,
         f.dir, `https://127.0.0.1:${address.port}/`, String(timeout)], {
-        cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+        cwd: REPO_ROOT,
         env: { ...process.env, NODE_EXTRA_CA_CERTS: cert }, timeout: 15_000,
       });
       return JSON.parse(stdout.trim().split("\n").at(-1)!);
@@ -364,7 +365,7 @@ test("cash worker passes caller cancellation into the actual adapter before the 
   const timer = setTimeout(() => controller.abort(Error("round cancelled")), 25);
   try {
     await assert.rejects(spawnWorker({ cwd: f.dir, permissionMode: "bypassPermissions",
-      settingsFile: fileURLToPath(new URL("../../../settings/worker.json", import.meta.url)),
+      settingsFile: join(REPO_ROOT, "settings", "worker.json"),
       prompt: "round fixture", model: "sonnet", effort: "low", maxTurns: 4, mountProvider: "cash", cashSqueezed: true,
       config: f.config, signal: controller.signal,
       providerRouting: { spawnOpenWeight: (args, config, selection) => spawnOpenWeightWorker({ ...args, env: f.args.env,
