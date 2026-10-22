@@ -1154,6 +1154,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
+import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -4189,8 +4190,36 @@ export function derivePrOwnerVerdict(
   corpus: PrOwnerLedgerRead,
   claimRead: PrOwnerClaimRead = { claims: [] },
 ): PrOwnerVerdict {
+  const sweepRows = corpus.rows.filter((row) => row.step === "sweep.disposed" && prNumberFromLedgerRow(row) === prNumber);
+  const taskIds = new Set(sweepRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v && v !== "SWEEP"));
+  const headShas = new Set(sweepRows.map((row) => stringField(row, "head_sha")).filter((v): v is string => !!v));
+  const fixRows = corpus.rows.filter((row) => {
+    if (row.step !== "fix.dispatch") return false;
+    if (prNumberFromLedgerRow(row) === prNumber) return true;
+    const taskId = stringField(row, "task_id");
+    if (!taskId || !taskIds.has(taskId)) return false;
+    const headSha = stringField(row, "head_sha");
+    return headSha === undefined || headShas.size === 0 || headShas.has(headSha);
+  });
+  const latestFix = newestLedgerRow(fixRows);
+  const latestSweep = newestLedgerRow(sweepRows);
+  const claimTaskIds = [...taskIds, ...fixRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v)];
+  const related = claimRead.claims.filter((c) => claimTaskIds.some((id) => c.key.includes(`run-${id}-`)));
+
+  return prOwnerVerdictFromFacts(prNumber, corpus, claimRead, {
+    corpusNewestTs: stringField(newestLedgerRow(corpus.rows) ?? {}, "ts"), latestFix, latestSweep,
+    relatedClaimKeys: related.map((claim) => claim.key),
+  });
+}
+
+function prOwnerVerdictFromFacts(
+  prNumber: number,
+  corpus: Omit<PrOwnerLedgerRead, "rows">,
+  claimRead: PrOwnerClaimRead,
+  facts: Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">,
+): PrOwnerVerdict {
   const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
-  const corpusNewestTs = stringField(newestLedgerRow(corpus.rows) ?? {}, "ts");
+  const corpusNewestTs = facts.corpusNewestTs;
   const base = {
     prNumber,
     corpusNewestTs,
@@ -4213,24 +4242,10 @@ export function derivePrOwnerVerdict(
     return { ...base, verdict: "UNKNOWN", reason: "no compressed ledger rotation opened" };
   }
 
-  const sweepRows = corpus.rows.filter((row) => row.step === "sweep.disposed" && prNumberFromLedgerRow(row) === prNumber);
-  const taskIds = new Set(sweepRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v && v !== "SWEEP"));
-  const headShas = new Set(sweepRows.map((row) => stringField(row, "head_sha")).filter((v): v is string => !!v));
-  const fixRows = corpus.rows.filter((row) => {
-    if (row.step !== "fix.dispatch") return false;
-    if (prNumberFromLedgerRow(row) === prNumber) return true;
-    const taskId = stringField(row, "task_id");
-    if (!taskId || !taskIds.has(taskId)) return false;
-    const headSha = stringField(row, "head_sha");
-    return headSha === undefined || headShas.size === 0 || headShas.has(headSha);
-  });
-  const latestFix = newestLedgerRow(fixRows);
-  const latestSweep = newestLedgerRow(sweepRows);
-  const claimTaskIds = [...taskIds, ...fixRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v)];
-  const related = claimRead.claims.filter((c) => claimTaskIds.some((id) => c.key.includes(`run-${id}-`)));
-  const liveClaim = related.find((c) => !c.stale);
-  const staleClaim = related.find((c) => c.stale);
-
+  const { latestFix, latestSweep } = facts;
+  const related = claimRead.claims.filter((claim) => facts.relatedClaimKeys.includes(claim.key));
+  const liveClaim = related.find((claim) => !claim.stale);
+  const staleClaim = related.find((claim) => claim.stale);
   if (latestFix !== undefined || liveClaim !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
     return {
       ...base,
@@ -4290,7 +4305,7 @@ export function prOwnerCommand(
     write?: (text: string) => void;
     error?: (text: string) => void;
   } = {},
-): number {
+): number | Promise<number> {
   const badArg = unknownArgError("pr-owner", rest.slice(1), [], []);
   if (badArg) {
     (deps.error ?? console.error)(badArg + "\n" + USAGE);
@@ -4302,9 +4317,19 @@ export function prOwnerCommand(
     return 2;
   }
   const stateDir = deps.stateDir ?? (deps.readLedger ? "" : dirname(ledgerPathFor(loadConfig())));
+  if (deps.readLedger === undefined) {
+    let claimRead: PrOwnerClaimRead = { claims: [] };
+    return readPrOwnerLedgerProjection(stateDir, prNumber, () => {
+      claimRead = readPrOwnerClaims(join(stateDir, "inflight"));
+      return claimRead.claims.map((claim) => claim.key);
+    }).then((projection) => {
+      (deps.write ?? console.log)(renderPrOwnerVerdict(prOwnerVerdictFromFacts(prNumber, projection, claimRead, projection)));
+      return 0;
+    });
+  }
   let corpus: PrOwnerLedgerRead;
   try {
-    corpus = (deps.readLedger ?? ((dir) => readLedgerUnionRecordsSync(dir, { requireArchives: true, refuseIncomplete: true })))(stateDir);
+    corpus = deps.readLedger(stateDir);
   } catch (error) {
     corpus = {
       rows: [],
@@ -53716,7 +53741,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "pr-owner",
     syntax: "rmd pr-owner <pr-number>",
     summary: "Report whether the local ledger shows a fix lane owning one PR.",
-    detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. READ-ONLY: this verb writes, claims and releases nothing.",
+    detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. Makes no ledger, claim or service changes; owned temporary disk scratch is removed after the read.",
   },
   {
     name: "plan",
