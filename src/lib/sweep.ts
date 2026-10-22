@@ -7153,13 +7153,9 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
   };
 }
 
-/** W1-T10171 — a runner's own word that one test finished: a TAP test point or a spec result. */
 const TEST_POINT_LINE = /^(?:not )?ok \d+ - |^[✔✖] /;
 
-/** W1-T10171 — `bodies` with every `pure-test-pool:` line a TEST printed blanked, stated twice like
- *  RUNNER_TIMEOUT_LINE (ci-friction-gardener.ts's twin). The runner prints its POOL DEFECT verdict after
- *  every test run it streams has ended, so a POOL DEFECT line any test point follows was a test's output
- *  (the fast tier's leak-locate fixture prints one), and so is every pool line since the point before it. */
+/** W1-T10171 — ci-friction-gardener.ts's withoutTestPrintedPoolLines, stated twice like RUNNER_TIMEOUT_LINE. */
 function withoutTestPrintedPoolLines(bodies: readonly string[]): string[] {
   const out = [...bodies];
   let followed = false;

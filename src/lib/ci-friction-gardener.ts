@@ -459,14 +459,11 @@ export function ciFailureSignature(logTail: string): string | undefined {
 const CI_RUNNER_TIMEOUT_LINE =
   /exceeded the maximum execution time|The (?:operation|job|run) was canceled|received a shutdown signal|SHARD HANG\W+the matrix was cancelled/i;
 
-/** W1-T10171: a runner's own word that one test finished — a TAP test point or a spec result. */
 const CI_TEST_POINT = /^(?:not )?ok \d+ - |^[✔✖] /;
 
-/** W1-T10171: `bodies` with every `pure-test-pool:` line a TEST printed blanked (sweep.ts states it
- *  twice, as it does the timeout line). The runner prints its POOL DEFECT verdict after every test run
- *  it streams has ended, so a POOL DEFECT line that any test point follows was a test's output (the fast
- *  tier's leak-locate fixture writes one into every log that runs it), and so is every pool line since
- *  the test point before it. */
+/** W1-T10171: `bodies` with every `pure-test-pool:` line a TEST printed blanked. The runner's POOL DEFECT
+ *  verdict follows every test run it streams, so one a test point follows is a fixture's output, as is
+ *  every pool line since the point before it. sweep.ts states this twice, as it does the timeout line. */
 function withoutTestPrintedPoolLines(bodies: readonly string[]): string[] {
   const out = [...bodies];
   let followed = false;
