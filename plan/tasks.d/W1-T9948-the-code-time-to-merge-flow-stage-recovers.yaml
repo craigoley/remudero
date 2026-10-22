@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -23,10 +23,10 @@
     Slowest PRs: #12043 (1361.6 min), #11973 (792.1 min), #12049 (766.9 min).
     Find what these PRs share at this stage before changing a bound.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.94
+    verdict: "operator"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The record supplies latency statistics and three PR references but no shared cause or bounded remedy; the finding cannot be verified from the supplied evidence, meeting the explicit escalation condition.; on the change's description/files alone, no diff was read — Acceptance uses a grep for a test declaration to claim recovery below 2x baseline; that proof establishes text presence, not measured stage recovery."
-    judged_at: "2026-10-16T23:30:08.470Z"
-    pin: "6b1499031432b18c2f81e025840cc1f8a818a893ebf08eb978218fb97e2ac7da"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:31:39.860Z"
+    pin: "024bff750c50b5f4b8fc6eaa31a3ed86ca7a941f9142e34ed7e00cab22b9ec7c"

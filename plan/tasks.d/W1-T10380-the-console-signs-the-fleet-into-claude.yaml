@@ -1,0 +1,75 @@
+- id: W1-T10380
+  title: "THE CONSOLE SIGNS THE FLEET INTO CLAUDE — provider-auth-v1 (W1-T3960) answers every Claude start with `unsupported` (\"Claude browser handoff is not available through a stable machine-facing contract yet\", `ProviderAuthSessionStore.start` in src/lib/provider-auth-sessions.ts), so the only way to change the account the fleet runs on is a shell on the host; the daemon drives the Claude CLI's own login into a staging dir, the console shows its authorize URL, the operator pastes the code back, and the fleet store is replaced atomically without touching the host's own login"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # credential write path; the browser never sees a token, the host login is never read or written
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-10-22 (P0): \"it's literally been a main function of console from day 1. if this isn't built yet, it's a huge failing\""
+  plan_refs: [W1-T3960, W1-T6252, W1-T10381, UI-T39, API-T55]
+  files:
+    - src/lib/provider-auth-sessions.ts
+    - src/lib/worker-home.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/routing/the-console-signs-the-fleet-into-claude.test.ts
+  status: queued
+  priority: 1  # operator ruling 2026-10-22: P0
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: build Claude login from the console now; W1-T3960's decision to leave Claude
+    `unsupported` until Anthropic publishes a web callback contract is superseded by driving the CLI's own login.
+    READ at origin/main 32887fe4d (symbols, not lines):
+    - `ProviderAuthSessionStore.start` (src/lib/provider-auth-sessions.ts) calls `finishChild(record, "unsupported",
+      "Claude browser handoff is not available through a stable machine-facing contract yet.")` for every
+      `profile.provider === "claude"`; only Codex reaches a child process (`codex app-server`).
+    - The fleet's ONE Claude credential is `<realHome>/.claude/fleet-auth/claude/.credentials.json`
+      (`sharedClaudeCredentialDir`, src/lib/worker-home.ts). `seedClaudeFleetCredentials` documents why it must stay
+      ONE lineage: two holders of one OAuth lineage rotate each other's refresh token out. The host's own login
+      (`~/.claude/.credentials.json`, `readOwnerCredential`) is a second holder and must never be copied into the store
+      by this flow, nor written by it.
+    - W1-T10381 (this filing) is the detector that tells the operator the fleet store is on an exhausted account;
+      this task is the remedy it points at.
+    CONSOLE COMPANION (not in this repo): the console's provider-auth panel (UI-T39 lineage) needs a paste-code field
+    and a "fleet account" label. Agent-authored console commits fail the required Vercel check, so that half is filed
+    through the console fleet once this task's API ships; this task does not touch the console repo.
+    NOT COVERED ELSEWHERE: swept origin/main 32887fe4d plan/tasks.d and the plan trees of all 18 open PR heads
+    (2026-10-22 ~01:30Z) for provider-auth-sessions, "Claude browser handoff" and claude login: only W1-T3960 (merged).
+  design: |
+    1. FIND THE CLI'S CONTRACT FIRST. From the pinned Claude CLI (resolved exactly as worker.ts resolves the real
+       binary), identify the login command that prints an authorize URL and reads the pasted code on stdin, and that
+       writes `.credentials.json` under `CLAUDE_CONFIG_DIR`. Drive it through a pipe, or a pseudo-terminal if the CLI
+       requires one; the URL is extracted by an allowlisted host match (the hosts the CLI actually prints, recorded in a
+       test fixture), never by scraping arbitrary output. If the pinned CLI has no such login, the start answers
+       `failed` with that reason; no fake success.
+    2. STAGE, NEVER WRITE IN PLACE. Each session runs the CLI with `CLAUDE_CONFIG_DIR` set to a fresh 0700 staging
+       directory beside the fleet store (same filesystem). Never the store itself, never `~/.claude`, and the host's
+       `.credentials.json` is neither read nor written.
+    3. CODE IN, URL OUT. Add one operation, `POST /provider-auth/sessions/{id}/code` (openapi/daemon.yaml,
+       serve.ts, regenerated api-client schema), taking the pasted code once. The code is length-bounded, single-use,
+       never logged and never echoed in a projection. The read projection carries the allowlisted authorize URL and,
+       on completion, a redacted account label. It never carries a token, a credential path or raw CLI output.
+    4. REPLACE ATOMICALLY. On CLI success, `classifyWorkerCredentialFile` must call the staged file `usable`. A new
+       worker-home.ts helper then renames it over the store's `.credentials.json` under the store's refresh lock, so a
+       concurrent CLI refresh cannot interleave. The account identity the CLI wrote travels with it. The staging dir
+       is removed on every path. Anything less than `usable` leaves the store untouched and the session `failed`.
+    5. Running workers keep their already-spawned process. New spawns read the new store. No restart and no deploy.
+    6. Tests (new file, titles verbatim as in the proofs): a fake CLI prints a URL, takes a code and writes a staged
+       credential, and the store is replaced while the host login file is byte-identical. A malformed staged file,
+       a CLI exit and an expired session leave the store byte-identical. The projection never contains the code, a
+       token or a path.
+  acceptance:
+    - claim: "a Claude session drives the CLI login in a staging dir and replaces only the fleet store"
+      proof: "unit test: W1-T10380: a pasted Claude code replaces the fleet store and leaves the host login untouched"
+    - claim: "a failed, malformed or expired Claude login leaves the fleet store byte-identical"
+      proof: "unit test: W1-T10380: a Claude login that does not finish usable never touches the fleet store"
+    - claim: "no projection carries the pasted code, a token or a credential path"
+      proof: "unit test: W1-T10380: the Claude session projection carries no code, token or path"
+  falsifier: |
+    Restore the `unsupported` branch for Claude and the first proof fails at start. Write the CLI's output directly
+    into the store instead of staging it, and the malformed-file case changes the store bytes.
+  note: |
+    Reservation refs/rmd-id/W1-T10380 is held by filing branch file-1022-fleet-routing.
