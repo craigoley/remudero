@@ -27,9 +27,10 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  appendFileSync, chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync,
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
+import { userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import {
@@ -268,6 +269,155 @@ export class GhLimiterPacer {
   }
 }
 
+// ── ONE PACER PER GITHUB LOGIN, ACROSS MAC ACCOUNTS (W1-T10302) ─────────────────────────────────
+
+/** WHO is reading, for the per-client measurement. Not an access decision. */
+export type GhBrokerClient = "claude" | "codex" | "agent";
+export function isGhBrokerClient(value: unknown): value is GhBrokerClient {
+  return value === "claude" || value === "codex" || value === "agent";
+}
+/** The client a read is when its caller names none: an agent-class read is an agent's, any other a Claude session's. */
+export function defaultGhBrokerClient(cls: GhBrokerClass, env: NodeJS.ProcessEnv = process.env): GhBrokerClient {
+  return isGhBrokerClient(env.RMD_GH_CLIENT) ? env.RMD_GH_CLIENT : cls === "agent" ? "agent" : "claude";
+}
+
+/** `/Users/Shared/remudero/gh-pace`: where Mac accounts that read as one GitHub login meet. The installer
+ *  creates `<root>/<login>/` with an ACL naming exactly the accounts it was run for. */
+export const GH_PACE_ROOT_DEFAULT = "/Users/Shared/remudero/gh-pace";
+export function ghPaceRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env.RMD_GH_PACE_ROOT || GH_PACE_ROOT_DEFAULT;
+}
+/** A GitHub login is a path component under the pace root: letters, digits and hyphens, never a separator or a dot. */
+export function isGhPaceLogin(login: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(login);
+}
+
+/** One limiter's shared pacing: TIMING NUMBERS AND COUNTS ONLY, never a response, header value or token. */
+interface GhSharedLimiterFile {
+  gapMs: number;
+  holdUntilMs: number;
+  lastStartMs: number | null;
+  secondaryRefusals: number;
+  primary: { remaining: number; resetMs: number } | null;
+  /** Refusals each Mac account's broker saw, so `status` can say which broker saw each. */
+  seen: Record<string, { refusals: number; lastMs: number }>;
+}
+
+/** Locks held by THIS process: never stale however long a virtual or real clock says they were held. */
+const heldPaceLocks = new Set<string>();
+/** An upstream call is bounded by DEFAULT_GH_CALL_TIMEOUT_MS; a lock another process has held twice that is a hung owner's. */
+const GH_PACE_LOCK_STALE_MS = 2 * DEFAULT_GH_CALL_TIMEOUT_MS;
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "EPERM"; // another account's live process: not ours to signal
+  }
+}
+
+/** The per-login directory both brokers reach. Every method THROWS on an unusable directory: the broker catches and falls back. */
+export class GhSharedPace {
+  constructor(readonly dir: string, readonly account: string) {}
+
+  private statePath(limiter: GhBrokerLimiter): string {
+    return join(this.dir, `state-${limiter}.json`);
+  }
+
+  private lockPath(limiter: GhBrokerLimiter): string {
+    return join(this.dir, `lock-${limiter}`);
+  }
+
+  read(limiter: GhBrokerLimiter): GhSharedLimiterFile | undefined {
+    let text: string;
+    try {
+      text = readFileSync(this.statePath(limiter), "utf8");
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined; // nobody has paced this limiter yet
+      throw cause;
+    }
+    const f = JSON.parse(text) as GhSharedLimiterFile;
+    if (typeof f.gapMs !== "number" || typeof f.holdUntilMs !== "number") throw new Error(`unreadable pace state ${this.statePath(limiter)}`);
+    return f;
+  }
+
+  write(limiter: GhBrokerLimiter, file: GhSharedLimiterFile): void {
+    const tmp = `${this.statePath(limiter)}.${process.pid}.tmp`;
+    // 0660, never world-writable: the directory's ACL names the accounts that may read and replace it.
+    writeFileSync(tmp, JSON.stringify(file), { mode: 0o660 });
+    renameSync(tmp, this.statePath(limiter));
+  }
+
+  /** mkdir is atomic: true when this call took the lock, false when another holder has it. */
+  tryLock(limiter: GhBrokerLimiter, nowMs: number): boolean {
+    const lock = this.lockPath(limiter);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        mkdirSync(lock);
+        writeFileSync(join(lock, "owner"), `${process.pid} ${nowMs}\n`, { mode: 0o660 });
+        heldPaceLocks.add(lock);
+        return true;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+        if (heldPaceLocks.has(lock) || !this.reclaimIfStale(lock, nowMs)) return false;
+      }
+    }
+    return false;
+  }
+
+  private reclaimIfStale(lock: string, nowMs: number): boolean {
+    let pid = Number.NaN;
+    let atMs = Number.NaN;
+    try {
+      [pid, atMs] = readFileSync(join(lock, "owner"), "utf8").trim().split(/\s+/).map(Number);
+    } catch {
+      // Between the owner's mkdir and its owner file, or not a lock this code wrote: it is taken only once the
+      // directory entry itself is older than any upstream call can run (real time: the entry's mtime is the OS's).
+      let mtimeMs = Number.NaN;
+      try {
+        mtimeMs = statSync(lock).mtimeMs;
+      } catch {
+        return true; // the holder released it between our mkdir and this stat: take it on the next attempt
+      }
+      if (!(systemClock.now() - mtimeMs > GH_PACE_LOCK_STALE_MS)) return false;
+      rmSync(lock, { recursive: true, force: true });
+      return true;
+    }
+    if (pid === process.pid || (pidAlive(pid) && !(nowMs - atMs > GH_PACE_LOCK_STALE_MS))) return false;
+    rmSync(lock, { recursive: true, force: true });
+    return true;
+  }
+
+  unlock(limiter: GhBrokerLimiter): void {
+    const lock = this.lockPath(limiter);
+    heldPaceLocks.delete(lock);
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/** The shared files under `<root>/<login>/`, read for `status`: which accounts' brokers saw how many refusals per limiter. */
+function readSharedSeen(root: string, login: string): Record<string, Record<string, { refusals: number; lastMs: number }>> {
+  const out: Record<string, Record<string, { refusals: number; lastMs: number }>> = {};
+  if (!isGhPaceLogin(login)) return out;
+  const dir = join(root, login);
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir).filter((n) => /^state-[a-z]+\.json$/.test(n));
+  } catch {
+    return out; // no shared directory for this login: nothing is shared
+  }
+  for (const name of names) {
+    try {
+      const f = JSON.parse(readFileSync(join(dir, name), "utf8")) as GhSharedLimiterFile;
+      out[name.slice("state-".length, -".json".length)] = f.seen ?? {};
+    } catch {
+      continue; // an unreadable limiter file is reported by the broker's own fallback, not by status
+    }
+  }
+  return out;
+}
+
 // ── THE CACHE ───────────────────────────────────────────────────────────────────────────────────
 
 interface GhBrokerCacheEntry {
@@ -387,6 +537,15 @@ export class GhReadBroker {
   private invalidationOffset = 0;
   private seq = 0;
   private loginPromise: Promise<string> | undefined;
+  private loginKnown: string | undefined;
+  /** W1-T10302: the shared pacer for this login, when its directory exists and is usable. */
+  private sharedPace: GhSharedPace | undefined;
+  private sharedScope = "account (no shared pace directory looked for yet)";
+  private sharedRetryAtMs = 0;
+  private readonly sharedRoot: string | null;
+  readonly account: string;
+  private readonly refusalCounts = new Map<GhBrokerLimiter, number>();
+  private readonly refusalsPushed = new Map<GhBrokerLimiter, number>();
   private apiFilterCache: "unverified" | "shared" | "filter-keyed" = "unverified";
 
   /** `exec` is the account's own `gh`; `freeBytes` is the cache volume's free space, read at each write —
@@ -397,7 +556,11 @@ export class GhReadBroker {
     clock: Clock = systemClock,
     sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     freeBytes?: () => number,
+    /** `sharedPaceRoot: null` keeps the pacer per account; `account` names this broker's Mac account in the shared state. */
+    options: { sharedPaceRoot?: string | null; account?: string } = {},
   ) {
+    this.sharedRoot = options.sharedPaceRoot === undefined ? ghPaceRoot() : options.sharedPaceRoot;
+    this.account = options.account ?? userInfo().username;
     this.dir = dir;
     this.exec = exec;
     this.clock = clock;
@@ -432,8 +595,69 @@ export class GhReadBroker {
 
   /** The login the account's token reads as: one `gh api user` per broker, so state is keyed by it. */
   login(): Promise<string> {
-    this.loginPromise ??= this.exec(["api", "user", "--jq", ".login"], {}).then((r) => (r.exitCode === 0 ? r.stdout.trim() : "") || "unknown");
+    this.loginPromise ??= this.exec(["api", "user", "--jq", ".login"], {}).then((r) => {
+      this.loginKnown = (r.exitCode === 0 ? r.stdout.trim() : "") || "unknown";
+      return this.loginKnown;
+    });
     return this.loginPromise;
+  }
+
+  /** The shared pacer, or `undefined` while this broker paces per account (the scope says why). */
+  private async shared(): Promise<GhSharedPace | undefined> {
+    if (this.sharedRoot === null) {
+      this.sharedScope = "account (shared pacing disabled)";
+      return undefined;
+    }
+    if (this.sharedPace) return this.sharedPace;
+    if (this.now() < this.sharedRetryAtMs) return undefined;
+    const login = await this.login();
+    const dir = join(this.sharedRoot, login);
+    if (!isGhPaceLogin(login)) {
+      this.sharedScope = `account (login ${login} names no shared pace directory)`;
+    } else if (!existsSync(dir)) {
+      this.sharedScope = `account (no shared pace directory for ${login}: run deploy/mac/install-gh-read-broker.sh)`;
+    } else {
+      this.sharedPace = new GhSharedPace(dir, this.account);
+      this.sharedScope = "shared";
+      return this.sharedPace;
+    }
+    this.sharedRetryAtMs = this.now() + 60_000;
+    return undefined;
+  }
+
+  /** FAIL OPEN: an unusable shared directory is never a reason to stop serving. Pace per account and say so. */
+  private sharedFailed(cause: unknown): void {
+    this.sharedPace = undefined;
+    this.sharedScope = `account (fallback: shared pacer unusable: ${String((cause as Error)?.message ?? cause)})`;
+    this.sharedRetryAtMs = this.now() + 60_000;
+  }
+
+  /** Adopts the shared state of `limiter`: every broker of this login sees the same gap, hold and last start. */
+  private pull(shared: GhSharedPace, limiter: GhBrokerLimiter): void {
+    const f = shared.read(limiter);
+    if (!f) return;
+    const pacer = this.pacer(limiter);
+    pacer.gapMs = f.gapMs;
+    pacer.holdUntilMs = f.holdUntilMs;
+    pacer.lastStartMs = f.lastStartMs ?? Number.NEGATIVE_INFINITY;
+    pacer.secondaryRefusals = f.secondaryRefusals;
+    pacer.primary = f.primary ?? undefined;
+  }
+
+  /** Publishes this broker's view of `limiter`. Called with the limiter's lock held (or by the unlocked replay path). */
+  private push(shared: GhSharedPace, limiter: GhBrokerLimiter): void {
+    const pacer = this.pacer(limiter);
+    const seen = shared.read(limiter)?.seen ?? {};
+    const delta = (this.refusalCounts.get(limiter) ?? 0) - (this.refusalsPushed.get(limiter) ?? 0);
+    if (delta > 0) {
+      seen[this.account] = { refusals: (seen[this.account]?.refusals ?? 0) + delta, lastMs: this.now() };
+      this.refusalsPushed.set(limiter, this.refusalCounts.get(limiter) ?? 0);
+    }
+    shared.write(limiter, {
+      gapMs: pacer.gapMs, holdUntilMs: pacer.holdUntilMs,
+      lastStartMs: Number.isFinite(pacer.lastStartMs) ? pacer.lastStartMs : null,
+      secondaryRefusals: pacer.secondaryRefusals, primary: pacer.primary ?? null, seen,
+    });
   }
 
   private entryPath(key: string): string {
@@ -594,29 +818,81 @@ export class GhReadBroker {
     });
   }
 
-  /** Upstream calls are SERIAL per limiter: one drainer per limiter, sleeping out the pacer's gap. */
+  /** Upstream calls are SERIAL per limiter: one drainer per limiter, sleeping out the pacer's gap. With a
+   *  shared pacer (W1-T10302) they are serial across every broker of the login: the start is taken under
+   *  the login's per-limiter lock, on the shared gap and hold, and the outcome is published before release. */
   private async drain(limiter: GhBrokerLimiter): Promise<void> {
     if (this.draining.has(limiter)) return;
     this.draining.add(limiter);
+    let lockBackoffMs = 25;
     try {
       const queue = this.queues.get(limiter)!;
       while (queue.length > 0) {
+        let shared = await this.shared();
+        if (shared) {
+          try {
+            this.pull(shared, limiter);
+          } catch (cause) {
+            this.sharedFailed(cause); // fail open: the cause is carried into the scope status prints
+            shared = undefined;
+          }
+        }
         const waitMs = this.pacer(limiter).nextStartMs(this.now()) - this.now();
         if (waitMs > 0) {
           this.reportPositions(limiter);
           await this.sleep(waitMs);
           continue;
         }
+        let locked = false;
+        if (shared) {
+          try {
+            locked = shared.tryLock(limiter, this.now());
+            if (!locked) {
+              // Another broker of this login is mid-call: wait for its outcome, which moves the shared gap.
+              this.reportPositions(limiter);
+              await this.sleep(lockBackoffMs);
+              lockBackoffMs = Math.min(1_000, lockBackoffMs * 2);
+              continue;
+            }
+            lockBackoffMs = 25;
+            this.pull(shared, limiter);
+            if (this.pacer(limiter).nextStartMs(this.now()) - this.now() > 0) {
+              shared.unlock(limiter);
+              continue; // the holder before us widened the gap or set a hold: wait it out
+            }
+          } catch (cause) {
+            if (locked) shared.unlock(limiter);
+            locked = false;
+            this.sharedFailed(cause); // fail open: the cause is carried into the scope status prints
+            shared = undefined;
+          }
+        }
         const job = this.ordered(limiter)[0];
         queue.splice(queue.indexOf(job), 1);
         this.lastServed.set(`${limiter}\0${job.cls}`, job.caller);
         this.pacer(limiter).lastStartMs = this.now();
         this.reportPositions(limiter);
-        await job.start();
+        try {
+          await job.start();
+        } finally {
+          if (shared && locked) {
+            try {
+              this.push(shared, limiter);
+            } catch (cause) {
+              this.sharedFailed(cause); // fail open: the cause is carried into the scope status prints
+            } finally {
+              shared.unlock(limiter);
+            }
+          }
+        }
       }
     } finally {
       this.draining.delete(limiter);
     }
+  }
+
+  private clientOf(request: GhBrokerReadRequest & { client?: unknown }): GhBrokerClient {
+    return isGhBrokerClient(request.client) ? request.client : defaultGhBrokerClient(isGhBrokerClass(request.class) ? request.class : "background", {});
   }
 
   /** One read. Never throws: every failure comes back as `gh` would have reported it. */
@@ -638,7 +914,10 @@ export class GhReadBroker {
     const view = JSON.stringify(request.args);
     const finish = (result: GhBrokerResult, extra: Record<string, unknown> = {}): GhBrokerResult => {
       this.counts[result.outcome] += 1;
-      this.log({ class: cls, key: extra.key, outcome: result.outcome, limiter: c.limiter, wait_ms: this.now() - startedMs, ...extra });
+      this.log({
+        class: cls, client: this.clientOf(request), account: this.account, key: extra.key, outcome: result.outcome,
+        limiter: c.limiter, wait_ms: this.now() - startedMs, ...extra,
+      });
       return result;
     };
     if (c.kind === "write") {
@@ -738,7 +1017,11 @@ export class GhReadBroker {
       if (expectedReplay) this.apiFilterCache = "filter-keyed";
       this.counts.upstream_calls += 1;
       this.pacer(c.limiter).lastStartMs = nowAtStart;
-      this.pacer(c.limiter).record(nowMs, { headers: split.headers, stderr: raw.stderr, status, exitCode: raw.exitCode });
+      const paced = this.pacer(c.limiter).record(nowMs, { headers: split.headers, stderr: raw.stderr, status, exitCode: raw.exitCode });
+      if (paced === "secondary" || paced === "primary") {
+        this.refusalCounts.set(c.limiter, (this.refusalCounts.get(c.limiter) ?? 0) + 1);
+        this.log({ event: "refusal", limiter: c.limiter, kind: paced, client: this.clientOf(request), account: this.account });
+      }
     }
     const maxAgeMs = ghMaxAgeMs(split.headers);
     if (maxAgeMs !== undefined) this.opaqueFreshMs = maxAgeMs;
@@ -796,7 +1079,10 @@ export class GhReadBroker {
       cache_bytes: [...this.entries.values()].reduce((sum, e) => sum + e.bytes, 0),
       cache_share_of_free: this.cacheShareOfFree,
       log_retention_days: this.logRetentionDays,
-      scope: "one broker per Mac account; two accounts reading as the same GitHub login each run a broker and do NOT share a pacer",
+      login: this.loginKnown ?? null,
+      account: this.account,
+      pacer: this.sharedScope,
+      scope: "one broker, socket and cache per Mac account (cached bodies never cross accounts); the pacer is shared per GitHub login when `pacer` says shared",
     };
   }
 }
@@ -808,6 +1094,9 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
   let upstream = 0;
   let filteredLocally = 0;
   let longestInteractiveWaitMs = 0;
+  const byClient: Record<string, number> = {};
+  const upstreamByClient: Record<string, number> = {};
+  const refusalsByLimiter: Record<string, number> = {};
   const since = clockFromMillisFn(() => sinceMs).iso();
   let files: string[] = [];
   try {
@@ -818,17 +1107,25 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
   for (const name of files) {
     for (const line of readFileSync(join(dir, "log", name), "utf8").split("\n")) {
       if (!line) continue;
-      let row: { ts?: string; outcome?: string; class?: string; wait_ms?: number; gh_filtered_locally?: boolean };
+      let row: { ts?: string; event?: string; limiter?: string; client?: string; outcome?: string; class?: string; wait_ms?: number; gh_filtered_locally?: boolean };
       try {
         row = JSON.parse(line) as typeof row;
       } catch {
         continue; // a torn last line from a crash is not a request
       }
       if ((row.ts ?? "") < since) continue;
+      if (row.event === "refusal") {
+        refusalsByLimiter[row.limiter ?? "unknown"] = (refusalsByLimiter[row.limiter ?? "unknown"] ?? 0) + 1;
+        continue; // a refusal is an upstream answer, not a read
+      }
       reads += 1;
+      byClient[row.client ?? "unknown"] = (byClient[row.client ?? "unknown"] ?? 0) + 1;
       if (row.gh_filtered_locally) filteredLocally += 1;
       byOutcome[row.outcome ?? "unknown"] = (byOutcome[row.outcome ?? "unknown"] ?? 0) + 1;
-      if (row.outcome === "upstream-200" || row.outcome === "upstream-error" || row.outcome === "revalidated-304") upstream += 1;
+      if (row.outcome === "upstream-200" || row.outcome === "upstream-error" || row.outcome === "revalidated-304") {
+        upstream += 1;
+        upstreamByClient[row.client ?? "unknown"] = (upstreamByClient[row.client ?? "unknown"] ?? 0) + 1;
+      }
       if (row.class === "interactive") longestInteractiveWaitMs = Math.max(longestInteractiveWaitMs, row.wait_ms ?? 0);
     }
   }
@@ -837,6 +1134,45 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
     filtered_locally: filteredLocally,
     served_without_upstream_share: reads === 0 ? null : (reads - upstream) / reads,
     longest_interactive_wait_ms: longestInteractiveWaitMs,
+    by_client: byClient, upstream_by_client: upstreamByClient, refusals_by_limiter: refusalsByLimiter,
+  };
+}
+
+/**
+ * W1-T10302 — `rmd gh-broker status` per GitHub LOGIN: requests by client, upstream calls and refusals by
+ * limiter, with which Mac account's broker saw each. This account's counts come from its own request log;
+ * the other accounts' refusals come from the shared pace state, which holds counts and never a response.
+ * One day by default: the measurement is read, no threshold is gated on it.
+ */
+export function ghBrokerLoginStatus(
+  dir: string,
+  sinceMs: number,
+  opts: { login?: string | null; account?: string; env?: NodeJS.ProcessEnv } = {},
+): Record<string, unknown> {
+  const account = opts.account ?? userInfo().username;
+  const root = ghPaceRoot(opts.env);
+  const log = summariseGhBrokerLog(dir, sinceMs);
+  const login = opts.login ?? null;
+  const seen = login === null ? {} : readSharedSeen(root, login);
+  const accounts = new Set<string>([account]);
+  const refusalsByAccount: Record<string, Record<string, number>> = {};
+  for (const [limiter, bySeen] of Object.entries(seen)) {
+    for (const [name, v] of Object.entries(bySeen)) {
+      accounts.add(name);
+      (refusalsByAccount[name] ??= {})[limiter] = v.refusals;
+    }
+  }
+  return {
+    login,
+    shared_pace_dir: login !== null && isGhPaceLogin(login) && existsSync(join(root, login)) ? join(root, login) : null,
+    accounts: [...accounts].sort(),
+    by_account: {
+      [account]: {
+        requests_by_client: log.by_client, upstream_calls: log.upstream_calls, upstream_by_client: log.upstream_by_client,
+        refusals_by_limiter: log.refusals_by_limiter, source: "this account's request log",
+      },
+    },
+    shared_refusals_by_account: refusalsByAccount,
   };
 }
 
@@ -965,6 +1301,33 @@ export async function serveGhReadBroker(opts: {
 
 export const GH_COMMAND_USAGE = "usage: rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>";
 
+/** {@link brokerGhRead} that also tells the broker WHICH client is reading (W1-T10302). The client library
+ *  predates the field, so the request is built here; the broker reads an absent client from the class. */
+export type GhBrokerClientRead = (
+  socketPath: string,
+  args: readonly string[],
+  opts?: Parameters<typeof brokerGhRead>[2] & { client?: GhBrokerClient },
+) => Promise<GhBrokerResult>;
+
+export const brokerGhReadAs: GhBrokerClientRead = async (socketPath, args, opts = {}) => {
+  const reply = await brokerRequest(socketPath, {
+    op: "read",
+    args: [...args],
+    class: opts.class ?? "background",
+    caller: opts.caller ?? ghBrokerCallerId(),
+    client: opts.client,
+    fresh: opts.fresh,
+    cwd: opts.cwd ?? process.cwd(),
+    repo: opts.repo,
+  } as GhBrokerReadRequest, opts.onProgress);
+  return {
+    stdout: String(reply.stdout ?? ""),
+    stderr: String(reply.stderr ?? ""),
+    exitCode: Number(reply.exitCode ?? 1),
+    outcome: (reply.outcome as GhBrokerOutcome | undefined) ?? "upstream-error",
+  };
+};
+
 /** The class a caller gets when it names none: W1-T10271's priority order, read from the actor. */
 export function defaultGhBrokerClass(env: NodeJS.ProcessEnv = process.env): GhBrokerClass {
   return ghBrokerClassForActor(deriveLedgerActor(env));
@@ -990,7 +1353,7 @@ export async function ghCommand(
   rest: string[],
   env: NodeJS.ProcessEnv = process.env,
   runDirect: (args: string[]) => number | Promise<number> = runGhDirect,
-  read: typeof brokerGhRead = brokerGhRead,
+  read: GhBrokerClientRead = brokerGhReadAs,
   write: (stream: "stdout" | "stderr", text: string) => void = (stream, text) => void process[stream].write(text),
 ): Promise<number> {
   const out = (t: string) => write("stdout", t);
@@ -1002,10 +1365,12 @@ export async function ghCommand(
   }
   let cls = defaultGhBrokerClass(env);
   let fresh = false;
+  let client: GhBrokerClient | undefined;
   const flags = rest.slice(0, dash);
   for (let i = 0; i < flags.length; i += 1) {
     if (flags[i] === "--fresh") fresh = true;
     else if (flags[i] === "--class" && isGhBrokerClass(flags[i + 1])) cls = flags[(i += 1)] as GhBrokerClass;
+    else if (flags[i] === "--client" && isGhBrokerClient(flags[i + 1])) client = flags[(i += 1)] as GhBrokerClient;
     else {
       err(`${GH_COMMAND_USAGE}\n`);
       return 2;
@@ -1029,7 +1394,7 @@ export async function ghCommand(
   if (socketPath === undefined) return runDirect(args);
   try {
     const result = await read(socketPath, args, {
-      class: cls, caller: ghBrokerCallerId(env), fresh, cwd, repo: resolvePorcelainRepo(args, env),
+      class: cls, client: client ?? defaultGhBrokerClient(cls, env), caller: ghBrokerCallerId(env), fresh, cwd, repo: resolvePorcelainRepo(args, env),
       onProgress: (p) => err(`gh-broker: queued, position ${p.position}, about ${Math.ceil(p.expectedWaitMs / 1000)}s\n`),
     });
     out(result.stdout);
@@ -1057,6 +1422,10 @@ export async function ghBrokerCommand(
   serve: (dir: string) => Promise<GhReadBrokerServer>,
   env: NodeJS.ProcessEnv = process.env,
   print: (text: string) => void = (t) => void process.stdout.write(t),
+  /** W1-T10302: the per-login view (`ghBrokerLoginStatus`), appended to `status`. Injected by the CLI. */
+  loginStatus?: (dir: string, sinceMs: number, login: string | null) => Record<string, unknown>,
+  /** The socket round trip; injected by tests that cannot listen on a unix socket. */
+  request: typeof brokerRequest = brokerRequest,
 ): Promise<number> {
   const dir = ghBrokerDir(env);
   if (dir === undefined) {
@@ -1082,10 +1451,14 @@ export async function ghBrokerCommand(
       print("gh-broker: not running (no live heartbeat)\n");
       return 1;
     }
-    const reply = await brokerRequest(socketPath, sub === "stop"
+    const reply = await request(socketPath, sub === "stop"
       ? { op: "stop" }
       : { op: "status", sinceMs: sinceDur === undefined ? undefined : systemClock.now() - sinceDur });
-    print(`${JSON.stringify(reply, null, 2)}\n`);
+    const sinceMs = systemClock.now() - (sinceDur ?? 86_400_000);
+    const shown = sub === "status" && loginStatus
+      ? { ...reply, login_status: loginStatus(dir, sinceMs, typeof reply.login === "string" ? reply.login : null) }
+      : reply;
+    print(`${JSON.stringify(shown, null, 2)}\n`);
     return 0;
   }
   print(`${GH_BROKER_USAGE}\n`);

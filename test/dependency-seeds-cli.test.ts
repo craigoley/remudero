@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 // @ts-expect-error -- standalone .mjs tool is outside tsconfig and has no declarations.
-import { seedIsOpen } from "../scripts/dependency-seeds.mjs";
+import { ownerOnlyHome, seedIsOpen } from "../scripts/dependency-seeds.mjs";
 
 test("dependency seed CLI requires administrator scans and distinguishes no-open-files from unknown", () => {
   assert.throws(() => seedIsOpen("/seed", 501), /administrator/);
@@ -46,4 +46,22 @@ test("dependency seed CLI enables once, preserves configuration and defaults to 
     const overridden = run("enable", "--root", join(root, "explicit")); assert.equal(overridden.status, 0, overridden.stderr);
     assert.equal(JSON.parse(overridden.stdout).root, join(root, "explicit"));
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a seed store in an owner-only macOS home is scanned with the owner's own lsof", () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "rmd-seed-home-")));
+  try {
+    const seed = join(home, "Library/seeds/abc"), uid = process.getuid!();
+    const acl = (line: string) => () => `drwx------+ 9 me staff 288 Oct 21 10:00 ${home}\n ${line}\n`;
+    chmodSync(home, 0o700);
+    assert.equal(ownerOnlyHome(seed, uid, home, acl("0: group:everyone deny delete"), "darwin"), true);
+    assert.equal(ownerOnlyHome(seed, uid, home, acl("0: user:other allow list,search"), "darwin"), false, "an ACL grant lets another account in");
+    assert.equal(ownerOnlyHome(seed, uid, home, acl(""), "linux"), false, "Linux keeps the administrator scan");
+    assert.equal(ownerOnlyHome("/elsewhere/seed", uid, home, acl(""), "darwin"), false);
+    assert.equal(ownerOnlyHome(seed, uid + 1, home, acl(""), "darwin"), false);
+    chmodSync(home, 0o711);
+    assert.equal(ownerOnlyHome(seed, uid, home, acl(""), "darwin"), false, "others can traverse the home");
+    assert.equal(seedIsOpen(seed, 501, () => "", () => true), false);
+    assert.throws(() => seedIsOpen(seed, 501, () => "", () => false), /administrator/);
+  } finally { chmodSync(home, 0o700); rmSync(home, { recursive: true, force: true }); }
 });

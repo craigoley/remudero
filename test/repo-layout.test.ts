@@ -33,11 +33,12 @@ const { evaluateCommentLoadRatchet } = (await import(
 
 // The counters live in scripts/house-layout-census.mjs so scripts/census-precheck.mjs counts through the
 // same module without starting this suite (`scripts/**` sits outside tsconfig's `include`, as above).
-const { houseLiteralCounts, listHouseLayoutSrcFiles } = (await import(
+const { houseLiteralCounts, listHouseLayoutSrcFiles, qualifiedRunTaskLayoutSplit } = (await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "house-layout-census.mjs")).href
 )) as {
   houseLiteralCounts: (contents: Iterable<string>) => Record<string, number>;
   listHouseLayoutSrcFiles: (root: string) => string[];
+  qualifiedRunTaskLayoutSplit: (base: ReadonlyMap<string, string | undefined>, current: ReadonlyMap<string, string>) => Record<string, number>;
 };
 
 /**
@@ -238,26 +239,30 @@ function readFileAtRef(root: string, ref: string, relPath: string): string | und
   return res.status === 0 ? res.stdout : undefined;
 }
 
-test("W1-T3701 ratchet: non-test src's house-layout literal count is judged against the merge base's own count, never a frozen ceiling", () => {
-  const currentCounts = houseLiteralCounts(
-    listHouseLayoutSrcFiles(REPO_ROOT).map((f) => readFileSync(join(REPO_ROOT, f), "utf8")),
-  );
-
+test("W1-T3701 ratchet: non-test src's house-layout literal count is judged against the merge base's own count, never a frozen ceiling", (t) => {
+  const currentByPath = new Map(listHouseLayoutSrcFiles(REPO_ROOT)
+    .map((p): [string, string] => [p, readFileSync(join(REPO_ROOT, p), "utf8")]));
+  const currentCounts = houseLiteralCounts(currentByPath.values());
   const base = resolveMergeBase(REPO_ROOT);
-  const baseContents = listSrcFilesAtRef(REPO_ROOT, base)
-    .map((p) => readFileAtRef(REPO_ROOT, base, p))
-    .filter((c): c is string => c !== undefined);
-  const baseCounts = houseLiteralCounts(baseContents);
+  // Preserve listed-but-unreadable entries so they cannot qualify as an absent moved owner.
+  const baseByPath = new Map(listSrcFilesAtRef(REPO_ROOT, base)
+    .map((p): [string, string | undefined] => [p, readFileAtRef(REPO_ROOT, base, p)]));
+  const baseCounts = houseLiteralCounts([...baseByPath.values()].filter((c): c is string => c !== undefined));
+  const split = qualifiedRunTaskLayoutSplit(baseByPath, currentByPath);
+  for (const [literal, count] of Object.entries(split)) {
+    t.diagnostic(`W1-T9332 qualified structural split: '${literal}' raw physical files ${currentCounts[literal]}, base ${baseCounts[literal]}; excluding ${count} conserved split duplicate`);
+  }
 
   // Reuses comment-load-ratchet's OWN caused-vs-ceiling split (design note i): a literal's count is
   // a violation only when THIS tree carries more sites than the merge base already did — a diff
   // that inherits an already-at-ceiling count, or adds nothing, is never blamed for what the
   // repository already was.
   const verdict = evaluateCommentLoadRatchet(currentCounts, baseCounts);
+  const remaining = verdict.violations.filter(v => v.comments - (split[v.path] ?? 0) > v.baseline);
   assert.deepEqual(
-    verdict.violations,
+    remaining,
     [],
-    verdict.violations
+    remaining
       .map(
         (v) =>
           `'${v.path}' now appears in ${v.comments} non-test src files, up from ${v.baseline} at the merge ` +

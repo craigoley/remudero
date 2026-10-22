@@ -27,9 +27,11 @@ import { recordCreditStateEdge } from "./account-usage.js";
 import {
   ANALYTICS_REFRESH_INTERVAL_MS,
   ANALYTICS_REFRESH_TIMEOUT_MS,
-  deriveAnalyticsSnapshotFromCheckpointedLedger,
   readAnalyticsCheckpoint,
+  scanAnalyticsLedger,
   type AnalyticsCheckpoint,
+  type AnalyticsResumePoint,
+  type AnalyticsScanReport,
 } from "./analytics-route.js";
 import { ANALYTICS_SOURCE_NAMES, ANALYTICS_VIEW_NAME, analyticsSourceBodies } from "./analytics-view.js";
 import type { SourceSnapshotWrite } from "./read-model-db.js";
@@ -195,12 +197,13 @@ function creditEdgeUnit(config: NonNullable<SlowLaneConfig["accountUsage"]>, log
 }
 
 /** The refresh the analytics unit runs: the one serve's analytics cache runs, unchanged. */
-export type AnalyticsRefresh = typeof deriveAnalyticsSnapshotFromCheckpointedLedger;
+export type AnalyticsRefresh = typeof scanAnalyticsLedger;
 
 /**
  * The analytics refresh per instance (W1-T5055), each due once per refresh interval, while `enabled`. A pass only
  * starts the due refreshes and returns, so a scan of a minute or more never holds the inbox unit behind it. Each
- * resumes from the checkpoint it last built, first from the one serve's cache keeps; it never writes that file.
+ * resumes a bounded partial fold, else its last complete checkpoint, first from serve's checkpoint file.
+ * Progress is private to this lane's lifetime, never a source snapshot or a write to serve's checkpoint file.
  * A refresh that throws, times out or could not read its ledger posts a failure: the worker keeps the last snapshot.
  */
 function analyticsUnit(
@@ -209,16 +212,22 @@ function analyticsUnit(
   post: (message: SlowLaneMessage) => void,
   log: (step: string, extra?: Record<string, unknown>) => void,
   enabled: () => boolean,
+  captureOwnership: () => () => boolean,
   refresh: AnalyticsRefresh,
 ): SlowLaneUnit {
   const intervalMs = config.intervalMs ?? ANALYTICS_REFRESH_INTERVAL_MS;
   const timeoutMs = config.timeoutMs ?? ANALYTICS_REFRESH_TIMEOUT_MS;
-  const attempted = new Map<string, number>();
+  const nextDue = new Map<string, number>();
   const checkpoints = new Map<string, AnalyticsCheckpoint | undefined>();
+  const progress = new Map<string, AnalyticsResumePoint>();
+  const scanFields = (scan?: AnalyticsScanReport): Record<string, unknown> => scan ? {
+    scan_mode: scan.mode, scan_reason: scan.reason, progress_refused: scan.progressRefused,
+    rotations_read: scan.rotationsRead, rotations_remaining: scan.rotationsRemaining,
+  } : {};
   let running = false;
-  const refreshOne = async (instance: { name: string; stateDir: string; repository?: string }): Promise<void> => {
+  const refreshOne = async (instance: { name: string; stateDir: string; repository?: string }, mayPublish: () => boolean): Promise<void> => {
     const started = clock.now();
-    attempted.set(instance.name, started);
+    nextDue.set(instance.name, started + intervalMs);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`analytics refresh exceeded ${timeoutMs} ms`)), timeoutMs);
     let work: SlowLaneWork = { unit: "analytics", instance: instance.name, phase: "read-checkpoint" };
@@ -228,13 +237,37 @@ function analyticsUnit(
       const prior = held ? checkpoints.get(instance.name) : readAnalyticsCheckpoint(instance.stateDir);
       work = { ...work, phase: held ? "scan" : "scan-from-disk-checkpoint" };
       post({ type: "begin", work });
-      const { snapshot, checkpoint } = await refresh(instance.stateDir, clock, controller.signal, prior);
+      const result = await refresh(instance.stateDir, clock, controller.signal, prior, {
+        progress: progress.get(instance.name), yieldAtMs: started + timeoutMs / 2,
+      });
       controller.signal.throwIfAborted();
-      if (snapshot.benchmarkEvidence?.reason === "ledger-source-unreadable") throw new Error("the ledger could not be read");
+      if (!mayPublish()) {
+        log("analytics.source_snapshot_withheld", { instance: instance.name, reason: "ownership-changed" });
+        return;
+      }
+      if ("progress" in result) {
+        progress.set(instance.name, result.progress);
+        const finished = clock.now();
+        nextDue.set(instance.name, finished + Math.max(1, finished - started));
+        log("analytics.source_snapshot_progress", { instance: instance.name, ms: finished - started,
+          retained_as_of: prior?.snapshot.asOf ?? null, ...scanFields(result.scan) });
+        return;
+      }
+      const { snapshot, checkpoint } = result;
+      progress.delete(instance.name);
+      const unavailable = snapshot.benchmarkEvidence?.reason;
+      if (unavailable === "ledger-source-unreadable") throw new Error("the ledger could not be read");
+      if (unavailable?.startsWith("ledger-source-") || unavailable?.startsWith("ledger-live-")) {
+        throw new Error(`analytics ledger evidence unavailable: ${unavailable}`);
+      }
       checkpoints.set(instance.name, checkpoint);
       post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: true, asOf: snapshot.asOf!, bodies: analyticsSourceBodies(snapshot, instance.repository) } });
-      log("analytics.source_snapshot_built", { instance: instance.name, ms: clock.now() - started, asOf: snapshot.asOf });
+      log("analytics.source_snapshot_built", { instance: instance.name, ms: clock.now() - started, asOf: snapshot.asOf, ...scanFields(result.scan) });
     } catch (error) {
+      if (!mayPublish()) {
+        log("analytics.source_snapshot_withheld", { instance: instance.name, reason: "ownership-changed" });
+        return;
+      }
       const message = String((error as Error)?.message ?? error);
       post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: false, names: ANALYTICS_SOURCE_NAMES, error: message, atMs: clock.now() } });
       log("analytics.source_snapshot_failed", { instance: instance.name, ms: clock.now() - started, error: message });
@@ -247,12 +280,18 @@ function analyticsUnit(
     name: "analytics",
     run: async () => {
       if (!enabled() || running) return { views: [] };
-      const due = config.instances.filter((instance) => clock.now() - (attempted.get(instance.name) ?? Number.NEGATIVE_INFINITY) >= intervalMs);
+      const mayPublish = captureOwnership();
+      if (!mayPublish()) return { views: [] };
+      const due = config.instances.filter((instance) => clock.now() >= (nextDue.get(instance.name) ?? Number.NEGATIVE_INFINITY));
       if (due.length > 0) {
         running = true;
         void (async () => {
-          for (const instance of due) await refreshOne(instance);
-          running = false;
+          try {
+            for (const instance of due) {
+              if (!mayPublish()) break;
+              await refreshOne(instance, mayPublish);
+            }
+          } finally { running = false; }
         })();
       }
       return { views: [] };
@@ -282,15 +321,19 @@ export function runSlowLaneWorker(
   const intervalMs = data.intervalMs ?? INBOX_CLASSIFY_INTERVAL_MS;
   const log = (step: string, extra: Record<string, unknown> = {}): void => port.postMessage({ type: "log", step, extra } satisfies SlowLaneMessage);
   let modes: Record<string, unknown> = {};
-  const post = (message: SlowLaneMessage): void => port.postMessage(message);
-  const analytics = data.analytics
-    ? [analyticsUnit(data.analytics, clock, post, log, () => BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]), opts.analyticsRefresh ?? deriveAnalyticsSnapshotFromCheckpointedLedger)]
-    : [];
   let held = false;
   let running = false;
   let stopped = false;
   let ownedInstances = new Set<string>();
   let leaseEpoch = 0;
+  let analyticsEpoch = 0;
+  const post = (message: SlowLaneMessage): void => port.postMessage(message);
+  const analytics = data.analytics
+    ? [analyticsUnit(data.analytics, clock, post, log, () => BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]), () => {
+      const leaseAtStart = leaseEpoch, viewAtStart = analyticsEpoch;
+      return () => !stopped && held && leaseEpoch === leaseAtStart && analyticsEpoch === viewAtStart && BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]);
+    }, opts.analyticsRefresh ?? scanAnalyticsLedger)]
+    : [];
   const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []),
     ...(data.instanceInboxes ?? []).map(config => instanceInboxUnit(config, clock, () => {
       const startedEpoch = leaseEpoch;
@@ -322,7 +365,11 @@ export function runSlowLaneWorker(
     if (!stopped) cancel = schedule(() => void pass(), intervalMs);
   };
   port.on("message", (msg) => {
-    if (msg.type === "views") modes = (msg.modes ?? {}) as Record<string, unknown>;
+    if (msg.type === "views") {
+      const next = (msg.modes ?? {}) as Record<string, unknown>;
+      if (next[ANALYTICS_VIEW_NAME] !== modes[ANALYTICS_VIEW_NAME]) analyticsEpoch += 1;
+      modes = next;
+    }
     if (msg.type !== "lease") return;
     const was = held;
     const previous = [...ownedInstances].join("|");

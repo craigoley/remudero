@@ -23,7 +23,7 @@ import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/iso
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 /**
  * Control-flow constructs that, sitting between the arm call and the gate, would mean control can

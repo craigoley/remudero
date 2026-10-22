@@ -1,0 +1,22 @@
+# W1-T10302 — wires the operator's Codex sessions to the deny floor's GitHub-read rule ONLY.
+#
+# Codex sessions under the second Mac account open PRs as the same GitHub user Claude sessions read as, but
+# nothing routed their gh reads through the read broker (W1-T10279). This hook runs hooks/deny-floor.sh with
+# RMD_DENY_FLOOR_ONLY=gh-read, which judges rule 10 alone (with a live broker a raw read-shaped gh call is refused
+# with one instruction: re-run it as `rmd gh --class interactive --client codex -- <same args>`; with none,
+# rule 10's own fallback floor applies) plus rule 7's refusal of a polling loop. The other rules encode the Claude
+# session and fleet-worker contracts; whether they bind the operator's own Codex sessions is a separate decision.
+#
+# No `matcher`: the hook reads the command from the payload's tool_input and returns at once for a file tool
+# (apply_patch and the like), so it cannot miss a shell tool through a tool-name guess. Codex loads a project's
+# .codex/config.toml only for a project the operator has trusted. The payload is codex-cli 0.163.0's
+# pre-tool-use.command.input: {session_id, turn_id, transcript_path, cwd, hook_event_name, model,
+# permission_mode, tool_name, tool_input, tool_use_id}; exit 2 blocks and stderr is fed back to the model.
+
+[[hooks.PreToolUse]]
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "RMD_DENY_FLOOR_ONLY=gh-read bash \"$(git rev-parse --show-toplevel)/hooks/deny-floor.sh\""
+timeout = 10
+statusMessage = "Routing GitHub reads through the broker"

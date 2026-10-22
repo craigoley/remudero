@@ -1,9 +1,9 @@
 - id: W1-T10171
-  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts cost 37.8 PR minute(s) across 9 round(s) on 9 pull request(s)"
+  title: "A PASSING TEST'S FIXTURE POOL DEFECT LINE IS READ AS THE SHARD'S FAILURE — the fast-tier SIGKILL-deadline test prints 'leaking file: test/b.test.ts (first failing alongside it: test/c.test.ts)' into every CI log that runs it, and ciFailureSignature and deterministicTimeoutSignature take that line over the runner's own not ok"
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: blast-radius
   priority: 1.18
@@ -11,92 +11,98 @@
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts"
+  principles: {tdd: strict}
   files:
-    - .github/workflows/ci.yml
-    - test/gardeners/check-ci-log-coverage-shard-pool-defect-test-b-test-ts-leaks-into-test-c.test.ts
+    - src/lib/ci-friction-gardener.ts
+    - src/lib/sweep.ts
+    - scripts/test-tier-manifest.mjs
+    - test/gardeners/a-fixture-pool-defect-line-is-never-a-shards-failure.test.ts
+    - test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts
   acceptance:
-    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts"
-      proof: "grep: test(\"W1-T10171: check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts is prevented, not retried\" in test/gardeners/check-ci-log-coverage-shard-pool-defect-test-b-test-ts-leaks-into-test-c.test.ts"
-  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+    - claim: "a real log holding a passing test's fixture POOL DEFECT block and a runner not ok signs as the runner's failing test, not as a pool defect"
+      proof: 'grep: test("W1-T10171: a fixture POOL DEFECT line beside a runner not ok signs as the runner failing test" in test/gardeners/a-fixture-pool-defect-line-is-never-a-shards-failure.test.ts'
+    - claim: "a cancelled shard whose only pool lines are a passing test's fixture output is re-queued, not judged a deterministic pool defect"
+      proof: 'grep: test("W1-T10171: a cancelled shard whose only POOL DEFECT line is test fixture output is re-queued" in test/gardeners/a-fixture-pool-defect-line-is-never-a-shards-failure.test.ts'
+    - claim: "the fast-tier SIGKILL-deadline test's fixture pool run writes no pure-test-pool line to the real stderr"
+      proof: 'grep: test("W1-T10171: a fast-tier fixture run sends its pool lines to its log sink, never the process stderr" in test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts'
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1; REWRITTEN 2026-10-21 by an operator-approved hand investigation to the proven cause. The filed scope (.github/workflows/ci.yml) was never involved. After its build merges, the gardener measures this cause's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
   rationale: |
-    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts cost 37.8 PR minute(s) (seven-day half-life) across 9 fix round(s) on 9 pull request(s).
+    PROVEN 2026-10-21, read-only (the ci-friction gardener filed this against ci.yml; the cause is elsewhere).
 
-    WHERE IT COMES FROM:
-    - .github/workflows/ci.yml: declares job coverage-ratchet for coverage-shard
-    - the rounds name a failing test: test/b.test.ts
+    THE SIGNATURE IS FIXTURE TEXT. Neither test/b.test.ts nor test/c.test.ts exists on main. The line
+    "pure-test-pool: POOL DEFECT — every pooled file passes isolated but the pool failed; leaking file:
+    test/b.test.ts (first failing alongside it: test/c.test.ts) after 5 probe(s)" is printed by the PASSING
+    test "W1-T9426: the fast tier hands every locate probe a SIGKILL deadline"
+    (test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts). It runs tiers.main(["--run", "fast"])
+    over fixtures a/b/c/d with a fake pool that fails whenever b and c share it, and
+    scripts/test-tier-manifest.mjs calls runShardWithPool with no `log`, so pure-test-pool's default
+    console.error writes every locate probe and the POOL DEFECT verdict into the real CI log. Reproduced on
+    main c8a55054a: a targeted run of that one test prints the line on stderr.
 
-    RECENT ROUNDS (newest first):
-    - PR #12787 (https://github.com/craigoley/remudero/pull/12787) at 2026-10-18T16:04:59.765Z: ci-log round — coverage-shard (2/8): test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts; coverage-shard (8/8): pool defect: test/b.test.ts leaks into test/c.test.ts
-        failing tests: W1-T9968: a P2 with 29 open dependents does not outrank a fresh P1; W1-T9325: calibrated age, starts and imputation survive in the explanation; ["W1-T9325: a tick start logs dispatch.pick_scored with its components and the runner-up","W1-T9325: a lane refill logs dispatch.pick_scored for the task it starts","W1-T9325: a runner-up serialized by packing keeps its score and reason","W1-T9325: explanation preserves calibrated inputs without reading a clock","W1-T9325: calibrated age, starts and imputation survive in the explanation"]
-        log excerpt:
-          | not ok 2270 - W1-T9968: a P2 with 29 open dependents does not outrank a fresh P1
-          |   ---
-          |   duration_ms: 27.574104
-          |   type: 'test'
-          |   location: '/home/runner/work/remudero/remudero/test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts:53:1'
-          |   failureType: 'testCodeFailure'
-          |   error: "the cost of delay keeps the fan-out product (W1-T9325's row)"
-          |   code: 'ERR_ASSERTION'
-          |   name: 'AssertionError'
-          |   expected: true
-          |   actual: false
-          |   operator: '=='
-          |   stack: |-
-    - PR #12780 (https://github.com/craigoley/remudero/pull/12780) at 2026-10-18T15:11:23.606Z: ci-log round — coverage-shard (2/8): pool defect: test/b.test.ts leaks into test/c.test.ts; coverage-shard (6/8): test/a-test-imports-through-the-subpath-alias.test.ts; coverage-shard (5/8): test/reso
-        failing tests: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — the head-bound resolver has exactly the review command and W1-T3557 fix-rung contract paths
-        log excerpt:
-          | FLAKE-RETRY: first attempt failed — test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
-          | not ok 1 - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
-          |   ---
-          |   duration_ms: 115.146545
-          |   type: 'test'
-          |   location: '/home/runner/work/remudero/remudero/test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:240:1'
-          |   failureType: 'testCodeFailure'
-          | 
-    - PR #12773 (https://github.com/craigoley/remudero/pull/12773) at 2026-10-18T13:42:05.902Z: ci-log round — coverage-shard (7/8): test/ci-cache-concurrency-and-job-timeouts.test.ts; coverage-shard (6/8): pool defect: test/b.test.ts leaks into test/c.test.ts
-        failing tests: R-50: every job in every PR-firing workflow declares a positive timeout-minutes; rmd lint-plan refuses a filing that cites a doctrine page no file holds and its files: does not create, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes; rmd lint-plan refuses a filing that cites a doctrine page no file holds and its files: does not create; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base
-        log excerpt:
-          | ...
-          | not ok 5 - R-50: every job in every PR-firing workflow declares a positive timeout-minutes
-          | TAP version 13
-          | # Subtest: R-50: setup caches npm unless it only bootstraps guarded dependency-free admission
-          | ok 1 - R-50: setup caches npm unless it only bootstraps guarded dependency-free admission
-          |   ---
-          |   duration_ms: 190.544516
-          |   type: 'test'
-          |   ...
-          | not ok 5 - R-50: every job in every PR-firing workflow declares a positive timeout-minutes
-          |   ---
-          |   duration_ms: 99.21028
-          |   type: 'test'
-          |   location: '/tmp/rmd-author-workflow-contract-ncGllU/test/ci-cache-concurrency-and-job-timeouts.test.ts:3:3338'
-    - PR #12667 (https://github.com/craigoley/remudero/pull/12667) at 2026-10-17T22:21:00.971Z: ci-log round — coverage-shard (7/8); coverage-shard (6/8): pool defect: test/b.test.ts leaks into test/c.test.ts; coverage-shard (8/8): test/a-fix-round-that-needs-scope-files-its-own-amendment.test.t
-        failing tests: the head-bound resolver has exactly the review command and W1-T3557 fix-rung contract paths, W1-T2594: production ordering records only after ownership/push and before the next gate; resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — the head-bound resolver has exactly the review command and W1-T3557 fix-rung contract paths; W1-T2594: production ordering records only after ownership/push and before the next gate; scope amendments refuse shard drift and leave the implementation contract unchanged, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes; scope amendments refuse shard drift and leave the implementation contract unchanged
-        log excerpt:
-          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED names check(s) outside REQUIRED: not-a-required-check
-          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is EMPTY, which would gate on nothing
-          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not a JSON array of strings
-          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not a JSON array of strings
-          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not valid JSON
-          | ci-gate-from-contract: refusing the merge_group gate:
-    - PR #12639 (https://github.com/craigoley/remudero/pull/12639) at 2026-10-17T21:36:46.564Z: ci-log round — coverage-shard (7/8): pool defect: test/b.test.ts leaks into test/c.test.ts; Scan
-        failing tests: W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain, W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row, W1-T6356: the loop turns during a managed checkout refresh; W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain
-        log excerpt:
-          | FLAKE-RETRY: first attempt failed — W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain, W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row, W1-T6356: the loop turns during a managed checkout refresh
-          | not ok 3 - W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain
-          |   ---
-          |   duration_ms: 295.297545
-          |   type: 'test'
-          |   location: '/home/runner/work/remudero/remudero/test/a-spent-check-requeue-survives-ledger-
+    TWO READERS TAKE IT AS THE SHARD'S FAILURE.
+    - src/lib/ci-friction-gardener.ts: ciFailureSignature calls poolOrTimeoutSignature FIRST, and its first
+      arm matches any "pure-test-pool: POOL DEFECT ... leaking file:" line anywhere in the tail, before the
+      runner's own `not ok` is read. Every unrelated red in a shard that ran this test is signed
+      "pool defect: test/b.test.ts leaks into test/c.test.ts", and the gardener prices those rounds to it.
+    - src/lib/sweep.ts: deterministicTimeoutSignature has the same first arm. A shard CANCELLED at its ceiling
+      whose log carries the fixture line returns "pool defect: test/b.test.ts leaks", so W1-T8040 judges it
+      deterministic and it is NOT re-queued (reproduced on main with the fixture line plus a cancel line).
 
-    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
-    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
-    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+    EXAMPLE. #12892's round at 2026-10-19T10:36:02Z (head 777f705, coverage-shard (8/8), job 117963751028):
+    the only real failure is route-wiring's `not ok 2631 - every declared write route is either
+    wiring-tested here or listed as explicit debt` (location test/route-wiring.test.ts:480:1, log line
+    22852); the fix.dispatch row's `tests` even names it, tail_source "log". The fixture block sits at log
+    lines 4767-4794, printed twice: once plain and once as a `# pure-test-pool: ...` TAP diagnostic. Main's
+    ciFailureSignature over that whole log still returns "pool defect: test/b.test.ts leaks into
+    test/c.test.ts".
+
+    MEASURED. 21 distinct fix rounds (fix.dispatch round_id) on 19 PRs carry this signature, from
+    2026-10-17T02:30Z to 2026-10-21T14:56:43Z: #12489 #12523 #12575 #12639 #12667 #12773 #12780 #12787 #12817
+    #12821 #12830 #12892 #12904 #12968 #13043 #13121 #13223 #13316 #13324 (bounded zgrep of the 89 archives
+    from 10-17 on plus the live file). The gardener priced 37.8 PR-minutes over 9 of them. The sweep half is
+    live too: sweep.check_requeue.skipped at 2026-10-21T12:13:04Z, #13338 coverage-shard (2/8), reason
+    "deterministic-timeout", signature "pool defect: test/b.test.ts leaks" — a cancelled shard left
+    un-requeued on a fixture line.
+
+    WHY #13324 (W1-T9434, c8a55054a) DID NOT FIX IT. #13324 decides which SOURCE becomes a failure's tail: a
+    readable log's `not ok` now wins over annotations a passing test printed. These rounds were already
+    tail_source "log"; the misreading is inside the log, in the signature arms above, which #13324 did not
+    touch. W1-T10154 (#12957) changed only how those arms strip timestamps.
+
+    RULE 25. scripts/test-tier-manifest.mjs is not on review.ts's INSTRUMENT_SURFACE, and rule 25 is advisory
+    since 2026-09-10, so the src guard and the instrument fix ride as one task.
+  design: |
+    1. Signature arms (ci-friction-gardener.ts poolOrTimeoutSignature, sweep.ts deterministicTimeoutSignature):
+       a POOL DEFECT line counts only when it is the shard runner's own verdict, never a line a test printed.
+       Signals observed in job 117963751028: the fixture lines are echoed a second time as `# pure-test-pool:`
+       TAP diagnostics, and the leaker/victim they name are files the shard never ran and that no `not ok`
+       in the log belongs to. Choose the discriminator from the real log shape; the two existing real-defect
+       fixtures (see falsifier) must keep their signatures. When the POOL DEFECT line is a test's output,
+       the ordinary arms decide: the runner's named failing test, or for a cancelled shard no deterministic
+       signature, so W1-T1223's one bounded requeue applies.
+    2. Instrument: scripts/test-tier-manifest.mjs's main accepts a `log` sink in its injected options and
+       passes it to runShardWithPool (default unchanged: console.error); the SIGKILL-deadline test passes
+       one and asserts nothing reached process stderr.
+    Tests: 1-2 in test/gardeners/a-fixture-pool-defect-line-is-never-a-shards-failure.test.ts using the job
+    117963751028 shape (the doubled fixture block from lines 4767-4794 inside passing subtests, then the
+    route-wiring `not ok` with its location block; for 2, the same block with no `not ok` and a
+    "The operation was canceled." line). 3 in the SIGKILL-deadline test's own file. Titles verbatim as in the
+    proofs.
+  falsifier: |
+    On main: ciFailureSignature over the job 117963751028 shape returns "pool defect: test/b.test.ts leaks into
+    test/c.test.ts"; deterministicTimeoutSignature over the fixture block plus a cancel line returns
+    "pool defect: test/b.test.ts leaks"; a targeted run of "W1-T9426: the fast tier hands every locate probe a
+    SIGKILL deadline" prints the POOL DEFECT line on stderr. Each of the three new tests is red there.
+    GUARDS (must stay green, unchanged): test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts
+    "W1-T8038: a pool defect names its leaking and victim files in the signature" (the-leaker/the-victim log
+    still signs "pool defect: test/the-leaker.test.ts leaks into test/the-victim.test.ts"), and
+    test/a-deterministic-shard-timeout-is-not-re-queued.test.ts "W1-T8040: the signature names a pool defect
+    and a runner failure before the ceiling".
   risk_ruling:
-    verdict: "high"
-    action: escalate
+    verdict: "operator"
+    action: proceed
     confidence: 1
     reasons:
-      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-19T01:59:28.231Z"
-    pin: "499d9eae1b2f48dd9cc3aca010f97a681d2ff68a0ea9a1ed35ce0b56ea69a8ab"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.221Z"
+    pin: "b3ecb6ec4cc46269bdbd4a478a71a416387c2dc59f775bd632a7ff0978fa5040"

@@ -1,0 +1,58 @@
+- id: W1-T10402
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/ledger-literal-census.test.ts:flaky cost 19 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.32
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/ledger-literal-census.test.ts:flaky"
+  files:
+    - src/lib/ledger-path.ts
+    - test/ledger/ci-friction-remedy-f1225ad64f31fc26.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/ledger-literal-census.test.ts:flaky"
+      proof: "grep: test(\"W1-T10402: check:test:test/ledger-literal-census.test.ts:flaky is prevented, not retried\" in test/ledger/ci-friction-remedy-f1225ad64f31fc26.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/ledger-literal-census.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/ledger-literal-census.test.ts:flaky cost 19 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ledger-path.ts: test/ledger-literal-census.test.ts imports it
+    - test/ledger-literal-census.test.ts: named by the failing check
+    - the rounds name a failing test: test/ledger-literal-census.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13317 (https://github.com/craigoley/remudero/pull/13317) at 2026-10-21T08:55:56.550Z: ci-log round — rule-checks: test/ledger-literal-census.test.ts
+        failing tests: the ledger filename literal appears only in the ledger owner modules
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/ledger-literal-census.test.ts:1:933
+          | ✖ the ledger filename literal appears only in the ledger owner modules (76.230464ms)
+          |   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'src/lib/state-backup-engine-links.ts'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/ledger-literal-census.test.ts:22:10)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
+    reasons:
+      - "The declared files are src/lib/ledger-path.ts and a new test file; the description shows no contact with secrets, auth, permissions, deletion, merge/deploy/review policy or irreversible actions."
+      - "The failing-test excerpt names a specific census assertion and the acceptance is a grep-verifiable test, so the finding can be verified from what is shown."
+      - "The family track record is mixed (39 merged, 58 declined) and the offending file in the log (state-backup-engine-links.ts) is not in the declared files list. This is a mild coherence concern, but CI and review still gate the PR."
+    judged_at: "2026-10-22T10:15:53.150Z"
+    pin: "aafba76d2cf02e5c6638991458ad46b7e127216b78c1b70654852e422fbe96ac"

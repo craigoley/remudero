@@ -1,0 +1,60 @@
+- id: W1-T10389
+  title: "A FOREIGN PID THE CWD CENSUS CANNOT READ DOES NOT HOLD A DEAD FIX ROUND'S WORKTREE — `readBoundedProcessCwdCensus` (src/run-task.ts) answers `unknown`/`cwd_unreadable` on the FIRST pid whose `/proc/<pid>/cwd` readlink fails with anything but ENOENT, and `decideRegisteredFixOwnerRecovery` then keeps the dead round's worktree (`process_cwd_probe_unreadable`); 18 `sweep.fix.checkout_claim_declined` rows across 12 PRs from 2026-10-21T08:49Z to 10-22T01:20Z, #13317 at 12:18Z among them, and #12894 declined the same way from 12:20Z to 18:23Z on 10-19"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19 (linter reads two concerns); widens reclaim only past processes that cannot be a fleet worker
+  band_meaning: span
+  origin: "operator ruling 2026-10-22, item 10: a dead fix round's worktree is never reclaimed"
+  plan_refs: [W1-T7998, W1-T6355, W1-T7719, W1-T9682]
+  files:
+    - src/run-task.ts
+    - test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: a dead round's worktree must be reclaimable.
+    READ at origin/main 32887fe4d (symbols, not lines):
+    - `readBoundedProcessCwdCensus` walks /proc and readlinks each numeric pid's cwd. ENOENT (the process exited) is
+      skipped. Every other error returns `{ state: "unknown", reason: "cwd_unreadable" }` for the whole census.
+    - `decideRegisteredFixOwnerRecovery` maps `processState !== "clear"` to keep, `process_cwd_probe_unreadable`, after
+      the claim is already clear (the round ended).
+    - Any process the daemon's uid may not inspect therefore holds every dead round's worktree, for as long as that
+      process lives. That includes a root-owned init or sidecar in the container, or another user's process.
+    OBSERVED (core ledger 10-21T08:49Z..10-22T01:20Z, read-only): 18 `sweep.fix.checkout_claim_declined`
+    rows, reason `registered_worktree_owner`, owner_recovery_reason `process_cwd_probe_unreadable` and
+    process_probe_reason `cwd_unreadable`, on PRs 10350, 10516, 10551, 11949, 12493, 12570, 12667, 12892, 12894,
+    12956, 13134 and 13317. One example: #13317 at 12:18:04Z, worktree sweep-W1-T10086-1792582078882.
+    REPORTED by the operator session: #12894 was declined the same way from 12:20Z to 18:23Z on 10-19.
+    INFERRED: the unreadable pid belongs to another uid. The row records no errno and no pid, which is part of
+    this task.
+    NOT COVERED ELSEWHERE: W1-T7998, W1-T6355 and W1-T7719 (merged) built the stale-dirty and untracked reclaim
+    paths, and all of them require `processState === "clear"`. Swept origin/main 32887fe4d plan/tasks.d and all 18
+    open PR heads' plan trees for readBoundedProcessCwdCensus, cwd_unreadable and process_cwd_probe_unreadable: no
+    other shard.
+  design: |
+    1. SAY WHICH PID AND WHY. A cwd read that fails records the errno and whether the pid's real uid (from its own
+       /proc status, read the same bounded way) equals the daemon's. `process_probe_reason` carries both, so the next
+       decline names its cause.
+    2. A FOREIGN PID CANNOT BE THE OWNER. When the cwd read fails with EACCES or EPERM AND the pid's uid is readable
+       AND it differs from the daemon's own uid, the census skips that pid and counts it. A fleet worker runs as the
+       daemon's uid; the builder confirms this from the spawn path before relying on it, and stops and reports if
+       it is false. A same-uid failure, an unreadable uid, or any other errno still answers `unknown`, as today.
+    3. The census row or decline row records the number of foreign pids skipped. `decideRegisteredFixOwnerRecovery`
+       is unchanged: a census that reaches `clear` past foreign pids reclaims through the existing paths.
+    4. No new bound, config key or env var. The wall and entry bounds are unchanged.
+    5. Tests (new file, titles verbatim as in the proofs; injected readCwd and uid seams plus one real /proc pass):
+       an EACCES pid owned by another uid is skipped and the census reaches clear. The same failure on the daemon's
+       own uid, or with an unreadable uid, stays unknown. The decline row names the errno.
+  acceptance:
+    - claim: "an unreadable cwd on another uid's pid no longer makes the census unknown"
+      proof: "unit test: W1-T10389: a foreign pid with an unreadable cwd is skipped by the census"
+    - claim: "an unreadable cwd on the daemon's own uid, or an unreadable uid, still keeps the worktree"
+      proof: "unit test: W1-T10389: an unreadable same-uid pid still keeps the worktree"
+  falsifier: |
+    Return unknown on every non-ENOENT error again, and the foreign-pid fixture keeps the dead round's worktree.
+  note: |
+    Reservation refs/rmd-id/W1-T10389 is held by filing branch file-1022-fleet-routing.

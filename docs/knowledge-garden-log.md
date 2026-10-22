@@ -132,3 +132,10 @@ Learnings used when offered: 26%. Dangling Why pointers: 1.
 - retire criteria-go-stale-on-relocation: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 28%. Dangling Why pointers: 1.
+
+## Pass 2026-10-22T06:10:07.785Z
+
+- retire commitlint-pr-title-lane: Workers offered it have rarely used it, compared with other learnings.
+- retire position-is-presentation-not-identity: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 26%. Dangling Why pointers: 1.

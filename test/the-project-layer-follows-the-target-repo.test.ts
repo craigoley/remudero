@@ -287,7 +287,7 @@ test("a target repo with no learnings home injects nothing and does not refuse",
 // ── Source-level (MUTANT-style) pins — the parts no behavioral test cheaply reaches ─────────
 
 test("MUTANT: the inline plan-derived expression is gone from the implement dispatch", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
   assert.equal(
     src.includes('join(dirname(planPath), "..", "learnings")'),
     false,
@@ -296,7 +296,7 @@ test("MUTANT: the inline plan-derived expression is gone from the implement disp
 });
 
 test("MUTANT: the injection calls the named helper against the TARGET repo's own checkout, never a literal repo name", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
   const call = "const learningsDir = projectLearningsHome(repoDir);";
   assert.equal(src.split(call).length - 1, 1, "the exact substitution must be unique, or this proves nothing");
   // No special case anywhere names this repo by name: the call takes an IDENTIFIER
@@ -308,7 +308,7 @@ test("MUTANT: the retro's promotion corpus resolution stays retired", () => {
   // The retro's promotion pass was RETIRED 2026-09-29 (DECISIONS.md), so its ORCHESTRATOR-checkout
   // corpus resolution no longer exists. This pins the retirement instead of the old "untouched"
   // claim: the deleted line must not return.
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
   assert.equal(
     src.includes("const promotionCorpusDir = projectLearningsHome(repoRoot);"),
     false,
@@ -317,7 +317,7 @@ test("MUTANT: the retro's promotion corpus resolution stays retired", () => {
 });
 
 test("MUTANT: the user-overall and global homes are resolved exactly as they are today", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url), "utf8");
   const homesBlock = src.slice(src.indexOf("const learningsResult = computeMatchedLearningsForArm"), src.indexOf("const matchedLearnings = learningsResult.matchedLearnings;"));
   assert.match(homesBlock, /userOverallDir:\s*userOverallLearningsHome\(config\)/);
   assert.match(homesBlock, /globalArtifactPath:\s*globalArtifactPath\(config\)/);

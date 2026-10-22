@@ -115,20 +115,20 @@ test("W1-T9995: a superseded red in a payload-reading check is never re-run", as
 
 test("W1-T9995: the re-runnable checks are the ones whose workflow reads live state", () => {
   const workflow = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
-  const evidence: Record<string, { reads: RegExp[]; job: RegExp }> = {
+  const evidence = [
     // pr-title-lint.yml lints the title it reads through the API at run time, never the event's.
-    commitlint: { job: /^ {4}name: commitlint$/m, reads: [/gh pr view "\$PR_NUMBER" --repo "\$GITHUB_REPOSITORY" --json title/] },
-    // ci.yml's ci-gate runs ci-gate.yml's aggregation step, which reads the check-runs API at the head.
-    "ci-gate": { job: /^ {4}name: ci-gate$/m, reads: [/node scripts\/ci-gate-from-contract\.mjs/] },
-  };
-  assert.deepEqual(LIVE_READING_RERUN_CHECKS.map((c) => c.check), Object.keys(evidence), "every live check carries its evidence");
-  for (const { check, workflow: path } of LIVE_READING_RERUN_CHECKS) {
+    { check: "commitlint", workflow: ".github/workflows/pr-title-lint.yml", reads: [/gh pr view "\$PR_NUMBER" --repo "\$GITHUB_REPOSITORY" --json title/] },
+    // Both legitimate ci-gate producers aggregate live check runs for the selected head.
+    { check: "ci-gate", workflow: ".github/workflows/ci.yml", reads: [/node scripts\/ci-gate-from-contract\.mjs/] },
+    { check: "ci-gate", workflow: ".github/workflows/ci-gate.yml", reads: [/types: \[edited\]/, /commits\/\$\{SHA\}\/check-runs/] },
+  ];
+  assert.deepEqual(LIVE_READING_RERUN_CHECKS, evidence.map(({ check, workflow }) => ({ check, workflow })), "every exact producer carries its evidence");
+  for (const { check, workflow: path, reads } of evidence) {
     const text = workflow(path);
-    assert.match(text, evidence[check].job, `${path} runs a job named ${check}`);
-    for (const read of evidence[check].reads) assert.match(text, read, `${path}: ${check} reads live state`);
-    assert.doesNotMatch(text, /github\.event\.pull_request\.(title|body)|GITHUB_EVENT_PATH/, `${path} reads no event payload`);
+    assert.match(text, new RegExp(`^ {4}name: ${check}$`, "m"), `${path} runs a job named ${check}`);
+    for (const read of reads) assert.match(text, read, `${path}: ${check} reads live state`);
+    assert.doesNotMatch(text, /github\.event\.pull_request\.(title|body)|GITHUB_EVENT_PATH/, `${path} reads no frozen title/body payload`);
   }
-  assert.match(workflow(".github/workflows/ci-gate.yml"), /commits\/\$\{SHA\}\/check-runs/);
   // The two frozen-body gates read the payload, which is why neither is in the set.
   assert.match(workflow("scripts/acceptance-author-gate.mjs"), /GITHUB_EVENT_PATH/);
   assert.match(workflow("scripts/proof-discrimination-gate.mjs"), /GITHUB_EVENT_PATH/);
@@ -266,3 +266,56 @@ function fixture(t: TestContext) {
       }),
   };
 }
+
+
+test("an edited-only ci-gate producer is reconciled once in its exact old run through the Actions port", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-edited-gate-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const statePath = join(root, "PR13354.json");
+  const head = "e68c847d3fe7be5ddf6d79fd897393e73c2e1d65";
+  const editedRun = 39670716213, editedJob = 119467554871;
+  const reads: string[][] = [], posts: string[] = [];
+  let attempt = 1;
+  const port = dependabotActionsPort("craigoley", "remudero", async (args) => {
+    reads.push(args);
+    if (args[1] === `repos/craigoley/remudero/actions/runs?head_sha=${head}&per_page=100`) {
+      return { workflow_runs: [
+        run(editedRun, "ci-gate.yml", attempt === 1 ? "failure" : "success", { run_attempt: attempt }),
+        run(42, "ci.yml", "success"),
+        // A same-name check in another producer must not acquire rerun authority.
+        run(43, "security-merge-policy.yml", "failure"),
+      ] };
+    }
+    assert.equal(args[1], `repos/craigoley/remudero/actions/runs/${editedRun}/jobs?per_page=100`);
+    return { jobs: [{ id: editedJob, name: "ci-gate", status: "completed", conclusion: "failure" }] };
+  }, async (path) => { posts.push(path); });
+  const reconcile = () => reconcileSupersededRedReruns({ statePath, prNumber: 13354, headSha: head,
+    superseded: ["ci-gate"], actions: port, nowMs: 1792620900000, log: () => {} });
+  assert.deepEqual(await reconcile(), { kind: "requested", checks: ["ci-gate"] });
+  assert.deepEqual(posts, [`repos/craigoley/remudero/actions/runs/${editedRun}/rerun-failed-jobs`]);
+  assert.deepEqual(JSON.parse(readFileSync(statePath, "utf8")).supersededReruns.map((r: Record<string, unknown>) =>
+    [r.headSha, r.runId, r.attempt, r.checks, r.endpoint]),
+    [[head, editedRun, 1, ["ci-gate"], `actions/runs/${editedRun}/rerun-failed-jobs`]]);
+  assert.deepEqual(await reconcile(), { kind: "pending", checks: ["ci-gate"] });
+  assert.equal(posts.length, 1, "unchanged older failure is not requested again");
+  attempt = 2;
+  assert.deepEqual(await reconcile(), { kind: "verified", checks: ["ci-gate"] });
+  assert.equal(posts.length, 1, "successful next attempt is verified, never rerun again");
+  assert.equal(reads.filter(args => args[1].includes("/jobs")).length, 1, "only the selected producer's jobs are read once");
+});
+
+test("an edited-only ci-gate keeps exact producer and failed-job selection", () => {
+  const job = { id: 119467554871, name: "ci-gate", status: "completed", conclusion: "failure" };
+  const edited = run(39670716213, "ci-gate.yml", "failure", { jobs: [job] });
+  assert.deepEqual(supersededRedReruns([edited], ["ci-gate"])[0], {
+    runId: edited.id, attempt: 1, checks: ["ci-gate"], jobIds: [job.id], kind: "rerun-failed-jobs",
+    endpoint: `actions/runs/${edited.id}/rerun-failed-jobs`,
+  });
+  assert.deepEqual(supersededRedReruns([{ ...edited, path: ".github/workflows/other.yml" }], ["ci-gate"]), []);
+  assert.deepEqual(supersededRedReruns([{ ...edited, status: "in_progress" }], ["ci-gate"]), []);
+  assert.deepEqual(supersededRedReruns([{ ...edited, jobs: [{ ...job, name: "ci" }] }], ["ci-gate"]), []);
+  assert.deepEqual(supersededRedReruns([edited], []), []);
+  const sibling = { ...edited, jobs: [job, { ...job, id: 9, name: "test-slow" }] };
+  assert.deepEqual(supersededRedReruns([sibling], ["ci-gate"])[0].endpoint, `actions/jobs/${job.id}/rerun`,
+    "another failed job is not rerun merely because it shares the aggregator's workflow");
+});

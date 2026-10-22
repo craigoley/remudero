@@ -73,12 +73,17 @@ test("Codex auth completion requires the matching app-server login notification"
   assert.equal(store.read(started.sessionId)?.state, "complete");
 });
 
-test("unsupported provider auth cannot become complete from browser-open state", async () => {
-  const store = new ProviderAuthSessionStore({ profiles: [{ id: "claude-personal", provider: "claude", label: "Claude personal" }] });
+// W1-T10380 superseded W1-T3960's `unsupported` Claude answer; the full Claude flow is proved in
+// test/routing/the-console-signs-the-fleet-into-claude.test.ts. What stays true here: no CLI, no completion.
+test("a claude profile with no resolvable cli cannot become complete from browser-open state", async () => {
+  const store = new ProviderAuthSessionStore({
+    profiles: [{ id: "claude-personal", provider: "claude", label: "Claude personal" }],
+    resolveClaudeBin: () => null,
+  });
   const started = await store.start({ provider: "claude", profileId: "claude-personal" });
-  assert.equal(started.state, "unsupported");
+  assert.equal(started.state, "unavailable");
   assert.equal(started.authUrl, null);
-  assert.match(started.reason ?? "", /stable machine-facing contract/);
+  assert.match(started.reason ?? "", /Claude executable is not available/);
 });
 
 test("provider auth refusal leaves effective account and queued admission unchanged", async () => {

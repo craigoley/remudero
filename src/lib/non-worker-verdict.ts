@@ -51,3 +51,53 @@ export function streakRefusal(line: Record<string, unknown>): string | undefined
   return lifetimeInfrastructureRefusal(line) ??
     (line.verdict === "no_pr" && typeof line.reason === "string" && HARNESS_CHECKPOINT_NO_PR_REASONS.has(line.reason) ? line.reason : undefined);
 }
+
+/** The liveness bound (W1-T179, 30 minutes): a dispatched run with no newer ledger line is no longer trusted as running.
+ *  BACKSTOP: it only ages out a run that went silent; the run's own terminal rows remain the primary signal. */
+export const DEFAULT_LIVENESS_BOUND_MS = 30 * 60_000;
+
+/** Rows a monitor writes ABOUT a run, so they are not rows the run itself produced. */
+const MONITOR_WRITTEN_RUN_STEPS: ReadonlySet<string> = new Set([
+  "run.running_long", // the duration sentinel reports about a run that may already be dead
+  "cost.anomaly", // the cost sentinel reports about a run after the run has stopped
+  "worker.stalled", // the daemon's quiet-episode detector writes about the observed run
+]);
+
+/**
+ * W1-T8166: THE PROVEN-ORPHAN RULE, shared by the breaker, the lifetime sensor and the cost-of-delay stride.
+ * A `run_id` is an orphan when its ONLY own row is its `run.start` (monitor rows excluded, a replayed row
+ * counted once) and that start is at least `livenessBoundMs` behind `nowMs`. A run that cannot be named or
+ * aged, or a missing `nowMs`, is never an orphan ("unknown stays counted"). `taskId` limits the rows read;
+ * omitted, every task's rows are read (run ids are unique per run).
+ */
+export function provenOrphanRunIds(
+  rows: Iterable<Record<string, unknown>>,
+  nowMs: number | undefined,
+  livenessBoundMs: number,
+  taskId?: string,
+): ReadonlySet<string> {
+  const rowCountByRunId = new Map<string, number>();
+  const startTsByRunId = new Map<string, string>();
+  const counted = new Set<string>();
+  for (const line of rows) {
+    if ((taskId !== undefined && line.task_id !== taskId) || typeof line.run_id !== "string") continue;
+    if (typeof line.step === "string" && MONITOR_WRITTEN_RUN_STEPS.has(line.step)) continue;
+    // A rotation union replays retained rows once per archive; a replayed lone run.start is still an orphan.
+    const key = `${line.run_id}|${String(line.step)}|${String(line.ts)}`;
+    if (counted.has(key)) continue;
+    counted.add(key);
+    rowCountByRunId.set(line.run_id, (rowCountByRunId.get(line.run_id) ?? 0) + 1);
+    if (line.step === "run.start" && typeof line.ts === "string" && !startTsByRunId.has(line.run_id)) {
+      startTsByRunId.set(line.run_id, line.ts);
+    }
+  }
+  const orphans = new Set<string>();
+  if (nowMs === undefined) return orphans; // no notion of "now" anywhere in this ledger — unknown stays counted
+  for (const [runId, ts] of startTsByRunId) {
+    if ((rowCountByRunId.get(runId) ?? 0) > 1) continue; // the run produced another row — not an orphan
+    const startMs = Date.parse(ts);
+    if (!Number.isFinite(startMs) || nowMs - startMs < livenessBoundMs) continue; // unknown age, or still live
+    orphans.add(runId);
+  }
+  return orphans;
+}

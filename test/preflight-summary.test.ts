@@ -24,7 +24,7 @@ test("W1-T2862: the worker-path wrapper reports filing failure and lets verdict 
 });
 
 test("W1-T2862: production consumes the summary before the first implementation verdict branch removes its worktree", () => {
-  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
   const directConsumer = source.indexOf("consumeSourceSizeFollowup(args)");
   const workerReturn = source.indexOf("driverResult = await runDiagnoseThenRetry");
   const consumer = source.indexOf("await reportWorkerSourceSizeFollowupWithGatePosture(", workerReturn);

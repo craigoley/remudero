@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -8,8 +9,44 @@ import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { scoutGardenSpec, scoutShard } from "#src/lib/scout-gardener.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const symptom = { step: "inbox.draft_error", older: 2, newer: 3, total: 5, files: [] };
+
+test("scout writer discovery finishes after nested templates and ignores later comment literals", (t) => {
+  const repo = gitRepo({ scope: t, kind: "scout-template-writer" });
+  mkdirSync(join(repo.dir, "src"), { recursive: true });
+  mkdirSync(join(repo.dir, "scripts"), { recursive: true });
+  writeFileSync(join(repo.dir, "scripts/hash.sh"), '# "inbox.draft_error" is comment data');
+  const template = 'const value = `outer ${flag ? { nested: `inner ${name}` } : {}} tail`;\n';
+  writeFileSync(join(repo.dir, "src/comment.ts"), template + '/** `## Acceptance` "inbox.draft_error" */\n');
+  writeFileSync(join(repo.dir, "src/regex.ts"), 'const pattern = /"inbox.draft_error"/;\n');
+  writeFileSync(join(repo.dir, "src/writer.ts"), template + '/** `## Acceptance` "inbox.draft_error" */\nconst after = `before ${name} after`;\n// "inbox.draft_error" is comment data\nlog("inbox.draft_error");\n');
+  repo.git("add", "src", "scripts");
+  const moduleUrl = new URL("../src/lib/scout-gardener.ts", import.meta.url).href;
+  const shellText = '# "inbox.draft_error" is comment data\nprintf "inbox.draft_error"\n';
+  const program = `import { scoutShard, countScoutStepLiterals } from ${JSON.stringify(moduleUrl)};
+    import { createScanner, SyntaxKind } from "typescript/unstable/ast";
+    const result = scoutShard(${JSON.stringify(symptom)}, "W1-T99000", [5], ${JSON.stringify(repo.dir)});
+    const shellCount = countScoutStepLiterals("scripts/writer.sh", ${JSON.stringify(shellText)}, "inbox.draft_error");
+    const scanner = createScanner(true, undefined, "");
+    Object.assign(scanner, { scan: () => SyntaxKind.Unknown, getTokenEnd: () => 0, getTokenStart: () => 0 });
+    let refusal;
+    try { countScoutStepLiterals("src/nonprogress.ts", "", "inbox.draft_error", scanner); }
+    catch (error) { refusal = String(error); }
+    process.stdout.write(JSON.stringify({ ...result, refusal, shellCount }));`;
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", program], {
+    cwd: REPO_ROOT, encoding: "utf8", timeout: 10_000,
+  });
+  assert.ifError(child.error);
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout) as { text: string; refused?: string; refusal?: string; shellCount: number };
+  assert.equal(result.refused, undefined);
+  assert.equal(result.shellCount, 1, "shell comments are ignored while quoted command arguments remain writers");
+  assert.match(result.refusal ?? "", /source scanner did not advance in src\/nonprogress\.ts at 0/);
+  const task = loadPlanFromYaml(result.text, "template-draft.yaml").tasks[0]!;
+  assert.deepEqual(task.files?.slice(0, -1), ["src/writer.ts"], "the real writer survives; comment and regex data are not writers");
+});
 
 test("W1-T10261: a recon scout draft declares the file that writes its step", (t) => {
   const repo = gitRepo({ scope: t, kind: "scout-writer" });

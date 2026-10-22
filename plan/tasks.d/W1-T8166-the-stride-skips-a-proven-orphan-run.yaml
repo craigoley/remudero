@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator approval 2026-10-11 (\"go with your recommendations\"): the stride and the breaker disagree about orphans (follow-up to #10916)"
   plan_refs: [W1-T7742, W1-T3523, W1-T4064, W1-T7534, W1-T4025]
-  files: [src/lib/non-worker-verdict.ts, src/lib/status.ts, src/lib/dispatch-value.ts, test/the-stride-skips-a-proven-orphan-run.test.ts]
+  files: [src/lib/non-worker-verdict.ts, src/lib/status.ts, src/lib/dispatch-value.ts, test/the-stride-skips-a-proven-orphan-run.test.ts, test/new-work-is-ordered-by-cost-of-delay.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -64,3 +64,10 @@
     sorts after a fresh task of the same score, and the first and fourth tests fail. Exclude every run with no
     verdict: the run that did work spends nothing and the second test fails. Drop the liveness bound: the young
     start is excluded and the third test fails.
+  amendment: |
+    2026-10-22 explicit operator approval in the stuck-PR recovery chat: add only
+    test/new-work-is-ordered-by-cost-of-delay.test.ts as an existing fixture companion.
+    Its duplicate-start and unfinished-work fixtures must carry their own worker-activity
+    evidence; stale lone starts are intentionally proven orphans. Preserve all 66 original
+    assertion calls byte-for-byte, and preserve the orphan, young-run, unknown and breaker-parity controls.
+    No acceptance, falsifier, limit, baseline or gate changes are authorized by this ruling.

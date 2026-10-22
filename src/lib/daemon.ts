@@ -84,6 +84,7 @@ import {
 } from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
 import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
+import { createFleetAccountEpisode, redactedAccountLabel, type FleetAccountDivergence, type FleetAccountPair } from "./account-usage.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
@@ -1454,6 +1455,14 @@ export interface DaemonDeps {
     limitPct: number;
     resetsAt: string;
   }) => void | Promise<void>;
+  /** W1-T10381: the identities of the fleet credential store and the host login. Present, the
+   *  `daemon.headroom` row names the measured (store) account as a redacted `account`, and a store at
+   *  or over its reserve beside a different host account with headroom is one divergence episode.
+   *  Identity fields only; nothing is copied. A throw is ledgered, never fatal. */
+  readFleetAccounts?: () => FleetAccountPair | undefined;
+  /** Called at most once per (store uuid, host uuid) episode, on top of the `daemon.fleet_account_diverged`
+   *  row. A pure notification: the real command may add its own cross-boot ledger dedup. */
+  onFleetAccountDivergence?: (info: FleetAccountDivergence) => void | Promise<void>;
   /** Called at most once per park, on the tick the ceiling forces a blind dispatch — never per tick,
    *  which at a 60s poll would be a pager. Re-armed when the park ends. */
   onHeadroomParkCeiling?: (info: {
@@ -3886,6 +3895,7 @@ export async function runDaemon(
   // breach is read fresh every tick, so without this the hook would fire on every idle poll. Cleared
   // the moment a read reports the window back under the reserve (P34 (c), W1-T249).
   let headroomReserveEscalated = false;
+  const fleetAccountEpisode = createFleetAccountEpisode();
   // Disk headroom escalation dedup, threaded rather than redeclared into every ticker below so all three phases share
   // one latch for this run: a breach first observed mid-dispatch must not re-escalate the moment another phase
   // observes the same unresolved reading. Held as a mutable object because the ticker is a free function called fresh
@@ -6096,9 +6106,27 @@ export async function runDaemon(
         // nothing at all. Measured: no headroom line at all after the governor was armed on 2026-07-31.
         // Nothing about enforcement moved, only the under-ceiling silence. Forensics: docs/forensics/daemon.md.
         const reading = over ?? windows[0];
+        // W1-T10381: whose usage this row measured, and whether the host login has moved off it.
+        let fleetAccount: string | undefined;
+        let fleetDivergence: FleetAccountDivergence | undefined;
+        if (deps.readFleetAccounts) {
+          let pair: FleetAccountPair | undefined;
+          try {
+            pair = deps.readFleetAccounts();
+          } catch (e) {
+            log("daemon.fleet_account.unreadable", { error: String((e as Error)?.message ?? e) });
+          }
+          fleetAccount = redactedAccountLabel(pair?.store);
+          fleetDivergence = fleetAccountEpisode.observe(
+            pair,
+            over ? { window: over.window, percentUsed: over.percentUsed, limitPct: over.limitPct } : null,
+            daemonClock.now(),
+          );
+        }
         if (reading) {
           log("daemon.headroom", {
             ...(enforcingIdle ? { tick: ticks } : {}),
+            ...(fleetAccount !== undefined ? { account: fleetAccount } : {}),
             window: reading.window,
             percent_used: reading.percentUsed,
             limit_pct: reading.limitPct,
@@ -6110,6 +6138,23 @@ export async function runDaemon(
               ? {}
               : { note: "headroom governor disabled (ruling a4153e) — telemetry only, dispatch not gated" }),
           });
+        }
+        if (fleetDivergence) {
+          const row = fleetDivergence;
+          log("daemon.fleet_account_diverged", {
+            store_account: row.storeAccount,
+            host_account: row.hostAccount,
+            window: row.window,
+            store_percent_used: row.storePercentUsed,
+            host_percent_used: row.hostPercentUsed,
+            limit_pct: row.limitPct,
+            remedy: row.remedy,
+          });
+          try {
+            await deps.onFleetAccountDivergence?.(fleetDivergence);
+          } catch (e) {
+            log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+          }
         }
         if (enforcingIdle) {
           // Notify once per episode. Dispatch is already paused by this same branch, so the hook is a pure
