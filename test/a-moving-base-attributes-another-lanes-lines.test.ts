@@ -182,20 +182,79 @@ test("W1-T3060 criterion 3: on a non-merge HEAD, HEAD^1 is an ordinary parent �
   }
 });
 
+
+type BaseStep = { id?: string; name?: string; run?: string; env?: Record<string, string> };
+function movingBaseWorkflow(): { raw: string; doc: { jobs: Record<string, { steps?: BaseStep[] }> } } {
+  const raw = readFileSync(CI_YAML, "utf8");
+  return { raw, doc: parseYaml(raw) as { jobs: Record<string, { steps?: BaseStep[] }> } };
+}
+
+/** The producer may read exact parent-verified identity metadata, never use it for a diff.
+ * Every other step/env still rejects the event payload's moving base. */
+function assertNoStaleEventDiffSteps(jobs: Record<string, { steps?: BaseStep[] }>): void {
+  for (const [jobId, job] of Object.entries(jobs)) {
+    for (const step of job.steps ?? []) {
+      const env = { ...step.env };
+      if (Object.values(env).some(value => String(value).includes("pull_request.base.sha"))) {
+        assert.equal(jobId, "commitlint", "only the protected-base producer reads identity metadata");
+        assert.equal(step.id, "dependency-evidence");
+        assert.equal(step.name, "Observe merged dependencies with protected-base producer code");
+        assert.deepEqual(Object.keys(env).sort(), ["DEPENDENCY_BASE_SHA", "GH_TOKEN"]);
+        assert.equal(env.GH_TOKEN, "${{ github.token }}");
+        assert.equal(env.DEPENDENCY_BASE_SHA, "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}");
+        const run = step.run ?? "";
+        assert.ok(run.includes('[[ "$DEPENDENCY_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]'), "metadata must be a full immutable SHA");
+        assert.ok(run.includes('if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then'), "the parent check must apply to PRs");
+        assert.ok(run.includes('[ "$(git rev-parse --verify \'HEAD^1^{commit}\')" = "$dependency_base" ]'), "metadata must equal the checked-out merge's first parent");
+        assert.ok(run.includes('git archive "$dependency_base" | tar -x -C "$dependency_runtime"'), "only protected-base code may produce evidence");
+        assert.doesNotMatch(run, /\bgit\s+diff\b/, "identity metadata never authorizes a diff from the event base");
+        delete env.DEPENDENCY_BASE_SHA;
+      }
+      assert.ok(!Object.values(env).some(value => String(value).includes("pull_request.base.sha")), "all attribution envs reject the event payload's base");
+      assert.ok(!(step.run ?? "").includes("pull_request.base.sha"), "an inline event base cannot bypass the env guard");
+    }
+  }
+}
+
 // ── criterion 4: all seven, not just the two loud ones ─────────────────────────────────────────
 
 test("W1-T3060 criterion 4: no ci.yml step computes a diff from the event payload's base.sha", () => {
   // FIX ALL SEVEN OR THE DEFECT SURVIVES WHERE IT IS HARDEST TO SEE. The two diff-coverage sites
   // produce a loud red; lint-plan, mutation-ratchet, containment-probe and the §8A net-byte arm
   // produce a WIDER measurement that usually still passes, so they degrade silently.
-  const raw = readFileSync(CI_YAML, "utf8");
-  const doc = parseYaml(raw) as { jobs: Record<string, { steps?: Array<{ run?: string; env?: Record<string, string> }> }> };
+  const { raw, doc } = movingBaseWorkflow();
   const steps = Object.values(doc.jobs).flatMap((j) => j.steps ?? []);
-  const stale = steps.filter((s) => Object.values(s.env ?? {}).some((v) => String(v).includes("pull_request.base.sha")));
-  assert.deepEqual(stale, [], "no step may still carry the event payload's base sha");
+  assertNoStaleEventDiffSteps(doc.jobs);
   assert.doesNotMatch(raw, /git diff[^\n]*BASE_SHA[^\n]*\.\.\.HEAD/, "and none may diff from it");
   // The count is asserted so a site added later cannot quietly reintroduce the stale point while
   // the two assertions above still pass on the six that were fixed.
-  const usingFirstParent = steps.filter((s) => (s.run ?? "").includes("HEAD^1") || (s.env ?? {}).BASE_SHA === "HEAD^1");
+  const usingFirstParent = steps.filter((s) => (s as BaseStep).id !== "dependency-evidence" && ((s.run ?? "").includes("HEAD^1") || (s.env ?? {}).BASE_SHA === "HEAD^1"));
   assert.ok(usingFirstParent.length >= 6, `every rewritten site must read HEAD^1, found ${usingFirstParent.length}`);
+});
+
+test("moving-base fixture admits only parent-verified producer metadata", () => {
+  const { doc: { jobs } } = movingBaseWorkflow();
+  assertNoStaleEventDiffSteps(jobs);
+  const producer = jobs.commitlint!.steps!.find(step => step.id === "dependency-evidence")!;
+  assert.ok(producer, "the positive control must see the real producer");
+  const changed = (mutate: (step: BaseStep) => void) => {
+    const copy = structuredClone(jobs);
+    mutate(copy.commitlint!.steps!.find(step => step.id === "dependency-evidence")!);
+    return copy;
+  };
+  for (const invalid of [
+    changed(step => { step.id = "other-step"; }),
+    changed(step => { step.env!.DEPENDENCY_BASE_SHA = "${{ github.event.pull_request.base.sha }}"; }),
+    changed(step => { step.env!.BASE_SHA = step.env!.DEPENDENCY_BASE_SHA!; }),
+    changed(step => { step.run = step.run!.replace('[[ "$DEPENDENCY_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]', ':'); }),
+    changed(step => { step.run = step.run!.replace('HEAD^1^{commit}', 'HEAD^{commit}'); }),
+    changed(step => { step.run = step.run!.replace('git archive "$dependency_base"', 'git archive HEAD'); }),
+    changed(step => { step.run += '\ngit diff "$dependency_base"...HEAD\n'; }),
+  ]) assert.throws(() => assertNoStaleEventDiffSteps(invalid));
+  const elsewhere = structuredClone(jobs);
+  elsewhere.ci!.steps!.push(structuredClone(producer));
+  assert.throws(() => assertNoStaleEventDiffSteps(elsewhere));
+  const inline = structuredClone(jobs);
+  inline.ci!.steps!.push({ run: "git diff ${{ github.event.pull_request.base.sha }}...HEAD" });
+  assert.throws(() => assertNoStaleEventDiffSteps(inline));
 });

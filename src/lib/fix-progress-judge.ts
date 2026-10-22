@@ -214,18 +214,25 @@ export function rowPrNumber(row: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
-/** A delivered unfiled-scope or instrument-scope question is an authority wait, not another paid repair attempt.
+/** A delivered unfiled-, instrument- or workflow-scope question is an authority wait, not another paid repair attempt.
  * Only this PR/head is held; a new head or a genuine filed identity is re-derived normally.
- * An answer alone does not expand the PR's diff or grant paths to its worker. */
-export function unfiledScopeStandDown(ledger: readonly Record<string, unknown>[],
-  pr: { taskId?: string; prNumber: number; headSha: string }): string | undefined {
+ * An answer alone does not expand the PR's diff or grant paths to its worker. A workflow need holds a filed task
+ * too: the fix lane never edits a workflow (W1-T9851), so each round at the head re-asked it (#13317, five rounds).
+ * The sweep releases an instrument or workflow hold through an amended task contract (`contractRevision`, the
+ * revision the escalation stood on), since only the operator can grant those paths. */
+export interface ScopeEscalationHold { kind: "unfiled" | "instrument" | "workflow"; reason: string; contractRevision?: string }
+export function scopeEscalationStandDown(ledger: readonly Record<string, unknown>[],
+  pr: { taskId?: string; prNumber: number; headSha: string }): ScopeEscalationHold | undefined {
   const unfiled = !pr.taskId || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`;
   const held = ledger.findLast(row => row.step === "fix.scope_amendment" && rowPrNumber(row) === pr.prNumber &&
-    row.head_sha === pr.headSha && (row.outcome === "instrument-escalated" || (unfiled && row.outcome === "unfiled-escalated")) &&
+    row.head_sha === pr.headSha && (row.outcome === "instrument-escalated" || row.outcome === "workflow-escalated" ||
+      (unfiled && row.outcome === "unfiled-escalated")) &&
     typeof row.issue_url === "string" && row.issue_url.length > 0 &&
     Array.isArray(row.paths) && row.paths.length > 0 && row.paths.every(p => typeof p === "string" && p.length > 0));
-  const kind = held?.outcome === "instrument-escalated" ? "instrument" : "unfiled";
-  return held ? `${kind} scope decision awaits resolution at this head — ${held.issue_url}; no automatic judge or fix round spent` : undefined;
+  if (!held) return undefined;
+  const kind = held.outcome === "instrument-escalated" ? "instrument" : held.outcome === "workflow-escalated" ? "workflow" : "unfiled";
+  return { kind, reason: `${kind} scope decision awaits resolution at this head — ${held.issue_url}; no automatic judge or fix round spent`,
+    ...(typeof held.contract_revision === "string" ? { contractRevision: held.contract_revision } : {}) };
 }
 
 export function buildFixProgressInput(facts: {
