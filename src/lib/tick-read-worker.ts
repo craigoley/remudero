@@ -1,3 +1,4 @@
+import { hydrateDependencyMainIdentitiesSteps } from "./dependency-main-identity.js";
 /**
  * lib/tick-read-worker.ts — W1-T9722: the daemon's read-plane worker starts here, not from src/run-task.ts.
  *
@@ -51,16 +52,25 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { reviewTaskIdFromBody } from "./report-commands.js";
 
-/** REST rollups preserve check-run order, so the raw response can supply external_id without
- * changing the shared REST mapper used by unrelated callers. */
+/** REST rollups preserve check-run order: retain external_id and the exact head/constituent
+ * outcome beside each row without changing the shared REST mapper's unrelated callers. */
 export function attachPostedGateIds<T extends object>(
   rollup: T[],
   response: unknown,
 ): T[] {
-  const runs = (response as { check_runs?: Array<{ external_id?: unknown }> } | undefined)?.check_runs;
+  const runs = (response as { check_runs?: Array<{ external_id?: unknown; head_sha?: unknown; output?: { summary?: unknown } }> } | undefined)?.check_runs;
   runs?.forEach((run, index) => {
     if (typeof run.external_id === "string" && rollup[index]) {
       (rollup[index] as T & { externalId?: string }).externalId = run.external_id;
+    }
+    if (rollup[index] && typeof run.head_sha === "string" && /^[a-f0-9]{40}$/.test(run.head_sha)) {
+      (rollup[index] as T & { headSha?: string }).headSha = run.head_sha;
+      const name = (rollup[index] as T & { name?: string }).name;
+      const summary = typeof name === "string"
+        ? `W1-T4399: reported by this job's ${name} step(s) (outcome(s): cancelled)` : undefined;
+      if (summary !== undefined && run.output?.summary === summary) {
+        (rollup[index] as T & { outputSummary?: string }).outputSummary = summary;
+      }
     }
   });
   return rollup;
@@ -609,6 +619,10 @@ export function buildBehindMainByPr(
 
 /** One rollup check entry as `gh pr list --json statusCheckRollup` returns it. */
 export interface RollupCheck {
+  /** Exact REST identity and posted constituent outcome; absent on unreadable/GraphQL-only rows. */
+  headSha?: string;
+  outputSummary?: string;
+  checkRunId?: number;
   __typename?: string;
   name?: string;
   context?: string;
@@ -635,6 +649,7 @@ export interface RawOpenPr {
   updatedAt: string;
   body: string;
   autoMergeRequest: unknown;
+  contributionOrigin?: OpenPrRest["contributionOrigin"];
   statusCheckRollup?: RollupCheck[];
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
@@ -1597,13 +1612,34 @@ function* ciFailuresSteps(
 export function cancelledRequiredChecks(
   rollup: RollupCheck[] | undefined,
   requiredContexts: string[] | undefined,
+  headSha?: string,
 ): CancelledRequiredCheck[] {
   const names = new Set(cancelledRequiredCheckNames(rollup, requiredContexts));
   if (names.size === 0) return [];
   const deduped = dedupeRollupByLatestAttempt(rollup ?? []);
   return deduped
     .filter((c) => names.has(c.name ?? c.context ?? "unknown"))
-    .map((c) => ({ name: c.name ?? c.context ?? "unknown", jobId: checkJobId(c) }));
+    .map((c) => {
+      const check: CancelledRequiredCheck = { name: c.name ?? c.context ?? "unknown", jobId: checkJobId(c) };
+      const producer = c.detailsUrl?.match(/\/actions\/runs\/([1-9]\d*)\/job\/([1-9]\d*)(?:[/?#]|$)/);
+      if (!headSha || !/^[a-f0-9]{40}$/.test(headSha) || c.headSha !== headSha || (c.status ?? "").toUpperCase() !== "COMPLETED" || !producer || producer[2] !== check.jobId) return check;
+      const aliases = deduped.flatMap(posted => {
+        const id = posted.externalId?.match(/^run:([1-9]\d*):([1-9]\d*):job:([1-9]\d*)$/);
+        const name = posted.name ?? posted.context;
+        if (!name || name === check.name || posted.headSha !== headSha || !id ||
+            id[1] !== producer[1] || id[3] !== check.jobId || checkJobId(posted) !== check.jobId ||
+            !Number.isSafeInteger(posted.checkRunId) || (posted.checkRunId ?? 0) <= 0 || !Number.isSafeInteger(Number(id[2])) ||
+            (posted.conclusion ?? posted.state ?? "").toUpperCase() !== "FAILURE" ||
+            (posted.status ?? "").toUpperCase() !== "COMPLETED" ||
+            posted.outputSummary !== `W1-T4399: reported by this job's ${name} step(s) (outcome(s): cancelled)`) return [];
+        return [{ name, attempt: Number(id[2]), checkRunId: posted.checkRunId! }];
+      });
+      if (aliases.length > 0 && new Set(aliases.map(a => a.attempt)).size === 1) {
+        check.explainedFailures = aliases.map(({ name, checkRunId }) => ({ name, checkRunId }));
+        check.runAttempt = aliases[0].attempt;
+      }
+      return check;
+    });
 }
 
 /**
@@ -2043,6 +2079,7 @@ function openPrPlanIdentity(path: string): { kind: "readable"; identity: string 
 
 interface OpenPrViewReads {
   read: GhApiFetcher;
+  dependencyIdentityRead?: GhApiFetcher;
   openPrRows: () => unknown;
   ciFailures: (owner: string, repo: string, rollup: RollupCheck[] | undefined) => CiFailure[] | Promise<CiFailure[]>;
   requiredContexts: (owner: string, repo: string) => RequiredContextsRead | Promise<RequiredContextsRead>;
@@ -2149,6 +2186,7 @@ export function* openPrViewSteps(
   // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
   // without it enter the bounded REST hydrator; complete reads are cached by exact head.
   const emitterPlanFilings = new Map(raw.map((pr) => [pr.number, isPlanOnlyFilingPr(ledger, pr.url)]));
+  const planFilingFileCache = deps.planFilingFileCache ?? createPlanFilingFileCache();
   const planFilingFiles = yield* hydratePlanFilingFilesSteps(
     owner,
     repo,
@@ -2158,8 +2196,11 @@ export function* openPrViewSteps(
         number: pr.number, headRefOid: pr.headRefOid, nominated: resolveOpenPrTaskId(pr, false) === undefined,
       })),
     fetch,
-    deps.planFilingFileCache ?? createPlanFilingFileCache(),
+    planFilingFileCache,
     { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
+  );
+  const dependencyMainIdentities = yield* hydrateDependencyMainIdentitiesSteps(
+    owner, repo, raw, planFilingFiles, io.dependencyIdentityRead ?? fetch, planFilingFileCache,
   );
   const planFilingClassifications = new Map<number, PlanFilingClassification>();
   for (const pr of raw) {
@@ -2493,6 +2534,7 @@ export function* openPrViewSteps(
       taskExistsOnMain: taskId === undefined ? undefined : taskRecord !== undefined,
       introducedTaskIds: observedFiles === undefined ? undefined : introducedTaskIdsFromPlanPaths(observedFiles),
       changedFiles: observedFiles,
+      dependencyMainIdentity: dependencyMainIdentities.get(pr.number),
       taskDeclaredFiles: taskRecord?.files,
       // W1-T528: the operator's hold, straight off the SAME list row the enumeration already
       // fetched — no extra request, because `draft` rides on GitHub's `pull-request-simple`
@@ -2519,7 +2561,7 @@ export function* openPrViewSteps(
       // `runSweep` ACTS on a cancellation before the gate concludes red is a separate question
       // `isBlockedCi` still gates (lib/sweep.ts) — this only stops the data itself from being
       // thrown away while pending.
-      cancelledRequiredChecks: cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts),
+      cancelledRequiredChecks: cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts, pr.headRefOid),
       // W1-T176: only meaningful in the zero-runs shape post-review routes on;
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.
@@ -2635,9 +2677,11 @@ export function buildOpenPrViewsAsync(
     readRequiredContextsAsync?: (owner: string, repo: string) => Promise<RequiredContextsRead>;
   } = {},
 ): Promise<ClassifiedOpenPrView[]> {
-  const read: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  const transport: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  const read = transport;
   return runStepsAsync(openPrViewSteps(owner, repo, ledgerPath, deps, {
     read,
+    dependencyIdentityRead: (args, onRateLimit) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => transport(args, onRateLimit)),
     openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, read, deps.pacer),
     ciFailures: deps.fetchCiFailureEvidence ?? deps.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync,
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,

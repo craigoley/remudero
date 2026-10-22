@@ -23,8 +23,10 @@ worker_lane=$confine_file_tools
 # Write/Edit/Read carry `file_path`. Fall back to raw input if jq is absent.
 if command -v jq >/dev/null 2>&1; then
   have_jq=1
-  cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""')"
-  path="$(printf '%s' "$input" | jq -r '.tool_input.file_path // ""')"
+  # W1-T10302: a Codex shell call names its command under tool_input.command (or .cmd for exec_command), and
+  # its tool_input is not always an object; an array is one argv. A Claude Bash call is unchanged by this.
+  cmd="$(printf '%s' "$input" | jq -r '(.tool_input | if type == "object" then (.command // .cmd // "") else "" end) | if type == "array" then join(" ") else tostring end')"
+  path="$(printf '%s' "$input" | jq -r '(.tool_input | if type == "object" then (.file_path // "") else "" end)')"
   hook_cwd="$(printf '%s' "$input" | jq -r '.cwd // ""')"
 else
   have_jq=0
@@ -34,7 +36,22 @@ else
 fi
 haystack="$cmd $path"
 
+# W1-T10302: RMD_DENY_FLOOR_ONLY=gh-read is how .codex/config.toml wires the operator's Codex sessions to this
+# floor. It judges ONLY the GitHub-read routing of rule 10 (and rule 7's refusal of a polling loop, so `rmd gh`
+# is no escape from it): the other rules encode the Claude session and fleet-worker contracts, and whether
+# they bind the operator's own Codex sessions is a separate operator decision. Every other refusal is skipped
+# under it; rule 10 and rule 7 refuse as they always do. Set inline in the hook command, so it IS in this env.
+deny_only="${RMD_DENY_FLOOR_ONLY:-}"
+# A file tool's payload carries the file's TEXT, which may merely mention a read command: not a shell call.
+if [ "$deny_only" = gh-read ] && [ "$have_jq" -eq 1 ]; then
+  case "$(printf '%s' "$input" | jq -r '.tool_name // ""')" in
+    apply_patch|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob) exit 0 ;;
+  esac
+fi
 deny() {
+  if [ "$deny_only" = gh-read ]; then
+    case "$1" in "inline polling loop"*) ;; *) return 0 ;; esac
+  fi
   printf 'deny-floor: blocked — %s\n' "$1" >&2
   exit 2
 }
@@ -60,9 +77,9 @@ invokes_gh() {
     | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
 
-# `rmd gh [--class c] [--fresh] -- <args>` runs `gh <args>`, so rules 2, 4, 5 and 10 all judge this text.
+# `rmd gh [--class c] [--client x] [--fresh] -- <args>` runs `gh <args>`, so rules 2, 4, 5 and 10 all judge this text.
 # Only rule 10 used to, and `rmd gh -- pr merge 1` passed rule 5 in a worker. rmd gh also refuses writes.
-gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
+gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--client[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
 
 # 1) a push whose DESTINATION is a default branch (main/master), judged per command SEGMENT (W1-T4588)
 #    by its PARSED refspecs (W1-T5352), never by substrings. Two loose greps -- a force flag anywhere
@@ -1601,7 +1618,12 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
       [ "$have_jq" -eq 1 ] && gh_agent="$(printf '%s' "$input" | jq -r '.agent_id // .agent_type // ""' 2>/dev/null || true)"
       if [ "$worker_lane" -eq 1 ] || [ -n "$gh_agent" ]; then gh_class=agent; fi
       printf 'deny-floor: routed - a live GitHub read broker serves this account (W1-T10279).\n' >&2
-      printf '  Re-run the read as: rmd gh --class %s -- <same gh args>\n' "$gh_class" >&2
+      if [ "$deny_only" = gh-read ]; then
+        # W1-T10302: this floor was wired by .codex/config.toml, so the reader is Codex and the instruction names it.
+        printf '  Re-run the read as: rmd gh --class %s --client codex -- <same gh args>\n' "$gh_class" >&2
+      else
+        printf '  Re-run the read as: rmd gh --class %s -- <same gh args>\n' "$gh_class" >&2
+      fi
       printf '  It answers exactly as gh would, from cache when GitHub says the answer is fresh.\n' >&2
       exit 2
     fi

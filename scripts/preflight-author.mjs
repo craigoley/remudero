@@ -359,10 +359,11 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     // Keep terminal feedback small even for thousands of suites. Never rerun to recover output.
     console.log(`${name}: ${!ok ? 'FAIL' : metadata.notMeasured ? 'NOT MEASURED' : 'PASS'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
     const failures = stdout.split('\n').filter((line) => /^\s*not ok [0-9]+/.test(line));
-    if (failures.length) console.log(failures.slice(0, 40).join('\n').slice(0, 4096));
+    const replay = (text, channel) => text.split('\n').map(line => `[author ${name} ${channel}] ${line}`).join('\n') + '\n';
+    if (failures.length) console.log(replay(failures.slice(0, 40).join('\n').slice(0, 4096), 'failures'));
     if (failures.length > 40) console.log(`additional failure titles in the saved log: ${failures.length - 40}`);
-    process.stdout.write(stdout.slice(-4096));
-    process.stderr.write(stderr.slice(-4096));
+    process.stdout.write(replay(stdout.slice(-4096), 'stdout'));
+    process.stderr.write(replay(stderr.slice(-4096), 'stderr'));
     if (result.error) console.error(`${name}: ${result.error.code ?? 'spawn-error'}: ${result.error.message}; captured logs may be incomplete`);
   };
   try {

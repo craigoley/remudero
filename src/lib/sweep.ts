@@ -1,3 +1,4 @@
+import type { DependencyMainIdentity } from "./dependency-main-identity.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
@@ -87,7 +88,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
@@ -203,7 +204,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -1583,7 +1584,7 @@ export interface BuildSweepEffectsDeps {
   fixSupersededPollMsOverride?: number;
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
-  readJsonImpl?: (args: string[]) => Promise<unknown>;
+  readJsonImpl?: (args: string[], readOpts?: GhJsonReadOptions) => Promise<unknown>;
   fleetDeployStateImpl?: DeployStateReader;
   fleetDeploySensorsImpl?: DeployStateReader["deploy"];
   /** Shared pacer; omitted for the existing immediate CLI/test mode. */
@@ -1921,6 +1922,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "arm",
   "readArmFacts",
   "close",
+  "withDependencyCloseFence",
   "dispatchFix",
   // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
   // spent and the caller has wired it (see planCappedRepair, classify.ts).
@@ -2078,6 +2080,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "arm"
   | "readArmFacts"
   | "close"
+  | "withDependencyCloseFence"
   | "headRehome"
   | "dispatchFix"
   | "dispatchPlanOnlyRepair"
@@ -2169,7 +2172,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixSupersededPollMsOverride,
     reclaimWorkerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reclaimWorkerImpl"]>>("reclaimWorkerImpl"),
     disarmImpl = disarmAutoMerge,
-    readJsonImpl = ghJsonAsync,
+    readJsonImpl = (args, readOpts) => ghJsonAsync(args, undefined, undefined, readOpts),
     pacer,
     fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
@@ -2917,6 +2920,30 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return { quiet: choice === "trailer", reason: `activity judge chose ${choice}: ${JSON.stringify(result.distribution)}` };
       },
     }),
+
+    withDependencyCloseFence: async (pr, close) => {
+      const proof = pr.dependencyMainIdentity;
+      if (proof?.state !== "identical" || proof.headSha !== pr.headSha || !pr.headRefName)
+        return { closed: false, reason: "dependency identity missing or unbound" };
+      let claim: InflightLockHandle | undefined;
+      try {
+        // Strict mode never inspects, reaps or steals a foreign inode, even a malformed one.
+        claim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, pr.headRefName), { run_id: runId, reclaim: false });
+        const main = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/main`], { fresh: true }) as { sha?: unknown } | undefined;
+        const live = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`], { fresh: true }) as {
+          state?: unknown; merged?: unknown; draft?: unknown; head?: { sha?: unknown; ref?: unknown }; base?: { ref?: unknown; sha?: unknown };
+          user?: { login?: unknown }; changed_files?: unknown;
+        } | undefined;
+        if (main?.sha !== proof.mainSha || live?.state !== "open" || live.merged !== false || live.draft !== false ||
+            live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" || live.base.sha !== proof.mainSha ||
+            typeof live.user?.login !== "string" || !isDependabotAuthor({ login: live.user.login }) || live.changed_files !== proof.files.length)
+          return { closed: false, reason: "fresh dependency close lifecycle/head/main evidence changed or unavailable" };
+        await close();
+        return { closed: true };
+      } catch (error) {
+        return { closed: false, reason: `dependency close claim or fresh read/effect refused: ${String(error)}` };
+      } finally { claim?.release(); }
+    },
 
     close: (pr, reason) => {
       try {
@@ -6619,8 +6646,9 @@ export interface OpenPrView {
   taskExistsOnMain?: boolean;
   /** Task ids whose plan records this PR added. Used only to refuse missing-trailer self-credit. */
   introducedTaskIds?: readonly string[];
-  /** This PR's changed paths, when already observed by the gateway. */
+  /** Observed PR paths; dependencyMainIdentity separately binds whole-path Git blob/mode identity to exact head and pinned main. */
   changedFiles?: readonly string[];
+  dependencyMainIdentity?: DependencyMainIdentity;
   /** The branch-derived task's declared files, when already observed from its main-plan record. */
   taskDeclaredFiles?: readonly string[];
   /** Observed: is GitHub auto-merge already armed on this PR? */
@@ -7030,14 +7058,16 @@ export function checksPendingSinceFromRollup(
  *  verdict rather than a bad one, so the job can be re-queued instead of a worker dispatched. */
 export interface CancelledRequiredCheck {
   name: string;
+  /** Failed posted gates whose exact head/run/attempt/job and own cancelled outcome bind to this producer. */
+  explainedFailures?: readonly { name: string; checkRunId: number }[];
   /** GitHub Actions job id, parsed by the real gateway from the rollup's URL or external id — the
    *  re-queue target is the JOB (design iv), never the workflow run. `undefined` when none could
    *  be read, and the real `requeueCheck` wiring then degrades to a named no-op. */
   jobId?: string;
   /** W1-T2431 — GitHub's OWN `run_attempt`, read off the SAME rollup {@link jobId} is parsed from:
    *  no new gateway, no new credential. A SURFACE the fleet does not write, so it counts an
-   *  operator's own re-run too. No producer sets it today — a WIDENING of the `true` case, never a
-   *  replacement that could narrow it. */
+   *  operator's own re-run too. An exact posted-gate cancellation link supplies its producer's
+   *  attempt; otherwise absent, preserving the ledger-derived retry bound. */
   runAttempt?: number;
 }
 
@@ -9359,7 +9389,7 @@ export const PLAN_REPAIR_STEP = "sweep.plan_repair";
  *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it.
  *  Exported so a fixture drives its refusing arm directly (W1-T2317's negative-reachability ratchet). */
 export const MACHINE_LANE_HEAD_RE = new RegExp(
-  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout)-garden-\\d+" +
+  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay)-garden-\\d+" +
     "|(?:feedback|decisions|plan-reconcile|ci-learning)-landing(?:-[a-z0-9-]+)?" +
     "|run-(?:TRIAGE|APPROVE)-.+|run-RETRO(?:-.+)?)$",
 );
@@ -9387,7 +9417,7 @@ export interface PlanRepairFacts {
   gardenRecordRefusal?: string;
 }
 
-const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout)-garden-\d+$/;
+const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay)-garden-\d+$/;
 
 function gardenRecordRefusalCandidate(pr: OpenPrView): boolean {
   const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)]
@@ -13306,8 +13336,9 @@ export interface SweepDeps {
    *  where {@link extractRefusal} found a refusal, so an ordinary `no_pr` never reaches this and
    *  keeps its retry path. Called once per full pass; omitted, the sweep never looks. */
   draftRefusalAmendments?: (candidates: readonly RefusalCandidate[]) => Promise<readonly RefusalAmendmentResult[]>;
-  /** Close a superseded/abandoned PR with a stated reason. */
+  /** Close superseded/abandoned PRs with a reason; the dependency fence alone holds the existing branch mutex through fresh reads and close. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
+  withDependencyCloseFence?: (pr: OpenPrView, close: () => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold" or an incomplete/unknown result, which re-run next sweep because a red
@@ -18434,6 +18465,20 @@ export async function runSweep(
         continue;
       }
     }
+    const dependencyIdentity = pr.dependencyMainIdentity;
+    const dependencyMainSupersession = disposition !== "mergeable" && disposition !== "stale" &&
+      dependencyIdentity?.state === "identical" && dependencyIdentity.headSha === pr.headSha &&
+      pr.isDependabot === true && pr.isDraft !== true && pr.changedFiles !== undefined && pr.changedFiles.length > 0 &&
+      new Set(pr.changedFiles).size === pr.changedFiles.length &&
+      JSON.stringify([...pr.changedFiles].sort()) === JSON.stringify(dependencyIdentity.files.map(file => file.path).sort()) &&
+      automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
+      !(pr.ciFailures ?? []).some(failure => failure.name === "proof-discrimination") &&
+      staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS;
+    if (dependencyMainSupersession) {
+      staleProofCloses += 1;
+      reason = `superseded — every dependency file's regular mode and blob already match main ${dependencyIdentity.mainSha} at head ${pr.headSha}`;
+      disposition = "stale";
+    }
     const emptyDiffSupersession = emptyDiffSupersedes(pr, disposition) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS;
     if (emptyDiffSupersession) {
       staleProofCloses += 1;
@@ -18481,6 +18526,12 @@ export async function runSweep(
         ...pr.cancelledRequiredChecks!.map(c => c.name),
       ], rollup));
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
+      const freshByName = new Map(dedupeRollupByLatestAttempt(rollup ?? []).map(c => [c.name ?? c.context, c]));
+      const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
+        .filter(alias => {
+          const latest = freshByName.get(alias.name);
+          return !latest || !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest));
+        }).map(alias => alias.name));
       const deterministicTimeouts = new Set<string>();
       const outcomes: string[] = [];
       let escalated = false;
@@ -18500,6 +18551,17 @@ export async function runSweep(
           continue;
         }
         if (deferred !== undefined) continue;
+        if (check.explainedFailures?.length) {
+          const producer = freshByName.get(check.name);
+          if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
+              (producer.status ?? "").toUpperCase() !== "COMPLETED" || checkJobId(producer) !== check.jobId || !check.explainedFailures.every(alias => {
+                const latest = freshByName.get(alias.name);
+                return latest !== undefined && latest.checkRunId === alias.checkRunId && rollupState(latest) === "FAILURE";
+              })) {
+            outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
+            continue;
+          }
+        }
         if (decision.requeue) {
           const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), rollup);
           if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
@@ -18519,7 +18581,10 @@ export async function runSweep(
       }
       // Only ci and ci-gate downstream of this cancelled shard are explained by cancellation.
       const genuine = [...fresh].filter(name => deterministicTimeouts.has(name) ||
-        (!cancelled.some(c => c.name === name) && name !== "ci-gate" &&
+        (!explained.has(name) && !cancelled.some(c => c.name === name &&
+          !(c.explainedFailures?.length && dedupeRollupByLatestAttempt(rollup ?? []).some(latest =>
+            (latest.name ?? latest.context) === name && REQUIRED_CHECK_FAIL.has(rollupState(latest)) &&
+            rollupState(latest) !== "CANCELLED"))) && name !== "ci-gate" &&
           !(name === "ci" && pr.cancelledRequiredChecks!.some(c => /^ci-shard \(\d+\/\d+\)$/.test(c.name)))));
       if (genuine.length === 0) {
         infrastructureBlockerByPr.set(pr.prNumber, escalated ? "escalated" : "awaiting-ci");
@@ -20611,7 +20676,12 @@ export async function runSweep(
                   break;
                 }
               }
-              await deps.close(pr, reason);
+              if (dependencyMainSupersession) {
+                const fenced = await deps.withDependencyCloseFence?.(pr, async () => { await deps.close(pr, reason); });
+                acted = fenced?.closed === true;
+                if (!acted) standDownReason = fenced?.reason ?? "dependency close requires a strict fresh lifecycle/main/owner fence";
+                extraDisposedFields = { ...extraDisposedFields, dependency_main_identity: dependencyIdentity };
+              } else await deps.close(pr, reason);
               break;
             }
             case "refused-escalate":

@@ -26,7 +26,10 @@ import {
   type FixDispatchSnapshot,
   type RollupCheckEntry,
 } from "../src/lib/sweep.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { activeWorkerCount, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "../src/lib/worker.js";
+import { resetMemoryAdmissionStateForTests, waitingStarts } from "../src/lib/host-memory-admission.js";
+import { MEMORY_ADMISSION_LOCK_BUSY } from "../src/lib/host-memory-ledger.js";
+import type { HostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
 import { priorStrikesFor, runFixRung } from "./helpers/run-task-test.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -99,7 +102,9 @@ const NEVER_ISSUES: IssueGateway = {
 /** Drive the real runFixRung in ci-log mode with the real watcher; `read` is the one PR read. */
 async function runWatchedRung(opts: {
   read: () => Promise<{ headSha?: string; rollup?: RollupCheckEntry[] }>;
-  spawn: (reads: () => number) => Promise<WorkerResult>;
+  spawn: (reads: () => number, args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  spawnWallClockBoundMs?: number;
+  onReclaim?: () => void;
   watchSuperseded?: (s: FixDispatchSnapshot, signal: AbortSignal) => Promise<never>;
 }) {
   const logs: Row[] = [];
@@ -124,7 +129,7 @@ async function runWatchedRung(opts: {
       initialReview: review("failure", OLD_HEAD),
       ciFailures: [{ name: "ci", logTail: "coverage suite red" }],
       deps: {
-        spawn: () => opts.spawn(() => reads),
+        spawn: args => opts.spawn(() => reads, args),
         waitForCiGreen: async () => "green",
         runReview: async () => review("success", NEW_HEAD),
         push: () => {},
@@ -133,8 +138,8 @@ async function runWatchedRung(opts: {
         log: (step, extra) => logs.push({ step, extra: { task_id: TASK, ...extra } }),
         say: () => {},
         account: (r) => r,
-        spawnWallClockBoundMs: 60_000,
-        reclaimWorker: (info) => void reclaims.push(info.runId),
+        spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? 60_000,
+        reclaimWorker: info => { reclaims.push(info.runId); opts.onReclaim?.(); },
         watchSuperseded:
           opts.watchSuperseded ??
           ((snapshot, signal) =>
@@ -417,4 +422,109 @@ test("W1-T4105: the sweep's fix dispatch watches the PR with one read per poll a
 
   const plain = await dispatchWithRung("plain");
   assert.equal(plain.removed.length, 1, "an ordinary round's worktree is still removed");
+});
+
+
+test("a superseded fix cancels its real pending admission before capacity can start a worker", async t => {
+  resetMemoryAdmissionStateForTests();
+  const root = mkdtempSync(join(tmpdir(), "rmd-superseded-admission-"));
+  t.after(() => { resetMemoryAdmissionStateForTests(); rmSync(root, { recursive: true, force: true }); });
+  let enter!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  let pending!: Promise<WorkerResult>;
+  let callSignal!: AbortSignal;
+  const cleanup = new AbortController();
+  t.after(() => cleanup.abort());
+  let attempts = 0;
+  const occupancy = activeWorkerCount();
+  const { outcome, logs, reclaims } = await runWatchedRung({
+    read: async () => { await entered; return { headSha: NEW_HEAD }; },
+    spawn: (_reads, args) => {
+      assert.ok(args.signal, "the real worker must receive cancellation from its bounded fix caller");
+      callSignal = args.signal;
+      pending = spawnWorker({ ...args, config: { ...args.config, root } as Config, signal: AbortSignal.any([args.signal, cleanup.signal]), settingsFile: "/missing-settings-must-never-be-read", memoryShadow: {
+        policy: () => ({ mode: "enforce" } as HostMemoryBudgetPolicy), enforceHere: () => true,
+        withLock: () => { throw Object.assign(new Error("fixture admission lock busy"), { code: MEMORY_ADMISSION_LOCK_BUSY }); },
+        write: () => {}, stderr: () => {},
+        sleep: async (_ms, signal) => {
+          attempts++; enter();
+          await new Promise<void>(resolve => {
+            if (signal?.aborted) resolve();
+            else signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+        },
+      } });
+      return pending;
+    },
+  });
+  // Own-fixture cleanup also bounds the delete-fix case; it never permits a real model start.
+  cleanup.abort();
+  const result = await pending;
+  assert.equal(callSignal.aborted, true, "supersession itself must cancel admission, independently of fixture cleanup");
+  assert.equal(outcome.outcome, "stood_down");
+  assert.equal(outcome.strikes, 0);
+  assert.equal(result.notStarted, "admission-abandoned");
+  assert.equal(result.numTurns, 0);
+  assert.equal(attempts, 1, "positive control: actual default spawn reached the real admission loop");
+  assert.equal(waitingStarts().length, 0);
+  assert.equal(activeWorkerCount(), occupancy);
+  assert.deepEqual(reclaims, [RUN]);
+  assert.equal(logs.filter(row => row.step === "fix.dispatch").length, 0);
+});
+
+test("a superseded fix aborts before reclaim and safely observes late success or rejection", async () => {
+  for (const reject of [false, true]) {
+    let finish!: (result: WorkerResult) => void;
+    let fail!: (error: Error) => void;
+    let signal!: AbortSignal;
+    let cancelled = false;
+    const pending = new Promise<WorkerResult>((resolve, rejectPromise) => { finish = resolve; fail = rejectPromise; });
+    const { outcome, logs } = await runWatchedRung({
+      read: async () => ({ headSha: NEW_HEAD }),
+      onReclaim: () => assert.equal(cancelled, true, "the admission signal must abort before process reclaim"),
+      spawn: (_reads, args) => {
+        signal = args.signal!;
+        signal.addEventListener("abort", () => { cancelled = true; }, { once: true });
+        return pending;
+      },
+    });
+    assert.equal(outcome.outcome, "stood_down");
+    assert.equal(signal.aborted, true);
+    assert.equal(cancelled, true);
+    if (reject) fail(new Error("owned late cancellation rejection"));
+    else finish(fakeWorkerResult());
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(logs.filter(row => row.step === "fix.spawn_settled_after_abandon").length, reject ? 1 : 0);
+    assert.equal(logs.filter(row => row.step === "fix.dispatch").length, 0);
+  }
+});
+
+test("a healthy completed fix leaves its call signal live and spends its ordinary strike", async () => {
+  let signal!: AbortSignal;
+  const { outcome, reclaims } = await runWatchedRung({
+    read: async () => ({ headSha: OLD_HEAD }),
+    spawn: async (_reads, args) => { signal = args.signal!; return fakeWorkerResult(); },
+  });
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(outcome.strikes, 1);
+  assert.equal(signal.aborted, false, "successful cleanup must not cancel a completed healthy call");
+  assert.deepEqual(reclaims, []);
+});
+
+test("the existing fix spawn deadline cancels pending admission without spending a strike", async () => {
+  let signal!: AbortSignal;
+  let finish!: (result: WorkerResult) => void;
+  const { outcome, reclaims } = await runWatchedRung({
+    read: async () => ({ headSha: OLD_HEAD }), spawnWallClockBoundMs: 20,
+    spawn: (_reads, args) => {
+      signal = args.signal!;
+      return new Promise<WorkerResult>(resolve => { finish = resolve; });
+    },
+  });
+  assert.equal(outcome.outcome, "spawn_abandoned");
+  assert.equal(outcome.strikes, 0);
+  assert.equal(signal.aborted, true);
+  assert.deepEqual(reclaims, [RUN]);
+  finish(fakeWorkerResult());
+  await new Promise<void>(resolve => setImmediate(resolve));
 });

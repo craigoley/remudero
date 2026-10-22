@@ -36,7 +36,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
-  rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>   # Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.
+  rmd gh [--class interactive|agent|background] [--client claude|codex|agent] [--fresh] -- <gh args>   # Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.
   rmd gh-broker serve | status [--since <dur>] | stop   # Serve, inspect or stop the per-account GitHub read broker (Mac only; installed by deploy/mac).
   rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>   # Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
@@ -94,6 +94,7 @@ usage:
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
   rmd release <task-id> --reason <text>   # Release a halted task's dispatch circuit breaker; dispatchable next tick.
   rmd garden run <name> [--hourly] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]   # Run one pass of one registered gardener (the daemon's off-loop child).
+  rmd review-replay refresh   # Refresh the recorded review sample from the complete retained ledger union.
   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.
   rmd notify <message>   # Real-time iMessage ping (osascript).
   rmd digest [--since <iso>] [--dry-run]   # Roll up the ledger into one daily digest message.
@@ -358,10 +359,10 @@ the deduplicated union of every state/ledger.*.ndjson.gz archive and the live st
 Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.
 
 ```
-rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>
+rmd gh [--class interactive|agent|background] [--client claude|codex|agent] [--fresh] -- <gh args>
 ```
 
-W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Reads only: a write (the one write rule, ghArgvIsWrite) or any auth call is refused with exit 2 and never run; run it as a plain gh call, where hooks/deny-floor.sh judges it. With no live broker a read runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.
+W1-T10279: with a live broker (rmd gh-broker serve), the read is served from its cache inside GitHub's own max-age, coalesced with identical reads in flight from any session, revalidated with If-None-Match, queued interactive-first then agent then background (round-robin by caller), and paced from GitHub's retry-after, secondary-limit refusals and x-ratelimit headers. Reads only: a write (the one write rule, ghArgvIsWrite) or any auth call is refused with exit 2 and never run; run it as a plain gh call, where hooks/deny-floor.sh judges it. With no live broker a read runs gh directly. --class defaults from the caller's actor (RMD_GH_CLASS overrides); --client names the reader (claude, codex or agent) in the broker's request log (W1-T10302); --fresh forces revalidation. Exits with gh's own exit code. Dispatches before credential refresh and self-sync, so it adds no network call of its own.
 
 ### `rmd gh-broker`
 
@@ -371,7 +372,7 @@ Serve, inspect or stop the per-account GitHub read broker (Mac only; installed b
 rmd gh-broker serve | status [--since <dur>] | stop
 ```
 
-W1-T10279: serve listens on <cache>/remudero/gh-broker/broker.sock (directory 0700, this uid only) and rewrites a heartbeat file every interval it advertises there; hooks/deny-floor.sh reads it to route raw gh reads to rmd gh. status prints queue depth by class, each limiter's gap, hold and primary spread, and counts of hit-fresh, coalesced, revalidated-304, upstream-200 and refused; --since <n>s|m|h|d summarises the request log (reads, upstream calls, share served without upstream, longest interactive wait). stop ends the server. deploy/mac/install-gh-read-broker.sh installs the launchd agent that keeps serve running; nothing on Azure changes.
+W1-T10279: serve listens on <cache>/remudero/gh-broker/broker.sock (directory 0700, this uid only) and rewrites a heartbeat file every interval it advertises there; hooks/deny-floor.sh reads it to route raw gh reads to rmd gh. status prints queue depth by class, each limiter's gap, hold and primary spread, and counts of hit-fresh, coalesced, revalidated-304, upstream-200 and refused; --since <n>s|m|h|d summarises the request log (reads, upstream calls, share served without upstream, longest interactive wait). status also prints login_status (W1-T10302): per GitHub login, requests by client, upstream calls and refusals by limiter, with the Mac account whose broker saw each; accounts reading as one login share a pacer through /Users/Shared/remudero/gh-pace/<login>/ and fall back to a per-account pacer when it is unusable. stop ends the server. deploy/mac/install-gh-read-broker.sh installs the launchd agent that keeps serve running and joins that directory; nothing on Azure changes.
 
 ### `rmd inspect`
 
@@ -932,6 +933,16 @@ rmd garden run <name> [--hourly] | rmd garden replay ci-friction [--days <n>] [-
 ```
 
 W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence. `replay ci-friction` replays the ci-friction remedy ladder over the past --days (default 7) at --step-hours (default 6) from the ledger union and main's plan history, read-only.
+
+### `rmd review-replay`
+
+Refresh the recorded review sample from the complete retained ledger union.
+
+```
+rmd review-replay refresh
+```
+
+Derives every distinct healthy input shape, excludes regressed reviewer shas, and refuses empty or incomplete evidence. Writes test/fixtures/review-replay/sample.ndjson for replay in CI.
 
 ### `rmd escalate`
 
