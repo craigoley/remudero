@@ -296,3 +296,63 @@ test("W1-T10380: the Claude session projection carries no code, token or path", 
   }
   assert.match(readFileSync(f.storeFile, "utf8"), new RegExp(NEW_ACCESS), "the flow really completed");
 });
+
+test("W1-T10380: every Claude start that cannot run the CLI ends without a path and without a staging dir", async (t) => {
+  const f = fixture(t);
+  const refused = new ProviderAuthSessionStore({
+    profiles: [{ id: "claude-fleet", provider: "claude", label: "Fleet Claude" }],
+    claudeRealHome: f.realHome,
+    resolveClaudeBin: () => { throw new Error(`claude executable not found — searched: ${f.realHome}/bin/claude`); },
+  });
+  const unresolved = await refused.start({ provider: "claude", profileId: "claude-fleet" });
+  assert.equal(unresolved.state, "unavailable");
+  assert.ok(!JSON.stringify(unresolved).includes(f.realHome), "the resolver's searched paths never reach the projection");
+
+  const spawnThrows = storeFor(f, "usable", { spawn: () => { throw new Error(`spawn ${f.realHome}/claude ENOENT`); } });
+  const unspawned = await spawnThrows.start({ provider: "claude", profileId: "claude-fleet" });
+  assert.equal(unspawned.state, "unavailable");
+  assert.ok(!JSON.stringify(unspawned).includes(f.realHome));
+  assert.deepEqual(stagingDirs(f), [], "a failed spawn removes its staging dir");
+
+  // The real binary emits `error` (here: an unexecutable path) instead of exiting.
+  const missing = new ProviderAuthSessionStore({
+    profiles: [{ id: "claude-fleet", provider: "claude", label: "Fleet Claude" }],
+    claudeRealHome: f.realHome,
+    resolveClaudeBin: () => join(f.realHome, "no-such-claude"),
+  });
+  const errored = await missing.start({ provider: "claude", profileId: "claude-fleet" });
+  const settled = await untilSettled(missing, errored.sessionId);
+  assert.equal(settled.state, "failed");
+  assert.deepEqual(stagingDirs(f), []);
+  assert.deepEqual(readFileSync(f.storeFile), f.oldStore);
+});
+
+test("W1-T10380: a cancelled Claude login, or a store write that throws, ends the session and keeps the store", async (t) => {
+  const f = fixture(t);
+  const store = storeFor(f, "usable");
+  const started = await store.start({ provider: "claude", profileId: "claude-fleet" });
+  await untilAuthUrl(store, started.sessionId);
+  assert.equal((await store.submitCode(started.sessionId, "")).outcome, "invalid");
+  const cancelled = store.cancel(started.sessionId);
+  assert.equal(cancelled?.state, "cancelled");
+  assert.equal((await store.submitCode(started.sessionId, PASTED_CODE)).outcome, "conflict");
+
+  const throwing = storeFor(f, "usable", { replaceClaudeStore: async () => { throw new Error("EIO"); } });
+  const second = await throwing.start({ provider: "claude", profileId: "claude-fleet" });
+  await untilAuthUrl(throwing, second.sessionId);
+  await throwing.submitCode(second.sessionId, PASTED_CODE);
+  const failed = await untilSettled(throwing, second.sessionId);
+  assert.equal(failed.state, "failed");
+  assert.match(failed.reason ?? "", /fleet-store-write-failed/);
+  assert.deepEqual(readFileSync(f.storeFile), f.oldStore);
+  assert.deepEqual(stagingDirs(f), []);
+
+  // A replacement whose session ended under the lock writes nothing.
+  const stagedDir = join(f.realHome, ".claude", "fleet-auth", ".claude-login-manual");
+  mkdirSync(stagedDir, { mode: 0o700 });
+  writeFileSync(join(stagedDir, ".credentials.json"), credential(NEW_ACCESS, NEW_REFRESH));
+  const ended = await replaceClaudeFleetCredential({ realHome: f.realHome, stagingDir: stagedDir, proceed: () => false });
+  assert.deepEqual(ended, { kind: "refused", reasonClass: "login-session-ended" });
+  assert.deepEqual(readFileSync(f.storeFile), f.oldStore);
+  assert.deepEqual(readdirSync(join(f.realHome, ".claude", "fleet-auth", "claude")), [".credentials.json"]);
+});
