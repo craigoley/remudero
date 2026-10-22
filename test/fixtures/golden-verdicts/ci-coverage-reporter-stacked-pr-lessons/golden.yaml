@@ -1,0 +1,15 @@
+violation: none
+rule: >
+  W1-T9958: the coverage reporter and stacked-PR lessons have executable proofs
+  against active CI learnings entries citing the measured session feedback.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass

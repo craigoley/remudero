@@ -729,6 +729,7 @@ import {
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
 import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
 import {
   buildPreflightSummary,
   callerReachableSuites,
@@ -25390,14 +25391,16 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     ? (file, args, opts) => metrics.observe(() => (deps.spawn ?? defaultPreflightSpawn)(file, args, opts))
     : deps.spawn;
   const boundary = <T>(run: () => T): T => metrics ? metrics.observe(run) : run();
+  const onPhase = deps.onPhase ?? reportPreflightPhase;
+  const phase = <T>(name: string, run: () => T): T => observeSynchronousPreflightPhase(name, () => boundary(run), onPhase);
 
-  const result = boundary(() => runPreflight(repoRoot, { ...deps, range, spawn }));
+  const result = phase("default", () => runPreflight(repoRoot, { ...deps, range, spawn, onPhase }));
   // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
   // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = rest.includes("--no-fast") ? undefined : boundary(() => runPreflightFast(repoRoot, { spawn }));
+  const fast = rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(repoRoot, { spawn }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -25405,17 +25408,17 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // needing a second flag to stay fast — see runPreflightScopedDiffCoverage's own doc.
   const ciChecks = rest.includes("--no-fast")
     ? undefined
-    : boundary(() => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
+    : phase("ci-checks", () => preflightCheckResult("ci-checks:invocation", () => runPreflightCiChecks(repoRoot, { spawn })));
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
-    : boundary(() => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
+    : phase("fast-coverage", () => preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn })));
   // Full-suite routes key containment/deadlines on the ORIGINAL spawn identity. Observe their
   // tier boundaries, never wrap their executor into the injected-spawn synchronous route.
-  const ciParity = rest.includes("--ci-parity") ? boundary(() => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
-  const coverage = rest.includes("--coverage") ? boundary(() => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const ciParity = rest.includes("--ci-parity") ? phase("ci-parity", () => runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
+  const coverage = rest.includes("--coverage") ? phase("coverage", () => runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator })) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
-  const proofs = rest.includes("--proofs") ? boundary(() => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
+  const proofs = rest.includes("--proofs") ? phase("proofs", () => runPreflightProofs(repoRoot, { spawn: deps.spawn })) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
