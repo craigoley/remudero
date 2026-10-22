@@ -1443,7 +1443,7 @@ jobs:
                 2>&1 >/dev/null); then
                 break
               fi
-              if [ "$attempt" -ge 4 ] || ! [[ "$error" =~ HTTP\ (429|500|502|503|504) ]]; then
+              if [ "$attempt" -ge 4 ] || ! [[ "$error" =~ HTTP\ (429|500|502|503|504) || "$error" == "unexpected end of JSON input" ]]; then
                 echo "check-run post failed for ${check_name} after ${attempt} attempt(s): ${error}" >&2
                 return 1
               fi

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,11 +7,12 @@ import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
 
-test("a transient GitHub 503 does not leave posted gate checks incomplete", () => {
-  const workflow = parseYaml(readFileSync(".github/workflows/ci.yml", "utf8")) as {
+const workflow = parseYaml(readFileSync(".github/workflows/ci.yml", "utf8")) as {
     jobs: { commitlint: { steps: Array<{ env?: Record<string, string>; run?: string }> } };
   };
-  const reporter = workflow.jobs.commitlint.steps.find((step) => step.run?.includes("report()"));
+const reporter = workflow.jobs.commitlint.steps.find((step) => step.run?.includes("report()"));
+
+test("a transient GitHub 503 does not leave posted gate checks incomplete", () => {
   assert.ok(reporter?.run && reporter.env);
   const root = mkdtempSync(join(tmpdir(), "rmd-gate-report-retry-"));
   try {
@@ -64,4 +65,48 @@ sleep() { :; }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("truncated check-run responses retry without changing the gate verdict or retry ceiling", () => {
+  assert.ok(reporter?.run && reporter.env);
+  const root = mkdtempSync(join(tmpdir(), "rmd-gate-report-json-"));
+  try {
+    const stub = `gh() {
+      printf '%s\\n' "$*" >> "$GH_LOG_FILE"
+      case "$*" in *name=jscpd-gate*)
+        if [ "$GH_FAIL_KIND" = persistent ] || [ ! -e "$GH_RETRIED" ]; then
+          : > "$GH_RETRIED"
+          if [ "$GH_FAIL_KIND" = unrelated ]; then echo 'invalid JSON request' >&2;
+          else echo 'unexpected end of JSON input' >&2; fi
+          exit 1
+        fi ;;
+      esac
+    }
+    sleep() { :; }
+    `;
+    const env = {
+      ...process.env,
+      ...Object.fromEntries(Object.keys(reporter.env).filter(key => key.startsWith("OUTCOME_")).map(key => [key, "success"])),
+      OUTCOME_JSCPD_GATE: "failure",
+      SETUP_OUTCOMES: successfulReporterSetupFixture(reporter.env),
+      GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123",
+      POSTING_JOB_ID: "12345", POSTING_RUN_ID: "777", POSTING_RUN_ATTEMPT: "2",
+      GH_LOG_FILE: join(root, "calls"), GH_RETRIED: join(root, "retried"),
+    };
+    for (const kind of ["transient", "persistent", "unrelated"]) {
+      writeFileSync(env.GH_LOG_FILE, "");
+      rmSync(env.GH_RETRIED, { force: true });
+      const result: SpawnSyncReturns<string> = spawnSync("bash", ["-c", stub + reporter.run], { env: { ...env, GH_FAIL_KIND: kind }, encoding: "utf8" });
+      const calls = readFileSync(env.GH_LOG_FILE, "utf8").trim().split("\n");
+      const posts = calls.filter(line => line.includes("name=jscpd-gate"));
+      assert.equal(posts.length, kind === "transient" ? 2 : kind === "persistent" ? 4 : 1);
+      assert.ok(posts.every(line => line.includes("conclusion=failure") && line.includes("head_sha=abc123") && line.includes("external_id=run:777:2:job:12345")));
+      assert.equal(new Set(posts).size, 1, "every retry retains the exact verdict payload");
+      assert.equal(result.status, kind === "transient" ? 0 : 1, result.stderr);
+      if (kind === "transient") assert.match(result.stdout, /reported baseline-monotonic = success/);
+      else assert.doesNotMatch(result.stdout, /reported baseline-monotonic/);
+      if (kind === "persistent") assert.match(result.stderr, /after 4 attempt/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
