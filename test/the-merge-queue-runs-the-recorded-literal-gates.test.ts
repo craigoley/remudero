@@ -104,7 +104,7 @@ tool="$(basename "$0")"
 echo "$tool $*" >> "$CALL_LOG"
 if [ "$tool" = npm ] && [ -n "\${BASE_SHA:-}" ]; then echo "env BASE_SHA=$BASE_SHA" >> "$CALL_LOG"; fi
 case "$tool $*" in
-  "git rev-parse --verify ${QUEUE_BASE}^{commit}"|"git rev-parse --verify HEAD^1^{commit}") echo "${QUEUE_BASE}"; exit 0 ;;
+  "git rev-parse --verify ${QUEUE_BASE}^{commit}"|"git rev-parse --verify HEAD^1^{commit}") echo "${QUEUE_BASE}" ;;
   "git archive "*) exit 1 ;; # The modeled missing archive fails explicitly on BSD and GNU tar.
   *diff-class.mjs*) echo SOURCE ;;
   *containment-diff-trigger.ts*) echo "matched=false" >> "$GITHUB_OUTPUT" ;;
@@ -194,6 +194,14 @@ function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcom
   });
   return result;
 }
+
+test("merge queue revision failure remains unavailable before any archive attempt", () => {
+  const run = runJob("merge_group", "git rev-parse");
+  assert.deepEqual(run.failures, []);
+  assert.deepEqual(run.calls.get("dependency-evidence"), [`git rev-parse --verify ${QUEUE_BASE}^{commit}`],
+    "the fixture failure injection must stop revision resolution before archive execution");
+  assert.match(run.exportedEnv.RMD_CI_DEPENDENCY_EVIDENCE ?? "", /unavailable\.json$/);
+});
 
 test("merge queue fixture executes the unavailable producer without inventing evidence", () => {
   const run = runJob("merge_group");
