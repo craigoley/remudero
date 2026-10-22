@@ -1088,6 +1088,28 @@ function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefine
   return title !== raw && title === escalationIssueTitle(e) && body.split("\n").find(line => line.startsWith("**Full summary (JSON):** ")) === fullEscalationSummaryLine(e);
 }
 
+/** Only the producer's header may replace a clipped title when reading its PR referent. */
+function candidatePrRef(title: string | undefined, body: string): string | undefined {
+  const header = body.split("\n\n", 1)[0]!;
+  const line = header.split("\n").find(row => row.startsWith("**Full summary (JSON):** "));
+  if (line) {
+    let summary: unknown;
+    try {
+      summary = JSON.parse(line.slice("**Full summary (JSON):** ".length));
+    } catch {
+      summary = undefined;
+    }
+    const taskId = TASK_LINE_RE.exec(header)?.[1];
+    const issueClass = CLASS_LINE_RE.exec(header)?.[1];
+    if (typeof summary === "string" && taskId && issueClass) {
+      const key = { summary, taskId, class: issueClass as EscalationClass };
+      if (title !== unboundedEscalationTitle(key) && title === escalationIssueTitle(key)
+          && line === fullEscalationSummaryLine(key)) return extractPrRef(`${summary}\n${body}`);
+    }
+  }
+  return extractPrRef(`${title ?? ""}\n${body}`);
+}
+
 function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined, body: string): boolean {
   if (e.headDedup === "independent") return titleCarriesSameSummary(e, title, body);
   return matchesOptionalDimension(e.headSha, candidate);
@@ -1137,7 +1159,7 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
       // W1-T195: the composite key. taskId + PR are REQUIRED matches. headSha/cause veto only when
       // both sides carry a value and disagree, so a caller setting neither keeps today's dedup while
       // the two rungs that set both get their own issue on a new push or a different cause.
-      if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
+      if (candidatePrRef(issue.title, body) !== prRef) return false;
       const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
       if (matchesHeadDimension(e, candidateHead, issue.title, body) === false) return false;
       if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
@@ -1282,7 +1304,7 @@ function* closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIss
   for (const issue of open) {
     const body = normalizeCandidateBody(issue.body ?? "");
     if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) continue;
-    if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) continue;
+    if (candidatePrRef(issue.title, body) !== prRef) continue;
     const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
     if (!candidateHead || candidateHead === e.headSha) continue;
     const comment =

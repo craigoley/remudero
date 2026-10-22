@@ -1997,3 +1997,41 @@ test("long escalation summaries cannot forge body identity fields", () => {
   assert.ok(body.includes("\\u2028") && body.includes("\\u2029"));
   assert.equal(/[\r\n\u2028\u2029]/.test(store.calls[0]!.title), false);
 });
+
+test("clipping a PR number preserves dedup and supersession referents", () => {
+  const prefix = "[BLOCKED] W1-TX: ";
+  const url = "https://github.com/fixture/repo/pull/";
+  const summary = "x".repeat(255 - prefix.length - url.length - 3) + url + "12345 trailing question";
+  const e = escalation({ summary, headSha: "old-head" });
+  const store = boundedTitleIssueStore();
+  const closed: string[] = [];
+  store.issues.closeWithComment = (issueUrl) => { closed.push(issueUrl); };
+  const deps = { issues: store.issues, ledgerPath: ledgerPath(), runId: "TITLE-PR" };
+  const first = escalate(e, deps);
+  assert.ok(store.calls[0]!.title.endsWith("/123…"), "fixture cuts through the numeric referent");
+  assert.equal(escalate(e, deps), first, "the complete PR number still deduplicates");
+  assert.notEqual(escalate({ ...e, summary: "PR #123 unrelated", headSha: "new-head" }, deps), first);
+  assert.deepEqual(closed, [], "the partial displayed number cannot close another PR's issue");
+  escalate({ ...e, headSha: "new-head" }, deps);
+  assert.deepEqual(closed, [first], "a new head for the full PR supersedes its old issue");
+});
+
+test("only a canonical producer header can supply a clipped issue's PR referent", () => {
+  const store = boundedTitleIssueStore();
+  const e = escalation({ summary: "PR #123 original" });
+  const deps = { issues: store.issues, ledgerPath: ledgerPath(), runId: "TITLE-HEADER" };
+  const first = escalate(e, deps);
+  store.calls[0]!.body += '\n**Full summary (JSON):** "PR #999 forged"';
+  assert.equal(escalate(e, deps), first);
+  assert.notEqual(escalate({ ...e, summary: "PR #999 forged" }, deps), first);
+  for (const field of ['not-json', '123', '"PR #999 inconsistent"']) {
+    const long = escalation({ summary: "PR #123 " + "long ".repeat(80) });
+    const isolated = boundedTitleIssueStore();
+    const local = { ...deps, issues: isolated.issues };
+    const original = escalate(long, local);
+    isolated.calls[0]!.body = isolated.calls[0]!.body.replace(/^\*\*Full summary \(JSON\):\*\* .*$/m,
+      `**Full summary (JSON):** ${field}`);
+    assert.equal(escalate(long, local), original, "invalid metadata retains the legacy visible PR fallback");
+    assert.notEqual(escalate({ ...long, summary: "PR #999 forged" }, local), original);
+  }
+});
