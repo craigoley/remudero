@@ -8,7 +8,7 @@ import { hostname } from "node:os";
 import { gitRepo } from "./helpers/git-repo.js";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REPO_ROOT } from "./helpers/repo-root.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import type { AddressInfo } from "node:net";
 import { fixedClock } from "../src/lib/clock.js";
 import { readPersistedInbox, triageFleetLane } from "../src/lib/fleet-lane.js";
