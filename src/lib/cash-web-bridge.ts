@@ -13,6 +13,8 @@
 // {@link cashWebSearchGrounding}, THE CHARGE SURVIVING A REFUSAL in {@link CashWebSearchOutcome},
 // and A REFUSAL BEING A TOOL RESULT RATHER THAN AN EXCEPTION in {@link performCashWebSearch}.
 
+import { cashUsageTuple } from "./cash-accounting.js";
+
 /** The daemon's OWN search credential, deliberately NOT {@link OPENWEIGHT_API_KEY_ENV}.
  *
  *  Two different grants: the worker key buys inference on a chat deployment, this one buys an
@@ -66,6 +68,8 @@ export type CashWebSearchRefusal =
 export interface CashWebSearchUsage {
   promptTokens: number;
   completionTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 }
 
 /**
@@ -106,7 +110,7 @@ export function cashWebSearchEndpoint(rawEndpoint: string, model: string): strin
 
 interface ResponsesPayload {
   output?: unknown;
-  usage?: { input_tokens?: unknown; output_tokens?: unknown };
+  usage?: { input_tokens?: unknown; output_tokens?: unknown; input_tokens_details?: { cached_tokens?: unknown; cache_write_tokens?: unknown } | null };
 }
 
 /**
@@ -153,13 +157,16 @@ export function cashWebSearchGrounding(payload: unknown): { searched: boolean; c
 
 function readUsage(payload: unknown): { usage: CashWebSearchUsage; usageRead: boolean } {
   const raw = (payload as ResponsesPayload | null)?.usage;
-  const input = raw?.input_tokens;
-  const output = raw?.output_tokens;
-  const usageRead = typeof input === "number" || typeof output === "number";
+  const measured = cashUsageTuple({ prompt_tokens: raw?.input_tokens, completion_tokens: raw?.output_tokens,
+    prompt_tokens_details: raw?.input_tokens_details,
+    cache_creation_tokens: raw?.input_tokens_details?.cache_write_tokens }, false, false);
+  const usageRead = measured !== undefined;
   return {
     usage: {
-      promptTokens: typeof input === "number" ? input : 0,
-      completionTokens: typeof output === "number" ? output : 0,
+      promptTokens: measured?.input ?? 0,
+      completionTokens: measured?.output ?? 0,
+      ...(measured && raw?.input_tokens_details?.cached_tokens !== undefined ? { cacheReadTokens: measured.cacheRead } : {}),
+      ...(measured && raw?.input_tokens_details?.cache_write_tokens !== undefined ? { cacheCreationTokens: measured.cacheCreation } : {}),
     },
     usageRead,
   };

@@ -1016,6 +1016,7 @@ test("spawnWorker (end-to-end, SUCCESS path): the process group spawned via opti
   let capturedPid: number | undefined;
   const result = await spawnWorker({
     ...e2eSpawnWorkerArgs(dir),
+    effort: "high",
     runId: "run-e2e-1",
     taskId: "W1-T117",
     queryFn: fakeQueryFn("success"),
@@ -1029,6 +1030,9 @@ test("spawnWorker (end-to-end, SUCCESS path): the process group spawned via opti
   } as Parameters<typeof spawnWorker>[0]);
 
   assert.equal(result.text, "done", "the fake success envelope reached the caller normally");
+  assert.equal(result.executionTransport, "claude-sdk");
+  assert.equal(result.requestedEffort?.provenance, "sdk-options");
+  assert.equal(result.requestedEffort?.value, "high");
   const estimates = join(dir, "memory", "estimates");
   const samples = readdirSync(estimates).filter(name => name.endsWith(".ndjson"))
     .flatMap(name => readFileSync(join(estimates, name), "utf8").trim().split("\n").filter(Boolean)

@@ -371,7 +371,7 @@ function addVerdict(state: UsageTelemetryState, line: Record<string, unknown>, t
   const runId = text(line.run_id);
   const run = runId ? state.markedRuns?.find((entry) => entry.runId === runId) : undefined;
   if (!run || run.outcome) return;
-  const cost = line.total_cost_usd;
+  const cost = spendAmountUsd(line);
   run.outcome = {
     success: line.success === true || SUCCESS_VERDICTS.has(text(line.verdict) ?? ""),
     costUsd: percent(cost) ?? null,

@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 # Private, bounded fleet snapshot. Install with install-field-trials-refresh.sh on the fleet host.
 set -euo pipefail
+
+# Fixed stage labels and process exit only: never log command arguments or credentials.
+# Successful process completion does not attest snapshot freshness or source completeness.
+run_stage() {
+  local stage="$1"; shift
+  case "$stage" in routing-daily-review|case-files|field-trials) ;; *) return 2 ;; esac
+  [ "$#" -gt 0 ] || return 2
+  printf 'field-trials-refresh: stage=%s event=started at=%s\n' "$stage" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+  local status
+  if "$@"; then status=0; else status=$?; fi
+  if [ "$status" -eq 0 ]; then
+    printf 'field-trials-refresh: stage=%s event=completed exit=%s at=%s\n' "$stage" "$status" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+  else
+    printf 'field-trials-refresh: stage=%s event=failed exit=%s at=%s\n' "$stage" "$status" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+  fi
+  return "$status"
+}
 umask 077
 
 REGISTRY="${RMD_INSTANCE_REGISTRY:-/home/craigoleyagent/rmd-state2/daemon-install/.remudero/daemon-instances.yaml}"
@@ -48,7 +65,7 @@ test -n "$IMAGE" || { echo "field-trials-refresh: core image unavailable" >&2; e
 # Review local evidence BEFORE GitHub collection: a remote outage cannot suppress the daily
 # routing review. Use the mounted installation checkout, whose main branch can satisfy the normal
 # freshness guard; serving generations are deliberately detached.
-docker run --rm --network none --volumes-from remudero-daemon \
+run_stage routing-daily-review docker run --rm --network none --volumes-from remudero-daemon \
   --mount "type=bind,src=$SITE/state,dst=/field-trials/site,readonly" \
   --mount "type=bind,src=$CONSOLE/state,dst=/field-trials/console,readonly" \
   --workdir /home/node/Remudero/daemon-install --entrypoint /bin/sh "$IMAGE" \
@@ -70,7 +87,7 @@ if [[ -n "${RMD_FIELD_TRIALS_CASE_FILES:-}" ]]; then
   CASE_MOUNT=(--mount "type=bind,src=$RMD_FIELD_TRIALS_CASE_FILES,dst=/field-trials/cases.json,readonly")
   CASE_ARG=(--case-files /field-trials/cases.json)
 else
-  docker run --rm --network host --volumes-from remudero-daemon \
+  run_stage case-files docker run --rm --network host --volumes-from remudero-daemon \
     --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
     --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
     --env RMD_FIELD_TRIALS_REPO_ROOT=/home/node/Remudero/daemon-install \
@@ -79,7 +96,7 @@ else
     --import tsx scripts/private-field-trials-case-files.mjs
 fi
 
-docker run --rm --network host --volumes-from remudero-daemon \
+run_stage field-trials docker run --rm --network host --volumes-from remudero-daemon \
   --mount "type=bind,src=$SITE/state,dst=/field-trials/site,readonly" \
   --mount "type=bind,src=$CONSOLE/state,dst=/field-trials/console,readonly" \
   ${CASE_MOUNT[@]+"${CASE_MOUNT[@]}"} \

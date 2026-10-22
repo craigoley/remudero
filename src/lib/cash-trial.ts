@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readCashAccounting, type CashAccountingObservation } from "./cash-accounting.js";
 import type { Config } from "./config-schema.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { enabledWorkerProviders } from "./config.js";
@@ -72,6 +73,8 @@ export interface CashTrialEvidence {
   cash: CashTrialArmEvidence;
   control: CashTrialArmEvidence;
   spentTodayUsd: number;
+  /** Known held reservations are not measured spend; they still consume the trial allowance. */
+  heldTodayUsd?: number;
   spendUnavailableReason?: string;
 }
 
@@ -82,7 +85,7 @@ export function summarizeCashTrial(rows: Iterable<Row>, today: string): CashTria
   const armByRun = new Map<string, "cash" | "control">();
   const cashAssignments = new Map<string, string>();
   const verdicts = new Map<string, boolean>();
-  const calls = new Map<string, { ts: string; usd: number | undefined; provider: unknown; billingMode: unknown; conflicting: boolean }>();
+  const calls = new Map<string, { ts: string; usd: number | undefined; provider: unknown; billingMode: unknown; accounting?: CashAccountingObservation; conflicting: boolean }>();
   for (const row of rows) {
     const assignment = row.worker_assignment as Row | undefined;
     const decision = (assignment?.routing as Row | undefined)?.decision as Row | undefined;
@@ -102,11 +105,12 @@ export function summarizeCashTrial(rows: Iterable<Row>, today: string): CashTria
         usd: typeof row.total_cost_usd === "number" ? row.total_cost_usd : undefined,
         provider: row.provider,
         billingMode: row.billing_mode,
+        ...(Object.hasOwn(row, "cash_accounting") ? { accounting: readCashAccounting(row.cash_accounting) } : {}),
         conflicting: false,
       };
       const prior = calls.get(id);
       if (prior) {
-        if (prior.ts !== current.ts || prior.usd !== current.usd || prior.provider !== current.provider || prior.billingMode !== current.billingMode) {
+        if (prior.ts !== current.ts || prior.usd !== current.usd || prior.provider !== current.provider || prior.billingMode !== current.billingMode || JSON.stringify(prior.accounting) !== JSON.stringify(current.accounting)) {
           prior.conflicting = true;
         }
       } else {
@@ -133,7 +137,17 @@ export function summarizeCashTrial(rows: Iterable<Row>, today: string): CashTria
       evidence.spendUnavailableReason = "cash worker-call cost receipt is missing or inconsistent";
       continue;
     }
-    evidence.spentTodayUsd = Math.round((evidence.spentTodayUsd + call.usd) * 1e6) / 1e6;
+    if (call.accounting !== undefined) {
+      if (call.accounting.state !== "observed") {
+        evidence.spendUnavailableReason = "cash accounting evidence is invalid or conflicting";
+        continue;
+      }
+      evidence.spentTodayUsd = Math.round((evidence.spentTodayUsd + call.accounting.evidence.usagePricedUsd) * 1e6) / 1e6;
+      evidence.heldTodayUsd = (evidence.heldTodayUsd ?? 0) + call.accounting.evidence.heldUsd;
+      if (call.accounting.evidence.state === "held") evidence.spendUnavailableReason = "cash billing is unknown and its original allowance remains held";
+    } else {
+      evidence.spentTodayUsd = Math.round((evidence.spentTodayUsd + call.usd) * 1e6) / 1e6;
+    }
   }
   return evidence;
 }

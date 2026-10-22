@@ -16,12 +16,8 @@ import {
   type OpenWeightAllowanceState,
 } from "../src/lib/worker-provider.js";
 
-// W1-T3666. MEASURED from state/openweight-allowance.json on 2026-09-15: 104 requests against the
-// $10 cap, $5.2696 reserved but only $0.9270 settled -- 32 of 104 never settled, so the day was
-// charged roughly TWICE its real spend. `reserveOpenWeightBudget` commits the conservative figure
-// BEFORE the transport call; `settleOpenWeightBudget` was reached only on a 200 whose usage block
-// parsed, so any OTHER failure -- a 429, a transport fault, an unparseable body -- stranded its
-// full reservation forever. These tests drive that failure path and assert it now settles down.
+// The operator's approved conservative policy replaces the old inferred failure refund.
+// A failed or unreadable reply cannot establish whether the provider billed output.
 
 const DEPLOYMENT = "gpt-oss-120b";
 
@@ -44,7 +40,7 @@ function soleReservation(root: string) {
   return rows[0]!;
 }
 
-test("a failed openweight request settles rather than stranding its reservation", async () => {
+test("an unknown openweight failure retains its original reservation and reports held billing", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-openweight-settle-fail-"));
   try {
     const config = allowanceConfig(root, 5);
@@ -65,20 +61,14 @@ test("a failed openweight request settles rather than stranding its reservation"
     assert.equal(result.budgetRefused, false, "a 429 spent a reservation; it did not refuse to spend one");
 
     const row = soleReservation(root);
-    assert.notEqual(row.settledUsd, null, "the ledger settles the reservation rather than stranding it");
-    assert.ok(row.settledUsd! < row.reservedUsd, "settlement corrects the conservative figure DOWN");
-    // THE LEDGER SAYS WHICH FAILURE SETTLED IT: a plain success settles with no reason recorded (see
-    // the sibling assertion below), so `settledReason` carrying the failure's own message is itself
-    // the ledger entry this criterion asks for.
-    assert.match(row.settledReason ?? "", /HTTP 429/, "the ledger row names the failure that settled it");
-
-    assert.ok(result.budgetSettledUsd > 0, "the returned totals reflect the correction, not a stranded zero");
-    assert.ok(result.budgetSettledUsd < result.budgetReservedUsd, "settled total stays below the reserved total");
-    assert.equal(
-      openWeightCommittedUsd(readAllowance(root)),
-      row.settledUsd,
-      "committed spend now reads the settled figure, not the stranded reservation",
-    );
+    assert.equal(row.settledUsd, null, "the failure supplies no reliable usage receipt");
+    assert.equal(row.settledReason, undefined);
+    assert.equal(result.budgetHeldUsd, row.reservedUsd);
+    assert.equal(result.budgetSettledUsd, 0);
+    assert.equal(result.cashAccounting.state, "held");
+    assert.equal(result.cashAccounting.usagePricedUsd, 0);
+    assert.equal(result.cashAccounting.invoiceCashUsd, null);
+    assert.equal(openWeightCommittedUsd(readAllowance(root)), row.reservedUsd);
 
     // DISCRIMINATION: an ordinary success settles too, but records no reason -- so `settledReason`
     // being present is specific to a failure having settled the row, not just any settlement.
@@ -109,7 +99,7 @@ test("a failed openweight request settles rather than stranding its reservation"
   }
 });
 
-test("a failed request is not charged for completion tokens it never produced", async () => {
+test("a malformed reply cannot prove a zero completion charge", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-openweight-settle-nocompletion-"));
   try {
     const config = allowanceConfig(root, 5);
@@ -129,19 +119,10 @@ test("a failed request is not charged for completion tokens it never produced", 
     );
 
     const row = soleReservation(root);
-    const price = OPENWEIGHT_PRICES[DEPLOYMENT]!;
-    // The reservation reserved for `OPENWEIGHT_MAX_COMPLETION_TOKENS` of output the request never
-    // produced; the settlement must not carry that ceiling forward. What remains of the reservation
-    // once the completion ceiling is stripped out is exactly the input-only portion of the SAME
-    // byte-bound estimate -- never a figure invented from nothing.
-    const completionCeilingUsd = (OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
-    // Compared with a tiny float tolerance, not `assert.equal`: the production figure is computed
-    // as `input * rate` directly, while the expectation here is `reserved - completionCeiling` --
-    // an equivalent but differently-ORDERED float computation, which can differ by a ULP or two.
-    assert.ok(
-      Math.abs(row.settledUsd! - (row.reservedUsd - completionCeilingUsd)) < 1e-9,
-      `settlement (${row.settledUsd}) must strip exactly the un-produced completion ceiling, charging only for input (expected ~${row.reservedUsd - completionCeilingUsd})`,
-    );
+    assert.equal(row.settledUsd, null);
+    assert.ok(row.reservedUsd > 0);
+    assert.equal(openWeightCommittedUsd(readAllowance(root)), row.reservedUsd);
+
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

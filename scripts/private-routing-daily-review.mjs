@@ -8,24 +8,33 @@ import { parseArgs } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { observeReviewFlow, REVIEW_FLOW_STEPS } from "../src/lib/review-flow-observation.ts";
 import { readCiLessonExposure } from "../src/lib/ci-lesson-recurrence.ts";
-import { goalObservationFromRow } from "../src/lib/goals.ts";
+import { goalObservationFromRow } from "../src/lib/goal-observation.ts";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
+import { createLedgerExactDedupe, LedgerExactDedupeError } from "../src/lib/ledger-exact-dedupe.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
-import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
+import { routingExperimentObserver, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
 import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.ts";
+
+import { ciRemedyExecutionObserver } from "../src/lib/ci-remedy-execution-observer.ts";
+import { codingLedgerObserver } from "../src/lib/model-canary-ledger.ts";
 
 const DAY = 86_400_000;
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
 
-async function readSource(source, asOf, resolutions) {
+async function readSource(source, asOf, resolutions, dedupeMaxBytes) {
+  const scanStarted = performance.now();
+  const coding = codingLedgerObserver();
+  const component = ciRemedyExecutionObserver(asOf, fixedClock(Date.parse(asOf) - DAY).iso());
+  const observers = ROUTING_EXPERIMENTS.map(experiment => routingExperimentObserver(experiment, asOf.slice(0, 10)));
+  const finishRouting = () => observers.map(observer => observer.report());
   let names;
   try { names = readdirSync(source.stateDir); }
-  catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [] }; }
+  catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [], routingReports: finishRouting(), codingTrials: coding.report(false), componentExecution: component.report(false) }; }
   const rotations = ledgerRotationEntries(names, source.stateDir);
   const forms = { gzip: rotations.filter((entry) => entry.form === "gzip").length,
     plain: rotations.filter((entry) => entry.form === "plain").length, live: names.includes("ledger.ndjson") ? 1 : 0 };
   if (rotations.length + forms.live === 0)
-    return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
+    return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [], routingReports: finishRouting(), codingTrials: coding.report(false), componentExecution: component.report(false) };
   const rows = [];
   const resolvedRows = new WeakSet();
   let routingResolvedFutureRows = 0;
@@ -35,7 +44,11 @@ async function readSource(source, asOf, resolutions) {
   const windowStart = Date.parse(asOf) - DAY;
   let retainedRowsOmitted = 0;
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
+  let index, dedupeEvidence, dedupeFailure;
+  try {
+    index = createLedgerExactDedupe(dedupeMaxBytes);
   for await (const row of openLedgerUnion(source.stateDir, {
+    exactDedupe: index,
     since: `${since}T00:00:00Z`,
     onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
     onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
@@ -57,22 +70,36 @@ async function readSource(source, asOf, resolutions) {
     if (time > Date.parse(asOf)) continue;
     rowsRead++;
     if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
-    if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step) || row.selection_assignment_id
-      || time >= windowStart && (REVIEW_FLOW_STEPS.includes(row.step) || row.step === "ci_learning_cadence.ran"
+    for (const observer of observers) observer.observe(row);
+    if (time >= windowStart) { coding.observe(row); component.observe(row); }
+    if (time >= windowStart && (REVIEW_FLOW_STEPS.includes(row.step) || row.step === "ci_learning_cadence.ran"
         || row.step === "ci_learning_cadence.run_failed" || row.step === "sweep.update_branch.pending_guard"
         || String(row.step).endsWith(".gardener_judged")
         || String(row.step).endsWith(".gardener_failed") || String(row.step).startsWith("goal."))) {
       if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
     }
   }
+    dedupeEvidence = index.evidence();
+  } catch (error) {
+    if (!(error instanceof LedgerExactDedupeError)) throw error;
+    dedupeFailure = error.reason;
+    if (index) dedupeEvidence = index.evidence();
+  } finally { index?.close(); }
   const reasons = [];
+  if (dedupeFailure) reasons.push(dedupeFailure);
   if (retainedRowsOmitted) reasons.push("ledger-retention-row-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
   if (futureRows) reasons.push("ledger-source-future-dated");
+  const routingReports = finishRouting();
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows, routingReports,
+    componentExecution: component.report(!dedupeFailure && unreadSources === 0 && malformedRows === 0 && invalidTimestampRows === 0 && futureRows === 0),
+    codingTrials: coding.report(reasons.length === 0 || reasons.every(reason => reason === "ledger-retention-row-bound")),
+    retention: { rawWindowRows: rows.length, rawWindowOmitted: retainedRowsOmitted, rawWindowLimit: 100_000,
+      routing: routingReports.map(report => ({ id: report.id, ...report.evidence })),
+      unionDedupe: "exact-utf16-sqlite-bounded-pages", dedupeEvidence: dedupeEvidence ?? null, distinctScanComplete: !dedupeFailure, scanWallMs: performance.now() - scanStarted } };
 }
 
 function privateWrite(path, value) {
@@ -81,7 +108,7 @@ function privateWrite(path, value) {
   renameSync(temp, path);
 }
 
-export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions }) {
+export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, dedupeMaxBytes }) {
   const resolutions = readRoutingQuarantineResolutions(quarantineResolutions, asOf, sources.map(source => source.label));
   const today = asOf.slice(0, 10);
   const yesterday = fixedClock(Date.parse(`${today}T00:00:00Z`) - DAY).iso().slice(0, 10);
@@ -103,19 +130,21 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   }
   const results = [];
   for (const source of sources) {
-    const { rows, ...quality } = await readSource(source, asOf, resolutions);
-    const trialReasons = quality.reasons.filter(reason => reason !== "ledger-source-future-dated"
-      || quality.futureRows !== quality.routingResolvedFutureRows);
+    const { rows, routingReports, componentExecution, ...quality } = await readSource(source, asOf, resolutions, dedupeMaxBytes);
+    const trialReasons = quality.reasons.filter(reason => reason !== "ledger-retention-row-bound" && (reason !== "ledger-source-future-dated"
+      || quality.futureRows !== quality.routingResolvedFutureRows));
     const trialSourceQuality = { scope: "routing-trials", rawSourceState: quality.state,
       state: quality.state === "unavailable" ? "unavailable" : trialReasons.length ? "observed-partial" : "observed",
       reasons: trialReasons, resolvedIrrelevantFutureRows: quality.routingResolvedFutureRows ?? 0 };
     const reports = ROUTING_EXPERIMENTS.map((experiment) => {
-      const report = evaluateRoutingExperiment(rows, experiment, today);
+      const report = routingReports.find(report => report.id === experiment.id);
+      const reportQuality = report.evidence?.state === "observed-partial" ? { ...trialSourceQuality,
+        state: "observed-partial", reasons: [...trialSourceQuality.reasons, "routing-compact-evidence-partial"] } : trialSourceQuality;
       const prior = previous?.sources.find((item) => item.label === source.label)?.reports?.find((item) => item.id === report.id);
       return { ...report, minTasksPerArm: experiment.minTasksPerArm,
-        sourceQuality: trialSourceQuality,
-        reviewState: trialSourceQuality.state !== "observed" ? "source-incomplete" : report.sufficient ? "sample-minimum-met" : "provisional",
-        nextAction: trialSourceQuality.state !== "observed" ? "repair-source-evidence" : report.sufficient ? "review-matched-cohorts" : "collect-more-tasks",
+        sourceQuality: reportQuality,
+        reviewState: reportQuality.state !== "observed" ? "source-incomplete" : report.sufficient ? "sample-minimum-met" : "provisional",
+        nextAction: reportQuality.state !== "observed" ? "repair-source-evidence" : report.sufficient ? "review-matched-cohorts" : "collect-more-tasks",
         changesSincePriorDay: prior ? { assignments: report.assignments - prior.assignments,
           tasks: report.arms.map((arm) => ({ arm: arm.arm, added: arm.tasks - (prior.arms.find((item) => item.arm === arm.arm)?.tasks ?? 0) })) } : null };
     });
@@ -125,7 +154,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
     const lastCiLearning = learningRows.filter(row => row.step === "ci_learning_cadence.ran")
       .sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
     const validCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
-    const selfImprovement = { windowStart, sourceComplete: false, efficacyClaim: "none",
+    const selfImprovement = { windowStart, sourceComplete: false, efficacyClaim: "none", componentExecution,
       ciRefreshDeferrals: observeCiRefreshDeferrals(learningRows, asOf, windowStart),
       ciLearning: lastCiLearning ? { at: lastCiLearning.ts, status: lastCiLearning.status ?? null,
         filed: validCount(lastCiLearning.filed), refused: validCount(lastCiLearning.refused),
@@ -152,6 +181,8 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
     lines.push(`${source.label}: ${source.state}; ${source.rowsRead} rows; ${source.reasons.join(", ") || "no source warnings"}`);
     lines.push(`  review flow (uncertified retention): ${source.reviewFlow.counts.delivered} delivered exact inputs; ${source.reviewFlow.counts.superseded} superseded; ${source.reviewFlow.counts.unresolvedSourceGap} source gaps; completed-only p95 ${source.reviewFlow.completedOnly.p95Ms ?? "unavailable"} ms; ${source.reviewFlow.semantic.notAttempted} semantic not attempted`);
     lines.push(`  self improvement: ${source.selfImprovement.gardenerFailures} observed gardener failures; ${source.selfImprovement.gardenerCredits} credits; ${source.selfImprovement.gardenerDebits} debits; ${source.selfImprovement.ciLearning?.recurredLessons ?? "unavailable"} recurring CI lessons; no efficacy claim`);
+    const component = source.selfImprovement.componentExecution;
+    lines.push(`  component execution: ${component.records.length} retained invocations; ${component.records.reduce((n, item) => n + (item.laterWork.state === "observed" ? item.laterWork.outcomes.length : 0), 0)} joined worker outcomes; ${component.evidence.scanComplete ? "bounded daily scan complete" : "evidence incomplete"}; no whole-fix adoption or efficacy claim`);
     for (const report of source.reports) {
       lines.push(`  ${report.id}: ${report.reviewState}; ${report.arms.map((arm) => `${arm.arm} ${arm.tasks}/${report.minTasksPerArm} tasks, ${arm.merged} merged, ${arm.nonStarterAssignments} no attempt, ${arm.costMissingAssignments} cost missing, served identity ${arm.receiptCoverage.servedModelKnownAssignments}/${arm.receiptCoverage.assignments}, worker outcome ${arm.receiptCoverage.outcomeKnownAssignments}/${arm.receiptCoverage.assignments}, cash mean ${arm.meanCashCostUsd ?? "unavailable"}, subscription notional mean ${arm.meanNotionalCostUsd ?? "unavailable"}`).join("; ")}; ${report.crossoverTasks} crossovers; assignment growth since prior day: ${report.changesSincePriorDay?.assignments ?? "unavailable"}; next action: ${report.nextAction}`);
     }

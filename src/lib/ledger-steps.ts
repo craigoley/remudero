@@ -82,6 +82,12 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "model_canary.coding_observed",
+    meaning: "An unregistered coding bridge attempted a redacted measured-or-unknown SDK receipt through the existing ledger. It is not executor qualification, successful grading, invoiced cost or a completed pair.",
+    writer: ["codingLedgerSave"],
+    outcomes: ["unregistered-mechanics-only"],
+  },
+  {
     step: "sweep.update_branch.pending_guard",
     meaning: "The actual sweep selector declined the pending input head that would win with only its pending-CI guard removed. This is snapshot decision evidence; no saved run, CPU time or cash is established.",
     writer: ["runSweep"],

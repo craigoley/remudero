@@ -268,7 +268,11 @@ test("an invalid Foundry usage receipt cannot release a cash reservation", async
     assert.equal(result.isError, false);
     const row = Object.values(allowance(f.root).reservations)[0];
     assert.equal(row?.settledUsd, null);
-    assert.equal(result.costUsd, row?.reservedUsd);
+    assert.equal(result.costUsd, 0, "unpriced usage is not an observed charge");
+    assert.equal(result.budgetSettledUsd, 0);
+    assert.equal(result.budgetHeldUsd, row?.reservedUsd);
+    assert.equal(result.cashAccounting.state, "held");
+    assert.equal(result.cashAccounting.heldUsd, row?.reservedUsd);
   } finally { f.cleanup(); }
 });
 
@@ -285,6 +289,9 @@ test("Foundry Opus keeps an uncertain bill reserved and settles a definite 404 t
     assert.equal(uncertain.isError, true);
     const rows = Object.values(allowance(f.root).reservations);
     assert.deepEqual(rows.map((row) => row.settledUsd), [0, null]);
-    assert.equal(uncertain.budgetSettledUsd, rows[1]?.reservedUsd);
+    assert.equal(uncertain.budgetSettledUsd, 0, "a transport failure does not establish a settled charge");
+    assert.equal(uncertain.budgetHeldUsd, rows[1]?.reservedUsd);
+    assert.equal(uncertain.cashAccounting.state, "held");
+    assert.equal(uncertain.cashAccounting.heldUsd, rows[1]?.reservedUsd);
   } finally { f.cleanup(); }
 });

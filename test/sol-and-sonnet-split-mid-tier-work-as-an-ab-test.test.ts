@@ -129,7 +129,21 @@ test("the evaluator compares merge rate fix strikes time and cost per arm", () =
   assert.equal(report.revisitDue, false);
   assert.equal(report.sufficient, false, "three tasks is not a verdict");
   const [sonnet, sol] = report.arms;
-  assert.deepEqual(sonnet, {
+  const { cashAccountingEvidence, executionEffortScope, ...legacySonnet } = sonnet!;
+  assert.deepEqual(cashAccountingEvidence, {
+    state: "unavailable", assignments: 2, reportedAssignments: 0, missingAssignments: 2,
+    invalidAssignments: 0, conflictingAssignments: 0, heldAssignments: 0,
+    usagePricedUsd: null, heldUsd: null, invoiceCashUsd: null,
+    basis: "qualified-usage-prices-and-held-allowance",
+  });
+  assert.equal(executionEffortScope.assignments, 2);
+  assert.equal(executionEffortScope.missingIdentityAssignments, 2);
+  assert.equal(executionEffortScope.apiWireAssignments, 0);
+  assert.equal(executionEffortScope.apiNativeAssignments, 0);
+  assert.equal(executionEffortScope.subscriptionNativeAssignments, 0,
+    "the selected subscription arm does not prove the actual execution transport");
+  assert.equal(executionEffortScope.providerEffectiveEffort, null);
+  assert.deepEqual(legacySonnet, {
     arm: "sonnet",
     provider: "claude",
     tasks: 2,

@@ -4,6 +4,8 @@ import { fixedClock, systemClock } from "./clock.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { routingDrawValue, type RoutingDrawSeed } from "./worker-provider.js";
 import { mergeCashRequestEfforts, summarizeCashRequestEfforts, type CashRequestEffortEvidence } from "./cash-request-effort.js";
+import { mergeCashAccounting, summarizeCashAccounting, type CashAccountingObservation } from "./cash-accounting.js";
+import { mergeServedModel, mergeWorkerIdentity, readWorkerRequestedEffort, type IdentityObservation, type WorkerExecutionTransport, type WorkerRequestedEffort } from "./worker-execution-evidence.js";
 
 /**
  * Live routing experiments (operator ruling 2026-09-24, DECISIONS.md). An assignment joins an
@@ -162,8 +164,10 @@ export interface ExperimentArmReport {
   meanCashCostUsd: number | null;
   meanNotionalCostUsd: number | null;
   costMissingAssignments: number;
-  nonStarterAssignments: number;
+  nonStarterAssignments: number | null;
   requestEffortEvidence: ReturnType<typeof summarizeCashRequestEfforts>;
+  cashAccountingEvidence: ReturnType<typeof summarizeCashAccounting>;
+  executionEffortScope: ReturnType<typeof executionEffortScope>;
   receiptCoverage: {
     assignments: number;
     terminalAssignments: number;
@@ -181,6 +185,7 @@ export interface ExperimentReport {
   reviewCadence: "daily" | "scheduled";
   nextReviewOn: string;
   assignments: number;
+  evidence?: RoutingObservationEvidence;
   excludedAssignments: { genericUnit: number; changedTreatment: number; unverifiedTreatment: number };
   /** Tasks whose tagged assignments landed in BOTH arms; counted under their first arm. */
   mixedTasks: number;
@@ -212,101 +217,212 @@ function tokenTotal(value: unknown): number | undefined {
 }
 
 /** One pass over ledger rows: tagged assignments, their receipts, fix dispatches and merges per task. */
-export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: RoutingExperiment, today: string): ExperimentReport {
+interface ExperimentReceipt {
+  minutes?: number; tokens?: number; cost?: number; notionalCost?: number | null;
+  billing?: IdentityObservation<"api" | "subscription">;
+  billingMode?: "api" | "subscription" | "conflict";
+  missingBilling?: number;
+  invalidBilling?: number;
+  transport?: IdentityObservation<WorkerExecutionTransport>;
+  cashAccounting?: CashAccountingObservation;
+  requestedEffort?: WorkerRequestedEffort | "invalid" | "conflicting";
+  attempted?: true; servedModel?: IdentityObservation<string>; success?: boolean; requestEfforts?: CashRequestEffortEvidence;
+}
+
+function executionEffortScope(receipts: (ExperimentReceipt | undefined)[]) {
+  const apiWire: ExperimentReceipt[] = [], subscription: ExperimentReceipt[] = [], apiNative: ExperimentReceipt[] = [];
+  let missing = 0, invalid = 0, conflicting = 0;
+  for (const receipt of receipts) {
+    const billing = receipt?.billing, transport = receipt?.transport;
+    if (billing?.state === "unavailable" && billing.reason === "invalid" || transport?.state === "unavailable" && transport.reason === "invalid") { invalid++; continue; }
+    if (billing?.state === "unavailable" && billing.reason === "conflicting" || transport?.state === "unavailable" && transport.reason === "conflicting") { conflicting++; continue; }
+    if (billing?.state !== "observed" || transport?.state !== "observed") { missing++; continue; }
+    const wire = ["chat-completions", "responses", "foundry-messages"].includes(transport.value);
+    if (billing.value === "subscription" && wire
+      || wire && receipt?.requestEfforts?.state === "observed" && receipt.requestEfforts.entries.some(entry => entry.transport !== transport.value)
+      || !wire && typeof receipt?.requestedEffort === "object" && receipt.requestedEffort.provenance !== (transport.value === "claude-sdk" ? "sdk-options" : "cli-argv")) { conflicting++; continue; }
+    if (wire) apiWire.push(receipt!);
+    else if (billing.value === "subscription") subscription.push(receipt!);
+    else apiNative.push(receipt!);
+  }
+  const native = (rows: ExperimentReceipt[]) => ({ assignments: rows.length,
+    reportedAssignments: rows.filter(row => row.requestedEffort !== undefined && typeof row.requestedEffort === "object").length,
+    missingAssignments: rows.filter(row => row.requestedEffort === undefined).length,
+    invalidAssignments: rows.filter(row => row.requestedEffort === "invalid").length,
+    conflictingAssignments: rows.filter(row => row.requestedEffort === "conflicting").length,
+    parameterPresentAssignments: rows.filter(row => typeof row.requestedEffort === "object" && row.requestedEffort.state === "parameter-present").length,
+    parameterOmittedAssignments: rows.filter(row => typeof row.requestedEffort === "object" && row.requestedEffort.state === "parameter-omitted").length,
+    parameterUnreadableAssignments: rows.filter(row => typeof row.requestedEffort === "object" && row.requestedEffort.state === "parameter-unreadable").length,
+    providerEffectiveEffort: null });
+  return { assignments: receipts.length, apiWireAssignments: apiWire.length, subscriptionNativeAssignments: subscription.length,
+    apiNativeAssignments: apiNative.length, missingIdentityAssignments: missing, invalidIdentityAssignments: invalid,
+    conflictingIdentityAssignments: conflicting, apiWireEvidence: summarizeCashRequestEfforts(apiWire.map(row => row.requestEfforts)),
+    subscriptionRequestedEvidence: native(subscription), apiNativeRequestedEvidence: native(apiNative), providerEffectiveEffort: null };
+}
+
+export interface RoutingObservationEvidence {
+  state: "observed" | "observed-partial";
+  keys: { tasks: number; assignments: number; receipts: number; merges: number; fixTimes: number };
+  omitted: { tasks: number; assignments: number; receipts: number; merges: number; fixTimes: number; oversized: number };
+  assignmentConflicts: number;
+  billing: { conflicts: number; missingObservations: number; invalidObservations: number };
+  receiptCorpusBilling: { conflicts: number; missingObservations: number; invalidObservations: number };
+}
+
+/** A compact, bounded observer shared by the iterable API and the sole daily scan.
+ * Omissions count rejected observations, not an invented distinct unseen-key count. */
+export function routingExperimentObserver(experiment: RoutingExperiment, today: string,
+  maxKeys = 100_000) {
+  if (!Number.isSafeInteger(maxKeys) || maxKeys < 1 || maxKeys > 100_000) throw new Error("routing-observer-bound-invalid");
+  const omitted = { tasks: 0, assignments: 0, receipts: 0, merges: 0, fixTimes: 0, oversized: 0 };
+  const billing = { conflicts: 0, missingObservations: 0, invalidObservations: 0 };
+  let assignmentConflicts = 0, fixTimes = 0;
+  const room = (map: Map<string, unknown>, key: string, scope: "tasks" | "assignments" | "receipts" | "merges") => {
+    if (map.has(key) || map.size < maxKeys) return true;
+    omitted[scope]++; return false;
+  };
   const firstArm = new Map<string, { arm: string; provider: WorkerProviderId; ts: string }>();
   const armsSeen = new Map<string, Set<string>>();
   const crossed = new Set<string>();
-  const assignmentTask = new Map<string, string>();
-  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; notionalCost?: number | null; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean; requestEfforts?: CashRequestEffortEvidence }>();
+  const assignmentTask = new Map<string, string | null>();
+  const receipts = new Map<string, ExperimentReceipt>();
   const excludedAssignments = { genericUnit: 0, changedTreatment: 0, unverifiedTreatment: 0 };
-  const merges: Array<{ task: string; ts: string }> = [];
-  const fixes: Array<{ task: string; ts: string }> = [];
-  for (const row of rows) {
+  const merges = new Map<string, string>();
+  const fixes = new Map<string, Map<string, number>>();
+  function observe(row: Row) {
     const step = str(row.step);
     const task = str(row.task_id);
     const ts = str(row.ts) ?? "";
+    if ((task && task.length > 512) || ts.length > 80 || (typeof row.selection_assignment_id === "string" && row.selection_assignment_id.length > 512)) {
+      omitted.oversized++; return;
+    }
     if (step === "worker.assignment" && task) {
       const assignment = row.worker_assignment as Row | undefined;
       const routing = assignment?.routing as Row | undefined;
       const decision = routing?.decision as Row | undefined;
-      if (decision?.ab !== experiment.id) continue;
-      if (experimentTaskIdentity(task) === undefined) { excludedAssignments.genericUnit += 1; continue; }
+      if (decision?.ab !== experiment.id) return;
+      if (experimentTaskIdentity(task) === undefined) { excludedAssignments.genericUnit += 1; return; }
       const considered = Array.isArray(decision.considered) ? decision.considered as Row[] : [];
       const claudeCandidate = considered.find((candidate) => candidate.provider === "claude");
       const candidateModel = str(claudeCandidate?.model);
-      if (candidateModel === undefined) { excludedAssignments.unverifiedTreatment += 1; continue; }
+      if (candidateModel === undefined) { excludedAssignments.unverifiedTreatment += 1; return; }
       if (!experiment.claudeModel.test(candidateModel)) {
         excludedAssignments.changedTreatment += 1;
-        continue;
+        return;
       }
       const provider = str((assignment?.selected as Row | undefined)?.provider) as WorkerProviderId | undefined;
       const itt = routing?.experiment as Row | undefined;
       // A row carrying its intention-to-treat record counts under its ASSIGNED arm; an older row, its served one.
       const arm = str(itt?.assignedArm) ?? (provider ? experiment.arms[provider] : undefined);
-      if (!provider || !arm) continue;
-      if (itt?.crossover === true) crossed.add(task);
+      if (!provider || !arm) return;
+      if (arm.length > 80 || !Object.values(experiment.arms).includes(arm)) { omitted.oversized++; return; }
+      if (!room(firstArm, task, "tasks")) return;
       const id = str(assignment?.id);
-      if (id) assignmentTask.set(id, task);
+      if (id && id.length > 512) { omitted.oversized++; return; }
+      if (itt?.crossover === true) crossed.add(task);
+      if (id && room(assignmentTask, id, "assignments")) {
+        const priorTask = assignmentTask.get(id);
+        if (priorTask !== undefined && priorTask !== task) {
+          if (priorTask !== null) assignmentConflicts++;
+          assignmentTask.set(id, null);
+        } else assignmentTask.set(id, task);
+      }
       const seen = armsSeen.get(task) ?? new Set<string>();
       seen.add(arm);
       armsSeen.set(task, seen);
       const first = firstArm.get(task);
       if (!first || ts < first.ts) firstArm.set(task, { arm, provider, ts });
     } else if (step === "verdict.merged" && task) {
-      merges.push({ task, ts });
+      if (room(merges, task, "merges") && (!merges.has(task) || ts > merges.get(task)!)) merges.set(task, ts);
     } else if (step === "fix.dispatch" && task) {
-      fixes.push({ task, ts });
+      const times = fixes.get(task);
+      if (times?.has(ts)) times.set(ts, times.get(ts)! + 1);
+      else if (fixTimes < maxKeys) { const histogram = times ?? new Map<string, number>(); histogram.set(ts, 1); fixes.set(task, histogram); fixTimes++; }
+      else omitted.fixTimes++;
     }
     const receiptId = str(row.selection_assignment_id);
     if (receiptId && (step === "worker.attempt" || step === "verdict" || step?.endsWith(".done"))) {
+      if (!room(receipts, receiptId, "receipts")) return;
       const prior = receipts.get(receiptId) ?? {};
+      const knownMode = row.billing_mode === "api" || row.billing_mode === "subscription" ? row.billing_mode : undefined;
+      if (!Object.hasOwn(row, "billing_mode")) billing.missingObservations++;
+      else if (!knownMode) billing.invalidObservations++;
+      const billingMode = prior.billingMode === "conflict" ? "conflict"
+        : knownMode && prior.billingMode && knownMode !== prior.billingMode ? "conflict" : knownMode ?? prior.billingMode;
+      if (billingMode === "conflict" && prior.billingMode !== "conflict") billing.conflicts++;
       const duration = num(row.worker_duration_ms);
       receipts.set(receiptId, {
         ...prior,
         ...(step === "worker.attempt" ? { attempted: true as const } : {}),
         ...(duration !== undefined ? { minutes: duration / 60_000 } : {}),
-        ...(tokenTotal(row.tokens) !== undefined ? { tokens: tokenTotal(row.tokens) } : {}),
+        ...(row.token_usage_state === "partial" || row.token_usage_state === "unavailable" ? { tokens: undefined }
+          : tokenTotal(row.tokens) !== undefined ? { tokens: tokenTotal(row.tokens) } : {}),
         ...(cost(row.total_cost_usd) !== undefined ? { cost: cost(row.total_cost_usd) }
           : cost(row.cost_usd) !== undefined ? { cost: cost(row.cost_usd) } : {}),
         ...(Object.hasOwn(row, "notional_cost_usd") ? { notionalCost: cost(row.notional_cost_usd) ?? null } : {}),
-        ...(row.billing_mode === "api" || row.billing_mode === "subscription" ? { billingMode: row.billing_mode } : {}),
-        ...(str(row.served_model)?.trim() ? { servedModel: str(row.served_model) } : {}),
+        billing: mergeWorkerIdentity(prior.billing, row.billing_mode, ["api", "subscription"]),
+        transport: mergeWorkerIdentity(prior.transport, row.execution_transport, ["chat-completions", "responses", "foundry-messages", "claude-sdk", "codex-cli"]),
+        ...(Object.hasOwn(row, "cash_accounting") ? { cashAccounting: mergeCashAccounting(prior.cashAccounting, row.cash_accounting) } : {}),
+        ...(Object.hasOwn(row, "requested_effort") ? { requestedEffort: (() => {
+          const next = readWorkerRequestedEffort(row.requested_effort);
+          if (!next || prior.requestedEffort === "invalid") return "invalid" as const;
+          if (prior.requestedEffort === "conflicting") return "conflicting" as const;
+          return prior.requestedEffort === undefined || JSON.stringify(prior.requestedEffort) === JSON.stringify(next) ? next : "conflicting" as const;
+        })() } : {}),
+        ...(Object.hasOwn(row, "served_model") ? { servedModel: mergeServedModel(prior.servedModel, row.served_model) } : {}),
+        ...(billingMode ? { billingMode } : {}),
+        missingBilling: (prior.missingBilling ?? 0) + (Object.hasOwn(row, "billing_mode") ? 0 : 1),
+        invalidBilling: (prior.invalidBilling ?? 0) + (Object.hasOwn(row, "billing_mode") && !knownMode ? 1 : 0),
         ...(typeof row.success === "boolean" ? { success: row.success } : {}),
         ...(Object.hasOwn(row, "request_efforts") ? { requestEfforts: mergeCashRequestEfforts(prior.requestEfforts, row.request_efforts) } : {}),
       });
     }
   }
+  function report(): ExperimentReport {
+  const joinedReceipts = [...assignmentTask].flatMap(([id, task]) => task === null || !receipts.has(id) ? [] : [receipts.get(id)!]);
+  const joinedBilling = { conflicts: joinedReceipts.filter(receipt => receipt.billingMode === "conflict").length,
+    missingObservations: joinedReceipts.reduce((sum, receipt) => sum + (receipt.missingBilling ?? 0), 0),
+    invalidObservations: joinedReceipts.reduce((sum, receipt) => sum + (receipt.invalidBilling ?? 0), 0) };
   const arms = (Object.entries(experiment.arms) as Array<[WorkerProviderId, string]>).map(([provider, arm]): ExperimentArmReport => {
     const tasks = [...firstArm.entries()].filter(([, first]) => first.arm === arm);
     const since = new Map(tasks.map(([task, first]) => [task, first.ts]));
-    const merged = new Set(merges.filter((merge) => since.has(merge.task) && merge.ts >= since.get(merge.task)!).map((merge) => merge.task));
-    const fixCounts = tasks.map(([task, first]) => fixes.filter((fix) => fix.task === task && fix.ts >= first.ts).length);
+    const merged = new Set([...merges].filter(([task, ts]) => since.has(task) && ts >= since.get(task)!).map(([task]) => task));
+    const fixCounts = tasks.map(([task, first]) => [...(fixes.get(task) ?? [])].reduce((n, [ts, count]) => n + (ts >= first.ts ? count : 0), 0));
     const armAssignments = [...assignmentTask.entries()]
-      .filter(([, task]) => since.has(task))
+      .filter(([, task]) => task !== null && since.has(task))
       .map(([id]) => receipts.get(id));
     const armReceipts = armAssignments
       .filter((receipt): receipt is NonNullable<typeof receipt> => receipt !== undefined);
-    const priced = (receipt: NonNullable<typeof armAssignments[number]>) => receipt.billingMode === "subscription"
-      ? receipt.notionalCost === null ? undefined : receipt.notionalCost ?? receipt.cost : receipt.cost;
+    const mode = (receipt: ExperimentReceipt) => receipt.billing?.state === "observed" ? receipt.billing.value : undefined;
+    const priced = (receipt: ExperimentReceipt) => {
+      if (receipt.billingMode === "conflict") return undefined;
+      if (mode(receipt) === "subscription") return receipt.notionalCost === null ? undefined : receipt.notionalCost ?? receipt.cost;
+      if (mode(receipt) !== "api") return undefined;
+      if (receipt.cashAccounting !== undefined) return receipt.cashAccounting.state === "observed" && receipt.cashAccounting.evidence.state === "complete"
+        ? receipt.cashAccounting.evidence.usagePricedUsd : undefined;
+      return receipt.cost; // Legacy reported cost remains historical, without invoice provenance.
+    };
     return {
       arm,
       provider,
       tasks: tasks.length,
       merged: merged.size,
-      mergeRate: tasks.length === 0 ? null : merged.size / tasks.length,
-      meanFixDispatches: mean(fixCounts),
+      mergeRate: tasks.length === 0 || omitted.merges ? null : merged.size / tasks.length,
+      meanFixDispatches: omitted.fixTimes ? null : mean(fixCounts),
       medianWorkerMinutes: median(armReceipts.flatMap((receipt) => (receipt.minutes === undefined ? [] : [receipt.minutes]))),
       meanTokens: mean(armReceipts.flatMap((receipt) => (receipt.tokens === undefined ? [] : [receipt.tokens]))),
-      meanCashCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "api" ? [] : [receipt.cost]))),
-      meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (priced(receipt) === undefined || receipt.billingMode !== "subscription" ? [] : [priced(receipt)!]))),
-      costMissingAssignments: armAssignments.filter((receipt) => receipt === undefined || priced(receipt) === undefined || receipt.billingMode === undefined).length,
-      nonStarterAssignments: armAssignments.filter((receipt) => receipt?.attempted !== true).length,
+      meanCashCostUsd: mean(armReceipts.flatMap((receipt) => (priced(receipt) === undefined || mode(receipt) !== "api" ? [] : [priced(receipt)!]))),
+      meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (priced(receipt) === undefined || mode(receipt) !== "subscription" ? [] : [priced(receipt)!]))),
+      costMissingAssignments: armAssignments.filter((receipt) => receipt === undefined || priced(receipt) === undefined || mode(receipt) === undefined).length,
+      nonStarterAssignments: omitted.receipts ? null : armAssignments.filter((receipt) => receipt?.attempted !== true).length,
       requestEffortEvidence: summarizeCashRequestEfforts(armAssignments.map(receipt => receipt?.requestEfforts)),
+      cashAccountingEvidence: summarizeCashAccounting(armAssignments.map(receipt => receipt?.cashAccounting)),
+      executionEffortScope: executionEffortScope(armAssignments),
       receiptCoverage: {
         assignments: armAssignments.length,
         terminalAssignments: armReceipts.length,
-        costKnownAssignments: armReceipts.filter((receipt) => priced(receipt) !== undefined && receipt.billingMode !== undefined).length,
-        servedModelKnownAssignments: armReceipts.filter((receipt) => receipt.servedModel !== undefined).length,
+        costKnownAssignments: armReceipts.filter((receipt) => priced(receipt) !== undefined && mode(receipt) !== undefined).length,
+        servedModelKnownAssignments: armReceipts.filter((receipt) => receipt.servedModel?.state === "observed").length,
         outcomeKnownAssignments: armReceipts.filter((receipt) => receipt.success !== undefined).length,
       },
     };
@@ -321,12 +437,24 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       ? fixedClock(Date.parse(`${today}T00:00:00Z`) + 86_400_000).iso().slice(0, 10)
       : experiment.revisitOn,
     assignments: assignmentTask.size,
+    evidence: { state: Object.values(omitted).some(Boolean) || assignmentConflicts || joinedBilling.conflicts ? "observed-partial" : "observed",
+      keys: { tasks: firstArm.size, assignments: assignmentTask.size, receipts: receipts.size, merges: merges.size, fixTimes },
+      omitted: { ...omitted }, assignmentConflicts, billing: joinedBilling, receiptCorpusBilling: { ...billing } },
     excludedAssignments,
     mixedTasks: [...armsSeen.values()].filter((seen) => seen.size > 1).length,
     crossoverTasks: crossed.size,
-    sufficient: arms.every((arm) => arm.tasks >= experiment.minTasksPerArm),
+    sufficient: !Object.values(omitted).some(Boolean) && !assignmentConflicts && arms.every((arm) => arm.tasks >= experiment.minTasksPerArm),
     arms,
   };
+  }
+  return { observe, report };
+}
+
+/** The public batch API delegates to the canonical observer; it retains no raw history. */
+export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: RoutingExperiment, today: string): ExperimentReport {
+  const observer = routingExperimentObserver(experiment, today);
+  for (const row of rows) observer.observe(row);
+  return observer.report();
 }
 
 export interface RoutingAbCommandOpts {

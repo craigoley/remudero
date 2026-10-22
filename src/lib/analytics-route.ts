@@ -1,5 +1,5 @@
 import { readRoutingDailyStatus } from "./routing-daily-status.js";
-import { goalObservationFromRow, type GoalObservation } from "./goals.js";
+import { goalObservationFromRow, type GoalObservation } from "./goal-observation.js";
 /**
  * lib/analytics-route.ts — `GET /v1/analytics`: the per-instance aggregate answering the
  * operator's four analytics questions the ledger could not answer before W1-T477 (see

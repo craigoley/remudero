@@ -4,6 +4,7 @@ export const REVIEW_FLOW_STEPS = ["sweep.review_eligible", "sweep.review_admitte
 type Stage = "eligible" | "admitted" | "attempted" | "posted";
 const stages: Record<string, Stage> = Object.fromEntries(REVIEW_FLOW_STEPS.map((step, i) => [step, ["eligible", "admitted", "attempted", "posted"][i]])) as Record<string, Stage>;
 type Row = Record<string, unknown>;
+const semanticNotAttempted = (outcome: string | null) => outcome === "not_attempted" || outcome?.startsWith("not_attempted_") === true;
 const identity = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 2048;
 
 /** Observed exact-input delivery, not queue truth. Readable rotations do not certify retention:
@@ -84,8 +85,8 @@ export function observeReviewFlow(rows: readonly Row[], asOf: string, windowStar
       unresolvedSourceGap: cohorts.filter(row => row.status === "unresolved-source-gap").length },
     completedOnly: { n: times.length, medianMs: quantile(0.5), p95Ms: quantile(0.95) },
     semantic: { succeeded: delivered.filter(row => row.reviewerOutcome === "success").length,
-      notAttempted: delivered.filter(row => row.reviewerOutcome === "not_attempted").length,
-      failed: delivered.filter(row => row.reviewerOutcome !== null && row.reviewerOutcome !== "success" && row.reviewerOutcome !== "not_attempted").length,
+      notAttempted: delivered.filter(row => semanticNotAttempted(row.reviewerOutcome)).length,
+      failed: delivered.filter(row => row.reviewerOutcome !== null && row.reviewerOutcome !== "success" && !semanticNotAttempted(row.reviewerOutcome)).length,
       unknown: delivered.filter(row => row.reviewerOutcome === null).length },
     cohorts: cohorts.slice(-200), omittedCohorts: Math.max(0, cohorts.length - 200) };
 }

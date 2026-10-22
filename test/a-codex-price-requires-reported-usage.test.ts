@@ -70,6 +70,10 @@ test("a real Codex worker prices complete usage, including an explicitly reporte
   const withTokens = await realWorker([completed(used)]);
   assert.ok(withTokens.notionalCostUsd !== undefined && withTokens.notionalCostUsd > 0);
   assert.equal(withTokens.costUsd, 0);
+  assert.equal(withTokens.executionTransport, "codex-cli");
+  assert.equal(withTokens.requestedEffort?.provenance, "cli-argv");
+  assert.equal(withTokens.requestedEffort?.providerEffectiveEffort, null);
+  assert.equal(workerLedgerFields(withTokens).execution_transport, "codex-cli");
 });
 
 test("reported Codex usage completeness survives the real worker and both trial receipt paths", async () => {

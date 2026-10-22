@@ -35,6 +35,8 @@ import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedge
 import { deriveReviewFindingOutcomes, type FindingOutcomeReport, type VerifiedFindingEvidence } from "./review-finding-outcomes.js";
 import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, type FindingEvidenceInput, type FindingEvidenceReport } from "./review-finding-evidence.js";
 import type { TaskCaseFile } from "./task-case-file.js";
+import { mergeCashAccounting, readCashAccounting, summarizeCashAccounting, type CashAccountingObservation } from "./cash-accounting.js";
+import { mergeServedModel, mergeWorkerIdentity, type IdentityObservation } from "./worker-execution-evidence.js";
 
 export const FIELD_TRIALS_FLOW_VERSION = "field-trials-flow-v1" as const;
 export const FIELD_TRIALS_RELEASE_VERSION = "field-trials-release-v1" as const;
@@ -112,6 +114,9 @@ export interface FlowRow {
   stackRevisions?: TrialRevisionPins;
   costUsd: number | null;
   billingMode: "api" | "subscription" | null;
+  billingIdentity?: IdentityObservation<"api" | "subscription">;
+  servedIdentity?: IdentityObservation<string>;
+  cashAccounting?: CashAccountingObservation;
   success: boolean | null;
   prRepo: string | null;
   prNumber: number | null;
@@ -148,6 +153,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
   const nonnegativeInteger = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0 ? value as number : null;
   const pinned = (field: string) => record(stack?.[field])?.state === "observed";
   const url = PR_URL_RE.exec(String(row.pr_url ?? ""));
+  const accounting = Object.hasOwn(row, "cash_accounting") ? readCashAccounting(row.cash_accounting) : undefined;
   return {
     fingerprint, ts: iso(row.ts), step: String(row.step), host: text(row.host), actor: text(row.actor),
     taskId: text(row.task_id), runId: text(row.run_id),
@@ -169,10 +175,15 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     workLane: lane?.state === "observed" ? text(lane.value) : text(row.worker_rung),
     stackPinned: assignment ? { harness: pinned("harnessRevision"), prompt: pinned("promptRevision"),
       tool: pinned("toolRevision"), scorer: pinned("scorerRevision"), environment: pinned("environmentRevision") } : null,
-    costUsd: typeof row.total_cost_usd === "number" && Number.isFinite(row.total_cost_usd) && row.total_cost_usd >= 0
+    costUsd: row.billing_mode === "api" && accounting !== undefined
+      ? accounting.state === "observed" && accounting.evidence.state === "complete" ? accounting.evidence.usagePricedUsd : null
+      : typeof row.total_cost_usd === "number" && Number.isFinite(row.total_cost_usd) && row.total_cost_usd >= 0
       ? row.total_cost_usd : typeof row.cost_usd === "number" && Number.isFinite(row.cost_usd) && row.cost_usd >= 0
         ? row.cost_usd : null,
     billingMode: row.billing_mode === "api" || row.billing_mode === "subscription" ? row.billing_mode : null,
+    ...(Object.hasOwn(row, "billing_mode") ? { billingIdentity: mergeWorkerIdentity(undefined, row.billing_mode, ["api", "subscription"]) } : {}),
+    ...(Object.hasOwn(row, "served_model") ? { servedIdentity: mergeServedModel(undefined, row.served_model) } : {}),
+    ...(accounting === undefined ? {} : { cashAccounting: accounting }),
     success: typeof row.success === "boolean" ? row.success : null,
     prRepo: url?.[1] ?? null, prNumber: url ? Number(url[2]) : Number.isSafeInteger(row.pr_number) ? row.pr_number as number : null,
     headSha: text(row.head_sha), verdict: text(row.verdict), action: text(row.action),
@@ -440,7 +451,8 @@ export interface FieldTrialsFlowSnapshot {
     workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
     environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
     apiCostEstimateUsd: number; subscriptionNotionalUsd: number; servedModelKnownAssignments: number;
-    workerOutcomeKnownAssignments: number; servedModelUnavailableReasons: Record<string, number> }[];
+    workerOutcomeKnownAssignments: number; servedModelUnavailableReasons: Record<string, number>;
+    cashAccountingEvidence?: ReturnType<typeof summarizeCashAccounting> }[];
   /** Private finding-quality evidence. Never copied into the public release. No trusted labels are inferred from GitHub workflow state. */
   reviewFindingOutcomes: FindingOutcomeReport;
   reviewFindingEvidence: FindingEvidenceReport;
@@ -727,8 +739,22 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       revertedAt: new Map(pulls.filter((pull) => pull.revertsPr !== null && pull.mergedAt !== null).map((pull) => [pull.revertsPr!, pull.mergedAt!])) };
     const rowsByTask = new Map<string, FlowRow[]>();
     const attemptByAssignment = new Map<string, FlowRow>();
+    const cashByAssignment = new Map<string, CashAccountingObservation>();
+    const billingByAssignment = new Map<string, IdentityObservation<"api" | "subscription">>();
+    const servedByAssignment = new Map<string, IdentityObservation<string>>();
+    const accountingByModel = new Map<string, (CashAccountingObservation | undefined)[]>();
     for (const row of ledgerRows) {
       if (row.step !== "worker.attempt" || row.assignmentId === null) continue;
+      if (row.cashAccounting !== undefined) {
+        const value = row.cashAccounting.state === "observed" ? row.cashAccounting.evidence : null;
+        cashByAssignment.set(row.assignmentId, mergeCashAccounting(cashByAssignment.get(row.assignmentId), value));
+      }
+      const billing = row.billingIdentity;
+      if (billing !== undefined || row.billingMode !== null) billingByAssignment.set(row.assignmentId,
+        mergeWorkerIdentity(billingByAssignment.get(row.assignmentId), billing?.state === "unavailable" ? null : billing?.value ?? row.billingMode, ["api", "subscription"]));
+      const served = row.servedIdentity;
+      if (served !== undefined || row.servedModel !== null) servedByAssignment.set(row.assignmentId,
+        mergeServedModel(servedByAssignment.get(row.assignmentId), served?.state === "unavailable" ? null : served?.value ?? row.servedModel));
       const prior = attemptByAssignment.get(row.assignmentId);
       if (prior === undefined || (row.ts ?? "") >= (prior.ts ?? "")) attemptByAssignment.set(row.assignmentId, row);
     }
@@ -751,24 +777,33 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         counts.scorerPinned += Number(row.stackPinned?.scorer === true);
         counts.environmentPinned += Number(row.stackPinned?.environment === true);
         const attempt = row.assignmentId === null ? undefined : attemptByAssignment.get(row.assignmentId);
+        const accounting = row.assignmentId === null ? undefined : cashByAssignment.get(row.assignmentId);
+        const accountingValues = accountingByModel.get(key) ?? [];
+        accountingValues.push(accounting); accountingByModel.set(key, accountingValues);
+        const billing = row.assignmentId === null ? undefined : billingByAssignment.get(row.assignmentId);
+        const billingMode = billing?.state === "observed" ? billing.value : billing !== undefined ? null : attempt?.billingMode;
+        const served = row.assignmentId === null ? undefined : servedByAssignment.get(row.assignmentId);
+        const servedModel = served?.state === "observed" ? served.value : served !== undefined ? null : attempt?.servedModel;
         if (attempt === undefined) counts.nonStarterAssignments += 1;
         else counts.attemptReceipts += 1;
-        counts.servedModelKnownAssignments += Number(attempt?.servedModel != null);
+        counts.servedModelKnownAssignments += Number(servedModel != null);
         counts.workerOutcomeKnownAssignments += Number(attempt?.success != null);
-        if (attempt !== undefined && attempt.servedModel === null) {
-          const reason = (attempt.servedModelReason ?? "provider-did-not-report-served-model").slice(0, 256);
+        if (attempt !== undefined && servedModel == null) {
+          const reason = (served?.state === "unavailable" && served.reason !== "missing" ? `served-model-${served.reason}`
+            : attempt.servedModelReason ?? "provider-did-not-report-served-model").slice(0, 256);
           const bucket = Object.hasOwn(counts.servedModelUnavailableReasons, reason) || Object.keys(counts.servedModelUnavailableReasons).length < 20
             ? reason : "other-unavailable-reason";
           const hits = Object.hasOwn(counts.servedModelUnavailableReasons, bucket) ? counts.servedModelUnavailableReasons[bucket] : 0;
           Object.defineProperty(counts.servedModelUnavailableReasons, bucket, { value: hits + 1, enumerable: true, configurable: true });
         }
-        const cost = attempt?.billingMode === "subscription"
-          ? attempt.notionalCostReported ? attempt.notionalCostUsd
-            : (attempt.provider ?? row.provider) === "codex" ? null : attempt.costUsd
-          : attempt?.costUsd;
-        if (cost === null || cost === undefined || attempt?.billingMode == null)
+        const cost = billingMode === "subscription"
+          ? attempt?.notionalCostReported ? attempt.notionalCostUsd
+            : (attempt?.provider ?? row.provider) === "codex" ? null : attempt?.costUsd
+          : accounting !== undefined ? accounting.state === "observed" && accounting.evidence.state === "complete" ? accounting.evidence.usagePricedUsd : null
+            : attempt?.costUsd;
+        if (cost === null || cost === undefined || billingMode == null)
           counts.costMissingAssignments += 1;
-        else if (attempt.billingMode === "api") counts.apiCostEstimateUsd += cost;
+        else if (billingMode === "api") counts.apiCostEstimateUsd += cost;
         else counts.subscriptionNotionalUsd += cost;
         assignmentTelemetry.set(key, counts);
       }
@@ -780,6 +815,9 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         if (taskRows) taskRows.push(row);
         else rowsByTask.set(row.taskId, [row]);
       }
+    }
+    for (const [key, values] of accountingByModel) {
+      if (values.some(value => value !== undefined)) assignmentTelemetry.get(key)!.cashAccountingEvidence = summarizeCashAccounting(values);
     }
     const ledgerTasksOfPr = new Map<number, Set<string>>();
     for (const row of ledgerRows) {

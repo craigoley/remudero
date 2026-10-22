@@ -416,6 +416,8 @@ function scanLedgerBuffer(
 }
 
 export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
+  /** Caller-owned exact replay index. A failed index aborts this scan rather than inventing distinct rows. */
+  exactDedupe?: { add(raw: string): boolean };
   dedupe?: boolean;
   /** Excludes the mutable live ledger from this scan. Archive-only audit readers use this so
    * callers can overlay the current live file at decision time instead of freezing it at boot. */
@@ -541,6 +543,9 @@ export async function* openLedgerUnion(
   if (opts.dedupe === false && opts.dedupeWindowPerStep !== undefined) {
     throw new TypeError("openLedgerUnion: dedupe=false and dedupeWindowPerStep are contradictory");
   }
+  if (opts.exactDedupe !== undefined && (opts.dedupe === false || opts.dedupeWindowPerStep !== undefined || opts.dedupeSeed !== undefined)) {
+    throw new TypeError("openLedgerUnion: exactDedupe requires whole-corpus dedupe without a window or seed");
+  }
   const { rotations } = listedLedgerFiles(stateDir, io, opts.onUnreadDirectory);
   const livePath = ledgerLivePath(stateDir);
   const resumedRotations = opts.afterRotation === undefined
@@ -592,6 +597,7 @@ export async function* openLedgerUnion(
     let gunzip: ReturnType<typeof createGunzip> | undefined;
     let input: Readable | undefined;
     let archiveUnread = false;
+    let exactDedupeFailed = false;
     let rowOrdinal = 0;
     let pendingLiveBad: LedgerMalformedRowFinding | undefined;
     let liveBytes = Math.max(0, opts.liveStartOffset ?? 0);
@@ -668,8 +674,13 @@ export async function* openLedgerUnion(
         // sighting, and the Set holds the stream's own rows rather than every line of the corpus.
         if (!recordMatchesFilters(parsed, opts, minimumTs)) continue;
         if (opts.dedupe !== false && opts.dedupeWindowPerStep === undefined) {
-          if (seen.has(line)) continue;
-          seen.add(line);
+          if (opts.exactDedupe !== undefined) {
+            try { if (!opts.exactDedupe.add(line)) continue; }
+            catch (error) { exactDedupeFailed = true; throw error; }
+          } else {
+            if (seen.has(line)) continue;
+            seen.add(line);
+          }
         }
         const step = typeof parsed.step === "string" ? parsed.step : "";
         const fingerprint = opts.dedupeWindowPerStep === undefined ? undefined : fingerprintLedgerLine(line);
@@ -683,6 +694,7 @@ export async function* openLedgerUnion(
       if (entry.path === livePath && !archiveUnread) opts.onLiveRead?.({ ino: liveIno, endOffset: liveBytes });
     } catch (error) {
       if (opts.signal?.aborted) throw opts.signal.reason ?? error;
+      if (exactDedupeFailed) throw error;
       // deliberate: an unreadable file costs that file, not the whole best-effort stream.
       // Console-style readers are best effort; audit-style refusal is handled by resolveLedgerUnion.
       archiveUnread = true;

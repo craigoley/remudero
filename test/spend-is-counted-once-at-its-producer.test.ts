@@ -45,6 +45,7 @@ test("W1-T4066: a verdict restating its last worker adds nothing to cost modeled
   // The writer labels the restatement.
   assert.equal(terminalVerdictFields(null).model, null);
   const written = terminalVerdictFields({
+    childEnvKeys: [],
     model: "sonnet", servedModel: "sonnet", costUsd: 3, isError: false, subtype: "success",
     tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 },
   } as unknown as Parameters<typeof terminalVerdictFields>[0]);

@@ -9225,3 +9225,61 @@ test("W1-T3787 retro error carries output-limit evidence in test/run-task.test.t
   assert.equal("raw_transcript" in (fields ?? {}), false, "the ledger carries bounded evidence, never transcript text");
   assert.match(runTaskSrc, /log\("retro\.error", retroErrorLedgerFields\(e\)/);
 });
+
+test("collector handoff preserves held implementation accounting after a real fix wait yields", async (t) => {
+  const { cashAccountingEvidence, recordCashAccounting } = await import("../src/lib/cash-accounting.js");
+  const { spendAmountUsd } = await import("../src/lib/spend-rows.js");
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtask-collector-fix-handoff-`));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
+  followupGitFixture(root);
+  const fixed = Date.now();
+  const now = t.mock.method(Date, "now", () => fixed);
+  const fakeBinDir = statefulFakeGh({
+    branch: `run-T-FOLLOWUP-${fixed}`,
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }], [{ name: "ci", conclusion: "FAILURE" }]],
+  });
+  const priorPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${priorPath}`;
+  const accounting = cashAccountingEvidence();
+  recordCashAccounting(accounting, "usage-priced", 0.1);
+  recordCashAccounting(accounting, "held", 0.04);
+  let calls = 0;
+  const spawn: typeof spawnWorker = async () => {
+    calls++;
+    if (calls === 1) return result({ text: "RECON REPORT\nOBSERVED: fixture\n" });
+    if (calls === 2) return result({ sessionId: "held-implementation", accountLabel: "held-implementation-account",
+      provider: "claude", executionTransport: "claude-sdk", childEnvKeys: ["ANTHROPIC_API_KEY"],
+      costUsd: 0.1, cashAccounting: accounting, budgetReservedUsd: 0.14, budgetHeldUsd: 0.04, budgetSettledUsd: 0.1,
+      text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/500\n" });
+    return result({ sessionId: "different-fix-worker", accountLabel: "different-fix-account", text: "REPORT\nfix attempted\n" });
+  };
+  try {
+    const outcome = await withLiveWritesAllowed(() => runTask("T-FOLLOWUP", {
+      skipGitSync: true, planPath, config, github: FOLLOWUP_OFFLINE_GITHUB, spawn,
+      containmentExec: followupHoldingContainmentExec, isolationExec: followupCleanIsolationExec,
+      runReview: async () => fakeReview("failure", [criterion({ claim: "fixture repair", met: false })]),
+      externalWaitFreshness: () => calls >= 3 ? { stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) } : undefined,
+    }));
+    assert.equal(calls, 3, "the real fix rung starts exactly one fixture worker before yielding");
+    assert.equal(outcome.verdict, "handed_off");
+    assert.equal(outcome.merged, false);
+    const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").split("\n").filter(Boolean)
+      .map(line => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(rows.filter(row => row.step === "fix.dispatch").length, 1);
+    const verdicts = rows.filter(row => row.step === "verdict"); assert.equal(verdicts.length, 1);
+    const verdict = verdicts[0]!;
+    assert.equal(verdict.verdict, "handed_off"); assert.equal(verdict.reason, "freshness_yield");
+    assert.equal(verdict.account_label, "held-implementation-account", "terminal attribution belongs to the implementation");
+    assert.equal(verdict.billing_mode, "api"); assert.equal(verdict.execution_transport, "claude-sdk");
+    assert.deepEqual(verdict.cash_accounting, accounting);
+    assert.equal(verdict.budget_held_usd, 0.04); assert.equal(verdict.budget_reserved_usd, 0.14);
+    assert.equal(verdict.spend_role, "restated", "the verdict never charges an already priced attempt twice");
+    assert.equal(spendAmountUsd(verdict), undefined);
+    assert.equal(spendAmountUsd({ ...verdict, spend_role: "producer" }), undefined, "a held charge is unavailable rather than free");
+  } finally {
+    now.mock.restore(); process.env.PATH = priorPath;
+    rmSync(fakeBinDir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
+  }
+});

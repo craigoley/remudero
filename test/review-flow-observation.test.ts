@@ -64,3 +64,18 @@ test("review observation bounds detail without losing cohort counts and rejects 
   assert.throws(() => observeReviewFlow([], asOf, "2026-10-06T12:00:00Z"), /invalid bounded/);
   assert.throws(() => observeReviewFlow(Array(100001).fill({}), asOf, start), /invalid bounded/);
 });
+
+test("reasoned reviewer non-attempts stay distinct from execution failures", () => {
+  const outcomes = ["not_attempted", "not_attempted_plan_only", "not_attempted_diff_unreadable",
+    "not_attempted_decision_in_flight", "not_attempted_new_reason", "spawn_error", "not_attemptedx", "success", null];
+  const rows = outcomes.flatMap((reviewer_outcome, n) => {
+    const pr_url = `reason-${n}`;
+    return [eligible(0, { pr_url }), event("review.posted", 2, { pr_url, state: "success", reviewer_outcome })];
+  });
+  const report = observeReviewFlow(rows, asOf, start);
+  assert.equal(report.counts.delivered, 9);
+  assert.deepEqual(report.semantic, { succeeded: 1, notAttempted: 5, failed: 2, unknown: 1 });
+  assert.equal(report.completedOnly.n, 9);
+  assert.equal(report.sourceComplete, false);
+  assert.equal(report.retention, "uncertified");
+});

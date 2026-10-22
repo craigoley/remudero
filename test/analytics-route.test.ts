@@ -58,6 +58,9 @@ test("historical analytics: five ledger-backed top-level series preserve explici
 
 test("W1-T3762 criterion 1: the terminal verdict receipt carries the assignment join key and worker outcome instead of treating task verdict as model success", () => {
   const receipt = terminalVerdictFields({
+    sessionId: "fixture", numTurns: 1, text: "", blocks: [], stderr: "", subtype: "success", effort: "low",
+    apiError: false, permissionDenials: [], modelUsage: {}, compactionEvents: 0, qualitySuspect: false,
+    childEnvKeys: [],
     model: "gpt-5.6-luna",
     servedModel: "gpt-5.6-luna",
     selectionAssignmentId: "assignment-1",
@@ -74,6 +77,7 @@ test("W1-T3762 criterion 1: the terminal verdict receipt carries the assignment 
     tokens: { input: 100, output: 25, cacheRead: 0, cacheCreation: 0 },
     worker_duration_ms: 1500,
     total_cost_usd: 0,
+    billing_mode: "subscription",
     spend_role: "restated",
     success: true,
   });
@@ -81,6 +85,9 @@ test("W1-T3762 criterion 1: the terminal verdict receipt carries the assignment 
 
 test("W1-T3762: terminal receipt keeps the existing clean post-envelope success rule while rejecting API errors and usage refusals", () => {
   const base = {
+    sessionId: "fixture", numTurns: 1, text: "", blocks: [], stderr: "", apiError: false, effort: "low",
+    permissionDenials: [], modelUsage: {}, compactionEvents: 0, qualitySuspect: false,
+    childEnvKeys: [],
     model: "gpt-5.6-luna",
     servedModel: "gpt-5.6-luna",
     tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },

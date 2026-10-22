@@ -1,5 +1,7 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import type { CashAccountingEvidence } from "./cash-accounting.js";
+import { sdkRequestedEffort, type WorkerExecutionTransport, type WorkerRequestedEffort } from "./worker-execution-evidence.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, denyMcpSuccessCredit, validateWorkerMcpIsolation,
   workerMcpExposure, workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
   type WorkerPluginInventory, type WorkerMcpExposure, type WorkerMcpIsolation,
@@ -340,12 +342,17 @@ export interface WorkerResult {
    * `budgetReservedUsd` is what was committed BEFORE the requests were sent (conservative, derived
    * from the adapter's price constants and its exact request ceiling); `budgetSettledUsd` is what
    * the provider's own receipts settled it down to. They differ whenever a receipt came back, and
-   * a row where they are EQUAL on a failed run is the signal that spend could not be read back and
-   * was deliberately left charged. `budgetRefused` marks a run the daily allowance declined before
+   * `budgetHeldUsd` names the amount with unknown billing, while `cashAccounting` separates
+   * usage-priced estimates, pending requests and unavailable invoice cash. `budgetRefused` marks a run the daily allowance declined before
    * any paid request — money not spent, which is a different outcome from a request that failed.
    * Never a prompt, never a credential: these are dollars only. */
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
+  budgetHeldUsd?: number;
+  cashAccounting?: CashAccountingEvidence;
+  /** Set only at a real execution boundary, never from the routing assignment. */
+  executionTransport?: WorkerExecutionTransport;
+  requestedEffort?: WorkerRequestedEffort;
   budgetRefused?: boolean;
   cashAllowanceResetAt?: string;
   /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
@@ -597,6 +604,34 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * checkable against the cap it ran under, and `stderr_excerpt` appears only when `r.isError`. `served_model` is ALWAYS
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
+/** The existing child-key authority remains the subscription/API distinction for native workers. */
+export function workerResultBillingMode(r: Pick<WorkerResult, "provider" | "childEnvKeys">): BillingMode {
+  return r.provider === "cash" ? "api" : billingMode(r.childEnvKeys);
+}
+
+/** Shared by real attempts and terminal/error writers. A missing worker emits no task execution claim. */
+export function workerExecutionLedgerFields(r: WorkerResult): {
+  billing_mode: BillingMode;
+  execution_transport?: WorkerExecutionTransport;
+  requested_effort?: WorkerRequestedEffort;
+  request_efforts?: readonly CashRequestEffortCount[];
+  cash_accounting?: CashAccountingEvidence;
+  budget_reserved_usd?: number;
+  budget_settled_usd?: number;
+  budget_held_usd?: number;
+} {
+  return {
+    billing_mode: workerResultBillingMode(r),
+    ...(r.executionTransport === undefined ? {} : { execution_transport: r.executionTransport }),
+    ...(r.requestedEffort === undefined ? {} : { requested_effort: r.requestedEffort }),
+    ...(r.requestEfforts === undefined ? {} : { request_efforts: r.requestEfforts }),
+    ...(r.cashAccounting === undefined ? {} : { cash_accounting: { ...r.cashAccounting } }),
+    ...(r.budgetReservedUsd === undefined ? {} : { budget_reserved_usd: r.budgetReservedUsd }),
+    ...(r.budgetSettledUsd === undefined ? {} : { budget_settled_usd: r.budgetSettledUsd }),
+    ...(r.budgetHeldUsd === undefined ? {} : { budget_held_usd: r.budgetHeldUsd }),
+  };
+}
+
 export function workerLedgerFields(r: WorkerResult): {
   continuation?: WorkerContinuationReceipt;
   mcp_isolation?: WorkerMcpIsolationEvidence;
@@ -654,7 +689,7 @@ export function workerLedgerFields(r: WorkerResult): {
     candidates: string[];
     searched_paths: string[];
   };
-} {
+} & ReturnType<typeof workerExecutionLedgerFields> {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
@@ -699,7 +734,7 @@ export function workerLedgerFields(r: WorkerResult): {
     total_cost_usd: r.costUsd,
     // W1-T5629: beside the billed figure, never in it — budgets and spend series keep reading `total_cost_usd`.
     ...(r.notionalCostUsd === undefined ? {} : { notional_cost_usd: r.notionalCostUsd }),
-    billing_mode: r.provider === "cash" ? "api" : billingMode(r.childEnvKeys),
+    ...workerExecutionLedgerFields(r),
     max_turns: r.maxTurns,
     // The account this spend is attributed to — a NAME, never a credential, carried verbatim off `WorkerResult.accountLabel`.
     // `undefined`, never guessed, when none resolved (W1-T268).
@@ -2402,6 +2437,7 @@ export async function runOpenWeightWalkingLadder(
 /** True when a Foundry Sonnet attempt failed at zero cost, so the Luna ladder may still carry it. */
 function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
   if (!result.isError) return false;
+  if ((result.budgetHeldUsd ?? 0) > 0) return false;
   if ((result.budgetSettledUsd ?? 0) > 0) return false;
   return result.budgetRefused === true || result.openWeightDeploymentAbsent !== undefined ||
     (result.budgetReservedUsd ?? 0) === 0;
@@ -3433,6 +3469,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         () =>
           collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
+            executionTransport: "claude-sdk", requestedEffort: sdkRequestedEffort(options),
             stderrChunks,
             // Logged verbatim as CONFIGURED inputs, never a read-back: effort is absent from the SDK envelope, and model here
             // is the requested knob, which may differ from the envelope's `modelUsage` keys. Unset gives the honest "default"
@@ -3911,6 +3948,8 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
+    executionTransport?: WorkerExecutionTransport;
+    requestedEffort?: WorkerRequestedEffort;
     root?: string;
     runId?: string;
     taskId?: string;
@@ -4170,6 +4209,8 @@ export async function collectWorkerResult(
       ? { servedModelReason: "no assistant message in the stream reported a real model before the call ended" }
       : {}),
     effort: opts.effort ?? DEFAULT_EFFORT_LABEL,
+    ...(opts.executionTransport === undefined ? {} : { executionTransport: opts.executionTransport }),
+    ...(opts.requestedEffort === undefined ? {} : { requestedEffort: opts.requestedEffort }),
     tokens,
     modelUsage,
     compactionEvents,

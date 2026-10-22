@@ -1,7 +1,10 @@
 import { setTimeout as abortableDelay } from "node:timers/promises";
+import { codexRequestedEffort, type WorkerRequestedEffort } from "./worker-execution-evidence.js";
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { CashResponsesConversation } from "./cash-responses.js";
+import { cashAccountingEvidence, cashUsageTuple, foundryUsageTuple, recordCashAccounting, type CashAccountingEvidence } from "./cash-accounting.js";
+import type { CashRequestTransport } from "./cash-request-effort.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
@@ -128,6 +131,8 @@ export type WorkerExit = { kind: "exit"; code: number } | { kind: "signal"; sign
 
 interface CodexWorkerResult {
   provider: "codex";
+  executionTransport: "codex-cli";
+  requestedEffort: WorkerRequestedEffort;
   /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
   harnessCommit?: CodexHarnessCommit;
   sessionId: string;
@@ -3673,17 +3678,9 @@ export function reserveOpenWeightBudget(
   }, input.beforeCommit, sharedCashAllowancePath(config) !== undefined);
 }
 
-/**
- * Settle a committed reservation DOWN, either to the provider's own reported usage, or — W1-T3666
- * — to the input-only portion of the same conservative estimate when the request FAILED before any
- * usage could be read.
- *
- * `reason`, present only on the failure path, is what makes settlement recorded rather than
- * inferred: an ordinary settle-from-receipt passes nothing, so the ledger row itself distinguishes
- * a bill it actually read from a figure it corrected after a failure (see
- * {@link OpenWeightAllowanceState}). Settlement never raises a reservation above what was
- * reserved; the reservation is a ceiling either way.
- */
+/** Settle a committed reservation down from complete usage or an established no-charge
+ * outcome. Unknown failures keep the original pending amount. UTC rollover and the
+ * concurrent shared-ledger policy are unchanged; no history is rewritten. */
 export function settleOpenWeightBudget(
   config: Config,
   input: { requestId: string; actualUsd: number; atIso: string; reason?: string },
@@ -3807,6 +3804,7 @@ export interface OpenWeightWorkerResult {
   requestEfforts: readonly CashRequestEffortCount[];
   selectionAssignmentId?: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
   /** W1-T4650: the model the provider's own responses named (see {@link cashServedModel}), or
    *  `null` beside a named {@link servedModelReason}. Never the requested deployment echoed back. */
@@ -3830,6 +3828,10 @@ export interface OpenWeightWorkerResult {
    *  refused this run BEFORE any paid request was made. */
   budgetReservedUsd: number;
   budgetSettledUsd: number;
+  /** Pending reservations remain committed against the cap; they are not usage or invoice charges. */
+  budgetHeldUsd: number;
+  cashAccounting: CashAccountingEvidence;
+  executionTransport: CashRequestTransport;
   budgetRefused: boolean;
   cashAllowanceResetAt?: string;
   externalEffect?: ExternalEffectResult;
@@ -4635,6 +4637,8 @@ function openWeightResult(input: {
   promptTokens: number;
   completionTokens: number;
   actualCostUsd?: number;
+  cashAccounting: CashAccountingEvidence;
+  executionTransport: CashRequestTransport;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
   error?: unknown;
@@ -4653,20 +4657,12 @@ function openWeightResult(input: {
   return {
     provider: "cash",
     sessionId: input.sessionId ?? "",
-    // ZERO USAGE COSTS ZERO AT ANY RATE, so it needs no price row. That is not a convenience: this
-    // result is also built on the ERROR path, and one way to get here is the refusal raised when a
-    // deployment has NO row. Pricing unconditionally would throw a second time out of the catch
-    // that is meant to turn a failure into a reportable result, so the refusal would escape
-    // `spawnOpenWeightWorker` instead of being returned — collapsing the very contract the catch
-    // exists to hold. A run that never reached the transport has no tokens, hence no cost, and
-    // saying so requires no rate.
-    costUsd: input.actualCostUsd ?? (
-      (input.promptTokens === 0 && input.completionTokens === 0
-        ? 0
-        : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens)) +
-      // Brokered searches are billed on a DIFFERENT API than the conversation, so their tokens are
-      // not in `promptTokens`/`completionTokens` and pricing those alone would understate the run.
-      (input.webSearchUsd ?? 0)),
+    // This legacy scalar carries usage-priced estimates only. Held allowance and invoice
+    // availability travel separately; an unknown request is never a reported zero charge.
+    costUsd: input.cashAccounting.usagePricedUsd,
+    cashAccounting: { ...input.cashAccounting },
+    budgetHeldUsd: input.cashAccounting.heldUsd,
+    executionTransport: input.executionTransport,
     numTurns: input.turns,
     maxTurns: undefined,
     text,
@@ -4682,6 +4678,7 @@ function openWeightResult(input: {
     effort: input.effort,
     requestEfforts: [...input.requestEfforts],
     tokens: { input: input.promptTokens, output: input.completionTokens, cacheRead: input.cacheReadTokens ?? 0, cacheCreation: input.cacheCreationTokens ?? 0 },
+    tokenUsageState: input.requestEfforts.length === 0 ? "unavailable" : input.cashAccounting.state === "held" ? "partial" : "observed",
     modelUsage: {},
     ...cashServedModel(input.servedModels),
     compactionEvents: [],
@@ -4731,10 +4728,6 @@ function foundryClaudeUsageUsd(deployment: string, usage: {
     usage.output_tokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
-function validFoundryTokenCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
 export async function spawnFoundryClaudeWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
@@ -4750,14 +4743,14 @@ export async function spawnFoundryClaudeWorker(
   let completionTokens = 0;
   let cacheReadTokens = 0;
   let cacheCreationTokens = 0;
-  let spentUsd = 0;
+  const accounting = cashAccountingEvidence();
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
   let text = "";
   let sessionId = "";
   const servedModels: Array<string | undefined> = [];
   const requestEfforts: CashRequestEffortCount[] = [];
-  let pending: { requestId: string; reservedUsd: number } | undefined;
+  let pending: { requestId: string; reservedUsd: number; utcDay: string } | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
   try {
     if (!isFoundryClaudeDeployment(selection.model) || (selection.model !== "claude-haiku-5-5" && args.cashSqueezed !== true)) {
@@ -4795,8 +4788,7 @@ export async function spawnFoundryClaudeWorker(
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
         canContinue: () => turns < maxTurns,
         chargeFailure: () => {
-          spentUsd += pending!.reservedUsd;
-          budgetSettledUsd += pending!.reservedUsd;
+          recordCashAccounting(accounting, "held", pending!.reservedUsd);
           pending = undefined;
         },
         next: (checkActive) => {
@@ -4807,10 +4799,11 @@ export async function spawnFoundryClaudeWorker(
           }
           checkActive();
           const requestId = `${requestPrefix}-${++turns}`;
+          const requestAtIso = clock.iso();
           const reservation = reserveOpenWeightBudget(config, { requestId, deployment: selection.model,
-            requestBodyBytes: Buffer.byteLength(body, "utf8"), atIso: clock.iso(), squeezed: args.cashSqueezed === true });
+            requestBodyBytes: Buffer.byteLength(body, "utf8"), atIso: requestAtIso, squeezed: args.cashSqueezed === true });
           budgetReservedUsd += reservation.reservedUsd;
-          pending = { requestId, reservedUsd: reservation.reservedUsd };
+          pending = { requestId, reservedUsd: reservation.reservedUsd, utcDay: openWeightUtcDay(requestAtIso) };
           recordCashRequestEffort(requestEfforts, body, "foundry-messages");
           return { requestId, reservation };
         },
@@ -4822,27 +4815,21 @@ export async function spawnFoundryClaudeWorker(
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       servedModels.push(cashResponseModel(payload.model));
-      const usage = payload.usage;
-      if (!usage || !validFoundryTokenCount(usage.input_tokens) || !validFoundryTokenCount(usage.output_tokens) ||
-          (usage.cache_read_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_read_input_tokens)) ||
-          (usage.cache_creation_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_input_tokens))) {
-        // The provider may have billed this request. Keep the conservative reservation.
-        spentUsd += reservation.reservedUsd;
-        budgetSettledUsd += reservation.reservedUsd;
+      const measured = foundryUsageTuple(payload.usage);
+      if (measured === undefined) {
+        recordCashAccounting(accounting, "held", reservation.reservedUsd);
       } else {
-        const measured = {
-          input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
-          cache_read_input_tokens: typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0,
-          cache_creation_input_tokens: typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0,
-        };
-        const actualUsd = foundryClaudeUsageUsd(selection.model, measured);
+        const actualUsd = foundryClaudeUsageUsd(selection.model, {
+          input_tokens: measured.input, output_tokens: measured.output,
+          cache_read_input_tokens: measured.cacheRead, cache_creation_input_tokens: measured.cacheCreation,
+        });
         if (actualUsd > reservation.reservedUsd) throw new Error(`cash ${label} usage exceeded its conservative reservation`);
         settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
-        promptTokens += measured.input_tokens;
-        completionTokens += measured.output_tokens;
-        cacheReadTokens += measured.cache_read_input_tokens;
-        cacheCreationTokens += measured.cache_creation_input_tokens;
-        spentUsd += actualUsd;
+        promptTokens += measured.input;
+        completionTokens += measured.output;
+        cacheReadTokens += measured.cacheRead;
+        cacheCreationTokens += measured.cacheCreation;
+        recordCashAccounting(accounting, "usage-priced", actualUsd);
         budgetSettledUsd += actualUsd;
       }
       pending = undefined;
@@ -4864,7 +4851,7 @@ export async function spawnFoundryClaudeWorker(
         return reconcileBoundedProviderAttempt(openWeightResult({
           model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
           promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
-          actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
+          cashAccounting: accounting, executionTransport: "foundry-messages", budgetReservedUsd, budgetSettledUsd,
         }), args.externalEffect);
       }
       if (payload.stop_reason !== "tool_use") throw new Error(`cash ${label} returned a tool call with stop_reason=${String(payload.stop_reason)}`);
@@ -4896,13 +4883,12 @@ export async function spawnFoundryClaudeWorker(
     if (pending) {
       const billed = error instanceof OpenWeightDeploymentNotFoundError ? 0 : pending.reservedUsd;
       if (billed === 0) settleOpenWeightBudget(config, { requestId: pending.requestId, actualUsd: 0, atIso: clock.iso(), reason: "deployment not found" });
-      spentUsd += billed;
-      budgetSettledUsd += billed;
+      recordCashAccounting(accounting, billed === 0 ? "no-charge" : "held", billed);
     }
     return reconcileBoundedProviderAttempt(openWeightResult({
       model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
       promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
-      actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
+      cashAccounting: accounting, executionTransport: "foundry-messages", budgetReservedUsd, budgetSettledUsd,
       budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
       ...(error instanceof OpenWeightDeploymentNotFoundError ? { deploymentAbsent: selection.model } : {}),
       error,
@@ -4951,12 +4937,9 @@ export async function spawnOpenWeightWorker(
   const requestEfforts: CashRequestEffortCount[] = [];
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
-  // W1-T3666: the reservation the CURRENT turn is still carrying, cleared the instant its own
-  // settlement question (settle down from a receipt, or leave the conservative figure standing --
-  // see the usage block below) is decided. If the turn throws before that point, this is what the
-  // outer `catch` settles down instead of stranding: everything before it in a PRIOR turn already
-  // reached its own decision and is no longer "pending".
-  let pendingReservation: { requestId: string; deployment: string; requestBodyBytes: number } | undefined;
+  const accounting = cashAccountingEvidence();
+  // One turn's original identity/amount/day. Earlier decisions cannot be settled twice.
+  let pendingReservation: { requestId: string; reservedUsd: number; utcDay: string } | undefined;
   // Metered SEPARATELY from conversation turns (W1-T3558). They share the day cap — one cap is the
   // only way it bounds total Azure spend — but are counted apart so an operator can read what web
   // access cost, and how often it was refused, without inferring it from a conversation total.
@@ -5020,12 +5003,8 @@ export async function spawnOpenWeightWorker(
         args, deployment: selection.model, source: "openweight", endpoint: openWeightEndpoint(config, selection.model), body,
         headers: { "content-type": "application/json", "api-key": key },
         canContinue: () => turns < maxTurns,
-        chargeFailure: (error) => {
-          const inputOnlyUsd = usesResponses ? openWeightReservationUsd(selection.model, requestBodyBytes)
-            : openWeightUsageUsd(selection.model, requestBodyBytes, 0);
-          settleOpenWeightBudget(config, { requestId: pendingReservation!.requestId, actualUsd: inputOnlyUsd,
-            atIso: clock.iso(), reason: error.message });
-          budgetSettledUsd += inputOnlyUsd;
+        chargeFailure: () => {
+          recordCashAccounting(accounting, "held", pendingReservation!.reservedUsd);
           pendingReservation = undefined;
         },
         next: (checkActive) => {
@@ -5036,10 +5015,11 @@ export async function spawnOpenWeightWorker(
           }
           checkActive();
           const requestId = `${runRequestPrefix}-${++turns}`;
+          const requestAtIso = clock.iso();
           const reservation = reserveOpenWeightBudget(config, { requestId, deployment: selection.model,
-            requestBodyBytes, atIso: clock.iso(), squeezed: args.cashSqueezed === true });
+            requestBodyBytes, atIso: requestAtIso, squeezed: args.cashSqueezed === true });
           budgetReservedUsd += reservation.reservedUsd;
-          pendingReservation = { requestId, deployment: selection.model, requestBodyBytes };
+          pendingReservation = { requestId, reservedUsd: reservation.reservedUsd, utcDay: openWeightUtcDay(requestAtIso) };
           recordCashRequestEffort(requestEfforts, body, usesResponses ? "responses" : "chat-completions");
           return { requestId, reservation };
         },
@@ -5052,30 +5032,23 @@ export async function spawnOpenWeightWorker(
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       servedModels.push(cashResponseModel(payload.model));
-      const turnPromptTokens = typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
-      const turnCompletionTokens = typeof payload.usage?.completion_tokens === "number" ? payload.usage.completion_tokens : 0;
-      const turnCached = typeof payload.usage?.cached_tokens === "number" ? payload.usage.cached_tokens : 0;
-      const turnWritten = typeof payload.usage?.cache_creation_tokens === "number" ? payload.usage.cache_creation_tokens : 0;
-      cacheReadTokens += turnCached;
-      cacheCreationTokens += turnWritten;
-      promptTokens += turnPromptTokens;
-      completionTokens += turnCompletionTokens;
-      // SETTLE DOWN ONLY FROM A RECEIPT WE COULD ACTUALLY READ. A response carrying no usage block
-      // settles at 0 tokens, which would silently hand the allowance back for a request that really
-      // was billed — so an absent receipt leaves the conservative reservation standing instead.
-      if (usesResponses
-        ? typeof payload.usage?.prompt_tokens === "number" && typeof payload.usage?.completion_tokens === "number" &&
-          typeof payload.usage?.cache_creation_tokens === "number"
-        : typeof payload.usage?.prompt_tokens === "number" || typeof payload.usage?.completion_tokens === "number") {
-        const actualUsd = openWeightUsageUsd(selection.model, turnPromptTokens, turnCompletionTokens, turnCached, turnWritten);
-        settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
-        budgetSettledUsd += actualUsd;
+      const price = openWeightPriceFor(selection.model);
+      const measured = cashUsageTuple(payload.usage, price.cachedInputUsdPerMillion !== undefined, usesResponses);
+      const turnCompletionTokens = measured?.output ?? 0;
+      if (measured === undefined) {
+        recordCashAccounting(accounting, "held", reservation.reservedUsd);
       } else {
-        budgetSettledUsd += reservation.reservedUsd;
+        const actualUsd = openWeightUsageUsd(selection.model, measured.input, measured.output, measured.cacheRead, measured.cacheCreation);
+        if (actualUsd > reservation.reservedUsd) throw new Error("cash usage exceeded its conservative reservation");
+        settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
+        promptTokens += measured.input;
+        completionTokens += measured.output;
+        cacheReadTokens += measured.cacheRead;
+        cacheCreationTokens += measured.cacheCreation;
+        budgetSettledUsd += actualUsd;
+        recordCashAccounting(accounting, "usage-priced", actualUsd);
       }
-      // THIS TURN'S SETTLEMENT QUESTION IS NOW DECIDED, one way or the other, so it is no longer
-      // "pending" for the failure-settlement catch below -- a later throw in this same turn (an
-      // undeclared tool, `maxTurns` exceeded) must not re-settle a row already resolved above.
+      // A missing receipt decides a hold once; a later content/tool failure cannot release it.
       pendingReservation = undefined;
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
@@ -5097,7 +5070,7 @@ export async function spawnOpenWeightWorker(
       if (calls.length === 0) {
         lineageEnd = "stream-ended";
         return reconcileBoundedProviderAttempt(
-          openWeightResult({ model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
+          openWeightResult({ model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, cashAccounting: accounting, executionTransport: usesResponses ? "responses" : "chat-completions", budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
           args.externalEffect,
         );
       }
@@ -5134,8 +5107,10 @@ export async function spawnOpenWeightWorker(
                     // Folded into the run totals as well as reported apart: a caller reading only
                     // `budget*Usd` must not see an understated bill.
                     budgetReservedUsd += metered.reservedUsd;
-                    budgetSettledUsd += metered.settledUsd;
-                    webSearchUsd += metered.settledUsd;
+                    budgetSettledUsd += metered.usagePricedUsd;
+                    webSearchUsd += metered.usagePricedUsd;
+                    if (metered.reservedUsd > 0) recordCashAccounting(accounting, metered.heldUsd > 0 ? "held" : "usage-priced",
+                      metered.heldUsd > 0 ? metered.heldUsd : metered.usagePricedUsd);
                   },
                 }),
               )
@@ -5160,28 +5135,16 @@ export async function spawnOpenWeightWorker(
       }
     }
   } catch (error) {
-    // W1-T3666: A RESERVATION STILL PENDING WHEN THE TURN FAILS IS SETTLED DOWN HERE, NOT
-    // STRANDED. `pendingReservation` is set only between a reservation's commit and its own
-    // settlement decision (above), so reaching this with it defined means a 429, a transport
-    // fault or an unparseable body cut the turn short before any usage receipt could be read --
-    // exactly the gap `settleOpenWeightBudget`'s own doc names. Settled to the INPUT-ONLY portion
-    // of the same byte-bound estimate the reservation used (zero completion tokens): a failed
-    // request produced no completion, so it must not be charged for the
-    // `OPENWEIGHT_MAX_COMPLETION_TOKENS` ceiling the reservation assumed it might. `reason` is the
-    // failure's own message, so the ledger row itself says which failure settled it.
+    // Unknown transport/HTTP/JSON outcomes retain the original reservation. Only the
+    // established absent-deployment outcome proves no model was reached.
     if (pendingReservation !== undefined) {
-      // A 404 reached no model, so nothing was billed: settle it to zero, not to the input.
-      const inputOnlyUsd = error instanceof OpenWeightDeploymentNotFoundError
-        ? 0
-        : usesResponses ? openWeightReservationUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes)
-        : openWeightUsageUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes, 0);
-      settleOpenWeightBudget(config, {
-        requestId: pendingReservation.requestId,
-        actualUsd: inputOnlyUsd,
-        atIso: clock.iso(),
-        reason: error instanceof Error ? error.message : String(error),
-      });
-      budgetSettledUsd += inputOnlyUsd;
+      if (error instanceof OpenWeightDeploymentNotFoundError) {
+        settleOpenWeightBudget(config, { requestId: pendingReservation.requestId, actualUsd: 0,
+          atIso: clock.iso(), reason: error.message });
+        recordCashAccounting(accounting, "no-charge", 0);
+      } else {
+        recordCashAccounting(accounting, "held", pendingReservation.reservedUsd);
+      }
     }
     // Preserve the transport/tool failure in the result's stderr + error flags; a failure must not
     // collapse into an ordinary empty worker response for callers or the catch-erasure census.
@@ -5199,7 +5162,7 @@ export async function spawnOpenWeightWorker(
         promptTokens,
         completionTokens,
         cacheReadTokens, cacheCreationTokens,
-        ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}),
+        cashAccounting: accounting, executionTransport: usesResponses ? "responses" : "chat-completions",
         error,
         budgetReservedUsd,
         budgetSettledUsd,
@@ -5236,7 +5199,7 @@ async function brokerCashWebSearch(input: {
   clock: Pick<Clock, "now" | "iso">;
   requestId: string;
   fetchImpl?: typeof fetch;
-  onMetered: (metered: { accepted: boolean; reservedUsd: number; settledUsd: number }) => void;
+  onMetered: (metered: { accepted: boolean; reservedUsd: number; usagePricedUsd: number; heldUsd: number }) => void;
 }): Promise<unknown> {
   const query = input.args.query;
   if (typeof query !== "string" || query.trim() === "") throw new Error("web_search query must be a non-empty string");
@@ -5262,25 +5225,39 @@ async function brokerCashWebSearch(input: {
     // escape would abort a worker that could still finish without the search, and leaving it
     // uncounted would hide "we ran out of money" among the searches that merely failed.
     if (!(error instanceof OpenWeightAllowanceExhaustedError)) throw error;
-    input.onMetered({ accepted: false, reservedUsd: 0, settledUsd: 0 });
+    input.onMetered({ accepted: false, reservedUsd: 0, usagePricedUsd: 0, heldUsd: 0 });
     return { error: `web_search refused (allowance): ${error.message}`, sources: [] };
   }
-  const result = await performCashWebSearch({
-    query,
-    endpoint,
-    apiKey: searchKey,
-    model: input.model,
-    fetchImpl: input.fetchImpl,
-  });
-  let settledUsd = reservation.reservedUsd;
-  if (result.usageRead) {
-    settledUsd = Math.min(
-      openWeightUsageUsd(input.model, result.usage.promptTokens, result.usage.completionTokens),
-      reservation.reservedUsd,
-    );
-    settleOpenWeightBudget(input.config, { requestId: input.requestId, actualUsd: settledUsd, atIso: input.clock.iso() });
+  let result: Awaited<ReturnType<typeof performCashWebSearch>>;
+  let pricedUsd: number | undefined;
+  let usagePriced = false;
+  let usagePricedUsd = 0;
+  try {
+    result = await performCashWebSearch({
+      query,
+      endpoint,
+      apiKey: searchKey,
+      model: input.model,
+      fetchImpl: input.fetchImpl,
+    });
+    const price = openWeightPriceFor(input.model);
+    const complete = result.usageRead
+      && (price.cachedInputUsdPerMillion === undefined || result.usage.cacheReadTokens !== undefined)
+      && (price.cacheWriteUsdPerMillion === undefined || result.usage.cacheCreationTokens !== undefined);
+    pricedUsd = complete ? openWeightUsageUsd(input.model, result.usage.promptTokens, result.usage.completionTokens,
+      result.usage.cacheReadTokens, result.usage.cacheCreationTokens) : undefined;
+    if (pricedUsd !== undefined && pricedUsd <= reservation.reservedUsd) {
+      settleOpenWeightBudget(input.config, { requestId: input.requestId, actualUsd: pricedUsd, atIso: input.clock.iso() });
+      usagePriced = true;
+      usagePricedUsd = pricedUsd;
+    }
+  } catch (error) {
+    input.onMetered({ accepted: false, reservedUsd: reservation.reservedUsd, usagePricedUsd: 0, heldUsd: reservation.reservedUsd });
+    throw error;
   }
-  input.onMetered({ accepted: result.outcome === "accepted", reservedUsd: reservation.reservedUsd, settledUsd });
+  input.onMetered({ accepted: result.outcome === "accepted" && !(pricedUsd !== undefined && !usagePriced), reservedUsd: reservation.reservedUsd,
+    usagePricedUsd, heldUsd: usagePriced ? 0 : reservation.reservedUsd });
+  if (pricedUsd !== undefined && !usagePriced) return { error: "web_search usage exceeded its conservative reservation", sources: [] };
   if (result.outcome === "refused") {
     return { error: `web_search refused (${result.reason}): ${result.detail}`, sources: [] };
   }
@@ -5332,8 +5309,9 @@ async function spawnCodexWorkerInPrivateTemp(
     if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
   };
   const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };
+  const actualArgv = codexExecArgs(args, config, selection);
   const contained = spawn(
-    { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
+    { command: bin, args: actualArgv, cwd: args.cwd, env: childEnv },
     (chunk) => {
       if (outputLimit || timedOut) return;
       // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.
@@ -5436,6 +5414,7 @@ async function spawnCodexWorkerInPrivateTemp(
       childEnvKeys: Object.keys(childEnv),
       accountLabel: undefined,
       provider: "codex",
+      executionTransport: "codex-cli", requestedEffort: codexRequestedEffort(actualArgv),
       model,
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,

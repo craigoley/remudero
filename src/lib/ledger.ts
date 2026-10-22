@@ -5,6 +5,7 @@ import {
   cpSync,
   existsSync,
   fstatSync,
+  fsyncSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -269,6 +270,8 @@ export function appendLedger(
     actor?: () => LedgerActor;
     clock?: Clock;
     fstat?: (fd: number) => { mtimeMs: number };
+    /** Critical saves require a complete synchronized write before owner release. */
+    durable?: boolean;
   } = {},
 ): void {
   const actor = (opts.actor ?? deriveLedgerActor)();
@@ -303,6 +306,7 @@ export function appendLedger(
   try {
     const written = writeSync(fd, buf, 0, buf.length);
     if (written !== buf.length) {
+      if (opts.durable === true) throw new Error("ledger-durable-write-incomplete");
       console.error(
         `ledger: short write for ${path} (${written}/${buf.length} bytes written) — ` +
           `the record may be torn; see readLedgerLines' torn-line handling`,
@@ -319,6 +323,12 @@ export function appendLedger(
       writeSync(fd, rows[1]!, 0, rows[1]!.length);
     }
     behind = rowsBehindRotationSeal(fd, rows);
+    if (opts.durable === true) {
+      if (behind.length > 0) throw new Error("ledger-durable-rotation-reconciliation-unconfirmed");
+      fsyncSync(fd);
+      const parent = openSync(dirname(path), "r");
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+    }
   } finally {
     closeSync(fd);
   }
@@ -342,7 +352,7 @@ export function appendProducerLedger(
   path: string,
   senderId: string,
   line: Omit<LedgerLine, "task_id">,
-  opts: { ceilingBytes?: number; identity?: () => string } = {},
+  opts: { ceilingBytes?: number; identity?: () => string; durable?: boolean } = {},
 ): ProducerIdentity {
   const identity = resolveProducerIdentity(senderId);
   appendLedger(path, { ...line, task_id: senderId } as LedgerLine, opts);

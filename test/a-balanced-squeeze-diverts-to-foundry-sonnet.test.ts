@@ -105,7 +105,7 @@ function sonnetReply(input = 100, output = 20): Response {
   return new Response(JSON.stringify({
     id: "msg-sonnet", model: "claude-sonnet-5-5", stop_reason: "end_turn",
     content: [{ type: "text", text: "Balanced work done." }],
-    usage: { input_tokens: input, output_tokens: output },
+    usage: { input_tokens: input, output_tokens: output, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
   }), { status: 200 });
 }
 

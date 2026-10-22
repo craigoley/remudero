@@ -20,7 +20,7 @@ function fixture(cap = 25) {
 function response(over: Record<string, unknown> = {}) {
   return new Response(JSON.stringify({ id: "haiku-fixture", model: MODEL, stop_reason: "end_turn",
     content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text: '{"ok":true}' }],
-    usage: { input_tokens: 100, output_tokens: 20 }, ...over }), { status: 200 });
+    usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, ...over }), { status: 200 });
 }
 
 test("Haiku 5.5 prices the whole prompt tier and reserves the one-hour cache-write ceiling", () => {

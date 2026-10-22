@@ -103,7 +103,7 @@ import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { buildBatchedGithub, classifyGhFailure, deriveStatus, dispatchesWithoutNewOwnedPr, ghGateway, ghRequiredStatusCheckContexts, projectPlan, readLedgerLines, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type StatusProjection, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "../../lib/status.js";
 import { dedupeRollupByLatestAttempt, buildFixProgressInput, terminalStateReason, type ActionableGateFailure, type CiFailure, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MergeConflictEvidence, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type RedBaseRefreshFacts, type SweepDeps, type RegistrationChange, trackRepairLadder, type FixRoundBranchClaim } from "../../lib/sweep.js";
 import { classifyNoPrShape } from "../../lib/fix-rung-classify.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation } from "../../lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerExecutionLedgerFields, workerResultBillingMode, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation } from "../../lib/worker.js";
 import { QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions, runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge } from "../../lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "../../lib/worker-provider.js";
 import { type AddedTestAliasRewrite, type TestAliasRewriter } from "../../lib/added-test-alias-rewrite.js";
@@ -2272,7 +2272,7 @@ function workerErrorVerdict(
       subtype: r.subtype,
       num_turns: r.numTurns,
       cost_usd: costUsd,
-      billing_mode: billingMode(r.childEnvKeys),
+      ...workerExecutionLedgerFields(r),
       account_label: r.accountLabel,
       reason: budgetBreach
         ? "worker breached maxBudgetUsd — not retried (dollars are the backstop)"
@@ -2303,7 +2303,7 @@ function noPrVerdict(
       subtype: r.subtype,
       num_turns: r.numTurns,
       cost_usd: costUsd,
-      billing_mode: billingMode(r.childEnvKeys),
+      ...workerExecutionLedgerFields(r),
       account_label: r.accountLabel,
       reason:
         reportExcerpt !== undefined
@@ -2402,7 +2402,7 @@ function alreadySatisfiedVerdict(
       subtype: r.subtype,
       num_turns: r.numTurns,
       cost_usd: costUsd,
-      billing_mode: billingMode(r.childEnvKeys),
+      ...workerExecutionLedgerFields(r),
       account_label: r.accountLabel,
       reason: `worker found acceptance already satisfied by merged ${pr.url} — credited, no new PR opened`,
       pr_number: pr.number,
@@ -2449,7 +2449,7 @@ function finishTransientRetry(
     subtype: worker.subtype,
     num_turns: worker.numTurns,
     cost_usd: costUsd,
-    billing_mode: billingMode(worker.childEnvKeys),
+    billing_mode: workerResultBillingMode(worker),
     account_label: worker.accountLabel,
     reason: driverResult.cashAllowanceExhausted ? driverResult.reason
       : `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
@@ -3153,7 +3153,7 @@ async function deferOpenToSiblingPr(
     branch,
     head_sha: headSha,
     cost_usd: costUsd,
-    billing_mode: billingMode(impl.childEnvKeys),
+    billing_mode: workerResultBillingMode(impl),
     account_label: impl.accountLabel,
     ...terminalVerdictFields(impl),
   });
@@ -7204,7 +7204,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
             strikes: rung.strikes,
             ...headProvenanceFields(worktreePath),
             cost_usd: costUsd,
-            billing_mode: billingMode(impl.childEnvKeys),
+            billing_mode: workerResultBillingMode(impl),
             account_label: impl.accountLabel,
             ...terminalVerdictFields(impl),
           });
@@ -7253,7 +7253,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           refusal_class: err.refusalClass,
           ...(issueUrl ? { issue_url: issueUrl } : {}),
           cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
+          billing_mode: workerResultBillingMode(impl),
           account_label: impl.accountLabel,
           ...terminalVerdictFields(impl),
         });
@@ -7275,7 +7275,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         verdict: "failed",
         reason: "no PR opened",
         cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
+        billing_mode: workerResultBillingMode(impl),
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
@@ -7358,7 +7358,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         old_sha: ci.oldSha,
         new_sha: ci.newSha,
         cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
+        billing_mode: workerResultBillingMode(impl),
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
@@ -7373,7 +7373,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         pr_url: prUrl,
         reason,
         cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
+        billing_mode: workerResultBillingMode(impl),
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
@@ -7454,7 +7454,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         pr_url: prUrl,
         reason: review.verdictWithheld,
         cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
+        billing_mode: workerResultBillingMode(impl),
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
@@ -7601,7 +7601,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           pr_url: prUrl,
           reason: `fix rung abandoned — worker spawn exceeded its ${rung.spawnAbandonedElapsedMs}ms wall-clock bound`,
           cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
+          billing_mode: workerResultBillingMode(impl),
           account_label: impl.accountLabel,
           ...terminalVerdictFields(impl),
         });
@@ -7611,7 +7611,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       if (rung.outcome === "handed_off") {
         log("verdict", {
           verdict: "handed_off", pr_url: prUrl, reason: rung.reason, cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys), account_label: impl.accountLabel, ...terminalVerdictFields(impl),
+          billing_mode: workerResultBillingMode(impl), account_label: impl.accountLabel, ...terminalVerdictFields(impl),
         });
         say(`verdict: handed_off (${rung.reason}) — PR left OPEN: ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "handed_off" };
@@ -7623,7 +7623,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           reason: `fix rung exhausted after ${rung.strikes} strike(s)`,
           issue_url: rung.issueUrl,
           cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
+          billing_mode: workerResultBillingMode(impl),
           account_label: impl.accountLabel,
           ...terminalVerdictFields(impl),
         });
@@ -7661,7 +7661,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           reason: termination.reason,
           ...termination.extra,
           cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
+          billing_mode: workerResultBillingMode(impl),
           account_label: impl.accountLabel,
           ...terminalVerdictFields(impl),
         });
@@ -7788,7 +7788,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         reason,
         issue_url: issueUrl,
         cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
+        billing_mode: workerResultBillingMode(impl),
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
@@ -7951,7 +7951,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         reason: "risk judge escalated",
         issue_url: riskJudgeResult.escalationUrl,
         cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
+        billing_mode: workerResultBillingMode(impl),
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
@@ -8023,7 +8023,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         verdict: "merged",
         pr_url: prUrl,
         cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
+        billing_mode: workerResultBillingMode(impl),
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
@@ -8041,7 +8041,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       ...(outcome.headSha ? { head_sha: outcome.headSha } : {}),
       ...(outcome.checks ? { checks: outcome.checks } : {}),
       cost_usd: costUsd,
-      billing_mode: billingMode(impl.childEnvKeys),
+      billing_mode: workerResultBillingMode(impl),
       account_label: impl.accountLabel,
       ...terminalVerdictFields(impl),
     });

@@ -15,7 +15,8 @@ import { readInflightLock, sweepStaleInflightLocks, type InflightLockInfo, type 
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
-import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { spawnWorker, workerExecutionLedgerFields, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { readCashAccounting } from "./cash-accounting.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
@@ -408,7 +409,10 @@ function callEvidence(row: Record<string, unknown>) {
   const workerCall: Outcome = row.success === true ? { state: "observed", value: true }
     : row.success === false ? { state: "failed", value: false }
       : unavailable("worker-outcome-not-reported");
-  const cost = observedNonnegative(row.total_cost_usd, "worker-cost-not-reported");
+  const cash = Object.hasOwn(row, "cash_accounting") ? readCashAccounting(row.cash_accounting) : undefined;
+  const cost = cash === undefined ? observedNonnegative(row.total_cost_usd, "worker-cost-not-reported")
+    : cash.state === "observed" && cash.evidence.state === "complete"
+      ? { state: "observed" as const, value: cash.evidence.usagePricedUsd } : unavailable("cash-billing-unavailable-or-held");
   const notional = observedNonnegative(Object.hasOwn(row, "notional_cost_usd") ? row.notional_cost_usd
     : row.provider === "codex" ? undefined : row.total_cost_usd, "worker-cost-not-reported");
   const billingMode = row.billing_mode === "api" || row.billing_mode === "subscription"
@@ -424,6 +428,7 @@ function callEvidence(row: Record<string, unknown>) {
       billingMode: billingMode ? { state: "observed" as const, value: billingMode } : unavailable("billing-mode-not-reported"),
       apiCostUsd: billingMode === "api" ? cost : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
       subscriptionNotionalUsd: billingMode === "subscription" ? notional : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
+      ...(cash === undefined ? {} : { cashAllowance: cash }),
     },
   };
 }
@@ -433,19 +438,24 @@ function callEvidence(row: Record<string, unknown>) {
  * supplies zero placeholders when dollars or token usage are not reported. */
 export function benchmarkWorkerAttemptResources(result: WorkerResult) {
   const fields = workerLedgerFields(result);
+  const { billing_mode, ...execution } = workerExecutionLedgerFields(result);
+  const cash = fields.cash_accounting === undefined ? undefined : readCashAccounting(fields.cash_accounting);
   const observedEnvelope = typeof result.subtype === "string" && result.subtype.length > 0;
   const codexPlaceholder = result.provider === "codex";
-  const costObserved = observedEnvelope && !(codexPlaceholder && result.costUsd === 0);
+  const costObserved = observedEnvelope && !(codexPlaceholder && result.costUsd === 0)
+    && (cash === undefined || cash.state === "observed" && cash.evidence.state === "complete");
   const tokensObserved = observedEnvelope && (fields.token_usage_state === undefined
     ? !(codexPlaceholder && result.tokens.input === 0 && result.tokens.output === 0
       && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0)
     : fields.token_usage_state === "observed");
   return {
+    ...execution,
+    ...(fields.provider === undefined ? {} : { provider: fields.provider }),
     served_model: fields.served_model,
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
     ...(fields.served_model_reason !== undefined ? { served_model_reason: fields.served_model_reason } : {}),
     worker_duration_ms: fields.worker_duration_ms,
-    ...(observedEnvelope ? { billing_mode: fields.billing_mode } : {}),
+    ...(observedEnvelope ? { billing_mode } : {}),
     ...(tokensObserved ? { tokens: fields.tokens } : {}),
     ...(fields.token_usage_state === undefined ? {} : { token_usage_state: fields.token_usage_state }),
     ...(costObserved ? { total_cost_usd: fields.total_cost_usd } : {}),

@@ -319,14 +319,16 @@ test("a daily row-budget breach remains partial evidence rather than a healthy z
   const f = fixture();
   try {
     writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson(Array.from({ length: 100001 }, (_, n) => ({
-      ts: "2026-10-02T10:00:00Z", step: "worker.assignment", task_id: `W1-T${n}`,
+      ts: "2026-10-02T10:00:00Z", step: "review.posted", task_id: `W1-T${n}`,
     }))));
     const source = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0];
     assert.equal(source.rowsRead, 100001);
     assert.equal(source.retainedRowsOmitted, 1);
     assert.equal(source.state, "observed-partial");
     assert.ok(source.reasons.includes("ledger-retention-row-bound"));
-    assert.equal(source.reports[0].nextAction, "repair-source-evidence");
+    assert.equal(source.retention.rawWindowRows, 100000);
+    assert.equal(source.retention.rawWindowOmitted, 1);
+    assert.equal(source.reports[0].sourceQuality.state, "observed", "review-window exhaustion cannot consume trial retention");
   } finally { f.close(); }
 });
 

@@ -12,6 +12,8 @@
  */
 
 /** `produced`: this row's cost is new money. `restated`: it repeats a cost an earlier row already carried. */
+import { readCashAccounting } from "./cash-accounting.js";
+
 export type SpendRole = "produced" | "restated";
 
 /**
@@ -54,6 +56,10 @@ function finiteNumber(value: unknown): number | undefined {
 
 /** The row's cost: `total_cost_usd`, else `cost_usd`. Absent stays `undefined` — never drawn as 0. */
 export function spendAmountUsd(row: Record<string, unknown>): number | undefined {
+  if (row.billing_mode === "api" && Object.hasOwn(row, "cash_accounting")) {
+    const cash = readCashAccounting(row.cash_accounting);
+    return cash.state === "observed" && cash.evidence.state === "complete" ? cash.evidence.usagePricedUsd : undefined;
+  }
   return finiteNumber(row.total_cost_usd) ?? finiteNumber(row.cost_usd);
 }
 
