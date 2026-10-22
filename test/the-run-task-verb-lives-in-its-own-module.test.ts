@@ -5,8 +5,12 @@ import { test } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // @source-text-subject: this task proves declaration ownership and import direction.
-function source(path: string): string {
-  return readFileSync(join(REPO_ROOT, path), "utf8");
+function entrySource(): string {
+  return readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
+}
+
+function moduleSource(): string {
+  return readFileSync(join(REPO_ROOT, "src/cli/commands/run-task-verb.ts"), "utf8");
 }
 
 function topLevelFunction(text: string, header: string): string {
@@ -18,8 +22,8 @@ function topLevelFunction(text: string, header: string): string {
 }
 
 test("W1-T9332: runTask is defined in its module and src/run-task.ts only delegates to it", () => {
-  const entry = source("src/run-task.ts");
-  const module = source("src/cli/commands/run-task-verb.ts");
+  const entry = entrySource();
+  const module = moduleSource();
   assert.match(module, /^export interface RunTaskCommandHost \{/m);
   for (const [name, minimumLines] of [["runTask", 500], ["runTaskBody", 2000]] as const) {
     const implementation = topLevelFunction(module, `export async function ${name}(`);
@@ -35,7 +39,7 @@ test("W1-T9332: runTask is defined in its module and src/run-task.ts only delega
 });
 
 test("W1-T9332: the run-task module imports nothing from src/run-task.ts", () => {
-  const module = source("src/cli/commands/run-task-verb.ts");
+  const module = moduleSource();
   const imports = [...module.matchAll(/(?:from|import\()\s*["']([^"']+)["']/g)].map((match) => match[1]);
   assert.ok(imports.length > 10, "the module imports its library collaborators directly");
   assert.deepEqual(imports.filter((path) => /(^|\/)run-task(?:\.[jt]s)?$/.test(path)), []);
