@@ -6,8 +6,9 @@ import {readSharedGitPolicy,readSharedWorkspaceCapacity,borrowedWorkspaceWorker,
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {main} from '#scripts/shared-workspace.mjs';
 import {resolveTestSlotDir,testSlotProcessFacts} from '#src/lib/test-slot.js';
-import {writeMutantModule} from '../helpers/mutant-module.js';
-const migrationSource=fileURLToPath(new URL('../../scripts/lib/shared-git-author-migration.mjs',import.meta.url));
+import {writeMutantModule} from '#test/helpers/mutant-module.js';
+import {REPO_ROOT} from '#test/helpers/repo-root.js';
+const migrationSource=join(REPO_ROOT,'scripts/lib/shared-git-author-migration.mjs');
 let migrationUrl=pathToFileURL(migrationSource).href;
 if(process.env.RMD_TEST_SHARED_GIT_MIGRATION_MUTANT!==undefined){
   assert.equal(process.env.RMD_TEST_SHARED_GIT_MIGRATION_MUTANT,'remove-bare-relocation');
@@ -187,7 +188,7 @@ test('shared Git author migration rejects linked pools and public, oversized or 
   renameSync(f.config,join(f.bare,'fixture-config'));symlinkSync(join(f.bare,'fixture-config'),f.config);assert.throws(()=>inspectSharedGitAuthorMigration(f.bare));
 });
 test('shared Git author migration CLI inspects read-only and refuses unslotted application',t=>{
-  const f=bareMigrationFixture(t),script=fileURLToPath(new URL('../../scripts/shared-git-author-migration.mjs',import.meta.url));
+  const f=bareMigrationFixture(t),script=join(REPO_ROOT,'scripts/shared-git-author-migration.mjs');
   const env={...process.env};delete env.RMD_TEST_SLOT_PARENT;
   const run=(args:string[])=>spawnSync(process.execPath,[script,...args],{env,encoding:'utf8',timeout:10000,maxBuffer:65536});
   const before=readFileSync(f.config),inspect=run(['inspect',f.bare]);assert.equal(inspect.status,0,inspect.stderr);const plan=JSON.parse(inspect.stdout);assert.equal(plan.liveApplicationAuthorized,false);
