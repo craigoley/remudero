@@ -2,7 +2,8 @@
 
 The fix rung refuses a newly added child of `test/` even though its caller explicitly
 adds that directory to the comparison list and its commit helper permits test edits.
-The code defect is confirmed; the fleet recurrence count is not measured in this session.
+The code defect is confirmed. A subsequent operator census measured nine matching
+stand-down rows since October 14; the worker access limitation is retained below.
 
 This W1-T10333 investigation reads source at
 `27f044d50ba0dedee510681c371750de62cf4535` on 2026-10-22. The session branch and local
@@ -61,20 +62,51 @@ list is the three paths above followed by `test/`. The recommendation is `revert
 The API reports the issue closed at 2026-10-21T04:34:46Z; that state does not establish
 whether the code defect was repaired.
 
-**REPORTED, ledger row; not independently reread:** W1-T10333's rationale records
-`2026-10-20T14:48:54.897Z`, step `fix.stood_down`, site `rung.scope`, strike 2,
-task W1-T10070, `scope_kind: files`, and `out_of_scope_paths` containing the same test
-path. Current `runFixRung` emits these fields after the scope escalation. The issue
-corroborates the refusal and the source explains its list, but neither supplies the
-original ledger bytes or proves the daemon's complete deployed source revision.
+**OBSERVED, operator ledger census:** on 2026-10-22, the operator reader independently
+opened the daemon's complete ledger corpus through `2026-10-22T19:01:17.871991Z`.
+The restricted worker did not receive additional filesystem permissions. The census
+opened 437 gzip archives, zero plain rotations and the live file: 438 files containing
+6,086,828 valid JSON rows. UTC timestamps were parsed before comparison; the corpus
+spans August 8 through `2026-10-22T19:01:16.529Z`, covering the requested window.
 
-The requested counting window starts at 2026-10-14T00:00:00Z. No ledger corpus was opened:
-this session's permission profile denies `/home/node/Remudero/state`, and no permitted
-ledger export is provided. Consequently the corpus's newest timestamp, coverage of that
-window, and the required positive control locating the 14:48:54.897Z row are **unverified**.
-The filing PR reports a different reader's corpus (67 rotations from October 18 plus the
-live file, newest row October 21 at 10:31Z); that is attributed historical evidence, not
-this session's measurement and not proof of coverage back to October 14.
+The positive control is W1-T10070's `2026-10-20T14:48:54.897Z` row at line 8745 in
+`ledger.2026-10-20T14-54-32-380Z.ndjson.gz`. Its original-row SHA256 is
+`7cc4d18cc16c69ae1325d20b9f9ea749efb81586159171a3bc1efc1dd83766b4`.
+It records `fix.stood_down`, `rung.scope`, strike 2, the three declared paths above
+plus `test/`, and the incident child as its offender. This independently locates the
+original row; it does not establish that daemon boot's complete source revision.
+
+Count rows, not paths or PRs: since `2026-10-14T00:00:00Z`, nine classified
+`fix.stood_down` rows at `rung.scope` contain a printed trailing-slash declaration
+prefixing an `out_of_scope_paths` item. Exact duplicate candidate row bytes are
+deduplicated by SHA256. Multiple refused children in one row count once.
+
+| Timestamp (UTC) | Task | Strike |
+| --- | --- | --- |
+| 2026-10-14T11:54:06.423Z | W1-T3956 | 2 |
+| 2026-10-15T01:58:33.684Z | W1-T9085 | 3 |
+| 2026-10-15T12:42:12.071Z | W1-T9086 | 2 |
+| 2026-10-16T20:14:28.974Z | W1-T9722 | 3 |
+| 2026-10-18T22:43:45.095Z | W1-T9240 | 2 |
+| 2026-10-20T04:08:47.654Z | W1-T10094 | 2 |
+| 2026-10-20T12:02:12.809Z | W1-T9089 | 2 |
+| 2026-10-20T14:48:54.897Z | W1-T10070 | 2 |
+| 2026-10-21T15:55:49.408Z | W1-T9434 | 2 |
+
+One malformed JSON row was separately checked: archive
+`ledger.2026-09-20T23-59-59-117Z.ndjson.gz`, line 36871, SHA256
+`2503b4211e8eb378d556430ac31a34df63f371fb541617522a9e813eae41b0d7`.
+Its readable timestamp is `2026-09-20T13:32:26.828Z`; it contains neither
+`fix.stood_down` nor `rung.scope` and predates the window. No valid row had an invalid
+timestamp. The scan snapshots the live file's opened bytes first, reads every rotation
+form, excludes timestamps after its cutoff, and records each file's identity, byte
+counts and candidate-row hashes. Complete receipts and the reproducible reader are
+retained in the operator's PR-queue evidence bundle as
+`pr13631-scope-refusal-census.json` and `scope-refusal-census.py`.
+
+The original worker could not read `/home/node/Remudero/state`; its earlier count was
+UNKNOWN. The operator census resolves that evidence gap without treating the historical
+67-rotation report as a current measurement or changing worker access.
 
 ## Which reading is right
 
@@ -183,13 +215,15 @@ If the retained corpus starts after October 14, label the result a partial-windo
 
 ## Remedy proposal
 
-Preserve the W1-T5532 permission and use one shared directory-aware membership predicate
-for the files-regime guard and commit helper. Preserve artifact, companion-ledger,
-registration, reachable-remedy and inherited-baseline handling, and the separate plan
-regime. Extracting `pathIsUnderDeclaredSurface` to a leaf module would avoid importing the
-CLI into `prompt-render.ts`. Review advisory, inverse-completion and dispatch-glob
-semantics require their own policy decisions; this diagnosis does not authorize changing
-all of them merely because they read declarations.
+Preserve the W1-T5532 permission by sharing the commit helper's existing safe-test
+admission predicate with the next-strike comparison. Materialize only observed safe
+`test/` children as exact comparison entries when the rung already grants test edits.
+Keep the generic files-regime guard's exact membership unchanged; the discrepancy does
+not authorize directory expansion for arbitrary task declarations. Preserve absent and
+empty declarations, artifact and companion-ledger exemptions, registrations, reachable
+remedies, inherited-baseline subtraction and the separate plan regime. A small leaf
+module avoids importing the CLI into another guard. Review advisory, inverse-completion
+and dispatch-glob semantics retain their separate contracts.
 
 The alternative is removing the minted directory entry and withdrawing the test-edit
 permission consistently from the prompt and commit helper. Removing only the entry would
@@ -206,11 +240,15 @@ exercised together. Controls must still refuse an unrelated `src/` path and a si
 Delete the fix and rerun to prove the new regression test fails, then restore it and
 require a passing summary.
 
-No implement task was filed here: this task declares only this forensic document, and
-filing must occur from an operator checkout. The separate filing and the missing ledger
-measurement remain explicit handoffs in the worker report. This change makes no scope,
-stand-down or escalation behavior changes. The required heading grep proofs establish
-document structure; they do not turn the missing ledger evidence into a satisfied claim.
+The operator reserved W1-T10432 through the normal remote ID allocator and prepared
+its separate plan record, `plan/tasks.d/W1-T10432-materialize-the-fix-rungs-existing-test-edit-grant.yaml`.
+The separate filing is [PR #13635](https://github.com/craigoley/remudero/pull/13635),
+head `5f94c7b9d277bb0661f6c1c8eafc454da0542097`. The implementation is parked at
+`verify: human` pending an explicit operator decision on the exact bounded patch.
+Filing this follow-up grants no new test-edit policy, gate exception or runtime authority.
+This diagnostic PR changes no scope, stand-down or escalation behavior. The original
+worker's inaccessible-ledger and task-filing handoffs are resolved by the attributed
+operator measurement above and the separate filing, rather than by weakening review.
 
 ## Validation on retry
 
