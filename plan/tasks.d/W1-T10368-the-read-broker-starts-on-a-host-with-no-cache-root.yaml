@@ -1,0 +1,52 @@
+- id: W1-T10368
+  title: "THE GITHUB READ BROKER STARTS ON A HOST WITH NO CACHE ROOT YET — at 19:52:21Z and 19:52:47Z on 2026-10-21 `rmd gh-broker serve` (unit remudero-gh-read-broker) died in `new GhReadBroker` with \"ENOENT: no such file or directory, mkdir '/home/craigoleyagent/.cache/remudero/gh-broker/cache'\", although that call already passes `recursive: true`; find which component failed and make startup create every component with mode 0700 or name the one it cannot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # one concern, how the broker creates its cache directory at startup; caching, pacing and serving are unchanged
+  band_meaning: blast-radius
+  origin: "coordinator brief f1021b item 14 (2026-10-21), from the broker unit's journal after the operator's GitHub-access ruling (~20:00Z)"
+  plan_refs: [W1-T10279, W1-T10310]
+  files:
+    - src/lib/gh-read-broker.ts
+    - test/github/the-read-broker-starts-on-a-host-with-no-cache-root.test.ts
+  status: queued
+  priority: 2  # every builder's reads now go through this broker; a crash at start sends them back to the 180 s floor
+  attempts: 0
+  rationale: |
+    OBSERVED, `journalctl --user -u remudero-gh-read-broker.service` on host remudero, 2026-10-21 19:50Z..19:53Z:
+    "### RUN-TASK ERROR / Error: ENOENT: no such file or directory, mkdir
+    '/home/craigoleyagent/.cache/remudero/gh-broker/cache' at mkdirSync (node:fs) at new GhReadBroker
+    (src/lib/gh-read-broker.ts:409:5) … at ghBrokerCommand", from pids 1671490 and 1674616. The unit has no sandbox
+    settings (`systemctl --user cat`: WorkingDirectory and ExecStart only). At 20:1xZ `~/.cache` exists, created
+    19:55Z, and `~/.cache/remudero/gh-broker` exists; the broker is serving.
+    READ at origin/main b49411212 (symbols, not lines): the `GhReadBroker` constructor calls
+    `mkdirSync(join(dir, "cache"), { recursive: true, mode: 0o700 })`, and `serve` calls the same on `dir`. So the
+    brief's "non-recursive mkdirSync" reading is REFUTED for the code at main: the call is recursive, and still threw
+    ENOENT. Node's recursive mkdir returns ENOENT when a component is a dangling symlink or vanishes mid-walk; which
+    one happened here is not known (INFERRED candidates; `~/.cache` was missing until 19:55Z).
+    A recursive mkdir also applies `mode` only to the directories it creates, and `serve` then `chmodSync`s `dir` alone,
+    so `~/.cache` and `~/.cache/remudero` get the process umask (OBSERVED now: `~/.cache` is 0775).
+    NOT COVERED ELSEWHERE: W1-T10279 (merged) built the broker; W1-T10310 (merged) fixed its cache key. Swept
+    origin/main plan/tasks.d and every open PR head's plan tree for GhReadBroker and gh-broker: no shard covers startup.
+  design: |
+    1. Reproduce first: a fixture cache root whose parent is (a) missing, (b) a dangling symlink, (c) removed between
+       components. Record which one yields ENOENT from a recursive mkdir.
+    2. Startup creates the cache root one component at a time below the account's home (or the cache-home override):
+       each missing component is made with mode 0700; an existing component is kept as it is (never chmod a directory
+       the broker did not create, such as `~/.cache`); a dangling symlink or a non-directory component is refused with
+       a message naming that component and exit 2, never an unhandled ENOENT.
+    3. The `serve` uid and 0700 checks on the broker's own directory are unchanged.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/github/the-read-broker-starts-on-a-host-with-no-cache-root.test.ts"
+    - claim: "a broker started with no cache root creates each missing component with mode 0700 and serves"
+      proof: "grep: W1-T10368: a broker with no cache root creates each component 0700 in test/github/the-read-broker-starts-on-a-host-with-no-cache-root.test.ts"
+    - claim: "a dangling symlink in the cache path is refused with the component named, not an ENOENT stack"
+      proof: "grep: W1-T10368: a dangling cache component is named, not thrown in test/github/the-read-broker-starts-on-a-host-with-no-cache-root.test.ts"
+  falsifier: |
+    Restore the single recursive mkdir and the dangling-symlink fixture throws ENOENT again; drop the per-component
+    mode and the 0700 test reds.
