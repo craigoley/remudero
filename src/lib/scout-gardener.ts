@@ -126,15 +126,38 @@ function scoutSourceTexts(repoRoot: string): Array<{ path: string; text: string 
   return paths.map((path) => ({ path, text: readFileSync(join(repoRoot, path), "utf8") }));
 }
 
-function scoutWriters(repoRoot: string, step: string, corpus = scoutSourceTexts(repoRoot)): string[] {
-  return corpus.map(({ path, text }) => {
-    const scanner = createScanner(true, undefined, text);
-    let count = 0;
-    for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
-      if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) && scanner.getTokenValue() === step) count++;
+/** Count only scanner literals; an unrecognized non-advancing token is unavailable evidence. */
+export function countScoutStepLiterals(path: string, text: string, step: string,
+  scanner = createScanner(true, undefined, text)): number {
+  let count = 0;
+  const templateBraces: number[] = [];
+  let previous = "=";
+  for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
+    if ((token === SyntaxKind.SlashToken || token === SyntaxKind.SlashEqualsToken) &&
+        /^(?:=|\(|\[|\{|,|:|\?|return|case|=>|!|&&|\|\||\?\?)$/.test(previous)) token = scanner.reScanSlashToken();
+    if (token === SyntaxKind.PrivateIdentifier && scanner.getTokenEnd() === scanner.getTokenStart()) {
+      token = scanner.reScanHashToken();
     }
-    return { path, count };
-  }).filter((f) => f.count > 0).sort((a, b) => b.count - a.count || a.path.localeCompare(b.path)).slice(0, 3).map((f) => f.path);
+    if (token === SyntaxKind.TemplateHead) templateBraces.push(0);
+    else if (token === SyntaxKind.OpenBraceToken && templateBraces.length > 0) templateBraces[templateBraces.length - 1]++;
+    else if (token === SyntaxKind.CloseBraceToken && templateBraces.length > 0) {
+      if (templateBraces[templateBraces.length - 1] === 0) {
+        token = scanner.reScanTemplateToken(false);
+        if (token === SyntaxKind.TemplateTail) templateBraces.pop();
+      } else templateBraces[templateBraces.length - 1]--;
+    }
+    if (scanner.getTokenEnd() <= scanner.getTokenStart()) {
+      throw new Error(`scout gardener: source scanner did not advance in ${path} at ${scanner.getTokenStart()}`);
+    }
+    if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) && scanner.getTokenValue() === step) count++;
+    previous = scanner.getTokenText();
+  }
+  return count;
+}
+
+function scoutWriters(repoRoot: string, step: string, corpus = scoutSourceTexts(repoRoot)): string[] {
+  return corpus.map(({ path, text }) => ({ path, count: countScoutStepLiterals(path, text, step) }))
+    .filter((f) => f.count > 0).sort((a, b) => b.count - a.count || a.path.localeCompare(b.path)).slice(0, 3).map((f) => f.path);
 }
 
 async function openScoutRuns(repoRoot: string): Promise<ReadonlySet<string>> {
