@@ -31,7 +31,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
-import type { Clock } from "./clock.js";
+import { fixedClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
@@ -843,7 +843,7 @@ async function reaskParkedEscalations(c: {
     const nextHistory = changed && reask.modelAsked
       ? { asked: (history?.asked ?? 0) + 1, flipped: (history?.flipped ?? 0) + 1 } : history;
     const nextInterval = reaskIntervalMs(nextHistory, changed ? 0 : state.reask[task.id]!.repeats);
-    const nextDue = new Date(ports.clock.now() + nextInterval);
+    const nextDue = fixedClock(ports.clock.now() + nextInterval).date();
     // W1-T9043: a re-ask that keeps `escalate` is a resurfacing, ledgered with the escalation's age and band.
     const ageDays = escalationAgeDays(task, ports.clock.now());
     ports.log("machine_judge.reasked", {
