@@ -142,6 +142,7 @@ import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/ada
 import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
+import { admittedFixTestPaths } from "./lib/fix-test-scope.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
@@ -11862,7 +11863,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           ? fixRungScopeStandDownReason(
               currentDiffFiles,
               baselineDiffFiles,
-              admitFixTests && opts.task.files ? [...opts.task.files, "test/"] : opts.task.files,
+              admitFixTests && opts.task.files
+                ? [...opts.task.files, "test/", ...admittedFixTestPaths(currentDiffFiles, opts.task.files.length > 0)]
+                : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
               readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha),
@@ -36245,7 +36248,7 @@ export function commitWorkerEdits(
     runGit(["ls-tree", "--name-only", "HEAD", "--", path]).trim() === "" &&
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
-  const admittedTests = options.admitTests ? changed.filter((path) => path.startsWith("test/") && !path.split("/").includes("..")) : [];
+  const admittedTests = admittedFixTestPaths(changed, options.admitTests);
   const registrationChanges = declaredPaths.every(isInPlanScope) ? [] :
     readRegistrationChanges(repoDir, changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)), undefined, runGit, options.priorHeadSha);
   const admittedRegistrations = registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
