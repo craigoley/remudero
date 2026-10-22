@@ -67,7 +67,7 @@ test("daemonCommand: the retro / auto-triage / github-posture hooks are gated on
   );
   assert.match(
     body,
-    /const autoTriageHooks = target\.isSelf \? buildAutoTriageDaemonHooks\(/,
+    /const autoTriageHooks = target\.isSelf \? \(deps\.buildAutoTriageHooks \?\? buildAutoTriageDaemonHooks\)\(/,
     "the auto-triage hooks must still be gated on target.isSelf",
   );
   assert.match(

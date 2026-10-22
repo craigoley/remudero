@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,11 @@
       proof: "grep: test/a-busy-primary-reaches-its-image-recycle\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/a-busy-primary-reaches-its-image-recycle.test.ts for each recorded edge"
       proof: "grep: test/a-busy-primary-reaches-its-image-recycle\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:31:39.861Z"
+    pin: "0900ca88c49ba64bd0a70941291d1a8c6fe749c802d752100f182b50c5c834af"

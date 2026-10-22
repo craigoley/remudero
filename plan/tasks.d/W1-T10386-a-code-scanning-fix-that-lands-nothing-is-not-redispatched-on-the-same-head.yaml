@@ -1,0 +1,70 @@
+- id: W1-T10386
+  title: "A CODE-SCANNING FIX ROUND THAT LANDS NOTHING IS NOT RE-JUDGED AND RE-DISPATCHED ON THE SAME HEAD FOREVER — #13317 (W1-T10086) at head 2baea6d sat behind \"security merge blocked: new-high-or-critical-security-alert\" (CodeQL #909/#910, js/file-system-race) from 20:49Z on 2026-10-21 past 01:13Z on 10-22: six code_scanning.judged_fix, three code_scanning.fix_dispatch (dispatched true), zero commits, nine automerge.arm_failed, and the single-PR fix rung refused the hold as \"no block evidence to drive the rung\""
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern, the per-head bound on the existing code-scanning fix path; policy and judge unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-22, item 7 (the merge arm loops on a security hold); premise corrected by the evidence below"
+  plan_refs: [W1-T100, W1-T9731, W1-T5633, W1-T9633, W1-T10065, W1-T10066, W1-T10339]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/github/a-code-scanning-fix-that-lands-nothing-is-not-redispatched-on-the-same-head.test.ts
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: a code-scanning merge block sends a fix round or escalates once, and does not loop.
+    PREMISE CORRECTED (OBSERVED, core ledger 10-21T08:49Z..10-22T01:20Z, read-only): fix rounds WERE dispatched,
+    because W1-T9731 (merged) works. What has no bound is the cycle after a round lands nothing.
+    - code_scanning.judged_fix for alerts [910, 909] at head 2baea6d: 20:49:50Z, 21:14:28Z, 21:57:28Z, 23:14:04Z,
+      00:15:39Z and 01:13:16Z.
+    - code_scanning.fix_dispatch with dispatched true: 22:00:52Z, 23:15:11Z and 00:17:28Z.
+    - After the 22:00 and 23:15 dispatches the only fix rows are `fix.base_refresh_checked`, and no worker row
+      follows. The DAEMON run_id changed between them, so INFERRED: the rounds died with daemon restarts.
+    - The 00:17 round ran a cash worker (assignment 00:35:08Z) and ended with `fix.commit_refused` "no anchored
+      COMMIT_MESSAGE line in the report" and `fix.done` at 00:35:27Z. Re-judging resumed at 01:13Z.
+    - At 23:06:28Z a single-PR fix run (FIX-1792623961310) ended `fix.refused` "review success, required checks
+      green — arming auto-merge (no block evidence to drive the rung)". `rmd fix`'s rung (src/run-task.ts,
+      the `no block evidence to drive the rung` fall-through) has no branch for a security-alert-hold.
+    - 9 automerge.arm_failed `arm-error-ignored` rows (09:16Z..00:42Z). The newest sweep.disposed rows read blocker
+      `security-alert-hold`, stand_down "code-scanning judgment in flight for head 2baea6d", repeat_streak 46.
+    - Escalations did open (#13454 at 22:28Z, #13471 at 23:44Z, both stage-stall), but neither stopped the
+      re-dispatch.
+    NOT COVERED ELSEWHERE: W1-T9731 (merged) built the refusal-driven alert read. W1-T10065 and W1-T10066 (merged)
+    keep the round from being traded for a refresh and carry its alerts. W1-T10339 (queued) stops a STOOD-DOWN
+    repair from being re-dispatched on the same head; it reads fix.stood_down, not a code-scanning round that ended
+    commit_refused or never reported. W1-T100 shares sweep.ts and run-task.ts as the broad fix-routing task;
+    this task adds only the per-head empty-round bound and the single-PR rung's hold branch. Swept origin/main 32887fe4d plan/tasks.d and all 18 open PR heads' plan trees
+    for code_scanning.fix_dispatch, security-alert-hold and "security merge blocked": no shard bounds this cycle.
+  design: |
+    1. COUNT A ROUND THAT LANDED NOTHING. For each (PR, head, alert-number set), a `code_scanning.fix_dispatch`
+       counts as an EMPTY round when it is followed by `fix.commit_refused`, `fix.refused`, or a `fix.done` with no
+       new head, or when no fix row follows it within the fix lane's existing round bound. The count lives on the
+       existing rows the sweep already reads; there is no new state file.
+    2. ONE EMPTY ROUND, THEN ESCALATE ONCE. With one empty round at this (head, alerts), the next pass neither
+       re-judges nor re-dispatches. It escalates once through W1-T5633's existing unfixable-alert escalation,
+       naming each alert (number, rule, path:line), each empty round's outcome, and the head. A new head or a
+       changed alert set starts over. "One empty round" is structural: changing it is an operator decision.
+    3. THE SINGLE-PR RUNG ROUTES THE HOLD. #13468 (merged 2026-10-22, 779e7f32f) already turns a mergeable PR with a
+       FAILED CodeQL check and head alerts into `blocked-fixable` in `rmd fix` (its `securityFix` branch). Extend that
+       same branch to a head whose newest arm row is a `security merge blocked` refusal (`securityArmRefusalAtHead`,
+       W1-T9731's case: CodeQL not failed), so it does not refuse for want of block evidence. Add no second path.
+    4. sweep.ts sits at its comment ceiling: add no new comment lines there.
+    5. Tests (new file, titles verbatim as in the proofs): a commit_refused round at a head makes the next pass
+       escalate once and not dispatch. A dispatch with no follow-up row inside the round bound counts as empty. A
+       new head re-arms the path. The single-PR rung dispatches on a security-alert-hold.
+  acceptance:
+    - claim: "after one code-scanning round that landed nothing, the same head and alerts escalate once and are not re-dispatched"
+      proof: "unit test: W1-T10386: an empty code-scanning round escalates once instead of re-dispatching"
+    - claim: "a new head or a changed alert set re-arms the code-scanning fix path"
+      proof: "unit test: W1-T10386: a new head re-arms the code-scanning fix path"
+    - claim: "the single-PR fix rung dispatches a code-scanning fix for a security-alert-hold"
+      proof: "unit test: W1-T10386: the single-pr rung dispatches on a security alert hold"
+  falsifier: |
+    Remove the empty-round count, and the commit_refused fixture is judged and dispatched again on the next pass.
+  note: |
+    Reservation refs/rmd-id/W1-T10386 is held by filing branch file-1022-fleet-routing.

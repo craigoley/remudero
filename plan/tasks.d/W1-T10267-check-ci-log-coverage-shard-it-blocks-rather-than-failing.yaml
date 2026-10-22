@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.41
   status: queued
@@ -43,10 +43,10 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.93
+    verdict: "operator"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The supplied excerpt names multiple failing tests and workflow checks but provides no diagnosis connecting them to the proposed preopen-gate.ts remedy; the finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not establish that the test passes or that fix-round dispatch is prevented."
-    judged_at: "2026-10-20T16:34:45.521Z"
-    pin: "2c347746cd21ae21200106161e8abe8f2367dab09307f5d7fcd500ef4589b19d"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.224Z"
+    pin: "009c8f0d996fc62321c3aa9b12210d448b52042c3e50de8a03af213808e8d915"

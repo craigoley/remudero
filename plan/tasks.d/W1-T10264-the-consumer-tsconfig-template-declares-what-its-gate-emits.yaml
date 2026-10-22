@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   # an operator decision about what every new consumer repo inherits
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 3.00
   risk: medium  # Rule 19: one concern, one compiler option in the consumer tsconfig template; the gate command and every other option are unchanged
@@ -61,10 +61,10 @@
     declarations kept on. EFFECT after merge: a new consumer's first gate run's tsc peak and wall time, compared with one
     generated before (measured on that consumer, not this repo).
   risk_ruling:
-    verdict: "high"
-    action: escalate
+    verdict: "operator"
+    action: proceed
     confidence: 1
     reasons:
-      - "deterministic backstop: it declares test/deploy/the-consumer-tsconfig-template-declares-what-its-gate-emits.test.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-20T16:32:46.302Z"
-    pin: "b6bc16d7b64fdd92b4ad35cf9f121fd51c96108cdb62f467291de0aa8c13c7d4"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.224Z"
+    pin: "b28b6800821ef64b6fde328829d77cd280d06980edd6808b1ed7dbfba5f5c995"

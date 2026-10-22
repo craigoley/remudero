@@ -25,8 +25,19 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 type Step = { name?: string; id?: string; if?: string; uses?: string; run?: string; with?: Record<string, unknown> };
-type Job = { if?: string; steps: Step[] };
+type Job = { if?: string; needs?: string | string[]; steps: Step[] };
 const jobs = (parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as { jobs: Record<string, Job> }).jobs;
+
+
+/** Only the required ci matrix has the approved same-run producer dependency. */
+function assertProducerAwareCiScheduling(job: { if?: string | boolean; needs?: string | string[] }): void {
+  if (job.needs === undefined) {
+    assert.equal(job.if, undefined, "an independent required matrix remains unconditional");
+    return;
+  }
+  assert.deepEqual(job.needs, ["commitlint"], "only the same-run producer may precede the required matrix");
+  assert.equal(job.if, "${{ always() && !cancelled() }}", "producer failure or skip cannot suppress the required matrix");
+}
 
 const isNpmInstall = (s: Step) => /\bnpm ci\b/.test(s.run ?? "");
 const isChromiumCache = (s: Step) => (s.uses ?? "").startsWith("actions/cache@") && String(s.with?.path ?? "").includes("ms-playwright");
@@ -117,7 +128,11 @@ function runBody(
 test("W1-T5697: in ci-shard and test-slow-shard the classify step runs on plain node before npm ci and Chromium", () => {
   for (const [jobId, { id, command }] of Object.entries(CLASSIFY)) {
     const job = jobs[jobId]!;
-    assert.equal(job.if, undefined, `${jobId}: the required check must still register on every event`);
+    if (jobId === "ci") assertProducerAwareCiScheduling(job);
+    else {
+      assert.equal(job.if, undefined, `${jobId}: the required check must still register on every event`);
+      assert.equal(job.needs, undefined, `${jobId}: the slow tier remains independent`);
+    }
     const classify = job.steps.findIndex((s) => s.id === id);
     assert.ok(classify >= 0, `${jobId}: no '${id}' step`);
     const run = job.steps[classify]!.run ?? "";
@@ -227,4 +242,16 @@ test("W1-T5697: test-slow-shard installs nothing exactly when it will skip, and 
   const fallback = slowShard("pull_request", ["plan/tasks.d/x.yaml"], answer(1));
   assert.deepEqual(fallback.outputs, { class: "PLAN_ONLY", established: "false" });
   assert.deepEqual([fallback.installs, fallback.runsTests], [true, true]);
+});
+
+test("idle-shard fixture preserves producer scheduling without weakening installation guards", () => {
+  assertProducerAwareCiScheduling({});
+  assertProducerAwareCiScheduling({ needs: ["commitlint"], if: "${{ always() && !cancelled() }}" });
+  for (const bad of [
+    { needs: ["commitlint"] },
+    { needs: ["commitlint"], if: "github.event_name == 'pull_request'" },
+    { needs: ["commitlint"], if: "${{ success() }}" },
+    { needs: ["another-job"], if: "${{ always() && !cancelled() }}" },
+    { if: "${{ always() && !cancelled() }}" },
+  ]) assert.throws(() => assertProducerAwareCiScheduling(bad));
 });

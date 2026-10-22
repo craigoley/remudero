@@ -28,6 +28,7 @@ import {
 } from "../src/lib/ledger.js";
 import { dispatchesWithoutNewOwnedPr, isDispatchBreakerTripped, readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runCreditBackfill, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
+import * as sweepModule from "./helpers/sweep-test.js";
 import { escalateCircuitBreak, deriveStrikeHistory } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -135,6 +136,17 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
     `DECISION_RELEVANT_LEDGER_STEPS is missing step(s) a real consumer reads to decide ` +
       `something (derived from source, not from the hardcoded list itself): ${missing.join(", ")}`,
   );
+});
+
+// The literal census above cannot see named step constants. Inspect the consumer's
+// exported receipt population at runtime; the real rotation tests exercise its decisions.
+test("security decision receipts exported by the consumer belong to the live retention core", () => {
+  const declared = Object.entries(sweepModule).filter(([name]) => /^CODE_SCANNING_[A-Z_]+_STEP$/.test(name));
+  assert.ok(declared.length >= 3, "positive control: discover the security ruling and dispatch receipts");
+  for (const [name, step] of declared) {
+    assert.equal(typeof step, "string", `${name} names a ledger receipt`);
+    assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(step as string), `${step} is consumed by the live-only sweep and must survive rotation`);
+  }
 });
 
 // ── W1-T1017: `review.unwired_advisory` (W1-T322's SHIPS-UNWIRED advisory floor) was absent

@@ -40,18 +40,18 @@ function deadPid(): number {
   return child.pid;
 }
 
-function verdict(dir: string): string {
+async function verdict(dir: string): Promise<string> {
   const out: string[] = [];
-  assert.equal(prOwnerCommand([String(PR)], { stateDir: dir, write: (text) => out.push(text) }), 0);
+  assert.equal(await prOwnerCommand([String(PR)], { stateDir: dir, write: (text) => out.push(text) }), 0);
   return out.join("\n");
 }
 
-test("W1-T4209: pr-owner reports a live branch claim as owned", () => {
+test("W1-T4209: pr-owner reports a live branch claim as owned", async () => {
   const dir = corpusDir();
   try {
-    assert.match(verdict(dir), /rmd pr-owner #4851 .+ FREE/);
+    assert.match(await verdict(dir), /rmd pr-owner #4851 .+ FREE/);
     writeClaim(dir, BRANCH, { pid: process.pid, run_id: "FIX-LIVE-7", host: undefined, startedAt: new Date().toISOString() });
-    const out = verdict(dir);
+    const out = await verdict(dir);
     assert.match(out, /rmd pr-owner #4851 .+ OWNED/);
     assert.match(out, new RegExp(`live fix branch claim held by pid ${process.pid} \\(run FIX-LIVE-7\\)`));
     assert.match(out, /fix branch claim: fix-branch--acme--remudero--run-W1-TCLAIM-1790000000000/);
@@ -60,11 +60,11 @@ test("W1-T4209: pr-owner reports a live branch claim as owned", () => {
   }
 });
 
-test("W1-T4209: pr-owner reports a claim whose holder pid is dead as stale, not owned", () => {
+test("W1-T4209: pr-owner reports a claim whose holder pid is dead as stale, not owned", async () => {
   const dir = corpusDir();
   try {
     writeClaim(dir, BRANCH, { pid: deadPid(), run_id: "FIX-DEAD-1", startedAt: new Date().toISOString() });
-    const out = verdict(dir);
+    const out = await verdict(dir);
     assert.match(out, /rmd pr-owner #4851 .+ FREE/);
     assert.match(out, /stale branch claim held by dead pid \d+/);
     assert.doesNotMatch(out, /OWNED/);
@@ -73,22 +73,22 @@ test("W1-T4209: pr-owner reports a claim whose holder pid is dead as stale, not 
   }
 });
 
-test("W1-T4209: pr-owner ignores another branch's claim and an unparseable claim file", () => {
+test("W1-T4209: pr-owner ignores another branch's claim and an unparseable claim file", async () => {
   const dir = corpusDir();
   try {
     writeClaim(dir, "run-W1-TOTHER-1790000000001", { pid: process.pid, run_id: "FIX-OTHER", startedAt: new Date().toISOString() });
     writeFileSync(join(dir, "inflight", `${fixBranchClaimKey("acme", "remudero", BRANCH)}.lock`), "{not json");
-    assert.match(verdict(dir), /rmd pr-owner #4851 .+ FREE/);
+    assert.match(await verdict(dir), /rmd pr-owner #4851 .+ FREE/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("W1-T4209: pr-owner reports UNKNOWN, never FREE, when the inflight directory is unreadable", () => {
+test("W1-T4209: pr-owner reports UNKNOWN, never FREE, when the inflight directory is unreadable", async () => {
   const dir = corpusDir();
   try {
     writeFileSync(join(dir, "inflight"), "not a directory");
-    const out = verdict(dir);
+    const out = await verdict(dir);
     assert.match(out, /rmd pr-owner #4851 .+ UNKNOWN/);
     assert.match(out, /inflight claims unreadable/);
     assert.doesNotMatch(out, /FREE/);

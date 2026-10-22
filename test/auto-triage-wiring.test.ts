@@ -35,9 +35,10 @@ function fixtureHome(): { home: string; root: string; planPath: string } {
   return { home, root, planPath };
 }
 
-async function captureDeps(planPath: string): Promise<DaemonDeps> {
+async function captureDeps(planPath: string, buildAutoTriageHooks?: NonNullable<Parameters<typeof daemonCommand>[1]>["buildAutoTriageHooks"]): Promise<DaemonDeps> {
   let captured: DaemonDeps | undefined;
   const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+    buildAutoTriageHooks,
     runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
       captured = deps;
       return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
@@ -47,6 +48,24 @@ async function captureDeps(planPath: string): Promise<DaemonDeps> {
   assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
   return captured;
 }
+
+test("the real daemon wires a cache-only PR repair snapshot into triage", async () => {
+  const { home, planPath } = fixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let supplied: (() => unknown) | undefined;
+  try {
+    await captureDeps(planPath, (options: { repairSnapshot?: () => unknown }) => {
+      supplied = options.repairSnapshot;
+      return { checkAutoTriage: () => ({ fire: false, reason: "fixture" }), runAutoTriage: async () => {} };
+    });
+    assert.equal(typeof supplied, "function", "deleting the production supplier breaks this composition test");
+    assert.equal(supplied!(), undefined, "without a published generation no read or priority evidence is manufactured");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("REACHABILITY: daemonCommand actually WIRES checkAutoTriage into the deps it hands runDaemon", async () => {
   const { home, planPath } = fixtureHome();
