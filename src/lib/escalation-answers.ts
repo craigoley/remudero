@@ -65,6 +65,7 @@ import { readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
   escalationTaskId,
+  escalationIssueTitle,
   ghIssueGatewayAsync,
   labelledIssuesRestArgs,
   parseLabelledIssuesRest,
@@ -516,7 +517,7 @@ async function raiseRefusalAlarms(
       writeLedger(deps.ledgerPath, { step: "escalation_answer.refusal_alarm", run_id: runId, task_id: alarm.taskId,
         login: group.login, reason: group.reason, comments: comments.length, issue_url: issueUrl });
       if (!open.some(issue => issue.url === issueUrl)) open.push({ number: Number(issueUrl.split("/").at(-1)),
-        url: issueUrl, title: `[${alarm.class}] ${alarm.taskId}: ${alarm.summary}`, body: renderIssueBody(alarm) });
+        url: issueUrl, title: escalationIssueTitle(alarm), body: renderIssueBody(alarm) });
     }
   }
   return 0;

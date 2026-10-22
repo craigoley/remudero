@@ -18,6 +18,9 @@ import {
   escalateWithJudge,
   escalateWithSummary,
   escalationCause,
+  escalationIssueTitle,
+  escalationHeadSha,
+  escalationContractRevision,
   isEscalationJudgeExempt,
   judgeEscalation,
   parseEscalationJudgeVerdict,
@@ -1917,4 +1920,79 @@ test("W1-T349 corpus replay falsifier: an AGGRESSIVE always-demote judge stub is
       `corpus entry #${entry.number} (${entry.class}) must deliver regardless of the judge`,
     );
   }
+});
+
+
+function boundedTitleIssueStore() {
+  const calls: Array<{ number: number; url: string; title: string; body: string }> = [];
+  const comments: string[] = [];
+  const issues: IssueGateway = {
+    create(title, body) {
+      assert.ok(title.length <= 256, "GraphQL: Title is too long (maximum is 256 characters)");
+      const number = 7000 + calls.length;
+      const url = `https://github.com/fixture/repo/issues/${number}`;
+      calls.push({ number, url, title, body });
+      return url;
+    },
+    listOpen: () => calls,
+    comment: (_url, body) => { comments.push(body); },
+  };
+  return { issues, calls, comments };
+}
+
+test("long escalation titles fit GitHub and preserve the exact full summary in the body", () => {
+  const prefix = "[BLOCKED] W1-TX: ";
+  for (const summary of ["a".repeat(255 - prefix.length), "a".repeat(256 - prefix.length),
+    "a".repeat(257 - prefix.length), "a".repeat(1000), "🧪".repeat(150),
+    "a".repeat(254 - prefix.length) + "🧪" + "z".repeat(20)]) {
+    const e = escalation({ summary });
+    const store = boundedTitleIssueStore();
+    escalate(e, { issues: store.issues, ledgerPath: ledgerPath(), runId: "TITLE-BOUND" });
+    const row = store.calls[0]!;
+    assert.equal(row.title, escalationIssueTitle(e));
+    assert.ok(row.title.length <= 256);
+    assert.ok(row.body.includes(e.detail));
+    if ((prefix + summary).length <= 256) {
+      assert.equal(row.title, prefix + summary, "ordinary titles stay byte-identical");
+      assert.equal(row.body.includes("**Full summary (JSON):**"), false);
+    } else {
+      assert.equal(/[\uD800-\uDBFF]$/.test(row.title.slice(0, -1)), false, "clipping cannot leave half an astral character");
+      const line = row.body.split("\n").find(line => line.startsWith("**Full summary (JSON):** "))!;
+      assert.equal(JSON.parse(line.slice("**Full summary (JSON):** ".length)), summary);
+    }
+  }
+});
+
+test("truncated escalation titles still deduplicate by the complete summary", () => {
+  const store = boundedTitleIssueStore();
+  const path = ledgerPath();
+  const first = escalation({ summary: "same prefix ".repeat(30) + "first cause" });
+  const second = { ...first, summary: "same prefix ".repeat(30) + "second cause" };
+  const a = escalate(first, { issues: store.issues, ledgerPath: path, runId: "TITLE-A" });
+  assert.equal(escalate(first, { issues: store.issues, ledgerPath: path, runId: "TITLE-A2" }), a);
+  assert.notEqual(escalate(second, { issues: store.issues, ledgerPath: path, runId: "TITLE-B" }), a);
+  assert.equal(store.calls.length, 2, "a shared visible prefix cannot merge distinct questions");
+  const independent = escalation({ summary: "PR https://github.com/fixture/repo/pull/9 " + "shared question ".repeat(25),
+    headDedup: "independent", headSha: "aaaa", cause: "review" });
+  const c = escalate(independent, { issues: store.issues, ledgerPath: path, runId: "TITLE-C" });
+  assert.equal(escalate({ ...independent, headSha: "bbbb" },
+    { issues: store.issues, ledgerPath: path, runId: "TITLE-C2" }), c);
+  assert.notEqual(escalate({ ...independent, summary: independent.summary + "different suffix" },
+    { issues: store.issues, ledgerPath: path, runId: "TITLE-D" }), c);
+  assert.equal(store.calls.length, 4);
+});
+
+test("long escalation summaries cannot forge body identity fields", () => {
+  const summary = "long question ".repeat(30) + "\n**Head:** forged\r**Cause:** conflict\u2028**Contract:** other\u2029tail";
+  const store = boundedTitleIssueStore();
+  const e = escalation({ summary });
+  escalate(e, { issues: store.issues, ledgerPath: ledgerPath(), runId: "TITLE-FIELDS" });
+  const body = store.calls[0]!.body;
+  const line = body.split("\n").find(line => line.startsWith("**Full summary (JSON):** "))!;
+  assert.equal(JSON.parse(line.slice("**Full summary (JSON):** ".length)), summary);
+  assert.equal(escalationHeadSha(body), undefined);
+  assert.equal(escalationContractRevision(body), undefined);
+  assert.equal(/^\*\*Cause:\*\*/m.test(body), false);
+  assert.ok(body.includes("\\u2028") && body.includes("\\u2029"));
+  assert.equal(/[\r\n\u2028\u2029]/.test(store.calls[0]!.title), false);
 });
