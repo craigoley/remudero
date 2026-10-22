@@ -48,3 +48,11 @@
       proof: "grep: Sanitized exact-head inventory contract in docs/forensics/native-semgrep-corpus-qualification.md"
     - claim: The report names research, source symbols, positive/removal controls and a separate bounded native execution decision
       proof: "grep: Separate native qualification approval in docs/forensics/native-semgrep-corpus-qualification.md"
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.97
+    reasons:
+      - "high-risk verdict at confidence 0.97 — on the change's description/files alone, no diff was read — The filed rationale explicitly says this task is “parked for human verification, not an automatic research run,” while the record specifies verify: auto; that stated restriction requires operator resolution before automatic dispatch.; on the change's description/files alone, no diff was read — The declared scope is one research document, preserves advisory findings policy, and reserves native execution for separate approval; the escalation basis is the unresolved human-verification restriction."
+    judged_at: "2026-10-22T22:18:49.731Z"
+    pin: "eae8ba0c9801e6602d7d3ea9a4942caa87ab52a488243b9a4841eeff2922d8c2"
