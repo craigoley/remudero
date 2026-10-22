@@ -318,3 +318,38 @@ test("PR-13121: a NEEDS_DESIGN stand-down escalates once per head and names the 
   assert.deepEqual(stands().map((r) => r.issue_url), [undefined, url, url]);
   assert.equal(design.counts().spawns, 1, "no stand-down spends a worker");
 });
+
+
+test("a fix review uses the actual checkout matching the head CI judged", async () => {
+  for (const kind of ["matching", "foreign", "unreadable", "aligned-refresh"] as const) {
+    const f = fixture("REPORT\nFIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(tests): repair source");
+    let reviews = 0;
+    let judgedHead = "";
+    f.setEdit(() => writeFileSync(join(f.repo.dir, "src/fix.ts"), "fixed source\n"));
+    f.run.deps.runReview = async () => { reviews++; return { ...f.run.initialReview, state: "success", headSha: judgedHead }; };
+    f.run.deps.readHeadShaForProvenance = () => f.repo.git("rev-parse", "HEAD");
+    f.run.deps.waitForCiGreen = async () => {
+      judgedHead = f.repo.git("rev-parse", "HEAD");
+      if (kind === "foreign" || kind === "aligned-refresh") {
+        judgedHead = f.repo.git("commit-tree", `${judgedHead}^{tree}`, "-p", judgedHead, "-m", "a different actor refreshed the head");
+        if (kind === "aligned-refresh") f.repo.git("update-ref", "HEAD", judgedHead);
+      }
+      if (kind === "unreadable") f.run.reviewBase.headCheckoutDir = join(f.repo.dir, "absent-review-checkout");
+      return { state: "green", sha: judgedHead };
+    };
+    try {
+      const result = await runFixRung(f.run);
+      const safe = kind === "matching" || kind === "aligned-refresh";
+      assert.equal(reviews, safe ? 1 : 0, kind);
+      assert.equal(result.outcome, safe ? "fixed" : "stood_down", kind);
+      assert.equal(f.counts().pushes, 1, "the already-landed repair remains intact");
+      if (!safe) {
+        const row = f.rows.find(row => row.step === "fix.stood_down" && row.site === "rung.post_ci_review_source");
+        assert.equal(row?.ci_head_sha, judgedHead);
+        assert.equal(typeof row?.reason, "string");
+        if (kind === "unreadable") assert.equal(typeof row?.checkout_error, "string");
+        else assert.notEqual(row?.checkout_head_sha, judgedHead);
+      }
+    } finally { f.repo.cleanup(); }
+  }
+});

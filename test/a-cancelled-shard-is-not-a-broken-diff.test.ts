@@ -60,7 +60,7 @@ function runGate(script: string, env: Record<string, string>, ghBody: string): {
   try {
     const out = execFileSync("bash", [scriptPath], {
       encoding: "utf8",
-      env: { ...process.env, PATH: pathWith(bin), ...env },
+      env: { ...process.env, GATE_REPORT_REQUIRED: "true", GATE_REPORT_OUTCOME: "success", PATH: pathWith(bin), ...env },
     });
     return { code: 0, out };
   } catch (error) {

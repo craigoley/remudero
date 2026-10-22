@@ -685,13 +685,15 @@ jobs:
   ci-required:
     name: ci
     runs-on: ubuntu-latest
-    needs: [ci]
+    needs: [ci, commitlint]
     if: ${{ always() }}
     timeout-minutes: 10
     steps:
       - name: Collapse all test shards into the stable required check
         env:
           SHARD_RESULT: ${{ needs.ci.result }}
+          GATE_REPORT_REQUIRED: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+          GATE_REPORT_OUTCOME: ${{ needs.commitlint.outputs.gate_report_outcome }}
           RUN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_REPO_SLUG: ${{ github.repository }}
@@ -745,6 +747,19 @@ jobs:
 
           case "$SHARD_RESULT" in
             success)
+              case "${GATE_REPORT_REQUIRED:-}" in
+                false) ;;
+                true)
+                  if [ "${GATE_REPORT_OUTCOME:-}" != "success" ]; then
+                    echo "::error::ci: gate result publication is unavailable: light-gates reporting returned ${GATE_REPORT_OUTCOME:-unavailable}. Open the light-gates job; passing test shards do not certify its named gates."
+                    exit 1
+                  fi
+                  ;;
+                *)
+                  echo "::error::ci: gate-report requirement is unavailable; refusing an unknown publication contract."
+                  exit 1
+                  ;;
+              esac
             echo "ci: all eight test shards succeeded."
               ;;
             failure)
@@ -1060,7 +1075,6 @@ jobs:
     # directions), and Standing rule 25 refuses a single PR editing that table beside the workflow
     # it mirrors. Expanding an EXISTING job key in place — this one — registers nothing new, so
     # ci-parity.ts needs no edit at all.
-    #
     # The other 16 original job keys stay in this file too (see each below), under their ORIGINAL
     # names, permanently `if: false` rather than deleted or renamed — deleting one is the same
     # ci-parity.ts problem as above, and renaming one breaks a DIFFERENT invariant:
@@ -1081,6 +1095,7 @@ jobs:
     outputs:
       dependency_digest: ${{ steps.dependency-evidence.outputs.digest }}
       dependency_producer_sha: ${{ steps.dependency-evidence.outputs.producer_sha }}
+      gate_report_outcome: ${{ steps.report-gates.outcome }}
     env:
       GATE_BASE: ${{ github.event.merge_group.base_sha }} # empty on pull_request
     permissions:
@@ -1368,6 +1383,7 @@ jobs:
           retention-days: 14
 
       - name: Report each gate's result under its own required check-run name (checks API — W1-T4399 design (i))
+        id: report-gates
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}

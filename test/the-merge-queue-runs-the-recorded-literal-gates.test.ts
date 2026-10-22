@@ -233,7 +233,7 @@ function reportLines(): Array<{ name: string; steps: string[] }> {
 
 /** Every check run the reporter posted, as [name, head_sha]. */
 function posted(run: JobRun): Array<[string, string]> {
-  const reporterKey = `#${JOB.steps!.length - 1}`;
+  const reporterKey = JOB.steps!.at(-1)!.id ?? `#${JOB.steps!.length - 1}`;
   return (run.calls.get(reporterKey) ?? [])
     .filter((c) => c.startsWith("gh api ") && c.includes("/check-runs"))
     .map((c) => {
@@ -317,7 +317,7 @@ test("W1-T5522: the pull_request steps are unchanged and the PR-only steps skip"
   for (const [id, argv] of Object.entries(PR_ARGV)) assert.deepEqual(pr.calls.get(id), argv, id);
   assert.deepEqual(
     [...pr.calls.keys()].filter((k) => !k.startsWith("#")).sort(),
-    Object.keys(PR_ARGV).sort(),
+    [...Object.keys(PR_ARGV), "report-gates"].sort(),
     "every id'd step is pinned above",
   );
   for (const [name, sha] of posted(pr)) assert.equal(sha, PR_HEAD, `${name} still posts on the PR head`);
@@ -330,7 +330,7 @@ test("W1-T5522: the pull_request steps are unchanged and the PR-only steps skip"
   assert.ok(!(group.calls.get("task-id-existence") ?? []).some((c) => c.includes("--require-open-prs")));
   const promptPost = posted(group).filter(([name]) => name === "prompt-surface-gate");
   assert.equal(promptPost.length, 1, "the skipped gate still posts");
-  const promptCall = group.calls.get(`#${JOB.steps!.length - 1}`)!.find((c) => c.includes("name=prompt-surface-gate"))!;
+  const promptCall = group.calls.get(JOB.steps!.at(-1)!.id ?? `#${JOB.steps!.length - 1}`)!.find((c) => c.includes("name=prompt-surface-gate"))!;
   assert.match(promptCall, /conclusion=success/);
   // The title lint left this job (W1-T5695): nothing here posts `commitlint`, on either event.
   assert.ok(!reportLines().some((l) => l.name === "commitlint"));
@@ -343,7 +343,7 @@ test("merge-group reporter refuses an unavailable action setup outcome in the ex
   for (const id of ["checkout", "setup-node"]) {
     const group = runJob("merge_group", "", { [id]: undefined });
     assert.deepEqual(group.failures, [], "the shell steps succeeded, not the unavailable action setup");
-    const posts = group.calls.get(`#${JOB.steps!.length - 1}`)!.filter((call) => call.includes("/check-runs"));
+    const posts = group.calls.get(JOB.steps!.at(-1)!.id ?? `#${JOB.steps!.length - 1}`)!.filter((call) => call.includes("/check-runs"));
     assert.ok(posts.length > 0, "positive control: the real reporter posted gate checks");
     for (const post of posts) {
       assert.match(post, /conclusion=failure/);
@@ -394,7 +394,7 @@ test("W1-T5522: a red comment-load ratchet on the group commit fails the gate", 
   const red = runJob("merge_group", "comment-load-signal");
   assert.equal(red.outcomes.get("comment-load-ratchet"), "failure");
   const conclusions = new Map(
-    red.calls.get(`#${JOB.steps!.length - 1}`)!.map((c) => [/-f name=(\S+)/.exec(c)?.[1], /conclusion=(\w+)/.exec(c)?.[1]]),
+    red.calls.get(JOB.steps!.at(-1)!.id ?? `#${JOB.steps!.length - 1}`)!.map((c) => [/-f name=(\S+)/.exec(c)?.[1], /conclusion=(\w+)/.exec(c)?.[1]]),
   );
   assert.equal(conclusions.get("comment-load-ratchet"), "failure");
   // ...and the merge-group gate, every other required check green, refuses it by name.

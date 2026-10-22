@@ -666,6 +666,14 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       // A replaced data file is a new identity: no earlier sidecar can certify it.
       dataIdentity = { sha256: digest.digest("hex"), bytes: writtenBytes };
       headerObservedAt = nextState.closedObservedAt;
+      // Retire the stale sidecar only after the replacement is published; a failed publication keeps it.
+      try {
+        io.unlink(observationPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          log("board_snapshot.observation_refused", "closed", rows.length, 0, "write_failed");
+        }
+      }
       log("board_snapshot.committed", channel, rows.length, writtenBytes);
       return true;
     } catch {
