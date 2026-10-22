@@ -101,6 +101,7 @@ test("inbox fixture cleanup closes its servers even when directory removal fails
     syncBuiltinESMExports();`;
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  env.NODE_V8_COVERAGE = undefined;
   const child = spawnSync(process.execPath, ["--experimental-test-isolation=none", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
     "--import", `data:text/javascript,${encodeURIComponent(injection)}`, "--test", "--test-reporter=tap",
     "--test-name-pattern=^the inbox gardener retires a proven terminal ask once and can restore it$", fileURLToPath(import.meta.url)],
