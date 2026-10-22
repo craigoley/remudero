@@ -29,6 +29,7 @@
     - test/an-instance-reframes-only-its-current-proposal.test.ts
     - test/inbox-thread-view.test.ts
     - test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts
+    - test/inbox-registry-atomic.test.ts
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=ab374897457de40c
@@ -114,6 +115,11 @@
     receipts and same-committed-tree instrumented diff coverage, naming the SHA; helper-only mocks,
     test-title greps and a fabricated mutant result are not evidence.
   note: |
+    October 22 operator approved only the existing atomic-registry fixture scope addition.
+    Preserve verbatim feedback, explicit supersession, fresh locked writes and draft invalidation
+    assertions, and additionally validate the new exact scoped causal-input identities. The
+    separate off-loop recovery regression stays within already-approved source and causal tests.
+    No test removal, scanner waiver, deployment or CI-policy change is authorized.
     Generated companion qualification adds only docs/cli-reference.md and
     packages/api-client/src/schema.d.ts, regenerated from the already-qualified CLI and OpenAPI
     sources. Retain the complete command reference and contract, including other owners' changes;
@@ -194,3 +200,11 @@
     No git/gh command, live ledger read or claim mutation was used by this triage. External trace-link
     and message-reference documents are design analogies only; no platform-facts gap required web
     research and no instrumentation/framework migration is proposed.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Direct operator answer to call_3918b754b7654f398e903a59772a0e94: Approve this test-only scope addition. Add only existing test/inbox-registry-atomic.test.ts to W1-T10283; retain all feedback, supersession, locked-write and invalidation assertions and validate new scoped identities. Existing source/test paths repair the off-loop regression. No model verdict, test removal, waiver, deployment, provider, budget, permission, CI-policy or service change."
+    judged_at: "2026-10-22T21:48:07.349Z"
+    pin: "376cbb7181569b10821b1732ec13c411dbd71282f0816901c712000099861374"
