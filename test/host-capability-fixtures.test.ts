@@ -155,6 +155,14 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "review/shared-git-storage.test.ts", key: "0o666", count: 1,
+    reason: "The migration reader rejects group/world-writable config by inspecting stat mode before parsing. This tests metadata policy, not an OS access denial, so the refusal also holds for uid 0.",
+  },
+  {
+    kind: "chmod", file: "review/shared-git-storage.test.ts", key: "0o600", count: 1,
+    reason: "Restores the same migration config fixture to private mode so its oversized and symlink refusal controls run independently. No assertion relies on OS access being denied or on the executing uid.",
+  },
+  {
     kind: "chmod", file: "ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts", key: "0o644", count: 2,
     reason: "The shared-slot fixture must have a public mode bit for the reader to select legacy recovery. This tests explicit mode classification, not an OS access denial, and works at every uid.",
   },
