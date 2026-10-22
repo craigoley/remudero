@@ -31,7 +31,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
 import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS, loadDefaultPolicy } from "./policy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 
 /**
  * The general shell-isolation mechanism (W1-T18, the OSS blocker). Every worker's HOME is redirected
@@ -240,7 +240,7 @@ export async function replaceClaudeFleetCredential(opts: {
   realHome: string;
   stagingDir: string;
   proceed?: () => boolean;
-  now?: () => number;
+  clock?: Clock;
   sleep?: (ms: number) => Promise<void>;
   lockAttempts?: number;
 }): Promise<ClaudeFleetCredentialReplacement> {
@@ -253,7 +253,7 @@ export async function replaceClaudeFleetCredential(opts: {
   const store = sharedClaudeCredentialDir(opts.realHome);
   mkdirSync(store, { recursive: true, mode: 0o700 });
   const locks = [join(store, CLAUDE_REFRESH_LOCK_NAME), `${realpathSync(store)}.lock`];
-  const now = opts.now ?? (() => Date.now());
+  const clock = opts.clock ?? systemClock;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
   const held: string[] = [];
   const release = (): void => {
@@ -261,7 +261,7 @@ export async function replaceClaudeFleetCredential(opts: {
   };
   for (let attempt = 0; attempt < (opts.lockAttempts ?? 20) && held.length < locks.length; attempt++) {
     for (const lock of locks) {
-      if (!tryClaudeRefreshLock(lock, now())) break;
+      if (!tryClaudeRefreshLock(lock, clock.now())) break;
       held.push(lock);
     }
     if (held.length < locks.length) {
