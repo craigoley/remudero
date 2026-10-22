@@ -598,7 +598,8 @@ test("W1-T8912: PR observation identity refuses foreign replaced and torn metada
     assert.equal(reader(dir, "o", "r").closedObservedAt, at(T0 + 10 * MIN));
     const stale = createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 20 * MIN) });
     assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 5 * MIN) }).commitClosed([closed(1), closed(2)]), true);
-    assert.deepEqual([observed(dir).at, observed(dir).refusal], [at(T0 + 5 * MIN), "foreign_snapshot"]);
+    assert.equal(fs.existsSync(sidecar), false, "successful publication retired the stale sidecar");
+    assert.deepEqual([observed(dir).at, observed(dir).refusal], [at(T0 + 5 * MIN), undefined]);
     assert.equal(reader(dir, "o", "r").closedObservedAt, at(T0 + 5 * MIN), "a warm reader sees the replacement between reads");
     assert.equal(stale.commitClosed(rows), true, "the stale writer's rows still match what it alone holds");
     assert.equal(stale.rows!().closedObservedAt, at(T0 + 20 * MIN));
