@@ -6670,15 +6670,15 @@ export interface OpenPrView {
   /** The failing review's one-line summary (context for fix/escalate). */
   reviewSummary?: string;
   /** Failing required-check name and log-tail evidence — the W1-T94 ci-log fix mode's input
-   *  (W1-T100, the #170 fix). Populated when `checksState === "red"`, or when a child named by
-   *  ci-gate's checked-in REQUIRED contract concluded red while the aggregate is still pending.
+   *  (W1-T100, the #170 fix). Populated when required CI is red, including a terminally failed CI
+   *  matrix child while its required parent or ci-gate aggregate remains pending.
    *  `[]`/undefined degrades the fix prompt to "no detail captured", never a crash. */
   ciFailures?: CiFailure[];
   /** W1-T1223 — required checks whose LATEST attempt is CANCELLED with no later attempt on this
    *  head, distinct from a genuine failure ({@link ciFailures} names both). Never makes
    *  `checksState` anything but "red" — see {@link CancelledRequiredCheck}. */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
-  /** W1-T2504/W1-T2599 — concluded red children from ci-gate's checked-in REQUIRED contract. */
+  /** W1-T2504/W1-T2599 — red required checks or failed CI matrix children awaiting their required parent. */
   redRequiredChecks?: string[];
   /** W1-T10067 — the same contract's children that have not concluded ({@link pendingQualityGateNames}). */
   pendingRequiredChecks?: string[];
@@ -7098,7 +7098,16 @@ export function cancelledRequiredCheckNames(
 
 const qualityGate = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): RollupCheckEntry[] => dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && ([...(requiredCheckNames ?? [])].includes(c.name ?? "") || [...(requiredCheckNames ?? [])].includes(c.context ?? ""))));
 const rollupState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => qualityGate(rollup, requiredCheckNames).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown"); // W1-T2504
+export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => {
+  const required = [...(requiredCheckNames ?? [])];
+  const red = qualityGate(rollup, required).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown");
+  if (red.length > 0 || !required.includes("ci")) return red;
+  const latest = dedupeRollupByLatestAttempt(rollup ?? []);
+  const parent = latest.find((c) => (c.name ?? c.context) === "ci");
+  if (parent && REQUIRED_CHECK_OK.has(rollupState(parent))) return red;
+  const family = CI_MATRIX_AGGREGATORS.find((entry) => entry.aggregator === "ci");
+  return latest.flatMap((c) => c.name !== undefined && family?.constituent.test(c.name) && rollupState(c) === "FAILURE" ? [c.name] : []);
+}; // W1-T2504
 
 /** W1-T10067: the required checks {@link redQualityGateNames} reads that have not concluded on this head —
  *  registered and still running, or not yet registered at all. Sorted. */

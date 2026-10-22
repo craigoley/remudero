@@ -43,7 +43,7 @@ import { isInPlanScope } from "./plan-architect.js";
 import { isDeclaredBranchGuard } from "./branch-reaper.js";
 import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
-import { infrastructureRefusal, lifetimeInfrastructureRefusal, streakRefusal } from "./non-worker-verdict.js";
+import { DEFAULT_LIVENESS_BOUND_MS, infrastructureRefusal, lifetimeInfrastructureRefusal, provenOrphanRunIds, streakRefusal } from "./non-worker-verdict.js";
 import { startWorker } from "./child-entry-argv.js";
 
 /**
@@ -500,7 +500,7 @@ export interface BoardDeps extends DeriveDeps {
 /** Default LIVENESS BOUND (W1-T179, 30 minutes): a dispatched task with no terminal verdict and no newer ledger
  *  line is no longer trusted as "running" absent an open PR. The W1-T1 spin-loop (27h21m) blows past it by two
  *  orders of magnitude, while a slow poll cadence sits inside it. */
-export const DEFAULT_LIVENESS_BOUND_MS = 30 * 60_000;
+export { DEFAULT_LIVENESS_BOUND_MS };
 
 /** The minimal fs surface {@link readLedgerLines} needs — deliberately ONLY `existsSync` and `readFileSync`,
  *  with no write or copy capability, so an injected fake CANNOT be made to create a temp copy. That proves
@@ -1612,12 +1612,6 @@ function latestLedgerTsMs(lines: ReadonlyArray<Record<string, unknown>>): number
   return max;
 }
 
-const MONITOR_WRITTEN_RUN_STEPS: ReadonlySet<string> = new Set([
-  "run.running_long", // the duration sentinel reports about a run that may already be dead
-  "cost.anomaly", // the cost sentinel reports about a run after the run has stopped
-  "worker.stalled", // the daemon's quiet-episode detector writes about the observed run
-]);
-
 /**
  * W1-T3523 — THE ORPHAN AS A FIRST-CLASS READING. Every `run_id` for `taskId` whose ONLY run-produced
  * ledger row is its own `run.start` — MEASURED on the live ledger 2026-09-13: 97 of 203 dispatched
@@ -1649,30 +1643,7 @@ export function orphanedRunIds(
   // same identity guard {@link indexedTaskRows} applies — falling back to a fresh scan otherwise.
   const nowMs = opts.nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines));
   const livenessBoundMs = opts.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
-  const rowCountByRunId = new Map<string, number>();
-  const startTsByRunId = new Map<string, string>();
-  const counted = new Set<string>();
-  for (const line of indexedTaskRows(lines, taskId, index)) {
-    if (line.task_id !== taskId || typeof line.run_id !== "string") continue;
-    if (typeof line.step === "string" && MONITOR_WRITTEN_RUN_STEPS.has(line.step)) continue;
-    // A rotation union replays retained rows once per archive; a replayed lone run.start is still an orphan.
-    const key = `${line.run_id}|${String(line.step)}|${String(line.ts)}`;
-    if (counted.has(key)) continue;
-    counted.add(key);
-    rowCountByRunId.set(line.run_id, (rowCountByRunId.get(line.run_id) ?? 0) + 1);
-    if (line.step === "run.start" && typeof line.ts === "string" && !startTsByRunId.has(line.run_id)) {
-      startTsByRunId.set(line.run_id, line.ts);
-    }
-  }
-  const orphans = new Set<string>();
-  if (nowMs === undefined) return orphans; // no notion of "now" anywhere in this ledger — unknown stays counted
-  for (const [runId, ts] of startTsByRunId) {
-    if ((rowCountByRunId.get(runId) ?? 0) > 1) continue; // the run produced another row — not an orphan
-    const startMs = Date.parse(ts);
-    if (!Number.isFinite(startMs) || nowMs - startMs < livenessBoundMs) continue; // unknown age, or still live
-    orphans.add(runId);
-  }
-  return orphans;
+  return provenOrphanRunIds(indexedTaskRows(lines, taskId, index), nowMs, livenessBoundMs, taskId);
 }
 
 /**

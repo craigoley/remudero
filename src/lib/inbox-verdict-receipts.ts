@@ -33,6 +33,8 @@ export interface VerdictReceipt {
   ts: string;
   run_id?: string;
   reason?: string;
+  /** W1-T10077: the verify-human observed-state key a decline was given on; absent on every earlier decline. */
+  observed_state?: string;
 }
 
 export function inboxVerdictReceiptsPath(stateDir: string): string {
@@ -47,6 +49,7 @@ export function verdictReceiptOf(row: Record<string, unknown>): VerdictReceipt |
     step: row.step, task_id: row.task_id, ts: row.ts,
     ...(typeof row.run_id === "string" ? { run_id: row.run_id } : {}),
     ...(typeof row.reason === "string" ? { reason: row.reason } : {}),
+    ...(typeof row.observed_state === "string" && row.observed_state ? { observed_state: row.observed_state } : {}),
   };
 }
 

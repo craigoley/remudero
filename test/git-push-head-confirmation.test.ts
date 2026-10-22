@@ -429,13 +429,13 @@ test("W1-T2610: control — with no rewind, the same wiring pushes normally and 
 // ── claim 4 (structural) — BOTH literal call sites carry the wiring, not just one ───────────
 
 test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRound to gitPushRunBranch (grep-verifiable)", () => {
-  const [runTask, sweep] = ["../src/run-task.ts", "../src/lib/sweep.ts"].map((p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8"));
+  const [entrypoint, runTask, sweep] = ["../src/run-task.ts", "../src/cli/commands/run-task-verb.ts", "../src/lib/sweep.ts"].map((p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8"));
   // W1-T4797 adds a coverage precheck to the run loop; its wrapper still delegates to the shared push helper.
   assert.equal((runTask.match(/^ {10}push: \(wt, br, sha, prior\) => pushFixRoundPrechecked\(.*?, wt, br, sha, \{ repo: task\.repo \}, pushFixRound, prior\),$/gm) ?? []).length, 1, "runTaskBody's fix rung passes the expected head and prior-head lease through the prechecked push");
-  const prechecked = runTask.split("export async function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
+  const prechecked = entrypoint.split("export async function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
   assert.match(prechecked, /push: .* = pushFixRound,/, "the precheck defaults to the shared push helper");
   assert.match(prechecked, /await push\(wt, branch, expectedHeadSha, priorHeadSha\);/, "the precheck preserves the expected head and prior-head lease");
   assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
-  assert.match(runTask, /pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{ repo: deps\.repo \}, pushFixRound, prior\),/, "the sweep entrypoint injects the run loop's prechecked push over the same helper (W1-T8833)");
-  assert.match(runTask, /await gitPushRunBranchAsync\(wt, \{ expectedHeadSha, capture, exec: /, "the helper threads expectedHeadSha to the leaf");
+  assert.match(entrypoint, /pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{ repo: deps\.repo \}, pushFixRound, prior\),/, "the sweep entrypoint injects the run loop's prechecked push over the same helper (W1-T8833)");
+  assert.match(entrypoint, /await gitPushRunBranchAsync\(wt, \{ expectedHeadSha, capture, exec: /, "the helper threads expectedHeadSha to the leaf");
 });

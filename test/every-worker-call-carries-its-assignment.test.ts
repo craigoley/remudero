@@ -1,3 +1,4 @@
+import { maskLiterals, stripComments } from "../src/lib/test-impact-map.js";
 /**
  * W1-T4615: every worker call carries its assignment.
  *
@@ -61,13 +62,8 @@ function sources(dir: string): string[] {
  *  in the stripped text is the line number in the file. */
 function codeOnly(text: string): string {
   const blank = (s: string) => s.replace(/[^\n]/g, " ");
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, blank)
-    .replace(/^\s*import\b[\s\S]*?\bfrom\s*["'][^"'\n]+["'];?/gm, blank)
-    .replace(/`(?:[^`\\]|\\[\s\S])*`/g, blank)
-    .replace(/"(?:[^"\\\n]|\\.)*"/g, (s) => `"${" ".repeat(s.length - 2)}"`)
-    .replace(/'(?:[^'\\\n]|\\.)*'/g, (s) => `'${" ".repeat(s.length - 2)}'`)
-    .replace(/\/\/[^\n]*/g, blank);
+  return maskLiterals(stripComments(text, { keepLines: true }))
+    .replace(/^\s*import\b[\s\S]*?\bfrom\s*["'][^"'\n]*["'];?/gm, blank);
 }
 
 const RECEIPT_WRAPPER = String.raw`(?:benchmarkNonDispatchSpawn|ledgeredNonDispatchSpawn)\(\s*[^,()]+,\s*`;

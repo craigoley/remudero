@@ -11,7 +11,7 @@ import type { spawnWorker } from "../src/lib/worker.js";
 import type { ProbeExecResult as ContainmentProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 // ── The isolation preflight is WIRED into the run path, before any task work ─
 
@@ -22,7 +22,7 @@ test("the run path INVOKES probeIsolation (the preflight probe is wired, not jus
 
 test("the isolation preflight runs BEFORE any task worker (recon/implement) or worktree work", () => {
   const isoCallIdx = runTaskSrc.indexOf("probeIsolation(");
-  const worktreeAddIdx = runTaskSrc.indexOf("worktreeAdd(");
+  const worktreeAddIdx = runTaskSrc.indexOf("await worktreeAddAsync(", runTaskSrc.indexOf("async function runTaskBody("));
   const reconIdx = runTaskSrc.indexOf('"recon worker"');
   // NOT `indexOf("renderImplementPrompt(task,")`. That needle assumed the call's exact spelling AND
   // its formatting, and both changed: the render now returns its parts too, so run-task calls
@@ -44,7 +44,7 @@ test("a failed isolation preflight returns BEFORE the worktree add — no implem
   const failBlockMatch = /IsolationError[\s\S]*?return \{ taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" \};/;
   assert.match(runTaskSrc, failBlockMatch, "the IsolationError catch must return a terminal blocked_isolation verdict");
   const returnIdx = runTaskSrc.search(failBlockMatch);
-  const worktreeAddIdx = runTaskSrc.indexOf("worktreeAdd(");
+  const worktreeAddIdx = runTaskSrc.indexOf("await worktreeAddAsync(", runTaskSrc.indexOf("async function runTaskBody("));
   assert.ok(returnIdx >= 0 && returnIdx < worktreeAddIdx, "the fail-closed return must be BEFORE worktreeAdd");
 });
 

@@ -29,7 +29,7 @@ import { logWorktreeReapBootSurvey } from "../src/run-task.js";
 import { runLockPath, writeRunLock, type RunLockInfo } from "../src/lib/worker.js";
 import type { Config } from "../src/lib/config.js";
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
 // ── 1. WIRING: the one-shot dispatch body really calls the rung ────────────────────────────
 
@@ -52,8 +52,8 @@ test("the boot rung is never wired into a daemon-only or sweep-only path — it 
   // Negative control: logWorktreeReapBootSurvey must be its OWN function, not a rename/alias of
   // the daemon/sweep-shared rung — the two ship independently-flagged (worktreeReapBoot vs the
   // unconditional daemon/sweep rung) and must not collapse into one call site.
-  assert.match(runTaskSrc, /export function logWorktreeReapBootSurvey\(/);
-  const defIdx = runTaskSrc.indexOf("export function logWorktreeReapBootSurvey(");
+  assert.match(runTaskSrc, /(?:export )?function logWorktreeReapBootSurvey\(/);
+  const defIdx = runTaskSrc.indexOf("function logWorktreeReapBootSurvey(");
   const body = runTaskSrc.slice(defIdx, runTaskSrc.indexOf("\n}\n", defIdx));
   assert.match(body, /worktreeReapBoot/, "the boot rung must read its OWN policy flag, not scratchReap or a shared one");
 });
