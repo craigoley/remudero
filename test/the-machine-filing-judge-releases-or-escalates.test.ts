@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
+import { GARDENER_ORIGIN_ENV } from "../src/lib/worker-containment.js";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { dispatchOrder, runnableCandidates } from "../src/lib/drain.js";
@@ -39,7 +41,11 @@ import {
 } from "../src/lib/machine-filing-judge.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Proposal } from "../src/lib/inbox.js";
-import { rotateLedger } from "../src/lib/ledger.js";
+import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
+import { readLedgerLines } from "../src/lib/status.js";
+import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
+import type { Config } from "../src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
 import { appendOperatorNote } from "../src/lib/operator-notes.js";
 import { loadPlan, loadPlanFromYaml, RELEASE_LEDGER_STEP, releasedTaskIds, type Plan } from "../src/lib/plan.js";
 import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
@@ -52,6 +58,265 @@ import { gitRepo } from "./helpers/git-repo.js";
 
 const CLOCK = fixedClock(1790700000000);
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+const telemetryInput: RiskJudgeInput = { change: { description: "private-prompt-sentinel" },
+  gatesState: {}, planContext: { taskId: "W1-T10160" } };
+const telemetryVerdict = "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.9\nRISK_REASON: private-result-sentinel";
+function telemetryResult(over: Partial<WorkerResult> = {}): WorkerResult {
+  return { sessionId: "private-session", costUsd: 0.25, numTurns: 1, text: telemetryVerdict,
+    blocks: [], stderr: "private-stderr-sentinel", subtype: "success", isError: false, apiError: false,
+    permissionDenials: [], childEnvKeys: ["ANTHROPIC_API_KEY"], provider: "claude", model: "sonnet",
+    servedModel: "sonnet", effort: "low", tokens: { input: 10, output: 5, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {}, compactionEvents: [], qualitySuspect: false, ...over };
+}
+function telemetryFixture(t: { after(fn: () => void): void },
+  provider: (args: SpawnWorkerArgs, call: number) => Promise<WorkerResult>,
+  failLog = false, select = true) {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}machine-money-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero", "mounts.yaml"), readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml")));
+  const config = { root, claudeBin: "/bin/false" } as Config;
+  const path = join(root, "state", "ledger.ndjson");
+  let calls = 0;
+  const requests: SpawnWorkerArgs[] = [];
+  const raw = async (args: SpawnWorkerArgs) => {
+    requests.push(args);
+    calls++;
+    const assignment: WorkerSelectionAssignment = { version: 1, id: `money-assignment-${calls}`, phase: "pre-execution",
+      requested: { model: args.model ?? "sonnet", effort: args.effort ?? "low", maxTurns: null },
+      selected: { provider: "claude", model: args.model ?? "sonnet", effort: args.effort ?? "low" },
+      routing: { mode: "claude-only", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } }, candidates: [] };
+    if (select) args.onSelectionAssignment?.(assignment);
+    const result = await provider(args, calls);
+    if (select) result.selectionAssignmentId ??= assignment.id;
+    return result;
+  };
+  const benchmark = benchmarkNonDispatchSpawn("risk-judge", raw);
+  const ports = productionMachineFilingJudgePorts({ repoRoot: root, stateDir: join(root, "state"),
+    worktreesRoot: join(root, "wt"), owner: "fixture", repo: "repo", mainFailures: () => [],
+    // The real default benchmark and ledger writer run against fixture-owned state. Only the provider is fake.
+    spawn: args => benchmark({ ...args, config }),
+    log: (step, extra) => { if (failLog) throw new Error("private-log-sentinel");
+      appendLedger(path, { run_id: "fixture", task_id: "fixture", step, ...extra }); } });
+  return { ports, requests, rows: () => [...readLedgerLines(path)] as unknown as Record<string, unknown>[] };
+}
+
+test("W1-T10160: default machine-filing judge emits one owned producer per real attempt", async t => {
+  const f = telemetryFixture(t, async (_args, call) => telemetryResult({ costUsd: call / 4 }));
+  assert.deepEqual(f.rows(), [], "an unused/cached judge produces no price receipt");
+  for (let call = 1; call <= 3; call++) assert.equal((await f.ports.riskJudge(telemetryInput)).verdict, "low");
+  const rows = f.rows(), money = rows.filter(r => r.step === "machine_judge.attempt_spend");
+  assert.deepEqual(money.map(r => r.total_cost_usd), [0.25, 0.5, 0.75], "no collector can accumulate earlier judgments");
+  for (const row of money) {
+    assert.equal(row.task_id, "W1-T10160");
+    assert.equal(row.provider, "claude");
+    assert.equal(row.billing_mode, "api");
+    const attempt = rows.find(r => r.step === "worker.attempt" && r.selection_assignment_id === row.selection_assignment_id);
+    assert.ok(attempt);
+    assert.equal(row.run_id, attempt.run_id);
+    assert.equal(row.task_id, attempt.task_id);
+  }
+  assert.equal(rows.filter(r => r.step === "worker.assignment").length, 3);
+  assert.equal(rows.filter(r => r.step === "worker.attempt").length, 3);
+  assert.equal(rows.some(r => r.step === "risk_judge.decision"), false);
+  assert.doesNotMatch(JSON.stringify(money), /private-prompt|private-result|private-stderr|ANTHROPIC_API_KEY|private-session/);
+});
+
+test("W1-T10160: retries failures and missing prices preserve monetary evidence", async t => {
+  const f = telemetryFixture(t, async (_args, call) => telemetryResult({ text: call < 3 ? "malformed-private-text" : telemetryVerdict,
+    costUsd: call / 4, isError: call === 2, apiError: call === 2 }));
+  assert.equal((await f.ports.riskJudge(telemetryInput)).verdict, "low");
+  assert.equal(f.requests.length, 3);
+  assert.deepEqual(f.rows().filter(r => r.step === "machine_judge.attempt_spend").map(r => r.total_cost_usd), [0.25, 0.5, 0.75]);
+  for (const [over, price, mode] of [
+    [{ costUsd: 0 }, 0, "api"],
+    [{ provider: "codex", costUsd: 0, childEnvKeys: [], notionalCostUsd: 1.5 }, undefined, "subscription"],
+    [{ subtype: "", costUsd: 0 }, undefined, "unknown"],
+    [{ costUsd: Number.NaN }, undefined, "api"],
+    [{ costUsd: -1 }, undefined, "api"],
+    [{ provider: "cash", costUsd: 0, childEnvKeys: [] }, 0, "api"],
+    [{ provider: undefined, childEnvKeys: undefined }, undefined, "unknown"],
+  ] as const) {
+    const g = telemetryFixture(t, async () => telemetryResult(over as Partial<WorkerResult>));
+    await g.ports.riskJudge(telemetryInput);
+    const row = g.rows().find(r => r.step === "machine_judge.attempt_spend");
+    assert.ok(row);
+    assert.equal(row.total_cost_usd, price);
+    assert.equal(row.billing_mode, mode);
+    assert.equal(row.price_state, price === undefined ? "unknown" : "reported");
+    if ("provider" in over && over.provider === "codex") assert.equal(row.notional_cost_usd, 1.5);
+  }
+  const thrown = new Error("private-provider-failure");
+  const g = telemetryFixture(t, async () => { throw thrown; });
+  await assert.rejects(g.ports.riskJudge(telemetryInput), e => e === thrown);
+  const row = g.rows().find(r => r.step === "machine_judge.attempt_spend");
+  assert.ok(row);
+  assert.equal(row.total_cost_usd, undefined);
+  assert.equal(row.price_state, "unknown");
+  assert.equal(row.attempt_state, "failed");
+  assert.doesNotMatch(JSON.stringify(row), /private-provider-failure/);
+  const unstarted = telemetryFixture(t, async () => { throw thrown; }, false, false);
+  await assert.rejects(unstarted.ports.riskJudge(telemetryInput), e => e === thrown);
+  const absent = unstarted.rows().find(r => r.step === "machine_judge.attempt_spend");
+  assert.equal(absent?.attempt_state, "not-started");
+  assert.equal(absent?.price_state, "unknown");
+  assert.equal(absent?.total_cost_usd, undefined);
+  const interrupted = telemetryFixture(t, async () => telemetryResult({ isError: true,
+    subtype: "interrupted", exit: { kind: "signal", signal: "SIGTERM" } }));
+  assert.equal((await interrupted.ports.riskJudge(telemetryInput)).verdict, "low");
+  assert.equal(interrupted.rows().find(r => r.step === "machine_judge.attempt_spend")?.total_cost_usd, 0.25);
+  const exhausted = telemetryFixture(t, async () => telemetryResult({ text: "malformed" }));
+  assert.equal((await exhausted.ports.riskJudge(telemetryInput)).availability, "unavailable");
+  assert.equal(exhausted.rows().filter(r => r.step === "machine_judge.attempt_spend").length, 3);
+  for (const terminalThrows of [false, true]) {
+    const fallback = telemetryFixture(t, async (args, call) => {
+      const id = `money-assignment-${call}`;
+      args.onModelFallbackAttempt?.({ selectionAssignmentId: id, model: "sonnet", reason: "draft-contract", result: telemetryResult({ costUsd: 0.125 }) });
+      if (terminalThrows) throw thrown;
+      args.onSelectionAssignment?.({ id: "money-fallback-success", requested: { model: "sonnet", effort: "low" },
+        selected: { provider: "claude", model: "sonnet", effort: "low" } } as WorkerSelectionAssignment);
+      return telemetryResult({ selectionAssignmentId: "money-fallback-success" });
+    });
+    if (terminalThrows) await assert.rejects(fallback.ports.riskJudge(telemetryInput), e => e === thrown);
+    else assert.equal((await fallback.ports.riskJudge(telemetryInput)).verdict, "low");
+    assert.deepEqual(fallback.rows().filter(r => r.step === "machine_judge.attempt_spend").map(r => r.total_cost_usd), terminalThrows ? [0.125] : [0.125, 0.25]);
+  }
+});
+
+test("W1-T10160: missing fallback IDs cannot restate one paid result", async t => {
+  for (const select of [false, true]) await t.test(select ? "assignment observed but fallback ID absent" : "all assignment IDs absent", async t => {
+    const result = telemetryResult();
+    const f = telemetryFixture(t, async args => {
+      args.onModelFallbackAttempt?.({ model: "sonnet", reason: "draft-contract", result });
+      return result;
+    }, false, select);
+    for (let judgment = 1; judgment <= 2; judgment++) {
+      assert.equal((await f.ports.riskJudge(telemetryInput)).verdict, "low");
+      const money = f.rows().filter(r => r.step === "machine_judge.attempt_spend");
+      assert.deepEqual(money.map(r => r.total_cost_usd), Array(judgment).fill(0.25), "callback and final return of one paid object are one producer per actual spawn");
+      assert.equal(f.requests.length, judgment);
+      if (select) assert.equal((f.rows().filter(r => r.step === "worker.assignment").at(-1)!.worker_assignment as WorkerSelectionAssignment).id, `money-assignment-${judgment}`);
+      assert.equal(money.at(-1)!.selection_assignment_id, undefined);
+      assert.equal(money.at(-1)!.selection_assignment_unavailable_reason, "assignment-not-observed", "do not infer a missing callback identity from an earlier assignment");
+      // Each raw spawn below intentionally returns the same provider object. Its next actual
+      // invocation is still another paid attempt, even when the previous call carried an ID.
+      delete result.selectionAssignmentId;
+    }
+  });
+  await t.test("distinct missing-ID attempt results retain both measured costs", async t => {
+    const f = telemetryFixture(t, async args => {
+      args.onModelFallbackAttempt?.({ model: "sonnet", reason: "draft-contract", result: telemetryResult() });
+      return telemetryResult();
+    }, false, false);
+    assert.equal((await f.ports.riskJudge(telemetryInput)).verdict, "low");
+    assert.deepEqual(f.rows().filter(r => r.step === "machine_judge.attempt_spend").map(r => r.total_cost_usd), [0.25, 0.25], "equal prices are not an identity; distinct results still own their own costs");
+    assert.equal(f.requests.length, 1);
+  });
+});
+
+test("W1-T10160: price telemetry cannot alter a ruling or spawn policy", async t => {
+  const results = [telemetryResult({ text: "malformed" }), telemetryResult()];
+  const good = telemetryFixture(t, async (_args, call) => results[call - 1]!);
+  const broken = telemetryFixture(t, async (_args, call) => results[call - 1]!, true);
+  assert.deepEqual(await good.ports.riskJudge(telemetryInput), await broken.ports.riskJudge(telemetryInput));
+  for (const f of [good, broken]) {
+    assert.equal(f.requests.length, 2);
+    const [first, second] = f.requests;
+    assert.equal(first!.prompt, second!.prompt);
+    assert.equal(first!.model, "sonnet");
+    assert.deepEqual(first!.tools, []);
+    assert.equal(first!.permissionMode, "bypassPermissions");
+    assert.equal(first!.workerClass, second!.workerClass);
+  }
+  const malformed = telemetryFixture(t, async () => ({ ...telemetryResult(),
+    get tokens(): never { throw new Error("private-resource-sentinel"); } }));
+  assert.equal((await malformed.ports.riskJudge(telemetryInput)).verdict, "low");
+});
+
+test("W1-T10160: default gardener capture joins machine-judge cost without double counting", async t => {
+  const repository = "fixture/repo", at = new Date().toISOString();
+  const passId = "12345678-1234-4123-8123-123456789abc";
+  const parent = { ts: at, step: "garden.lifecycle", name: "config", passId, repository,
+    daemon_run_id: "daemon-1", phase: "completed", exit: 0 };
+  const archive = (offset = 0) => `ledger.${new Date(Date.parse(at) + offset).toISOString().replace(/[:.]/g, "-")}.ndjson`;
+  const runtime = () => ({ version: 1, repository, daemonRunId: "daemon-1", codeSha: null, configuredAt: at, observedAt: at,
+    gardens: [{ name: "config", enabled: true, scope: "repository", cadenceMs: 1000, phase: "scheduled", observedAt: at,
+      passId: null, nextDueAt: null, queueMs: null, executionMs: null, exit: null, reason: null,
+      attempts: 1, completions: 1, failures: 0, lastCompletedAt: null, lastSuccessAt: null, lastFailureAt: null }] });
+  const loadSpend = () => import("../src/lib/gardener-spend.js");
+  const captured = async (fixture: typeof t, rows: Record<string, unknown>[]) => {
+    const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}machine-money-control-`));
+    fixture.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(runtime()));
+    writeFileSync(join(dir, "ledger.ndjson"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    const { captureGardenerSpendSource, foldGardenerSpend } = await loadSpend();
+    return { spend: foldGardenerSpend(await captureGardenerSpendSource(dir), repository, new Date().toISOString()) };
+  };
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}machine-money-default-join-`)), dir = join(root, "state"), path = join(dir, "ledger.ndjson");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const prior = process.env[GARDENER_ORIGIN_ENV];
+  process.env[GARDENER_ORIGIN_ENV] = JSON.stringify({ version: 1, name: "config", passId });
+  t.after(() => { if (prior === undefined) delete process.env[GARDENER_ORIGIN_ENV]; else process.env[GARDENER_ORIGIN_ENV] = prior; });
+  mkdirSync(dir);
+  mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero", "mounts.yaml"), readFileSync(new URL("../.remudero/mounts.yaml", import.meta.url)));
+  const inventory = runtime();
+  Object.assign(inventory.gardens[0]!, { attempts: 1, completions: 1 });
+  writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(inventory));
+  let calls = 0;
+  const spawn = benchmarkNonDispatchSpawn("risk-judge", async args => {
+    const id = `private-money-call-${++calls}`;
+    args.onSelectionAssignment?.({ version: 1, id, phase: "pre-execution", requested: { model: "sonnet", effort: "low", maxTurns: null },
+      selected: { provider: "claude", model: "sonnet", effort: "low" }, candidates: [],
+      routing: { mode: "claude-only", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } } } satisfies WorkerSelectionAssignment);
+    return { selectionAssignmentId: id, sessionId: "private-session", costUsd: calls === 1 ? 0.25 : calls === 2 ? 0.75 : 0,
+      text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.9\nRISK_REASON: private-result", numTurns: 1,
+      subtype: "success", isError: false, apiError: false, provider: calls === 3 ? "codex" : calls === 4 ? "cash" : "claude",
+      model: "sonnet", servedModel: "sonnet", effort: "low", ...(calls === 3 ? { notionalCostUsd: 5 } : {}),
+      childEnvKeys: calls === 3 ? [] : ["ANTHROPIC_API_KEY"], tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 },
+      blocks: [], stderr: "", permissionDenials: [], modelUsage: {}, compactionEvents: [], qualitySuspect: false } as WorkerResult;
+  });
+  const ports = productionMachineFilingJudgePorts({ repoRoot: root, stateDir: dir, worktreesRoot: join(root, "wt"),
+    owner: "fixture", repo: "repo", mainFailures: () => [], spawn: args => spawn({ ...args, config: { root } as Config }),
+    log: (step, extra) => appendLedger(path, { run_id: "fixture", task_id: "fixture", step, ...extra }) });
+  for (let i = 0; i < 2; i++) await ports.riskJudge({ change: { description: "private-prompt" }, gatesState: {}, planContext: { taskId: "W1-T10160" } });
+  const { captureGardenerSpendSource, foldGardenerSpend } = await loadSpend();
+  const collect = async () => foldGardenerSpend(await captureGardenerSpendSource(dir), repository, new Date().toISOString());
+  assert.equal((await collect()).pricedSubtotalUsd, null, "a child cannot invent its parent");
+  appendLedger(path, { run_id: "garden-parent", task_id: "MACHINE-JUDGE", ...parent });
+  const baseline = await collect();
+  assert.equal(baseline.workerCalls?.counts.matched, 2);
+  t.diagnostic("positive control: default assignment/attempt capture matched two calls before the monetary assertion");
+  assert.equal(baseline.totalUsd, 1);
+  assert.deepEqual(baseline.counts, { priced: 2, unpriced: 0, unlinked: 0 });
+  const replay = readFileSync(path, "utf8"), rows = [...readLedgerLines(path)] as unknown as Record<string, unknown>[];
+  writeFileSync(join(dir, archive() + ".gz"), gzipSync(replay));
+  writeFileSync(join(dir, archive(1000)), replay);
+  appendLedger(path, { run_id: "terminal", task_id: "W1-T10160", step: "verdict", total_cost_usd: 99 });
+  const rotated = await collect();
+  assert.equal(rotated.totalUsd, 1, "assignment, attempt, terminal and archive restatements add no dollars");
+  assert.equal(rotated.workerCalls?.counts.matched, 2);
+  assert.ok(Buffer.byteLength(JSON.stringify(rotated)) <= 65536);
+  assert.doesNotMatch(JSON.stringify(rotated), /private-money|private-prompt|private-result|selection_assignment_id/);
+  for (const mismatch of [{ passId: "22345678-1234-4123-8123-123456789abc" }, { daemon_run_id: "daemon-2" }, { repository: "wrong/repo" }]) {
+    const isolated = await captured(t, rows.map(row => row.step === "garden.lifecycle" ? { ...row, ...mismatch } : row));
+    assert.equal(isolated.spend.pricedSubtotalUsd, null);
+  }
+  const noProducer = await captured(t, rows.filter(row => row.step !== "machine_judge.attempt_spend"));
+  assert.equal(noProducer.spend.pricedSubtotalUsd, null, "call coverage alone is not a monetary producer");
+  assert.equal(noProducer.spend.workerCalls?.counts.matched, 2);
+  writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify({ ...inventory, daemonRunId: "daemon-2" }));
+  assert.equal((await collect()).pricedSubtotalUsd, null, "a new generation cannot infer old parentage");
+  writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(inventory));
+  for (let i = 0; i < 2; i++) await ports.riskJudge({ change: { description: "private-prompt" }, gatesState: {}, planContext: { taskId: "W1-T10160" } });
+  const partial = await collect();
+  assert.equal(partial.totalUsd, null, "subscription notional cannot close an unknown monetary price");
+  assert.equal(partial.pricedSubtotalUsd, 1);
+  assert.deepEqual(partial.counts, { priced: 3, unpriced: 1, unlinked: 0 }, "a real reported zero is priced; a Codex placeholder is not");
+  assert.equal(partial.workerCalls?.counts.matched, 4);
+  assert.deepEqual(partial.workerCalls?.billingModes, { api: 3, subscription: 1, unknown: 0 });
+});
 
 function machineShard(id: string, over: { title?: string; files?: string[]; origin?: string } = {}): string {
   const files = over.files ?? ["docs/ci-friction-remedies.md"];

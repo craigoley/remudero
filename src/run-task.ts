@@ -1194,7 +1194,7 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -1662,7 +1662,7 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "./lib/sweep.js";
+import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -38871,6 +38871,13 @@ export function inFlightTaskIdsFrom(inflightDir: string): string[] {
     .map((entry) => entry.slice(0, -".lock".length));
 }
 
+/** W1-T9569 — what a review-only light pass writes on its rows: its scope, in the stand-down text and in
+ * `light_pass_scope`, never the ordinary "deferred to full sweep (light pass)". An ordinary pass gets nothing. */
+export function reviewOnlyLightPassDeps(scope?: LightPassScope): Pick<SweepDeps, "lightPassScope" | "standDownReasonFor"> {
+  const name = scope?.reviewOnly === true ? scope.scope : undefined;
+  return name ? { lightPassScope: name, standDownReasonFor: () => reviewOnlyStandDownReason(name) } : {};
+}
+
 export function buildSweepLightHook(
   owner: string,
   repo: string,
@@ -38977,6 +38984,7 @@ export function buildSweepLightHook(
             // W1-T8086: own-red and conflict repairs use per-claim capacity on ordinary passes;
             // review-only still stands them down.
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, fixAdmitted),
+            ...reviewOnlyLightPassDeps(scope),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
             // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.
@@ -42639,7 +42647,7 @@ export function productionMachineFilingJudgePorts(opts: {
   /** Test files main's CI failed at a sha (W1-T9694). Absent: read from GitHub, as the flake-incident gardener does. */
   mainFailures?: SelectorShadowMainFailures;
 }): MachineJudgePorts {
-  let judge: ((input: RiskJudgeInput) => Promise<RiskJudgeVerdict>) | undefined;
+  let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
   return {
     flakeEvidence: flakeJudgeEvidencePort({
@@ -42651,11 +42659,61 @@ export function productionMachineFilingJudgePorts(opts: {
     stateDir: opts.stateDir,
     plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
     riskJudge: (input) => {
-      if (!judge) {
+      if (!mount) {
         const mounts = loadMounts(mountsPath(opts.repoRoot));
-        judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"), spawn: opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+        mount = mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts);
       }
-      return judge(input);
+      // Per-judgment receipts precede parse retries; symbol-only identity preserves router inputs.
+      const identity = { runId: `machine-judge-${nextLaneEpochMs()}`, taskId: input.planContext.taskId ?? "RISK-JUDGE" };
+      const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge");
+      const record = (result: WorkerResult | undefined, assignmentId: string | undefined): void => {
+        try {
+          let resources: ReturnType<typeof benchmarkWorkerAttemptResources> | undefined;
+          try { if (result) resources = benchmarkWorkerAttemptResources(result); }
+          catch { /* unavailable accounting is unknown, never a replacement judgment */ }
+          const { billing_mode = "unknown" } = resources ?? {};
+          const price = resources?.total_cost_usd, notional = resources?.notional_cost_usd;
+          const priced = typeof price === "number" && Number.isFinite(price) && price >= 0;
+          opts.log("machine_judge.attempt_spend", {
+            run_id: identity.runId, task_id: identity.taskId,
+            ...attemptAssignmentJoin(assignmentId, result === undefined),
+            attempt_state: result ? "result" : assignmentId ? "failed" : "not-started",
+            accounting_source: "worker-result-estimate-not-invoice",
+            provider: result?.provider === "claude" || result?.provider === "codex" || result?.provider === "cash" ? result.provider : "unknown",
+            billing_mode,
+            price_state: priced ? "reported" : "unknown",
+            ...(priced ? { total_cost_usd: price } : {}),
+            ...(typeof notional === "number" && Number.isFinite(notional) && notional >= 0 ? { notional_cost_usd: notional } : {}),
+          });
+        } catch { /* a telemetry failure must not change the ruling, retries or provider result */ }
+      };
+      return realRiskJudge({ mount, cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"),
+        spawn: async (args) => {
+          let assignmentId: string | undefined;
+          const recorded = new Set<string>();
+          const recordedResults = new WeakSet<WorkerResult>();
+          const recordAttempt = (result: WorkerResult | undefined, id: string | undefined): void => {
+            // A fallback observer and final return can carry the same result object without IDs.
+            if (result !== undefined && recordedResults.has(result) || id !== undefined && recorded.has(id)) return;
+            record(result, id);
+            if (result !== undefined) recordedResults.add(result);
+            if (id !== undefined) recorded.add(id);
+          };
+          try {
+            const result = await spawn(withReceiptIdentity({ ...args,
+              onSelectionAssignment: (assignment) => { assignmentId = assignment.id; args.onSelectionAssignment?.(assignment); },
+              onModelFallbackAttempt: (attempt) => {
+                recordAttempt(attempt.result, attempt.selectionAssignmentId);
+                args.onModelFallbackAttempt?.(attempt);
+              },
+            }, identity));
+            recordAttempt(result, result.selectionAssignmentId ?? assignmentId);
+            return result;
+          } catch (error) {
+            recordAttempt(undefined, assignmentId);
+            throw error;
+          }
+        } })(input);
     },
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),

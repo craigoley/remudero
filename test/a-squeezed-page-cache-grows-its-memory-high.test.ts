@@ -6,7 +6,7 @@
  * 28.7 MiB from /mnt/rmd — the refaults were its disk reads — with 6-11 GB of host MemAvailable
  * unused. deploy/memory-high-tuner.sh grows a squeezed container's memory.high by what it refaulted,
  * bounded by host headroom, and gives it back under host pressure, never below the policy value.
- * These drive the SHIPPED shell through real bash; only docker, sudo and systemctl are faked.
+ * These drive the SHIPPED shell through real bash; docker, sudo, systemctl and the fixture clock are faked.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -105,8 +105,10 @@ test("the tuner never sets memory.high below the policy value", () => {
 });
 
 /** A host with one console container on a systemd-driver cgroup tree, and fake docker/sudo/systemctl. */
-function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: string; calls: string } {
+function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: string; calls: string; now: number } {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}memory-high-tuner-`));
+  const now = 1_800_000_000;
+  const iso = new Date(now * 1000).toISOString();
   const id = "c0ffee".padEnd(64, "0");
   const cg = join(root, "cg", "system.slice", `docker-${id}.scope`);
   mkdirSync(cg, { recursive: true });
@@ -124,10 +126,18 @@ function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: 
     writeFileSync(join(root, "bin", name), `#!/usr/bin/env bash\nprintf '%s\\n' "${name} $*" >> '${calls}'\n${body}\n`);
     chmodSync(join(root, "bin", name), 0o755);
   };
+  // Node-only clock shifts cannot move Bash's clock; every fixture sample and date call shares this one.
+  fake("date", `case "$*" in
+    "-u +%s") printf '%s\\n' '${now}' ;;
+    "-u +%Y-%m-%dT%H:%M:%SZ") printf '%s\\n' '${iso.replace(".000Z", "Z")}' ;;
+    "-u +%Y-%m-%dT%H:%M:%S.000Z") printf '%s\\n' '${iso}' ;;
+    *) printf 'unexpected fixture date arguments: %s\\n' "$*" >&2; exit 2 ;;
+  esac`);
   fake("docker", `case "$1" in inspect) echo ${id} ;; ps) echo "${container} ${id}" ;; esac`);
   fake("systemctl", `[ "$1" = set-property ] && [ "$2" = --runtime ] && printf '%s\\n' "\${4#MemoryHigh=}" > '${join(root, "cg", "system.slice")}'/"$3"/memory.high`);
   return {
     root,
+    now,
     cg,
     calls,
     env: {
@@ -150,7 +160,7 @@ test("serve tuning honors its canonical hard-capped policy instead of the build 
       writeFileSync(join(h.root, "meminfo"), `MemTotal: ${totalMiB * 1024} kB\nMemAvailable: 9216000 kB\n`);
       writeFileSync(join(h.cg, "memory.max"), `${7680 * MIB}\n`);
       writeFileSync(join(h.cg, "memory.high"), `${policyMiB * MIB}\n`);
-      const then = Math.floor(Date.now() / 1000) - 300;
+      const then = h.now - 300;
       const id = "c0ffee".padEnd(64, "0");
       writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${container}.txt`),
         `v1 ${then} ${id} 1124 25000 5000 30 0\n`);
@@ -174,7 +184,7 @@ test("a tick writes the grown memory.high through the container's systemd scope,
   try {
     const id = "c0ffee".padEnd(64, "0");
     // The previous tick's sample, 300 s ago: 124 high events and 18,000 refaulted pages (~70 MiB) since.
-    const then = Math.floor(Date.now() / 1000) - 300;
+    const then = h.now - 300;
     writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${CONSOLE}.txt`), `v1 ${then} ${id} 1000 7000 5000 30 0\n`);
     const run = spawnSync("bash", [TUNER, "--container", CONSOLE, "--state-dir", join(h.root, "cfg")], { encoding: "utf8", env: h.env });
     assert.equal(run.status, 0, run.stderr);
@@ -358,7 +368,7 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
       const swapin = tier === "watch" || tier === "calm" || tier === "no-squeeze" ? 5000 : 65000;
       writeFileSync(join(h.root, "meminfo"), `MemTotal: ${HOST_KB} kB\nMemAvailable: ${availableMiB * 1024} kB\n`);
       writeFileSync(join(h.root, "vmstat"), `pswpin ${swapin}\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n`);
-      const then = Math.floor(Date.now() / 1000) - 300;
+      const then = h.now - 300;
       const noSqueeze = tier === "no-squeeze";
       writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${row.current}.txt`),
         `v1 ${then} ${currentId} ${noSqueeze ? 1124 : 1000} ${noSqueeze ? 25000 : 7000} 5000 30 0\n`);
@@ -421,7 +431,7 @@ test("the tuner's swap-in counts what zswap serves: its counter is pswpin plus z
       // No disk swap-in since the last tick; 60,000 pages from zswap (or, without zswap, 60,000 from disk).
       writeFileSync(join(h.root, "vmstat"), zswap ? "pswpin 5000\nzswpin 60000\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n"
         : "pswpin 65000\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n");
-      const then = Math.floor(Date.now() / 1000) - 300;
+      const then = h.now - 300;
       writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${CONSOLE}.txt`), `v1 ${then} ${id} 1124 25000 5000 30 0\n`);
       const run = spawnSync("bash", [TUNER, "--container", CONSOLE, "--state-dir", join(h.root, "cfg")], { encoding: "utf8", env: h.env });
       assert.equal(run.status, 0, run.stderr);
