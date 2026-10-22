@@ -1,0 +1,28 @@
+id: incident-ccddaf2208c66b13
+ts: 2026-10-22T17:01:13.633Z
+raw: >-
+  Incident ccddaf2208c6: invariant reconcile.ci
+
+  First seen: 2026-10-22T16:17:15.867Z
+
+  Last seen: 2026-10-22T16:17:15.867Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - ci.yml run covering main commit db200bbfaae401311d2513955ee5b77b0ef5ca73: gap persists after its repair attempt (db200bbfaae401311d2513955ee5b77b0ef5ca73:ci.yml)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ccddaf2208c66b1379d3d2c80932cedea5cd0da812fb3f77ef2374e34eba8ae9
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

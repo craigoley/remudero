@@ -1,0 +1,28 @@
+id: incident-7d374259850a3394
+ts: 2026-10-22T16:57:18.351Z
+raw: >-
+  Incident 7d374259850a: invariant reconcile.ci
+
+  First seen: 2026-10-22T16:16:57.157Z
+
+  Last seen: 2026-10-22T16:16:57.157Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - ci.yml run covering main commit 5066309dc1ad035c0d61840b8f8453bbe83b1966: gap persists after its repair attempt (5066309dc1ad035c0d61840b8f8453bbe83b1966:ci.yml)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7d374259850a3394b4caa90e58aa0a5838e6084ff776247e5f0d7f9253b34dd3
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
