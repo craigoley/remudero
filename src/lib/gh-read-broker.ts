@@ -380,7 +380,7 @@ export class GhSharedPace {
       } catch {
         return true; // the holder released it between our mkdir and this stat: take it on the next attempt
       }
-      if (!(Date.now() - mtimeMs > GH_PACE_LOCK_STALE_MS)) return false;
+      if (!(systemClock.now() - mtimeMs > GH_PACE_LOCK_STALE_MS)) return false;
       rmSync(lock, { recursive: true, force: true });
       return true;
     }

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ghBrokerDir } from "#src/lib/gh-read-broker-client.js";
 import {
-  ghBrokerCommand, ghBrokerLoginStatus, ghCommand, GhReadBroker, isGhPaceLogin, summariseGhBrokerLog,
+  brokerGhReadAs, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, GhReadBroker, GhSharedPace, isGhPaceLogin, serveGhReadBroker,
+  summariseGhBrokerLog,
   type GhUpstreamExec, type GhUpstreamResult,
 } from "#src/lib/gh-read-broker.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
@@ -337,4 +338,97 @@ test("W1-T10302: the installer joins a second account to the login's shared pace
   assert.match(second.stdout, /would join the shared pace directory .*gh-pace\/octo \(add to its ACL: user:/);
   assert.equal(existsSync(join(home, "Library")), false, "a dry run still creates nothing under HOME");
   assert.equal(spawnSync("bash", [INSTALLER, "--dry-run", "--rmd", rmd, "--login", "../etc"], { encoding: "utf8", env }).status, 2, "a login is a path component, validated");
+});
+
+/** Wraps one GhSharedPace method for the length of a test, so a test can fail the shared directory at a chosen step. */
+function patchPace(t: TestContext, name: "tryLock" | "write", impl: (this: GhSharedPace, orig: (...a: unknown[]) => unknown, ...a: unknown[]) => unknown): void {
+  const proto = GhSharedPace.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const orig = proto[name];
+  proto[name] = function patched(this: GhSharedPace, ...a: unknown[]) { return impl.call(this, orig, ...a); };
+  t.after(() => { proto[name] = orig; });
+}
+
+const holdFile = (holdUntilMs: number) => ({ gapMs: 1_500, holdUntilMs, lastStartMs: null, secondaryRefusals: 0, primary: null, seen: {} });
+
+test("W1-T10302: a start that loses the race for the login's lock waits out the hold the winner set", async (t) => {
+  const shared = tmp(t, "pace");
+  mkdirSync(join(shared, LOGIN));
+  const clock = virtualClock();
+  const exec = scriptedExec(clock, () => http("200 OK", [], "{}"));
+  const broker = accountBroker(t, "late", shared, clock, exec.exec);
+  let raced = false;
+  const t0 = clock.now();
+  // The other account's broker finishes a refused call between our first look at the state and taking the lock.
+  patchPace(t, "tryLock", function (orig, ...a) {
+    if (!raced) {
+      raced = true;
+      this.write("core", holdFile(t0 + 10_000));
+    }
+    return orig.apply(this, a);
+  });
+  assert.equal((await read(broker, 1)).outcome, "upstream-200");
+  assert.ok(raced);
+  assert.ok(exec.starts[0].startedMs - t0 >= 10_000, `the start waited out the hold seen after the lock (${exec.starts[0].startedMs - t0} ms)`);
+  assert.equal(existsSync(join(shared, LOGIN, "lock-core")), false, "the lock taken for the lost race was released");
+  assert.equal((broker.status() as { pacer: string }).pacer, "shared");
+});
+
+test("W1-T10302: a shared directory that fails while the lock is taken or after the call falls back and releases the lock", async (t) => {
+  const clock = virtualClock();
+
+  // The lock itself cannot be taken: nothing is held, the read is served on the account pacer.
+  const noLock = tmp(t, "no-lock");
+  mkdirSync(join(noLock, LOGIN));
+  const execA = scriptedExec(clock, () => http("200 OK", [], "{}"));
+  const a = accountBroker(t, "no-lock", noLock, clock, execA.exec);
+  let mode: "lock-throws" | "state-torn-after-lock" | "write-throws" = "lock-throws";
+  patchPace(t, "tryLock", function (orig, ...a2) {
+    if (mode === "lock-throws") throw new Error("EACCES: lock directory");
+    const got = orig.apply(this, a2);
+    if (mode === "state-torn-after-lock") writeFileSync(join(this.dir, "state-core.json"), "{torn");
+    return got;
+  });
+  assert.equal((await read(a, 1)).outcome, "upstream-200");
+  assert.match((a.status() as { pacer: string }).pacer, /fallback: shared pacer unusable: EACCES: lock directory/);
+
+  // The lock is taken, then the state read after it is torn: the lock is let go before the read goes on.
+  mode = "state-torn-after-lock";
+  const torn = tmp(t, "torn-after-lock");
+  mkdirSync(join(torn, LOGIN));
+  const execB = scriptedExec(clock, () => http("200 OK", [], "{}"));
+  const b = accountBroker(t, "torn", torn, clock, execB.exec);
+  assert.equal((await read(b, 2)).outcome, "upstream-200");
+  assert.match((b.status() as { pacer: string }).pacer, /fallback: shared pacer unusable: /);
+  assert.equal(existsSync(join(torn, LOGIN, "lock-core")), false, "the lock taken before the failure is released");
+});
+
+test("W1-T10302: a shared directory that cannot take the outcome falls back after the call and frees the lock", async (t) => {
+  const shared = tmp(t, "pace");
+  mkdirSync(join(shared, LOGIN));
+  const clock = virtualClock();
+  const exec = scriptedExec(clock, () => http("200 OK", [], "{}"));
+  const broker = accountBroker(t, "full", shared, clock, exec.exec);
+  patchPace(t, "write", () => { throw new Error("ENOSPC: no space left"); });
+  assert.equal((await read(broker, 1)).outcome, "upstream-200", "the read that ran is still answered");
+  assert.match((broker.status() as { pacer: string }).pacer, /fallback: shared pacer unusable: ENOSPC/);
+  assert.equal(existsSync(join(shared, LOGIN, "lock-core")), false, "the lock is released even when the outcome could not be published");
+});
+
+test("W1-T10302: the default client read sends the client to the broker and returns gh's answer", async (t) => {
+  const cache = tmp(t, "cache");
+  const clock = virtualClock();
+  const exec = scriptedExec(clock, () => http("200 OK", [], '{"n":1}'));
+  const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
+  const broker = new GhReadBroker(dir, exec.exec, clockFromMillisFn(clock.now), clock.sleep, () => 1e12, { sharedPaceRoot: null, account: "craigoley" });
+  const server = await serveGhReadBroker({ dir, broker });
+  t.after(() => server.close());
+  const named = await brokerGhReadAs(server.socketPath, ["api", "repos/o/r/pulls/1"], { class: "interactive", caller: "codex-1", client: "codex", cwd: REPO_ROOT, repo: "o/r" });
+  assert.equal(named.exitCode, 0);
+  assert.equal(named.outcome, "upstream-200");
+  assert.equal(named.stdout, '{"n":1}');
+  // Every option left out takes its default: a background read from this process, named by no client.
+  const bare = await brokerGhReadAs(server.socketPath, ["api", "repos/o/r/pulls/2"]);
+  assert.equal(bare.exitCode, 0);
+  const log = summariseGhBrokerLog(dir, 0) as { by_client: Record<string, number> };
+  assert.deepEqual(log.by_client, { codex: 1, claude: 1 }, "the named client reached the log; an unnamed background read is a Claude session's");
 });
