@@ -1,0 +1,37 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -0,0 +1,30 @@
++- id: coverage-ratchet-is-a-reporter
++  subsystem: ci
++  lifecycle: active
++  files: ["scripts/coverage-ratchet.mjs", ".github/workflows/ci.yml"]
++  fact: >-
++    The coverage-ratchet is a REPORTER in learnings/ci.yaml: when all four coverage shards are green and only the
++    aggregate ratchet is red, the ratchet result is superseded. Read diff-coverage: BLOCKED to
++    identify the line-level failure, and rerun the failed jobs rather than pushing a fresh SHA.
++  src: "feedback#fb-1789601878740-3711ab"
++  cited: "2026-10-22"
++
++- id: dispatch-function-owns-its-precondition
++  subsystem: ci
++  lifecycle: active
++  files: [src/run-task.ts]
++  fact: >-
++    Put a dispatch precondition inside the function whose behavior it guards, so that function
++    owns and enforces the invariant. Keep the caller unconditional; duplicating an inline guard
++    at the call site can leave other callers unprotected.
++  src: "feedback#fb-1789601878740-3711ab"
++  cited: "2026-10-22"
++
++- id: stack-tip-merges-its-base
++  subsystem: ci
++  lifecycle: active
++  files: ["scripts/*", "plan/tasks.d/**"]
++  fact: >-
++    The stack tip merges its base in learnings/ci.yaml. Close a base with an empty diff and a proof that
++    passes at both the stack tip and its base; do not repair the base's proofs after the tip
++    merges it.
++  src: "feedback#fb-1789601878740-3711ab"
++  cited: "2026-10-22"
