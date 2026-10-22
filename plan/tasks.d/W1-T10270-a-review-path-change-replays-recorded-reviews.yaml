@@ -24,10 +24,47 @@
     - src/lib/required-semantic-review.ts
     - src/lib/review.ts
     - src/lib/garden-registry.ts
+    - src/lib/config-gardener.ts
+    - src/lib/sweep.ts
+    - docs/cli-reference.md
+    - docs/operator-guide.md
+    - scripts/console-parity-ratchet.mjs
+    - scripts/console-parity-baseline.json
     - src/lib/affected-suites.ts
     - src/run-task.ts
     - test/fixtures/review-replay/sample.ndjson
     - test/review/a-review-path-change-replays-recorded-reviews.test.ts
+    - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
+    - test/help-renders-a-summary-not-a-paragraph.test.ts
+  amendment: |
+    W1-T10270 companion reconciliation (2026-10-21 stuck-PR recovery): include
+    src/lib/config-gardener.ts only to register review.replay_input in the existing
+    CONFIG_GARDEN_LEDGER_STEPS filtered-read vocabulary. The new replay receipt already carries
+    pr_url; the unchanged priced-step census requires that consumer to retain the row.
+    This adds no pricing, spend, budget, governor, trust or write authority. Preserve the
+    census and every existing acceptance criterion and falsifier; do not add an exemption.
+    Prove the real union reader retains this row and still filters unrelated telemetry.
+    Additional W1-T10270 registration companions (2026-10-21, PR #13416 exact
+    6b62f08026ae87250098708f771b7d39c7548075): src/lib/sweep.ts may add only
+    the literal review-replay garden name to MACHINE_LANE_HEAD_RE and
+    GARDEN_PLAN_HEAD_RE, preserving every existing alternative and all author,
+    path, lifecycle and failing-check guards. The existing config-gardener
+    counterfactual suite may add only a review.replay_input pr_url fallback row
+    to its corpus; retain its complete step inventory, assertions and limits.
+    The existing help inventory suite may add the review-replay literal name
+    and its provenance for the already-registered command, without changing
+    help behavior, assertion logic or a stored count.
+    These are companions of the already-required garden registration and
+    replay receipt, not new machine-lane, pricing, dispatch or close authority.
+    Preserve existing command behavior, routes, gates and operating limits.
+    Original acceptance, falsifier, budget and risk are unchanged.
+    Separate operator CLI parity ruling:
+    Permit exactly one reasoned CLI_ONLY entry for the already-filed review-replay refresh verb, which writes
+    a checked-in sample in the caller's local git checkout from its complete ledger and seeded health projection.
+    Add only review-replay to console-parity-baseline.json (93 to 94 recorded names); keep every other row,
+    route mapping, classification predicate and assertion unchanged. This grants no exclusion to another verb
+    and creates no new write authority. Declare the generated CLI reference and operator guide companions.
+    All existing acceptance criteria, falsifiers and behavioral requirements remain unchanged.
   rationale: |
     READ on origin/main 04ed915a7 (2026-10-20).
 
