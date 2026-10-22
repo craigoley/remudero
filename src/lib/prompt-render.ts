@@ -15,6 +15,7 @@ import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, neutralizeFenceMarkers } from ".
 import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
 import type { Task } from "./plan.js";
+import { taskSemanticRevision } from "./escalate.js";
 import { citation } from "./provenance.js";
 import { REFUSAL_REASON_CLASSES, workerProofTitles, type CriterionVerdict } from "./review.js";
 import {
@@ -465,7 +466,7 @@ export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule
  * pre-strike gate would still refuse.
  */
 export function renderFixPrompt(opts: {
-  task: { id: string; title: string; files?: readonly string[] };
+  task: { id: string; title: string; files?: readonly string[]; design?: string; amendment?: string; narrativeUnavailable?: true };
   round: number;
   branch: string;
   evidence: FixEvidence;
@@ -500,7 +501,11 @@ export function renderFixPrompt(opts: {
       ]
     : [];
   // W1-T6434: a preserved dead-owner patch rides the same mode-agnostic slot.
-  const constraintBlock = [...operatorConstraintBlock, ...priorPartialWorkLines(opts.evidence.priorPartialWork)];
+  const constraintBlock = [...operatorConstraintBlock, ...priorPartialWorkLines(opts.evidence.priorPartialWork),
+    ...(taskSemanticRevision(opts.task) === undefined ? [] : [
+      ...(opts.task.design ? ["", "AUTHORITATIVE TASK DESIGN:", opts.task.design] : []),
+      ...(opts.task.amendment ? ["", "AUTHORITATIVE TASK AMENDMENT:", opts.task.amendment] : []),
+    ])];
   if (mode === "plan-gate") {
     return [header, ...constraintBlock,
       `STAGEABLE PLAN PATHS: ${(opts.task.files ?? []).join(", ")}. Edit only these exact paths.`,

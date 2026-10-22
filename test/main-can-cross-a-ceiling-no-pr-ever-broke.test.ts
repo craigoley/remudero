@@ -20,6 +20,7 @@ const WORKFLOW = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 
 interface Job {
   if?: string;
+  needs?: string | string[];
   name?: string;
   steps?: Array<{ run?: string; name?: string }>;
 }
@@ -41,10 +42,19 @@ const ABSOLUTE_CEILING_GATES = [
   "comment-load-signal",
 ];
 
+function assertProducerAwareCiScheduling(job: { if?: string | boolean; needs?: string | string[] }): void {
+  if (job.needs === undefined) {
+    assert.equal(job.if, undefined, "an independent required matrix remains unconditional");
+    return;
+  }
+  assert.deepEqual(job.needs, ["commitlint"], "only the same-run producer may precede the required matrix");
+  assert.equal(job.if, "${{ always() && !cancelled() }}", "producer failure or skip cannot suppress the required matrix");
+}
+
 test("the ci push lane measures the absolute ceilings against main itself", () => {
   const ci = jobs().ci;
   assert.ok(ci, "ci.yml must carry the ci job that runs on main pushes");
-  assert.equal(ci.if, undefined, "the ci job must stay ungated so it runs on both PRs and main pushes");
+  assertProducerAwareCiScheduling(ci);
   const script = stepScript(ci, "Test");
   assert.match(script, /\$\{GITHUB_EVENT_NAME\}" = "push"/, "the ceiling signal must run on the push event");
   assert.match(script, /\$\{\{ matrix\.shard \}\}" = "1"/, "one shard must own the non-sharded ceiling checks");
@@ -93,4 +103,16 @@ test("every ceiling main is measured against is one a PR is ALSO measured agains
     assert.ok(mainScript.includes(gate), `${gate} must be measured on main`);
     assert.ok(prScripts.includes(gate), `${gate} is measured on main but on no PR — a branch nobody can fix`);
   }
+});
+
+test("main ceiling fixture rejects skipped matrix scheduling", () => {
+  for (const job of [
+    { needs: ["commitlint"] },
+    { needs: ["commitlint"], if: "github.event_name == 'pull_request'" },
+    { needs: ["commitlint"], if: "${{ success() }}" },
+    { needs: ["other"], if: "${{ always() && !cancelled() }}" },
+    { if: "${{ always() && !cancelled() }}" },
+  ]) assert.throws(() => assertProducerAwareCiScheduling(job));
+  assert.doesNotThrow(() => assertProducerAwareCiScheduling({}));
+  assert.doesNotThrow(() => assertProducerAwareCiScheduling({ needs: ["commitlint"], if: "${{ always() && !cancelled() }}" }));
 });

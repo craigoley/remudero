@@ -3,8 +3,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import type { Config } from "#src/lib/config.js";
-import { taskContractRevision } from "#src/lib/escalate.js";
+import { taskContractRevision, taskSemanticRevision } from "#src/lib/escalate.js";
 import { CONTRACT_AMENDED_REFRESH_STEP, runSweep, type OpenPrView, type SweepDeps, type UpdateBranchOutcome } from "#src/lib/sweep.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
@@ -159,7 +161,7 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
       model: "sonnet", effort: "medium", tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 },
       modelUsage: {}, compactionEvents: [], qualitySuspect: false, provider: "claude",
     };
-    const task = { id: TASK, title: "design contract", files: ["src/fix.ts"] };
+    const task = { id: TASK, title: "design contract", files: ["src/fix.ts"], design: "preserve the bounded rule", amendment: "approved precise repair" };
     const outcome = await runFixRung({
       taskId: TASK, runId: "design-contract-run", task, prUrl: "https://github.com/o/remudero/pull/13039",
       branch: `run-${TASK}-1`, worktreePath: repo.dir, initialSessionId: "initial", mount, settingsFile: join(repo.dir, "settings.json"),
@@ -168,7 +170,10 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
       reviewBase: { owner: "o", repo: "remudero", headCheckoutDir: repo.dir, reviewerMount: mount },
       escalationJudge: async () => ({ decision: "deliver", reason: "test" }),
       deps: {
-        spawn: async () => worker, waitForCiGreen: async () => "green",
+        spawn: async (prompt) => {
+          assert.ok(String(prompt.prompt).includes(task.design)); assert.ok(String(prompt.prompt).includes(task.amendment));
+          return worker;
+        }, waitForCiGreen: async () => "green",
         runReview: async () => ({ ...review, state: "success" }), fetchPrBody: async () => "REPORT", push: () => {},
         issues: { create: () => "https://github.com/o/remudero/issues/1", listOpen: () => [], comment: () => {} },
         ledgerPath: join(repo.dir, "ledger.ndjson"), ledgerLines: () => rows,
@@ -177,6 +182,7 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     });
     assert.equal(outcome.outcome, "needs_design");
     assert.equal(rows.find((r) => r.step === "fix.needs_design")?.contract_revision, taskContractRevision(task));
+    assert.equal(rows.find((r) => r.step === "fix.needs_design")?.task_semantic_revision, taskSemanticRevision(task));
   });
 });
 
@@ -189,4 +195,168 @@ test("design-hold fixture preserves approved amendments without spending fix adm
   assert.equal(f.state.refreshed, 1); assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
   await runSweep([pr()], f.deps);
   assert.equal(f.state.refreshed, 1);
+});
+
+const semanticA = taskSemanticRevision({ design: "keep behavior", amendment: "original decision" })!;
+const semanticB = taskSemanticRevision({ design: "keep behavior", amendment: "approved answer" })!;
+function semanticFixture(receipt: unknown = semanticA) {
+  const rows = designRows("contract-A");
+  if (receipt !== undefined) rows.find(row => row.step === "fix.needs_design")!.task_semantic_revision = receipt;
+  const f = fixture(rows);
+  f.deps.readTaskSemanticRevision = () => semanticB;
+  return { ...f, rows };
+}
+
+test("validated task narratives survive the real loader and change only the separate versioned digest", () => {
+  const yaml = `- id: W1-T9265
+  title: repair
+  repo: remudero
+  type: implement
+  status: queued
+  design: preserve exact behavior
+  amendment: approved precise answer
+  files: [src/fix.ts]
+`;
+  const task = parseTasksFromYaml(yaml, "semantic-fixture")[0];
+  assert.equal(task.amendment, "approved precise answer");
+  assert.equal(task.design, "preserve exact behavior");
+  assert.match(taskSemanticRevision(task)!, /^narrative-v1:[a-f0-9]{64}$/);
+  for (const field of ["design", "amendment"] as const) {
+    const changed = { ...task, [field]: "new approved contract" };
+    assert.equal(taskContractRevision(changed), taskContractRevision(task), "legacy hash remains byte-identical");
+    assert.notEqual(taskSemanticRevision(changed), taskSemanticRevision(task));
+    const invalid = parseTasksFromYaml(yaml.replace(`${field}: ${task[field]}`, `${field}: [malformed]`), "invalid-narrative")[0];
+    assert.equal(invalid.narrativeUnavailable, true);
+    assert.equal(taskSemanticRevision(invalid), undefined);
+  }
+  assert.equal(taskSemanticRevision({ ...task, status: "done", attempts: 9, note: "decorative", files: [...task.files!].reverse() } as typeof task), taskSemanticRevision(task));
+  const prompt = renderFixPrompt({ task, branch: "run-W1-T9265-1", round: 1, evidence: {} });
+  assert.ok(prompt.includes(task.design!)); assert.ok(prompt.includes(task.amendment!));
+  assert.ok(!renderFixPrompt({ task: { ...task, narrativeUnavailable: true }, branch: "run-W1-T9265-1", round: 1, evidence: {} }).includes(task.amendment!));
+});
+
+test("a producer-captured semantic amendment refreshes main once without admitting a fix at the old head", async () => {
+  const f = semanticFixture();
+  await runSweep([pr()], f.deps);
+  assert.equal(f.state.refreshed, 1); assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+  assert.equal(lastDisposed(f.rows).progress_task_semantic_revision, semanticB);
+  const row = f.rows.find(row => row.step === CONTRACT_AMENDED_REFRESH_STEP)!;
+  assert.equal(row.escalated_under_semantic, semanticA); assert.equal(row.task_semantic_revision, semanticB);
+  await runSweep([pr()], f.deps);
+  assert.equal(f.state.refreshed, 1); assert.equal(f.state.dispatched, 0);
+});
+
+test("legacy, malformed, unrelated-head and unchanged semantic receipts do not rearm design holds", async () => {
+  for (const kind of ["legacy", "malformed", "same", "other-head", "unknown", "unknown-contract", "throws", "bad-record"]) {
+    const f = semanticFixture();
+    const held = f.rows.find(row => row.step === "fix.needs_design")!;
+    if (kind === "legacy") delete held.task_semantic_revision;
+    if (kind === "malformed") held.task_semantic_revision = "not-a-digest";
+    if (kind === "same") f.deps.readTaskSemanticRevision = () => semanticA;
+    if (kind === "other-head") held.head_sha = "another-head";
+    if (kind === "unknown") f.deps.readTaskSemanticRevision = () => undefined;
+    if (kind === "unknown-contract") f.state.revision = undefined;
+    if (kind === "throws") f.deps.readTaskSemanticRevision = () => { throw new Error("unreadable canonical task"); };
+    if (kind === "bad-record") f.rows.push({ step: "sweep.disposed", pr_number: 13039, head_sha: HEAD, needs_design_hold: true,
+      task_id: TASK, needs_design_round_id: "DESIGN-ROUND:1", progress_contract_revision: "contract-A", progress_task_semantic_revision: "malformed" });
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.refreshed, 0, kind);
+    if (kind !== "other-head") { assert.equal(f.state.dispatched, 0, kind); assert.equal(f.state.admissions, 0, kind); }
+    if (kind === "bad-record") {
+      await runSweep([pr()], f.deps);
+      assert.equal(f.state.refreshed, 0, "an ordinary observation cannot erase the unreadable explicit semantic receipt");
+      assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+    }
+    if (kind === "legacy") {
+      f.deps.readTaskSemanticRevision = () => semanticA;
+      await runSweep([pr()], f.deps);
+      assert.equal(f.state.refreshed, 0, "observation cannot manufacture a legacy semantic receipt");
+      assert.equal(lastDisposed(f.rows).progress_task_semantic_revision, undefined);
+    }
+  }
+});
+
+test("semantic refresh refuses mid-observation drift and never admits after update failure", async () => {
+  for (const kind of ["drift", "unavailable", "unknown", "throws", "failed-update", "throwing-update"]) {
+    const f = semanticFixture(); let reads = 0;
+    if (kind === "drift") f.deps.readTaskSemanticRevision = () => ++reads === 1 ? semanticB : semanticA;
+    if (kind === "unavailable") f.deps.updateBranch = undefined;
+    if (kind === "unknown") f.deps.readTaskSemanticRevision = () => ++reads === 1 ? semanticB : undefined;
+    if (kind === "throws") f.deps.readTaskSemanticRevision = () => { if (++reads === 1) return semanticB; throw new Error("unreadable at action"); };
+    if (kind === "failed-update") f.deps.updateBranch = async () => "conflict" as const;
+    if (kind === "throwing-update") f.deps.updateBranch = async () => { throw new Error("merge refused"); };
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 0, kind); assert.equal(f.state.admissions, 0, kind);
+    assert.equal(lastDisposed(f.rows).acted, false, kind);
+    if (["drift", "unknown"].includes(kind)) assert.match(String(lastDisposed(f.rows).stand_down_reason), /changed during design-handoff observation/);
+    if (kind === "throws") assert.match(String(lastDisposed(f.rows).stand_down_reason), /semantic revision unavailable.*unreadable at action/);
+  }
+});
+
+
+test("a failed semantic amendment refresh remains explicitly held without checkpointing adoption or repeating its write", async () => {
+  for (const outcome of ["error", "conflict", "up-to-date", "unknown", "throw"] as const) {
+    const f = semanticFixture(); let attempts = 0;
+    f.deps.updateBranch = async () => { attempts++; if (outcome === "throw") throw new Error("upstream unavailable"); return outcome as UpdateBranchOutcome; };
+    await runSweep([pr()], f.deps);
+    assert.equal(attempts, 1, outcome); assert.equal(lastDisposed(f.rows).progress_task_semantic_revision, semanticA);
+    await runSweep([pr()], f.deps);
+    assert.equal(attempts, 1, outcome); assert.equal(lastDisposed(f.rows).progress_task_semantic_revision, semanticA);
+    assert.match(String(lastDisposed(f.rows).stand_down_reason), /amendment refresh failed; awaiting new evidence\/operator answer/);
+    assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+    const semanticC = taskSemanticRevision({ design: "keep behavior", amendment: "genuinely different approved answer" })!;
+    f.deps.readTaskSemanticRevision = () => semanticC;
+    f.deps.updateBranch = async () => { attempts++; return "updated" as const; };
+    await runSweep([pr()], f.deps);
+    assert.equal(attempts, 2, "new actual narrative earns its normal attempt");
+    assert.equal(lastDisposed(f.rows).progress_task_semantic_revision, semanticC);
+    await runSweep([pr()], f.deps); assert.equal(attempts, 2);
+  }
+});
+
+test("semantic receipts bind the validated protective handoff round and never another hold at the same head", async () => {
+  const f = semanticFixture();
+  const common = { task_id: TASK, head_sha: HEAD, run_id: "SECOND-ROUND", host: "second-host", actor_pid: 888 };
+  const round = { ...common, round_id: "SECOND-ROUND:1", repair_pr_url: pr().prUrl };
+  f.rows.push({ ...round, step: "fix.dispatch", ts: new Date(NOW - 900).toISOString() },
+    { ...common, step: "fix.needs_design", ts: new Date(NOW - 800).toISOString(), reason: "another protected handoff", contract_revision: "contract-A", task_semantic_revision: semanticB },
+    { ...round, step: "fix.done", ts: new Date(NOW - 700).toISOString(), fix_outcome: "NEEDS_DESIGN" },
+    { task_id: TASK, step: "sweep.disposed", pr_number: 13039, head_sha: HEAD, needs_design_hold: true,
+      needs_design_round_id: "SECOND-ROUND:1", progress_contract_revision: "contract-A", progress_task_semantic_revision: semanticB });
+  await runSweep([pr()], f.deps);
+  assert.equal(f.state.refreshed, 1, "the original protective producer A is not replaced by second-round B");
+  assert.equal(lastDisposed(f.rows).needs_design_round_id, "DESIGN-ROUND:1");
+  const receipt = f.rows.find(row => row.step === CONTRACT_AMENDED_REFRESH_STEP)!;
+  assert.equal(receipt.escalated_under_semantic, semanticA);
+  assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+});
+
+
+test("a confirmed moved head checkpoints the semantic amendment without another write at the prior head", async () => {
+  const f = semanticFixture(); let attempts = 0;
+  f.deps.updateBranch = async () => { attempts++; return "head-moved" as const; };
+  await runSweep([pr()], f.deps);
+  assert.equal(lastDisposed(f.rows).progress_task_semantic_revision, semanticB);
+  await runSweep([pr()], f.deps);
+  assert.equal(attempts, 1); assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+});
+
+test("failed refresh evidence is exact task, PR, head, old semantic, new semantic and legacy contract bound", async () => {
+  const failure = { step: CONTRACT_AMENDED_REFRESH_STEP, task_id: TASK, pr_number: 13039, head_sha: HEAD,
+    escalated_under_semantic: semanticA, task_semantic_revision: semanticB, contract_revision: "contract-A", outcome: "error" };
+  for (const over of [{ task_id: "W1-T9999" }, { pr_number: 999 }, { head_sha: "another-head" },
+    { escalated_under_semantic: semanticB }, { task_semantic_revision: semanticA }, { contract_revision: "another-contract" }]) {
+    const f = semanticFixture(); f.rows.push({ ...failure, ...over });
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.refreshed, 1, JSON.stringify(over));
+    assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
+  }
+  const f = semanticFixture(); let attempts = 0;
+  f.deps.updateBranch = async () => { attempts++; return "error" as const; };
+  await runSweep([pr()], f.deps);
+  f.state.revision = "contract-B";
+  f.deps.updateBranch = async () => { attempts++; return "updated" as const; };
+  await runSweep([pr()], f.deps);
+  assert.equal(attempts, 2, "a genuinely different legacy contract earns its normal attempt");
+  assert.equal(f.state.dispatched, 0); assert.equal(f.state.admissions, 0);
 });
