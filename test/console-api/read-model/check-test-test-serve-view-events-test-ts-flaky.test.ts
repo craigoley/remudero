@@ -4,9 +4,9 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { createService } from "../../../src/lib/service.js";
-import { createViewEvents, VIEW_EVENTS_PATH, VIEW_EVENTS_SWEEP_MS } from "../../../src/lib/view-events.js";
-import { viewEtag, type ViewBodyEntry, type ViewSource } from "../../../src/lib/views.js";
+import { createService } from "#src/lib/service.js";
+import { createViewEvents, VIEW_EVENTS_PATH, VIEW_EVENTS_SWEEP_MS } from "#src/lib/view-events.js";
+import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
 
 const GEN = "2026-09-30T12:00:00.000Z";
 
