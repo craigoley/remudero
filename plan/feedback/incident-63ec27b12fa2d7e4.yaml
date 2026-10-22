@@ -1,0 +1,28 @@
+id: incident-63ec27b12fa2d7e4
+ts: 2026-10-22T17:04:34.139Z
+raw: >-
+  Incident 63ec27b12fa2: invariant reconcile.ci
+
+  First seen: 2026-10-22T16:17:23.125Z
+
+  Last seen: 2026-10-22T16:17:23.125Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - main-plan-guard.yml run covering main commit 5b694b811e7b2d37bda82bfb95bac0d73e3d4711: gap persists after its repair attempt (5b694b811e7b2d37bda82bfb95bac0d73e3d4711:main-plan-guard.yml)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#63ec27b12fa2d7e488eb3d200c97affc0ba6d085acd697c62618b22eb8795008
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
