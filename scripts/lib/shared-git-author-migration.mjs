@@ -64,6 +64,7 @@ export async function applySharedGitAuthorMigration(pool,expectedPlanSha256,{con
     writeFileSync(locks[0].fd,after.bytes);fsyncSync(locks[0].fd);worker.verify();
     if(readConfig(join(pool,'config')).sha256!==plan.configSha256)throw Error('common config changed before publish');
     renameSync(locks[0].path,join(pool,'config'));commonPublished=true;
+    worker.verify();
     if(readConfig(join(pool,'config')).sha256!==after.sha256||git(pool,['rev-parse','--is-bare-repository']).trim()!=='true')throw Error('migration read-back unknown');
     for(const field of git(pool,['worktree','list','--porcelain','-z']).split('\0').filter(v=>v.startsWith('worktree ')).slice(1))if(git(field.slice(9),['rev-parse','--is-inside-work-tree'],[0],true).trim()!=='true')throw Error('linked worktree read-back unknown');
     receipt.state='APPLIED_MAIN_BARE_PRESERVED';receipt.configSha256=after.sha256;

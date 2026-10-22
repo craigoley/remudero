@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
-import {homedir,hostname} from 'node:os';import{join,resolve}from'node:path';import test,{type TestContext}from'node:test';
+import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,renameSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
+import {homedir,hostname} from 'node:os';import{dirname,join,resolve}from'node:path';import test,{type TestContext}from'node:test';
 import {readSharedGitPolicy,readSharedWorkspaceCapacity,borrowedWorkspaceWorker,createSharedWorkspace} from '#scripts/lib/shared-workspace.mjs';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {main} from '#scripts/shared-workspace.mjs';
 import {resolveTestSlotDir,testSlotProcessFacts} from '#src/lib/test-slot.js';
-import {inspectSharedGitAuthorMigration,applySharedGitAuthorMigration} from '#scripts/lib/shared-git-author-migration.mjs';
+import {writeMutantModule} from '../helpers/mutant-module.js';
+const migrationSource=fileURLToPath(new URL('../../scripts/lib/shared-git-author-migration.mjs',import.meta.url));
+let migrationUrl=pathToFileURL(migrationSource).href;
+if(process.env.RMD_TEST_SHARED_GIT_MIGRATION_MUTANT!==undefined){
+  assert.equal(process.env.RMD_TEST_SHARED_GIT_MIGRATION_MUTANT,'remove-bare-relocation');
+  const source=readFileSync(migrationSource,'utf8'),removal="git(pool,['config','--file',next,'--unset-all','core.bare']);";
+  assert.equal(source.split(removal).length,2,'physical falsifier removes exactly the relocation');
+  migrationUrl=pathToFileURL(writeMutantModule('shared-git-bare-relocation-removed.mjs',source.replace(removal,''),dirname(migrationSource))).href;
+  console.error(JSON.stringify({fixture:'shared-git-remove-bare-relocation',removedBlocks:1}));
+}
+const {inspectSharedGitAuthorMigration,applySharedGitAuthorMigration}=await import(migrationUrl) as typeof import('#scripts/lib/shared-git-author-migration.mjs');
 function fixture(t:TestContext){
   const home=realpathSync(mkdtempSync(join(homedir(),'.rmd-shared-git-fixture-'))),parent=join(home,'workspaces'),seed=join(home,'origin'),pool=join(home,'pool'),root=join(home,'dependencies'),configDir=join(home,'.config/remudero'),config=join(configDir,'git-storage.json');
   for(const p of[parent,seed,root,configDir])mkdirSync(p,{recursive:true,mode:0o700});
@@ -154,4 +164,33 @@ test('shared Git author migration retains an interrupted main staging file witho
   assert.equal(result.state,'STAGED_MAIN_CONFIG_RETAINED');assert.equal(f.git(f.bare,'config','--local','--get','core.bare'),'true');
   assert.equal(f.git(f.a,'rev-parse','--is-inside-work-tree'),'true');assert.equal(existsSync(join(f.bare,'config.worktree')),true);assert.equal(existsSync(join(f.bare,'config.lock')),false);
   assert.throws(()=>inspectSharedGitAuthorMigration(f.bare),/existing/);
+});
+test('shared Git author migration reports unknown after publication instead of undoing intervening work',async t=>{
+  const f=bareMigrationFixture(t),plan=inspectSharedGitAuthorMigration(f.bare);let calls=0;
+  const result=await applySharedGitAuthorMigration(f.bare,plan.planSha256,{confirmIdle:true,borrowWorker:async()=>({admitted:true,verify(){if(++calls===4)throw Error('fixture read-back interrupted');}})});
+  assert.equal(result.state,'APPLIED_READBACK_UNKNOWN');assert.equal(result.automaticRollback,false);assert.equal(existsSync(result.backup),true);assert.equal(existsSync(join(f.bare,'config.lock')),false);
+});
+test('shared Git author migration detects a changing inventory and preserves the new worktree',async t=>{
+  const f=bareMigrationFixture(t),plan=inspectSharedGitAuthorMigration(f.bare),c=join(f.parent,'c');let calls=0;
+  const result=await applySharedGitAuthorMigration(f.bare,plan.planSha256,{confirmIdle:true,borrowWorker:async()=>({admitted:true,verify(){if(++calls===2)f.git(f.bare,'worktree','add','-qb','fixture-c',c,'main');}})});
+  assert.equal(result.state,'NOT_APPLIED');assert.match(result.reason!,/pool changed/);assert.equal(f.git(c,'rev-parse','--is-inside-work-tree'),'true');assert.equal(f.git(f.bare,'config','--get','core.bare'),'true');
+});
+test('shared Git author migration preserves a foreign replacement of its own lock',async t=>{
+  const f=bareMigrationFixture(t),plan=inspectSharedGitAuthorMigration(f.bare);let calls=0;
+  const result=await applySharedGitAuthorMigration(f.bare,plan.planSha256,{confirmIdle:true,borrowWorker:async()=>({admitted:true,verify(){if(++calls===2){renameSync(join(f.bare,'config.lock'),join(f.bare,'fixture-owned-lock-moved'));writeFileSync(join(f.bare,'config.lock'),'foreign replacement');throw Error('fixture foreign replacement');}}})});
+  assert.equal(result.state,'NOT_APPLIED');assert.equal(readFileSync(join(f.bare,'config.lock'),'utf8'),'foreign replacement');assert.equal(existsSync(join(f.bare,'config.worktree.lock')),false);
+});
+test('shared Git author migration rejects linked pools and public, oversized or linked configuration',t=>{
+  const f=bareMigrationFixture(t),before=readFileSync(f.config),link=join(f.home,'pool-link');symlinkSync(f.bare,link);assert.throws(()=>inspectSharedGitAuthorMigration(link),/physical/);
+  chmodSync(f.config,0o666);assert.throws(()=>inspectSharedGitAuthorMigration(f.bare),/bounded config/);chmodSync(f.config,0o600);
+  writeFileSync(f.config,' '.repeat(65537));assert.throws(()=>inspectSharedGitAuthorMigration(f.bare),/bounded config/);writeFileSync(f.config,before);
+  renameSync(f.config,join(f.bare,'fixture-config'));symlinkSync(join(f.bare,'fixture-config'),f.config);assert.throws(()=>inspectSharedGitAuthorMigration(f.bare));
+});
+test('shared Git author migration CLI inspects read-only and refuses unslotted application',t=>{
+  const f=bareMigrationFixture(t),script=fileURLToPath(new URL('../../scripts/shared-git-author-migration.mjs',import.meta.url));
+  const env={...process.env};delete env.RMD_TEST_SLOT_PARENT;
+  const run=(args:string[])=>spawnSync(process.execPath,[script,...args],{env,encoding:'utf8',timeout:10000,maxBuffer:65536});
+  const before=readFileSync(f.config),inspect=run(['inspect',f.bare]);assert.equal(inspect.status,0,inspect.stderr);const plan=JSON.parse(inspect.stdout);assert.equal(plan.liveApplicationAuthorized,false);
+  const refused=run(['apply',f.bare,plan.planSha256,'--confirm-idle']);assert.equal(refused.status,3);assert.match(refused.stderr,/genuine inherited worker/);assert.deepEqual(readFileSync(f.config),before);
+  assert.equal(run(['apply',f.bare]).status,3);assert.equal(run(['inspect',join(f.home,'absent')]).status,3);
 });
