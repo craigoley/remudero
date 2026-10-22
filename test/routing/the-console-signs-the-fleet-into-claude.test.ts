@@ -276,6 +276,11 @@ test("W1-T10380: the Claude session projection carries no code, token or path", 
     assert.ok(!refused.body.includes("whitespace") && !refused.body.includes(tooLong), "a refused code is never echoed");
     bodies.push(refused.body);
   }
+  assert.equal((await invoke(patch!, "/v1/provider-auth", "{")).status, 400);
+  const [tiny] = buildProviderAuthCodeRoutes(store, 8);
+  const tooLarge = await invoke(tiny!, "/v1/provider-auth", JSON.stringify({ sessionId, code: PASTED_CODE }));
+  assert.equal(tooLarge.status, 413);
+  assert.ok(!tooLarge.body.includes(PASTED_CODE));
   assert.equal((await invoke(patch!, "/v1/provider-auth", JSON.stringify({ code: PASTED_CODE }))).status, 400);
   assert.equal((await invoke(patch!, "/v1/provider-auth", JSON.stringify({ sessionId: "claude-session-missing", code: PASTED_CODE }))).status, 404);
 
