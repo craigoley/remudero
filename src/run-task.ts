@@ -1191,7 +1191,7 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -42632,7 +42632,7 @@ export function productionMachineFilingJudgePorts(opts: {
   /** Test files main's CI failed at a sha (W1-T9694). Absent: read from GitHub, as the flake-incident gardener does. */
   mainFailures?: SelectorShadowMainFailures;
 }): MachineJudgePorts {
-  let judge: ((input: RiskJudgeInput) => Promise<RiskJudgeVerdict>) | undefined;
+  let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
   return {
     flakeEvidence: flakeJudgeEvidencePort({
@@ -42644,11 +42644,60 @@ export function productionMachineFilingJudgePorts(opts: {
     stateDir: opts.stateDir,
     plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
     riskJudge: (input) => {
-      if (!judge) {
+      if (!mount) {
         const mounts = loadMounts(mountsPath(opts.repoRoot));
-        judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"), spawn: opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+        mount = mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts);
       }
-      return judge(input);
+      // Per-judgment receipts precede parse retries; symbol-only identity preserves router inputs.
+      const identity = { runId: `machine-judge-${nextLaneEpochMs()}`, taskId: input.planContext.taskId ?? "RISK-JUDGE" };
+      const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("risk-judge");
+      const record = (result: WorkerResult | undefined, assignmentId: string | undefined): void => {
+        try {
+          let resources: ReturnType<typeof benchmarkWorkerAttemptResources> | undefined;
+          try { if (result) resources = benchmarkWorkerAttemptResources(result); }
+          catch { /* unavailable accounting is unknown, never a replacement judgment */ }
+          const price = resources?.total_cost_usd, notional = resources?.notional_cost_usd;
+          const priced = typeof price === "number" && Number.isFinite(price) && price >= 0;
+          opts.log("machine_judge.attempt_spend", {
+            run_id: identity.runId, task_id: identity.taskId,
+            ...attemptAssignmentJoin(assignmentId, result === undefined),
+            attempt_state: result ? "result" : assignmentId ? "failed" : "not-started",
+            accounting_source: "worker-result-estimate-not-invoice",
+            provider: result?.provider === "claude" || result?.provider === "codex" || result?.provider === "cash" ? result.provider : "unknown",
+            billing_mode: resources?.billing_mode ?? "unknown",
+            price_state: priced ? "reported" : "unknown",
+            ...(priced ? { total_cost_usd: price } : {}),
+            ...(typeof notional === "number" && Number.isFinite(notional) && notional >= 0 ? { notional_cost_usd: notional } : {}),
+          });
+        } catch { /* a telemetry failure must not change the ruling, retries or provider result */ }
+      };
+      return realRiskJudge({ mount, cwd: opts.repoRoot, settingsFile: join(opts.repoRoot, "settings", "worker.json"),
+        spawn: async (args) => {
+          let assignmentId: string | undefined;
+          const recorded = new Set<string>();
+          const recordedResults = new WeakSet<WorkerResult>();
+          const recordAttempt = (result: WorkerResult | undefined, id: string | undefined): void => {
+            // A fallback observer and final return can carry the same result object without IDs.
+            if (result !== undefined && recordedResults.has(result) || id !== undefined && recorded.has(id)) return;
+            record(result, id);
+            if (result !== undefined) recordedResults.add(result);
+            if (id !== undefined) recorded.add(id);
+          };
+          try {
+            const result = await spawn(withReceiptIdentity({ ...args,
+              onSelectionAssignment: (assignment) => { assignmentId = assignment.id; args.onSelectionAssignment?.(assignment); },
+              onModelFallbackAttempt: (attempt) => {
+                recordAttempt(attempt.result, attempt.selectionAssignmentId);
+                args.onModelFallbackAttempt?.(attempt);
+              },
+            }, identity));
+            recordAttempt(result, result.selectionAssignmentId ?? assignmentId);
+            return result;
+          } catch (error) {
+            recordAttempt(undefined, assignmentId);
+            throw error;
+          }
+        } })(input);
     },
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
