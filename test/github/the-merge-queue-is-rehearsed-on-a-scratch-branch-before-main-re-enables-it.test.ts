@@ -10,6 +10,7 @@ import {
 } from "#scripts/merge-queue-canary.mjs";
 import { DEFAULT_SWEEP_POLICY, MERGE_QUEUE_REPLAY_HEAD_PREFIX, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const NOW = Date.parse("2026-10-22T04:00:00Z");
 const SCRATCH = "mq-canary/2026-10-22";
@@ -394,6 +395,6 @@ test("W1-T7736: the harness CLI writes the report and really runs as a script", 
   assert.equal(go, 0);
   assert.equal(await main(["--help"], { seam: f.seam, log: () => {} }), 0);
   const help = execFileSync(process.execPath, ["--import", "tsx", "scripts/merge-queue-canary.mjs", "--help"],
-    { cwd: join(import.meta.dirname, "..", ".."), encoding: "utf8" });
+    { cwd: REPO_ROOT, encoding: "utf8" });
   assert.match(help, /rehearse the merge queue on a scratch branch/);
 });
