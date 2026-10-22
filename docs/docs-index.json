@@ -916,7 +916,7 @@
     {
       "path": "docs/shared-git-storage.md",
       "title": "Account-private shared Git workspaces",
-      "summary": "Stage new unfiled author work in linked worktrees sharing one existing account's",
+      "summary": "",
       "grepHint": "Account-private shared Git workspaces"
     },
     {
