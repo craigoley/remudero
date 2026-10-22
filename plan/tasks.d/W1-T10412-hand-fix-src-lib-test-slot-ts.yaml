@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.47
   status: queued
@@ -31,3 +31,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are one lib file (src/lib/test-slot.ts) and one new test file; neither falls into the escalation categories (secrets, auth, deletion, merge/deploy/review policy, irreversible actions)."
+      - "The acceptance criterion is a grep for a named test in the new test file, so it can be verified from what is shown, and no operator-only decision is requested."
+      - "Evidence cites 3 distinct PRs, and the task is filed at rung 1 with a post-merge measurement that reopens the cause if the share does not fall. The family's mixed track record (Beta mean 0.67) does not by itself indicate danger. No bounded change view was supplied, so this judgment rests on the description alone."
+    judged_at: "2026-10-22T15:22:30.683Z"
+    pin: "0b93f572cfe11ba724ed76f07338ebb758d3af91281d1be9d658b5ba4da7ad8a"
