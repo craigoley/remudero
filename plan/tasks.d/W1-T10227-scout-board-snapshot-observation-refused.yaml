@@ -11,9 +11,9 @@
   author_class: machine
   origin: "scout:board_snapshot.observation_refused"
   files:
-    - test/gardeners/scout-board-snapshot-observation-refused.test.ts
     - src/lib/board-snapshot-cache.ts
     - test/board-snapshot-cache.test.ts
+    - test/gardeners/scout-board-snapshot-observation-refused.test.ts
   acceptance:
     - claim: "board_snapshot.observation_refused stops recurring: its cause is fixed rather than its rows hidden"
       proof: "grep: test(\"W1-T10227: board_snapshot.observation_refused no longer recurs\" in test/gardeners/scout-board-snapshot-observation-refused.test.ts"
