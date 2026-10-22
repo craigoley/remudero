@@ -1399,6 +1399,7 @@ export function dependabotStaleEventVerdict(input: {
 export const LIVE_READING_RERUN_CHECKS: ReadonlyArray<{ check: string; workflow: string }> = [
   { check: "commitlint", workflow: ".github/workflows/pr-title-lint.yml" },
   { check: "ci-gate", workflow: ".github/workflows/ci.yml" },
+  { check: "ci-gate", workflow: ".github/workflows/ci-gate.yml" },
 ];
 
 export function isLiveReadingCheck(check: string): boolean {
