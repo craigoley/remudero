@@ -123,9 +123,9 @@ test('security producer CLI recovers a truncated association read and publishes 
  const shim=ghShim([{when:'POST',stdout:'{}'},
   {when:'/commits/'+head+'/pulls?',stdout:JSON.stringify([{number:1,state:'open',head:{sha:head}}])},
   {when:'/files?',stdout:JSON.stringify([{filename:'docs/a.md'}])},
-  {when:'GET',stdout:JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1})}]);
+  {when:'GET',stdout:JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1})}],{command:'security-metadata-answer'});
  t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
- const answer=join(shim.dir,'gh');
+ const answer=join(shim.dir,'security-metadata-answer');
  const wrapper=ghStubPath(`#!/usr/bin/env node
 const fs=require('node:fs'),{spawnSync}=require('node:child_process');
 const args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(args)+'\\n');
