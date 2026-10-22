@@ -1022,6 +1022,15 @@ export function taskContractRevision(task: {
   return createHash("sha256").update(JSON.stringify({ id: task.id, files, acceptance })).digest("hex");
 }
 
+export function taskSemanticRevision(task: {
+  design?: unknown; amendment?: unknown; narrativeUnavailable?: true;
+}): string | undefined {
+  if (task.narrativeUnavailable || [task.design, task.amendment].some(value => value !== undefined && typeof value !== "string")) return undefined;
+  return `narrative-v1:${createHash("sha256").update(JSON.stringify({
+    design: task.design ?? "", amendment: task.amendment ?? "",
+  })).digest("hex")}`;
+}
+
 export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
 
 /** The `**Head:** <sha>` sha an already-open issue's body carries, or `undefined` (W1-T2799). Reads

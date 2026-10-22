@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // Namespace reads, never named imports: at a base without this task the suite must still LOAD and
@@ -14,8 +14,9 @@ import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
+import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { rotateLedger } from "../src/lib/ledger.js";
 import { readLedgerUnionBounded } from "../src/lib/status.js";
 
 // W1-T5633 — GitHub's `CodeQL` results check failed on #9034 ("1 new alert including 1 high") and the PR
@@ -501,6 +502,45 @@ test("the daemon's code-scanning ruling is posted as a PR comment through gh", (
   }
 });
 
+// Real live-ledger reads matter: an in-memory fixture never exercises the rotation boundary
+// between the asynchronous ruling and the next sweep that must consume it.
+for (const ruling of ["fix", "false_positive"] as const) {
+  test(`a code-scanning ${ruling} ruling and its dispatch survive real rotation before the next default-reader sweep`, async () => {
+    let settle!: (verdict: CodeScanningJudgment) => void;
+    const h = harness(() => new Promise(resolve => { settle = resolve; }), {
+      readLedger: undefined,
+      appendLine: undefined,
+    });
+    const rotate = () => {
+      const coreBytes = statSync(h.deps.ledgerPath).size;
+      const ceilingBytes = Math.max(coreBytes * 4, 16_384);
+      writeFileSync(h.deps.ledgerPath, JSON.stringify({ step: "rotation-test.noise", payload: "x".repeat(ceilingBytes * 2) }) + "\n", { flag: "a" });
+      assert.equal(rotateLedger(h.deps.ledgerPath, { ceilingBytes, smoothingWindowMs: 0 }).rotated, true, "the real rotator ran");
+      assert.ok(readLedgerLines(h.deps.ledgerPath).some(row => row.step === "sweep.disposed"), "positive control: the live reader sees the retained decision corpus");
+    };
+    try {
+      appendLedger(h.deps.ledgerPath, { run_id: "REVIEW-5633", task_id: `W1-T${N}`, step: "review.posted", pr_url: pr().prUrl, head_sha: HEAD, state: "success", capped: false, plan_only: false });
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.equal(h.fixes.length, 0);
+      assert.equal(h.armed.length, 0, "the initial asynchronous judgment holds the arm");
+      settle({ ruling, reason: "rotation regression: exact-head ruling" });
+      await settleTurns();
+      const rulingStep = ruling === "fix" ? sweepModule.CODE_SCANNING_FIX_STEP : sweepModule.CODE_SCANNING_FALSE_POSITIVE_STEP;
+      assert.ok(readLedgerLines(h.deps.ledgerPath).some(row => row.step === rulingStep), "the async writer published its ruling before rotation");
+      rotate();
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.deepEqual(h.judged, [N], "rotation must not cause a second judgment");
+      assert.equal(h.fixes.length, ruling === "fix" ? 1 : 0, "a retained fix ruling admits the repair exactly once");
+      assert.equal(h.armed.length, ruling === "false_positive" ? 1 : 0, "only the retained false-positive ruling permits the arm");
+      rotate();
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.deepEqual(h.judged, [N]);
+      assert.equal(h.fixes.length, ruling === "fix" ? 1 : 0, "rotation preserves the fix-dispatch dedupe as well as its ruling");
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+}
 
 const OLD_SCANNER_RUN = "DAEMON-scanner-before-recycle";
 function scannerIntent(over: Record<string, unknown> = {}): Record<string, unknown> {

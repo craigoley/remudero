@@ -163,6 +163,14 @@ function templateKind(id: string): string {
   return inboxKind(id).split("/").at(-1)!;
 }
 
+function isOpenAgeFinding(proposal: { id: string; summary: string }): boolean {
+  return templateKind(proposal.id) === "board-review"
+    && proposal.id.slice(proposal.id.indexOf(":") + 1).startsWith("stale:")
+    && !/unhandled escalation/i.test(proposal.summary)
+    && (proposal.summary.trim() === ""
+      || /^board-review: \S+ has sat open [^\r\n]*h, past the \d+(?:\.\d+)?h depth threshold$/.test(proposal.summary));
+}
+
 export function checkPlainMessage(m: PlainInboxMessage, proposal?: { id: string; summary: string }): PlainCheckResult {
   const problems: string[] = [];
   const parts = checkOperatorMessage({
@@ -183,6 +191,15 @@ export function checkPlainMessage(m: PlainInboxMessage, proposal?: { id: string;
   });
   if (!card) problems.push("not a decision card: headline over 15 words, a question as the ask, or not two or three options");
   const texts = [m.headline, m.whatHappened, m.whatWeNeed, m.ifNothingHappens, ...m.options.flatMap((o) => [o.label, o.consequence])];
+  if (proposal && isOpenAgeFinding(proposal)) {
+    // This producer supplies age, not a review deadline or a person's obligation. Keep its fixed
+    // factual card rather than guessing which free-text review claims a cache might invent.
+    const facts = (message: PlainInboxMessage) => [message.headline, message.whatHappened, message.whatWeNeed,
+      message.ifNothingHappens, message.options.map((option) => [option.label, option.consequence, option.intent])];
+    if (JSON.stringify(facts(m)) !== JSON.stringify(facts(plainTemplate(proposal)))) {
+      problems.push("open PR age does not establish a human review obligation; retain only the source-qualified age card");
+    }
+  }
   for (const t of texts) for (const token of machineTokens(t)) problems.push(`machine text: ${token}`);
   if (proposal && !SOURCE_PEOPLE.test(proposal.summary) && texts.some((t) => PEOPLE_TIME.test(t))) {
     problems.push("people's time is not in the source; describe the fleet's machine and CI time");
@@ -220,6 +237,19 @@ function daysWaiting(summary: string): string {
 }
 
 type Template = (summary: string) => Omit<PlainInboxMessage, "source" | "options"> & { options?: PlainOption[] };
+
+const openAgeTemplate: Template = (summary) => {
+  const reported = /has sat open ((?:0|[1-9]\d*)(?:\.\d+)?)h(?:,|\s|$)/.exec(summary)?.[1];
+  const hours = reported !== undefined && Number.isFinite(Number(reported)) ? reported : undefined;
+  return {
+    headline: "A proposed change is still open",
+    whatHappened: hours !== undefined
+      ? `The board records that a proposed change has been open for ${hours} hours. This measures time since opening, not time spent awaiting a review.`
+      : "The board records an open proposed change, but its age is unavailable. The record does not establish time spent awaiting a review.",
+    whatWeNeed: "Read the current evidence if you need more context; age alone does not establish a human decision.",
+    ifNothingHappens: "The proposed change remains open; its next step depends on the current evidence, not its age alone.",
+  };
+};
 
 function plainEvidence(text: string): string {
   let plain = text.replace(/https?:\/\/\S+/g, "");
@@ -270,13 +300,11 @@ const TEMPLATES: Record<string, Template> = {
     };
   },
   "board-review": (summary) => {
-    const hours = /has sat open ([\d.]+)h/.exec(summary)?.[1];
     const ask = /unhandled escalation: "([\s\S]*?)"/.exec(summary)?.[1];
     return {
-      headline: hours ? "A proposed change has been waiting for review" : "A proposed change has an unanswered decision",
-      whatHappened: hours ? `The review record reports that a proposed change has waited ${hours} hours.`
-        : ask ? `The review record has an unanswered request: ${plainEvidence(ask)}`
-          : "The review record reports an unanswered request whose question could not be read.",
+      headline: "A proposed change has an unanswered decision",
+      whatHappened: ask ? `The review record has an unanswered request: ${plainEvidence(ask)}`
+        : "The review record reports an unanswered request whose question could not be read.",
       whatWeNeed: "Check the current evidence and answer the recorded review request.",
       ifNothingHappens: "The review request stays unresolved and the proposed change keeps waiting.",
     };
@@ -342,7 +370,7 @@ const UNKNOWN_TEMPLATE: Template = () => ({
 export const TEMPLATED_KINDS: readonly string[] = Object.keys(TEMPLATES);
 
 export function plainTemplate(proposal: { id: string; summary: string }): PlainInboxMessage {
-  const t = (TEMPLATES[templateKind(proposal.id)] ?? UNKNOWN_TEMPLATE)(proposal.summary);
+  const t = (isOpenAgeFinding(proposal) ? openAgeTemplate : TEMPLATES[templateKind(proposal.id)] ?? UNKNOWN_TEMPLATE)(proposal.summary);
   return { ...t, options: t.options ?? ASK_OPTIONS, source: "template" };
 }
 
@@ -401,7 +429,9 @@ export async function writePlainMessage(
   proposal: { id: string; summary: string },
   deps: Partial<SummarizeDeps> = {},
 ): Promise<PlainInboxMessage> {
-  if (!deps.summarize) return plainTemplate(proposal);
+  // The existing backfill also calls this seam after refusing a cached card. A known age-only
+  // finding needs no model call, including when its previous writer text is misleading.
+  if (isOpenAgeFinding(proposal) || !deps.summarize) return plainTemplate(proposal);
   const summarize = { summarize: deps.summarize };
   const first = await askWriter(proposal, summarize, []);
   if (first.message) return first.message;
