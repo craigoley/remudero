@@ -1,0 +1,67 @@
+- id: W1-T10411
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/coverage-session-blanking.test.ts:flaky cost 11.6 PR minute(s) across 4 round(s) on 4 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.45
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/coverage-session-blanking.test.ts:flaky"
+  files:
+    - scripts/coverage-session-blanking-check.mjs
+    - test/ci/coverage/check-test-test-coverage-session-blanking-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/coverage-session-blanking.test.ts:flaky"
+      proof: "grep: test(\"W1-T10411: check:test:test/coverage-session-blanking.test.ts:flaky is prevented, not retried\" in test/ci/coverage/check-test-test-coverage-session-blanking-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/coverage-session-blanking.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/coverage-session-blanking.test.ts:flaky cost 11.6 PR minute(s) (seven-day half-life) across 4 fix round(s) on 4 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/coverage-session-blanking-check.mjs: test/coverage-session-blanking.test.ts imports it
+    - test/coverage-session-blanking.test.ts: named by the failing check
+    - the rounds name a failing test: test/coverage-session-blanking.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13383 (https://github.com/craigoley/remudero/pull/13383) at 2026-10-21T16:07:58.629Z: ci-log round — rule-checks: test/coverage-session-blanking.test.ts; coverage-session-blanking
+        failing tests: the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus); the CLI, run directly (no injected collaborators), exits 0 against the real repo now that W1-T2732 cleared it, and still prints blind spots
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/coverage-session-blanking.test.ts:1:3070
+          | ✖ the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus) (1697.10366ms)
+          |   AssertionError [ERR_ASSERTION]: W1-T2732 blanked every unblanked NODE_TEST_CONTEXT-strip finding
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   {
+          |   +     file: 'test/screenshot-artefact-retired.test.ts',
+          |   +     ident: 'env',
+          |   +     line: 44
+          |   +   }
+    - PR #13173 (https://github.com/craigoley/remudero/pull/13173) at 2026-10-20T19:23:35.731Z: ci-log round — rule-checks: test/coverage-session-blanking.test.ts; CodeQL alert #487 (js/file-system-race): UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this h
+        failing tests: the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus); the CLI, run directly (no injected collaborators), exits 0 against the real repo now that W1-T2732 cleared it, and still prints blind spots; ["no tracked test file contains a delete-is-noop defect","the check exits 0 on the real, cleared repo tree","the CLI, run directly against the real repo, exits 0 and still prints the clean summary","both the clean run and a violation run still print the blind-spots statement","the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus)","the CLI, run directly (no injected collaborators), exits 0 against the real repo now that W1-T2732 cleared it, and still prints blind spots"]
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/coverage-session-blanking.test.ts:1:3070
+          | ✖ the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus) (1655.991044ms)
+          |   AssertionError [ERR_ASSERTION]: W1-T2732 converted every delete-is-noop site to real blanking
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   {
+          |   +     expr: 'env',
+          |   +     file: 'test/review/subpath-missing-export.test.ts',
+          |   +     line: 34
+          |   +   }
+    - PR #10815 at 2026-10-11T06:40:57.761Z: ci-log round — rule-checks: test/a-budget-check-run-never-writes-the-checkout.test.ts; ci-shard (8/8): test/a-net-positive-claude-md-diff-is-not-refused.test.ts; coverage-session-blanking; test-slow-s
+    - PR #10779 (https://github.com/craigoley/remudero/pull/10779) at 2026-10-11T02:51:56.297Z: ci-log round — rule-checks: test/clock-sweep.test.ts; coverage-shard (7/8): test/coverage-session-blanking.test.ts; coverage-session-blanking; clock-sweep (+400d, artifacts excluded by name): test/a-r
+        failing tests: W1-T4948: real shifted sweep cannot reap a sibling sentinel
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
