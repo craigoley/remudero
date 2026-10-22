@@ -37,7 +37,7 @@ function virtualClock(start = 1_800_000_000_000) {
 }
 
 const ok = (stdout: string): GhUpstreamResult => ({ stdout, stderr: "", exitCode: 0 });
-const http = (status: string, headers: string[], body: string) => ok(`HTTP/2.0 ${status}\r\n${headers.join("\r\n")}\r\n\r\n${body}`);
+const http = (status: string, headers: string[], body: string) => ok(`${["HTTP/2.0 " + status, ...headers].join("\r\n")}\r\n\r\n${body}`);
 
 async function until(predicate: () => boolean, what: string): Promise<void> {
   const deadline = Date.now() + 30_000;
