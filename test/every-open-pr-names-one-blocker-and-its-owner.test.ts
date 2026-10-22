@@ -48,7 +48,7 @@ test("W1-T5537: every disposition row declares a blocker from the closed set", (
 test("W1-T5537: one disposition splits into the blocker each PR actually waits on", async () => {
   const cases: [Partial<OpenPrView>, string, string][] = [
     [{ checksState: "red", priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, "strikes-exhausted", "strike-ladder"],
-    [{ checksState: "red", isPlanFiling: true, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, "plan-proof-unrunnable", "NONE"],
+    [{ checksState: "red", isPlanFiling: true, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, "plan-proof-unrunnable", "plan-repair"],
     [{ mergeState: "dirty" }, "conflict", "conflict-rebase"],
     [{ autoMergeArmed: true }, "armed-idle", "armed-idle-merge"],
   ];
@@ -100,7 +100,7 @@ test("blocker refinement uses named facts and prioritizes base red and withheld 
   assert.equal(finalBlocker("escalated", { strikesExhausted: true }), "strikes-exhausted");
   assert.equal(finalBlocker("other", {}), "other");
   assert.equal(blockerFields("plan-proof-unrunnable", undefined, NOW, true).blocker_owner, "plan-repair");
-  assert.equal(blockerFields("plan-proof-unrunnable", undefined, NOW, false).blocker_owner, "NONE");
+  assert.equal(blockerFields("plan-proof-unrunnable", undefined, NOW, false).blocker_owner, "plan-repair");
 });
 
 test("blocker history ignores unrelated rows and never recovers age from a malformed latest observation", () => {
@@ -173,7 +173,7 @@ test("the final write distinguishes plan and metadata waits from own and base re
   const d = deps({ repairMetadata: () => ({ repaired: false, reason: "unrepairable" }) });
   await runSweep(views, d);
   assert.deepEqual(disposed(d).map(row => [row.blocker, row.blocker_owner]), [
-    ["plan-proof-unrunnable", "NONE"], ["plan-proof-unrunnable", "plan-repair"], ["own-red", "fix-lane"],
+    ["plan-proof-unrunnable", "plan-repair"], ["plan-proof-unrunnable", "plan-repair"], ["own-red", "fix-lane"],
   ]);
 });
 
@@ -254,7 +254,7 @@ test("a capped-green exhausted body repair names a plan-proof wait and its avail
     await runSweep([view], d);
     const [row] = disposed(d);
     assert.equal(row.blocker, "plan-proof-unrunnable");
-    assert.equal(row.blocker_owner, capable ? "plan-repair" : "NONE");
+    assert.equal(row.blocker_owner, "plan-repair");
     assert.equal(row.disposition, capable ? "blocked-fixable" : "blocked-ambiguous");
   }
 });
