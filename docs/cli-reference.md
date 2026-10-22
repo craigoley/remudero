@@ -94,6 +94,7 @@ usage:
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
   rmd release <task-id> --reason <text>   # Release a halted task's dispatch circuit breaker; dispatchable next tick.
   rmd garden run <name> [--hourly] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]   # Run one pass of one registered gardener (the daemon's off-loop child).
+  rmd review-replay refresh   # Refresh the recorded review sample from the complete retained ledger union.
   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.
   rmd notify <message>   # Real-time iMessage ping (osascript).
   rmd digest [--since <iso>] [--dry-run]   # Roll up the ledger into one daily digest message.
@@ -932,6 +933,16 @@ rmd garden run <name> [--hourly] | rmd garden replay ci-friction [--days <n>] [-
 ```
 
 W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence. `replay ci-friction` replays the ci-friction remedy ladder over the past --days (default 7) at --step-hours (default 6) from the ledger union and main's plan history, read-only.
+
+### `rmd review-replay`
+
+Refresh the recorded review sample from the complete retained ledger union.
+
+```
+rmd review-replay refresh
+```
+
+Derives every distinct healthy input shape, excludes regressed reviewer shas, and refuses empty or incomplete evidence. Writes test/fixtures/review-replay/sample.ndjson for replay in CI.
 
 ### `rmd escalate`
 
