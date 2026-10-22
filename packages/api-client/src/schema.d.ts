@@ -4797,8 +4797,27 @@ export interface components {
       action: InboxThreadAction;
       undo?: string;
     };
+    /** A new source-captured input, scoped by the verified repository binding. A digest validates content, not identity or permission. Legacy records are not backfilled. */
+    InboxInputReference: {
+      id: string;
+      repository: string;
+      proposalId: string;
+      threadId: string;
+      contentSha256: string;
+    };
+    /** An explicit same-scope response to captured inputs. Queued verifies a handoff, not completed work. Unknown is not success and never authorizes replay. */
+    InboxResponseReference: {
+      id: string;
+      repository: string;
+      proposalId: string;
+      threadId: string;
+      inputs: (InboxInputReference)[];
+      outcome: "queued" | "completed" | "unknown";
+    };
     /** A stored thread message's structured extras (src/lib/inbox-thread.ts's `ThreadMessageExtra`). */
     InboxThreadMessageExtra: {
+      input?: InboxInputReference;
+      response?: InboxResponseReference;
       event?: {
         key: string;
         kind: "reframed" | "declined" | "restored" | "approved" | "released" | "redrafted" | "task_filed" | "released_to_fleet" | "refused" | "retired" | "retirement_outcome";
@@ -4824,6 +4843,16 @@ export interface components {
       actions?: (InboxThreadAction)[];
       extra?: InboxThreadMessageExtra;
     };
+    /** Exact captured-input correspondence within this source reading, not write authority or proof of task/PR completion. Scope comes from the registered source, never stored input labels or the selected account. Unknown or missing legacy correspondence is not zero. Explicitly verified retraction removes pending work without deleting the input history. */
+    InboxThreadCorrespondence: {
+      state: "linked" | "unknown";
+      /** Repository established by the source binding, if available. */
+      repository?: string;
+      /** Unacknowledged active captured inputs; null when correspondence is unknown. */
+      pendingInputs: number | null;
+      /** Active inputs queued but not completed; null when correspondence is unknown. */
+      pendingWork: number | null;
+    };
     /** One operator thread in GET /v1/inbox/threads (src/lib/inbox-responder.ts's `ThreadSummaryView`). A declined item is listed only once someone has written on its thread. */
     InboxThreadSummary: {
       /** `thread:<proposalId>::inbox::-::-` (src/lib/inbox-thread.ts's `inboxThreadId`). */
@@ -4833,7 +4862,7 @@ export interface components {
       headline: string;
       /** The latest message's first sentence, at most 160 characters. */
       snippet: string;
-      /** Last-speaker direction only; use attention for an actionable count. */
+      /** Conversation direction, including exact pending input/work when linked; use attention for an actionable count. */
       waitingOn: "operator" | "daemon";
       /** Current operator attention from proposal state and an explicit thread question. */
       attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
@@ -4843,6 +4872,7 @@ export interface components {
       messageCount: number;
       /** The daemon wrote last and the read mark is behind that message. */
       unread: boolean;
+      correspondence?: InboxThreadCorrespondence;
     };
     /** Classification evidence, not the HTTP read time or permission to write. Partial coverage never establishes a complete empty Inbox. */
     InboxThreadListSource: {
@@ -5028,6 +5058,7 @@ export interface components {
       lastActivity: number | null;
       messageCount: number;
       unread: boolean;
+      correspondence?: InboxThreadCorrespondence;
       /** The raw proposal summary, for the console's Details. */
       details: string;
       /** Oldest first; `seq` 0 is the derived opening message. */
