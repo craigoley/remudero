@@ -464,23 +464,23 @@ test("W1-T10302: the registered `rmd gh-broker` handler serves, reports the logi
   // A serve that fails to start is reported by the assertions below, not as an unhandled rejection.
   serving.catch(() => undefined);
   const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
-  // Whatever an assertion below does, the broker is stopped: a heartbeat interval left running would keep this
-  // test process alive forever, and the flake-screen would wait on it until the job's ceiling.
-  t.after(async () => {
+  // Close this fixture's server before after-hooks remove its cache or restore its environment.
+  try {
+    await until(() => existsSync(join(dir, "broker.sock")) && existsSync(join(dir, "heartbeat")), "the broker the CLI serves");
+    assert.equal(await handler(["status", "--since", "1d"]), 0);
+    const printed = writes.join("");
+    const shown = JSON.parse(printed.slice(printed.indexOf("{"))) as { login_status: { login: unknown; accounts: string[]; by_account: Record<string, unknown> } };
+    assert.ok(Array.isArray(shown.login_status.accounts), "status carries the per-login view from ghBrokerLoginStatus");
+    assert.equal(Object.keys(shown.login_status.by_account).length, 1, "this account's request log is summarised");
+    assert.equal(await handler(["stop"]), 0);
+    assert.equal(await serving, 0, "serve returns once the broker it started has been stopped");
+    assert.match(writes.join(""), /gh-broker: serving .*broker\.sock/);
+  } finally {
     try {
       if (existsSync(join(dir, "heartbeat"))) await handler(["stop"]);
-      await Promise.race([serving.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
+      await serving;
     } finally {
       process.stdout.write = realWrite;
     }
-  });
-  await until(() => existsSync(join(dir, "broker.sock")) && existsSync(join(dir, "heartbeat")), "the broker the CLI serves");
-  assert.equal(await handler(["status", "--since", "1d"]), 0);
-  const printed = writes.join("");
-  const shown = JSON.parse(printed.slice(printed.indexOf("{"))) as { login_status: { login: unknown; accounts: string[]; by_account: Record<string, unknown> } };
-  assert.ok(Array.isArray(shown.login_status.accounts), "status carries the per-login view from ghBrokerLoginStatus");
-  assert.equal(Object.keys(shown.login_status.by_account).length, 1, "this account's request log is summarised");
-  assert.equal(await handler(["stop"]), 0);
-  assert.equal(await serving, 0, "serve returns once the broker it started has been stopped");
-  assert.match(writes.join(""), /gh-broker: serving .*broker\.sock/);
+  }
 });
