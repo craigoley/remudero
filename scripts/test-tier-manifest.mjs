@@ -880,7 +880,9 @@ function parseShard(raw) {
   return { index, count };
 }
 
-export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
+// W1-T10171: `log` receives the pool ladder's lines (default stderr); a test running the fast tier over
+// fixtures passes one, or its fixture POOL DEFECT verdict lands in the real CI log as a shard's failure.
+export function main(argv, { spawn = spawnSync, env = process.env, log = (line) => console.error(line) } = {}) {
   const root = resolve(getFlagValue(argv, "--root") ?? ".");
   if (argv.includes("--write-resolved-ledger") || argv.includes("--verify-resolved-ledger")) {
     try {
@@ -937,7 +939,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     // plan-reading candidates are judged the same way as the pool ladder.
     const prefix = role === "rest" ? "test-tier-manifest" : "pure-test-pool";
     // W1-T9426: a leak-locate probe carries a deadline measured from the full pool run.
-    return spawnJudgedRun(files, { spawn, cwd: root, args: testArgs, pool, quiet, role, prefix, deadlineMs });
+    return spawnJudgedRun(files, { spawn, cwd: root, args: testArgs, pool, quiet, role, prefix, log, deadlineMs });
   };
 
   if (argv.includes("--record-evidence")) {
@@ -1228,7 +1230,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     }
     // W1-T6085: only the fast tier shares processes; a slow file keeps its own child.
     if (runTier === "fast" && env.RMD_TEST_POOL !== "0") {
-      return runShardWithPool(files, { fast, root, env, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
+      return runShardWithPool(files, { fast, root, env, log, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
     }
     return spawnTestFiles(files, { bounded: runTier === "fast" });
   }

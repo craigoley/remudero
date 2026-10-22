@@ -43,7 +43,10 @@ const pool = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "pure-test-p
   ) => RunStatus;
 };
 const tiers = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "test-tier-manifest.mjs")).href)) as {
-  main: (argv: string[], opts: { spawn: (cmd: string, args: string[], o?: Record<string, unknown>) => { status: number | null }; env?: NodeJS.ProcessEnv }) => number;
+  main: (
+    argv: string[],
+    opts: { spawn: (cmd: string, args: string[], o?: Record<string, unknown>) => { status: number | null }; env?: NodeJS.ProcessEnv; log?: (line: string) => void },
+  ) => number;
 };
 
 const PURE = `import test from "node:test";\ntest("x", () => {});\n`;
@@ -187,7 +190,8 @@ test("W1-T9426: a judged run still going at its deadline is killed and reported 
   }
 });
 
-test("W1-T9426: the fast tier hands every locate probe a SIGKILL deadline", () => {
+/** The fast tier over fixtures a-d whose pool fails whenever b and c share it, every pool line in `log`. */
+function fixtureFastTier(log: (line: string) => void) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t9426-tier-`));
   try {
     mkdirSync(join(root, "test"));
@@ -197,6 +201,7 @@ test("W1-T9426: the fast tier hands every locate probe a SIGKILL deadline", () =
     const probeOpts: Array<Record<string, unknown>> = [];
     const status = tiers.main(["--root", root, "--run", "fast"], {
       env: {},
+      log,
       spawn: (_cmd, args, opts) => {
         const pooled = args.includes(pool.POOL_ISOLATION_FLAG);
         if (pooled && opts?.stdio === "ignore") probeOpts.push(opts);
@@ -204,13 +209,41 @@ test("W1-T9426: the fast tier hands every locate probe a SIGKILL deadline", () =
         return finishJudgedRun(args, opts, fails ? 1 : 0);
       },
     });
-    assert.equal(status, 0);
-    assert.ok(probeOpts.length > 0, "the pool failed and the isolated re-run passed, so location ran");
-    for (const opts of probeOpts) {
-      assert.ok(typeof opts.timeout === "number" && opts.timeout > 0, JSON.stringify(opts.timeout));
-      assert.equal(opts.killSignal, "SIGKILL");
-    }
+    return { status, probeOpts };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+test("W1-T9426: the fast tier hands every locate probe a SIGKILL deadline", () => {
+  const { status, probeOpts } = fixtureFastTier(() => {});
+  assert.equal(status, 0);
+  assert.ok(probeOpts.length > 0, "the pool failed and the isolated re-run passed, so location ran");
+  for (const opts of probeOpts) {
+    assert.ok(typeof opts.timeout === "number" && opts.timeout > 0, JSON.stringify(opts.timeout));
+    assert.equal(opts.killSignal, "SIGKILL");
+  }
+});
+
+// W1-T10171: before `main` took a `log`, this fixture's POOL DEFECT verdict ("leaking file: test/b.test.ts
+// (first failing alongside it: test/c.test.ts)") reached every CI log that ran this file, and the gardener
+// and the sweep read it as that shard's failure.
+test("W1-T10171: a fast-tier fixture run sends its pool lines to its log sink, never the process stderr", () => {
+  const sink: string[] = [];
+  const stderr: string[] = [];
+  const write = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    stderr.push(String(chunk));
+    return (write as (...a: unknown[]) => boolean).call(process.stderr, chunk, ...rest);
+  }) as typeof process.stderr.write;
+  let status: number;
+  try {
+    status = fixtureFastTier((line) => sink.push(line)).status;
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.equal(status, 0);
+  assert.match(sink.join("\n"), /^pure-test-pool: POOL DEFECT\b.*leaking file: /m, "the verdict reached the sink");
+  assert.match(sink.join("\n"), /^pure-test-pool: pool run complete\b/m, "the judged runs' lines reached the sink too");
+  assert.deepEqual(stderr.filter((chunk) => chunk.includes("pure-test-pool:")), [], "no pool line reached the process stderr");
 });

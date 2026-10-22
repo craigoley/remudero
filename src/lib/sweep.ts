@@ -7165,6 +7165,26 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
   };
 }
 
+const TEST_POINT_LINE = /^(?:not )?ok \d+ - |^[✔✖] /;
+
+/** W1-T10171 — ci-friction-gardener.ts's withoutTestPrintedPoolLines, stated twice like RUNNER_TIMEOUT_LINE. */
+function withoutTestPrintedPoolLines(bodies: readonly string[]): string[] {
+  const out = [...bodies];
+  let followed = false;
+  let printed = false;
+  for (let i = bodies.length - 1; i >= 0; i -= 1) {
+    const b = bodies[i]!;
+    if (TEST_POINT_LINE.test(b)) {
+      followed = true;
+      printed = false;
+    } else {
+      if (followed && /^pure-test-pool: POOL DEFECT\b/.test(b)) printed = true;
+      if (printed && b.startsWith("pure-test-pool:")) out[i] = "";
+    }
+  }
+  return out;
+}
+
 /** W1-T8040 — the signature of a cancelled check whose OWN log proves the job ran its tests, recorded a
  *  failure, and was cancelled only by its ceiling: re-running the same sha runs the same tests and hangs
  *  again (ci.yml's SHARD HANG text). Three shapes, mirroring W1-T8038's `poolOrTimeoutSignature`
@@ -7174,7 +7194,7 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
  *  readable log, and a SUPERSEDED run keep W1-T1223's one bounded requeue. */
 export function deterministicTimeoutSignature(logTail: string | undefined): string | undefined {
   if (!logTail) return undefined;
-  const bodies = logTail.split("\n").map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").trim());
+  const bodies = withoutTestPrintedPoolLines(logTail.split("\n").map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").trim()));
   if (bodies.some((b) => /\bSUPERSEDED\b/.test(b))) return undefined;
   const defect = bodies.map((b) => /^pure-test-pool: POOL DEFECT\b.*?leaking file: (not isolated to one file|\S+)/.exec(b)).find((m) => m);
   if (defect) return `pool defect: ${defect[1] === "not isolated to one file" ? "leak not isolated to one file" : `${defect[1]} leaks`}`;

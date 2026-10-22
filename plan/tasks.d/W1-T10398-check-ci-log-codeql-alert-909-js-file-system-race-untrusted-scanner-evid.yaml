@@ -1,0 +1,43 @@
+- id: W1-T10398
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:codeql-alert-909-js-file-system-race:untrusted-scanner-evidence-the-codeql-check-failed-at-this-p cost 25.6 PR minute(s) across 4 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.27
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:codeql-alert-909-js-file-system-race:untrusted-scanner-evidence-the-codeql-check-failed-at-this-p"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/check-ci-log-codeql-alert-909-js-file-system-race-untrusted-scanner-evid.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:codeql-alert-909-js-file-system-race:untrusted-scanner-evidence-the-codeql-check-failed-at-this-p"
+      proof: "grep: test(\"W1-T10398: check:ci-log:codeql-alert-909-js-file-system-race:untrusted-scanner-evidence-the-codeql-check-failed-at-this-p is prevented, not retried\" in test/sweep/check-ci-log-codeql-alert-909-js-file-system-race-untrusted-scanner-evid.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:codeql-alert-909-js-file-system-race:untrusted-scanner-evidence-the-codeql-check-failed-at-this-p's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:codeql-alert-909-js-file-system-race:untrusted-scanner-evidence-the-codeql-check-failed-at-this-p cost 25.6 PR minute(s) (seven-day half-life) across 4 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/sweep.ts: names "UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this high-severity" (1 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #13317 (https://github.com/craigoley/remudero/pull/13317) at 2026-10-21T13:42:07.911Z: ci-log round — coverage-shard (7/8): ["WN-TN: a daemon tree behind on deploy logic still defers, naming the paths","the baked supervisor catalogs cover its a; CodeQL alert #910 (js/file-system-race):
+        failing tests: ["W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths","the baked supervisor catalogs cover its actual runtime import closure"]; W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths; the baked supervisor catalogs cover its actual runtime import closure
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — ["W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths","the baked supervisor catalogs cover its actual runtime import closure"]
+          | not ok 2 - W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths
+          |   ---
+          |   duration_ms: 2691.503342
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-busy-primary-reaches-its-image-recycle.test.ts:186:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     src/lib/state-backup-engine-links.ts is deploy logic: the busy tick must not ask deploy-run
+          |     + actual - expecte
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
