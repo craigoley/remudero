@@ -80,6 +80,23 @@ test("W1-T10270: an empty, incomplete or hand-edited sample fails the replay", (
   assert.throws(() => replayReviewSample({ ...sample, header: { ...sample.header, classes: ["posted", "withheld", "refused"] } }), /class/);
 });
 
+test("W1-T10270: a recorded row whose input is malformed is refused with an invalid-input error", () => {
+  const good = row(input());
+  const malformed: Record<string, unknown>[] = [
+    { stage: "bogus" },
+    { criteria_count: -1 },
+    { reviewer_outcome: 7 },
+    { plan_only: "yes" },
+    { verdict_lines: ["free prose verdict"] },
+    { verdict_lines: "something-else" },
+    { publication_refusal: 7 },
+  ].map(patch => ({ ...good, input: { ...(good.input as Record<string, unknown>), ...patch } }));
+  malformed.push({ ...good, input: "not-an-object" });
+  for (const bad of malformed) {
+    assert.throws(() => derive([bad]), /invalid review replay input/);
+  }
+});
+
 test("W1-T10270: the sample is refreshed from the ledger and excludes regressed reviewer shas", () => {
   const a = row(input());
   const b = row(input({ reviewer_outcome: "spawn_error" }));
