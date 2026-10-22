@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.22
   status: queued
@@ -42,10 +42,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.55
+    verdict: "low"
+    action: proceed
+    confidence: 0.6
     reasons:
-      - "high-risk verdict at confidence 0.55 — on the change's description/files alone, no diff was read — The task's stated source is src/lib/sweep.ts, where a line names \"UNTRUSTED SCANNER EVIDENCE\" about a CodeQL check failure on a high-severity alert. A remedy that stops dispatching a fix round for this cause could weaken or suppress security-scanner handling, which touches review policy.; on the change's description/files alone, no diff was read — The rationale's recent-round evidence shows failing tests (W1-T6282, deploy-logic and supervisor catalog tests) that appear unrelated to CodeQL alert #910. The cause label mixes a scanner alert with flaky test failures, so what this change should fix cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The declared test file does not exist at base, and no bounded change view was supplied. The acceptance criterion is a grep for a test title, which is weak verification of the remedy.; on the change's description/files alone, no diff was read — The family track record is 39 merged against 58 declined, a mean of 0.66, so it is judged more strictly. The task is machine-authored."
-    judged_at: "2026-10-22T05:21:35.872Z"
-    pin: "de2a46c868533fa8c14dd444d8bfa697fd7dd3ae210866a28c0b9effb291967c"
+      - "The declared files are src/lib/sweep.ts and one new test file under test/sweep/. These match the plan's stated remedy, which is a change to the code path that names the \"UNTRUSTED SCANNER EVIDENCE\" text, and neither is a secrets, auth, deploy, merge-policy or review-policy file."
+      - "The description does not show any deletion of data, branches or history, any irreversible action, or any decision reserved for the operator. The acceptance criterion is a grep-verifiable test, so the finding can be checked from what is shown."
+      - "The change touches sweep logic that handles CodeQL scanner evidence, which is adjacent to review policy. The filing does not say the change would weaken or bypass that gate, and the PR still has to pass CI and review. I cannot confirm this without a diff, so confidence is moderate."
+      - "The family track record is mixed (39 merged, 58 declined, Beta mean 0.67), which is a mild caution but not a gates-state concern on its own. The new test file is absent at base, as expected for an implement task."
+    judged_at: "2026-10-22T16:32:46.005Z"
+    pin: "dd5a789a5fdb774bc7e5c52ff1215fe65edf097671e6ce824f3b95e0b65d1033"
