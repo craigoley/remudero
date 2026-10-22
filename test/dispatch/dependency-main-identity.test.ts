@@ -66,6 +66,35 @@ for (const fault of ["bytes", "mode", "symlink", "submodule", "missing", "trunca
   });
 }
 
+test("nested workflow manifest path walks each directory tree to its blob leaf", () => {
+  const f = fixture();
+  const path = ".github/workflows/ci.yml";
+  const ids = (n: string) => ({ gh: n.repeat(40), wf: (n === "1" ? "2" : "3").repeat(40) });
+  const head = ids("1"), main = ids("4");
+  const treeBody = (sha: string, tree: Array<{ path: string; mode: string; type: string; sha: string }>) => ({ sha, truncated: false, tree });
+  const dir = (name: string, sha: string) => ({ path: name, mode: "040000", type: "tree", sha });
+  const blob = { path: "ci.yml", mode: "100644", type: "blob", sha: BLOB };
+  f.metadata.changed_files = 1;
+  f.responses.set("repos/o/r/pulls/13446/files?per_page=100", [{ filename: path, status: "modified", sha: BLOB }]);
+  f.responses.set(`repos/o/r/git/trees/${HEAD_TREE}`, treeBody(HEAD_TREE, [dir(".github", head.gh)]));
+  f.responses.set(`repos/o/r/git/trees/${MAIN_TREE}`, treeBody(MAIN_TREE, [dir(".github", main.gh)]));
+  for (const side of [head, main]) {
+    f.responses.set(`repos/o/r/git/trees/${side.gh}`, treeBody(side.gh, [dir("workflows", side.wf)]));
+    f.responses.set(`repos/o/r/git/trees/${side.wf}`, treeBody(side.wf, [blob]));
+  }
+  f.observations.set(13446, { state: "complete", cache: "miss", paths: [path] });
+  const proof = f.observe();
+  assert.equal(proof?.state, "identical");
+  if (proof?.state === "identical") assert.deepEqual(proof.files, [{ path, mode: "100644", blob: BLOB }]);
+  assert.ok(f.calls.includes(`repos/o/r/git/trees/${head.wf}`), "descended through the nested directories");
+
+  // A parent that is not a directory tree is refused rather than descended into.
+  f.responses.set(`repos/o/r/git/trees/${HEAD_TREE}`, treeBody(HEAD_TREE, [{ ...dir(".github", head.gh), mode: "100644", type: "blob" }]));
+  const refused = runGhReadSteps(hydrateDependencyMainIdentitiesSteps("o", "r", [f.candidate], f.observations, f.fetch, {})).get(13446);
+  assert.equal(refused?.state, "unavailable");
+  if (refused?.state === "unavailable") assert.match(refused.reason, /non-directory parent/);
+});
+
 test("non-bot, incomplete, duplicate, mixed-scope and unsupported nested manifest observations are inert without network", () => {
   for (const fault of ["author", "draft", "incomplete", "duplicate", "scope", "nested"] as const) {
     const f = fixture();
