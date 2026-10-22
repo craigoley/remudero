@@ -448,16 +448,36 @@ test("W1-T10302: the registered `rmd gh-broker` handler serves, reports the logi
       else process.env[key] = value;
     }
   });
+  // Only the handler's own string output is captured. Everything else the process writes (the test runner's
+  // reports reach stdout through this same function, as binary chunks) goes on to the real stream untouched.
   const writes: string[] = [];
   const realWrite = process.stdout.write;
-  process.stdout.write = ((chunk: string | Uint8Array) => { writes.push(String(chunk)); return true; }) as typeof process.stdout.write;
-  t.after(() => { process.stdout.write = realWrite; });
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    if (typeof chunk === "string" && /^(gh-broker: |\{)/.test(chunk)) {
+      writes.push(chunk);
+      return true;
+    }
+    return (realWrite as (...args: unknown[]) => boolean).call(process.stdout, chunk, ...rest);
+  }) as typeof process.stdout.write;
 
   const serving = handler(["serve"]);
+  // A serve that fails to start is reported by the assertions below, not as an unhandled rejection.
+  serving.catch(() => undefined);
   const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
+  // Whatever an assertion below does, the broker is stopped: a heartbeat interval left running would keep this
+  // test process alive forever, and the flake-screen would wait on it until the job's ceiling.
+  t.after(async () => {
+    try {
+      if (existsSync(join(dir, "heartbeat"))) await handler(["stop"]);
+      await Promise.race([serving.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
+    } finally {
+      process.stdout.write = realWrite;
+    }
+  });
   await until(() => existsSync(join(dir, "broker.sock")) && existsSync(join(dir, "heartbeat")), "the broker the CLI serves");
   assert.equal(await handler(["status", "--since", "1d"]), 0);
-  const shown = JSON.parse(writes.join("").slice(writes.join("").indexOf("{"))) as { login_status: { login: unknown; accounts: string[]; by_account: Record<string, unknown> } };
+  const printed = writes.join("");
+  const shown = JSON.parse(printed.slice(printed.indexOf("{"))) as { login_status: { login: unknown; accounts: string[]; by_account: Record<string, unknown> } };
   assert.ok(Array.isArray(shown.login_status.accounts), "status carries the per-login view from ghBrokerLoginStatus");
   assert.equal(Object.keys(shown.login_status.by_account).length, 1, "this account's request log is summarised");
   assert.equal(await handler(["stop"]), 0);
