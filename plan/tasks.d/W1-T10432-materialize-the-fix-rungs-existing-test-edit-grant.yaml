@@ -5,7 +5,7 @@
   type: implement
   verify: human
   principles: {tdd: strict}
-  risk: medium
+  risk: high
   priority: 2
   budget_usd: 6.00
   files:
@@ -19,7 +19,8 @@
   note: |
     PARKED FOR AN EXPLICIT OPERATOR DECISION. This record files W1-T10333's required
     separate implement task; it does not approve or activate a scope change. Obtain the
-    operator's approval of the exact bounded repair before building. Retain all existing
+    operator's approval of the exact bounded repair before publishing or activating it.
+    A private qualified proposal may be prepared for that decision. Retain all existing
     gates, ceilings, assertions, task-specific rulings and source ownership.
   rationale: |
     W1-T10333 traces test/ to W1-T5532's existing non-plan test-edit permission. The commit
@@ -72,6 +73,8 @@
       proof: "unit test: an admitted fix test survives the next strike without widening source scope"
     - claim: "plan-only repairs and ungranted test paths retain their original refusals"
       proof: "unit test: fix test admission preserves plan and ungranted scope refusals"
+    - claim: "the shared test-admission leaf has a production caller"
+      proof: "grep: admittedFixTestPaths( in src/run-task.ts"
   falsifier: |
     Use W1-T10070's three declarations, the actual incident test, and the existing non-plan
     test-edit grant. Before the fix, a second runFixRung strike records rung.scope for that
