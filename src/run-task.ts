@@ -320,7 +320,7 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
+import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { realThreadDecider, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { realRecommendationWriter } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -608,6 +608,7 @@ import {
   escalationContractRevision,
   findDuplicateEscalation,
   taskContractRevision,
+  taskSemanticRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
   presenceMode,
@@ -630,6 +631,9 @@ import {
   createGhCallPacer,
   type OpenPrRest,
   fetchSinglePrRest,
+  codeqlCheckFailed,
+  hydrateCodeqlHeadAlertsSteps,
+  CODEQL_CHECK_NAME,
   fetchSinglePrRestAsync,
   hydrateMergeStates,
   liveStateFromRest,
@@ -782,7 +786,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -1210,6 +1214,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
+import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -1603,6 +1608,8 @@ import {
   dependabotCommandAnswer,
   type DependabotIssueComment,
   reconcileDependabotOwnRed,
+  prioritizeDepReviewRepairs,
+  type DepReviewRepairSnapshot,
   reconcileDependabotRefusedPath,
   reconcileDependabotStaleEvent,
   dependabotStaleEventVerdict,
@@ -1644,7 +1651,7 @@ import {
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
-import { readyDraftPullRequest, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
+import { readyDraftPullRequest, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
@@ -3983,8 +3990,36 @@ export function derivePrOwnerVerdict(
   corpus: PrOwnerLedgerRead,
   claimRead: PrOwnerClaimRead = { claims: [] },
 ): PrOwnerVerdict {
+  const sweepRows = corpus.rows.filter((row) => row.step === "sweep.disposed" && prNumberFromLedgerRow(row) === prNumber);
+  const taskIds = new Set(sweepRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v && v !== "SWEEP"));
+  const headShas = new Set(sweepRows.map((row) => stringField(row, "head_sha")).filter((v): v is string => !!v));
+  const fixRows = corpus.rows.filter((row) => {
+    if (row.step !== "fix.dispatch") return false;
+    if (prNumberFromLedgerRow(row) === prNumber) return true;
+    const taskId = stringField(row, "task_id");
+    if (!taskId || !taskIds.has(taskId)) return false;
+    const headSha = stringField(row, "head_sha");
+    return headSha === undefined || headShas.size === 0 || headShas.has(headSha);
+  });
+  const latestFix = newestLedgerRow(fixRows);
+  const latestSweep = newestLedgerRow(sweepRows);
+  const claimTaskIds = [...taskIds, ...fixRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v)];
+  const related = claimRead.claims.filter((c) => claimTaskIds.some((id) => c.key.includes(`run-${id}-`)));
+
+  return prOwnerVerdictFromFacts(prNumber, corpus, claimRead, {
+    corpusNewestTs: stringField(newestLedgerRow(corpus.rows) ?? {}, "ts"), latestFix, latestSweep,
+    relatedClaimKeys: related.map((claim) => claim.key),
+  });
+}
+
+function prOwnerVerdictFromFacts(
+  prNumber: number,
+  corpus: Omit<PrOwnerLedgerRead, "rows">,
+  claimRead: PrOwnerClaimRead,
+  facts: Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">,
+): PrOwnerVerdict {
   const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
-  const corpusNewestTs = stringField(newestLedgerRow(corpus.rows) ?? {}, "ts");
+  const corpusNewestTs = facts.corpusNewestTs;
   const base = {
     prNumber,
     corpusNewestTs,
@@ -4007,24 +4042,10 @@ export function derivePrOwnerVerdict(
     return { ...base, verdict: "UNKNOWN", reason: "no compressed ledger rotation opened" };
   }
 
-  const sweepRows = corpus.rows.filter((row) => row.step === "sweep.disposed" && prNumberFromLedgerRow(row) === prNumber);
-  const taskIds = new Set(sweepRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v && v !== "SWEEP"));
-  const headShas = new Set(sweepRows.map((row) => stringField(row, "head_sha")).filter((v): v is string => !!v));
-  const fixRows = corpus.rows.filter((row) => {
-    if (row.step !== "fix.dispatch") return false;
-    if (prNumberFromLedgerRow(row) === prNumber) return true;
-    const taskId = stringField(row, "task_id");
-    if (!taskId || !taskIds.has(taskId)) return false;
-    const headSha = stringField(row, "head_sha");
-    return headSha === undefined || headShas.size === 0 || headShas.has(headSha);
-  });
-  const latestFix = newestLedgerRow(fixRows);
-  const latestSweep = newestLedgerRow(sweepRows);
-  const claimTaskIds = [...taskIds, ...fixRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v)];
-  const related = claimRead.claims.filter((c) => claimTaskIds.some((id) => c.key.includes(`run-${id}-`)));
-  const liveClaim = related.find((c) => !c.stale);
-  const staleClaim = related.find((c) => c.stale);
-
+  const { latestFix, latestSweep } = facts;
+  const related = claimRead.claims.filter((claim) => facts.relatedClaimKeys.includes(claim.key));
+  const liveClaim = related.find((claim) => !claim.stale);
+  const staleClaim = related.find((claim) => claim.stale);
   if (latestFix !== undefined || liveClaim !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
     return {
       ...base,
@@ -4084,7 +4105,7 @@ export function prOwnerCommand(
     write?: (text: string) => void;
     error?: (text: string) => void;
   } = {},
-): number {
+): number | Promise<number> {
   const badArg = unknownArgError("pr-owner", rest.slice(1), [], []);
   if (badArg) {
     (deps.error ?? console.error)(badArg + "\n" + USAGE);
@@ -4096,9 +4117,19 @@ export function prOwnerCommand(
     return 2;
   }
   const stateDir = deps.stateDir ?? (deps.readLedger ? "" : dirname(ledgerPathFor(loadConfig())));
+  if (deps.readLedger === undefined) {
+    let claimRead: PrOwnerClaimRead = { claims: [] };
+    return readPrOwnerLedgerProjection(stateDir, prNumber, () => {
+      claimRead = readPrOwnerClaims(join(stateDir, "inflight"));
+      return claimRead.claims.map((claim) => claim.key);
+    }).then((projection) => {
+      (deps.write ?? console.log)(renderPrOwnerVerdict(prOwnerVerdictFromFacts(prNumber, projection, claimRead, projection)));
+      return 0;
+    });
+  }
   let corpus: PrOwnerLedgerRead;
   try {
-    corpus = (deps.readLedger ?? ((dir) => readLedgerUnionRecordsSync(dir, { requireArchives: true, refuseIncomplete: true })))(stateDir);
+    corpus = deps.readLedger(stateDir);
   } catch (error) {
     corpus = {
       rows: [],
@@ -10785,6 +10816,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // into both the pre-strike probe's key and the false-block producer below, so the two can never
   // disagree about "current".
   const currentContractRevision = taskContractRevision(opts.task);
+  const currentSemanticRevision = taskSemanticRevision(opts.task);
   let progressReviewInputDigest = opts.progressReviewInputDigest;
   const admitFixTests = !(opts.task.files?.length && opts.task.files.every(isInPlanScope));
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
@@ -13103,6 +13135,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (evidence.proofDiscrimination) amendProofs(evidence.proofDiscrimination);
       const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
       deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, contract_revision: currentContractRevision,
+        ...(currentSemanticRevision === undefined ? {} : { task_semantic_revision: currentSemanticRevision }),
         ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
       logFixDone();
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
@@ -13145,7 +13178,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const reason = issueUrl ? `${scopeKind} scope need escalated` : `${scopeKind} scope escalation undelivered`;
         deps.log("fix.scope_amendment", { outcome: issueUrl ? `${scopeKind}-escalated` : `${scopeKind}-escalation-failed`,
           identity_key: identityKey, paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
-          issue_url: issueUrl, reason, ...deliveryError });
+          issue_url: issueUrl, reason, contract_revision: currentContractRevision, ...deliveryError });
         deps.log("fix.stood_down", { site: `rung.${scopeKind}_scope`, head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
         logFixDone();
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
@@ -26153,7 +26186,7 @@ function retroTriggerDecide(now: Date, ctx: RetroTriggerContext, shipped: Shippe
 // throttle, so "refuse ⇒ behave as disabled" would WIDEN what dispatch may do — backwards for
 // design (v)'s "can only refuse" invariant. Wiring a rung whose refusal direction is inverted is
 // this task's own follow-up, not a call this diff makes for it.
-export const AUTO_TRIAGE_CONTRACT_VERSION = "v1";
+export const AUTO_TRIAGE_CONTRACT_VERSION = "v2-aged-dependency-repair-priority";
 export const MEASUREMENT_CADENCE_CONTRACT_VERSION = "v1";
 export const DIGEST_CADENCE_CONTRACT_VERSION = "v1";
 export const INTAKE_CADENCE_CONTRACT_VERSION = "v1";
@@ -26283,6 +26316,9 @@ export function buildAutoTriageDaemonHooks(deps: {
   runTriage?: (feedbackId: string) => Promise<number>;
   config?: Config;
   now?: () => Date;
+  repairSnapshot?: () => DepReviewRepairSnapshot | undefined;
+  /** Fixture repository for feedback reads; production retains repoRoot, distinct from config.root. */
+  feedbackRoot?: string;
   /** Injected policy, forwarded to {@link autoTriageCheck} — see its doc for why this seam exists.
    *  Production passes none and the checked-in `plan/policy.yaml` governs, exactly as before. */
   policy?: Policy;
@@ -26297,7 +26333,8 @@ export function buildAutoTriageDaemonHooks(deps: {
   const check =
     deps.check ??
     ((signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) =>
-      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ratifications: deps.ratifications, ...signals }));
+      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ratifications: deps.ratifications,
+        repairSnapshot: deps.repairSnapshot, feedbackRoot: deps.feedbackRoot, ...signals }));
   const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
   const configFor = () => deps.config ?? loadConfig();
   return {
@@ -26334,6 +26371,8 @@ export async function autoTriageCheck(
   opts: {
     config?: Config;
     now?: Date;
+    repairSnapshot?: () => DepReviewRepairSnapshot | undefined;
+    feedbackRoot?: string;
     policy?: Policy;
     /** W1-T2694: injected ratification pins — same seam shape as `policy` above (this
      *  function's own doc). Production passes none and the checked-in (or absent)
@@ -26368,6 +26407,7 @@ export async function autoTriageCheck(
   }
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
+  const feedbackRoot = opts.feedbackRoot ?? repoRoot;
   const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
@@ -26387,10 +26427,10 @@ export async function autoTriageCheck(
     marker: readAutoTriageMarker(autoTriageMarkerPath(config.root)),
     now,
     // repoRoot, NOT config.root — see this block's doc comment.
-    candidates: newFeedbackIdsOldestFirst(repoRoot),
+    candidates: newFeedbackIdsOldestFirst(feedbackRoot),
     // SAME repoRoot, SAME reasoning, read through the SAME underlying walk (W1-T2289) — see
     // `oldestFeedbackAgeMs`'s own doc for why this must never drift onto `config.root`.
-    oldestCandidateAgeMs: oldestFeedbackAgeMs(repoRoot, now),
+    oldestCandidateAgeMs: oldestFeedbackAgeMs(feedbackRoot, now),
   };
   // W1-T4769: decide FIRST without any claim knowledge — every refusal that does not depend on which
   // entry is claimed returns here with no git or ledger I/O. Only a would-be fire pays for the sweep.
@@ -26408,7 +26448,12 @@ export async function autoTriageCheck(
   }
   const passInputs = { ...inputs, candidates };
   const sweep = await triageClaimSweepForPass(config, now, candidates, opts);
-  return decideAutoTriage(sweep === undefined ? passInputs : { ...passInputs, heldCandidates: sweep });
+  const ordered = await prioritizeDepReviewRepairs(candidates, join(config.root, "state"), opts.repairSnapshot?.(), now.getTime(),
+    (step, extra) => appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }));
+  const decision = decideAutoTriage({ ...passInputs, candidates: ordered, ...(sweep === undefined ? {} : { heldCandidates: sweep }) });
+  return decision.fire && ordered.indexOf(decision.feedbackId) < candidates.indexOf(decision.feedbackId)
+    ? { ...decision, reason: "verified aged dependency repair precedes ordinary FIFO feedback; all normal triage bounds passed" }
+    : decision;
 }
 
 /**
@@ -38932,7 +38977,24 @@ export async function routeFix(
   if (terminal) {
     return { outcome: "refused", reason: terminal };
   }
-  const { disposition, reason } = deriveDisposition(pr, policy);
+  let { disposition, reason } = deriveDisposition(pr, policy);
+  let securityFix = disposition === "mergeable" &&
+    pr.codeqlHeadAlerts?.headSha === pr.headSha && pr.codeqlHeadAlerts.alerts.length > 0 &&
+    (pr.ciFailures ?? []).some(failure => failure.name === CODEQL_CHECK_NAME);
+  if (securityFix) {
+    if (!deps.ledgerLines) return { outcome: "refused", reason: "code-scanning ruling history unavailable; no security repair admitted" };
+    try {
+      securityFix = !deps.ledgerLines().some(row => row.step === CODE_SCANNING_FALSE_POSITIVE_STEP &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
+    } catch {
+      return { outcome: "refused", reason: "code-scanning ruling history unavailable; no security repair admitted" };
+    }
+  }
+  const ciFailures = withCodeqlAlertEvidence(pr, pr.ciFailures ?? []);
+  if (securityFix) {
+    disposition = "blocked-fixable";
+    reason = "CodeQL failed with open high-severity alerts at this exact head";
+  }
   let progressDecision: FixProgressVerdict | undefined;
   if (disposition === "blocked-fixable" && (pr.priorStrikes ?? 0) > 0) {
     // W1-T7096 (ruling 2026-10-09): a PR that already spent rounds gets another only when the progress
@@ -38942,7 +39004,7 @@ export async function routeFix(
       (line) => console.error(line));
     const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
       strikesSpent: pr.priorStrikes,
-      currentRed: isBlockedCi(pr) ? (pr.ciFailures ?? []).map((f) => f.name)
+      currentRed: isBlockedCi(pr) || securityFix ? ciFailures.map((f) => f.name)
         : pr.unmetCriteria.filter((c) => !c.met).map((c) => `review:${c.claim}`),
       ledger: [...(deps.ledgerLines?.() ?? [])], formerCeiling: policy.strikeCap,
       parkedReason: "fix-strike: another operator-requested repair after prior rounds" });
@@ -38972,8 +39034,8 @@ export async function routeFix(
       pr,
       { ...(progressDecision ? { progressDecision, progressJudge: deps.fixProgressJudge,
           progressApproach: progressDecision.verdict === "change-approach" ? progressDecision.approach : undefined } : {}),
-        ...(isBlockedCi(pr)
-        ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
+        ...(isBlockedCi(pr) || securityFix
+        ? { unmetCriteria: [], ciFailures }
         : {
             unmetCriteria: pr.unmetCriteria,
             actionableGateFailures: pr.actionableGateFailures,
@@ -39080,6 +39142,14 @@ export async function fixCommand(
   const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
   const ciGateRequired = readCiGateRequiredChecks(repoRoot);
   const redRequiredChecks = redQualityGateNames(raw.statusCheckRollup, ciGateRequired);
+  const falsePositive = ledger.some(row => row.step === CODE_SCANNING_FALSE_POSITIVE_STEP &&
+    row.pr_number === raw.number && row.head_sha === raw.headRefOid);
+  const failedCodeql = codeqlCheckFailed(raw.statusCheckRollup);
+  const codeqlHeadAlerts = failedCodeql && !falsePositive
+    ? (await runStepsAsync(hydrateCodeqlHeadAlertsSteps(owner, repo, [{ number: raw.number, headSha: raw.headRefOid }],
+      deps.fetch ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit)),
+      undefined, (pr_number, reason) => log("fix.codeql_alerts_unreadable", { pr_number, head_sha: raw.headRefOid, reason })))).get(raw.number)
+    : undefined;
   const pr: OpenPrView = {
     prNumber: raw.number,
     prUrl: raw.url,
@@ -39119,7 +39189,9 @@ export async function fixCommand(
     autoMergeArmed: raw.autoMergeRequest != null,
     reviewSummary: reviewState === "failure" ? reviewSummaryFromLedger(ledger, reviewLedgerKeyFor(taskId, raw.number), raw.url, raw.headRefOid) : undefined,
     // W1-T100: the ci-log fix mode's input — see buildOpenPrViews.
-    ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup) : undefined,
+    ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup)
+      : codeqlHeadAlerts ? [{ name: CODEQL_CHECK_NAME, logTail: "The CodeQL results check failed at this head." }] : undefined,
+    codeqlHeadAlerts,
     redRequiredChecks,
   };
 
@@ -43025,6 +43097,16 @@ export function readLedgerRawLines(path: string): readonly string[] {
     // no ledger yet (a fresh checkout) or unreadable — releases nothing, never throws into dispatch
     return [];
   }
+}
+
+export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
+  const { owner, repo } = deps ? { owner: "", repo: "" } : resolveOwnerRepo();
+  const actions = buildInboxVerbActions(deps ?? {
+    root: repoRoot, inboxRoot: config.root, planPath: join(repoRoot, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+    github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
+    ratify: ratifyCliGateway(repoRoot, join(config.root, "logs")),
+  });
+  return inboxVerbCommand(name, rest, actions);
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
@@ -47337,7 +47419,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "pr-owner",
     syntax: "rmd pr-owner <pr-number>",
     summary: "Report whether the local ledger shows a fix lane owning one PR.",
-    detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. READ-ONLY: this verb writes, claims and releases nothing.",
+    detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. Makes no ledger, claim or service changes; owned temporary disk scratch is removed after the read.",
   },
   {
     name: "plan",
@@ -47402,6 +47484,31 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd reframe <P##> --feedback \"<text>\" [--supersedes <rounds>]",
     summary: "The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.",
     detail: "the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range (\"2-3\"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range",
+  },
+
+  {
+    name: "reply",
+    syntax: 'rmd reply <threadId> --text "<text>" [--intent-id <id>]',
+    summary: "Reply on an operator inbox thread.",
+    detail: inboxVerbHelp("reply").detail,
+  },
+  {
+    name: "archive",
+    syntax: "rmd archive <proposalId> [--unarchive]",
+    summary: "Set an inbox item aside, or undo its archive.",
+    detail: inboxVerbHelp("archive").detail,
+  },
+  {
+    name: "snooze",
+    syntax: "rmd snooze <proposalId> --until <RFC3339-UTC>|--wake",
+    summary: "Hide an inbox item until a UTC instant, or wake it now.",
+    detail: inboxVerbHelp("snooze").detail,
+  },
+  {
+    name: "keep",
+    syntax: 'rmd keep <proposalId> [--reason "<text>"] [--unkeep]',
+    summary: "Record the current observation as kept, or undo that decision.",
+    detail: inboxVerbHelp("keep").detail,
   },
 
 ] as const;
@@ -48226,6 +48333,10 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await reframeCommand(rest);
     },
   ],
+  ["reply", (rest) => inboxActionCliCommand("reply", rest)],
+  ["archive", (rest) => inboxActionCliCommand("archive", rest)],
+  ["snooze", (rest) => inboxActionCliCommand("snooze", rest)],
+  ["keep", (rest) => inboxActionCliCommand("keep", rest)],
 ]);
 
 /**

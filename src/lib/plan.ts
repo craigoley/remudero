@@ -187,6 +187,8 @@ export interface Task {
    *  rendered on the row-click task card (lib/task-card.ts). */
   rationale?: string;
   design?: string;
+  amendment?: string;
+  narrativeUnavailable?: true;
   /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`, `alert#…`,
    *  `issue#…`. Never defaulted — its absence is itself what the §5C linter's provenance check reports. */
   origin?: string;
@@ -762,6 +764,9 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       note: e.note as string | undefined,
       rationale: e.rationale as string | undefined,
       design: typeof e.design === "string" ? e.design : undefined,
+      amendment: typeof e.amendment === "string" ? e.amendment : undefined,
+      ...([e.design, e.amendment].some(value => value !== undefined && typeof value !== "string")
+        ? { narrativeUnavailable: true as const } : {}),
       origin: e.origin as string | undefined,
       // W1-T2968 — LAW 5'S MARK MUST SURVIVE THE FILE. Omitting this line made
       // `machineAuthorVerifyViolation` unfireable on every record that lives on disk: the field

@@ -347,8 +347,8 @@ function isNodeTestRun(cmd, args) {
 
 async function runOnce(cmd, args, env = process.env) {
   if (!isNodeTestRun(cmd, args)) return runChild(cmd, args, env);
-  const judged = prepareJudgedRun();
   const files = testFilesInArgv(args, process.cwd());
+  const judged = prepareJudgedRun({ files, root: process.cwd() });
   const first = await runChild(cmd, judgedNodeTestArgs(args, judged.args), { ...env, ...judged.env });
   const lines = [];
   const { status, verdict } = closeJudgedRun(judged, files, {
@@ -502,7 +502,8 @@ function finalSummary(output) {
 
 function finalSummaryAllPass(output) {
   const counts = finalSummary(output);
-  return counts !== null && counts.tests > 0 && counts.tests === counts.pass && counts.fail === 0 && counts.cancelled === 0;
+  return counts !== null && counts.pass > 0 && counts.tests === counts.pass + (counts.skipped ?? 0) &&
+    counts.fail === 0 && counts.cancelled === 0 && (counts.todo ?? 0) === 0;
 }
 
 function emptyCoverageFailure(cmd, args, output) {

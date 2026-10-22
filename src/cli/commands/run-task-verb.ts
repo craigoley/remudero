@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { fixStrikeCap, globalArtifactPath, enabledWorkerProviders, loadConfig, softBudgetThreshold, userOverallLearningsHome, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor, nextLaneEpochMs } from "../../lib/ledger-path.js";
@@ -304,11 +305,11 @@ export interface RunTaskCommandHost {
   taskId: string;
   runId: string;
   
-  task: { id: string; title: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
+  task: { id: string; title: string; acceptance?: AcceptanceCriterion[]; files?: string[]; design?: string; amendment?: string; narrativeUnavailable?: true };
   prUrl: string;
   branch: string;
   worktreePath: string;
-  
+
   initialSessionId: string;
   initialSessionProvider?: WorkerResult["provider"];
   mount: Mount;
@@ -2744,8 +2745,8 @@ function resolveRunMounts(
   // The fresh advisory reviewer is its OWN mount-governed phase (task_type="reviewer",
   // W1-T63/P10); the blocked_review fix rung rides its own "fix" row (W1-T76) —
   // both resolved here alongside the task's own mount, never an undeclared literal.
-  // impl-BP — RESOLVE THE RECON ROW, the one `routes:` entry nothing read. `.remudero/
-  // mounts.yaml` has carried a fully-specified `recon:` block (haiku for low-risk/docs/plan-lint,
+  // impl-BP — RESOLVE THE RECON ROW, the one `routes:` entry nothing read. The state
+  // directory's `mounts.yaml` has carried a fully-specified `recon:` block (haiku for low-risk/docs/plan-lint,
   // sonnet for medium/high src) since the class axis landed, and the recon spawn passed neither
   // `model` nor `effort` — so every recon in this repo's history ran on the SDK default. Measured
   // over the ledger unioned across all 661 rotations: 413 `recon.done` rows, model label
@@ -5933,9 +5934,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
-    // carries a content-hash-cached PLAN INDEX derived from MASTER-PLAN.md, not the plan body.
+    // carries a content-hash-cached PLAN INDEX derived from the master plan, not the plan body.
     // `loadPlanIndex` is non-fatal when the source is missing and never writes a generated file.
-    const planIndex = loadPlanIndex(join(dirname(planPath), "..", "MASTER-PLAN.md"));
+    const planIndex = loadPlanIndex(resolveRepoLayout(join(dirname(planPath), "..")).masterPlan);
     const planIndexBlock = planIndex ? renderPlanIndex(planIndex) : "";
     // W1-T164: task-scoped operator guidance notes — read from the durable console-editable
     // store (`repoRoot`, the SAME root worker.ts's question store reads/writes), scoped strictly
@@ -6158,7 +6159,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // LAYERED — project + user-overall + global, P32/W1-T145): inject the
     // distrust rule, the autonomy clause, and the task-matched LEARNINGS
     // facts. `loadLayeredLearningsForTaskFiles` reads the PROJECT layer via
-    // the index-based LOOKUP (W1-T33's `learnings/index.json`, not a scan —
+    // the index-based LOOKUP (W1-T33's learnings `index.json`, not a scan —
     // it parses only the corpus shards task.files could match), then merges
     // in the USER-OVERALL layer (a fleet-readable home outside this repo)
     // and the RMD-GLOBAL layer (a hash-pinned artifact — a tampered/missing
@@ -7682,7 +7683,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // "checks green + review success -> mergeable" reconciliation does not consult capped or an
     // override. A refused PR stays OPEN and UNARMED here but a later sweep could still arm it.
     // Leave that gap to its follow-up rather than silently widening this task.
-    // A SECOND, SAME-SHAPED RESIDUAL GAP (W1-T947): its plan/tasks.d/W1-T947-*.yaml files name
+    // A SECOND, SAME-SHAPED RESIDUAL GAP (W1-T947): its W1-T947-*.yaml plan shard files name
     // only review.ts, run-task.ts and its test. decideArmFromLedgerVerdict/armAutoMerge
     // (lib/review.ts, lib/run-task.ts), reached through withdrawArmIfVerdictRefuses/
     // armIfVerdictPermits, use the SAME decideAutoMergeArm but pass no irreversible signal:

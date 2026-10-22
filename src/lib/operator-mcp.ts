@@ -4,6 +4,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { runBoundedSuite } from "./ci-parity.js";
+import { INBOX_VERBS, validateInboxVerbArguments } from "./inbox-verdict-command.js";
 
 const TASK = /^[A-Za-z][A-Za-z0-9]*-T[0-9]+[a-z]?$/;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -27,6 +28,10 @@ export function createOperatorMcpServer(deps: OperatorMcpConfig): Server {
     { name: "ledger_grep", description: "Read the audited archive plus live ledger union using the existing bounded regex reader.", inputSchema: { type: "object", properties: { pattern: { type: "string", minLength: 1, maxLength: 200 } }, required: ["pattern"], additionalProperties: false }, annotations: { readOnlyHint: true } },
     { name: "case_file", description: "Read a task case file. Source, merge, deployment and runtime evidence remain separate.", inputSchema: { type: "object", properties: { taskId: { type: "string", pattern: TASK.source } }, required: ["taskId"], additionalProperties: false }, annotations: { readOnlyHint: true } },
     ...(deps.writeToken ? [{ name: "answer_question", description: "Record an operator answer through POST /v1/questions/answer, the console's existing low write tier. This does not approve a PR or lift a dispatch hold.", inputSchema: { type: "object", properties: { taskId: { type: "string", pattern: TASK.source }, answer: { type: "string", minLength: 1, maxLength: 16384 } }, required: ["taskId", "answer"], additionalProperties: false }, annotations: { readOnlyHint: false, destructiveHint: false } }] : []),
+    ...(deps.writeToken ? INBOX_VERBS.filter(verb => verb.tool).map(verb => ({ name: verb.tool!,
+      description: `${verb.summary} POST ${verb.path}; ${verb.tier} write tier.`,
+      inputSchema: { type: "object", properties: verb.properties, required: verb.required, additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: false } })) : []),
   ];
   const server = new Server({ name: "remudero-operator", version: "1.0.0" }, { capabilities: { tools: {} } });
   const scrub = (text: string) => [deps.readToken, deps.writeToken].filter((s): s is string => !!s)
@@ -62,7 +67,13 @@ export function createOperatorMcpServer(deps: OperatorMcpConfig): Server {
     try {
       const args = params.arguments ?? {};
       let output: string;
-      if (params.name === "inbox") {
+      const verb = INBOX_VERBS.find(verb => verb.tool === params.name);
+      if (verb) {
+        if (!deps.writeToken) throw new Error("write tool is disabled; no write-scope token configured");
+        const error = validateInboxVerbArguments(verb, args);
+        if (error) throw new Error(error);
+        output = await request(verb.path, deps.writeToken, args);
+      } else if (params.name === "inbox") {
         if (Object.keys(args).length) throw new Error("inbox takes no arguments");
         output = await request("/v1/inbox", deps.readToken);
       } else if (params.name === "ledger_grep") {

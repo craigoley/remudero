@@ -1,10 +1,12 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
+import { TICK_READ_MAX_AGE_MS } from "./read-plane.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
@@ -1397,6 +1399,7 @@ export function dependabotStaleEventVerdict(input: {
 export const LIVE_READING_RERUN_CHECKS: ReadonlyArray<{ check: string; workflow: string }> = [
   { check: "commitlint", workflow: ".github/workflows/pr-title-lint.yml" },
   { check: "ci-gate", workflow: ".github/workflows/ci.yml" },
+  { check: "ci-gate", workflow: ".github/workflows/ci-gate.yml" },
 ];
 
 export function isLiveReadingCheck(check: string): boolean {
@@ -1669,6 +1672,69 @@ interface DependabotOwnRedRecord {
 interface DependabotOwnRedProposal { feedbackId: string; submissionKey: string; bumps: string[]; prNumbers: number[]; filedAtMs: number }
 
 const OWN_RED_PROPOSALS_FILE = "own-red-proposals.json";
+
+export interface DepReviewRepairSnapshot {
+  owner: string;
+  repo: string;
+  asOfMs: number;
+  prs: readonly {
+    prNumber: number;
+    headSha?: string;
+    headRefName?: string;
+    createdAt?: string;
+    checksState: "green" | "red" | "pending" | "none";
+  }[];
+}
+
+/** PRIMARY CONTROL: the operator's stuck-PR horizon; it changes ordering, never admission or spend. */
+export const DEPENDABOT_STUCK_PR_AGE_MS = 60 * 60 * 1000;
+
+/** Reorder existing eligible feedback only. Registry, per-head repair state and a fresh OPEN
+ * PR snapshot must agree; prose never grants priority. Unknown evidence preserves FIFO. */
+export async function prioritizeDepReviewRepairs(
+  candidates: readonly string[], stateRoot: string, snapshot: DepReviewRepairSnapshot | undefined, nowMs: number,
+  log: (step: string, extra: Record<string, unknown>) => void = () => {},
+): Promise<string[]> {
+  const ordinary = [...candidates];
+  const recordEvent = (step: string, extra: Record<string, unknown>) => {
+    try { log(step, extra); } catch { /* Priority telemetry cannot change the eligible queue or admit a run. */ }
+  };
+  if (!snapshot || !Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ||
+      nowMs < snapshot.asOfMs || nowMs - snapshot.asOfMs > TICK_READ_MAX_AGE_MS ||
+      !/^[\w.-]+$/.test(snapshot.owner) || !/^[\w.-]+$/.test(snapshot.repo)) return ordinary;
+  const oldReds = snapshot.prs.filter(pr => Number.isSafeInteger(pr.prNumber) && pr.prNumber > 0 &&
+    pr.headRefName?.startsWith("dependabot/") && pr.checksState === "red" &&
+    Number.isFinite(Date.parse(pr.createdAt ?? "")) && nowMs - Date.parse(pr.createdAt!) >= DEPENDABOT_STUCK_PR_AGE_MS);
+  if (oldReds.length === 0) return ordinary;
+  const dir = join(stateRoot, "dep-review-holds", snapshot.owner, snapshot.repo);
+  try {
+    const registry: unknown = JSON.parse(await readFile(join(dir, OWN_RED_PROPOSALS_FILE), "utf8"));
+    const proposals = (registry as { proposals?: unknown } | null)?.proposals;
+    if (!Array.isArray(proposals)) throw new Error("invalid dependency repair registry");
+    const priority = new Map<string, number>();
+    for (const pr of oldReds) {
+      if (!proposals.some(p => p && candidates.includes(p.feedbackId) &&
+          Array.isArray(p.prNumbers) && p.prNumbers.includes(pr.prNumber))) continue;
+      const state: unknown = JSON.parse(await readFile(join(dir, `PR${pr.prNumber}.json`), "utf8"));
+      const record = (state as { ownRed?: unknown } | null)?.ownRed;
+      if (!isOwnRedRecord(record) || record.headSha !== pr.headSha || !record.feedbackId ||
+          !candidates.includes(record.feedbackId)) continue;
+      const bumps = record.bumps.map(ownRedBumpKey);
+      const linked = proposals.some(p => p && p.feedbackId === record.feedbackId &&
+        Array.isArray(p.prNumbers) && p.prNumbers.includes(pr.prNumber) && Array.isArray(p.bumps) &&
+        bumps.length > 0 && bumps.every(b => p.bumps.includes(b)));
+      if (!linked) continue;
+      const created = Date.parse(pr.createdAt!);
+      priority.set(record.feedbackId, Math.min(priority.get(record.feedbackId) ?? created, created));
+    }
+    const ranked = ordinary.filter(id => priority.has(id)).sort((a, b) => priority.get(a)! - priority.get(b)!);
+    if (ranked.length > 0) recordEvent("auto_triage.repair_priority", { feedback_ids: ranked, snapshot_as_of_ms: snapshot.asOfMs });
+    return [...ranked, ...ordinary.filter(id => !priority.has(id))];
+  } catch (error) {
+    recordEvent("auto_triage.repair_priority_unavailable", { reason: String(error) });
+    return ordinary;
+  }
+}
 
 function ownRedBumpKey(b: DependabotOwnRedBump): string {
   return `${b.dependency.trim().toLowerCase()}@${b.toVersion}`;

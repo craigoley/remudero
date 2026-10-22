@@ -1,3 +1,4 @@
+import { setTimeout as abortableDelay } from "node:timers/promises";
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { CashResponsesConversation } from "./cash-responses.js";
@@ -3167,9 +3168,17 @@ export class OpenWeightDeploymentNotFoundError extends RmdError {
   }
 }
 
+class CashHttpFailure extends RmdError {
+  constructor(message: string, readonly status: number, readonly retryAfterMs?: number) {
+    super("usage", 1, message, { status, retryAfterMs });
+    this.name = "CashHttpFailure";
+  }
+}
+
 /** Keep bounded Azure rate evidence, never response bodies, arbitrary headers or credentials. */
 function cashHttpFailure(response: Response, source: string): Error {
   const evidence: Record<string, number | string> = {};
+  let continuationDelay: number | undefined;
   try {
     const unsigned = (name: string): number | undefined => {
       const value = response.headers.get(name);
@@ -3178,6 +3187,7 @@ function cashHttpFailure(response: Response, source: string): Error {
     };
     const millis = unsigned("retry-after-ms"), seconds = unsigned("retry-after");
     const retryAfter = millis ?? (seconds !== undefined && Number.isSafeInteger(seconds * 1000) ? seconds * 1000 : undefined);
+    continuationDelay = response.headers.get("retry-after-ms") !== null ? millis : retryAfter;
     if (retryAfter !== undefined) evidence.retry_after_ms = retryAfter;
     const requests = unsigned("x-ratelimit-remaining-requests"), tokens = unsigned("x-ratelimit-remaining-tokens");
     if (requests !== undefined) evidence.remaining_requests = requests;
@@ -3192,9 +3202,87 @@ function cashHttpFailure(response: Response, source: string): Error {
   } catch {
     // An unreadable diagnostic must not replace the actual HTTP failure or expose its exception.
     evidence.diagnostics = "unreadable";
+    continuationDelay = undefined;
   }
   const suffix = Object.keys(evidence).length > 0 ? ` ${JSON.stringify(evidence)}` : "";
-  return new Error(`${source} request failed with HTTP ${response.status}${suffix}`);
+  return new CashHttpFailure(`${source} request failed with HTTP ${response.status}${suffix}`, response.status, continuationDelay);
+}
+
+/** A provider that ignores cancellation must still not hold its caller or wake up to spend later. */
+function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const finish = (done: () => void): void => {
+      signal.removeEventListener("abort", aborted);
+      done();
+    };
+    const aborted = (): void => finish(() => reject(signal.reason));
+    signal.addEventListener("abort", aborted, { once: true });
+    Promise.resolve().then(() => { signal.throwIfAborted(); return run(); }).then(
+      value => finish(() => resolve(value)), error => finish(() => reject(error)),
+    );
+  });
+}
+
+/** One unchanged-payload request, bounded across all paid attempts, body reads and server cooldowns. */
+async function cashRequestJson<T>(input: {
+  args: OpenWeightSpawnArgs; deployment: string; source: string; endpoint: string;
+  body: string; headers: Record<string, string>; next: (checkActive: () => void) => T;
+  canContinue: () => boolean; chargeFailure: (error: Error) => void;
+}): Promise<{ envelope: unknown; attempt: T }> {
+  const { args } = input;
+  const timeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
+  const clock = args.clock ?? systemClock;
+  const expires = clock.now() + timeoutMs;
+  const controller = new AbortController();
+  const relay = (): void => controller.abort(args.signal?.reason);
+  if (args.signal?.aborted) relay();
+  else args.signal?.addEventListener("abort", relay, { once: true });
+  const timeout = (): void => controller.abort(new OpenWeightRequestTimeoutError(timeoutMs, input.deployment));
+  const checkActive = (): void => {
+    if (clock.now() >= expires) timeout();
+    controller.signal.throwIfAborted();
+  };
+  const timer = setTimeout(timeout, timeoutMs);
+  try {
+    for (;;) {
+      checkActive();
+      const attempt = input.next(checkActive);
+      checkActive();
+      try {
+        const response = await cashAbortable(controller.signal, () => {
+          checkActive();
+          return (args.fetchImpl ?? fetch)(input.endpoint, {
+            method: "POST", headers: input.headers, body: input.body, signal: controller.signal,
+          });
+        });
+        if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(input.deployment);
+        if (!response.ok) {
+          const failure = cashHttpFailure(response, input.source);
+          // Release unread error bodies without interpreting untrusted content; failure accounting remains unchanged.
+          void response.body?.cancel().catch(() => {
+            console.error(JSON.stringify({ event: "cash.error_body_cancel_failed", status: response.status }));
+          });
+          throw failure;
+        }
+        const envelope = await cashAbortable(controller.signal, () => response.json());
+        checkActive();
+        args.streamObserver?.({ kind: "working", tsMs: (args.clock ?? systemClock).now() });
+        return { envelope, attempt };
+      } catch (error) {
+        if (!(error instanceof CashHttpFailure) || error.status !== 429 ||
+            error.retryAfterMs === undefined || error.retryAfterMs <= 0 ||
+            error.retryAfterMs >= expires - clock.now() || !input.canContinue()) throw error;
+        input.chargeFailure(error);
+        checkActive();
+        if (error.retryAfterMs >= expires - clock.now()) throw error;
+        await abortableDelay(error.retryAfterMs, undefined, { signal: controller.signal });
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    args.signal?.removeEventListener("abort", relay);
+  }
 }
 
 /** How long a 404 keeps a deployment out of selection before one request asks again. */
@@ -3643,6 +3731,8 @@ export interface OpenWeightSpawnArgs {
   responseFormat?: string;
   /** Test-only override; production uses the global fetch implementation. */
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
+  streamObserver?: CodexSpawnArgs["streamObserver"];
   /** The request deadline, defaulting to {@link OPENWEIGHT_REQUEST_TIMEOUT_MS}. A seam ONLY so a
    *  test can reach the aborted arm of the catch below: with the real 180s bound, covering it means
    *  a test that waits three minutes, and an uncovered catch arm is how a refusal quietly stops
@@ -4692,7 +4782,6 @@ export async function spawnFoundryClaudeWorker(
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error(`cash ${label} maxTurns must be a positive integer`);
     const messages: Array<{ role: string; content: unknown }> = [{ role: "user", content: args.prompt }];
     for (;;) {
-      turns += 1;
       const body = JSON.stringify({
         model: selection.model,
         system: OPENWEIGHT_OUTPUT_CONTRACT,
@@ -4701,30 +4790,32 @@ export async function spawnFoundryClaudeWorker(
         output_config: { effort: selection.effort === "default" ? "medium" : selection.effort },
         ...(tools.length ? { tools } : {}),
       });
-      const requestId = `${requestPrefix}-${turns}`;
-      const reservation = reserveOpenWeightBudget(config, {
-        requestId, deployment: selection.model, requestBodyBytes: Buffer.byteLength(body, "utf8"),
-        atIso: clock.iso(), squeezed: args.cashSqueezed === true,
+      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson({
+        args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
+        headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+        canContinue: () => turns < maxTurns,
+        chargeFailure: () => {
+          spentUsd += pending!.reservedUsd;
+          budgetSettledUsd += pending!.reservedUsd;
+          pending = undefined;
+        },
+        next: (checkActive) => {
+          if (turns >= maxTurns) throw new Error(`cash ${label} tool loop exceeded maxTurns=${maxTurns}`);
+          if (args.capabilityGrant) {
+            const verification = verifyCapabilityGrant(args.capabilityGrant.store, args.capabilityGrant.request);
+            if (!verification.ok) throw new CapabilityGrantRefusedError(verification.reason, verification.code, args.capabilityGrant.request.grantId);
+          }
+          checkActive();
+          const requestId = `${requestPrefix}-${++turns}`;
+          const reservation = reserveOpenWeightBudget(config, { requestId, deployment: selection.model,
+            requestBodyBytes: Buffer.byteLength(body, "utf8"), atIso: clock.iso(), squeezed: args.cashSqueezed === true });
+          budgetReservedUsd += reservation.reservedUsd;
+          pending = { requestId, reservedUsd: reservation.reservedUsd };
+          recordCashRequestEffort(requestEfforts, body, "foundry-messages");
+          return { requestId, reservation };
+        },
       });
-      budgetReservedUsd += reservation.reservedUsd;
-      pending = { requestId, reservedUsd: reservation.reservedUsd };
-      const abort = new AbortController();
-      const timeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
-      const deadline = setTimeout(() => abort.abort(), timeoutMs);
-      let response: Response;
-      try {
-        recordCashRequestEffort(requestEfforts, body, "foundry-messages");
-        response = await (args.fetchImpl ?? fetch)(endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-          body, signal: abort.signal,
-        });
-      } finally {
-        clearTimeout(deadline);
-      }
-      if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
-      if (!response.ok) throw cashHttpFailure(response, `cash ${label}`);
-      const payload = await response.json() as {
+      const payload = envelope as {
         id?: unknown; model?: unknown; stop_reason?: unknown; stop_details?: { category?: unknown } | null;
         content?: Array<Record<string, unknown>>;
         usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
@@ -4786,6 +4877,7 @@ export async function spawnFoundryClaudeWorker(
           throw new Error(`cash ${label} requested an undeclared or malformed tool`);
         }
         let result: unknown;
+        args.streamObserver?.({ kind: "tool-executing", tsMs: (args.clock ?? systemClock).now(), text: `[tool_use: ${call.name}]` });
         try {
           result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck,
             { config, runId: args.runId, taskId: args.taskId, clock });
@@ -4913,7 +5005,6 @@ export async function spawnOpenWeightWorker(
     // request refuses before the first reservation rather than once per turn.
     const responseFormatField = openWeightResponseFormatField(selection.model, args.responseFormat);
     for (;;) {
-      turns += 1;
       const body = responses ? responses.body(selection.model, selection.effort, OPENWEIGHT_MAX_COMPLETION_TOKENS, tools, args.responseFormat) : JSON.stringify({
         model: selection.model,
         messages,
@@ -4924,51 +5015,36 @@ export async function spawnOpenWeightWorker(
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });
-      // THE CAP IS ENFORCED HERE, NOT IN CONFIGURATION. Every turn of the tool loop is its own paid
-      // Azure request, so each one reserves before it is sent. A refusal throws out of this loop
-      // with no `fetch` performed, which is what makes `dailyCapUsd` a spend bound rather than a
-      // declared intention. Reserve FIRST, then send: the reservation is committed to disk before
-      // the money can be spent, so a crash between the two leaves the allowance charged, never free.
-      const requestId = `${runRequestPrefix}-${turns}`;
       const requestBodyBytes = Buffer.byteLength(body, "utf8");
-      const reservation = reserveOpenWeightBudget(config, {
-        requestId,
-        deployment: selection.model,
-        requestBodyBytes,
-        atIso: clock.iso(),
-        squeezed: args.cashSqueezed === true,
+      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson({
+        args, deployment: selection.model, source: "openweight", endpoint: openWeightEndpoint(config, selection.model), body,
+        headers: { "content-type": "application/json", "api-key": key },
+        canContinue: () => turns < maxTurns,
+        chargeFailure: (error) => {
+          const inputOnlyUsd = usesResponses ? openWeightReservationUsd(selection.model, requestBodyBytes)
+            : openWeightUsageUsd(selection.model, requestBodyBytes, 0);
+          settleOpenWeightBudget(config, { requestId: pendingReservation!.requestId, actualUsd: inputOnlyUsd,
+            atIso: clock.iso(), reason: error.message });
+          budgetSettledUsd += inputOnlyUsd;
+          pendingReservation = undefined;
+        },
+        next: (checkActive) => {
+          if (turns >= maxTurns) throw new Error(`openweight tool loop exceeded maxTurns=${maxTurns}`);
+          if (args.capabilityGrant) {
+            const verification = verifyCapabilityGrant(args.capabilityGrant.store, args.capabilityGrant.request);
+            if (!verification.ok) throw new CapabilityGrantRefusedError(verification.reason, verification.code, args.capabilityGrant.request.grantId);
+          }
+          checkActive();
+          const requestId = `${runRequestPrefix}-${++turns}`;
+          const reservation = reserveOpenWeightBudget(config, { requestId, deployment: selection.model,
+            requestBodyBytes, atIso: clock.iso(), squeezed: args.cashSqueezed === true });
+          budgetReservedUsd += reservation.reservedUsd;
+          pendingReservation = { requestId, deployment: selection.model, requestBodyBytes };
+          recordCashRequestEffort(requestEfforts, body, usesResponses ? "responses" : "chat-completions");
+          return { requestId, reservation };
+        },
       });
-      budgetReservedUsd += reservation.reservedUsd;
-      // ARMED THE MOMENT THE RESERVATION COMMITS, CLEARED ONLY ONCE ITS SETTLEMENT IS DECIDED
-      // (below). Anything that throws in between -- a transport error, a non-2xx status, an
-      // unparseable body -- leaves this set, which is exactly what the outer `catch` reads to know
-      // there is a reservation still to settle down (W1-T3666).
-      pendingReservation = { requestId, deployment: selection.model, requestBodyBytes };
-      // THE DEADLINE IS ARMED AROUND THE REQUEST, AND THE RESERVATION IS ALREADY COMMITTED. An
-      // abandoned request keeps its charge on purpose: the endpoint may have served and billed it,
-      // so handing the allowance back would let a timeout buy free authority against `dailyCapUsd`.
-      const abort = new AbortController();
-      const requestTimeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
-      const deadline = setTimeout(() => abort.abort(), requestTimeoutMs);
-      let response: Response;
-      try {
-        recordCashRequestEffort(requestEfforts, body, usesResponses ? "responses" : "chat-completions");
-        response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
-          method: "POST",
-          headers: { "content-type": "application/json", "api-key": key },
-          body,
-          signal: abort.signal,
-        });
-      } catch (error) {
-        if (abort.signal.aborted) throw new OpenWeightRequestTimeoutError(requestTimeoutMs, selection.model);
-        throw error;
-      } finally {
-        clearTimeout(deadline);
-      }
-      if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
-      if (!response.ok) throw cashHttpFailure(response, "openweight");
-      const envelope = await response.json();
-      const payload = (responses ? responses.read(envelope) : envelope) as {
+      const payload = (responses ? responses.read(envelope as Parameters<CashResponsesConversation["read"]>[0]) : envelope) as {
         id?: unknown;
         model?: unknown;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cached_tokens?: unknown; cache_creation_tokens?: unknown };
@@ -5033,6 +5109,8 @@ export async function spawnOpenWeightWorker(
         if (typeof name !== "string" || !declaredNames.has(name) || typeof id !== "string") {
           throw new Error("openweight response requested an undeclared tool");
         }
+        args.signal?.throwIfAborted();
+        args.streamObserver?.({ kind: "tool-executing", tsMs: clock.now(), text: `[tool_use: ${name}]` });
         let content: string;
         let toolFailed = false;
         try {

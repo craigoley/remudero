@@ -53,6 +53,8 @@ test("a push to main that changes an authoritative baked or build-context path s
     "deploy/codex-requirements.toml",
     ...BAKED_RUNTIME_SOURCE_PATHS,
     "package-lock.json",
+    "package.json",
+    "packages/**/package.json",
   ]);
 });
 
@@ -61,17 +63,18 @@ test("a push to main that changes only mounted source paths does not start the A
   // package-lock.json is deliberately excluded here (W1-T4061 added it above): the workflow DOES
   // start on a root lockfile edit, but its own first step decides build vs skip from content —
   // this list is only the mounted paths that must never even trigger that decision.
-  for (const mountedPath of ["src/**", "test/**", "plan/**", "scripts/**", "bin/**", "package.json"]) {
+  for (const mountedPath of ["src/**", "test/**", "plan/**", "scripts/**", "bin/**"]) {
     assert.equal(paths.includes(mountedPath), false, `${mountedPath} must not trigger an image build`);
   }
-  assert.equal(paths.some((path) => path.includes("**") || path === "."), false, "the push filter must stay exact");
+  assert.equal(paths.filter(path => path.includes("**")).join(), "packages/**/package.json", "only workspace manifests use a glob, never their mounted source");
+  assert.equal(paths.includes("."), false);
 });
 
 test("W1-T4061: a root package-lock.json push is gated behind a content-based guard, not built unconditionally", () => {
   const build = workflow().jobs?.build;
   const guard = build?.steps?.find((step) => step.name === "Decide whether this push needs a new image");
   assert.ok(guard, "a guard step must exist to keep the root lockfile path from building on every edit");
-  assert.match(guard!.run ?? "", /playwright-core/);
+  assert.match(guard!.run ?? "", /Object\.entries\(lock\.packages\)/);
   const buildPush = build?.steps?.find((step) => step.name === "Build and push (ACR)");
   assert.match((buildPush as { if?: string } | undefined)?.if ?? "", /steps\.image_guard\.outputs\.build/);
 });
