@@ -20,6 +20,17 @@
   rationale: |
     MEASURED by the ci-friction gardener: check:test:test/mutation-ratchet.test.ts:flaky cost 9.7 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
 
+    HUMAN REVIEW BEFORE IMPLEMENTATION:
+    The :flaky origin label is a recurrence signal, not evidence of nondeterminism.
+    The PR #12776 excerpt reports a classify importer missing from Stryker's commandRunner;
+    importing classify.ts does not establish that classify.ts caused the failure. PR #10551
+    lists several failing assertions without enough detail to establish one shared mechanism.
+    Review the two cited rounds from 2026-10-10 through 2026-10-18, capturing each head SHA,
+    failing assertion, importer list and commandRunner configuration before choosing a repair.
+    If the assertion or configuration mismatch differs, retain separate causes and reject the
+    shared-cause hypothesis. Keep verify: human until the evidence supports a bounded scope;
+    do not weaken the mutation census or suppress its failures to satisfy the remedy claim.
+
     WHERE IT COMES FROM:
     - src/lib/classify.ts: test/mutation-ratchet.test.ts imports it
     - test/mutation-ratchet.test.ts: named by the failing check
