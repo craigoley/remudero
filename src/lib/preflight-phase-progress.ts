@@ -14,18 +14,23 @@ export interface PreflightPhaseEvent {
 export type PreflightPhaseReporter = (event: Readonly<PreflightPhaseEvent>) => unknown;
 let nextPhaseId = 0;
 
-function sample(clock: Clock): number | null {
+function samplePreflightPhaseClock(clock: Clock): number | null {
   try { const value = clock.now(); return Number.isFinite(value) ? value : null; }
-  catch { return null; }
+  catch {
+    // A failed clock is unknown elapsed cost, never a measured zero or a check verdict.
+    return null;
+  }
 }
 
-function emit(report: PreflightPhaseReporter, event: PreflightPhaseEvent): void {
+function emitPreflightPhaseEvent(report: PreflightPhaseReporter, event: PreflightPhaseEvent): void {
   try {
     const pending = report(Object.freeze(event));
     // TypeScript's void-return convention also admits async observers. Their rejection is
     // missing telemetry, not an unhandled rejection allowed to overturn the check verdict.
     if (pending && typeof (pending as PromiseLike<unknown>).then === "function")
-      void Promise.resolve(pending).catch(() => undefined);
+      void Promise.resolve(pending).catch(() => {
+        // A rejected diagnostic is missing telemetry; only the original check owns its verdict.
+      });
   } catch { /* Diagnostic failure must not skip a check or replace its result/error. */ }
 }
 
@@ -36,19 +41,19 @@ export function observeSynchronousPreflightPhase<T>(
 ): T {
   if (report === undefined) return run();
   const phaseId = ++nextPhaseId;
-  const started = sample(clock);
-  emit(report, {step: "preflight.phase", phaseId, phase, event: "started", durationMs: null, trainingEligible: false});
+  const started = samplePreflightPhaseClock(clock);
+  emitPreflightPhaseEvent(report, {step: "preflight.phase", phaseId, phase, event: "started", durationMs: null, trainingEligible: false});
   let returned = false;
   try {
     const result = run();
     returned = true;
     return result;
   } finally {
-    const finished = sample(clock);
+    const finished = samplePreflightPhaseClock(clock);
     const delta = started !== null && finished !== null ? finished - started : NaN;
     const rounded = Math.ceil(delta);
     const durationMs = Number.isFinite(delta) && delta >= 0 && Number.isSafeInteger(rounded) ? rounded : null;
-    emit(report, {step: "preflight.phase", phaseId, phase, event: returned ? "returned" : "threw", durationMs, trainingEligible: false});
+    emitPreflightPhaseEvent(report, {step: "preflight.phase", phaseId, phase, event: returned ? "returned" : "threw", durationMs, trainingEligible: false});
   }
 }
 

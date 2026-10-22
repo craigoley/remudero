@@ -11,7 +11,7 @@ test("preflight phase progress starts before each original check and preserves i
   };
   const baseline = runPreflight("/fixture", { spawn });
   order.length = 0;
-  const events: Array<{phase: string; event: string; phaseId: string; durationMs: number | null}> = [];
+  const events: Array<{phase: string; event: string; phaseId: number; durationMs: number | null}> = [];
   const observed = runPreflight("/fixture", {
     spawn,
     onPhase: event => { events.push(event); order.push(`${event.event}:${event.phase}`); },
