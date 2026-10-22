@@ -8,6 +8,7 @@ import {
 } from "./typecheck-buildinfo.js";
 import { dirIsWritable, prepareTypecheckRun } from "./typecheck-run.js";
 import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { observeSynchronousPreflightPhase, type PreflightPhaseReporter } from "./preflight-phase-progress.js";
 
 /**
  * Conventional-Commits shaping for commit messages the harness builds (MASTER-PLAN §6A, the
@@ -639,6 +640,8 @@ export interface PreflightResult {
 export interface PreflightDeps {
   range?: PreflightRange;
   spawn?: PreflightSpawn;
+  /** Optional data-only diagnostics; direct API callers remain quiet by default. */
+  onPhase?: PreflightPhaseReporter;
 }
 
 /**
@@ -651,9 +654,9 @@ export function runPreflight(repoRoot: string, deps: PreflightDeps = {}): Prefli
   const range = deps.range ?? DEFAULT_PREFLIGHT_RANGE;
   const spawn = deps.spawn ?? defaultPreflightSpawn;
   const steps: PreflightStepResult[] = [
-    commitlintStep(repoRoot, range, spawn),
-    typecheckStep(repoRoot, spawn),
-    emitterChecksStep(repoRoot, range, spawn),
+    observeSynchronousPreflightPhase("commitlint", () => commitlintStep(repoRoot, range, spawn), deps.onPhase),
+    observeSynchronousPreflightPhase("typecheck", () => typecheckStep(repoRoot, spawn), deps.onPhase),
+    observeSynchronousPreflightPhase("emitter-checks", () => emitterChecksStep(repoRoot, range, spawn), deps.onPhase),
   ];
   return { steps, ok: steps.every((s) => s.ok) };
 }
