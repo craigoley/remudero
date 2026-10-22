@@ -90,7 +90,7 @@ import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
 // here; a value import would close a real cycle. This module never shells GitHub itself (W1-T372).
 import type { GhRateLimitBuckets } from "./daemon-health.js";
-import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, LightPassScopeName, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 // W1-T3691 — a value import (`trackStaleReviewerSkipRecurrence`, `renderHeldReviewQueueBlocker`)
 // alongside the type-only ones above: sweep.ts imports nothing from this module, so this closes
 // no cycle either, same as the value import just below.
@@ -2084,6 +2084,8 @@ export const INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS = 1_000;
  * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review. */
 export interface LightPassScope {
   readonly reviewOnly: boolean;
+  /** W1-T9569: WHY the pass is review-only, so its stand-downs name it; an ordinary pass passes none. */
+  readonly scope?: LightPassScopeName;
   /** W1-T9808: present only while a restart is latched; the pass asks it before each review or fix it admits. */
   readonly admit?: RestartAdmission;
 }
@@ -2321,7 +2323,8 @@ export function startInterphaseReviewClock(
           passes += 1;
           const pass = (async () => {
             try {
-              await (reviewOnly ? deps.sweepLight!(admit ? { reviewOnly: true, admit } : { reviewOnly: true }) : deps.sweepLight!());
+              const named = { reviewOnly: true, scope: scope ?? "interphase-review" } as const;
+              await (reviewOnly ? deps.sweepLight!(admit ? { ...named, admit } : named) : deps.sweepLight!());
               if (reviewOnly) log("daemon.review_clock.pass", { trigger, ...scopeTag, review_only: true });
               if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
             } catch (e) {
@@ -2835,7 +2838,7 @@ function startInFlightTicker(
             log("daemon.sweep_light.review_only", { phase: owner.phase, detail: lightHalt });
             const pass = (async () => {
               try {
-                await deps.sweepLight!(admit ? { reviewOnly: true, admit } : { reviewOnly: true });
+                await deps.sweepLight!(admit ? { reviewOnly: true, scope: "pause", admit } : { reviewOnly: true, scope: "pause" });
               } catch (e) {
                 log("daemon.sweep_light.failed", { phase: owner.phase, review_only: true, error: String((e as Error)?.message ?? e) });
               }
@@ -5826,7 +5829,7 @@ export async function runDaemon(
       bootReviewInFlight = true;
       void (async () => {
         try {
-          await deps.sweepLight?.({ reviewOnly: true });
+          await deps.sweepLight?.({ reviewOnly: true, scope: "boot" });
         } catch (e) {
           log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
         } finally {
@@ -5986,7 +5989,7 @@ export async function runDaemon(
           pushes_per_pr_hour: demand.pushesPerPrHour, poll_interval_ms: pollIntervalMs, pass: passes,
         });
         try {
-          await deps.sweepLight!({ reviewOnly: true });
+          await deps.sweepLight!({ reviewOnly: true, scope: "idle" });
         } catch (e) {
           log("daemon.sweep_light.failed", { phase: "idle", error: String((e as Error)?.message ?? e) });
         }
