@@ -25,6 +25,7 @@ const MAX_AUTH_URL_LENGTH = 2_048;
 const CODEX_AUTH_HOSTS = new Set(["auth.openai.com", "chatgpt.com"]);
 /** W1-T10380: the hosts the pinned Claude CLI's `auth login` prints its authorize URL on (fixture in the test). */
 export const CLAUDE_AUTH_HOSTS = new Set(["claude.com", "claude.ai", "platform.claude.com", "console.anthropic.com"]);
+/** PRIMARY CONTROL: the longest pasted code the CLI is ever handed; anything longer is refused unread. */
 export const MAX_CLAUDE_CODE_LENGTH = 1_024;
 const MAX_CLAUDE_OUTPUT_LENGTH = 64 * 1024;
 const CLAUDE_CODE_WAIT_MS = 20_000;
