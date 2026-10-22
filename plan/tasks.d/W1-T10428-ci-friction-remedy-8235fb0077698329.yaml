@@ -1,0 +1,44 @@
+- id: W1-T10428
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/mutation-ratchet.test.ts:flaky cost 9.7 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.58
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/mutation-ratchet.test.ts:flaky"
+  files:
+    - src/lib/classify.ts
+    - test/triage/ci-friction-remedy-8235fb0077698329.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/mutation-ratchet.test.ts:flaky"
+      proof: "grep: test(\"W1-T10428: check:test:test/mutation-ratchet.test.ts:flaky is prevented, not retried\" in test/triage/ci-friction-remedy-8235fb0077698329.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/mutation-ratchet.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/mutation-ratchet.test.ts:flaky cost 9.7 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/classify.ts: test/mutation-ratchet.test.ts imports it
+    - test/mutation-ratchet.test.ts: named by the failing check
+    - the rounds name a failing test: test/mutation-ratchet.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12776 (https://github.com/craigoley/remudero/pull/12776) at 2026-10-18T15:41:15.914Z: ci-log round — coverage-shard (6/8): test/mutation-ratchet.test.ts; rule-checks: test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts
+        failing tests: the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix)
+        log excerpt:
+          | not ok 1902 - the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix)
+          |   ---
+          |   duration_ms: 401.832243
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/mutation-ratchet.test.ts:337:1'
+          |   failureType: 'testCodeFailure'
+          |   error: "test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts imports src/lib/classify.ts but is NOT in stryker's commandRunner, so its assertions kill no mutants and the score silently drops -- add it to stryker.conf.json (an instrument-only PR; Standing rule 25 forbids
+    - PR #10551 (https://github.com/craigoley/remudero/pull/10551) at 2026-10-10T05:29:09.255Z: ci-log round — coverage-shard (3/8): test/mutation-ratchet.test.ts; rule-checks; remudero-review
+        failing tests: W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its refusal surfaces too; W1-T2862: production consumes the summary before the first implementation verdict branch removes its worktree; MUTANT: the read is wired ONCE, and ABOVE every verdict branch that reclaims the worktree; the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
