@@ -9162,6 +9162,8 @@ test("W1-T2564: the attempt-key migration runs ONCE per daemon start, not per po
 // same file — the #5571 coverage-shard break this placement exists to avoid repeating. ──
 
 test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung reaches its ordinary fresh semantic review without emitting fix.ci_not_green or spending a second strike", async () => {
+  const { gitRepo } = await import("./helpers/git-repo.js");
+  const source = gitRepo({ kind: "target-green-review-source" });
   const spawnCalls: SpawnWorkerArgs[] = [];
   const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
   const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
@@ -9169,6 +9171,8 @@ test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung r
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts(),
+    worktreePath: source.dir,
+    reviewBase: { ...fixRungBaseOpts().reviewBase, headCheckoutDir: source.dir },
     strikeCap: 2,
     initialReview: failing,
     deps: {
@@ -9180,7 +9184,7 @@ test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung r
       // The verdict the FIXED `waitForCiGreen` now returns for a console-shaped rollup —
       // console-ci/ci-gate/Vercel required and SUCCESS, remudero-review still pending, no context
       // named `ci` — carrying the sha it judged (CiGateOutcome, W1-T2804).
-      waitForCiGreen: async () => ({ state: "green" as const, sha: "consolesha1" }),
+      waitForCiGreen: async () => ({ state: "green" as const, sha: source.git("rev-parse", "HEAD") }),
       runReview: async () => passing,
       push: () => {},
       issues: fakeIssues([]),

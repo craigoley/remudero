@@ -7,8 +7,7 @@
  * logged `fix.ci_not_green` and returned `handed_off` with no outcome row at all.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { gitRepo } from "./helpers/git-repo.js";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -21,7 +20,8 @@ type Row = { step: string } & Record<string, unknown>;
 type Run = Parameters<typeof runFixRung>[0];
 type Deps = Run["deps"];
 
-const HEAD = "cd7e7dfb0ee5fd1c8aaf26771a3c2884ce701417";
+const source = gitRepo({ kind: "ci-not-green-source" });
+const HEAD = source.git("rev-parse", "HEAD");
 const PR_URL = "https://github.com/acme/remudero/pull/9450";
 const mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 } as const;
 /** The rows that end a round: exactly one of them, or a further strike, follows `fix.ci_not_green`. */
@@ -46,7 +46,7 @@ function initialReview(state: "failure" | "success" = "failure"): Run["initialRe
 
 /** A ci-log dispatch shaped like #9450's: strike cap 2, one red required check, a worker that commits. */
 function harness(over: Partial<Deps> & { strikeCap?: number; birthWorktreeSnapshot?: WorktreeSnapshot } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "rmd-ci-not-green-outcome-"));
+  const root = gitRepo({ kind: "ci-not-green-outcome", cloneFrom: source.dir }).dir;
   const rows: Row[] = [];
   const issues: string[] = [];
   let spawns = 0;

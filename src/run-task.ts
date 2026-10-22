@@ -13472,6 +13472,21 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // W1-T106: green CI proves the merge ref computes, so merge mode ends (a named red ends it above, #10787).
     currentMergeConflict = undefined;
 
+    const judgedCiHead = ciGateSha(ci);
+    if (judgedCiHead !== undefined) {
+      const checkout = await hostWorktreeGitAsync(opts.reviewBase.headCheckoutDir, ["rev-parse", "HEAD"]).then(
+        head => ({ kind: "known" as const, headSha: head.trim() }),
+        error => ({ kind: "unknown" as const, reason: String(error) }),
+      );
+      if (checkout.kind === "unknown" || checkout.headSha !== judgedCiHead) {
+        const reason = checkout.kind === "unknown" ? `review checkout unreadable after CI: ${checkout.reason}`
+          : `CI judged ${judgedCiHead}, but the review checkout is ${checkout.headSha}`;
+        deps.log("fix.stood_down", { site: "rung.post_ci_review_source", ci_head_sha: judgedCiHead,
+          ...(checkout.kind === "known" ? { checkout_head_sha: checkout.headSha } : { checkout_error: checkout.reason }), reason });
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      }
+    }
+
     // W1-T3501: judge the CURRENT PR BODY — the artifact the authoritative
     // reviewCommand/post-review path judges — not the fix worker's chat text. The
     // worker transcript remains available to the prompt and diagnostics, including
