@@ -1548,6 +1548,8 @@ import {
   dependabotCommandAnswer,
   type DependabotIssueComment,
   reconcileDependabotOwnRed,
+  prioritizeDepReviewRepairs,
+  type DepReviewRepairSnapshot,
   reconcileDependabotRefusedPath,
   reconcileDependabotStaleEvent,
   dependabotStaleEventVerdict,
@@ -32202,7 +32204,7 @@ function retroTriggerDecide(now: Date, ctx: RetroTriggerContext, shipped: Shippe
 // throttle, so "refuse ⇒ behave as disabled" would WIDEN what dispatch may do — backwards for
 // design (v)'s "can only refuse" invariant. Wiring a rung whose refusal direction is inverted is
 // this task's own follow-up, not a call this diff makes for it.
-export const AUTO_TRIAGE_CONTRACT_VERSION = "v1";
+export const AUTO_TRIAGE_CONTRACT_VERSION = "v2-aged-dependency-repair-priority";
 export const MEASUREMENT_CADENCE_CONTRACT_VERSION = "v1";
 export const DIGEST_CADENCE_CONTRACT_VERSION = "v1";
 export const INTAKE_CADENCE_CONTRACT_VERSION = "v1";
@@ -32332,6 +32334,9 @@ export function buildAutoTriageDaemonHooks(deps: {
   runTriage?: (feedbackId: string) => Promise<number>;
   config?: Config;
   now?: () => Date;
+  repairSnapshot?: () => DepReviewRepairSnapshot | undefined;
+  /** Fixture repository for feedback reads; production retains repoRoot, distinct from config.root. */
+  feedbackRoot?: string;
   /** Injected policy, forwarded to {@link autoTriageCheck} — see its doc for why this seam exists.
    *  Production passes none and the checked-in `plan/policy.yaml` governs, exactly as before. */
   policy?: Policy;
@@ -32346,7 +32351,8 @@ export function buildAutoTriageDaemonHooks(deps: {
   const check =
     deps.check ??
     ((signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) =>
-      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ratifications: deps.ratifications, ...signals }));
+      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ratifications: deps.ratifications,
+        repairSnapshot: deps.repairSnapshot, feedbackRoot: deps.feedbackRoot, ...signals }));
   const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
   const configFor = () => deps.config ?? loadConfig();
   return {
@@ -32383,6 +32389,8 @@ export async function autoTriageCheck(
   opts: {
     config?: Config;
     now?: Date;
+    repairSnapshot?: () => DepReviewRepairSnapshot | undefined;
+    feedbackRoot?: string;
     policy?: Policy;
     /** W1-T2694: injected ratification pins — same seam shape as `policy` above (this
      *  function's own doc). Production passes none and the checked-in (or absent)
@@ -32417,6 +32425,7 @@ export async function autoTriageCheck(
   }
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
+  const feedbackRoot = opts.feedbackRoot ?? repoRoot;
   const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
@@ -32436,10 +32445,10 @@ export async function autoTriageCheck(
     marker: readAutoTriageMarker(autoTriageMarkerPath(config.root)),
     now,
     // repoRoot, NOT config.root — see this block's doc comment.
-    candidates: newFeedbackIdsOldestFirst(repoRoot),
+    candidates: newFeedbackIdsOldestFirst(feedbackRoot),
     // SAME repoRoot, SAME reasoning, read through the SAME underlying walk (W1-T2289) — see
     // `oldestFeedbackAgeMs`'s own doc for why this must never drift onto `config.root`.
-    oldestCandidateAgeMs: oldestFeedbackAgeMs(repoRoot, now),
+    oldestCandidateAgeMs: oldestFeedbackAgeMs(feedbackRoot, now),
   };
   // W1-T4769: decide FIRST without any claim knowledge — every refusal that does not depend on which
   // entry is claimed returns here with no git or ledger I/O. Only a would-be fire pays for the sweep.
@@ -32457,7 +32466,12 @@ export async function autoTriageCheck(
   }
   const passInputs = { ...inputs, candidates };
   const sweep = await triageClaimSweepForPass(config, now, candidates, opts);
-  return decideAutoTriage(sweep === undefined ? passInputs : { ...passInputs, heldCandidates: sweep });
+  const ordered = await prioritizeDepReviewRepairs(candidates, join(config.root, "state"), opts.repairSnapshot?.(), now.getTime(),
+    (step, extra) => appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }));
+  const decision = decideAutoTriage({ ...passInputs, candidates: ordered, ...(sweep === undefined ? {} : { heldCandidates: sweep }) });
+  return decision.fire && ordered.indexOf(decision.feedbackId) < candidates.indexOf(decision.feedbackId)
+    ? { ...decision, reason: "verified aged dependency repair precedes ordinary FIFO feedback; all normal triage bounds passed" }
+    : decision;
 }
 
 /**
