@@ -41,3 +41,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.55
+    reasons:
+      - "high-risk verdict at confidence 0.55 — on the change's description/files alone, no diff was read — The task's stated source is src/lib/sweep.ts, where a line names \"UNTRUSTED SCANNER EVIDENCE\" about a CodeQL check failure on a high-severity alert. A remedy that stops dispatching a fix round for this cause could weaken or suppress security-scanner handling, which touches review policy.; on the change's description/files alone, no diff was read — The rationale's recent-round evidence shows failing tests (W1-T6282, deploy-logic and supervisor catalog tests) that appear unrelated to CodeQL alert #910. The cause label mixes a scanner alert with flaky test failures, so what this change should fix cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The declared test file does not exist at base, and no bounded change view was supplied. The acceptance criterion is a grep for a test title, which is weak verification of the remedy.; on the change's description/files alone, no diff was read — The family track record is 39 merged against 58 declined, a mean of 0.66, so it is judged more strictly. The task is machine-authored."
+    judged_at: "2026-10-22T05:21:35.872Z"
+    pin: "de2a46c868533fa8c14dd444d8bfa697fd7dd3ae210866a28c0b9effb291967c"
