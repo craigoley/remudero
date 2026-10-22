@@ -463,6 +463,13 @@ export interface ProviderEligibility {
 
 /** The auction's own admission test, exported so a decision record states it rather than re-deriving it. */
 export function providerEligibility(capacity: ProviderCapacity, reservePercent: number): ProviderEligibility {
+  // W1-T10383: an exhausted capacity ANSWERED (every candidate sat below the reserve), so it is
+  // `below-reserve` with the tightest window it still carries, not `unreadable`.
+  if (capacity.exhausted === true) {
+    const carried = providerAllocationWindows(capacity).filter(validCapacityWindow);
+    return { eligible: false, reason: "below-reserve",
+      headroomPercent: carried.length > 0 ? Math.min(...carried.map((window) => 100 - window.usedPercent)) : null };
+  }
   const remaining = tightestRemaining(capacity);
   const headroomPercent = Number.isFinite(remaining) ? remaining : null;
   if (!capacity.readable || capacity.windows.length === 0) return { eligible: false, reason: "unreadable", headroomPercent };
