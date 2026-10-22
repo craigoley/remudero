@@ -13,7 +13,16 @@ const { requiresSetup } = (existsSync(script) ? await import(pathToFileURL(scrip
   requiresSetup: (files: unknown, opts: { event: string; shard: string; live: string }) => boolean;
 };
 type Step = { name?: string; id?: string; uses?: string; if?: string; run?: string };
-const ci = parse(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')).jobs.ci as { if?: string; steps: Step[] };
+const ci = parse(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')).jobs.ci as { if?: string; needs?: string | string[]; steps: Step[] };
+
+function assertProducerAwareCiScheduling(job: { if?: string | boolean; needs?: string | string[] }): void {
+  if (job.needs === undefined) {
+    assert.equal(job.if, undefined, "an independent required matrix remains unconditional");
+    return;
+  }
+  assert.deepEqual(job.needs, ["commitlint"], "only the same-run producer may precede the required matrix");
+  assert.equal(job.if, "${{ always() && !cancelled() }}", "producer failure or skip cannot suppress the required matrix");
+}
 
 test('CI admission skips setup only on the seven idle source PR shards and fails closed elsewhere', () => {
   const opts = { event: 'pull_request', shard: '2', live: '0' };
@@ -54,7 +63,7 @@ test('CI idle shards run the actual install and classifier guards without depend
   const skipped = runStep(classify, 'false');
   assert.equal(readFileSync(join(skipped.fixture, 'changed-files.txt'), 'utf8'), 'src/leaf.ts\n');
   assert.match(readFileSync(join(skipped.fixture, 'out'), 'utf8'), /class=SOURCE/);
-  assert.equal(ci.if, undefined, 'the matrix check must still register');
+  assertProducerAwareCiScheduling(ci);
   assert.equal(ci.steps.find((step) => step.name === 'Restore npm cache only for admitted work')?.if, "${{ steps.admission.outputs.setup != 'false' }}");
   // W1-T5697: the browser cache follows the browser admission, which equals setup on shards 2-8.
   assert.equal(ci.steps.find((step) => step.name === "Cache Playwright's Chromium download")?.if, "${{ steps.admission.outputs.browser != 'false' }}");
@@ -73,4 +82,16 @@ test('CI admission runs on pinned native Node before npm and treats unreadable d
   assert.equal(unreadable.status, 0);
   assert.equal(unreadable.stdout.trim(), 'true');
   assert.match(unreadable.stderr, /unreadable diff/);
+});
+
+test("CI admission fixture rejects parent-skippable matrix scheduling", () => {
+  for (const job of [
+    { needs: ["commitlint"] },
+    { needs: ["commitlint"], if: "github.event_name == 'pull_request'" },
+    { needs: ["commitlint"], if: "${{ success() }}" },
+    { needs: ["other"], if: "${{ always() && !cancelled() }}" },
+    { if: "${{ always() && !cancelled() }}" },
+  ]) assert.throws(() => assertProducerAwareCiScheduling(job));
+  assert.doesNotThrow(() => assertProducerAwareCiScheduling({}));
+  assert.doesNotThrow(() => assertProducerAwareCiScheduling({ needs: ["commitlint"], if: "${{ always() && !cancelled() }}" }));
 });
