@@ -2142,15 +2142,17 @@ export function commitInboxDraftOutcomes(opts: {
 }): void {
   const registryPath = join(opts.stateDir, "inbox-proposals.json"), draftsPath = join(opts.stateDir, "inbox-drafts.json"),
     attemptsPath = join(opts.stateDir, "inbox-draft-attempts.json"), outboxPath = join(opts.stateDir, "inbox-draft-completions.json");
+  // Strictly parse existing files. A corrupt store is not an empty successful observation.
+  const readObject = (path: string): Record<string, unknown> => {
+    let raw: string;
+    try { raw = fs.readFileSync(path, "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return {}; throw error; }
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`invalid draft object at ${path}`);
+    return value as Record<string, unknown>;
+  };
+  // Idle recovery must not synchronously scan every shard. Pending receipts are re-read under lock.
+  if (opts.outcomes.length === 0 && Object.keys(readObject(outboxPath)).length === 0) return;
   updateProposalRegistry(registryPath, current => {
-    // Strictly parse existing files. A corrupt store is not an empty successful observation.
-    const readObject = (path: string): Record<string, unknown> => {
-      let raw: string;
-      try { raw = fs.readFileSync(path, "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return {}; throw error; }
-      const value: unknown = JSON.parse(raw);
-      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`invalid draft object at ${path}`);
-      return value as Record<string, unknown>;
-    };
     const drafts = readObject(draftsPath) as DraftCache, attempts = (opts.lane ? readObject(attemptsPath) : {}) as DraftAttemptCache,
       outbox = readObject(outboxPath) as Record<string, DraftCompletionOutboxEntry>;
     const saveOutbox = () => writeAtomic(outboxPath, JSON.stringify(outbox));
