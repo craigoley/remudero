@@ -640,7 +640,7 @@
 - id: coverage-shard-one-four-refusal-repair-lane
   subsystem: ci
   lifecycle: active
-  files: ["plan/tasks.d/**", test/**, "src/**"]
+  files: ["plan/tasks.d/**", "test/**", "src/**"]
   fact: >-
     When coverage-shard (1/4) refuses a pull request, inspect that shard's failure output before
     repairing; a refusal cohort and its repaired diffs do not establish a shared cause. Route the
