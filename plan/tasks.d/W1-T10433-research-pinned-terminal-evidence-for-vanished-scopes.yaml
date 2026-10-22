@@ -10,7 +10,7 @@
   budget_usd: 4
   status: queued
   attempts: 0
-  author_class: human
+  author_class: machine
   origin: "operator archive disposition 2026-10-22; docket P03/P03a/P06; contract ruling: require pinned terminal evidence"
   files: [docs/forensics/pinned-terminal-scope-contract.md]
   rationale: |

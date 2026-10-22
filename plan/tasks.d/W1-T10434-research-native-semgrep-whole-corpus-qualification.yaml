@@ -10,7 +10,7 @@
   budget_usd: 4
   status: queued
   attempts: 0
-  author_class: human
+  author_class: machine
   origin: "operator archive disposition 2026-10-22; docket C02 and scanner portion of P02"
   files: [docs/forensics/native-semgrep-corpus-qualification.md]
   rationale: |

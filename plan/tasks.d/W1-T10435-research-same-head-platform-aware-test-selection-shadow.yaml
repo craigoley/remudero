@@ -10,7 +10,7 @@
   budget_usd: 4
   status: queued
   attempts: 0
-  author_class: human
+  author_class: machine
   origin: "operator archive disposition 2026-10-22; docket P09; native runner qualification remains separate"
   files: [docs/forensics/same-head-test-selection-shadow.md]
   rationale: |
