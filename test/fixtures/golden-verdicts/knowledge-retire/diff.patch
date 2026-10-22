@@ -1,25 +1,25 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -127,0 +128,7 @@
+@@ -134,0 +135,7 @@
 +
-+## Pass 2026-10-16T20:50:36.321Z
++## Pass 2026-10-22T06:10:07.785Z
 +
-+- retire claims-gate-lane: Workers offered it have rarely used it, compared with other learnings.
-+- retire criteria-go-stale-on-relocation: Workers offered it have rarely used it, compared with other learnings.
++- retire commitlint-pr-title-lane: Workers offered it have rarely used it, compared with other learnings.
++- retire position-is-presentation-not-identity: Workers offered it have rarely used it, compared with other learnings.
 +
-+Learnings used when offered: 28%. Dangling Why pointers: 1.
++Learnings used when offered: 26%. Dangling Why pointers: 1.
 diff --git a/learnings/ci.yaml b/learnings/ci.yaml
 --- a/learnings/ci.yaml
 +++ b/learnings/ci.yaml
-@@ -289,1 +289,2 @@
+@@ -260,1 +260,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire claims-gate-lane
++  # knowledge gardener: retire commitlint-pr-title-lane
 +  lifecycle: superseded
-diff --git a/learnings/failures.yaml b/learnings/failures.yaml
---- a/learnings/failures.yaml
-+++ b/learnings/failures.yaml
-@@ -38,1 +38,2 @@
+diff --git a/learnings/testing.yaml b/learnings/testing.yaml
+--- a/learnings/testing.yaml
++++ b/learnings/testing.yaml
+@@ -96,1 +96,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire criteria-go-stale-on-relocation
++  # knowledge gardener: retire position-is-presentation-not-identity
 +  lifecycle: superseded

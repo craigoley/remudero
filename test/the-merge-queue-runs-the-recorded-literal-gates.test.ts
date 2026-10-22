@@ -104,6 +104,8 @@ tool="$(basename "$0")"
 echo "$tool $*" >> "$CALL_LOG"
 if [ "$tool" = npm ] && [ -n "\${BASE_SHA:-}" ]; then echo "env BASE_SHA=$BASE_SHA" >> "$CALL_LOG"; fi
 case "$tool $*" in
+  "git rev-parse --verify ${QUEUE_BASE}^{commit}"|"git rev-parse --verify HEAD^1^{commit}") echo "${QUEUE_BASE}" ;;
+  "git archive "*) exit 1 ;; # The modeled missing archive fails explicitly on BSD and GNU tar.
   *diff-class.mjs*) echo SOURCE ;;
   *containment-diff-trigger.ts*) echo "matched=false" >> "$GITHUB_OUTPUT" ;;
   *bundled-gate-report.mjs*) echo "$2" ;;
@@ -193,6 +195,14 @@ function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcom
   return result;
 }
 
+test("merge queue revision failure remains unavailable before any archive attempt", () => {
+  const run = runJob("merge_group", "git rev-parse");
+  assert.deepEqual(run.failures, []);
+  assert.deepEqual(run.calls.get("dependency-evidence"), [`git rev-parse --verify ${QUEUE_BASE}^{commit}`],
+    "the fixture failure injection must stop revision resolution before archive execution");
+  assert.match(run.exportedEnv.RMD_CI_DEPENDENCY_EVIDENCE ?? "", /unavailable\.json$/);
+});
+
 test("merge queue fixture executes the unavailable producer without inventing evidence", () => {
   const run = runJob("merge_group");
   assert.deepEqual(run.failures, []);
@@ -236,7 +246,7 @@ function posted(run: JobRun): Array<[string, string]> {
 // The argv each base-reading or PR-scoped step reaches today on pull_request, recorded verbatim.
 const PR_ARGV: Record<string, string[]> = {
   install: ["npm ci"],
-  "dependency-evidence": [`git rev-parse --verify ${QUEUE_BASE}^{commit}`, "git rev-parse --verify HEAD^1^{commit}", "git archive "],
+  "dependency-evidence": [`git rev-parse --verify ${QUEUE_BASE}^{commit}`, "git rev-parse --verify HEAD^1^{commit}", `git archive ${QUEUE_BASE}`],
   classify: ["git diff --name-only HEAD^1...HEAD", "node scripts/diff-class.mjs --changed-files changed-files.txt"],
   "rule-checks": ["node --import tsx scripts/list-rule-suites.mjs --run"],
   "leak-grep": ["leak-grep.sh "],
@@ -271,7 +281,7 @@ test("W1-T5522: a group commit runs the ratchets against the queue base", () => 
   assert.deepEqual(at("comment-load-ratchet"), [`npm run --silent comment-load-signal -- --base ${QUEUE_BASE}`]);
   assert.deepEqual(at("baseline-monotonic"), [`node scripts/baseline-monotonic-check.mjs --base ${QUEUE_BASE}`]);
   assert.deepEqual(at("lint-plan"), [`node --import tsx --input-type=module - ${QUEUE_BASE}`]);
-  assert.deepEqual(at("dependency-evidence"), [`git rev-parse --verify ${QUEUE_BASE}^{commit}`, "git archive "], "the simulated source archive is absent and the producer must retain UNKNOWN");
+  assert.deepEqual(at("dependency-evidence"), [`git rev-parse --verify ${QUEUE_BASE}^{commit}`, `git archive ${QUEUE_BASE}`], "the simulated source archive is absent and the producer must retain UNKNOWN");
   assert.deepEqual(at("task-id-existence"), [`node scripts/task-id-existence-check.mjs --base ${QUEUE_BASE}`]);
   assert.deepEqual(at("source-size"), [`npm run --silent source-size-signal -- --base ${QUEUE_BASE}`]);
   // The diff-reading steps and the CLAUDE.md net-byte comparand read it too.

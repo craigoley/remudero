@@ -257,7 +257,8 @@
 
 - id: commitlint-pr-title-lane
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire commitlint-pr-title-lane
+  lifecycle: superseded
   files: ["plan/tasks.d/**", src/lib/plan-pr-emitter.ts, src/run-task.ts, .github/workflows/ci.yml]
   fact: >-
     The commitlint gate checks the LIVE PR TITLE, which becomes the squash-merge subject, not the

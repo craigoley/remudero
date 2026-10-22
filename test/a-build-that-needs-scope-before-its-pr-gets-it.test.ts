@@ -116,7 +116,9 @@ async function dispatch(f: ReturnType<typeof fixture>, spawn: typeof spawnWorker
 function amendmentIo(f: ReturnType<typeof fixture>) {
   const prs: Array<Parameters<ProofAmendmentWritePorts["createPr"]>[0]> = [];
   const io: NonNullable<Parameters<typeof runTask>[1]>["implementScopeAmendmentPortsIo"] = {
-    gitPushFn: () => {}, probeExistingPlanPrFn: () => undefined,
+    gitPushFn: (_wp, branch, sha) => {
+      execFileSync("git", ["-C", f.repoDir, "update-ref", `refs/remotes/origin/${branch}`, sha]);
+    }, probeExistingPlanPrFn: () => undefined,
     createPlanPrRestFn: (_fetch, _owner, _repo, opts) => {
       prs.push(opts);
       return { prUrl: "https://github.com/acme/remudero/pull/7", prNumber: 7 };
@@ -136,7 +138,7 @@ function saved(f: ReturnType<typeof fixture>) {
 }
 
 function mergeAmendment(f: ReturnType<typeof fixture>, branch: string) {
-  const text = execFileSync("git", ["-C", f.repoDir, "show", `${branch}:${SHARD}`], { encoding: "utf8" });
+  const text = execFileSync("git", ["-C", f.repoDir, "show", `refs/remotes/origin/${branch}:${SHARD}`], { encoding: "utf8" });
   writeFileSync(join(f.seed.dir, SHARD), text);
   f.seed.git("add", SHARD);
   f.seed.git("commit", "-qm", "merge scope amendment");
@@ -156,7 +158,7 @@ test("W1-T10070: a build with no PR opens a shard amendment for its companions",
     const pr = amendment.prs[0]!;
     assert.match(pr.head, new RegExp(`^scope-amendment/${TASK_ID}-build-[a-f0-9]{20}$`));
     assert.match(pr.title, /files for its build$/);
-    const changedShard = execFileSync("git", ["-C", f.repoDir, "show", `${pr.head}:${SHARD}`], { encoding: "utf8" });
+    const changedShard = execFileSync("git", ["-C", f.repoDir, "show", `refs/remotes/origin/${pr.head}:${SHARD}`], { encoding: "utf8" });
     assert.deepEqual(parse(changedShard)[0].files.sort(), [...DECLARED, LEFT_OUT].sort());
     const recovery = saved(f);
     assert.equal(Buffer.from(recovery.data.companions[0]!.bytes, "base64").toString(), IMPORTING[LEFT_OUT]);
