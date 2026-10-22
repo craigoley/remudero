@@ -88,8 +88,14 @@ function gitPlanRepo(): { dir: string; run: (args: string[]) => string; commit: 
 interface ProbeScenario {
   headRefOid: string;
   body: string;
+  expectRefusal?: boolean;
 }
 interface ProbeResult {
+  design?: string;
+  amendment?: string;
+  exitCode?: number;
+  pendingPosts?: number;
+  materializations?: number;
   criteria?: { claim: string }[];
   taskId?: string;
   fetchViewCalls?: number;
@@ -123,17 +129,18 @@ function driveReviewCommand(scratchDir: string, scenarios: ProbeScenario[]): Pro
         `  const out = [];`,
         `  for (const scenario of scenarios) {`,
         `    let fetchViewCalls = 0;`,
+        `    let pendingPosts = 0; let materializations = 0;`,
         `    let captured;`,
         `    const SENTINEL = "rmd-probe-stop";`,
         `    try {`,
-        `      await reviewCommand("review-wires-at-head-branch", ["--repo", "o/r"], {`,
+        `      const exitCode = await reviewCommand("review-wires-at-head-branch", ["--repo", "o/r"], {`,
         `        fetchView: () => { fetchViewCalls += 1; return { headRefOid: scenario.headRefOid, headRefName: "b", body: scenario.body, url: "https://github.com/o/r/pull/1", number: 1 }; },`,
         `        loadConfig: () => ({ root: stateRoot }),`,
-        `        materialize: () => ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip" } }),`,
-        `        postReviewPending: async () => ({ posted: false }),`,
-        `        runReview: (args) => { captured = { criteria: args.task.acceptance, taskId: args.task.id }; throw new Error(SENTINEL); },`,
+        `        materialize: () => (materializations++, { worktreePath: undefined, failure: { errorClass: "test", message: "skip" } }),`,
+        `        postReviewPending: async () => (pendingPosts++, { posted: false }),`,
+        `        runReview: (args) => { captured = { criteria: args.task.acceptance, taskId: args.task.id, design: args.task.design, amendment: args.task.amendment }; throw new Error(SENTINEL); },`,
         `      });`,
-        `      out.push({ error: "reviewCommand resolved instead of throwing the probe's sentinel" });`,
+        `      out.push(scenario.expectRefusal ? { exitCode, pendingPosts, materializations } : { error: "reviewCommand resolved instead of throwing the probe's sentinel" });`,
         `    } catch (e) {`,
         `      if (!captured || e.message !== SENTINEL) out.push({ error: String((e && e.stack) || e) });`,
         `      else out.push({ ...captured, fetchViewCalls });`,
@@ -347,4 +354,21 @@ test("the swap costs no second network fetch and stays synchronous — one fetch
   assert.equal(fetchViewCalls, 1, "reviewCommand must fetch the PR view exactly once — resolving criteria at head must not trigger a second gh/REST read");
   assert.ok(captured, "runReview must be reached");
   assert.ok((captured!.task.acceptance.length ?? 0) > 0, "a real, currently-declared task's criteria must actually resolve, proving the wiring engaged rather than silently falling through");
+});
+
+
+test("review command forwards exact-head narrative and refuses unreadable narrative before effects", () => {
+  const { dir, commit } = gitPlanRepo();
+  try {
+    const path = join(dir, "plan", "tasks.yaml");
+    writeFileSync(path, task("W1-T1", ["the thing works"]) + '\n  design: "Preserve assertions."\n  amendment: "First ruling."\n');
+    const first = commit("first narrative");
+    writeFileSync(path, task("W1-T1", ["the thing works"]) + '\n  design: "Preserve assertions."\n  amendment: {invalid: narrative}\n');
+    const invalid = commit("invalid narrative");
+    const result = driveReviewCommand(dir, [{ headRefOid: first, body: TRAILERED_BODY("W1-T1") }, { headRefOid: invalid, body: TRAILERED_BODY("W1-T1"), expectRefusal: true }]);
+    assert.equal(result[0].error, undefined);
+    assert.equal(result[0].design, "Preserve assertions.");
+    assert.equal(result[0].amendment, "First ruling.");
+    assert.deepEqual(result[1], { exitCode: 2, pendingPosts: 0, materializations: 0 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

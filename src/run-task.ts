@@ -1555,6 +1555,8 @@ import {
   preparePromisedReviewDecision,
   reviewTaskIdEvidenceAsync,
   reviewContractDigest,
+  reviewTaskNarrative,
+  type ReviewTaskNarrativeInput,
   reviewInputDigest,
   cappedReason,
   reviewLedgerLegibilityFields,
@@ -7739,7 +7741,7 @@ async function runReview(args: {
   runtimeImageSha?: string | null;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string };
+  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -7900,6 +7902,19 @@ async function runReview(args: {
       pr_url: prUrl, head_sha: headSha, reviewer_code_sha: typeof sha === "string" ? sha : null,
     }));
   };
+  const narrative = reviewTaskNarrative(task);
+  if (narrative === undefined) {
+    const reason = "head-task-narrative-unavailable";
+    replayInput = { ...replayInput, stage: "setup", setup_unavailable: true };
+    recordReplay(classifyReviewOutcome(replayInput));
+    log("review.reviewer.skipped", { reason, head_sha: headSha, pr_url: prUrl });
+    return {
+      state: "failure", criteria: [], testTheater: false,
+      summary: "review stood down: task design or amendment is unavailable",
+      floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: "not_attempted_task_narrative_unavailable", verdictWithheld: reason,
+    };
+  }
   // A substituted worker transcript is not a material PR input. Production fix-rung callers
   // supply the independently fetched body; a degraded caller with neither fails open toward
   // retrying rather than letting unrelated worker prose consume the cap.
@@ -7972,7 +7987,7 @@ async function runReview(args: {
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
   const preparedDecision = await preparePromisedReviewDecision({
-    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership },
+    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership, ...narrative },
     headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
   // W1-T9970: read once per review; a reviewer-image re-review of this head is its own decision.
@@ -8069,7 +8084,7 @@ async function runReview(args: {
         });
         const prompt =
           buildReviewPrompt({
-            task: { id: task.id, acceptance: criteria },
+            task: { id: task.id, acceptance: criteria, ...narrative },
             prUrl,
             owner,
             repo,
@@ -8324,6 +8339,7 @@ async function runReview(args: {
     declaredFiles: task.files,
     risk: task.risk,
     budgetUsd: task.budget_usd ?? args.budgetUsd,
+    ...narrative,
   });
   verdict = { ...verdict, reviewContractDigest: contractDigest };
 
@@ -17747,6 +17763,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let taskDeclaredFiles: string[] | undefined;
   let taskRisk: TaskRisk | undefined;
   let taskBudgetUsd: number | undefined;
+  let taskNarrative: ReviewTaskNarrativeInput = {};
   // W1-T2623: PERMANENTLY `undefined` on THIS path, deliberately — `resolvePlanCriteriaAtHead`
   // (lib/review.ts) has no `openTaskIds` field to assign from (the field the resolver it replaced,
   // `resolvePlanCriteriaForReview`, DID carry — see that function's own comment on why: computing
@@ -17799,6 +17816,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     taskDeclaredFiles = resolved.taskDeclaredFiles;
     taskRisk = resolved.taskRisk;
     taskBudgetUsd = resolved.taskBudgetUsd;
+    taskNarrative = resolved.taskNarrative ?? {};
     resolverDivergence = resolved.divergence;
     headTaskResolved = resolved.divergence === undefined && resolved.criteria.length > 0;
     // W1-T9232: a head cut before its own shard merged is pending a refresh from main, not a plan fault. Only a task
@@ -17837,6 +17855,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       pr_url: view.url, head_sha: view.headRefOid, reviewer_code_sha: typeof sha === "string" ? sha : null,
     }));
   };
+  if (reviewTaskNarrative(taskNarrative) === undefined) {
+    const unavailableInput = { ...replaySetupInput, setup_unavailable: true };
+    recordSetupReplay(unavailableInput, classifyReviewOutcome(unavailableInput));
+    log("review.reviewer.skipped", { reason: "head-task-narrative-unavailable", head_sha: view.headRefOid, pr_url: view.url });
+    console.error("rmd review: head task design or amendment unavailable; no pending status, verdict or merge effect");
+    return 2;
+  }
   const setupDecision = classifyReviewOutcome(replaySetupInput);
   if (executionMode === "semantic") {
     // Unfiled PRs and exact generated lanes use bounded defaults; semantic review remains required.
@@ -18010,6 +18035,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
             files: taskDeclaredFiles,
             risk: taskRisk,
             budget_usd: taskBudgetUsd,
+            ...taskNarrative,
           },
           report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
           settingsFile,

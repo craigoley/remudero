@@ -6315,6 +6315,25 @@ components:
           format: date-time
         reason:
           type: string
+        accountLabel:
+          type: string
+          description: >
+            W1-T10380: a redacted label for the account a completed Claude login now runs the
+            fleet on. Never a token, an email in full, or a credential path.
+
+    ProviderAuthCodeRequest:
+      type: object
+      required: [sessionId, code]
+      additionalProperties: false
+      properties:
+        sessionId:
+          type: string
+        code:
+          type: string
+          maxLength: 1024
+          description: >
+            The authorization code the provider's page showed, pasted once. Never logged and never
+            echoed in a projection.
 
     ProviderAuthStartRequest:
       type: object
@@ -13384,8 +13403,9 @@ paths:
       summary: Start a server-owned provider browser-auth handoff.
       description: >
         Starts provider-auth-v1 for an opaque server-configured account profile. Codex uses the
-        daemon-side app-server login flow and returns only an allowlisted browser authorization URL;
-        Claude remains explicitly unsupported until a stable machine-facing handoff exists.
+        daemon-side app-server login flow and returns only an allowlisted browser authorization URL.
+        Claude (W1-T10380) drives the CLI's own login in a private staging directory and returns
+        its allowlisted authorize URL; the operator pastes the code back with PATCH.
       security:
         - bearerWrite: []
       requestBody:
@@ -13433,6 +13453,42 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+    patch:
+      summary: Submit the pasted Claude authorization code to a provider-auth-v1 session.
+      description: >
+        W1-T10380: hands the code to the waiting Claude CLI once. Only a staged credential that
+        classifies usable replaces the fleet store, atomically under the CLI's refresh lock; the
+        host's own login is never read or written. Running workers keep their process.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderAuthCodeRequest"
+      responses:
+        "200":
+          description: The session projection after the login settled, or still awaiting it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderAuthProjection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The session is not waiting for a code (not Claude, already given one, or settled).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
     delete:
       summary: Cancel a provider-auth-v1 session.

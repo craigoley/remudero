@@ -266,6 +266,7 @@ import {
 } from "./onboarding-readiness.js";
 import { buildOnboardingRepositoryInventoryRoute, type OnboardingInventoryRouteOptions } from "./onboarding-repository-inventory.js";
 import {
+  buildProviderAuthCodeRoutes,
   buildProviderAuthRoutes,
   ProviderAuthSessionStore,
   readProviderAuthProfiles,
@@ -273,6 +274,7 @@ import {
   type ProviderAuthProfile,
 } from "./provider-auth-sessions.js";
 import { setWorkerEntryLog } from "./child-entry-argv.js";
+import { createClaudeExecutableCache, resolveClaudeExecutable } from "./worker.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -2875,8 +2877,11 @@ function assembleServeRoutes(
     root: deps.accountUsage?.root ?? deps.fleetControlRoot,
     accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
+  // W1-T10380: a console Claude login drives the SAME real binary a worker spawns.
+  const claudeExecutableCache = createClaudeExecutableCache();
   const providerAuthStore = deps.providerAuth?.store ?? new ProviderAuthSessionStore({
     profiles: deps.providerAuth?.profiles ?? readProviderAuthProfiles(deps.providerAuth?.env),
+    resolveClaudeBin: (profile) => profile.claudeBin ?? resolveClaudeExecutable(claudeExecutableCache),
   });
   // Personal context governance is mounted with the existing operator-agent routes. Its context
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
@@ -2968,6 +2973,7 @@ function assembleServeRoutes(
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
     buildAccountUsageRoute(accountUsageDeps),
     ...buildProviderAuthRoutes(providerAuthStore, undefined, (input) => startProviderAuthSession(providerAuthStore, input)),
+    ...buildProviderAuthCodeRoutes(providerAuthStore),
     buildProviderRoutingRoute({ root: deps.fleetControlRoot, ...deps.providerRouting }),
     buildSetProviderRoutingPolicyRoute({
       root: deps.fleetControlRoot,
