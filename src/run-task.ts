@@ -42659,6 +42659,7 @@ export function productionMachineFilingJudgePorts(opts: {
           let resources: ReturnType<typeof benchmarkWorkerAttemptResources> | undefined;
           try { if (result) resources = benchmarkWorkerAttemptResources(result); }
           catch { /* unavailable accounting is unknown, never a replacement judgment */ }
+          const { billing_mode = "unknown" } = resources ?? {};
           const price = resources?.total_cost_usd, notional = resources?.notional_cost_usd;
           const priced = typeof price === "number" && Number.isFinite(price) && price >= 0;
           opts.log("machine_judge.attempt_spend", {
@@ -42667,7 +42668,7 @@ export function productionMachineFilingJudgePorts(opts: {
             attempt_state: result ? "result" : assignmentId ? "failed" : "not-started",
             accounting_source: "worker-result-estimate-not-invoice",
             provider: result?.provider === "claude" || result?.provider === "codex" || result?.provider === "cash" ? result.provider : "unknown",
-            billing_mode: resources?.billing_mode ?? "unknown",
+            billing_mode,
             price_state: priced ? "reported" : "unknown",
             ...(priced ? { total_cost_usd: price } : {}),
             ...(typeof notional === "number" && Number.isFinite(notional) && notional >= 0 ? { notional_cost_usd: notional } : {}),
