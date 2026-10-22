@@ -796,6 +796,74 @@ export function roleScopedBakedCommitsBehind(
  */
 export const ROOT_LOCKFILE_PATH = "package-lock.json";
 
+/** W1-T10366: the recipe can fall back to full npm ci, so no dev/optional package is omitted.
+ * Keep every parsed lock/manifest field conservatively; only object order and whitespace are
+ * immaterial. Missing, old-format, malformed and incomplete inputs remain UNKNOWN. */
+export function imageDependencyInputFingerprint(
+  ref: string,
+  runGit: (args: readonly string[]) => string,
+): string | undefined {
+  try {
+    const object = (value: unknown): value is Record<string, unknown> =>
+      value !== null && typeof value === "object" && !Array.isArray(value);
+    const lock: unknown = JSON.parse(runGit(["show", `${ref}:${ROOT_LOCKFILE_PATH}`]));
+    if (!object(lock) || (lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3) || !object(lock.packages) || !object(lock.packages[""])) return undefined;
+    const manifests = new Set(["package.json"]);
+    for (const [path, entry] of Object.entries(lock.packages)) {
+      if (!object(entry)) return undefined;
+      if (path && entry.link !== true && typeof entry.version !== "string") return undefined;
+      if (entry.link === true) {
+        if (typeof entry.resolved !== "string" || !/^[\w@./-]+$/.test(entry.resolved) ||
+          entry.resolved.startsWith("/") || entry.resolved.split("/").some(part => part === "..") ||
+          !object(lock.packages[entry.resolved])) return undefined;
+        manifests.add(`${entry.resolved}/package.json`);
+      }
+    }
+    const inputs: Record<string, unknown> = { [ROOT_LOCKFILE_PATH]: lock };
+    for (const path of [...manifests].sort()) {
+      const manifest: unknown = JSON.parse(runGit(["show", `${ref}:${path}`]));
+      if (!object(manifest)) return undefined;
+      inputs[path] = manifest;
+    }
+    const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
+      : object(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    return JSON.stringify(canonical(inputs));
+  } catch {
+    return undefined; // UNKNOWN input, not an empty dependency graph or a known no-op.
+  }
+}
+
+export function imageDependenciesCommitsBehind(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string,
+): number | undefined {
+  if (imageBuildSha === undefined || imageBuildSha.trim() === "") return undefined;
+  const before = imageDependencyInputFingerprint(imageBuildSha.trim(), runGit);
+  const after = imageDependencyInputFingerprint("origin/main", runGit);
+  return before === undefined || after === undefined ? undefined : before === after ? 0 : 1;
+}
+
+/** First-parent push boundaries match the workflow's before/head pairs, including merge commits.
+ * Never skip an unreadable newer input and misname an older commit as the current build input. */
+export function newestImageDependencyInputSha(runGit: (args: readonly string[]) => string): string | undefined {
+  try {
+    const shas = runGit(["log", "--first-parent", "--format=%H", "origin/main", "--", ROOT_LOCKFILE_PATH, "package.json", "packages"])
+      .trim().split("\n").filter(Boolean);
+    for (const sha of shas) {
+      const after = imageDependencyInputFingerprint(sha, runGit);
+      if (after === undefined) return undefined;
+      const parents = runGit(["rev-list", "--parents", "-n", "1", sha]).trim().split(/\s+/);
+      if (parents.length === 1) return sha;
+      const before = imageDependencyInputFingerprint(`${sha}^`, runGit);
+      if (before === undefined) return undefined;
+      if (before !== after) return sha;
+    }
+    return undefined;
+  } catch {
+    return undefined; // Git history is unavailable; no invented newest-input identity.
+  }
+}
+
 /** The npm-lockfile key `deploy/Dockerfile` itself reads to pick the image's Chromium build, so
  *  the workflow guard and this drift check can never disagree about which field is authoritative. */
 const PLAYWRIGHT_CORE_LOCKFILE_KEY = "node_modules/playwright-core";
@@ -2747,11 +2815,10 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // W1-T4061 — a playwright-core version bump is image drift too, even though it lands only
       // in the root lockfile (never in IMAGE_BAKED_PATHS). UNKNOWN only when BOTH readings are:
       // one known signal must never be swallowed by the other going unreadable.
-      const playwright = playwrightCoreVersionCommitsBehind(sha, (args) => git([...args]));
-      // W1-T5367 — and so is a worker SDK move (acr-build.yml builds on it since W1-T5018).
-      const workerSdk = workerSdkCommitsBehind(sha, (args) => git([...args]));
-      if (baked === undefined && playwright === undefined && workerSdk === undefined) return undefined;
-      return (baked ?? 0) + (playwright ?? 0) + (workerSdk ?? 0);
+      const dependencies = imageDependenciesCommitsBehind(sha, (args) => git([...args]));
+      // A known positive survives an independent unknown, but a known zero cannot erase it.
+      if ((baked ?? 0) > 0 || (dependencies ?? 0) > 0) return (baked ?? 0) + (dependencies ?? 0);
+      return baked === undefined || dependencies === undefined ? undefined : 0;
     },
     resourcePolicyDrift: () =>
       // W1-T4267: the launcher names the container and role it owns; the policy is evaluated by the
@@ -2772,13 +2839,9 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       } catch {
         newestBaked = undefined; // no git answer — the tick treats the image's publication as UNKNOWN and waits
       }
-      // W1-T4061 — the newest commit that actually MOVED the playwright-core pin, not merely the
-      // newest commit that touched the root lockfile (an unrelated bump landing after it would
-      // otherwise misname itself as "the" image input, and imagePublished would look up a tag
-      // acr-build.yml's own guard never created for that commit).
-      // W1-T5367 — or the worker SDK pin, whichever lockfile image input moved last.
-      const newestPlaywright = newestLockfileImageInputSha((args) => git([...args]));
-      if (!newestPlaywright) return newestBaked;
+      // W1-T10366: the same semantic input pair that the workflow builds, not the latest touch.
+      const newestPlaywright = newestImageDependencyInputSha((args) => git([...args]));
+      if (!newestPlaywright) return undefined; // Do not label an older baked commit current when dependency history is unknown.
       if (!newestBaked) return newestPlaywright;
       try {
         const bakedDistance = Number.parseInt(git(["rev-list", "--count", `${newestBaked}..origin/main`]).trim(), 10);

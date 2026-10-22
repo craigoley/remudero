@@ -33,6 +33,7 @@ const REPO_ROOT = join(import.meta.dirname, "..");
 
 function lockfile(playwrightCoreVersion: string | undefined, otherDepVersion = "1.0.0"): string {
   return JSON.stringify({
+    lockfileVersion: 3,
     packages: {
       "": { name: "remudero" },
       "node_modules/left-pad": { version: otherDepVersion },
@@ -59,8 +60,8 @@ test("W1-T4061: a playwright-core bump starts the image build", () => {
   // field name so a rename on either side breaks this test instead of silently drifting apart.
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "acr-build.yml"), "utf8");
   assert.match(workflow, /Decide whether this push needs a new image/);
-  assert.match(workflow, /packages\["node_modules\/playwright-core"\]/);
-  assert.match(workflow, /oldVersion !== newVersion/);
+  assert.match(workflow, /Object\.entries\(lock\.packages\)/, "the complete package map includes Playwright");
+  assert.match(workflow, /before !== after/);
   // Gated: the actual build step does not run unconditionally on every push touching the paths.
   assert.match(workflow, /name: Build and push \(ACR\)[\s\S]*?if: github\.event_name != 'push' \|\| steps\.image_guard\.outputs\.build == 'true'/);
   // Root package-lock.json is now itself a trigger path, so the guard has something to run on.
@@ -200,6 +201,8 @@ test("W1-T4061: newestBakedSha prefers whichever of the two signals is closer to
   // the playwright-core move is the more recent image input, so it must win.
   const closerPlaywright = (cmd: string, args: string[]): string => {
     if (cmd !== "git") throw new Error(`unexpected exec ${cmd}`);
+    if (args.includes("show") && args.at(-1)?.endsWith(":package.json")) return "{}";
+    if (args.includes("rev-list") && args.includes("--parents")) return `${playwrightSha} ${bakedSha}`;
     if (args.includes("-1") && args.includes("--format=%H")) return `${bakedSha}\n`; // IMAGE_BAKED_PATHS query
     if (!args.includes("-1") && args.includes("--format=%H")) return `${playwrightSha}\n`; // playwright-core log walk
     if (args.includes("show") && args.at(-1) === `${playwrightSha}:${ROOT_LOCKFILE_PATH}`) return PLAYWRIGHT_BUMP_LOCK;
@@ -213,6 +216,8 @@ test("W1-T4061: newestBakedSha prefers whichever of the two signals is closer to
   // Now bakedSha is CLOSER (1 vs 3) — the baked-path signal wins instead.
   const closerBaked = (cmd: string, args: string[]): string => {
     if (cmd !== "git") throw new Error(`unexpected exec ${cmd}`);
+    if (args.includes("show") && args.at(-1)?.endsWith(":package.json")) return "{}";
+    if (args.includes("rev-list") && args.includes("--parents")) return `${playwrightSha} ${bakedSha}`;
     if (args.includes("-1") && args.includes("--format=%H")) return `${bakedSha}\n`;
     if (!args.includes("-1") && args.includes("--format=%H")) return `${playwrightSha}\n`;
     if (args.includes("show") && args.at(-1) === `${playwrightSha}:${ROOT_LOCKFILE_PATH}`) return PLAYWRIGHT_BUMP_LOCK;
@@ -227,6 +232,8 @@ test("W1-T4061: newestBakedSha prefers whichever of the two signals is closer to
   // than throwing or picking an arbitrary sha.
   const unparseableDistance = (cmd: string, args: string[]): string => {
     if (cmd !== "git") throw new Error(`unexpected exec ${cmd}`);
+    if (args.includes("show") && args.at(-1)?.endsWith(":package.json")) return "{}";
+    if (args.includes("rev-list") && args.includes("--parents")) return `${playwrightSha} ${bakedSha}`;
     if (args.includes("-1") && args.includes("--format=%H")) return `${bakedSha}\n`;
     if (!args.includes("-1") && args.includes("--format=%H")) return `${playwrightSha}\n`;
     if (args.includes("show") && args.at(-1) === `${playwrightSha}:${ROOT_LOCKFILE_PATH}`) return PLAYWRIGHT_BUMP_LOCK;

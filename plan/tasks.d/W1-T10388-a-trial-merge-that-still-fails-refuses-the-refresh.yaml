@@ -1,0 +1,61 @@
+- id: W1-T10388
+  title: "A TRIAL MERGE THAT STILL FAILS A FAILING TEST REFUSES THE REFRESH — `assessRefreshClearance` (src/lib/base-reproduction.ts) answers `partial` (\"some failing test files still fail on the trial merge; keeping today's refresh\") with refresh TRUE, and `refreshedOnSameRed` matches a prior refresh only when every current failing file was in it, so #13324 (W1-T9434) took five main merges in 6 h on 2026-10-21 (82f6d57, 5ac41a4, 59e8130, 97349e0, 355244c8e), each admitted `partial`, each re-running CI on a red that was the PR's own"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium  # narrows one refresh admission; the fix lane already owns an own-red
+  band_meaning: span
+  origin: "operator ruling 2026-10-22, item 9: a refresh must not be the remedy when the failing check is the PR's own"
+  plan_refs: [W1-T8396, W1-T6405, W1-T9595, W1-T10338, W1-T10387]
+  files:
+    - src/lib/base-reproduction.ts
+    - test/fix-lane/a-trial-merge-that-still-fails-refuses-the-refresh.test.ts
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: do not refresh a PR whose red is its own.
+    READ at origin/main 32887fe4d (symbols, not lines):
+    - `assessRefreshClearance` refuses on a `reproduced` trial merge (every failing file still fails) and refreshes
+      on `clear`. On `partial`, with no prior refresh on the same red, it refreshes ("keeping today's refresh").
+      A file that still fails on main-merged-into-the-head cannot be cleared by merging main.
+    - `refreshedOnSameRed` treats a prior refresh as the same red only when EVERY current failing file was in that
+      refresh's list. A red whose file list shifts while one persistent file keeps failing is never "the same red".
+    OBSERVED (core ledger 10-21T08:49Z..10-22T01:20Z, read-only):
+    - PR 13324 has five `refresh.clearance` rows, arm base-fixed, refresh true, evidence partial, at heads
+      3dca3cda1, 82f6d5747, 212d9d3ad, 59e8130dd and 97349e0ae. Each is followed by a `sweep.base_fixed.refresh`
+      outcome updated.
+    - The failing lists differ head to head. All of them name
+      test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts, #13318's test, which kept failing
+      because the branch had reverted #13318's sweep.ts hunk (W1-T10387).
+    - Main was green for it: `sweep.base_reproduction` reads `passes` on main.
+    - Fleet-wide in the same window, 45 `refresh.clearance` rows admitted a refresh on `partial`.
+    NOT COVERED ELSEWHERE: W1-T10338 (queued) stops a refresh after a red refresh only while the fix rung stands down
+    on an escalation; #13324's rung was not standing down. W1-T8396 (merged) built this clearance, and W1-T6405 and
+    W1-T9595 (merged) the base-fixed arm and its admission. Swept origin/main 32887fe4d plan/tasks.d and all 18
+    open PR heads' plan trees for assessRefreshClearance, refresh.clearance, base-fixed and "keeping today's
+    refresh": no other shard.
+  design: |
+    1. PARTIAL REFUSES. A `partial` trial merge returns refresh false, evidence `partial`, naming the files that
+       still fail on the trial merge. Merging main cannot clear them, so the red stays with the fix lane, which
+       already owns an own-red. `clear` still refreshes, and `reproduced` still refuses.
+    2. THE SAME RED IS A SHARED FAILING FILE. `refreshedOnSameRed` treats a prior refresh as the same red when the
+       checks overlap and at least one current failing file was in that refresh's list. A red with no test files
+       keeps today's rule.
+    3. `unrunnable` and `fileless` keep today's behaviour. They are not this task, and the 44 `unrunnable` rows in the
+       window come from a probe that is not wired.
+    4. No new config key, threshold or env var.
+    5. Tests (new file, titles verbatim as in the proofs): a partial trial merge refuses and names its still-failing
+       files. A prior refresh sharing one failing file counts as the same red. Clear still refreshes and reproduced
+       still refuses.
+  acceptance:
+    - claim: "a trial merge on which a failing test file still fails refuses the refresh and names the file"
+      proof: "unit test: W1-T10388: a partial trial merge refuses the refresh and names the still-failing files"
+    - claim: "a prior refresh that shared one failing file is the same red"
+      proof: "unit test: W1-T10388: a prior refresh sharing a failing file is the same red"
+  falsifier: |
+    Restore refresh true on partial, and the #13324-shaped fixture is refreshed again.
+  note: |
+    Reservation refs/rmd-id/W1-T10388 is held by filing branch file-1022-fleet-routing.

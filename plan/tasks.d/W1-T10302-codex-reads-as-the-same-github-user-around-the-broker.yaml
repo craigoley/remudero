@@ -21,6 +21,7 @@
     - deploy/mac/install-gh-read-broker.sh
     - docs/operator-guide.md
     - test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts
+    - "src/lib/config-schema.ts"
   rationale: |
     READ 2026-10-20 at origin/main c89ef695b, on the Mac as craigoleyagent.
     WHO READS AS cao825.

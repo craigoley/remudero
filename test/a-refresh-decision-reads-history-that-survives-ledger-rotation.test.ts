@@ -11,6 +11,8 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { assessRefreshClearance, refusedRefreshClearancesFromLedger } from "../src/lib/base-reproduction.js";
 
+import { taskSemanticRevision } from "../src/lib/escalate.js";
+
 type Row = Record<string, unknown>;
 const KNOWN = ["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"];
 const PR = 8533;
@@ -290,4 +292,39 @@ test("W1-T8533: a complete history preserves the main-green base-red refresh", a
   assert.deepEqual(h.refreshed, [PR]);
   assert.deepEqual(h.probes, []);
   assert.deepEqual(h.fixed, []);
+});
+
+
+test("a failed semantic amendment refresh survives real ledger rotation and never earns a repeat attempt", async t => {
+  const h = fixture(t), roundId = "fixture:design-round";
+  const semanticA = taskSemanticRevision({ design: "preserve behavior", amendment: "original answer" })!;
+  const semanticB = taskSemanticRevision({ design: "preserve behavior", amendment: "approved amendment" })!;
+  const common = { head_sha: HEAD, host: "fixture-host", actor_pid: 123 };
+  const round = { ...common, round_id: roundId, repair_pr_url: h.pr.prUrl };
+  h.rotate([
+    h.row({ ...round, step: "fix.dispatch" }, 65),
+    h.row({ ...common, step: "fix.needs_design", reason: "needs the approved narrative answer", contract_revision: "contract-A", task_semantic_revision: semanticA }, 64),
+    h.row({ ...round, step: "fix.done", fix_outcome: "NEEDS_DESIGN" }, 63),
+  ]);
+  h.deps.readTaskContractRevision = () => "contract-A";
+  h.deps.readTaskSemanticRevision = () => semanticB;
+  let attempts = 0, admissions = 0;
+  h.deps.updateBranch = () => { attempts++; return "error" as const; };
+  h.deps.claimFixAdmission = () => { admissions++; return { admitted: true }; };
+  await h.pass();
+  assert.equal(attempts, 1); assert.equal(admissions, 0); assert.deepEqual(h.fixed, []);
+  const rows = readLedgerLines(h.ledgerPath);
+  const failed = rows.find(row => row.step === "sweep.contract_amended.refresh" && row.pr_number === PR)!;
+  assert.equal(failed.outcome, "error"); assert.equal(failed.escalated_under_semantic, semanticA);
+  assert.equal(failed.task_semantic_revision, semanticB);
+  const archive = h.rotate(rows);
+  const live = readFileSync(h.ledgerPath, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
+  assert.ok(live.some(row => row.step === "sweep.contract_amended.refresh" && row.pr_number === PR), "the actual failed attempt must remain live under existing retention bounds");
+  writeFileSync(archive, "unreadable gzip proves the retained live decision is sufficient");
+  await h.pass();
+  assert.equal(attempts, 1, "rotation cannot mint another update attempt");
+  assert.equal(admissions, 0); assert.deepEqual(h.fixed, []);
+  const disposed = readLedgerLines(h.ledgerPath).findLast(row => row.step === "sweep.disposed" && row.pr_number === PR)!;
+  assert.equal(disposed.progress_task_semantic_revision, semanticA);
+  assert.match(String(disposed.stand_down_reason), /amendment refresh failed; awaiting new evidence\/operator answer/);
 });

@@ -1,0 +1,56 @@
+- id: W1-T10383
+  title: "A CODEX ACCOUNT BELOW ITS RESERVE IS NOT LOGGED UNREADABLE — `selectCodexModel` (src/lib/worker-provider.ts) returns `readable:false, exhausted:true` when every mapped model is below the reserve (W1-T2573's fail-closed contract), and `providerEligibility` maps every `!readable` to `unreadable`, so 179 worker.assignment rows from 2026-10-21T10:49Z to 10-22T01:20Z record Codex as `unreadable` while its probe returned a 95% weekly window"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: two modules carry one concern (the recorded reason); eligibility itself is unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-22: Codex at or over its reserve is logged unreadable and misleads diagnosis; make the reason honest"
+  plan_refs: [W1-T2573, W1-T3718, W1-T10382]
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/provider-routing-policy.ts
+    - test/worker/spawn/a-codex-below-its-reserve-is-not-logged-unreadable.test.ts
+  status: queued
+  priority: 1.5  # cheap, and W1-T10382 waits on it
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-22: the reason must say what the probe saw.
+    PREMISE CORRECTED: the brief named `selectWorkerProviderForPolicy`'s `preferenceBypass` reason
+    (src/lib/provider-routing-policy.ts, `!preferred.readable || windows.length === 0 ? "unreadable"`) and a probe that
+    "timed out primary and recovered by hedge". The rows in question are worker.assignment `considered[]`. Those are
+    built by `routingDecision` (src/lib/worker.ts) from `providerEligibility`, and the cause is in the capacity, not
+    the probe:
+    - `selectCodexModel`, with no eligible mapped model, returns the first ranked candidate with `readable: false`.
+      It adds `exhausted: true` when that candidate's reason is `below-reserve`, and its detail reads "<tier> Codex
+      models have no reserved headroom". This is the W1-T3718 detail.
+    - `providerEligibility` returns `unreadable` whenever `!capacity.readable || capacity.windows.length === 0`, before
+      it looks at `exhausted`. The considered[] entry therefore says `unreadable` for an exhausted account. The
+      preference-bypass reason in provider-routing-policy.ts reads the same two fields and inherits the same error.
+    OBSERVED (core ledger rotations 10-21T08:49Z..10-22T01:20Z plus the live file, read-only): 179 worker.assignment
+    rows carry a Codex considered[] entry with reason `unreadable`. In the same rows, claude reads `below-reserve` and
+    cash is selected. The 2026-10-21T22:06Z Codex rollout reads primary used_percent 95.0 against the 5% reserve.
+    NOT COVERED ELSEWHERE: swept origin/main 32887fe4d plan/tasks.d and all 18 open PR heads' plan trees for
+    providerEligibility and "exhausted: true": no shard.
+  design: |
+    1. `providerEligibility` returns reason `below-reserve` for a capacity carrying `exhausted: true`, before the
+       readability test. The `headroomPercent` it reports is the tightest window the capacity still carries.
+       Eligibility is unchanged: the capacity stays ineligible.
+    2. `selectWorkerProviderForPolicy`'s preference-bypass reason reads the same verdict (`providerEligibility`)
+       instead of re-deriving it from `readable`/`windows`, so the two rows cannot disagree.
+    3. A capacity that is genuinely unreadable still reads `unreadable`: probe failure, missing response or
+       `quota-unreadable`.
+    4. Tests (new file, titles verbatim as in the proofs): an exhausted Codex capacity from `selectCodexModel` with a
+       95% window reads `below-reserve` in providerEligibility and in the routing decision's considered[]. A probe
+       failure and a quota-unreadable model still read `unreadable`.
+  acceptance:
+    - claim: "an exhausted Codex capacity is recorded below-reserve, not unreadable"
+      proof: "unit test: W1-T10383: an exhausted codex capacity reads below-reserve in considered"
+    - claim: "a genuinely unreadable Codex probe still reads unreadable"
+      proof: "unit test: W1-T10383: an unreadable codex probe still reads unreadable"
+  falsifier: |
+    Restore the readability test ahead of `exhausted`, and the first proof reads `unreadable` again.
+  note: |
+    Reservation refs/rmd-id/W1-T10383 is held by filing branch file-1022-fleet-routing.
