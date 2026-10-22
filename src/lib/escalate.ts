@@ -1096,7 +1096,8 @@ function candidatePrRef(title: string | undefined, body: string): string | undef
     let summary: unknown;
     try {
       summary = JSON.parse(line.slice("**Full summary (JSON):** ".length));
-    } catch {
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
       summary = undefined;
     }
     const taskId = TASK_LINE_RE.exec(header)?.[1];
@@ -1107,6 +1108,8 @@ function candidatePrRef(title: string | undefined, body: string): string | undef
           && line === fullEscalationSummaryLine(key)) return extractPrRef(`${summary}\n${body}`);
     }
   }
+  // A clipped numeric token is not an identity when its full producer metadata is unavailable.
+  if (/(?:\/pull\/|\bPR\s*#?\s*)\d+…$/i.test(title ?? "")) return undefined;
   return extractPrRef(`${title ?? ""}\n${body}`);
 }
 

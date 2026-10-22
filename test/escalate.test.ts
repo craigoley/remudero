@@ -2014,6 +2014,17 @@ test("clipping a PR number preserves dedup and supersession referents", () => {
   assert.deepEqual(closed, [], "the partial displayed number cannot close another PR's issue");
   escalate({ ...e, headSha: "new-head" }, deps);
   assert.deepEqual(closed, [first], "a new head for the full PR supersedes its old issue");
+  for (const field of ['not-json', '123', '"PR #999 inconsistent"', undefined]) {
+    const isolated = boundedTitleIssueStore();
+    const refusedCloses: string[] = [];
+    isolated.issues.closeWithComment = (issueUrl) => { refusedCloses.push(issueUrl); };
+    const local = { ...deps, issues: isolated.issues };
+    const original = escalate(e, local);
+    isolated.calls[0]!.body = isolated.calls[0]!.body.replace(/^\*\*Full summary \(JSON\):\*\* .*$/m,
+      field === undefined ? "" : `**Full summary (JSON):** ${field}`);
+    assert.notEqual(escalate({ ...e, summary: "PR #123 unrelated", headSha: "new-head" }, local), original);
+    assert.deepEqual(refusedCloses, [], "missing or invalid metadata cannot authorize a clipped PR identity");
+  }
 });
 
 test("only a canonical producer header can supply a clipped issue's PR referent", () => {
