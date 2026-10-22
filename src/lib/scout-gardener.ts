@@ -137,6 +137,10 @@ export function countScoutStepLiterals(path: string, text: string, step: string,
         /^(?:=|\(|\[|\{|,|:|\?|return|case|=>|!|&&|\|\||\?\?)$/.test(previous)) token = scanner.reScanSlashToken();
     if (token === SyntaxKind.PrivateIdentifier && scanner.getTokenEnd() === scanner.getTokenStart()) {
       token = scanner.reScanHashToken();
+      // A bare hash is a script comment; private identifiers already advance normally.
+      const newline = text.indexOf("\n", scanner.getTokenEnd());
+      scanner.resetTokenState(newline < 0 ? text.length : newline + 1);
+      continue;
     }
     if (token === SyntaxKind.TemplateHead) templateBraces.push(0);
     else if (token === SyntaxKind.OpenBraceToken && templateBraces.length > 0) templateBraces[templateBraces.length - 1]++;
