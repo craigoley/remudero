@@ -142,9 +142,25 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
   return `v2:${createHash("sha256").update(encoded, "utf8").update(PROOF_LOAD_REVISION).digest("hex")}`;
 }
 
+/** Head-resolved task prose; malformed narrative must remain distinguishable from absence. */
+export interface ReviewTaskNarrativeInput {
+  design?: unknown;
+  amendment?: unknown;
+  narrativeUnavailable?: true;
+}
+
+/** Only the task narrative resolved at the reviewed head may constrain its review. */
+export function reviewTaskNarrative(task: ReviewTaskNarrativeInput): { design?: string; amendment?: string } | undefined {
+  if (task.narrativeUnavailable || [task.design, task.amendment].some(value => value !== undefined && typeof value !== "string")) return undefined;
+  return {
+    ...(typeof task.design === "string" && task.design.length > 0 ? { design: task.design } : {}),
+    ...(typeof task.amendment === "string" && task.amendment.length > 0 ? { amendment: task.amendment } : {}),
+  };
+}
+
 /** Stable identity of the reviewer contract, independent of a PR head, diff, or prose report.
  * Reuse may only carry a verdict across a base move when this identity is unchanged. */
-export interface ReviewContractDigestInput {
+export interface ReviewContractDigestInput extends ReviewTaskNarrativeInput {
   taskId: string;
   acceptance: readonly AcceptanceCriterion[];
   declaredFiles?: readonly string[];
@@ -155,6 +171,8 @@ export interface ReviewContractDigestInput {
 }
 
 export function reviewContractDigest(input: ReviewContractDigestInput): string {
+  const narrative = reviewTaskNarrative(input);
+  if (narrative === undefined) throw new Error("review task narrative is unavailable");
   const acceptance = input.acceptance.map((criterion) => ({
     claim: criterion.claim,
     proof: criterion.proof,
@@ -171,6 +189,7 @@ export function reviewContractDigest(input: ReviewContractDigestInput): string {
     budgetUsd: input.budgetUsd ?? null,
     policyRevision: input.policyRevision ?? REVIEW_DECISION_POLICY_REVISION,
     engineRevision,
+    ...narrative,
   });
   return `contract-v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
@@ -7115,7 +7134,7 @@ export function failSummary(
 // ── The fresh-context reviewer prompt (read-only + gh, never edits) ─────────
 
 export interface ReviewPromptInput {
-  task: { id: string; acceptance?: AcceptanceCriterion[] };
+  task: { id: string; acceptance?: AcceptanceCriterion[] } & ReviewTaskNarrativeInput;
   prUrl: string;
   owner: string;
   repo: string;
@@ -7132,6 +7151,8 @@ export interface ReviewPromptInput {
  * alone; when a proof names an executable check it receives an already-materialised disposable PR-head checkout and
  * RUNS it, verdicting on the OBSERVED result. It never edits the PR's code or changes the head sha it judges. */
 export function buildReviewPrompt(input: ReviewPromptInput): string {
+  const narrative = reviewTaskNarrative(input.task);
+  if (narrative === undefined) throw new Error("review task narrative is unavailable");
   const criteria = (input.task.acceptance ?? [])
     .map((c, i) => `  ${i + 1}. CLAIM: ${c.claim}\n     PROOF: ${c.proof}`)
     .join("\n");
@@ -7152,6 +7173,13 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `DECLARED PATHS: ${declaredFiles}`,
     `CHANGED PATHS: ${changedFiles}`,
     `WIDENED PATHS (changed but not declared): ${widenedFiles}`,
+    ...(narrative.design ? ["", "AUTHORITATIVE TASK DESIGN AT THIS HEAD:", narrative.design] : []),
+    ...(narrative.amendment ? ["", "AUTHORITATIVE TASK AMENDMENT AT THIS HEAD:", narrative.amendment] : []),
+    ...(narrative.design || narrative.amendment ? [
+      "Honor these constraints when judging the stated criteria. A passing proof does not",
+      "substantiate a claim if its implementation violates an explicit preservation constraint.",
+      "Name the affected criterion, exact constraint and changed behavior; do not invent criteria.",
+    ] : []),
     ``,
     `Do this:`,
     `1. Read the PR diff:            gh pr diff ${input.prUrl}`,
@@ -7779,6 +7807,7 @@ export interface PlanCriteriaAtHeadResult {
   /** Routing/spend metadata from the same task record at the same head as {@link criteria}. */
   taskRisk?: TaskRisk;
   taskBudgetUsd?: number;
+  taskNarrative?: ReviewTaskNarrativeInput;
   source?: string;
   divergence?: PlanCriteriaAtHeadDivergence;
 }
@@ -7872,6 +7901,13 @@ function planCriteriaAtHeadResult(
     taskDeclaredFiles: t?.files,
     taskRisk: t?.risk,
     taskBudgetUsd: t?.budget_usd,
+    ...(t && (t.design !== undefined || t.amendment !== undefined || t.narrativeUnavailable) ? {
+      taskNarrative: {
+        ...(t.design === undefined ? {} : { design: t.design }),
+        ...(t.amendment === undefined ? {} : { amendment: t.amendment }),
+        ...(t.narrativeUnavailable ? { narrativeUnavailable: true as const } : {}),
+      },
+    } : {}),
     source: criteria.length
       ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` + (identity ? ` — read: ${identity}` : "")
       : undefined,

@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
+  reviewContractDigest,
+  reviewTaskNarrative,
   applyVerdictStability,
   buildReviewPrompt,
   cappedAnnotation,
@@ -3434,4 +3436,33 @@ test("W1-T1085: reviewCommand stops telling a plan-only PR it is uncertified and
   const codePr = (await runReviewCommandCapturing(false)).join("\n");
   assert.match(codePr, /CAPPED: not certified/);
   assert.match(codePr, /--override-capped-by/);
+});
+
+
+test("review task narrative binds the prompt and contract without changing legacy identities", () => {
+  const contract = {
+    taskId: "W1-NARRATIVE",
+    acceptance: [{ claim: "the cache is repaired", proof: "unit test: existing cache control" }],
+    declaredFiles: ["src/lib/cache.ts"], risk: "low" as const, budgetUsd: 1,
+    policyRevision: "fixture-policy", engineRevision: "fixture-engine",
+  };
+  const legacy = reviewContractDigest(contract);
+  assert.equal(legacy, "contract-v1:253a11734da6d4f71168fd20fc7e184f4b218dfe5693e228f17bb102e488c6bd");
+  assert.equal(reviewContractDigest({ ...contract, design: "", amendment: "" }), legacy);
+  const narrative = { design: "Preserve the original assertions.\nVerify publication failures.", amendment: "Only the two approved companions may change." };
+  assert.deepEqual(reviewTaskNarrative(narrative), narrative);
+  const amended = reviewContractDigest({ ...contract, ...narrative });
+  assert.notEqual(amended, legacy);
+  assert.notEqual(reviewContractDigest({ ...contract, ...narrative, amendment: "A different ruling." }), amended);
+  assert.notEqual(reviewContractDigest({ ...contract, design: narrative.design }), amended);
+  const input = { task: { id: contract.taskId, acceptance: contract.acceptance }, prUrl: "https://github.com/o/r/pull/1", owner: "o", repo: "r", headSha: "a".repeat(40) };
+  const prompt = buildReviewPrompt({ ...input, task: { ...input.task, ...narrative } });
+  assert.ok(prompt.includes(narrative.design));
+  assert.ok(prompt.includes(narrative.amendment));
+  assert.ok(!buildReviewPrompt(input).includes("AUTHORITATIVE TASK DESIGN AT THIS HEAD:"));
+  for (const invalid of [{ design: null }, { amendment: {} }, { narrativeUnavailable: true as const }]) {
+    assert.equal(reviewTaskNarrative(invalid), undefined);
+    assert.throws(() => reviewContractDigest({ ...contract, ...invalid }), /narrative is unavailable/);
+    assert.throws(() => buildReviewPrompt({ ...input, task: { ...input.task, ...invalid } }), /narrative is unavailable/);
+  }
 });
