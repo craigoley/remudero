@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.36
   status: queued
@@ -31,3 +31,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The description names a recurring hand-fix on one source file and a new test file as the only declared files, with a grep-verifiable acceptance criterion."
+      - "Nothing in the description or files list indicates secrets, auth, deletion, merge/deploy policy, irreversible actions, or an operator-only decision."
+      - "The family track record is mixed (Beta mean 0.66), and dep-review.ts might relate to dependency review. The description does not say the change alters review policy, and no diff is shown. The PR still passes CI and review."
+    judged_at: "2026-10-22T11:57:23.336Z"
+    pin: "547af8b8ee2950f5492637928389dafd8b8b709ac7f08e7d6369731a86a7138b"
