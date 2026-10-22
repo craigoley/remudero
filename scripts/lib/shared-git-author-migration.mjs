@@ -1,5 +1,5 @@
 // Explicit idle-window migration only. Author validation never calls this writer.
-import {constants,openSync,closeSync,fstatSync,lstatSync,readFileSync,writeFileSync,fsyncSync,realpathSync,mkdtempSync,linkSync,unlinkSync,renameSync} from 'node:fs';
+import {constants,openSync,closeSync,fstatSync,lstatSync,readSync,writeFileSync,fsyncSync,realpathSync,mkdtempSync,linkSync,unlinkSync,renameSync} from 'node:fs';
 import {dirname,join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
@@ -13,7 +13,10 @@ function owned(path){
 function readConfig(path){
   const fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
   try{const s=fstatSync(fd);if(!s.isFile()||s.uid!==process.getuid()||s.nlink!==1||(s.mode&0o022)||s.size>65536)throw Error('owned bounded config required');
-    const bytes=readFileSync(fd);if(!equal(s,fstatSync(fd))||!equal(s,lstatSync(path)))throw Error('config changed during read');return{bytes,sha256:digest(bytes)};
+    const buffer=Buffer.alloc(s.size+1);let used=0;
+    while(used<buffer.length){const n=readSync(fd,buffer,used,buffer.length-used,used);if(!n)break;used+=n;}
+    if(used!==s.size||!equal(s,fstatSync(fd))||!equal(s,lstatSync(path)))throw Error('config changed during read');
+    const bytes=buffer.subarray(0,used);return{bytes,sha256:digest(bytes)};
   }finally{closeSync(fd);}
 }
 function git(pool,args,allowed=[0],linked=false){
