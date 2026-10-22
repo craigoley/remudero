@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.42
   status: queued
@@ -47,10 +47,10 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.91
+    verdict: "operator"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The supplied rounds establish recurring schema-validation failures, but provide no reproduction or diagnosis establishing flakiness or connecting a shared cause to actions-view.ts beyond its import.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test-title text with grep; it does not verify prevention or self-healing. The proposed remedy's causal basis therefore cannot be verified from what is shown, meeting the stated escalation condition."
-    judged_at: "2026-10-20T16:29:54.264Z"
-    pin: "2ddacd8cc83c31d9231a2ffeb1b9051710d38df3cf55d397035194b54cc6d067"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:29:10.224Z"
+    pin: "ac49146f34b8f870d5cd245ace72219e1b14097188756972c7a8d0e152c76505"
