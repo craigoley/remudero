@@ -23,14 +23,14 @@ function writeCorpus(dir: string, parts: { plain?: string; gzip?: string; live?:
   if (parts.live !== undefined) writeFileSync(join(dir, "ledger.ndjson"), parts.live);
 }
 
-function runPrOwner(dir: string, pr: number): string {
+async function runPrOwner(dir: string, pr: number): Promise<string> {
   const out: string[] = [];
-  const code = prOwnerCommand([String(pr)], { stateDir: dir, write: (text) => out.push(text) });
+  const code = await prOwnerCommand([String(pr)], { stateDir: dir, write: (text) => out.push(text) });
   assert.equal(code, 0);
   return out.join("\n");
 }
 
-test("a PR with a recent fix.dispatch row reports OWNED and names the strike and strike cap the lane is on", () => {
+test("a PR with a recent fix.dispatch row reports OWNED and names the strike and strike cap the lane is on", async () => {
   const dir = tmpStateDir();
   try {
     writeCorpus(dir, {
@@ -70,7 +70,7 @@ test("a PR with a recent fix.dispatch row reports OWNED and names the strike and
       }),
     });
 
-    const out = runPrOwner(dir, 4851);
+    const out = await runPrOwner(dir, 4851);
     assert.match(out, /rmd pr-owner #4851 .+ OWNED/);
     assert.match(out, /strike=1\/2/);
     assert.match(out, /mode=ci-log/);
@@ -80,7 +80,7 @@ test("a PR with a recent fix.dispatch row reports OWNED and names the strike and
   }
 });
 
-test("a PR with no lane row reports FREE, while an unreadable ledger reports UNKNOWN instead", () => {
+test("a PR with no lane row reports FREE, while an unreadable ledger reports UNKNOWN instead", async () => {
   const dir = tmpStateDir();
   try {
     writeCorpus(dir, {
@@ -106,10 +106,10 @@ test("a PR with no lane row reports FREE, while an unreadable ledger reports UNK
       live: row({ ts: "2026-09-12T21:24:00.000Z", step: "sweep.pass", enumerated: 1 }),
     });
 
-    assert.match(runPrOwner(dir, 4851), /rmd pr-owner #4851 .+ FREE/);
+    assert.match(await runPrOwner(dir, 4851), /rmd pr-owner #4851 .+ FREE/);
 
     const out: string[] = [];
-    const code = prOwnerCommand(["4851"], {
+    const code = await prOwnerCommand(["4851"], {
       readLedger: () => {
         throw new Error("permission denied");
       },
@@ -123,7 +123,7 @@ test("a PR with no lane row reports FREE, while an unreadable ledger reports UNK
   }
 });
 
-test("the verdict names the corpus newest timestamp so stale reads are visible", () => {
+test("the verdict names the corpus newest timestamp so stale reads are visible", async () => {
   const verdict = derivePrOwnerVerdict(12, {
     archiveFiles: ["ledger.2026-09-12T00-01-00-000Z.ndjson.gz"],
     liveFileRead: false,
@@ -139,7 +139,7 @@ test("the verdict names the corpus newest timestamp so stale reads are visible",
   assert.equal(verdict.corpusNewestTs, "2026-09-12T00:05:00.000Z");
 });
 
-test("an acted fixable sweep owns the PR unless it was explicitly unspent", () => {
+test("an acted fixable sweep owns the PR unless it was explicitly unspent", async () => {
   const active = derivePrOwnerVerdict(12, {
     archiveFiles: ["ledger.2026-09-12T00-01-00-000Z.ndjson.gz"],
     liveFileRead: true,
@@ -181,7 +181,7 @@ test("an acted fixable sweep owns the PR unless it was explicitly unspent", () =
   assert.equal(unspent.verdict, "FREE");
 });
 
-test("pr-owner rejects unknown flags and missing PR numbers with usage", () => {
+test("pr-owner rejects unknown flags and missing PR numbers with usage", async () => {
   const errors: string[] = [];
   assert.equal(prOwnerCommand(["4851", "--json"], { error: (text) => errors.push(text) }), 2);
   assert.match(errors.join("\n"), /unexpected argument '--json'/);
@@ -193,7 +193,7 @@ test("pr-owner rejects unknown flags and missing PR numbers with usage", () => {
   assert.match(errors.join("\n"), /rmd pr-owner <pr-number>/);
 });
 
-test("the read covers live, plain rotation and gzip rotation, and no gzip rotation reports UNKNOWN", () => {
+test("the read covers live, plain rotation and gzip rotation, and no gzip rotation reports UNKNOWN", async () => {
   const allForms = tmpStateDir();
   const noGzip = tmpStateDir();
   try {
@@ -202,7 +202,7 @@ test("the read covers live, plain rotation and gzip rotation, and no gzip rotati
       gzip: row({ ts: "2026-09-12T00:01:00.000Z", step: "sweep.pass", enumerated: 1 }),
       live: row({ ts: "2026-09-12T00:02:00.000Z", step: "sweep.pass", enumerated: 1 }),
     });
-    const free = runPrOwner(allForms, 77);
+    const free = await runPrOwner(allForms, 77);
     assert.match(free, /FREE/);
     assert.match(free, /files_read=3/);
     assert.match(free, /archives=2/);
@@ -213,7 +213,7 @@ test("the read covers live, plain rotation and gzip rotation, and no gzip rotati
       plain: row({ ts: "2026-09-12T00:00:00.000Z", step: "sweep.pass", enumerated: 1 }),
       live: row({ ts: "2026-09-12T00:02:00.000Z", step: "sweep.pass", enumerated: 1 }),
     });
-    const unknown = runPrOwner(noGzip, 77);
+    const unknown = await runPrOwner(noGzip, 77);
     assert.match(unknown, /UNKNOWN/);
     assert.match(unknown, /no compressed ledger rotation opened/);
     assert.doesNotMatch(unknown, /FREE/);
@@ -223,7 +223,7 @@ test("the read covers live, plain rotation and gzip rotation, and no gzip rotati
   }
 });
 
-test("the verb is registered and dispatchable as rmd pr-owner without a worker lane", () => {
+test("the verb is registered and dispatchable as rmd pr-owner without a worker lane", async () => {
   assert.ok(COMMANDS.some((c) => c.name === "pr-owner" && c.syntax === "rmd pr-owner <pr-number>"));
   assert.ok(HANDLERS.has("pr-owner"));
 });
