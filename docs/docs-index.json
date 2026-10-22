@@ -230,6 +230,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/a-declared-test-directory-and-the-fix-rung-scope-check.md",
+      "title": "A declared test directory and the fix rung's scope check",
+      "summary": "The fix rung refuses a newly added child of `test/` even though its caller explicitly",
+      "grepHint": "A declared test directory and the fix rung's scope check"
+    },
+    {
       "path": "docs/forensics/account-usage.md",
       "title": "account-usage.ts comment forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
