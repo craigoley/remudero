@@ -93,6 +93,13 @@ test("W1-T10270: a malformed recorded input is refused instead of entering the s
     assert.throws(() => derive([malformed(patch)]), /invalid review replay input/);
   }
   assert.equal(derive([good]).rows.length, 1);
+  // The checked-in-file route reaches the same refusal: a hand-edited input is refused before the digest check.
+  const text = serializeReviewReplaySample(derive([good]));
+  assert.ok(text.includes('"stage":"semantic"'));
+  assert.throws(() => parseReviewReplaySample(text.replace('"stage":"semantic"', '"stage":"elsewhere"')),
+    /invalid review replay input/);
+  assert.throws(() => parseReviewReplaySample(text.replace('"criteria_count":1', '"criteria_count":1.5')),
+    /invalid review replay input/);
 });
 
 test("W1-T10270: the sample is refreshed from the ledger and excludes regressed reviewer shas", () => {
