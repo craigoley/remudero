@@ -16473,6 +16473,14 @@ export function createFullPreludeTimer(
   return timer;
 }
 
+/** W1-T7736 — the head-ref prefix scripts/merge-queue-canary.mjs gives every replayed PR head. A replay PR
+ *  targets the rehearsal's scratch branch, never main, and the harness owns its whole life. */
+export const MERGE_QUEUE_REPLAY_HEAD_PREFIX = "mq-canary-replay/";
+
+export function isMergeQueueReplayPr(pr: Pick<OpenPrView, "headRefName">): boolean {
+  return pr.headRefName?.startsWith(MERGE_QUEUE_REPLAY_HEAD_PREFIX) === true;
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   sweepDeps: SweepDeps,
@@ -16507,6 +16515,9 @@ export async function runSweep(
   const now = deps.now ? deps.now() : Date.now();
   const repairDemandMark = repairMemoryDemandMark(); // W1-T9706: what this pass did not refuse again, it clears at its end.
   const log = deps.log ?? (() => {});
+  // W1-T7736: the sweep never disposes, reviews, fixes or refreshes a merge-queue rehearsal's replay PR.
+  for (const pr of openPrs.filter(isMergeQueueReplayPr)) log("sweep.replay_pr_excluded", { pr_number: pr.prNumber, head_ref: pr.headRefName });
+  openPrs = openPrs.filter((pr) => !isMergeQueueReplayPr(pr));
   const mergeBaseKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
   const judgmentPool = sweepJudgmentPool(deps);
   const mergeBases = strikeLadderMergeBases.get(deps.ledgerPath) ?? new Map<string, string>();
