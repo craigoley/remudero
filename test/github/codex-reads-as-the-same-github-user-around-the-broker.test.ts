@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ghBrokerDir } from "#src/lib/gh-read-broker-client.js";
 import {
-  ghBrokerCommand, ghBrokerLoginStatus, ghCommand, GhReadBroker, serveGhReadBroker, summariseGhBrokerLog,
+  ghBrokerCommand, ghBrokerLoginStatus, ghCommand, GhReadBroker, isGhPaceLogin, summariseGhBrokerLog,
   type GhUpstreamExec, type GhUpstreamResult,
 } from "#src/lib/gh-read-broker.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
@@ -236,6 +236,14 @@ test("W1-T10302: an unusable shared pacer falls back to the account pacer", asyn
   const lone = accountBroker(t, "lone", none, clock, exec.exec);
   await read(lone, 3);
   assert.match((lone.status() as { pacer: string }).pacer, /no shared pace directory for octo/);
+
+  // A login is a path component under the pace root: anything else is never joined, and never escapes the root.
+  assert.deepEqual(["octo", "octo-2", "A1"].map(isGhPaceLogin), [true, true, true]);
+  assert.deepEqual(["", "../etc", "a/b", ".", "-x", "a b"].map(isGhPaceLogin), [false, false, false, false, false, false]);
+  const evilExec = scriptedExec(clock, () => http("200 OK", [], "{}"));
+  const evil = new GhReadBroker(join(tmp(t, "evil"), "gh-broker"), async (args, o) => (args[1] === "user" ? ok("../etc\n") : evilExec.exec(args, o)), clockFromMillisFn(clock.now), clock.sleep, () => 1e12, { sharedPaceRoot: none, account: "evil" });
+  assert.equal((await read(evil, 5)).outcome, "upstream-200");
+  assert.match((evil.status() as { pacer: string }).pacer, /names no shared pace directory/);
 
   // A torn state file is not a pace either: the read is still served, per account.
   const odd = tmp(t, "odd");

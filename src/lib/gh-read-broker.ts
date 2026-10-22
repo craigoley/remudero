@@ -287,7 +287,10 @@ export const GH_PACE_ROOT_DEFAULT = "/Users/Shared/remudero/gh-pace";
 export function ghPaceRoot(env: NodeJS.ProcessEnv = process.env): string {
   return env.RMD_GH_PACE_ROOT || GH_PACE_ROOT_DEFAULT;
 }
-const GH_LOGIN_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+/** A GitHub login is a path component under the pace root: letters, digits and hyphens, never a separator or a dot. */
+export function isGhPaceLogin(login: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(login);
+}
 
 /** One limiter's shared pacing: TIMING NUMBERS AND COUNTS ONLY, never a response, header value or token. */
 interface GhSharedLimiterFile {
@@ -396,7 +399,7 @@ export class GhSharedPace {
 /** The shared files under `<root>/<login>/`, read for `status`: which accounts' brokers saw how many refusals per limiter. */
 function readSharedSeen(root: string, login: string): Record<string, Record<string, { refusals: number; lastMs: number }>> {
   const out: Record<string, Record<string, { refusals: number; lastMs: number }>> = {};
-  if (!GH_LOGIN_RE.test(login)) return out;
+  if (!isGhPaceLogin(login)) return out;
   const dir = join(root, login);
   let names: string[] = [];
   try {
@@ -609,7 +612,7 @@ export class GhReadBroker {
     if (this.now() < this.sharedRetryAtMs) return undefined;
     const login = await this.login();
     const dir = join(this.sharedRoot, login);
-    if (!GH_LOGIN_RE.test(login)) {
+    if (!isGhPaceLogin(login)) {
       this.sharedScope = `account (login ${login} names no shared pace directory)`;
     } else if (!existsSync(dir)) {
       this.sharedScope = `account (no shared pace directory for ${login}: run deploy/mac/install-gh-read-broker.sh)`;
@@ -830,7 +833,7 @@ export class GhReadBroker {
           try {
             this.pull(shared, limiter);
           } catch (cause) {
-            this.sharedFailed(cause);
+            this.sharedFailed(cause); // fail open: the cause is carried into the scope status prints
             shared = undefined;
           }
         }
@@ -860,7 +863,7 @@ export class GhReadBroker {
           } catch (cause) {
             if (locked) shared.unlock(limiter);
             locked = false;
-            this.sharedFailed(cause);
+            this.sharedFailed(cause); // fail open: the cause is carried into the scope status prints
             shared = undefined;
           }
         }
@@ -876,7 +879,7 @@ export class GhReadBroker {
             try {
               this.push(shared, limiter);
             } catch (cause) {
-              this.sharedFailed(cause);
+              this.sharedFailed(cause); // fail open: the cause is carried into the scope status prints
             } finally {
               shared.unlock(limiter);
             }
@@ -1161,7 +1164,7 @@ export function ghBrokerLoginStatus(
   }
   return {
     login,
-    shared_pace_dir: login !== null && GH_LOGIN_RE.test(login) && existsSync(join(root, login)) ? join(root, login) : null,
+    shared_pace_dir: login !== null && isGhPaceLogin(login) && existsSync(join(root, login)) ? join(root, login) : null,
     accounts: [...accounts].sort(),
     by_account: {
       [account]: {
@@ -1296,7 +1299,7 @@ export async function serveGhReadBroker(opts: {
 
 // ── THE CLI ─────────────────────────────────────────────────────────────────────────────────────
 
-export const GH_COMMAND_USAGE = "usage: rmd gh [--class interactive|agent|background] [--client claude|codex|agent] [--fresh] -- <gh args>";
+export const GH_COMMAND_USAGE = "usage: rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>";
 
 /** {@link brokerGhRead} that also tells the broker WHICH client is reading (W1-T10302). The client library
  *  predates the field, so the request is built here; the broker reads an absent client from the class. */

@@ -106,8 +106,8 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd correct <task-id> --pr <n> [--reason <text>]` | Sanctioned operator correction: records the task's TRUE merged PR when derived status disagrees, supreme over every other status rung. |
 | `rmd release <task-id> --reason <text>` | The sanctioned release for a task the dispatch circuit breaker has halted with no new owned PR since (W1-T4691) — a trip that deliberately survives a rotation and a daemon restart (W1-T2425), so a halted task can otherwise never open the `pr.opened` line that would reset it. Appends one explicit, attributable `dispatch.breaker_released` ledger row — never an inference, never an archive read — that the breaker reads exactly like a new owned PR, so the task is dispatchable on the next tick. Best-effort closes the task's open circuit-breaker needs-human issue with a pointer to the row. |
 | `rmd garden run <name> [--hourly]` | One pass of one registered gardener, built from the shared garden registry (W1-T5114). The daemon spawns this as a child per gardener pass so no pass runs on its event loop; an operator can run it by hand to watch one pass. It appends to the same ledger the daemon does; `--hourly` also refreshes the test garden's hourly CI evidence. |
-| `rmd gh [--class interactive\|agent\|background] [--fresh] -- <gh args>` | A gh READ through this Mac account's GitHub read broker (W1-T10279): cached inside GitHub's own max-age, coalesced across sessions, revalidated with If-None-Match, interactive callers first. Prints exactly what gh would and exits with its code. A read with no live broker runs gh directly. Reads only: a write or any auth call is refused with exit 2; run it as plain gh, where the deny floor judges it. |
-| `rmd gh-broker serve \| status [--since <dur>] \| stop` | Serve, inspect or stop the per-account read broker. `status` prints queue depth by class, each limiter's gap and hold, and hit/coalesce/304/upstream counts; `--since` summarises its request log. Installed on a Mac by `deploy/mac/install-gh-read-broker.sh`; nothing runs it on Azure. |
+| `rmd gh [--class interactive\|agent\|background] [--client claude\|codex\|agent] [--fresh] -- <gh args>` | A gh READ through this Mac account's GitHub read broker (W1-T10279): cached inside GitHub's own max-age, coalesced across sessions, revalidated with If-None-Match, interactive callers first. Prints exactly what gh would and exits with its code. A read with no live broker runs gh directly. Reads only: a write or any auth call is refused with exit 2; run it as plain gh, where the deny floor judges it. |
+| `rmd gh-broker serve \| status [--since <dur>] \| stop` | Serve, inspect or stop the per-account read broker. `status` prints queue depth by class, each limiter's gap and hold, and hit/coalesce/304/upstream counts; `--since` summarises its request log, and `login_status` gives per-login counts by client and refusals by limiter (W1-T10302). Installed on a Mac by `deploy/mac/install-gh-read-broker.sh`; nothing runs it on Azure. |
 | `rmd escalate --class <BLOCKED\|MANUAL\|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label\|detail"]...` | Open a needs-human GitHub issue. `MANUAL`/`HARD_STOP` also fire a real-time iMessage ping; `BLOCKED` collapses into the digest. |
 | `rmd notify <message>` | Real-time iMessage ping via `osascript` (no BlueBubbles dependency). |
 | `rmd digest [--since <iso>] [--dry-run]` | Roll up the ledger since `<iso>` (default 24h ago) into one digest ping. |
@@ -183,6 +183,33 @@ when the remote branch set changes, or after the six-hour
 cheap `git ls-remote --heads origin` fingerprint; the REST/ancestry classifier
 is throttled, and the light in-flight pass never reaches the remote git write.
 An unreadable or empty listing refuses rather than becoming a healthy zero.
+
+### Two Mac accounts, one GitHub login: Codex reads through the broker too (W1-T10302)
+
+Your Codex sessions run under a second Mac account and open every `codex/` PR as the same GitHub user the Claude
+sessions read as, so both spend one user's per-user limits. Two things route them through one pacer.
+
+1. **The hook.** The repo's `.codex/config.toml` registers a `PreToolUse` hook that runs `hooks/deny-floor.sh` with
+   `RMD_DENY_FLOOR_ONLY=gh-read`. That evaluates the GitHub-read routing rule alone, plus the refusal of an inline
+   polling loop, so a loop around `rmd gh` is still refused from either client. The other deny-floor rules are not
+   Codex's. Codex loads a project's `.codex/config.toml` only for a project you have trusted.
+2. **One pacer per login.** Each account keeps its own broker, socket and cache (cached bodies never cross an
+   account). The pacer's gap, hold, last start and refusal count live in `/Users/Shared/remudero/gh-pace/<login>/`,
+   and an upstream start takes that login's per-limiter lock, so both brokers' calls are serial and a refusal either
+   one sees holds both. The directory holds timing numbers and counts only. An unreadable or unwritable shared
+   directory falls back to the per-account pacer, and `rmd gh-broker status` says so under `pacer`.
+
+**Install on both accounts.** Run `deploy/mac/install-gh-read-broker.sh` once under each account (add `--dry-run` to
+see the plan). The first run creates `/Users/Shared/remudero/gh-pace/<login>/` (mode 0700 plus an ACL naming that
+account). The second run joins it by adding itself to the ACL, which needs the directory owner or `sudo`: running it
+is your approval of the second account. It prints the login, the accounts sharing the pacer and the `codex-cli`
+version. Nothing is world-writable.
+
+**Confirm a Codex session is routed.** In a Codex session, run one `gh pr view <n>`. It is refused with
+`rmd gh --class interactive --client codex -- <same gh args>`; run that, and `rmd gh-broker status` shows the read
+under `login_status.by_account.<account>.requests_by_client.codex`. `status` also prints, per login, upstream calls and
+refusals by limiter, and which account's broker saw each refusal (`shared_refusals_by_account`). `--since` defaults
+to one day for this view.
 
 ## A normal day
 
