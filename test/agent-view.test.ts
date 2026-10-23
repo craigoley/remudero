@@ -3,7 +3,7 @@
 // analytics, and the per-instance fold must spread a large panel fact delta over passes, resuming from its
 // committed position after a restart.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -389,17 +389,42 @@ test("the nav badge reads the agent view's fold, so its count never folds past t
 // ---- the persisted fold ----
 
 /** A store holding `n` panel facts (and one non-panel fact per 1,000), written straight into `fact`. */
-function factStore(t: { after: (fn: () => void) => void }, n: number): { db: ReadModelDb; lease: ReadModelLease } {
+function factStore(t: { after: (fn: () => void) => void }, n: number): { db: ReadModelDb; lease: ReadModelLease; root: string } {
   const root = makeTempDir("agent-fold");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let db: ReadModelDb | undefined;
+  t.after(() => {
+    // SQLite may checkpoint and remove its WAL on close. Keep the directory until
+    // close completes; if close fails, preserve the fixture and the failure.
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  });
   mkdirSync(join(root, "state"), { recursive: true });
-  const db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
-  t.after(() => db.close());
+  db = openProjectorReadModel(join(root, "state"), "core", fixedClock(NOW));
   const got = acquireLease(db, { holder: "fold-test", clock: fixedClock(NOW) });
   assert.ok(got.ok);
   addFacts(db, 0, n);
-  return { db, lease: got.lease };
+  return { db, lease: got.lease, root };
 }
+
+test("W1-T10430: agent fold teardown closes SQLite before deleting its directory", () => {
+  const cleanup: Array<() => void> = [];
+  const { db, root } = factStore({ after: (fn) => void cleanup.push(fn) }, 0);
+  const close = db.close.bind(db);
+  let directoryPresentAtClose: boolean | undefined;
+  db.close = () => {
+    directoryPresentAtClose = existsSync(root);
+    close();
+  };
+  const failures: unknown[] = [];
+  // Run every registered hook even on the negative control, so the real store is
+  // closed after a reversed-order deletion fails. No external resource is faked.
+  for (const finish of cleanup) {
+    try { finish(); } catch (error) { failures.push(error); }
+  }
+  assert.deepEqual(failures, [], "fixture teardown completes without hiding a failure");
+  assert.equal(directoryPresentAtClose, true, "the real SQLite close runs before any directory removal");
+  assert.equal(existsSync(root), false, "the fixture is removed after the real close completes");
+});
 
 function addFacts(db: ReadModelDb, from: number, n: number): void {
   const insert = db.prepare("INSERT INTO fact(ts, ts_ms, step, body) VALUES(?, ?, ?, ?)");
