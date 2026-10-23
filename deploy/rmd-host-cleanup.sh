@@ -30,10 +30,23 @@
 #                  tsx's transpile cache (`tsx-*` directly under a tmp root) is a protected UNIT —
 #                  the directory itself is never removed — but its stale FILES are (prune_tsx_cache).
 #   4. archive   — transcripts are moved, never deleted; refused when the archive root shares a
-#                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS
-#   5. DRY_RUN=1 changes nothing; a pass that leaves ANY watched filesystem past its mark exits
+#                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS.
+#                  Operator ruling 2026-10-23: preserved and archived copies of unpublished work
+#                  expire after RETAIN_DAYS (7): the worktree archive, the dated archives and the
+#                  preserve root, entry by entry (retention); nothing outside those roots is expired
+#   5. DRY_RUN=1 (or RMD_CLEANUP_DRY_RUN=1) changes and writes nothing anywhere — no receipt, audit
+#      line, lock, gzip, bundle or copy; a pass that leaves ANY watched filesystem past its mark exits
 #      non-zero, naming each one (W1-T5548, pinned by
 #      test/the-host-janitor-alarms-on-every-watched-filesystem.test.ts; `/` used to be the only alarm)
+
+# The 2026-10-23 phases (operator: apply the Mac janitor's learnings, under the same six-hour rule):
+#   preserve-then-retire — what the sweeps KEEP as unpublished, dirty, ignored-data or unverified is
+#     copied to PRESERVE_ROOT and then retired (preserve_unit); a folder held only by a live child is
+#     descended, each child judged on its own
+#   dump housekeeping    — idle JSON/log dumps outside repositories are gzipped; old ones expire
+#   retention            — the archives and the preserved copies expire after RETAIN_DAYS
+# and a `rmd-host-cleanup: reclaim-total <phase> <root>: [would ]reclaim N MB (B bytes) in E entries`
+# line per root. The hourly root pass (RMD_CLEANUP_ONLY_TMP=1) runs retention only.
 
 # Every decision is logged: `KEEP <path>: <reason>` / `REMOVE <path>` / `ARCHIVE <path>` /
 # `PRUNE <path>: <bytes> bytes, ...` / `REFUSE <what>: <reason>`, then a summary `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this
@@ -65,7 +78,24 @@
 #   RMD_CLEANUP_TSX_MAX_AGE_HOURS  pins the age (h; under 6 is clamped to 6) past which a file
 #                               inside a `tsx-*` cache directly under a tmp root is pruned
 #                               (default: the idle window)
-#   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go
+#   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go (default <state disk>/host/archive, measured 2026-10-23)
+#   RMD_CLEANUP_STATE_DISK      the state disk the archive defaults derive from (default /mnt/rmd); set,
+#                               it also turns on the host-layout defaults below, as RMD_CLEANUP_ROOT_FS=/ does
+#   RMD_SCRATCH_ROOT            the scratch disk (default /mnt/scratch)
+#   RMD_CLEANUP_RETAIN_DAYS     days after which preserved and archived copies expire (default 7)
+#   RMD_CLEANUP_RETAIN_ROOTS    colon-separated archive roots expired entry by entry (host default: the
+#                               worktree archive, <state disk>/archive, <state disk>/host-cleanup-archive)
+#   RMD_CLEANUP_PRESERVE_ROOTS  colon-separated roots whose units preserve-then-retire judges (host
+#                               default: the worktree roots, the scratch disk, its o/, tmp/ and
+#                               rmd-work-tmp/, <state disk>/tmp, ~/rmd-state2/tmp and the tmp roots)
+#   RMD_CLEANUP_PRESERVE_ROOT   where the copies go (default <scratch disk>/host-cleanup-preserved)
+#   RMD_CLEANUP_MAX_UNTRACKED_MB  an untracked or ignored file over this holds its checkout (default 50)
+#   RMD_CLEANUP_PUBLISHED_REMOTES  space-separated URL prefixes whose advertised heads/tags count as
+#                               published when bundling (default the craigoley GitHub forms)
+#   RMD_CLEANUP_DUMP_ROOTS      roots whose units' idle dumps are gzipped / expired (default: the preserve roots)
+#   RMD_CLEANUP_DUMP_GZIP_ONLY_ROOTS  roots whose dumps are gzipped and never deleted (host default
+#                               <state disk>/agent-codex/sessions)
+#   RMD_CLEANUP_DUMP_MIN_MB / RMD_CLEANUP_DUMP_RETAIN_DAYS  dump size to gzip (5) and age to expire (14)
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
 #                               filesystem holding it (default `df -Pk`)

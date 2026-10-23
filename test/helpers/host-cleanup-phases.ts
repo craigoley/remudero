@@ -4,7 +4,6 @@
  * every default derived from RMD_CLEANUP_STATE_DISK / RMD_SCRATCH_ROOT is exercised for real and no
  * case reaches the real /mnt/rmd, /mnt/scratch or /tmp.
  */
-import { execFileSync } from "node:child_process";
 import { lstatSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -81,9 +80,4 @@ export function treeSnapshot(root: string): string[] {
   };
   walk(root);
   return out;
-}
-
-export function gitIn(cwd: string, ...args: string[]): string {
-  return execFileSync("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args],
-    { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }

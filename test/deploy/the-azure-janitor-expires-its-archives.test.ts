@@ -58,7 +58,8 @@ test("archived copies of unpublished work expire after seven days, entry by entr
   // out of scope: the live validation bundles and any state beside the archive roots
   const validation = file(join(fx.state, "host-cleanup-validation-bundles-20261014", "v.bundle"));
   const state = file(join(fx.state, "state2", "ledger.ndjson"));
-  for (const p of [oldBundle, oldScratch, oldWork, oldTar, legacy, validation, state, join(youngInsideOld, "old.md")]) ageDays(p, 9);
+  // youngInsideOld is itself nine days old; only a leaf inside it changed recently, which keeps it
+  for (const p of [oldBundle, oldScratch, oldWork, oldTar, legacy, validation, state, youngInsideOld]) ageDays(p, 9);
   ageDays(freshBundle, 3);
   ageDays(freshScratch, 6);
   ageDays(recentLeaf, 2);

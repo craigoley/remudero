@@ -7,6 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -82,4 +83,23 @@ test("Codex sessions are gzipped once idle and never deleted, however old", () =
   assert.equal(existsSync(smallOld), true, `a gzip-only root never deletes a session:\n${r.stdout}`);
   assert.equal(existsSync(recent), true, "a session written within six hours is left for Codex to resume");
   assert.doesNotMatch(r.stdout, /REMOVE .*agent-codex/);
+});
+
+test("a dump whose compressed copy does not read back byte for byte is kept, and no partial copy is left", () => {
+  const fx = phaseFixture();
+  const root = join(fx.root, "dump-root");
+  const big = join(root, "unit", "native.json");
+  const body = dump(big, 6 * 1024 * 1024);
+  age(join(root, "unit"), 13);
+  // a gzip that truncates what it writes (a full disk, a flaky device) but decompresses honestly
+  const bin = join(fx.root, "bad-gzip-bin");
+  mkdirSync(bin);
+  const real = execFileSync("sh", ["-c", "command -v gzip"], { encoding: "utf8" }).trim();
+  writeFileSync(join(bin, "gzip"), `#!/usr/bin/env bash\ncase " $* " in *" -dc "*|*" -t "*) exec '${real}' "$@" ;; esac\n'${real}' "$@" | head -c 4096\n`, { mode: 0o755 });
+
+  const r = run(fx, { ...fx.env, PATH: `${bin}:${process.env.PATH}`, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: root, RMD_CLEANUP_DUMP_GZIP_ONLY_ROOTS: "" });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, new RegExp(`KEEP ${big}: compression read-back failed`));
+  assert.deepEqual(readFileSync(big), body, "the original is untouched");
+  assert.equal(existsSync(`${big}.gz`) || existsSync(`${big}.gz.incoming`), false, r.stdout);
 });
