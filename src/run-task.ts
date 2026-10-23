@@ -26156,7 +26156,8 @@ export async function projectRetroReadCost(stateDir: string, holder: string = RE
       key = `${stat.size}:${stat.mtimeMs}`;
     } catch (error) {
       undigested++;
-      unreadable.push(`${name}: ${String(error)}`);
+      const reason = `${name}: ${String(error)}`;
+      unreadable.push(reason);
       continue;
     }
     const digest = await readValidatedRotationDigest(rotationDigestFile(stateDir, holder, name), {holder, archive: name, key, reducerVersion});
