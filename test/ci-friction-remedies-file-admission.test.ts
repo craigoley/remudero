@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -18,6 +18,8 @@ import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
 import { assertLintClean, lintTask, sizingViolation, taskRulingPin } from "#src/lib/task-linter.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalBinding, type NewPathApprovalFacts, type NewPathApprovalRecord, type Task } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import * as approvalPlan from "#src/lib/plan.js";
 import * as service from "#src/lib/service.js";
 import type { IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -165,6 +167,33 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
 
 const APPROVAL_RECORD_PATH = "plan/tasks.d/W1-T99001-approved-new-path.yaml";
 const APPROVAL_REFERENCE = `npa1_${"A".repeat(43)}`;
+
+test("new path admission refuses missing drifted and unsupported authority before staging with real checkout and pinned-base path reads", async () => {
+  const read = (approvalPlan as unknown as { readNewPathApprovalPaths?: typeof approvalPlan.readNewPathApprovalPaths }).readNewPathApprovalPaths;
+  assert.equal(typeof read, "function", "a permanently injected path port cannot establish real missing-path scope");
+  const repo = gitRepo({ kind: "new-path-approval" });
+  try {
+    repo.addRemote("origin", "https://github.com/acme/remudero.git");
+    mkdirSync(join(repo.dir, "src", "lib"), { recursive: true });
+    writeFileSync(join(repo.dir, "src", "lib", "existing.ts"), "export {};\n");
+    symlinkSync("lib", join(repo.dir, "src", "linked"));
+    repo.git("add", "src");repo.git("commit", "-m", "test: seed actual approved path controls");
+    const base = repo.git("rev-parse", "HEAD"), { task, facts } = approvalFixture();
+    const files = ["src/lib/existing.ts", "src/lib/future.ts", "src/NewFolder/new.ts", "src/linked/future.ts", "src/Lib/future.ts"];
+    const context = { repoRoot: repo.dir, base, binding: facts.binding };
+    const observed = await read!({ ...task, files }, context, AbortSignal.timeout(2_000));
+    assert.deepEqual(observed?.[files[0]!], { checkout: "present", base: "present" });
+    assert.deepEqual(observed?.[files[1]!], { checkout: "missing", base: "missing" });
+    assert.deepEqual(observed?.[files[2]!], { checkout: "missing", base: "missing" }, "a genuinely new directory is not a guessed Git error");
+    assert.equal(observed?.[files[3]!]?.checkout, "unknown", "a symlink ancestor is not missing authority");
+    assert.equal(observed?.[files[3]!]?.base, "unknown");
+    assert.equal(observed?.[files[4]!]?.checkout, "unknown", "case substitutions are not approved missing paths");
+    assert.equal(await read!(task, { ...context, base: "0".repeat(40) }, AbortSignal.timeout(2_000)), undefined, "failed Git reads are UNKNOWN, not all-missing");
+    assert.equal(await read!(task, { ...context, binding: { ...facts.binding, repository: "other/remudero" } }, AbortSignal.timeout(2_000)), undefined);
+    const cancelled = new AbortController();cancelled.abort();
+    assert.equal(await read!(task, context, cancelled.signal), undefined);
+  } finally { repo.cleanup(); }
+});
 
 function approvalFixture(mode: "human" | "auto" = "human", overrides: Partial<Task> = {}) {
   const plan = loadPlanFromYaml([
