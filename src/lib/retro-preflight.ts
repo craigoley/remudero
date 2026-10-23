@@ -279,7 +279,9 @@ function failureExcerpt(output: string, buffer: Buffer, budget: number, failingT
   const blocks: string[] = [];
   const retained = new Set<string>();
   for (const match of output.matchAll(/^not ok \d+ - (.+)\r?\n(?:[ \t].*(?:\r?\n|$))*/gm)) {
-    const name = failingTests.find((candidate) => match[1].startsWith(candidate));
+    // Prefer an exact name: e.g. failure-1 must not consume failure-10's block.
+    const name = failingTests.find((candidate) => candidate === match[1])
+      ?? failingTests.find((candidate) => match[1].startsWith(candidate));
     if (name !== undefined && !retained.has(name)) {
       retained.add(name);
       blocks.push(match[0]);
@@ -289,16 +291,19 @@ function failureExcerpt(output: string, buffer: Buffer, budget: number, failingT
   if (blocks.length === 0) return utf8Slice(buffer, 0, budget);
   const omission = "[... other output omitted ...]\n";
   const tailBytes = Math.min(1024, Math.floor(budget / 4));
-  const tail = utf8Slice(buffer, buffer.byteLength - tailBytes, buffer.byteLength);
+  // Only the summary tail, not arbitrary trailing payload outside a diagnostic block.
+  let tail = "";
+  for (const match of output.matchAll(/^(?:1\.\.\d+[^\r\n]*|# (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) [^\r\n]*)\r?(?:\n|$)/gm)) {
+    const bytes = Buffer.from(tail + match[0], "utf8");
+    tail = utf8Slice(bytes, Math.max(0, bytes.byteLength - tailBytes), bytes.byteLength);
+  }
   let available = Math.max(0, budget - Buffer.byteLength(omission) - Buffer.byteLength(tail));
   const excerpts = blocks.map((block, index) => {
     const share = Math.floor(available / (blocks.length - index));
     const bytes = Buffer.from(block, "utf8");
     const marker = "\n[... failure block omitted ...]\n";
     const excerpt = bytes.byteLength <= share ? block
-      : share >= Buffer.byteLength(marker)
-        ? utf8Slice(bytes, 0, share - Buffer.byteLength(marker)) + marker
-        : utf8Slice(bytes, 0, share);
+      : utf8Slice(bytes, 0, share - Buffer.byteLength(marker)) + marker;
     available -= Buffer.byteLength(excerpt);
     return excerpt;
   });
