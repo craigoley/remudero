@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {mkdirSync, readFileSync, rmSync, statSync, writeFileSync} from "node:fs";
+import {mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync} from "node:fs";
 import {join} from "node:path";
 import {gzipSync} from "node:zlib";
 import {test, type TestContext} from "node:test";
@@ -92,4 +92,16 @@ test("the real async memo retains its cold and restored digest records and accou
   assert.equal(restored.retention().digestHits, 1);
   assert.equal(restored.retention().digestMisses, 0);
   assert.deepEqual(restored.kept(f.archive, key), cold.kept(f.archive, key));
+});
+
+test("an archive that cannot be statted stays visible as unreadable in the cost projection", async t => {
+  const f = fixture(t);
+  const broken = "ledger.2026-10-02T00-00-00-000Z.ndjson.gz";
+  symlinkSync(join(f.dir, "missing-fixture-archive"), join(f.dir, broken));
+  const projected = await projectRetroReadCost(f.dir);
+  assert.equal(projected.rotations, 2);
+  assert.equal(projected.undigested, 2);
+  assert.ok(projected.projectedBytes > 2000, "the readable archive still has its real cost");
+  assert.equal(projected.unreadable?.length, 1);
+  assert.match(projected.unreadable[0]!, /ledger\.2026-10-02.*ENOENT/);
 });
