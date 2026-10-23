@@ -45,3 +45,11 @@
       proof: "grep: Closure precedes separately authorized release in docs/forensics/pinned-terminal-scope-contract.md"
     - claim: The report names source evidence, primary research, discriminating controls and the separate native-approval boundary
       proof: "grep: Research and falsifier matrix in docs/forensics/pinned-terminal-scope-contract.md"
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"authorized\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-22T22:18:10.179Z"
+    pin: "aa125dfeb549954226add451158fd562e67cfd95c9f28114237f092f66e1d8c5"
