@@ -30,6 +30,7 @@
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
 import { spawnSync } from "node:child_process";
+import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
@@ -1150,6 +1151,18 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/every-ci-census-is-asked-before-the-push.test.ts",
+    trigger: ({ changed, readHead, readBase }) => changed.some((p) => [
+      "scripts/census-precheck.mjs", "scripts/census-precheck-parity-baseline.json",
+      "scripts/list-rule-suites.mjs", "src/lib/ci-parity.ts", "src/lib/rule-suites.ts",
+    ].includes(p) || isRuleSuitePath(p, readHead?.(p) ?? readBase?.(p) ?? "")),
+    remedy: "register each new CI census in an actual pre-push execution path; the CI-only baseline may only shrink" },
+  { testFile: "test/rules/the-janitor-preserves-tracked-artifacts.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [
+      "deploy/mac/remudero-janitor.sh", "deploy/workspace-retirement-guard.sh", "scripts/census-precheck.mjs",
+      "test/rules/the-janitor-preserves-tracked-artifacts.test.ts",
+    ].includes(p)),
+    remedy: "preserve tracked source and unreadable Git indexes before generated-artifact deletion" },
   { testFile: "test/rules/scout-config-gardener-failed.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.some((p) => [
       "src/run-task.ts", "src/lib/config-gardener.ts", "scripts/build-child-entries.mjs",

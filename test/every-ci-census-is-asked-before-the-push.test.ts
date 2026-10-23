@@ -208,3 +208,29 @@ test("W1-T9872: recursive test censuses refuse nested fixture defects before pus
   assert.ok(!precheck.gitFreeCensusSuites().includes("test/host-capability-fixtures.test.ts"),
     "tracked-test enumeration needs git even when every audit input is fixture data");
 });
+
+test("a new CI rule suite reaches the birth parity check before push", () => {
+  const gate = "test/every-ci-census-is-asked-before-the-push.test.ts";
+  const added = "test/rules/an-unregistered-new-rule.test.ts";
+  const { baseline, population } = live();
+  const evaluate = (registered: boolean, changed = added) => {
+    const ran: string[] = [];
+    const parity = { ...PRECHECK_PARITY, ...(registered ? { [added]: { modeled: () => [] } } : {}) };
+    const found = precheck.evaluateAdmittedCensusSuites({
+      changed: [changed], loadMembers: () => [], readHead: () => "", readBase: () => null,
+      runSuites: (files: string[]) => {
+        ran.push(...files);
+        const verdict = precheckParityVerdict({ population: [...population, added], baseline, parity });
+        return files.includes(gate) && verdict.unasked.length ? [gate] : [];
+      },
+    });
+    assert.equal(found.unmeasured, null);
+    return { ran, violations: found.violations as string[] };
+  };
+  const missing = evaluate(false);
+  assert.ok(missing.ran.includes(gate), "a new rules-directory member asks the real parity census");
+  assert.equal(missing.violations.length, 1, "unregistered CI suites refuse before publication");
+  assert.ok(missing.violations[0].startsWith(`census-suite: ${gate} fails`));
+  assert.deepEqual(evaluate(true).violations, [], "a registered suite passes the same question");
+  assert.deepEqual(evaluate(false, "docs/example.md").ran, [], "unrelated documentation starts no child");
+});

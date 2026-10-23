@@ -87,7 +87,10 @@ test("W1-T5693: the structural suites' own files, registries and plan shards sta
     ["scripts/cycle-baseline.json", [[CYCLE]]],
     ["scripts/cycle-ratchet.mjs", [[CYCLE]]],
     ["scripts/source-size-ratchet.mjs", [[SIZE]]],
-    ["src/lib/ci-parity.ts", [["test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts"], [SIZE]]],
+    ["src/lib/ci-parity.ts", [[
+      "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+      "test/every-ci-census-is-asked-before-the-push.test.ts",
+    ], [SIZE]]],
     ["plan/tasks.d/W1-T1-x.yaml", [[CITATION]]],
     ["MASTER-PLAN.md", [[CITATION]]],
     ["scripts/citation-anchor-census.mjs", [[CITATION]]],
