@@ -219,6 +219,8 @@ export interface Task {
    *  {@link Plan} instead of re-reading and re-parsing every shard to find it. Optional because a
    *  `Task` built by hand (fixtures, tests) never went through a parse and has no file to name. */
   sourcePath?: string;
+  /** Opaque reference only; copied receipt text and recorded ruling labels grant no authority. */
+  new_path_approval_ref?: string;
 }
 
 export interface TaskPrecondition {
@@ -381,6 +383,55 @@ export interface Plan {
   byId: Map<string, Task>;
 }
 
+export const NEW_PATH_APPROVAL_PROTOCOL = "new-path-approval-v1";
+export const NEW_PATH_APPROVAL_MAX_TASK_BYTES = 64 * 1024;
+export const NEW_PATH_APPROVAL_MAX_LIFETIME_MS = 4 * 60 * 60 * 1000;
+export const NEW_PATH_APPROVAL_FACT_MAX_AGE_MS = 30_000;
+
+export interface NewPathApprovalBinding {
+  issuerId: string;
+  origin: string;
+  epoch: string;
+  policy: string;
+  repositoryId: number;
+  repository: string;
+  instance: string;
+  audience: string;
+}
+
+export interface NewPathApprovalRecord {
+  protocol: typeof NEW_PATH_APPROVAL_PROTOCOL;
+  reference: string;
+  binding: NewPathApprovalBinding;
+  taskId: string;
+  taskRepo: string;
+  intentDigest: string;
+  recordPath: string;
+  declaredPaths: readonly string[];
+  approvedMissingPaths: readonly string[];
+  operatorId: string;
+  confirmationId: string;
+  issuedAt: number;
+  expiresAt: number;
+}
+
+export interface NewPathApprovalPathEvidence {
+  checkout: "present" | "missing" | "unknown";
+  base: "present" | "missing" | "unknown";
+}
+
+/** Prepared by the selected current reader, NEVER decoded from a task's receipt-looking prose. */
+export type NewPathApprovalFacts = { state: "unknown"; reason: string } | {
+  state: "verified";
+  reference: string;
+  binding: NewPathApprovalBinding;
+  record: NewPathApprovalRecord;
+  observedAt: number;
+  currentSourcePath: string;
+  recordPath: string;
+  paths: Readonly<Record<string, NewPathApprovalPathEvidence>>;
+};
+
 export interface MachineFilingAdmissionContext {
   plan: Plan;
   releasedIds: ReadonlySet<string>;
@@ -388,6 +439,129 @@ export interface MachineFilingAdmissionContext {
   dependencyEvidence?: (task: Task) => DependencyMergeEvidence;
   pathExists?: (repoRelPath: string) => boolean;
   pathExistsAtBase?: (repoRelPath: string) => boolean;
+  newPathApproval?: NewPathApprovalFacts;
+  clock?: Clock;
+}
+
+const NEW_PATH_TASK_FIELDS = new Set([
+  "id", "title", "repo", "depends_on", "plan_refs", "goal", "symptom_query", "ci_learning_prs", "type", "verify",
+  "risk", "band_meaning", "priority", "status", "dispatch_hold", "not_before", "precondition", "attempts", "pr",
+  "principles", "budget_usd", "acceptance", "hand_built", "note", "rationale", "design", "amendment",
+  "narrativeUnavailable", "origin", "author_class", "risk_ruling", "prompt", "context", "files", "retirement",
+  "superseded_by", "sourcePath", "new_path_approval_ref",
+]);
+
+export function isNewPathApprovalReference(value: unknown): value is string {
+  return typeof value === "string" && /^npa1_[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+export function isCanonicalApprovalPath(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    /^[A-Za-z0-9._/-]+$/.test(value) && !value.startsWith("/") &&
+    value.split("/").every(part => part !== "" && part !== "." && part !== "..");
+}
+
+function canonicalApprovalJson(value: unknown, seen = new Set<object>(), depth = 0): string {
+  if (depth > 32) throw new Error("approval data exceeds its depth bound");
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (typeof value !== "object" || seen.has(value) || Object.getOwnPropertySymbols(value).length > 0) throw new Error("unsupported approval data");
+  if (!Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error("unsupported approval object");
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (value.length > 1_024 || Object.keys(value).length !== value.length) throw new Error("unsupported approval array");
+      return `[${value.map(item => canonicalApprovalJson(item, seen, depth + 1)).join(",")}]`;
+    }
+    const properties = Object.getOwnPropertyDescriptors(value);
+    if (Object.keys(properties).length > 256) throw new Error("approval object exceeds its field bound");
+    return `{${Object.keys(properties).sort().flatMap(key => {
+      const property = properties[key]!;
+      if (!Object.hasOwn(property, "value")) throw new Error("approval accessors are unsupported");
+      return property.value === undefined ? [] : [`${JSON.stringify(key)}:${canonicalApprovalJson(property.value, seen, depth + 1)}`];
+    }).join(",")}}`;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+/** Full acted-on task intent, with a canonical destination replacing only the loader's host prefix. */
+export function newPathApprovalIntentDigest(task: Task, recordPath: string): string | undefined {
+  try {
+    if (!isCanonicalApprovalPath(recordPath) || !/^plan\/tasks[.]d\/[^/]+[.]ya?ml$/.test(recordPath) ||
+      Object.keys(task).some(key => !NEW_PATH_TASK_FIELDS.has(key))) return undefined;
+    const canonical: Record<string, unknown> = Object.create(null);
+    for (const [key, property] of Object.entries(Object.getOwnPropertyDescriptors(task))) {
+      if (!Object.hasOwn(property, "value")) return undefined;
+      if (key !== "new_path_approval_ref") canonical[key] = key === "sourcePath" ? recordPath : property.value;
+    }
+    const bytes = canonicalApprovalJson({ protocol: NEW_PATH_APPROVAL_PROTOCOL, recordPath, task: canonical });
+    if (Buffer.byteLength(bytes, "utf8") > NEW_PATH_APPROVAL_MAX_TASK_BYTES) return undefined;
+    return createHash("sha256").update("remudero:new-path-approval-v1:task-intent\0").update(bytes).digest("hex");
+  } catch {
+    // Cyclic, accessor-bearing, over-bound or otherwise unsupported intent is UNKNOWN, never authority.
+    return undefined;
+  }
+}
+
+export function newPathApprovalBindingError(binding: NewPathApprovalBinding): string | undefined {
+  if (!binding || typeof binding !== "object") return "missing issuer binding";
+  const fields = ["issuerId", "origin", "epoch", "policy", "repositoryId", "repository", "instance", "audience"];
+  if (Object.keys(binding).length !== fields.length || fields.some(key => !Object.hasOwn(binding, key))) return "unsupported issuer binding";
+  for (const key of ["issuerId", "epoch", "policy", "instance", "audience"] as const) {
+    if (typeof binding[key] !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(binding[key])) return "invalid issuer identity or policy";
+  }
+  if (!Number.isSafeInteger(binding.repositoryId) || binding.repositoryId <= 0 || typeof binding.repository !== "string" ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(binding.repository) || binding.repository.split("/").some(part => part === "." || part === "..")) return "invalid numeric repository identity";
+  try {
+    const origin = new URL(binding.origin);
+    if (origin.protocol !== "https:" || origin.origin !== binding.origin || origin.username || origin.password) return "issuer origin is not canonical HTTPS";
+  } catch {
+    // URL syntax is unsupported binding data; it cannot become a guessed trust root.
+    return "issuer origin is unreadable";
+  }
+  return undefined;
+}
+
+interface NewPathApprovalDecision {
+  allowed: ReadonlySet<string>;
+  facts?: Extract<NewPathApprovalFacts, { state: "verified" }>;
+  reason?: string;
+}
+
+function newPathApprovalDecision(task: Task, context: MachineFilingAdmissionContext): NewPathApprovalDecision {
+  const refuse = (reason: string): NewPathApprovalDecision => ({ allowed: new Set(), reason: `new-path approval UNKNOWN: ${reason}` });
+  try {
+    const facts = context.newPathApproval;
+    if (!isNewPathApprovalReference(task.new_path_approval_ref)) return refuse("unsupported reference");
+    if (!facts || facts.state !== "verified") return refuse(facts?.state === "unknown" ? facts.reason : "current selected evidence is missing");
+    const record = facts.record, now = (context.clock ?? systemClock).now();
+    if (newPathApprovalBindingError(facts.binding) || newPathApprovalBindingError(record.binding) ||
+      canonicalApprovalJson(facts.binding) !== canonicalApprovalJson(record.binding)) return refuse("issuer, repository, instance, audience or policy drift");
+    if (facts.reference !== task.new_path_approval_ref || record.reference !== task.new_path_approval_ref ||
+      record.protocol !== NEW_PATH_APPROVAL_PROTOCOL || record.taskId !== task.id || record.taskRepo !== task.repo ||
+      facts.currentSourcePath !== task.sourcePath || typeof facts.currentSourcePath !== "string" ||
+      facts.recordPath !== record.recordPath || record.intentDigest !== newPathApprovalIntentDigest(task, facts.recordPath)) return refuse("task, reference, destination or full intent drift");
+    if (![now, facts.observedAt, record.issuedAt, record.expiresAt].every(Number.isFinite) ||
+      facts.observedAt > now || now - facts.observedAt > NEW_PATH_APPROVAL_FACT_MAX_AGE_MS ||
+      record.issuedAt > now || record.expiresAt <= now || record.expiresAt <= record.issuedAt ||
+      record.expiresAt - record.issuedAt > NEW_PATH_APPROVAL_MAX_LIFETIME_MS) return refuse("stale, expired or unsupported time evidence");
+    if (typeof record.operatorId !== "string" || !/^operator:[^\x00-\x20\x7f]{1,240}$/.test(record.operatorId) ||
+      typeof record.confirmationId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(record.confirmationId)) return refuse("verified confirmation identity is missing");
+    const declared = task.files ?? [];
+    if (declared.length === 0 || declared.length > 128 || !declared.every(isCanonicalApprovalPath) || new Set(declared).size !== declared.length ||
+      !Array.isArray(record.declaredPaths) || canonicalApprovalJson([...declared].sort()) !== canonicalApprovalJson([...record.declaredPaths].sort()) ||
+      !Array.isArray(record.approvedMissingPaths) || record.approvedMissingPaths.length === 0 ||
+      new Set(record.approvedMissingPaths).size !== record.approvedMissingPaths.length ||
+      record.approvedMissingPaths.some(path => !declared.includes(path))) return refuse("declared or approved path scope is unsupported");
+    if (!facts.paths || canonicalApprovalJson(Object.keys(facts.paths).sort()) !== canonicalApprovalJson([...declared].sort()) ||
+      declared.some(path => !["present", "missing"].includes(facts.paths[path]?.checkout ?? "unknown") ||
+        !["present", "missing"].includes(facts.paths[path]?.base ?? "unknown"))) return refuse("current path bytes or base evidence is unreadable");
+    return { allowed: new Set(record.approvedMissingPaths), facts };
+  } catch {
+    // Malformed prepared evidence and failed clocks are explicit UNKNOWN refusals, not empty success.
+    return refuse("prepared evidence could not be evaluated");
+  }
 }
 
 /** Missing evidence is not an observed unmerged dependency; both still refuse admission. */
@@ -778,6 +952,10 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
+      ...(e.new_path_approval_ref === undefined ? {} : (() => {
+        if (!isNewPathApprovalReference(e.new_path_approval_ref)) throw new PlanError(`task ${id}: unsupported new_path_approval_ref`);
+        return { new_path_approval_ref: e.new_path_approval_ref };
+      })()),
       retirement,
       superseded_by: supersededBy,
       // W1-T2920 — record it once, HERE, at the one place that already knows it: `sourceLabel`
@@ -1492,8 +1670,15 @@ export function machineFilingAdmissionViolations(
   const declared = task.files ?? [];
   const scoutNew = isScoutDraftShape(task) ? declared[declared.length - 1] : undefined;
   const newLessonAllowed = task.origin?.startsWith("ci-learning:") === true && declared.length === 1 && isParkedMachineProposal(task);
-  const missing = missingDeclaredPaths(task, context, (path) =>
-    (newTestAllowed && created(path)) || path === scoutNew || (newLessonAllowed && isCiLearningLessonPath(path)));
+  const approval = task.new_path_approval_ref === undefined ? undefined : newPathApprovalDecision(task, context);
+  if (approval?.reason) reasons.push(approval.reason);
+  const pathFacts = approval?.facts;
+  const currentPaths = pathFacts ? {
+    pathExists: (path: string) => pathFacts.paths[path]?.checkout === "present",
+    pathExistsAtBase: (path: string) => pathFacts.paths[path]?.base === "present",
+  } : context;
+  const missing = missingDeclaredPaths(task, currentPaths, (path) =>
+    (newTestAllowed && created(path)) || path === scoutNew || (newLessonAllowed && isCiLearningLessonPath(path)) || approval?.allowed.has(path) === true);
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +
