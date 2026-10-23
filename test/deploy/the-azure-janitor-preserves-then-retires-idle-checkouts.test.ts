@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lutimesSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { age, git, run } from "#test/helpers/host-cleanup-fixture.js";
@@ -234,4 +234,55 @@ test("a preserved manifest never carries a remote's credentials", () => {
   const manifest = readFileSync(join(copy, "MANIFEST.txt"), "utf8");
   assert.match(manifest, /mirror https:\/\/github\.com\/craigoley\/remudero\.git/);
   assert.doesNotMatch(manifest + r.stdout, /ghs_SECRET123/);
+});
+
+test("retiring a worktree whose node_modules links to a live tree removes only the link, and a node_modules lender stays while a borrower does", () => {
+  const fx = phaseFixture();
+  const root = units(fx);
+  // a live operator checkout with a real install, and worktrees of it under a scratch namespace
+  const owner = cloneAt(fx, join(fx.root, "rmd-op"));
+  const ownerDep = join(owner, "node_modules", "dep", "index.js");
+  mkdirSync(join(ownerDep, ".."), { recursive: true });
+  writeFileSync(ownerDep, "live install\n");
+  const add = (name: string) => {
+    const wt = join(root, name);
+    git(owner, "worktree", "add", "--quiet", "-b", name, wt, "main");
+    commitFile(wt, `${name}.txt`, "unpublished\n", `work in ${name}`);
+    return wt;
+  };
+  const toLive = add("wt-c5");
+  symlinkSync(join(owner, "node_modules"), join(toLive, "node_modules"));
+  const lender = add("wt-batch1017-repro");
+  mkdirSync(join(lender, "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(lender, "node_modules", "pkg", "index.js"), "lent install\n");
+  const borrower = add("wt-live");
+  symlinkSync(join(lender, "node_modules"), join(borrower, "node_modules"));
+  age(root, 13);
+  age(owner, 13);
+  // age() follows a link to its target; the links themselves are aged as on the host
+  const old = new Date(Date.now() - 13 * 3600_000);
+  for (const link of [join(toLive, "node_modules"), join(borrower, "node_modules")]) lutimesSync(link, old, old);
+  writeFileSync(join(borrower, "today.txt"), "live\n");
+  age(join(borrower, "today.txt"), 1);
+
+  const first = pass(fx, root);
+  assert.equal(first.status, 0, first.stderr + first.stdout);
+  assert.equal(existsSync(toLive), false, first.stdout);
+  assert.equal(readFileSync(ownerDep, "utf8"), "live install\n", "the live tree behind the link is untouched");
+  assert.doesNotMatch(git(owner, "worktree", "list"), /wt-c5/, "the owner's Git no longer registers the retired worktree");
+  const [copy] = copiesOf(fx, toLive);
+  const tarball = join(copy, "untracked.tar.gz");
+  assert.ok(copy && (!existsSync(tarball) || !/node_modules/.test(execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" }))),
+    "the copy never holds node_modules, link or not");
+  assert.match(first.stdout, new RegExp(`KEEP ${lender}: preserve-then-retire hold: lends files to symlinks ${borrower}/node_modules`));
+  assert.equal(readFileSync(join(lender, "node_modules", "pkg", "index.js"), "utf8"), "lent install\n");
+  assert.equal(existsSync(borrower), true);
+
+  // once the borrower is idle too, it is retired first and the lender follows in the same pass
+  age(borrower, 13);
+  const second = pass(fx, root);
+  assert.equal(second.status, 0, second.stderr + second.stdout);
+  assert.equal(existsSync(borrower), false, second.stdout);
+  assert.equal(existsSync(lender), false, `the lender goes once its last borrower is retired:\n${second.stdout}`);
+  assert.equal(readFileSync(ownerDep, "utf8"), "live install\n");
 });

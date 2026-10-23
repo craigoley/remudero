@@ -159,7 +159,6 @@ TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS-/tmp}"                                # [UNVE
 TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS-claude-* rmd-* remudero-* tmp.*}"     # [UNVERIFIED]
 BIG_MB="${RMD_CLEANUP_BIG_MB:-200}"                                      # [UNVERIFIED]
 TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-}"  # empty: the idle window
-# Measured 2026-10-23: the old default, /mnt/rmd/host-cleanup-archive, never held a transcript.
 ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-$STATE_DISK/host/archive}"
 ROOT_FS="${RMD_CLEANUP_ROOT_FS:-/}"
 DF_CMD="${RMD_CLEANUP_DF:-df -Pk}"
@@ -1104,9 +1103,8 @@ archive_transcript() {
   mkdir -p "$(dirname "$dest")" && cp -p -- "$f" "$dest" && rm -f -- "$f"
 }
 
-# ── preserve-then-retire (operator 2026-10-23): the Mac preserve-retire.py design on this janitor's own
-# guards (that helper judges only folders inside the home, and a stdin run has no helper beside it).
-# Holds, copy format and restore steps: deploy/mac/JANITOR.md "Preserve-then-retire".
+# ── preserve-then-retire (operator 2026-10-23): the Mac preserve-retire.py design on this janitor's
+# own guards; holds, copy format and restore steps are in deploy/mac/JANITOR.md.
 PRESERVE_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PRESERVE_SKIP_DIRS="node_modules coverage dist .turbo .next"
 PRESERVE_RETIRED=0; PRESERVE_HELD=0
@@ -1145,7 +1143,6 @@ preserve_oversized() {
     rgit "$repo" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || { printf '%s\n' "$rel"; return 0; }
   done <<< "$files"
 }
-# ^<commit> per advertised head/tag of a published origin; unreachable, its cached main (the Mac rule).
 preserve_exclusions() {
   local repo="$1" unit="$2" url ref sha
   url="$(rgit "$repo" remote get-url origin 2>/dev/null)" || return 0
@@ -1340,6 +1337,7 @@ preserve_unit() {
     esac
   fi
   if [ -z "$descend" ] && ! lender_check "$p"; then descend="$SCRATCH_REASON"; fi
+  if [ -z "$descend" ] && ! link_lender_check "$p"; then descend="$SCRATCH_REASON"; LINK_LENDERS+=("$p"); fi
   if [ -z "$descend" ]; then
     pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
     while IFS= read -r entry; do
@@ -1400,7 +1398,8 @@ preserve_unit() {
     return
   fi
   snapshot_open; snapshot_docker
-  if ! is_worktree_idle "$p" || is_open "$p" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$p" || ! lender_check "$p"; then
+  if ! is_worktree_idle "$p" || is_open "$p" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$p" || ! lender_check "$p" ||
+     ! link_lender_check "$p"; then
     preserve_hold "$p" "changed or active before retire (copies kept: $copies)"; return
   fi
   i=0
@@ -1413,11 +1412,14 @@ preserve_unit() {
   done
   if ! audit_writable; then preserve_hold "$p" "audit log unwritable ($AUDIT_LOG)"; return; fi
   log "REMOVE $p: preserved then retired (${bytes:-unknown} bytes; copies: $copies)"
+  # A linked worktree of a repository outside the unit (a live checkout's) leaves through its owner's Git.
   for repo in ${repos[@]+"${repos[@]}"}; do
     [ -f "$repo/.git" ] || continue
     gitdir="$(rgit "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
     case "$gitdir" in "$p"/*|"$pp"/*) continue ;; esac
-    if ! rgit "$repo" worktree remove --force -- "$repo" 2>/dev/null; then
+    if [ "${gitdir##*/}" = .git ] && rgit "${gitdir%/.git}" worktree remove --force -- "$repo" 2>/dev/null; then
+      rgit "${gitdir%/.git}" worktree prune 2>/dev/null || true
+    elif [ "${gitdir##*/}" = .git ] || ! rgit "$repo" worktree remove --force -- "$repo" 2>/dev/null; then
       preserve_hold "$p" "git worktree remove failed; no recursive filesystem fallback (copies kept: $copies)"; return
     fi
   done
@@ -1425,8 +1427,37 @@ preserve_unit() {
   PRESERVE_RETIRED=$(( PRESERVE_RETIRED + 1 ))
   tally "preserve-retire ${p%/*}" "$bytes"
 }
+# A unit a symlink outside it points into (a linked-to node_modules) is a lender; links are never followed.
+LINKS=""; LINKS_OK=1; LINK_LENDERS=()
+snapshot_links() {
+  local root link target out
+  LINKS=""; LINKS_OK=1
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    out="$(find "$root" -xdev \( -name .git -o \( -name node_modules -type d \) \) -prune -o -type l -print 2>/dev/null)" || { LINKS_OK=0; return; }
+    while IFS= read -r link; do
+      [ -n "$link" ] || continue
+      target="$(readlink -- "$link" 2>/dev/null)" || continue
+      case "$target" in /*) ;; *) target="${link%/*}/$target" ;; esac
+      LINKS="$LINKS$link	$(normalize_path "$target")
+"
+    done <<< "$out"
+  done < <(printf '%s\n%s\n' "$PRESERVE_ROOTS" "$LIVE_CHECKOUTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+}
+link_lender_check() {   # fails with SCRATCH_REASON when a live link outside unit $1 points into it
+  local p="$1" pp link target borrowers=""
+  if [ "$LINKS_OK" != 1 ]; then SCRATCH_REASON="symlink scan failed (unknown)"; return 1; fi
+  pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
+  while IFS='	' read -r link target; do
+    [ -n "$link" ] || continue
+    case "$link" in "$p"/*|"$pp"/*) continue ;; esac
+    case "$target" in "$p"|"$p"/*|"$pp"|"$pp"/*) [ -L "$link" ] && borrowers="$borrowers${borrowers:+, }$link" ;; esac
+  done <<< "$LINKS"
+  [ -z "$borrowers" ] || { SCRATCH_REASON="lends files to symlinks $borrowers"; return 1; }
+}
 preserve_then_retire() {
-  local root unit
+  local root unit retired_before lender
   [ -n "$PRESERVE_ROOTS" ] || return 0
   if [ -L "$PRESERVE_ROOT" ]; then log "REFUSE preserve-then-retire: $PRESERVE_ROOT is a symbolic link"; return; fi
   if [ "$OPEN_OK" != 1 ]; then log "REFUSE preserve-then-retire: lsof failed — keeping everything (fail closed)"; return; fi
@@ -1437,6 +1468,8 @@ preserve_then_retire() {
     preserve_root_mark
   fi
   log "rmd-host-cleanup: preserve-then-retire over ${PRESERVE_ROOTS} into $PRESERVE_ROOT (copies expire after $RETAIN_DAYS days)"
+  snapshot_links
+  retired_before="$PRESERVE_RETIRED"
   while IFS= read -r root; do
     root="${root%/}"
     [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
@@ -1445,6 +1478,12 @@ preserve_then_retire() {
       preserve_unit "$unit"
     done
   done < <(printf '%s\n' "$PRESERVE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+  # Recompute after the batch: a lender whose every borrower was retired above goes in this pass too.
+  while [ "${#LINK_LENDERS[@]}" -gt 0 ] && [ "$PRESERVE_RETIRED" != "$retired_before" ]; do
+    retired_before="$PRESERVE_RETIRED"
+    set -- "${LINK_LENDERS[@]}"; LINK_LENDERS=()
+    for lender in "$@"; do preserve_unit "$lender"; done
+  done
   log "rmd-host-cleanup: preserve-then-retire retired $PRESERVE_RETIRED units, held $PRESERVE_HELD"
 }
 
