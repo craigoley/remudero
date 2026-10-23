@@ -19,11 +19,12 @@ import { fixedClock, systemClock } from "#src/lib/clock.js";
 import { runnableCandidates } from "#src/lib/drain.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, machineShardLandingRefusal } from "#src/lib/machine-filing.js";
 import { assertLintClean, lintTask, sizingViolation, taskRulingPin } from "#src/lib/task-linter.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalBinding, type NewPathApprovalFacts, type NewPathApprovalRecord, type Task } from "#src/lib/plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath, type NewPathApprovalBinding, type NewPathApprovalFacts, type NewPathApprovalRecord, type Task } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
-import { buildServeRoutes, createNewPathApprovalFilesystemAudit, type ServeDeps } from "#src/lib/serve.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import * as approvalServe from "#src/lib/serve.js";
 import * as approvalPlan from "#src/lib/plan.js";
 import * as runTask from "#src/run-task.js";
 import * as service from "#src/lib/service.js";
@@ -105,7 +106,7 @@ test("new path admission binds the explicit approval to the exact task and decla
     const confirmed = await post("confirm", { previewId: first.body.previewId });assert.equal(confirmed.status, 200);
     const reference = confirmed.body.reference;assert.match(reference, /^npa1_[A-Za-z0-9_-]{43}$/);
     assert.equal(confirmed.body.record.operatorId, "operator:fixture-user");
-    assert.equal(confirmed.body.record.intentDigest, newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH));
+    assert.equal(confirmed.body.record.intentDigest, approvalPlan.newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH));
     assert.equal((await verify(reference)).state, "verified");assert.equal((await verify(reference)).state, "verified");
     assert.equal((await post("confirm", { previewId: first.body.previewId })).status, 409);
     assert.equal(writes, 1, "verification and replay never issue a second approval");
@@ -206,6 +207,8 @@ test("new path admission bounds partial bodies and pending authentication before
 });
 
 test("new path admission default filesystem audit bounds concurrent identities and never restores authority from replaced bytes", { timeout: 30_000 }, async () => {
+  const createNewPathApprovalFilesystemAudit = approvalServe.createNewPathApprovalFilesystemAudit;
+  assert.equal(typeof createNewPathApprovalFilesystemAudit, "function", "the actual default audit must exist, not only a fake port");
   const repo = gitRepo({ kind: "default-approval-audit" }), controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), 25_000);
   try {
