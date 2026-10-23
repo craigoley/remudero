@@ -27,6 +27,33 @@ function evaluate(changed: string[], head: Files = {}, base: Files = {}, behave:
   return { result, runs };
 }
 
+test("a clock fixture edit asks its measured cross-clock regression before push", () => {
+  const suite = "test/gardeners/the-memory-tuner-fixture-shares-a-clock-with-its-shell.test.ts";
+  for (const path of ["test/a-squeezed-page-cache-grows-its-memory-high.test.ts",
+    "test/the-beat-publishes-each-daemons-memory-high.test.ts", "test/the-sweep-reads-the-reviewers-own-summary.test.ts", suite]) {
+    const found = evaluate([path]);
+    assert.ok(found.runs.flat().includes(suite), path);
+    assert.deepEqual(found.result.violations, [], path);
+  }
+  const red = evaluate(["test/the-beat-publishes-each-daemons-memory-high.test.ts"], {}, {}, files => files.includes(suite) ? [suite] : []);
+  assert.ok(red.result.violations.some((violation: string) => violation.startsWith(`census-suite: ${suite} fails`)),
+    "a failed real clock experiment refuses publication");
+});
+
+test("a learning corpus edit asks its sandbox subject generator before push", () => {
+  const suite = "test/sandbox-subject-generator.test.ts";
+  for (const path of ["learnings/ci.yaml", "learnings/entries.d/new.yml", "learnings/index.json",
+    "src/lib/learnings.ts", "src/lib/wipe-test.ts", suite]) {
+    const found = evaluate([path]);
+    assert.ok(found.runs.flat().includes(suite), path);
+    assert.deepEqual(found.result.violations, [], path);
+  }
+  const red = evaluate(["learnings/ci.yaml"], {}, {}, files => files.includes(suite) ? [suite] : []);
+  assert.ok(red.result.violations.some((violation: string) => violation.startsWith(`census-suite: ${suite} fails`)),
+    "a failed real-corpus generator refuses publication");
+  assert.deepEqual(evaluate(["docs/example.md"]).runs, [], "unrelated prose starts no child");
+});
+
 test("test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts: a ring-closing import starts cycle-ratchet alone, a src/lib import of src/cli starts source-size, a diff touching neither starts no structural child", () => {
   // A new import in a src file that could close a ring starts cycle-ratchet, in a child of its own.
   const ring = evaluate(

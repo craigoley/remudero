@@ -1218,6 +1218,18 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
     trigger: ({ changed }) => changed.some((p) =>
       ["src/lib/test-path-resolver.ts", "test/every-test-basename-is-unique.test.ts"].includes(p)),
     remedy: "rename one test of each pair: resolveTestPath (src/lib/test-path-resolver.ts) finds a moved test by its unique basename" },
+  { testFile: "test/gardeners/the-memory-tuner-fixture-shares-a-clock-with-its-shell.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [
+      "test/a-squeezed-page-cache-grows-its-memory-high.test.ts", "test/the-beat-publishes-each-daemons-memory-high.test.ts",
+      "test/the-sweep-reads-the-reviewers-own-summary.test.ts", "test/gardeners/the-memory-tuner-fixture-shares-a-clock-with-its-shell.test.ts",
+    ].includes(p)),
+    remedy: "run the measured clock-control regressions when their physical fixture inputs change" },
+  { testFile: "test/sandbox-subject-generator.test.ts",
+    trigger: ({ changed }) => changed.some((p) => (p.startsWith("learnings/") && /\.ya?ml$/.test(p)) || [
+      "learnings/index.json", "src/lib/learnings.ts", "src/lib/wipe-test.ts",
+      "test/sandbox-subject-generator.test.ts",
+    ].includes(p)),
+    remedy: "preserve isolating sandbox subjects when learning bindings change" },
 ];
 
 /**
