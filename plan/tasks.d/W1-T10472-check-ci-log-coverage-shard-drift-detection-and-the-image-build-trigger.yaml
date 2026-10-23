@@ -1,0 +1,49 @@
+- id: W1-T10472
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard:drift-detection-and-the-image-build-trigger-watch-at-least-t cost 8.2 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.64
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard:drift-detection-and-the-image-build-trigger-watch-at-least-t"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/check-ci-log-coverage-shard-drift-detection-and-the-image-build-trigger.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-shard:drift-detection-and-the-image-build-trigger-watch-at-least-t"
+      proof: "grep: test(\"W1-T10472: check:ci-log:coverage-shard:drift-detection-and-the-image-build-trigger-watch-at-least-t is prevented, not retried\" in test/gardeners/check-ci-log-coverage-shard-drift-detection-and-the-image-build-trigger.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard:drift-detection-and-the-image-build-trigger-watch-at-least-t's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard:drift-detection-and-the-image-build-trigger-watch-at-least-t cost 8.2 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet for coverage-shard
+    - the rounds name a failing test: test/b.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13493 (https://github.com/craigoley/remudero/pull/13493) at 2026-10-22T02:17:01.771Z: ci-log round — coverage-shard (4/8): drift detection and the image build trigger watch at least the same paths, real deploy dependency probes recover expired; coverage-shard (3/8): pool defect: test/b
+        failing tests: drift detection and the image build trigger watch at least the same paths, real deploy dependency probes recover expired ACR auth without conflating missing or unknown publication; drift detection and the image build trigger watch at least the same paths; real deploy dependency probes recover expired ACR auth without conflating missing or unknown publication; W1-T9094: a build container ignores a serve-supervisor-only commit
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — drift detection and the image build trigger watch at least the same paths, real deploy dependency probes recover expired ACR auth without conflating missing or unknown publication
+          | not ok 7 - drift detection and the image build trigger watch at least the same paths
+          |   ---
+          |   duration_ms: 2.617023
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/image-drift-recycles-itself.test.ts:98:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly deep-equal:
+          |     + actual - expected
+          |     ... Skipped lines
+          | 
+          |       [
+          |         '.d
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
