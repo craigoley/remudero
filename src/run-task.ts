@@ -1292,12 +1292,15 @@ import {
   type Task,
   type TaskStatus,
   parseTasksFromYaml,
+  prepareNewPathApprovalFacts,
+  type NewPathApprovalFacts,
   taskRecordPath,
   readBlobsAtRef,
   mergePlanBlobs,
   loadPlanAtRefAsync,
   TaskAdmissionError,
 } from "./lib/plan.js";
+import { machineShardFilingRefusal } from "./lib/machine-filing.js";
 import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
 import { flushThenExit } from "./lib/flush-exit.js";
 import {
@@ -40724,8 +40727,15 @@ async function triageCommandLocked(
 
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
     // the worker produced, mirroring regenerateOrientation's post-worker deterministic commit.
-    setFeedbackStatus(worktreePath, feedbackId, decision.status);
     const commitMessage = triageCommitMessage({ decision, feedbackId, taskId, grillIssueUrl });
+    let proposalCommit: () => void;
+    try {
+      proposalCommit = await prepareNewPathPlanProposalCommit(worktreePath, commitMessage, log, opts.config ? () => opts.config! : loadConfig);
+    } catch (error) {
+      commitTriageOrRecordRefusal(() => { throw error; }, feedbackId, log);
+      throw error;
+    }
+    setFeedbackStatus(worktreePath, feedbackId, decision.status);
     // W1-T1089: route through the SAME shared stage-and-commit function `rmd plan` uses
     // (applyPlanProposalCommit, lib/plan-architect.ts) rather than triage's own inline `git
     // add -A -- plan/`, which never matched MASTER-PLAN.md (a root-level file, not under
@@ -40734,7 +40744,7 @@ async function triageCommandLocked(
     // `plan/ MASTER-PLAN.md` pathspec stages the amendment; the section index is derived from
     // MASTER-PLAN.md whenever a runtime reader needs it.
     // W1-T4203: a refused commit leaves the entry at `status: new`; the row below is what stops the rung re-picking it.
-    commitTriageOrRecordRefusal(() => applyPlanProposalCommit(worktreePath, commitMessage, log), feedbackId, log);
+    commitTriageOrRecordRefusal(proposalCommit, feedbackId, log);
 
     // OUTPUT VALIDATION (W1-T2326 Q2) — the PORT of `planCommand`'s `unreservedFiledIds` +
     // `plan.id_check`. Reserving ids is half the mint-and-reserve contract; this is the other half,
@@ -40958,6 +40968,74 @@ const PLAN_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch",
  * run holds a trivial slice of the id space until the next acquirer reclaims it lazily.
  */
 export const PLAN_MAX_NEW_TASKS = 5;
+
+export interface NewPathProposalCommitIO {
+  prepareFacts: typeof prepareNewPathApprovalFacts;
+  commit: typeof applyPlanProposalCommit;
+  clock: Clock;
+}
+
+/** Both proposal writers await this before staging; the returned synchronous effect rechecks the exact selected bytes. */
+export async function prepareNewPathPlanProposalCommit(worktreePath: string, message: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  readConfig: () => Pick<Config, "root" | "serve"> = loadConfig,
+  io: NewPathProposalCommitIO = { prepareFacts: prepareNewPathApprovalFacts, commit: applyPlanProposalCommit, clock: systemClock }): Promise<() => void> {
+  const signal = AbortSignal.timeout(10_000);
+  const git = (args: string[]) => hostWorktreeGitAsync(worktreePath, args, { timeout: 2_000, configReadTimeoutMs: 2_000, maxBuffer: 256 * 1024 });
+  const modified = await git(["diff", "--name-only", "-z", "HEAD", "--", "plan/"]);
+  const untracked = await git(["ls-files", "--others", "--exclude-standard", "-z", "--", "plan/"]);
+  const paths = [...new Set((modified + untracked).split("\0").filter(path => /^plan\/(?:tasks[.]ya?ml|tasks[.]d\/[^/]+[.]ya?ml)$/.test(path)))];
+  if (paths.length > 1_024) throw new Error("proposal source census exceeds its bounded file population");
+  const snapshots: Array<{ path: string; text: string; facts: Map<string, NewPathApprovalFacts>; pin: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number } }> = [];
+  const read = (path: string) => {
+    const parts = path.split("/");
+    for (let index = 1; index < parts.length; index++) {
+      const parent = lstatSync(join(worktreePath, ...parts.slice(0, index)));
+      if (parent.isSymbolicLink() || !parent.isDirectory()) throw new Error("proposal source parent is not a canonical directory");
+    }
+    const fd = openSync(join(worktreePath, path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      const pin = fstatSync(fd);
+      if (!pin.isFile() || pin.size > 1024 * 1024) throw new Error("proposal source exceeds its bounded regular-file contract");
+      const bytes = Buffer.alloc(pin.size + 1);
+      let count = 0;
+      while (count < bytes.length) { const size = readSync(fd, bytes, count, bytes.length - count, count);if (size === 0) break;count += size; }
+      const after = fstatSync(fd);
+      if (count !== pin.size || pin.size !== after.size || pin.mtimeMs !== after.mtimeMs || pin.ctimeMs !== after.ctimeMs) throw new Error("proposal source changed while reading");
+      return { pin, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, count)) };
+    } finally { closeSync(fd); }
+  };
+  let base: string | undefined;
+  for (const path of paths) {
+    signal.throwIfAborted();
+    let snapshot: ReturnType<typeof read>;
+    try { snapshot = read(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;throw error; }
+    const tasks = parseTasksFromYaml(snapshot.text, path).filter(task => task.author_class === "machine" && task.new_path_approval_ref !== undefined);
+    if (tasks.length === 0) continue;
+    const config = readConfig();
+    base ??= (await git(["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    const facts = new Map<string, NewPathApprovalFacts>();
+    for (const task of tasks) facts.set(task.id, await io.prepareFacts(task, path, { repoRoot: worktreePath, base,
+      readTokenFile: join(config.root, "state", "service-tokens.json"), currentBinding: () => readConfig().serve?.newPathApproval }, signal) ??
+      { state: "unknown", reason: "current selected approval facts missing" });
+    const refusal = machineShardFilingRefusal(snapshot.text, path, { pathExists: p => existsSync(join(worktreePath, p)),
+      newPathApprovals: facts, clock: io.clock });
+    if (refusal) throw new Error(refusal);
+    snapshots.push({ path, ...snapshot, facts });
+  }
+  return () => {
+    for (const snapshot of snapshots) {
+      const current = read(snapshot.path);
+      if (current.text !== snapshot.text || ["dev", "ino", "size", "mtimeMs", "ctimeMs"].some(key =>
+        current.pin[key as keyof typeof snapshot.pin] !== snapshot.pin[key as keyof typeof snapshot.pin])) throw new Error("selected approval task changed before staging");
+      const refusal = machineShardFilingRefusal(snapshot.text, snapshot.path, { pathExists: p => existsSync(join(worktreePath, p)),
+        newPathApprovals: snapshot.facts, clock: io.clock });
+      if (refusal) throw new Error(refusal);
+    }
+    io.commit(worktreePath, message, log);
+  };
+}
 
 export async function planCommand(
   rest: string[],
@@ -41212,7 +41290,8 @@ export async function planCommand(
     log("plan.verdict", { action: "propose", detail: decision.detail, files: decision.files });
     say(formatPlanVerdictLine(mode, decision));
     const commitMessage = planCommitMessage({ decision, mode, brief });
-    applyPlanProposalCommit(worktreePath, commitMessage, log);
+    const proposalCommit = await prepareNewPathPlanProposalCommit(worktreePath, commitMessage, log, opts.config ? () => opts.config! : loadConfig);
+    proposalCommit();
     // Build the body only AFTER the shared commit writer has staged the plan sources. The
     // changed-files block is an assertion about the actual commit, not the worker's pre-harness
     // advisory list; constructing it before regeneration would immediately make the PR contradict
