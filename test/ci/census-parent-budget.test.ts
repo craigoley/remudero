@@ -193,6 +193,17 @@ test('a reported native census timeout is never a parent-budget deferral', async
   error => !budget.owns(error));
 });
 
+test('budgeted census refuses a real native child before its whole backstop fits', async t => {
+  await loadBudget();
+  const f = fixture(t); let at = 0;
+  writeFileSync(join(f.dir, 'test/a.test.ts'),
+    'import{test}from"node:test";import{writeFileSync}from"node:fs";test("unstarted child",()=>writeFileSync("child-started","yes"));\n');
+  const budget = censusParentBudget(110000, () => at)!; at = 105000;
+  assert.throws(() => census.runCensusSuitesViaChild({root: f.dir, files: ['test/a.test.ts'], parentBudget: budget}),
+    error => budget.owns(error));
+  assert.equal(existsSync(join(f.dir, 'child-started')), false);
+});
+
 test('a real failing head with an unstarted base remains unavailable rather than partial', async t => {
   await loadBudget();
   const f = fixture(t); let at = 0;
