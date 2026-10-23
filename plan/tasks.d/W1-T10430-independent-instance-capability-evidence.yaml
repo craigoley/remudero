@@ -16,6 +16,7 @@
     - src/lib/instance-inbox-contract.ts
     - src/lib/read-model-worker.ts
     - test/instances-view.test.ts
+    - test/agent-view.test.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - docs/views.md
@@ -28,7 +29,7 @@
       proof: "unit test: W1-T10430: capability evidence follows owned generation and revalidation without request-time scans"
     - claim: "Old wire consumers keep their conservative semantics and independently updated source clocks do not fabricate new data"
       proof: "unit test: W1-T10430: legacy instances remain conservative and new capability clocks do not churn data"
-  note: "Machine-authored, initially unjudged under the shared native filing header. Broad follow-up authorization is not a fabricated model verdict or risk pin. This is the core producer contract; a separately gated Console consumer must use it before live Inbox recovery can be claimed. No provider, permissions, budgets, services, deployment, activation, CI infrastructure or Azure-memory policy change."
+  note: "Machine-authored, initially unjudged under the shared native filing header. Broad follow-up authorization is not a fabricated model verdict or risk pin. This is the core producer contract; a separately gated Console consumer must use it before live Inbox recovery can be claimed. No provider, permissions, budgets, services, deployment, activation, CI infrastructure or Azure-memory policy change. October 23 operator approved only the existing test/agent-view.test.ts scope addition to close SQLite before deleting fixture directories. Preserve every executable assertion, both retained broader-run ENOTEMPTY failures and the passing exact-base controls; no proven base-red or unique causal diagnosis is claimed. All production guards, native author, review and CI remain unchanged; this adds no model call, deployment, service, CI-infrastructure, memory-policy, spending, provider or permission authority."
   rationale: |
     October 22 operator scope decision: "Approve the two coordinated task scopes" as high / span. This records implementation breadth only. Native judgment, review and CI remain required; no proceed ruling, deployment, automatic action, permission, spending or guard change is authorized. The original shared low-band renderer refused sizing; the amended record is checked again by native whole-filing admission.
     Grounded in CLAUDE.md, MASTER-PLAN.md, LEARNINGS.md and DECISIONS.md. The read side remains a rebuildable materialized projection; the server remains the authority for writes.
@@ -45,13 +46,10 @@
     Remove only independent observation wiring and require the stale-health/current-contract assertion to fail while revocation controls remain green; restore source. Retain physical TAP, literal canonical proofs, caller/census, instrumented exact-tree coverage, native author, stored-body verification, governed review and complete current-head CI.
     Core source merge, qualified backend adoption, Console consumer merge/deployment and signed-in reply readiness are separate stages. This filing authorizes none of the live changes. Preserve Console #2235 per-message readiness; unrelated page failures cannot become a whole-mailbox gate again.
   risk_ruling:
-    verdict: "low"
+    verdict: "operator"
     action: proceed
-    confidence: 0.72
+    confidence: 1
     reasons:
-      - "The description states a read-side evidence producer with no permission, deploy, CI, budget or review-policy change, and it adds no action endpoint."
-      - "Server per-request write checks are stated to remain authoritative, and the design fails closed on missing, revoked or malformed capability evidence."
-      - "The four acceptance criteria are each tied to named unit tests, so the finding is verifiable. The declared files are all existing and match the stated scope."
-      - "The breadth (seven files, an additive API contract) and the family's empty track record are noted, but CI and review still gate the PR."
-    judged_at: "2026-10-22T19:35:09.247Z"
-    pin: "c46a48c190aaeda4204734c9cd876fcd043a5a8396921631576cb54e7498e3e4"
+      - "Direct user answer call_be27777620fc482dbe8c63266587c723 item0: Approve this fixture-only amendment. Add only existing test/agent-view.test.ts to W1-T10430 and then close SQLite before directory deletion. Retain every assertion and failure receipt, all production behavior, CI/memory/service settings and review gates. This is an operator release, not a model verdict."
+    judged_at: "2026-10-23T18:52:17.247Z"
+    pin: "5e9171e18bbad02ee58913c206ef360916b4cb96a9454f2393c27f433478fb0d"
