@@ -23,7 +23,7 @@ import {
 } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildOpenPrViews } from "../src/run-task.js";
-import { activeCiRerunEvidence } from "../src/lib/workflow-run.js";
+import { activeCiRerunEvidence } from "#src/lib/open-prs-rest.js";
 
 const OWNER = "o";
 const REPO = "r";

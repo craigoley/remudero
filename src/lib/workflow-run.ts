@@ -35,14 +35,3 @@ export interface WorkflowRunObservation {
   jobs?: ReadonlyArray<WorkflowRunJobObservation>;
 }
 
-export function activeCiRerunEvidence(raw: unknown, headSha: string): WorkflowRunObservation["activeCiRerun"] {
-  if (raw === null || typeof raw !== "object") return undefined;
-  const run = raw as Record<string, unknown>;
-  if (!/^[a-f0-9]{40}$/.test(headSha) || run.head_sha !== headSha ||
-      run.path !== ".github/workflows/ci.yml" || run.status !== "in_progress" ||
-      (run.conclusion !== null && run.conclusion !== undefined && run.conclusion !== "") ||
-      typeof run.id !== "number" || !Number.isSafeInteger(run.id) || run.id <= 0 ||
-      typeof run.run_attempt !== "number" || !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 1 ||
-      typeof run.run_started_at !== "string" || !Number.isFinite(Date.parse(run.run_started_at))) return undefined;
-  return { headSha, runId: run.id, attempt: run.run_attempt, startedAt: run.run_started_at };
-}

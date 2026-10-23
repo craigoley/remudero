@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { contributionOriginFromRest, type ContributionOrigin, type RestContributionOrigin } from "./contributor-admission.js";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState, RedundantRefixEvidence } from "./merge-state.js";
-import { activeCiRerunEvidence, type WorkflowRunJobObservation, type WorkflowRunObservation } from "./workflow-run.js";
+import type { WorkflowRunJobObservation, WorkflowRunObservation } from "./workflow-run.js";
 // W1-T2384: from the LEAF, never from sweep.js. dependency-cruiser reads a type-only import as
 // a dependency (MEASURED: importing this off sweep.js took it 13 -> 24 warnings), and sweep.ts
 // imports a VALUE back off this module — see supersession.ts's own header.
@@ -1264,6 +1264,18 @@ function restJobObservation(x: { status?: string | null; name?: string | null; i
     ...(typeof x.name === "string" && x.name.trim() !== "" ? { name: x.name } : {}),
     ...(typeof x.id === "number" && Number.isSafeInteger(x.id) && x.id > 0 ? { id: String(x.id) } : {}),
   };
+}
+
+export function activeCiRerunEvidence(raw: unknown, headSha: string): WorkflowRunObservation["activeCiRerun"] {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const run = raw as Record<string, unknown>;
+  if (!/^[a-f0-9]{40}$/.test(headSha) || run.head_sha !== headSha ||
+      run.path !== ".github/workflows/ci.yml" || run.status !== "in_progress" ||
+      (run.conclusion !== null && run.conclusion !== undefined && run.conclusion !== "") ||
+      typeof run.id !== "number" || !Number.isSafeInteger(run.id) || run.id <= 0 ||
+      typeof run.run_attempt !== "number" || !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 1 ||
+      typeof run.run_started_at !== "string" || !Number.isFinite(Date.parse(run.run_started_at))) return undefined;
+  return { headSha, runId: run.id, attempt: run.run_attempt, startedAt: run.run_started_at };
 }
 
 /** Observations for one head: every workflow run on it, with jobs attached to the runs that have
