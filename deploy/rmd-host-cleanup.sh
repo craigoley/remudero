@@ -72,7 +72,7 @@
 #   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go (default <state disk>/host/archive)
 #   RMD_CLEANUP_STATE_DISK, RMD_SCRATCH_ROOT  the data disks (/mnt/rmd, /mnt/scratch); setting the first selects the host layout
 #   RMD_CLEANUP_{RETAIN_DAYS,RETAIN_ROOTS,PRESERVE_ROOTS,PRESERVE_ROOT,MAX_UNTRACKED_MB,PUBLISHED_REMOTES,DUMP_ROOTS,
-#     DUMP_GZIP_ONLY_ROOTS,DUMP_MIN_MB,DUMP_RETAIN_DAYS}  the 2026-10-23 phases; their defaults are set below
+#     DUMP_RESUMABLE_ROOTS,DUMP_MIN_MB,DUMP_RETAIN_DAYS}  the 2026-10-23 phases; their defaults are set below
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
 #                               filesystem holding it (default `df -Pk`)
@@ -214,9 +214,9 @@ elif [ "$HOST_LAYOUT" = 1 ]; then
   PRESERVE_ROOTS="$WORKTREE_ROOTS:$SCRATCH_DISK:$SCRATCH_DISK/o:$SCRATCH_DISK/tmp:$SCRATCH_DISK/rmd-work-tmp:$STATE_DISK/tmp:$CLEAN_HOME/rmd-state2/tmp:$TMP_ROOTS"
 else PRESERVE_ROOTS=""; fi
 DUMP_ROOTS="${RMD_CLEANUP_DUMP_ROOTS-$PRESERVE_ROOTS}"
-if [ -n "${RMD_CLEANUP_DUMP_GZIP_ONLY_ROOTS+x}" ]; then DUMP_GZIP_ONLY_ROOTS="$RMD_CLEANUP_DUMP_GZIP_ONLY_ROOTS"
-elif [ "$HOST_LAYOUT" = 1 ]; then DUMP_GZIP_ONLY_ROOTS="$STATE_DISK/agent-codex/sessions"  # Codex may resume these
-else DUMP_GZIP_ONLY_ROOTS=""; fi
+if [ -n "${RMD_CLEANUP_DUMP_RESUMABLE_ROOTS+x}" ]; then DUMP_RESUMABLE_ROOTS="$RMD_CLEANUP_DUMP_RESUMABLE_ROOTS"
+elif [ "$HOST_LAYOUT" = 1 ]; then DUMP_RESUMABLE_ROOTS="$STATE_DISK/agent-codex/sessions"  # Codex may resume these
+else DUMP_RESUMABLE_ROOTS=""; fi
 # Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
 # with fs.protected_regular=2 root cannot O_CREAT-open a user's file in a sticky directory either.
 if ! SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]:-}")" && pwd -P)"; then
@@ -1487,8 +1487,8 @@ preserve_then_retire() {
   log "rmd-host-cleanup: preserve-then-retire retired $PRESERVE_RETIRED units, held $PRESERVE_HELD"
 }
 
-# ── dump housekeeping (the Mac rule, JANITOR.md). A gzip-only root (Codex sessions) is never deleted
-# from: Codex resumes `.jsonl` (and `.jsonl.zst`), not `.jsonl.gz`.
+# ── dump housekeeping (the Mac rule, JANITOR.md). A resumable root (Codex sessions) is compressed to
+# `.zst`, which Codex resumes (it cannot resume `.gz`), and is never deleted from.
 DUMP_COMPRESSED=0; DUMP_EXPIRED=0
 dump_in_repo() {   # true when an ancestor of file $1, up to root $2, is a repository
   local d="${1%/*}" stop="$2"
@@ -1499,28 +1499,34 @@ dump_in_repo() {   # true when an ancestor of file $1, up to root $2, is a repos
   done
 }
 file_sig() { stat -c '%s %Y' -- "$1" 2>/dev/null || stat -f '%z %m' -- "$1" 2>/dev/null; }
-compress_dump() {
-  local f="$1" root="$2" tmp="$1.gz.incoming" before after mode orig gz
-  if [ -e "$tmp" ] || [ -L "$tmp" ] || [ -e "$f.gz" ] || [ -L "$f.gz" ]; then log "KEEP $f: a compressed copy is already beside it"; return; fi
+dump_pack() { if [ "$1" = zst ]; then zstd -q -3 -c -- "$2"; else gzip -6 -c -- "$2"; fi; }
+dump_unpack() { if [ "$1" = zst ]; then zstd -q -dc -- "$2"; else gzip -dc -- "$2"; fi; }
+compress_dump() {   # compress_dump <file> <root> <gz|zst>
+  local f="$1" root="$2" ext="$3" tmp="$1.$3.incoming" before after mode orig packed tool=gzip
+  [ "$ext" = zst ] && tool=zstd
+  if [ -e "$tmp" ] || [ -L "$tmp" ] || [ -e "$f.gz" ] || [ -L "$f.gz" ] || [ -e "$f.zst" ] || [ -L "$f.zst" ]; then
+    log "KEEP $f: a compressed copy is already beside it"; return
+  fi
+  if ! command -v "$tool" >/dev/null 2>&1; then log "KEEP $f: $tool unavailable"; return; fi
   orig="$(wc -c < "$f" | tr -d ' ')"
   if [ "$DRY_RUN" = 1 ]; then
-    log "DRYRUN would: gzip $f (${orig} bytes; idle dump)"; tally "dumps-gzip $root" "$orig"; return
+    log "DRYRUN would: $tool $f (${orig} bytes; idle dump)"; tally "dumps-$tool $root" "$orig"; return
   fi
   before="$(file_sig "$f")" || { log "KEEP $f: stat failed (unknown)"; return; }
-  if ! gzip -6 -c -- "$f" > "$tmp" 2>/dev/null </dev/null || ! gzip -dc -- "$tmp" 2>/dev/null </dev/null | cmp -s - "$f"; then
+  if ! dump_pack "$ext" "$f" > "$tmp" 2>/dev/null </dev/null || ! dump_unpack "$ext" "$tmp" 2>/dev/null </dev/null | cmp -s - "$f"; then
     rm -f -- "$tmp"; log "KEEP $f: compression read-back failed"; return
   fi
   after="$(file_sig "$f")"
   if [ "$before" != "$after" ]; then rm -f -- "$tmp"; log "KEEP $f: changed while compressing"; return; fi
   mode="$(stat -c %a -- "$f" 2>/dev/null || stat -f %Lp -- "$f" 2>/dev/null)" && chmod "$mode" "$tmp" 2>/dev/null
-  if ! touch -r "$f" -- "$tmp" 2>/dev/null || ! audit_writable || ! mv -n -- "$tmp" "$f.gz" 2>/dev/null || [ -e "$tmp" ]; then
-    rm -f -- "$tmp"; log "KEEP $f: could not place $f.gz"; return
+  if ! touch -r "$f" -- "$tmp" 2>/dev/null || ! audit_writable || ! mv -n -- "$tmp" "$f.$ext" 2>/dev/null || [ -e "$tmp" ]; then
+    rm -f -- "$tmp"; log "KEEP $f: could not place $f.$ext"; return
   fi
-  gz="$(wc -c < "$f.gz" | tr -d ' ')"
-  log "PRUNE $f: $(( orig - gz )) bytes, compressed beside itself as $f.gz after a full read-back"
-  if rm -f -- "$f"; then DUMP_COMPRESSED=$(( DUMP_COMPRESSED + 1 )); tally "dumps-gzip $root" "$(( orig - gz ))"; fi
+  packed="$(wc -c < "$f.$ext" | tr -d ' ')"
+  log "PRUNE $f: $(( orig - packed )) bytes, compressed beside itself as $f.$ext after a full read-back"
+  if rm -f -- "$f"; then DUMP_COMPRESSED=$(( DUMP_COMPRESSED + 1 )); tally "dumps-$tool $root" "$(( orig - packed ))"; fi
 }
-dump_walk() {   # dump_walk <root> <unit> <gzip-only 0|1>
+dump_walk() {   # dump_walk <root> <unit> <resumable 0|1>
   local root="$1" unit="$2" only="$3" f bytes idle_m="$IDLE_MINUTES" keep_m=$(( DUMP_RETAIN_DAYS * 1440 ))
   local min_c=$(( DUMP_MIN_MB * 1048576 - 1 ))
   local -a names=(-name "*.json" -o -name "*.json.gz") plain=(-name "*.json")
@@ -1545,13 +1551,13 @@ dump_walk() {   # dump_walk <root> <unit> <gzip-only 0|1>
     dump_in_repo "$f" "$root" && continue
     [ "$(owner_uid "$f")" = "$RUN_UID" ] || continue
     if is_open "$f"; then log "KEEP $f: held open by a process"; continue; fi
-    compress_dump "$f" "$root"
+    if [ "$only" = 1 ]; then compress_dump "$f" "$root" zst; else compress_dump "$f" "$root" gz; fi
   done < <($FIND_CMD "$unit" -xdev \( -name node_modules -o -name .git \) -prune -o -type f \( "${plain[@]}" \) \
              ! -mmin "-$idle_m" ! -cmin "-$idle_m" -size "+${min_c}c" -print 2>/dev/null)
 }
 dump_housekeeping() {
   local root unit
-  [ -n "$DUMP_ROOTS$DUMP_GZIP_ONLY_ROOTS" ] || return 0
+  [ -n "$DUMP_ROOTS$DUMP_RESUMABLE_ROOTS" ] || return 0
   if [ "$OPEN_OK" != 1 ]; then log "REFUSE dump housekeeping: lsof failed — keeping everything (fail closed)"; return; fi
   while IFS= read -r root; do
     root="${root%/}"
@@ -1568,9 +1574,9 @@ dump_housekeeping() {
   while IFS= read -r root; do
     root="${root%/}"
     [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
-    [ "$(owner_uid "$root")" = "$RUN_UID" ] || { log "KEEP $root: gzip-only dump root is not the pass identity's own"; continue; }
+    [ "$(owner_uid "$root")" = "$RUN_UID" ] || { log "KEEP $root: resumable dump root is not the pass identity's own"; continue; }
     dump_walk "$root" "$root" 1
-  done < <(printf '%s\n' "$DUMP_GZIP_ONLY_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+  done < <(printf '%s\n' "$DUMP_RESUMABLE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
   log "rmd-host-cleanup: dump housekeeping compressed $DUMP_COMPRESSED and expired $DUMP_EXPIRED dumps"
 }
 

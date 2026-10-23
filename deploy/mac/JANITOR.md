@@ -305,8 +305,9 @@ open, mounted or otherwise held is descended, so each child is judged on its own
 A folder holding an instance's protected checkout (`rmd/<key>/remudero` or `serve-repo`)
 is held whole. The 6-hourly service-user pass judges only what that user owns;
 the hourly root pass runs retention only. Dump housekeeping follows the Mac rule
-below. In `/mnt/rmd/agent-codex/sessions` it only gzips and never deletes: Codex
-resumes `.jsonl` (and its own `.jsonl.zst`), not `.jsonl.gz`.
+below. In `/mnt/rmd/agent-codex/sessions` it never deletes, and it compresses idle
+sessions to `.jsonl.zst` with zstd instead of gzip: Codex resumes `.jsonl` and
+`.jsonl.zst`, but not `.jsonl.gz`.
 
 ## Preserve-then-retire (opt-in per account)
 

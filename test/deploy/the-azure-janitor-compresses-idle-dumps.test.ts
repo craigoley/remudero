@@ -1,8 +1,8 @@
 /**
  * Dump housekeeping on the Azure host (operator 2026-10-23, the Mac rule): outside any repository an
  * idle, unopened JSON/log dump of at least dump_min_mb is gzipped beside itself after a full read-back;
- * elsewhere than the gzip-only roots a dump unchanged for dump_retain_days is deleted; in a gzip-only
- * root (Codex sessions) nothing is ever deleted. Runs the REAL deploy/rmd-host-cleanup.sh on the host
+ * elsewhere than the resumable roots a dump unchanged for dump_retain_days is deleted; a resumable root
+ * (Codex sessions) is compressed to `.zst`, the form Codex resumes, and nothing in it is ever deleted. Runs the REAL deploy/rmd-host-cleanup.sh on the host
  * layout rebuilt under a fixture root.
  */
 import { test } from "node:test";
@@ -49,7 +49,7 @@ test("outside any repository an idle dump is gzipped beside itself, an old one e
   const mtime = statSync(big).mtimeMs;
   writeFileSync(fx.lsofList, `${open}\n`);
 
-  const r = run(fx, { ...fx.env, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: root, RMD_CLEANUP_DUMP_GZIP_ONLY_ROOTS: "" });
+  const r = run(fx, { ...fx.env, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: root, RMD_CLEANUP_DUMP_RESUMABLE_ROOTS: "" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const compressed = r.stdout.split("\n").filter(l => /^PRUNE .*compressed beside itself/.test(l));
   assert.equal(compressed.length, 1, `exactly the one idle dump is compressed:\n${r.stdout}`);
@@ -63,26 +63,33 @@ test("outside any repository an idle dump is gzipped beside itself, an old one e
   assert.match(r.stdout, new RegExp(`reclaim-total dumps-gzip ${root}: reclaimed [1-9]\\d* MB`));
 });
 
-test("Codex sessions are gzipped once idle and never deleted, however old", () => {
+test("Codex sessions are compressed to the resumable .jsonl.zst once idle and never deleted, however old", () => {
   const fx = phaseFixture();
   const sessions = join(fx.state, "agent-codex", "sessions", "2026", "09", "28");
   const bigOld = join(sessions, "rollout-2026-09-28T10-00-00-aaaa.jsonl");
-  dump(bigOld, 6 * MB);
+  const body = dump(bigOld, 6 * MB);
   const smallOld = join(sessions, "rollout-2026-09-28T11-00-00-bbbb.jsonl");
   dump(smallOld, 2048);
   const recent = join(sessions, "rollout-2026-10-23T09-00-00-cccc.jsonl");
   dump(recent, 6 * MB);
   ageDays(join(fx.state, "agent-codex"), 25);
   age(recent, 2);
+  const mtime = statSync(bigOld).mtimeMs;
 
-  // the default gzip-only root on the host layout is <state disk>/agent-codex/sessions
+  // the default resumable root on the host layout is <state disk>/agent-codex/sessions
   const r = run(fx, { ...fx.env, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: "" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.equal(existsSync(`${bigOld}.gz`), true, r.stdout);
+  const packed = `${bigOld}.zst`;
+  assert.equal(existsSync(packed), true, r.stdout);
   assert.equal(existsSync(bigOld), false, r.stdout);
-  assert.equal(existsSync(smallOld), true, `a gzip-only root never deletes a session:\n${r.stdout}`);
-  assert.equal(existsSync(recent), true, "a session written within six hours is left for Codex to resume");
+  assert.equal(existsSync(`${bigOld}.gz`), false, "a resumable root is never gzipped: Codex cannot resume .jsonl.gz");
+  assert.match(packed, /rollout-[^/]+\.jsonl\.zst$/, "the name Codex resumes");
+  assert.deepEqual(execFileSync("zstd", ["-q", "-dc", packed], { maxBuffer: 64 * MB }), body, "the .zst reads back byte for byte");
+  assert.equal(Math.round(statSync(packed).mtimeMs / 1000), Math.round(mtime / 1000), "its modification time is kept");
+  assert.equal(existsSync(smallOld), true, `a resumable root never deletes a session:\n${r.stdout}`);
+  assert.equal(existsSync(recent), true, "a session written within six hours is left as it is");
   assert.doesNotMatch(r.stdout, /REMOVE .*agent-codex/);
+  assert.match(r.stdout, new RegExp(`reclaim-total dumps-zstd ${fx.state}/agent-codex/sessions: reclaimed`));
 });
 
 test("a dump whose compressed copy does not read back byte for byte is kept, and no partial copy is left", () => {
@@ -97,7 +104,7 @@ test("a dump whose compressed copy does not read back byte for byte is kept, and
   const real = execFileSync("sh", ["-c", "command -v gzip"], { encoding: "utf8" }).trim();
   writeFileSync(join(bin, "gzip"), `#!/usr/bin/env bash\ncase " $* " in *" -dc "*|*" -t "*) exec '${real}' "$@" ;; esac\n'${real}' "$@" | head -c 4096\n`, { mode: 0o755 });
 
-  const r = run(fx, { ...fx.env, PATH: `${bin}:${process.env.PATH}`, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: root, RMD_CLEANUP_DUMP_GZIP_ONLY_ROOTS: "" });
+  const r = run(fx, { ...fx.env, PATH: `${bin}:${process.env.PATH}`, RMD_CLEANUP_PRESERVE_ROOTS: "", RMD_CLEANUP_DUMP_ROOTS: root, RMD_CLEANUP_DUMP_RESUMABLE_ROOTS: "" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.match(r.stdout, new RegExp(`KEEP ${big}: compression read-back failed`));
   assert.deepEqual(readFileSync(big), body, "the original is untouched");
