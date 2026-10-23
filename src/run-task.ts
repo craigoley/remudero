@@ -136,7 +136,7 @@ import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStri
 import { boundChildByLoopTime, execFileLoopBounded, type LoopBound } from "./lib/loop-bounded-child.js";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
-import { access as accessAsync, mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
+import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
@@ -1222,7 +1222,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -26142,23 +26142,29 @@ export function rotationDigestFile(stateDir: string, holder: string, name: strin
  *  as undigested at zero bytes and NAMED in `unreadable`, so an unreadable corpus never blocks the check by itself. */
 export async function projectRetroReadCost(stateDir: string, holder: string = RETRO_TRIGGER_RUN_SLICE.holder): Promise<RetroReadProjection> {
   const entries = ledgerRotationEntries(await readdirAsync(stateDir), stateDir);
+  const reducerVersion = `${RETRO_TRIGGER_RUN_SLICE.version ?? "1"}:${RETRO_TRIGGER_RUN_SLICE.steps.join(",")}`;
   let projectedBytes = 0;
   let undigested = 0;
   const unreadable: string[] = [];
   for (const entry of entries) {
     const name = basename(entry.path);
-    let digested = true;
+    let size: number;
+    let key: string;
     try {
-      await accessAsync(rotationDigestFile(stateDir, holder, name));
+      const stat = await statAsync(entry.path);
+      size = stat.size;
+      key = `${stat.size}:${stat.mtimeMs}`;
     } catch (error) {
-      // No digest file is the measurement itself: this rotation is read in full. Any other failure is carried too.
-      digested = false;
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable.push(`${name}: ${String(error)}`);
+      undigested++;
+      unreadable.push(`${name}: ${String(error)}`);
+      continue;
     }
-    if (digested) continue;
+    const digest = await readValidatedRotationDigest(rotationDigestFile(stateDir, holder, name), {holder, archive: name, key, reducerVersion});
+    if (digest.kind === "hit") continue;
     undigested++;
+    if (digest.kind === "unreadable") unreadable.push(`${name}: ${digest.error}`);
     try {
-      projectedBytes += await rotationDecompressedBytes(entry.path, (await statAsync(entry.path)).size);
+      projectedBytes += await rotationDecompressedBytes(entry.path, size);
     } catch (error) {
       // An unstattable rotation adds no bytes; the slice reader reports it unread on the read itself.
       unreadable.push(`${name}: ${String(error)}`);
