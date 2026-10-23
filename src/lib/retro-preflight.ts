@@ -263,24 +263,18 @@ function normalizedOutput(value: unknown): string {
   return value === undefined || value === null ? "" : String(value);
 }
 
-/** Byte slicing must not decode a partial UTF-8 sequence into an expanding replacement character. */
 function utf8Slice(buffer: Buffer, start: number, end: number): string {
   while (start < end && (buffer[start] & 0xc0) === 0x80) start += 1;
   while (end > start && end < buffer.byteLength && (buffer[end] & 0xc0) === 0x80) end -= 1;
   return buffer.subarray(start, end).toString("utf8");
 }
 
-/** W1-T10298: choose evidence for the EXISTING verdict, never reclassify an excerpt.
- * TAP diagnostics are indented below their test point. Keep the blocks named by the classifier,
- * sharing space so one oversized stack cannot crowd out every later failure, then the summary tail.
- * This remains bounded diagnostic text, not a complete or independently executable TAP stream. */
+/** W1-T10298: preserve classified diagnostics and summary inside the existing byte budget. */
 function failureExcerpt(output: string, buffer: Buffer, budget: number, failingTests: readonly string[]): string {
   if (buffer.byteLength <= budget) return output;
   const blocks: string[] = [];
   const retained = new Set<string>();
   for (const match of output.matchAll(/^not ok \d+ - (.+)\r?\n(?:[ \t].*(?:\r?\n|$))*/gm)) {
-    // Use the classifier's exact byte-capped identity, not an arbitrary prefix: a
-    // cancelled prefix-sibling must never consume the real failure's evidence.
     const fullName = match[1].trim();
     const boundedName = Buffer.from(fullName, "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8");
     const name = failingTests.find((candidate) => candidate === fullName)
@@ -290,18 +284,15 @@ function failureExcerpt(output: string, buffer: Buffer, budget: number, failingT
       blocks.push(match[0]);
     }
   }
-  // No parsed assertion (including spec-only output): preserve the existing head fallback.
   if (blocks.length === 0) return utf8Slice(buffer, 0, budget);
   const omission = "[... other output omitted ...]\n";
   const tailBytes = Math.min(1024, Math.floor(budget / 4));
-  // Only the summary tail, not arbitrary trailing payload outside a diagnostic block.
   let tail = "";
   for (const match of output.matchAll(/^(?:1\.\.\d+[^\r\n]*|# (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) [^\r\n]*)\r?(?:\n|$)/gm)) {
     const bytes = Buffer.from(tail + match[0], "utf8");
     tail = utf8Slice(bytes, Math.max(0, bytes.byteLength - tailBytes), bytes.byteLength);
   }
   let available = Math.max(0, budget - Buffer.byteLength(omission) - Buffer.byteLength(tail));
-  // Fair sharing is only needed when the retained diagnostic group itself is oversized.
   if (blocks.reduce((bytes, block) => bytes + Buffer.byteLength(block), 0) <= available) {
     return omission + blocks.join("") + tail;
   }
