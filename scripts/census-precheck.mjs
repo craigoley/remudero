@@ -34,7 +34,7 @@ import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
-import { delimiter, dirname, join, posix, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import {censusParentBudget, CENSUS_PARENT_BUDGET_PREFIX} from './lib/census-parent-budget.mjs';
 import { parseArgs } from "node:util";
@@ -694,7 +694,7 @@ function completeCensusCapture(dir, owner, result) {
 }
 
 function runCensusChild(file, args, options) {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
+  const dir = mkdtempSync(join(options.captureRoot ?? tmpdir(), "rmd-census-capture-"));
   const owner = lstatSync(dir);
   let result;
   try {
@@ -761,11 +761,13 @@ function censusReaderContext(root, child, options) {
  */
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
   readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0],
-  parentBudget }) {
-  const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
+  parentBudget, captureRoot }) {
+  const args = ["--test", ...(parentBudget ? ['--test-concurrency=1'] : []), "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
   const options = childOptions(root, timeoutMs);
+  if (parentBudget) options.maxBuffer = Math.min(options.maxBuffer, parentBudget.outputLimitBytes);
+  if (captureRoot) options.captureRoot = captureRoot;
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
   if (pathOverride !== undefined) options.env.PATH = pathOverride;
   const pending = new Set();
@@ -1260,7 +1262,7 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
  *   readBase?: (p: string) => string | null }} input
  * @returns {{ violations: string[], unmeasured: string | null }}
  */
-export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, readHead, readBase }) {
+export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, readHead, readBase, separateChildren = false }) {
   if (changed.length === 0) return { violations: [], unmeasured: null };
   let members;
   let triggered;
@@ -1287,7 +1289,7 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
   if (joined.length === 0) return { violations: [], unmeasured: null };
   // W1-T5693: the slow whole-tree suites each run in their OWN child, so one that exceeds its time bound reads
   // NOT MEASURED alone and cannot turn the others' verdicts into a silent pass.
-  const groups = [joined.filter((m) => !m.structural), ...joined.filter((m) => m.structural).map((m) => [m])]
+  const groups = (separateChildren ? joined.map(m => [m]) : [joined.filter((m) => !m.structural), ...joined.filter((m) => m.structural).map((m) => [m])])
     .filter((group) => group.length > 0);
   const violations = [];
   const unmeasured = [];
@@ -1443,6 +1445,8 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites, ...optionsFo
   // Hook GIT_* variables must not redirect the private checkout into the pushing checkout.
   const options = { env: Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_")).map((k) => [k, undefined])) };
   try {
+    optionsForSuites.parentBudget?.ensureFits(`merge-base census checkout: ${failing[0]}`,
+      optionsForSuites.timeoutMs ?? CENSUS_SUITE_CHILD_TIME_BOUND_MS, failing);
     mkdirSync(baseRoot);
     gitOut(baseRoot, ["init", "--quiet"], options);
     const objects = gitOut(root, ["rev-parse", "--path-format=absolute", "--git-path", "objects"], options).trim();
@@ -1463,7 +1467,7 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites, ...optionsFo
     const baseFailing = new Set(runSuites({ root: baseRoot, files: failing, ...optionsForSuites }));
     return failing.filter((file) => !baseFailing.has(file));
   } catch (e) {
-    throw new Error(`merge-base census run could not be measured: ${String(e?.message ?? e)}`);
+    throw new Error(`merge-base census run could not be measured: ${String(e?.message ?? e)}; head-failing suites: ${failing.join(', ')}`);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -1594,14 +1598,18 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     ({ values } = parseArgs({
       args: argv,
       options: { root: { type: "string", default: "." }, base: { type: "string", default: "origin/main" },
-        'parent-budget-ms': {type: 'string'} },
+        'parent-budget-ms': {type: 'string'}, 'capture-root': {type: 'string'}, 'capture-budget-bytes': {type: 'string'} },
     }));
-    parentBudget = censusParentBudget(values['parent-budget-ms'], now);
+    parentBudget = censusParentBudget(values['parent-budget-ms'], now,
+      values['capture-budget-bytes'] === undefined ? {} : {captureBytes: Number(values['capture-budget-bytes'])});
+    if (!parentBudget && (values['capture-root'] !== undefined || values['capture-budget-bytes'] !== undefined))
+      throw new Error('explicit census captures require a parent budget');
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;
   }
   const root = resolve(values.root);
+  let captureRoot;
   let violations;
   let changed;
   const unmeasured = [];
@@ -1610,6 +1618,13 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
   const instrumentErrors = [];
   let partialReceipt;
   try {
+    if (values['capture-root'] !== undefined) {
+      const path = values['capture-root'], stat = lstatSync(path);
+      if (!isAbsolute(path) || !stat.isDirectory() || stat.isSymbolicLink() ||
+          !realpathSync(path).startsWith(join(realpathSync(root), 'coverage') + sep))
+        throw new Error('census captures must use an existing private coverage directory in this checkout');
+      captureRoot = realpathSync(path);
+    }
     const snapshot = readCensusSnapshot();
     if (snapshot && parentBudget) throw new Error('parent census budgets are unavailable in snapshot mode');
     if (snapshot && resolve(snapshot.root) !== root) throw new Error("census snapshot belongs to another worktree");
@@ -1662,6 +1677,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     if (instrument.unmeasured !== null) unmeasured.push(`instrument-surface NOT MEASURED - ${instrument.unmeasured}`);
     const suites = evaluateAdmittedCensusSuites({
       changed,
+      separateChildren: Boolean(parentBudget),
       ...readers,
       loadMembers: () => {
         try {
@@ -1675,7 +1691,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
         if (!snapshot) {
           try {
             return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options,
-              ...(parentBudget ? {parentBudget} : {}) });
+              ...(parentBudget ? {parentBudget} : {}), ...(captureRoot ? {captureRoot} : {}) });
           } catch (e) {
             suiteErrors.push(e);
             throw e;

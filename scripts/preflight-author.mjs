@@ -558,13 +558,18 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const dependencyBefore=authorDependencyProvenance(root);
       receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
+      ensureDiagnostics();
+      const censusCaptures = resourceBudget ? join(diagnosticsRoot, 'census-native') : undefined;
+      if (censusCaptures) mkdirSync(censusCaptures, {mode: 0o700});
       const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha,
-        ...(resourceBudget ? ['--parent-budget-ms', '110000'] : [])]);
+        ...(resourceBudget ? ['--parent-budget-ms', '110000', '--capture-root', censusCaptures,
+          '--capture-budget-bytes', String(resourceBudget.scratchBytes)] : [])]);
       // The bounded mode accepts only its explicit unstarted-work deferral.
       // Legacy default-author handling of a head backstop remains unchanged.
       const censusTimeBound = !resourceBudget && censusTimeBoundOnly(census);
       const censusPartial = resourceBudget && readCensusParentBudgetResult(census,
-        {root: resolve(root), head: receipt.headSha, requestedBase: receipt.baseSha, budgetMs: 110000});
+        {root: resolve(root), head: receipt.headSha, requestedBase: receipt.baseSha, budgetMs: 110000,
+          captureBytes: resourceBudget.scratchBytes});
       const censusOk = (census.status === 0 || censusTimeBound || Boolean(censusPartial)) && !census.signal && !census.error;
       report('census-precheck', census, censusOk, censusPartial ? {notMeasured: 'parent-budget', partial: true}
         : censusTimeBound ? { notMeasured: 'time-bound' } : {});

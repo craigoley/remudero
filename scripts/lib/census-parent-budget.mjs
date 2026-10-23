@@ -10,11 +10,13 @@ class CensusParentDeferral extends Error {
 }
 
 /** A parent allowance never shortens a child's existing backstop or retries it. */
-export function censusParentBudget(milliseconds, now = () => performance.now()) {
+export function censusParentBudget(milliseconds, now = () => performance.now(), {captureBytes = 256 * 1024 ** 2} = {}) {
   if (milliseconds === undefined) return undefined;
   const budgetMs = Number(milliseconds);
   if (!Number.isSafeInteger(budgetMs) || budgetMs < 1 || budgetMs > CENSUS_PARENT_BUDGET_MAX_MS)
     throw new Error('parent census budget must be an integer from 1 through 110000 ms');
+  if (!Number.isSafeInteger(captureBytes) || captureBytes < 16 * 1024 ** 2 || captureBytes > 256 * 1024 ** 2)
+    throw new Error('parent census capture allowance must be from 16 through 256 MiB');
   let previous = now();
   if (!Number.isFinite(previous)) throw new Error('parent census clock is unavailable');
   const started = previous, admitted = [], completed = [], deferred = [];
@@ -24,20 +26,26 @@ export function censusParentBudget(milliseconds, now = () => performance.now()) 
     previous = at; return at - started;
   };
   const owner = {
-    admit(label, requiredMs, files = []) {
+    outputLimitBytes: Math.min(8 * 1024 ** 2, Math.floor(captureBytes / 32)),
+    ensureFits(label, requiredMs, files = []) {
       if (typeof label !== 'string' || !label || !Number.isSafeInteger(requiredMs) || requiredMs < 1 ||
           !Array.isArray(files) || files.some(p => typeof p !== 'string') || admitted.length + deferred.length >= 8192)
         throw new Error('invalid parent census operation');
-      const operation = {label, requiredMs, files: [...files], remainingMs: Math.max(0, budgetMs - elapsed())};
-      if (operation.remainingMs < requiredMs + 2000) {
+      const operation = {label, requiredMs, files: [...files], remainingMs: Math.max(0, budgetMs - elapsed()),
+        reason: admitted.length >= 32 ? 'operation-count' : 'time'};
+      if (admitted.length >= 32 || operation.remainingMs < requiredMs + 2000) {
         deferred.push(operation); throw new CensusParentDeferral(owner, operation);
       }
-      admitted.push(operation);
+      return operation;
+    },
+    admit(label, requiredMs, files = []) {
+      admitted.push(owner.ensureFits(label, requiredMs, files));
     },
     complete(label, observation) { elapsed(); completed.push({label, ...observation}); },
     owns(error) { return error instanceof CensusParentDeferral && error.owner === owner; },
     receipt(identity) { return {version: 'census-parent-budget-v1', state: 'over-capacity', ...identity,
-      budgetMs, shutdownReserveMs: 2000, elapsedMs: elapsed(), admitted, completed, deferred,
+      budgetMs, shutdownReserveMs: 2000, maxOperations: 32, captureBytes, outputLimitBytes: owner.outputLimitBytes,
+      elapsedMs: elapsed(), admitted, completed, deferred,
       assurance: 'partial-local-feedback; full census remains required'}; },
   };
   return owner;
@@ -56,12 +64,16 @@ export function readCensusParentBudgetResult(result, identity) {
     if (row.version !== 'census-parent-budget-v1' || row.state !== 'over-capacity' ||
         Object.entries(identity).some(([key, value]) => row[key] !== value) ||
         !Number.isSafeInteger(row.budgetMs) || row.budgetMs < 1 || row.budgetMs > CENSUS_PARENT_BUDGET_MAX_MS ||
-        row.shutdownReserveMs !== 2000 || !Number.isFinite(row.elapsedMs) || row.elapsedMs < 0 ||
+        row.shutdownReserveMs !== 2000 || row.maxOperations !== 32 ||
+        !Number.isSafeInteger(row.captureBytes) || row.captureBytes < 16 * 1024 ** 2 || row.captureBytes > 256 * 1024 ** 2 ||
+        row.outputLimitBytes !== Math.min(8 * 1024 ** 2, Math.floor(row.captureBytes / 32)) ||
+        !Number.isFinite(row.elapsedMs) || row.elapsedMs < 0 ||
         !Array.isArray(row.deferred) || !row.deferred.length || row.deferred.length > 8192 ||
-        !Array.isArray(row.admitted) || !Array.isArray(row.completed) ||
+        !Array.isArray(row.admitted) || row.admitted.length > 32 || !Array.isArray(row.completed) ||
         row.deferred.some(op => typeof op.label !== 'string' || !op.label || !Array.isArray(op.files) ||
           !Number.isSafeInteger(op.requiredMs) || op.requiredMs < 1 || !Number.isFinite(op.remainingMs) ||
-          op.remainingMs < 0 || op.remainingMs >= op.requiredMs + row.shutdownReserveMs)) return undefined;
+          op.remainingMs < 0 || !(op.reason === 'operation-count' && row.admitted.length === 32 ||
+            op.reason === 'time' && op.remainingMs < op.requiredMs + row.shutdownReserveMs))) return undefined;
     return row;
   } catch { return undefined; }
 }

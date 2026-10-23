@@ -1,30 +1,43 @@
 import assert from 'node:assert/strict';
 import {test, type TestContext} from 'node:test';
-import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {gitRepo} from '#test/helpers/git-repo.js';
 import {makeRuntimeFixture} from '#test/helpers/native-runtime-fixture.js';
 import {REPO_ROOT} from '#test/helpers/repo-root.js';
 
-type Budget = {admit: (label: string, bound: number, files?: string[]) => void;
+type Budget = {outputLimitBytes: number; admit: (label: string, bound: number, files?: string[]) => void;
+  ensureFits: (label: string, bound: number, files?: string[]) => unknown;
   complete: (label: string, observation: Record<string, unknown>) => void;
   owns: (error: unknown) => boolean; receipt: (identity: Record<string, unknown>) => Record<string, unknown>};
-const budgetModule = '#scripts/lib/census-parent-budget.mjs';
-const {censusParentBudget, readCensusParentBudgetResult, CENSUS_PARENT_BUDGET_PREFIX: prefix} = await import(budgetModule) as {
-  censusParentBudget: (budget?: string | number, now?: () => number) => Budget | undefined;
+type BudgetExports = {
+  censusParentBudget: (budget?: string | number, now?: () => number, options?: {captureBytes: number}) => Budget | undefined;
   readCensusParentBudgetResult: (result: Record<string, unknown>, identity: Record<string, unknown>) => Record<string, unknown> | undefined;
   CENSUS_PARENT_BUDGET_PREFIX: string;
 };
-type CensusInput = {root: string; files: string[]; parentBudget?: Budget};
-const censusModule = '#scripts/census-precheck.mjs';
-const census = await import(censusModule) as {
+type CensusInput = {root: string; files: string[]; parentBudget?: Budget; captureRoot?: string};
+type CensusModule = {
   main: (argv: string[], ports?: {measure?: Function; admitted?: Function; runSuites?: Function; now?: () => number}) => number;
+  evaluateAdmittedCensusSuites: (input: Record<string, unknown>) => {violations: string[]; unmeasured: string | null};
   runCensusSuitesViaChild: (input: CensusInput & {run?: Function}) => string[];
 };
+type AuthorModule = {main: (argv: string[], ports: {root: string; select: Function; admitHost: Function}) => number};
+const budgetModule = '#scripts/lib/census-parent-budget.mjs';
+const censusModule = '#scripts/census-precheck.mjs';
 const authorModule = '#scripts/preflight-author.mjs';
-const {main: authorMain} = await import(authorModule) as {main: (argv: string[], ports: {
-  root: string; select: Function; admitHost: Function}) => number};
+let censusParentBudget: BudgetExports['censusParentBudget'];
+let readCensusParentBudgetResult: BudgetExports['readCensusParentBudgetResult'];
+let prefix: string;
+let census: CensusModule;
+let authorMain: AuthorModule['main'];
+async function loadBudget() {
+  assert.ok(existsSync(join(REPO_ROOT, 'scripts/lib/census-parent-budget.mjs')),
+    'this named test requires the actual parent-budget implementation');
+  ({censusParentBudget, readCensusParentBudgetResult, CENSUS_PARENT_BUDGET_PREFIX: prefix} = await import(budgetModule) as BudgetExports);
+  census = await import(censusModule) as CensusModule;
+  ({main: authorMain} = await import(authorModule) as AuthorModule);
+}
 
 function capture(t: TestContext, run: () => number) {
   const errors: string[] = [];
@@ -52,7 +65,8 @@ function partial() {
   return {identity, row: budget.receipt(identity)};
 }
 
-test('parent census budget is opt in and refuses invalid declarations and clocks', () => {
+test('parent census budget is opt in and refuses invalid declarations and clocks', async () => {
+  await loadBudget();
   assert.equal(censusParentBudget(undefined, () => {throw Error('default must not read budget clock');}), undefined);
   for (const value of [0, -1, 110001, 1.1, 'no', Infinity]) assert.throws(() => censusParentBudget(value));
   assert.throws(() => censusParentBudget(110000, () => NaN), /clock/);
@@ -60,7 +74,8 @@ test('parent census budget is opt in and refuses invalid declarations and clocks
   assert.throws(() => budget.admit('reader', 60000), /clock/);
 });
 
-test('parent census admits only a whole existing child bound plus shutdown reserve', () => {
+test('parent census admits only a whole existing child bound plus shutdown reserve', async () => {
+  await loadBudget();
   let at = 0; const budget = censusParentBudget(62000, () => at)!;
   budget.admit('fits', 60000); budget.complete('fits', {kind: 'observation'});
   at = 1; assert.throws(() => budget.admit('unstarted', 60000), error => budget.owns(error));
@@ -69,7 +84,57 @@ test('parent census admits only a whole existing child bound plus shutdown reser
   assert.equal((row.admitted as unknown[]).length, 1); assert.equal((row.deferred as unknown[]).length, 1);
 });
 
-test('partial census consumer binds actual context and rejects failures, truncation and unknown rows', () => {
+test('parent census bounds operation count and allocates nested output inside declared scratch', async () => {
+  await loadBudget();
+  const budget = censusParentBudget(110000, () => 0, {captureBytes: 64 * 1024 ** 2})!;
+  assert.equal(budget.outputLimitBytes, 2 * 1024 ** 2);
+  for (let i = 0; i < 32; i++) budget.admit(`operation-${i}`, 60000);
+  assert.throws(() => budget.admit('unstarted-33', 60000), error => budget.owns(error));
+  const row = budget.receipt({});
+  assert.equal((row.admitted as unknown[]).length, 32);
+  assert.equal((row.deferred as {reason: string}[])[0]!.reason, 'operation-count');
+  assert.throws(() => censusParentBudget(110000, () => 0, {captureBytes: 257 * 1024 ** 2}));
+});
+
+test('budgeted census separates file groups and runs native children with one worker and bounded output', async t => {
+  await loadBudget();
+  const groups: string[][] = [];
+  const input = {changed: ['lib/a.ts'], readHead: () => '', readBase: () => '',
+    loadMembers: () => ['a', 'b'].map(name => ({testFile: `test/${name}.test.ts`, script: '', walks: ['lib/']})),
+    runSuites: (files: string[]) => {groups.push(files); return [];}};
+  census.evaluateAdmittedCensusSuites(input); assert.equal(groups.length, 1);
+  groups.length = 0;
+  census.evaluateAdmittedCensusSuites({...input, separateChildren: true});
+  assert.deepEqual(groups, [['test/a.test.ts'], ['test/b.test.ts']]);
+  const f = fixture(t), observations: {args: string[]; maxBuffer: number}[] = [];
+  const run = (_file: string, args: string[], options: {maxBuffer: number}) => {
+    observations.push({args, maxBuffer: options.maxBuffer});
+    return {status: 0, stdout: 'TAP version 13\nok 1 - native case\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n'};
+  };
+  census.runCensusSuitesViaChild({root: f.dir, files: ['test/a.test.ts'], run,
+    parentBudget: censusParentBudget(110000, () => 0, {captureBytes: 64 * 1024 ** 2})});
+  assert.ok(observations[0]!.args.includes('--test-concurrency=1'));
+  assert.equal(observations[0]!.maxBuffer, 2 * 1024 ** 2);
+  census.runCensusSuitesViaChild({root: f.dir, files: ['test/a.test.ts'], run});
+  assert.ok(!observations[1]!.args.includes('--test-concurrency=1'));
+});
+
+test('a rejected real native census capture survives outside disposable fixture scratch', async t => {
+  await loadBudget();
+  const f = fixture(t), captureRoot = join(f.dir, 'coverage', 'native');
+  mkdirSync(captureRoot, {recursive: true});
+  writeFileSync(join(f.dir, 'test/a.test.ts'), 'import{test}from"node:test";test("retained native failure",()=>{throw Error("retain this failure")});\n');
+  const failed = census.runCensusSuitesViaChild({root: f.dir, files: ['test/a.test.ts'], captureRoot,
+    parentBudget: censusParentBudget(110000)});
+  assert.deepEqual(failed, ['test/a.test.ts']);
+  const dirs = readdirSync(captureRoot); assert.equal(dirs.length, 1);
+  const captured = join(captureRoot, dirs[0]!);
+  assert.match(readFileSync(join(captured, 'stdout'), 'utf8'), /not ok/);
+  assert.equal(JSON.parse(readFileSync(join(captured, 'native.json'), 'utf8')).status, 1);
+});
+
+test('partial census consumer binds actual context and rejects failures, truncation and unknown rows', async () => {
+  await loadBudget();
   const {identity, row} = partial();
   const result = {status: 3, stderr: prefix + JSON.stringify(row), outputComplete: true};
   assert.ok(readCensusParentBudgetResult(result, identity));
@@ -84,7 +149,8 @@ test('partial census consumer binds actual context and rejects failures, truncat
     assert.equal(readCensusParentBudgetResult({...result, stderr: prefix + JSON.stringify({...row, ...mutation})}, identity), undefined);
 });
 
-test('real census main defers unstarted expensive work with a context-bound partial receipt', t => {
+test('real census main defers unstarted expensive work with a context-bound partial receipt', async t => {
+  await loadBudget();
   const f = fixture(t); let children = 0;
   const result = capture(t, () => census.main(['--root', f.dir, '--base', 'main', '--parent-budget-ms', '1'],
     {admitted: () => {children++; throw Error('must not start');}, runSuites: () => {children++; return [];}}));
@@ -93,7 +159,8 @@ test('real census main defers unstarted expensive work with a context-bound part
   assert.ok(row); assert.equal((row.completed as unknown[]).length, 0);
 });
 
-test('unbudgeted census keeps its original behavior and never reads the parent clock', t => {
+test('unbudgeted census keeps its original behavior and never reads the parent clock', async t => {
+  await loadBudget();
   const f = fixture(t); let admitted = 0;
   const result = capture(t, () => census.main(['--root', f.dir, '--base', 'main'],
     {admitted: () => {admitted++; return [];}, now: () => {throw Error('not an opt-in budget');}}));
@@ -101,14 +168,16 @@ test('unbudgeted census keeps its original behavior and never reads the parent c
   assert.ok(!result.stderr.includes(prefix));
 });
 
-test('invalid census parent budget refuses before a child starts', t => {
+test('invalid census parent budget refuses before a child starts', async t => {
+  await loadBudget();
   const f = fixture(t); let admitted = 0;
   const result = capture(t, () => census.main(['--root', f.dir, '--base', 'main', '--parent-budget-ms', '110001'],
     {admitted: () => {admitted++; return [];}}));
   assert.equal(result.status, 2); assert.equal(admitted, 0);
 });
 
-test('an unrelated unavailable instrument beside a deferred child stays unavailable', t => {
+test('an unrelated unavailable instrument beside a deferred child stays unavailable', async t => {
+  await loadBudget();
   const f = fixture(t, true); let at = 0;
   const result = capture(t, () => census.main(['--root', f.dir, '--base', 'main', '--parent-budget-ms', '110000'],
     {now: () => at, measure: () => {at = 105000; throw Error('unrelated instrument failure');}, admitted: () => []}));
@@ -116,14 +185,16 @@ test('an unrelated unavailable instrument beside a deferred child stays unavaila
   assert.ok(!result.stderr.includes(prefix));
 });
 
-test('a reported native census timeout is never a parent-budget deferral', t => {
+test('a reported native census timeout is never a parent-budget deferral', async t => {
+  await loadBudget();
   const f = fixture(t); const budget = censusParentBudget(110000)!;
   assert.throws(() => census.runCensusSuitesViaChild({root: f.dir, files: ['test/a.test.ts'], parentBudget: budget,
     run: () => ({status: null, error: Object.assign(Error('actual native timeout'), {code: 'ERR_AUTHOR_STEP_TIMEOUT'})})}),
   error => !budget.owns(error));
 });
 
-test('a real failing head with an unstarted base remains unavailable rather than partial', t => {
+test('a real failing head with an unstarted base remains unavailable rather than partial', async t => {
+  await loadBudget();
   const f = fixture(t); let at = 0;
   writeFileSync(join(f.dir, 'test/a.test.ts'), 'import{test}from"node:test";test("native census case",()=>{throw Error("head failure")});\n');
   f.git('add', '.'); f.git('commit', '-m', 'test: native head failure');
@@ -135,7 +206,8 @@ test('a real failing head with an unstarted base remains unavailable rather than
   assert.ok(!result.stderr.includes(prefix));
 });
 
-test('budgeted census preserves an actual head-red base-green assertion failure', t => {
+test('budgeted census preserves an actual head-red base-green assertion failure', async t => {
+  await loadBudget();
   const f = fixture(t);
   writeFileSync(join(f.dir, 'test/a.test.ts'), 'import{test}from"node:test";test("native census case",()=>{throw Error("head failure")});\n');
   f.git('add', '.'); f.git('commit', '-m', 'test: native caused failure');
@@ -147,7 +219,8 @@ test('budgeted census preserves an actual head-red base-green assertion failure'
 });
 
 test('ordinary bounded author continues after a genuine partial producer and never claims PASS',
-  {skip: process.platform !== 'darwin' ? 'actual bounded-volume author requires Mac' : false}, t => {
+  {skip: process.platform !== 'darwin' ? 'actual bounded-volume author requires Mac' : false}, async t => {
+  await loadBudget();
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
   const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
     [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(f.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
@@ -167,7 +240,8 @@ test('ordinary bounded author continues after a genuine partial producer and nev
 });
 
 test('ordinary bounded author refuses a native timeout even when the legacy producer marks it time-bound',
-  {skip: process.platform !== 'darwin' ? 'actual bounded-volume author requires Mac' : false}, t => {
+  {skip: process.platform !== 'darwin' ? 'actual bounded-volume author requires Mac' : false}, async t => {
+  await loadBudget();
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
   const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
     [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(f.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
