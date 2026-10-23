@@ -233,6 +233,15 @@ test("new path admission default filesystem audit bounds concurrent identities a
     const cancelled = new AbortController();cancelled.abort();
     await assert.rejects(audit.write(at(999).value, at(999).bytes, cancelled.signal));
     assert.equal(existsSync(join(directory, `${at(999).value.reference}.json`)), false);
+    const negativeRoot = join(repo.dir, "negative");mkdirSync(negativeRoot, { mode: 0o700 });
+    const negative = createNewPathApprovalFilesystemAudit(negativeRoot);
+    await assert.rejects(negative.write({ ...record, reference: "../outside-audit" }, first.bytes, controller.signal));
+    await assert.rejects(negative.write(at(999).value, "x".repeat(128 * 1024 + 1), controller.signal));
+    await assert.rejects(negative.write(at(999).value, at(999).bytes, cancelled.signal));
+    assert.equal(existsSync(join(negativeRoot, "state")), false, "invalid, oversized and already-cancelled inputs perform no filesystem write");
+    await negative.write(at(999).value, at(999).bytes, controller.signal);
+    await assert.rejects(negative.write(at(999).value, at(999).bytes, controller.signal));
+    assert.equal(await negative.read(at(999).value.reference, controller.signal), at(999).bytes);
   } finally { clearTimeout(deadline);controller.abort();repo.cleanup(); }
 });
 

@@ -69,7 +69,7 @@ import {
   type WriteTier,
   verifiedActor,
 } from "./service.js";
-import { awaitNewPathApprovalRead, newPathApprovalBindingError, readNewPathApprovalFile, readNewPathApprovalPaths,
+import { awaitNewPathApprovalRead, isNewPathApprovalReference, newPathApprovalBindingError, readNewPathApprovalFile, readNewPathApprovalPaths,
   type NewPathApprovalBinding, type NewPathApprovalRecord } from "./plan.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import {
@@ -3229,6 +3229,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
 export function createNewPathApprovalFilesystemAudit(root: string): NewPathApprovalAudit {
   const state = join(root, "state"), directory = join(state, "new-path-approvals-v1");
   const pins = new Map<string, { dev: number; ino: number; uid: number; size: number; mtimeMs: number; ctimeMs: number }>();
+  const identities = new Set<string>();
   const privateDirectory = async (create: boolean, signal: AbortSignal): Promise<void> => {
     for (const [path, privateMode] of [[root, false], [state, false], [directory, true]] as const) {
       signal.throwIfAborted();
@@ -3243,19 +3244,23 @@ export function createNewPathApprovalFilesystemAudit(root: string): NewPathAppro
   };
   return {
     write: async (record: Readonly<NewPathApprovalRecord>, bytes: string, signal: AbortSignal) => {
-      if (pins.size >= 256) throw new Error("approval audit identity capacity reached");
+      signal.throwIfAborted();
+      if (!isNewPathApprovalReference(record.reference) || Buffer.byteLength(bytes, "utf8") > 128 * 1024) throw new Error("unsupported bounded approval audit");
+      if (identities.has(record.reference) || identities.size >= 256) throw new Error("approval audit identity capacity reached");
+      identities.add(record.reference); // Failed writes retain their reservation; evidence is not erased to reset capacity.
       await privateDirectory(true, signal);signal.throwIfAborted();
       const path = join(directory, `${record.reference}.json`);
       const handle = await fsPromises.open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
-      try {
+      const info = await (async () => { try {
         signal.throwIfAborted();
         await handle.writeFile(bytes, "utf8");await handle.sync();
         const info = await handle.stat();
-        pins.set(record.reference, { dev: info.dev, ino: info.ino, uid: info.uid, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
         const parent = await fsPromises.open(directory, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
         try { await parent.sync(); } finally { await parent.close(); }
-        signal.throwIfAborted();
-      } finally { await handle.close(); }
+        signal.throwIfAborted();return info;
+      } finally { await handle.close(); } })();
+      signal.throwIfAborted();
+      pins.set(record.reference, { dev: info.dev, ino: info.ino, uid: info.uid, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
     },
     read: async (reference, signal) => {
       const pin = pins.get(reference);
