@@ -555,7 +555,7 @@ export function proveNearCrossings(reported, runSuite, controlShiftDays) {
     try {
       const control = runSuite(file, controlShiftDays);
       if (!control.passed) {
-        verification = { verdict: "control_failed", reason: "file is red without any shift", ...control };
+        verification = { verdict: "control_failed", reason: `suite failed the +${controlShiftDays}d clock control (${control.pass}/${control.tests} pass)`, ...control };
       } else {
         const shifted = runSuite(file, shiftDays);
         verification = { verdict: shifted.passed ? "shifted_passed" : "confirmed", shiftDays, ...shifted };
