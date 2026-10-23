@@ -10,6 +10,7 @@ const CYCLE = "test/cycle-ratchet.test.ts";
 const SIZE = "test/source-size-baseline-is-enforced.test.ts";
 const CITATION = "test/citation-anchor-census.test.ts";
 const LEDGER = "test/ledger-rotation.test.ts";
+const GARDENER = "test/rules/scout-config-gardener-failed.test.ts";
 
 type Files = Record<string, string | null>;
 
@@ -56,7 +57,7 @@ test("test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts: a
   );
   assert.deepEqual(
     evaluate(["src/run-task.ts"], { "src/run-task.ts": 'import { r } from "./cli/registry.js";' }, { "src/run-task.ts": "" }).runs,
-    [["test/rules/scout-config-gardener-failed.test.ts"], [CYCLE]],
+    [[GARDENER], [CYCLE]],
   );
 
   // A diff touching neither starts no structural child: no new import, removed imports, or a non-source file.
@@ -65,6 +66,19 @@ test("test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts: a
   assert.deepEqual(evaluate(["src/lib/a.ts"], { "src/lib/a.ts": "" }, { "src/lib/a.ts": same }).runs, []);
   assert.deepEqual(evaluate(["README.md", "docs/a.md"], { "README.md": 'import x from "./y.js"' }).runs, []);
   assert.deepEqual(evaluate(["test/a.test.ts"], { "test/a.test.ts": 'import x from "../src/cli/registry.js"' }).runs, []);
+});
+
+test("W1-T10141: runner and garden changes share one gardener child and propagate its failure", () => {
+  const changed = ["src/run-task.ts", "src/lib/config-gardener.ts"];
+  const priced = "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts";
+  const found = evaluate(changed, {}, {}, () => [GARDENER]);
+  assert.deepEqual(found.runs, [[priced, GARDENER]]);
+  assert.deepEqual(found.result, {
+    violations: [`census-suite: ${GARDENER} fails — run node --test --import tsx ${GARDENER}; load the config garden and bundled measurement worker with the TypeScript loader`],
+    unmeasured: null,
+  });
+  const unreadable = evaluate(changed, {}, {}, () => { throw new Error("gardener child did not finish"); });
+  assert.deepEqual(unreadable.result, { violations: [], unmeasured: "gardener child did not finish" });
 });
 
 test("W1-T5693: the structural suites' own files, registries and plan shards start their suite", () => {
