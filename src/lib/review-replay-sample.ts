@@ -215,10 +215,15 @@ export function reviewReplayGardenSpec(deps: GardenerDeps, generatorRevision: ()
       const path = join(ws.root, REVIEW_REPLAY_SAMPLE_PATH);
       if (existsSync(path) && readFileSync(path, "utf8") === content) return undefined;
       parseReviewReplaySample(content);
+      const header = content.split("\n", 1)[0]!;
+      const pattern = header.replace(/[\\.^$*[\]]/g, "\\$&");
       writeAtomic(path, content);
       return { paths: [REVIEW_REPLAY_SAMPLE_PATH], title: "chore(test): refresh recorded review inputs",
-        body: "Refresh every distinct healthy input from the retained ledger union.\n\nAcceptance:\n" +
-          "- recorded classes survive replay | unit test: test/review/a-review-path-change-replays-recorded-reviews.test.ts" };
+        body: "Refresh every distinct healthy input from the retained ledger union. " +
+          "The exact capture header proves this fixture refresh; the existing replay suite still validates every recorded class in CI.\n\nAcceptance:\n" +
+          "- claim: the refreshed capture header is present\n" +
+          `  proof: grep: ${pattern} in ${REVIEW_REPLAY_SAMPLE_PATH}\n\n` +
+          "Validation: unit test: test/review/a-review-path-change-replays-recorded-reviews.test.ts" };
     },
   };
 }
