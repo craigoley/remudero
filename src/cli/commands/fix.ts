@@ -72,6 +72,7 @@ export interface FixCommandHost {
   readonly MERGE_HEAD_ABSENT_REASON: string;
   readonly MERGE_UP_TO_DATE_REASON: string;
   readonly MISSING_COMMIT_MESSAGE_REASON: RunTaskCommandHost["MISSING_COMMIT_MESSAGE_REASON"];
+  readonly PLAN_SCOPE_PATHS: string;
   readonly USAGE: string;
   readonly acceptanceGateBodyRepair: HostFn;
   readonly addedTestCriterion: HostFn;
@@ -507,9 +508,9 @@ function fixRungScopeStandDownReason(
       ? `a fix worker added path(s) outside plan scope on a plan-only PR: ${newOutOfScopePaths.join(", ")} — ` +
         (planFiling
           ? `this PR is a plan-only filing (every path it carried before this rung is plan-scoped), so its ` +
-            `declared future paths are not yours to build here: a repair may only touch plan/** (or MASTER-PLAN.md/`
-          : `every file this task declares is plan-scoped, so a repair may only touch plan/** (or MASTER-PLAN.md/`) +
-        `ORIENTATION.md), never a src/test path, or the next round's rule-15 refusal fires on the file this ` +
+            `declared future paths are not yours to build here: a repair may only touch ${host.PLAN_SCOPE_PATHS}`
+          : `every file this task declares is plan-scoped, so a repair may only touch ${host.PLAN_SCOPE_PATHS}`) +
+        `, never a src/test path, or the next round's rule-15 refusal fires on the file this ` +
         `rung itself wrote`
       : `a fix worker added path(s) outside the declared scope: ${newOutOfScopePaths.join(", ")} — declared ` +
         `files: ${declaredFiles.join(", ")} — dispatching another strike would compound on a PR the next ` +
@@ -5317,7 +5318,7 @@ export async function fixCommand(
   const self = deps.self ?? resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
-  const runId = `FIX-${Date.now()}`;
+  const runId = `FIX-${systemClock.now()}`;
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });

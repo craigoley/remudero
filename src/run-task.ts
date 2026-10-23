@@ -8668,21 +8668,7 @@ export function allCiFailuresAreGeneratorFixable(
 
 
 
-export async function runGeneratorFixForCiFailures(opts: {
-  failures: readonly CiFailure[];
-  scripts: Readonly<Record<string, string>>;
-  worktreePath: string;
-  taskId: string;
-  branch: string;
-  deps: {
-    runScript: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
-    commit: (opts: { cwd: string; message: string }) => Promise<{ sha: string; changed: boolean }> | { sha: string; changed: boolean };
-    // W1-T2610: `expectedHeadSha` is the sha `commit` above just returned — threaded through so
-    // the real `gitPushRunBranch` leaf underneath (see the run-loop's `push:` closure) can
-    // confirm it actually landed rather than silently no-op'ing a rewound ref.
-    push: (opts: { cwd: string; branch: string; expectedHeadSha?: string }) => Promise<void> | void;
-  };
-}): Promise<GeneratorFixResult> {
+export async function runGeneratorFixForCiFailures(opts: Parameters<ReturnType<typeof fixCommandHelpers>["runGeneratorFixForCiFailures"]>[0]): Promise<GeneratorFixResult> {
   return fixCommandHelpers(fixCommandHost()).runGeneratorFixForCiFailures(opts);
 }
 
@@ -44463,6 +44449,7 @@ function fixCommandHost(): FixCommandHost {
     get MERGE_HEAD_ABSENT_REASON() { return MERGE_HEAD_ABSENT_REASON; },
     get MERGE_UP_TO_DATE_REASON() { return MERGE_UP_TO_DATE_REASON; },
     get MISSING_COMMIT_MESSAGE_REASON() { return MISSING_COMMIT_MESSAGE_REASON; },
+    get PLAN_SCOPE_PATHS() { return "plan/** (or MASTER-PLAN.md/ORIENTATION.md)"; },
     get USAGE() { return USAGE; },
     get acceptanceGateBodyRepair() { return acceptanceGateBodyRepair; },
     get addedTestCriterion() { return addedTestCriterion; },
