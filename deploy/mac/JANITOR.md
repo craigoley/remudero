@@ -298,9 +298,17 @@ account writes an owner-private (0600) `~/.local/state/remudero/preserve-retire.
 below private parents, for example `{"enabled": true, "idle_hours": 24, "retain_days": 7}`.
 It scans `~/Remudero`, `~/rmd-work`, `~/.codex/work-artifacts`,
 `~/Developer/remudero-operator-worktrees`, every `~/Developer/remudero-operator-recovered-worktrees-*`
-and every `~/Downloads/remudero-*` folder (never other `Developer` or `Downloads` content or
-protected roots), at most once every `interval_hours` (default 6). A `roots` entry with `*`
-names every folder it matches.
+every `~/Downloads/remudero-*` folder and `~/.local/share/remudero/source-recovery` (never
+other `Developer` or `Downloads` content or protected roots), at most once every
+`interval_hours` (default 6). A `roots` entry with `*` names every folder it matches.
+
+`temp_roots` (default none) adds folders under `/private/tmp`, for example
+`["remudero-*", "rmd*"]`. macOS on this host has no periodic `/tmp` cleaner, so agent scratch
+there lasts until a reboot: on 2026-10-23 one `remudero-pr-queue-*` folder held 7.9 GiB, 5.6 GiB
+of it in 60 subfolders idle for over six hours. A match counts only when this account owns it
+and it is not a symlink. A worktree there is preserved and retired like any other; a clone or
+bare repository is held (`shared-temp-root`) unless other accounts cannot enter its root, since
+they could borrow its objects. Preserved copies are named `tmp__<path>@<UTC>`.
 
 A checkout, standalone clone or bare repository is a candidate when nothing in it
 (dependencies included, its own Git metadata excluded) changed in `idle_hours` by
@@ -316,7 +324,8 @@ steps. "Published" means the first-parent history of each published remote's cur
 Every candidate is preserved before any is deleted, and the keep set is recomputed
 afterwards, so a borrower whose copy failed keeps its object lender. A clone or bare
 repository is deleted only when no other account can enter the home (mode and ACL)
-and a complete borrower census of the home found no kept borrower. These are held
+and a complete borrower census of the home and both temp folders (`/private/tmp` and
+`$TMPDIR`) found no kept borrower; agent clones in `/private/tmp` borrow from each other. These are held
 for a person and never retired: unreadable history (missing worktree Git dir or
 alternate object store), a locked worktree, an untracked file over `max_untracked_mb`
 (default 50), a foreign owner, and any failed probe. Each candidate is checked again
@@ -335,10 +344,17 @@ to 111 MiB, and agents had left 16 GB of JSON and log dumps beside their checkou
 - Outside any repository, a `.json`, `.jsonl`, `.ndjson`, `.log`, `.lcov` or `.info`
   file of at least `dump_min_mb` (default 5) idle for `idle_hours` and not open is
   gzipped beside itself after a full read-back; its modification time is kept. A dump in
-  either form unchanged for `dump_retain_days` (default 14) is deleted.
+  either form unchanged for `dump_retain_days` (default 7) is deleted. A smaller plain file, any
+  file in a folder holding `package.json`, and anything inside an `.app`, `.framework`,
+  `.xcframework` or `.bundle` is never a dump (the first rule, 2026-10-21, would have expired
+  `package.json` files and a cached Chrome for Testing app).
 - Outside any repository, an idle, unopened `node_modules` is removed, and so are
   `coverage`, `.turbo` and `.next` beside a `package.json`; elsewhere those names may be
   fixture data. Symlinked folders are never followed.
+- With `codex_session_days` set (default 0, off), Codex session logs
+  (`~/.codex/sessions/**/rollout-*.jsonl` and `~/.codex/archived_sessions`) unchanged for that
+  many days and not open are deleted. Archiving a thread in Codex keeps its log on disk, and its
+  history database (`thread_history_*.sqlite`) is Codex's own and never touched.
 
 The janitor also runs `~/.local/bin/remudero-dependencies sweep --apply` on every apply
 pass when that tool is installed (see `deploy/DEPENDENCY-SEEDS.md`).
