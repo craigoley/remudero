@@ -169,10 +169,10 @@ test("new path admission preserves legacy proposals and independent owner holds"
   const pin = taskRulingPin(task);
   assert.equal(taskRulingPin({ ...task, new_path_approval_ref: `npa1_${"B".repeat(43)}` }), pin,
     "the independent receipt does not silently change the legacy ruling pin");
-  const withoutApproval = { ...task };
+  const withoutApproval: Task = { ...task };
   delete withoutApproval.new_path_approval_ref;
   const legacyContext = { ...context, newPathApproval: undefined, pathExists: () => true,
-    clock: { now() { throw new Error("legacy admission must not read the approval clock"); } } };
+    clock: { ...fixedClock(1_200), now() { throw new Error("legacy admission must not read the approval clock"); } } };
   assert.deepEqual(machineFilingAdmissionViolations(withoutApproval, legacyContext), []);
   assert.equal(Object.hasOwn(loadPlanFromYaml("- id: W1-T99009\n  title: legacy\n  repo: remudero\n  type: implement\n", "legacy").tasks[0]!, "new_path_approval_ref"), false);
   const held = approvalFixture("auto", { dispatch_hold: true });
@@ -251,7 +251,7 @@ test("new path admission refuses missing drifted and unsupported authority befor
     const provider = () => service.operatorSessionIdentityProvider({ issuer: "https://session.fixture.invalid",
       allowedOrigins: ["https://ui.fixture.invalid"], operatorUserIds: ["fixture-user"], keys: { key: async () => jwk }, clock });
     const path = "/v1/new-path-approvals/confirm", payload = "{}";
-    for (const mode of ["genuine", "wrong-provider", "unenforced", "missing-iat", "oversized", "cached-oversized"] as const) {
+    for (const mode of ["genuine", "wrong-provider", "unenforced", "missing-iat", "missing-nonce", "oversized", "cached-oversized"] as const) {
       let effects = 0, consumes = 0, sequence = 0;
       const store = service.createConfirmNonceStore(() => `fixture-nonce-${++sequence}`, clock.now);
       const consume = store.consume.bind(store);
@@ -266,6 +266,9 @@ test("new path admission refuses missing drifted and unsupported authority befor
           return authorize(req, allow);
         };
       }
+      let captured: IncomingMessage | undefined;
+      const authorize = operatorSession.authorize!.bind(operatorSession);
+      operatorSession.authorize = (req, allow) => { captured = req; return authorize(req, allow); };
       const route = { method: "POST", path, scope: "write", tier: "high", newPathApproval: true,
         handler: (req: IncomingMessage, res: import("node:http").ServerResponse) => {
           const proof = action!(req, true);
@@ -280,7 +283,8 @@ test("new path admission refuses missing drifted and unsupported authority befor
       try {
         const nonce = store.issue({ method: "POST", path, payload });
         const response = await fetch(url, { method: "POST", body: mode === "oversized" ? "x".repeat(256 * 1_024) : payload,
-          headers: { [service.OPERATOR_SESSION_HEADER]: token(mode === "missing-iat" ? { iat: undefined } : {}), "x-confirm-nonce": nonce }, signal: AbortSignal.timeout(2_000) });
+          headers: { [service.OPERATOR_SESSION_HEADER]: token(mode === "missing-iat" ? { iat: undefined } : {}),
+            ...(mode === "missing-nonce" ? {} : { "x-confirm-nonce": nonce }) }, signal: AbortSignal.timeout(2_000) });
         assert.equal(response.status, mode === "genuine" ? 200 : mode.includes("oversized") ? 413 : 403, mode);
         await response.text();
         if (mode === "genuine") {
@@ -288,6 +292,8 @@ test("new path admission refuses missing drifted and unsupported authority befor
           assert.equal(replay.status, 403);await replay.text();
         }
         assert.equal(effects, mode === "genuine" ? 1 : 0, "forbidden effect stays trapped");
+        assert.ok(captured);
+        assert.equal(action!(captured, false), undefined, "a completed or refused dispatch retains no reusable handler provenance");
         if (mode.includes("oversized")) assert.equal(consumes, 0, "the byte bound precedes nonce buffering/consumption, including the cache");
       } finally {
         server.closeAllConnections();
