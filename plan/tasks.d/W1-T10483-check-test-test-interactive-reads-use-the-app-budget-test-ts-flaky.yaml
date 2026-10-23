@@ -1,0 +1,35 @@
+- id: W1-T10483
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/interactive-reads-use-the-app-budget.test.ts:flaky cost 7.6 PR minute(s) across 3 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.68
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/interactive-reads-use-the-app-budget.test.ts:flaky"
+  files:
+    - src/lib/github-transport.ts
+    - test/github/check-test-test-interactive-reads-use-the-app-budget-test-ts-flaky.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/interactive-reads-use-the-app-budget.test.ts:flaky"
+      proof: "grep: test(\"W1-T10483: check:test:test/interactive-reads-use-the-app-budget.test.ts:flaky is prevented, not retried\" in test/github/check-test-test-interactive-reads-use-the-app-budget-test-ts-flaky.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/interactive-reads-use-the-app-budget.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/interactive-reads-use-the-app-budget.test.ts:flaky cost 7.6 PR minute(s) (seven-day half-life) across 3 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/github-transport.ts: test/interactive-reads-use-the-app-budget.test.ts imports it
+    - test/interactive-reads-use-the-app-budget.test.ts: named by the failing check
+    - the rounds name a failing test: test/interactive-reads-use-the-app-budget.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13248 at 2026-10-21T00:34:32Z: hand fix PR #13248: src/lib/gh-read-broker.ts, src/lib/github-transport.ts; minutes are the pass median proxy (5.840216666666667), not measured repair time
+    - PR #12163 at 2026-10-15T23:11:51Z: hand fix PR #12163: src/lib/github-transport.ts, src/lib/loop-bounded-child.ts; minutes are the pass median proxy (5.840216666666667), not measured repair time
+    - PR #10296 at 2026-10-09T09:42:10.022Z: ci-log round — ci-shard (5/8): b failed; ci-shard (3/8): test/a-reservation-names-its-holder.test.ts; ci-shard (7/8): test/interactive-reads-use-the-app-budget.test.ts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
