@@ -210,3 +210,17 @@ test("the top-level archive catch-up still copies a rotation published during th
   assert.equal(readFileSync(join(snap.archiveDir, archive), "utf8"), WHOLE);
   assert.equal(readFileSync(join(snap.archiveDir, "ledger.ndjson"), "utf8"), WHOLE);
 });
+
+test("an archive-shaped dangling link created during copying remains a loud failure", (t) => {
+  const { state, backups } = liveState(WHOLE);
+  t.after(() => rmSync(join(state, ".."), { recursive: true, force: true }));
+  const archive = "ledger.2026-10-23T00-00-00-001Z.ndjson";
+  let published = false;
+  assert.throws(() => snapshotState(state, backups, {beforeCopy: (rel) => {
+    if (rel !== "ledger.ndjson" || published) return;
+    fs.symlinkSync(join(state, "missing-archive"), join(state, archive));
+    published = true;
+  }}), StateBackupError);
+  assert.equal(published, true);
+  assert.deepEqual(readdirSync(backups), []);
+});
