@@ -94,7 +94,13 @@ export function observeInstanceInboxContract(stateDir: string, expected: { insta
     if (state.mode !== "read-write") return { state, current: () => false };
     const body = JSON.parse(text) as Record<string, unknown>;
     if ((body.instance !== undefined && body.instance !== expected.instance) || (body.repository !== undefined && body.repository !== expected.repository)) return refused();
-    const current = (): boolean => { try { return same(lstatSync(path)); } catch { return false; } };
+    const current = (): boolean => {
+      try { return same(lstatSync(path)); }
+      catch {
+        // deliberate: missing and unreadable both invalidate this prior positive; callers publish unavailable, never absence or readiness.
+        return false;
+      }
+    };
     return current() ? { state, current } : refused();
   } catch {
     // deliberate: no stale positive or private file/error content survives an unverifiable observation.
