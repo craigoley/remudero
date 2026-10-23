@@ -127,7 +127,10 @@ test('the ordinary bounded author uses its real fixed volume and records natural
   const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
     [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(fixture.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
   writeFileSync(join(fixture.dir, 'package-lock.json'), JSON.stringify({lockfileVersion: 3, packages}));
-  fixture.git('add', 'package-lock.json'); fixture.git('commit', '-m', 'test: lock bounded author fixture tools');
+  const staticPath = join(fixture.dir, 'src/run-task.ts');
+  writeFileSync(staticPath, 'import {getHeapStatistics} from "node:v8";\n' + readFileSync(staticPath, 'utf8') +
+    'writeFileSync("coverage/fixture-heap-limit",String(getHeapStatistics().heap_size_limit));\n');
+  fixture.git('add', 'package-lock.json', 'src/run-task.ts'); fixture.git('commit', '-m', 'test: lock bounded author fixture tools');
   const result = main(['--bounded-scratch-mib=64'], {root: fixture.dir,
     select: () => ({fullRun: false, suites: ['test/a.test.ts', 'test/b.test.ts'], reasons: ['real bounded author fixture']}),
     admitHost: () => ({state: 'admitted', fixtureOnly: true})});
@@ -140,6 +143,8 @@ test('the ordinary bounded author uses its real fixed volume and records natural
   assert.equal(receipt.resourceBudget.stepRuntimeMs, 120000);
   assert.equal(receipt.executionWorkers, 1);
   assert.ok(receipt.resourceBudget.completedPhaseCaptures >= 2);
+  assert.ok(Number(readFileSync(join(fixture.dir, 'coverage/fixture-heap-limit'), 'utf8')) <= 1088 * 1024 ** 2,
+    'the real ordinary static child inherits the declared V8 generation bounds');
   assert.equal(existsSync(receipt.resourceBudget.scratch.dir), false);
 });
 
