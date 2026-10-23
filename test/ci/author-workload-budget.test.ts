@@ -3,12 +3,28 @@ import {test} from 'node:test';
 import {existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {getHeapStatistics} from 'node:v8';
-import {spawnSync} from 'node:child_process';
-import {boundedAuthorWorkload, boundedAuthorWorkloadFromArgv, readMacAuthorAdmission} from '#scripts/lib/mac-author-admission.mjs';
-import {boundedAuthorCaptureClosure, finishBoundedAuthorScratch, main, requireBoundedAuthorHost} from '#scripts/preflight-author.mjs';
+import {spawn, spawnSync} from 'node:child_process';
+import {once} from 'node:events';
 import {ownedFixtureDir} from '#test/helpers/owned-fixture-dir.js';
 import {makeRuntimeFixture} from '#test/helpers/native-runtime-fixture.js';
 import {REPO_ROOT} from '#test/helpers/repo-root.js';
+
+type Budget = {minimumFreeBytes: number; scratchBytes: number};
+const admissionModule = '#scripts/lib/mac-author-admission.mjs';
+const {boundedAuthorWorkload, boundedAuthorWorkloadFromArgv, readMacAuthorAdmission} = await import(admissionModule) as {
+  boundedAuthorWorkload: (scratchMiB: number) => Budget;
+  boundedAuthorWorkloadFromArgv: (argv: string[]) => Budget | undefined;
+  readMacAuthorAdmission: (root: string, options?: {platform?: string; minimumFreeBytes?: number;
+    statfs?: Function; spawn?: Function}) => {state: string; reasons: string[]};
+};
+const authorModule = '#scripts/preflight-author.mjs';
+const {boundedAuthorCaptureClosure, finishBoundedAuthorScratch, main, requireBoundedAuthorHost} = await import(authorModule) as {
+  boundedAuthorCaptureClosure: (path: string) => {state: string};
+  finishBoundedAuthorScratch: (scratch: {release: () => void}, closed: boolean) => {state: string};
+  requireBoundedAuthorHost: (options?: {platform?: string; heapLimitBytes?: number}) => void;
+  main: (argv: string[], options: {root: string; select: () => {fullRun: boolean; suites: string[]; reasons: string[]};
+    admitHost: () => unknown}) => number;
+};
 
 test('ordinary author admission prices declared bounded scratch and outputs below the full coverage reserve', () => {
   const budget = boundedAuthorWorkload(256);
@@ -72,6 +88,21 @@ test('bounded author unknown closure and failed detach preserve their volume and
   assert.equal(released, 1);
 });
 
+test('bounded author closure probes retain a live native group until that exact child exits', {timeout: 20000}, async t => {
+  if (process.platform === 'win32') return;
+  const {dir} = ownedFixtureDir(t, 'author-budget-live-group');
+  const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},15000)'], {detached: true, stdio: 'ignore'});
+  let exited = false;
+  const closed = once(child, 'exit').then(() => {exited = true;});
+  t.after(async () => {if (!exited) {child.kill('SIGTERM'); await closed;}});
+  await once(child, 'spawn');
+  const path = join(dir, 'native.json');
+  writeFileSync(path, JSON.stringify({parentTracking: {ownerPid: process.pid, childPid: child.pid}}));
+  assert.equal(boundedAuthorCaptureClosure(path).state, 'unknown');
+  child.kill('SIGTERM'); await closed;
+  assert.equal(boundedAuthorCaptureClosure(path).state, 'closed');
+});
+
 test('the ordinary bounded author uses its real fixed volume and records natural native child closure', t => {
   if (process.platform !== 'darwin') {
     assert.throws(() => requireBoundedAuthorHost(), /native Mac volume/);
@@ -116,4 +147,24 @@ test('a real failed ordinary bounded author keeps its failed verdict and closes 
   assert.equal(receipt.steps.find((row: {name: string}) => row.name === 'affected-tests').ok, false);
   assert.equal(receipt.resourceBudget.cleanup, 'closed-and-removed');
   assert.equal(existsSync(receipt.resourceBudget.scratch.dir), false);
+});
+
+test('ordinary bounded author stops real oversized native output and preserves the failed phase', t => {
+  if (process.platform !== 'darwin') return;
+  const fixture = makeRuntimeFixture(); t.after(() => fixture.cleanup());
+  const packages = Object.fromEntries(['tsx', 'typescript', '@commitlint/cli'].map(name =>
+    [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(fixture.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
+  writeFileSync(join(fixture.dir, 'package-lock.json'), JSON.stringify({lockfileVersion: 3, packages}));
+  writeFileSync(join(fixture.dir, 'src/run-task.ts'), 'process.stdout.write(Buffer.alloc(9*1024**2,120));\n');
+  fixture.git('add', '.'); fixture.git('commit', '-m', 'test: emit oversized native diagnostics');
+  const result = main(['--bounded-scratch-mib', '64'], {root: fixture.dir,
+    select: () => ({fullRun: false, suites: ['test/a.test.ts'], reasons: ['oversized native output fixture']}),
+    admitHost: () => ({state: 'admitted', fixtureOnly: true})});
+  const receipt = JSON.parse(readFileSync(join(fixture.dir, 'coverage/preflight-author.json'), 'utf8'));
+  const phase = receipt.steps.find((row: {name: string}) => row.name === 'static-preflight');
+  assert.equal(result, 1);
+  assert.equal(receipt.verdict, 'failed');
+  assert.equal(phase.error.code, 'ERR_AUTHOR_OUTPUT_LIMIT');
+  assert.ok(phase.diagnostics.stdoutBytes + phase.diagnostics.stderrBytes <= 8 * 1024 ** 2);
+  assert.equal(receipt.resourceBudget.cleanup, 'closed-and-removed');
 });
