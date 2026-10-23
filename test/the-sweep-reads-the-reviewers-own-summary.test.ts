@@ -23,6 +23,8 @@ const PR_URL = `https://github.com/craigoley/remudero/pull/${PR_NUMBER}`;
 const HEAD = "d".repeat(40);
 const OLD_HEAD = "e".repeat(40);
 const BODY = `Remudero-Task: ${TASK}`;
+// The REST fixture is one day old; this suite tests refusal routing, not wall-clock aging.
+const FIXTURE_NOW = Date.parse("2026-10-11T05:00:00.000Z");
 const RULE_15 =
   "remudero-review: FAIL — Standing rule 15: a criterion was added/edited beside non-plan files — file the shard in its own plan-only PR";
 const RENUMBER = "remudero-review: FAIL — id W1-T7620 is reserved by scout-garden-1, not this PR — renumber";
@@ -90,7 +92,7 @@ test("a later passing review at the same head clears the carried review summary"
 test("a rule-15 refusal on the current head is named in the sweep's escalation reason", () => {
   const view = viewFrom([reviewRow(HEAD, RULE_15)]);
   assert.equal(namesRule15Refusal(view), true);
-  const { disposition, reason } = deriveDisposition(view, DEFAULT_SWEEP_POLICY);
+  const { disposition, reason } = deriveDisposition(view, DEFAULT_SWEEP_POLICY, FIXTURE_NOW);
   assert.equal(disposition, "blocked-ambiguous");
   assert.match(reason, /Standing rule 15/);
   assert.doesNotMatch(reason, /contradictory/);

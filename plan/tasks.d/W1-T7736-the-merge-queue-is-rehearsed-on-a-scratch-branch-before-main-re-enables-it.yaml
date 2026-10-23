@@ -12,7 +12,7 @@
   origin: "operator approval 2026-10-10: throughput study follow-up — 'rehearse the merge queue on a scratch target before main'"
   plan_refs: [W1-T5940, W1-T5941, W1-T4406, W1-T5515, W1-T5522, W1-T5909, W1-T5956, W1-T6088, W1-T7214, W1-T7735]
   files: [scripts/merge-queue-canary.mjs, test/the-merge-queue-is-rehearsed-on-a-scratch-branch-before-main-re-enables-it.test.ts, docs/recon/merge-queue-canary-rehearsal.md, docs/docs-index.json, src/lib/sweep.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

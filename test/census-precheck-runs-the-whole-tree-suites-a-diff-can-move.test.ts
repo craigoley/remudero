@@ -10,6 +10,7 @@ const CYCLE = "test/cycle-ratchet.test.ts";
 const SIZE = "test/source-size-baseline-is-enforced.test.ts";
 const CITATION = "test/citation-anchor-census.test.ts";
 const LEDGER = "test/ledger-rotation.test.ts";
+const GARDENER = "test/rules/scout-config-gardener-failed.test.ts";
 
 type Files = Record<string, string | null>;
 
@@ -25,6 +26,33 @@ function evaluate(changed: string[], head: Files = {}, base: Files = {}, behave:
   });
   return { result, runs };
 }
+
+test("a clock fixture edit asks its measured cross-clock regression before push", () => {
+  const suite = "test/gardeners/the-memory-tuner-fixture-shares-a-clock-with-its-shell.test.ts";
+  for (const path of ["test/a-squeezed-page-cache-grows-its-memory-high.test.ts",
+    "test/the-beat-publishes-each-daemons-memory-high.test.ts", "test/the-sweep-reads-the-reviewers-own-summary.test.ts", suite]) {
+    const found = evaluate([path]);
+    assert.ok(found.runs.flat().includes(suite), path);
+    assert.deepEqual(found.result.violations, [], path);
+  }
+  const red = evaluate(["test/the-beat-publishes-each-daemons-memory-high.test.ts"], {}, {}, files => files.includes(suite) ? [suite] : []);
+  assert.ok(red.result.violations.some((violation: string) => violation.startsWith(`census-suite: ${suite} fails`)),
+    "a failed real clock experiment refuses publication");
+});
+
+test("a learning corpus edit asks its sandbox subject generator before push", () => {
+  const suite = "test/sandbox-subject-generator.test.ts";
+  for (const path of ["learnings/ci.yaml", "learnings/entries.d/new.yml", "learnings/index.json",
+    "src/lib/learnings.ts", "src/lib/wipe-test.ts", suite]) {
+    const found = evaluate([path]);
+    assert.ok(found.runs.flat().includes(suite), path);
+    assert.deepEqual(found.result.violations, [], path);
+  }
+  const red = evaluate(["learnings/ci.yaml"], {}, {}, files => files.includes(suite) ? [suite] : []);
+  assert.ok(red.result.violations.some((violation: string) => violation.startsWith(`census-suite: ${suite} fails`)),
+    "a failed real-corpus generator refuses publication");
+  assert.deepEqual(evaluate(["docs/example.md"]).runs, [], "unrelated prose starts no child");
+});
 
 test("test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts: a ring-closing import starts cycle-ratchet alone, a src/lib import of src/cli starts source-size, a diff touching neither starts no structural child", () => {
   // A new import in a src file that could close a ring starts cycle-ratchet, in a child of its own.
@@ -56,7 +84,7 @@ test("test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts: a
   );
   assert.deepEqual(
     evaluate(["src/run-task.ts"], { "src/run-task.ts": 'import { r } from "./cli/registry.js";' }, { "src/run-task.ts": "" }).runs,
-    [[CYCLE]],
+    [[GARDENER], [CYCLE]],
   );
 
   // A diff touching neither starts no structural child: no new import, removed imports, or a non-source file.
@@ -67,13 +95,29 @@ test("test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts: a
   assert.deepEqual(evaluate(["test/a.test.ts"], { "test/a.test.ts": 'import x from "../src/cli/registry.js"' }).runs, []);
 });
 
+test("W1-T10141: runner and garden changes share one gardener child and propagate its failure", () => {
+  const changed = ["src/run-task.ts", "src/lib/config-gardener.ts"];
+  const priced = "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts";
+  const found = evaluate(changed, {}, {}, () => [GARDENER]);
+  assert.deepEqual(found.runs, [[priced, GARDENER]]);
+  assert.deepEqual(found.result, {
+    violations: [`census-suite: ${GARDENER} fails — run node --test --import tsx ${GARDENER}; load the config garden and bundled measurement worker with the TypeScript loader`],
+    unmeasured: null,
+  });
+  const unreadable = evaluate(changed, {}, {}, () => { throw new Error("gardener child did not finish"); });
+  assert.deepEqual(unreadable.result, { violations: [], unmeasured: "gardener child did not finish" });
+});
+
 test("W1-T5693: the structural suites' own files, registries and plan shards start their suite", () => {
   for (const [path, suites] of [
     [".dependency-cruiser.cjs", [[CYCLE], [SIZE], ["test/architecture-fitness.test.ts"]]],
     ["scripts/cycle-baseline.json", [[CYCLE]]],
     ["scripts/cycle-ratchet.mjs", [[CYCLE]]],
     ["scripts/source-size-ratchet.mjs", [[SIZE]]],
-    ["src/lib/ci-parity.ts", [["test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts"], [SIZE]]],
+    ["src/lib/ci-parity.ts", [[
+      "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+      "test/every-ci-census-is-asked-before-the-push.test.ts",
+    ], [SIZE]]],
     ["plan/tasks.d/W1-T1-x.yaml", [[CITATION]]],
     ["MASTER-PLAN.md", [[CITATION]]],
     ["scripts/citation-anchor-census.mjs", [[CITATION]]],

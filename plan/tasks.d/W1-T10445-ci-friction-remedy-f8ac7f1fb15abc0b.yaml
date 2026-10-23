@@ -1,0 +1,69 @@
+- id: W1-T10445
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-census-this-branch-grows-is-refused-before-the-push.test.ts cost 12.6 PR minute(s) across 5 round(s) on 4 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.41
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-census-this-branch-grows-is-refused-before-the-push.test.ts"
+  files:
+    - scripts/census-precheck.mjs
+    - test/ci/gates/ci-friction-remedy-f8ac7f1fb15abc0b.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-census-this-branch-grows-is-refused-before-the-push.test.ts"
+      proof: "grep: test(\"W1-T10445: check:test:test/a-census-this-branch-grows-is-refused-before-the-push.test.ts is prevented, not retried\" in test/ci/gates/ci-friction-remedy-f8ac7f1fb15abc0b.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-census-this-branch-grows-is-refused-before-the-push.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-census-this-branch-grows-is-refused-before-the-push.test.ts cost 12.6 PR minute(s) (seven-day half-life) across 5 fix round(s) on 4 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/census-precheck.mjs: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts imports it
+    - test/a-census-this-branch-grows-is-refused-before-the-push.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13652 (https://github.com/craigoley/remudero/pull/13652) at 2026-10-22T22:30:10.024Z: ci-log round — comment-load-ratchet: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts; rule-checks: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts
+        failing tests: census precheck: a real git push that grows a clock row is REFUSED by the hook, naming the file; census precheck: a real git push of a clean change passes, and one with no origin/main is named, not blocked
+        log excerpt:
+          | --- rule-checks failed-suites line retained from this job ---
+          | rule-checks: failed suites: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts test/census-precheck-counts-the-house-layout-ratchet.test.ts test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts
+          | 
+          | ✖ failing tests:
+          | 
+          | test at test/a-census-this-branch-grows-is-refused-before-the-push.test.ts:1:6852
+          | ✖ census precheck: a real git push that grows a clock row is REFUSED by the hook, naming the file (177.223906ms)
+          |   AssertionError [ERR_ASSERTION]: The input did not match the regular expression /clock-signatur
+    - PR #12740 (https://github.com/craigoley/remudero/pull/12740) at 2026-10-18T13:17:08.818Z: ci-log round — rule-checks: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts
+        failing tests: census precheck: a real git push that grows a clock row is REFUSED by the hook, naming the file; census precheck: a real git push of a clean change passes, and one with no origin/main is named, not blocked
+        log excerpt:
+          | --- rule-checks failed-suites line retained from this job ---
+          | rule-checks: failed suites: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts test/census-precheck-counts-the-house-layout-ratchet.test.ts
+          | 
+          | ✖ failing tests:
+          | 
+          | test at test/a-census-this-branch-grows-is-refused-before-the-push.test.ts:1:6783
+          | ✖ census precheck: a real git push that grows a clock row is REFUSED by the hook, naming the file (241.286007ms)
+          |   AssertionError [ERR_ASSERTION]: The input did not match the regular expression /clock-signature: src\/a\.ts dateNow 2 > baseline 1/. Input:
+          | 
+          |   'pre-push: scripts/rule
+    - PR #10817 at 2026-10-11T07:20:01.000Z: ci-log round — rule-checks: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts
+    - PR #10516 (https://github.com/craigoley/remudero/pull/10516) at 2026-10-10T00:21:35.238Z: ci-log round — rule-checks: test/a-census-this-branch-grows-is-refused-before-the-push.test.ts; coverage-session-blanking
+        failing tests: reviewCommand resolves at the PR's own head sha, judges a shard the PR's own diff adds, still fails closed on an id absent at that head, and still cannot see a shard that merges later; W1-T460 (5): the production showBlob pipes git's stderr — a review over an absent base path prints no `fatal:`
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
+    reasons:
+      - "The declared files are a pre-push census precheck script (scripts/census-precheck.mjs) and a new test file. Neither is described as touching secrets, credentials, auth, permissions, deletion, merge/deploy policy, or irreversible actions."
+      - "The task is a machine-filed ci-friction remedy that makes a recurring test failure (a real git push hook test) be prevented rather than retried. It is verifiable by a grep acceptance on a named test in a new file, and its PR still goes through CI and review."
+      - "The family track record (39 merged, 58 declined) is mixed, but this is a caution rather than a concrete danger. The evidence shows 4 distinct PRs cited and 1 of 2 declared files existing, with the other being the new test the task creates. No operator-only decision is requested."
+    judged_at: "2026-10-23T00:13:03.315Z"
+    pin: "73f7286227238f4365c7053b027e0b2d834cddd1a4a4d36dbc60bd3ed538d9de"

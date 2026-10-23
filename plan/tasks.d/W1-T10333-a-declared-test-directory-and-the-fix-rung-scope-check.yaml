@@ -17,7 +17,7 @@
   # refusal-amendment (W1-T10333, run DAEMON-1792684563707@c05db4f67260c7236be4303138fd4cf6cf441cea, 2026-10-22T19:18:53.491Z): the worker refused criterion 3 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: A separate implement task must be filed from an operator checkout; this worker may edit only the forensic document.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, core ledger on host remudero (rmd-state2, read-only, rotations from 2026-10-18 plus the live file):
