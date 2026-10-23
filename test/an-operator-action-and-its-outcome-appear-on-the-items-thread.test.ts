@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { captureInboxInput, causalThreadInputs } from "#src/lib/inbox-thread.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
+
 import { createDemandBook } from "../src/lib/view-demand.js";
 import { createInboxThreadView, inboxThreadViewKey, type InboxThreadViewData } from "../src/lib/inbox-thread-view.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
@@ -32,7 +35,19 @@ interface Fx {
 /** A registry on disk, a ledger of the given rows, and the thread routes over both. */
 async function fixture(t: { after: (fn: () => void) => void }, registry: Array<Record<string, unknown>>, ledger: Array<Record<string, unknown>> = []): Promise<Fx> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t9252-`));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let server: ReturnType<typeof createService> | undefined;
+  t.after(async () => {
+    const ownedServer = server;
+    if (ownedServer?.listening) {
+      await new Promise<void>((resolve, reject) => {
+        ownedServer.close(error => error ? reject(error) : resolve());
+        ownedServer.closeAllConnections();
+      });
+    }
+    // SQLite close queues its diagnostic writer's final record; deletion must wait for its ACK.
+    await flushReadModelTransactions();
+    rmSync(root, { recursive: true, force: true });
+  });
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
@@ -50,12 +65,11 @@ async function fixture(t: { after: (fn: () => void) => void }, registry: Array<R
     statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
     ratify: { approve: () => {}, reframe: () => {} },
   };
-  const server = createService({
+  server = createService({
     tokens: { read: "t9252-read", write: "t9252-write" },
     routes: [buildInboxRoute(deps), buildInboxThreadRoute(deps), buildInboxThreadReplyRoute(deps), buildDeclineProposalRoute(deps), buildRestoreProposalRoute(deps)],
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
   return {
     root, stateDir, ledgerPath, deps,
     threadStorePath: inboxThreadStorePath(root),
@@ -128,12 +142,15 @@ test("W1-T9252: a release appears on every open ask thread for the task", async 
 });
 
 test("W1-T9252: a redraft, a filed task and a refusal follow the operator action", async (t) => {
+  const repository = "fixture/repository";
+  const input = captureInboxInput({ repository }, "ruling:P1", "Shorter, please.", "feedback:W1-T9252");
   const fx = await fixture(t, [
-    { id: "ruling:P1", reframeHistory: [{ feedback: "Shorter, please." }] },
+    { id: "ruling:P1", reframeHistory: [{ feedback: "Shorter, please.", input }] },
     { id: "ruling:P2" },
   ], [
-    { ts: iso(0), run_id: "REFRAME-1", task_id: "ruling:P1", step: "ratify.reframed", feedback: "Shorter, please." },
-    { ts: iso(1_000), run_id: "DRAFT-1", step: "inbox.drafted", proposal_id: "ruling:P1", lint_clean: true },
+    { ts: iso(0), run_id: "REFRAME-1", task_id: "ruling:P1", step: "ratify.reframed", feedback: "Shorter, please.", repository, input },
+    { ts: iso(1_000), run_id: "DRAFT-1", step: "inbox.drafted", proposal_id: "ruling:P1", lint_clean: true,
+      repository, completion_id: "completion:W1-T9252", consumed_inputs: [input], cache_adopted: true },
     { ts: iso(2_000), run_id: "APPROVE-P1", task_id: "ruling:P1", step: "ratify.approved" },
     { ts: iso(3_000), run_id: "APPROVE-P1", step: "approve.shards_written", proposal_id: "ruling:P1", paths: ["plan/tasks.d/W1-T950-the-shorter-thing.yaml"] },
     { ts: iso(4_000), run_id: "APPROVE-P2", task_id: "ruling:P2", step: "ratify.approve_refused", state: "not_ready", reason: "it has no draft yet" },
@@ -148,6 +165,8 @@ test("W1-T9252: a redraft, a filed task and a refusal follow the operator action
   assert.deepEqual(shown, [
     ["reframed", "operator", T0], ["redrafted", "daemon", T0 + 1_000], ["approved", "operator", T0 + 2_000], ["task_filed", "daemon", T0 + 3_000],
   ]);
+  assert.equal(first.status === "ok" && first.messages[0]!.extra!.input!.id, input.id);
+  assert.deepEqual(first.status === "ok" && first.messages[1]!.extra!.response!.inputs, [input], "the adopted redraft consumed this captured direction");
   assert.match(storedEvents(fx, "ruling:P1")[3]!.body, /W1-T950/);
   assert.deepEqual(storedEvents(fx, "ruling:P2").map((m) => m.extra!.event!.kind), ["refused"], "a draft nobody asked to redo is not announced as a redraft");
   assert.match(storedEvents(fx, "ruling:P2")[0]!.body, /no draft yet/);
@@ -157,6 +176,28 @@ test("W1-T9252: a redraft, a filed task and a refusal follow the operator action
   assert.equal(await sync.sync(), 1);
   assert.equal(await sync.sync(), 0);
   assert.equal(storedEvents(fx, "ruling:P2").length, 2);
+});
+
+test("W1-T9252: an unlinked historical draft cannot consume later captured direction", async (t) => {
+  const repository = "fixture/repository", proposalId = "ruling:legacy";
+  const feedback = "Keep the newer direction pending.";
+  const input = captureInboxInput({ repository }, proposalId, feedback, "feedback:W1-T9252-later");
+  const fx = await fixture(t, [{ id: proposalId, reframeHistory: [{ feedback: "Legacy direction." }, { feedback, input }] }], [
+    { ts: iso(0), run_id: "LEGACY-REFRAME", task_id: proposalId, step: "ratify.reframed", feedback: "Legacy direction." },
+    { ts: iso(1_000), run_id: "LEGACY-DRAFT", step: "inbox.drafted", proposal_id: proposalId, lint_clean: true },
+    { ts: iso(2_000), run_id: "LATER-REFRAME", task_id: proposalId, step: "ratify.reframed", feedback, repository, input },
+  ]);
+  const registryPath = join(fx.stateDir, "inbox-proposals.json"), original = readFileSync(registryPath, "utf8");
+  const sync = createThreadEventSync({ ledgerPath: fx.ledgerPath, threadStorePath: fx.threadStorePath });
+  assert.equal(await sync.backfill(), 2);
+  assert.equal(await sync.backfill(), 0, "replay does not manufacture an answer from historical ordering");
+  const messages = storedEvents(fx, proposalId);
+  assert.deepEqual(messages.map(message => message.extra!.event!.kind), ["reframed", "reframed"]);
+  assert.ok(messages.every(message => message.extra?.response === undefined));
+  const correspondence = causalThreadInputs(messages, { repository }, proposalId, fx.proposals[0]!.reframeHistory);
+  assert.equal(correspondence.unknown, true, "legacy linkage is unknown, not retrofitted");
+  assert.deepEqual(correspondence.pending.map(message => message.extra!.input!.id), [input.id]);
+  assert.equal(readFileSync(registryPath, "utf8"), original, "the original feedback history is unchanged");
 });
 
 test("W1-T9252: a retried verb and a re-run backfill write each event once", async (t) => {

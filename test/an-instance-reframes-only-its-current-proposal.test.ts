@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,10 +82,17 @@ test("a source-owned reframe survives concurrent replay and restart without repe
   assert.equal((await restart("POST", "/v1/i/site/inbox/reframe", body)).status, 200);
   assert.equal((await restart("POST", "/v1/i/site/inbox/reframe", { ...body, feedback: "different" })).status, 409);
   const registry = JSON.parse(readFileSync(f.registry, "utf8"));
-  assert.deepEqual(registry.proposals[0].reframeHistory, [{ feedback: body.feedback }]);
+  const history = registry.proposals[0].reframeHistory;
+  assert.equal(history.length, 1);
+  const { input, ...originalFields } = history[0];
+  assert.deepEqual(originalFields, { feedback: body.feedback });
+  assert.match(input.id, /^[a-f0-9]{64}$/);
+  assert.deepEqual({ ...input, id: undefined }, { id: undefined, repository: "owner/site", proposalId: f.proposal.id,
+    threadId: inboxThreadId(f.proposal.id), contentSha256: createHash("sha256").update(body.feedback).digest("hex") });
   assert.deepEqual(JSON.parse(readFileSync(f.drafts, "utf8")), { unrelated: { retained: true } });
   const rows = readFileSync(f.ledgerPath, "utf8").trim().split("\n").map(l => JSON.parse(l));
   assert.equal(rows.filter(r => r.step === "ratify.reframed").length, 1);
+  assert.deepEqual(rows.find(r => r.step === "ratify.reframed").input, input, "the unchanged source-owned action records its exact captured input");
   assert.equal(rows.filter(r => r.step === "panel.proposal_reframe_requested").length, 1);
   assert.ok(rows.every(r => r.task_id === f.proposal.id));
   assert.ok(!rows.some(r => r.step === "ratify.approved"));

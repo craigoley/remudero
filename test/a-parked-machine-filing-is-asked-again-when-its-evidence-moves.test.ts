@@ -139,12 +139,8 @@ test("W1-T8830: an escalation is asked again when its evidence moves", async () 
     assert.deepEqual(noRoom.asked, [], "a pass with no room left asks nothing");
     const bar = pass(root, clock, everyone, world);
     const barReport = await bar.run();
-    assert.deepEqual(bar.asked, ["W1-T9100"], "a moved bar re-asks its family's parked escalation");
-    assert.deepEqual(barReport.reasked, ["W1-T9100"]);
-    const barRow = bar.logs.find((l) => l.step === "machine_judge.reasked")?.extra;
-    assert.deepEqual(barRow?.moved, ["confidence_bar"], "the re-ask is ledgered with the input that moved");
-    assert.equal(barRow?.changed, false);
-    assert.equal(barRow?.cadence_due, false);
+    assert.deepEqual(bar.asked, [], "W1-T10349: a moved bar re-applies the pinned action with no model call; a high verdict stays");
+    assert.deepEqual(barReport.reasked ?? [], []);
 
     // A dependency merges: the record is asked, now proceeds, and lands re-pinned through the one judge path.
     merged.add("W1-T9101");
@@ -166,7 +162,7 @@ test("W1-T8830: an escalation is asked again when its evidence moves", async () 
     assert.deepEqual(priced.asked, ["W1-T9103"]);
     assert.deepEqual(priced.logs.find((l) => l.step === "machine_judge.reasked")?.extra?.moved, ["cost"]);
 
-    assert.deepEqual(movedEvidence({ bar: 0.7, cost: null, merged_deps: [] }, { bar: 0.8, cost: 5, merged_deps: ["W1-T1"] }), ["confidence_bar", "cost", "depends_on"]);
+    assert.deepEqual(movedEvidence({ bar: 0.7, cost: null, merged_deps: [] }, { bar: 0.8, cost: 5, merged_deps: ["W1-T1"] }), ["cost", "depends_on"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

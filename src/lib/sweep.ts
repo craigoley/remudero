@@ -7037,22 +7037,30 @@ function requiredCheckGate(
   return { all, knownRequired, gate };
 }
 
-/** W1-T4054 — when checks began pending on this head: the EARLIEST start among the entries that keep
- *  {@link checksStateFromRollup} at "pending", over the same gate. A push, comment or label moves the
- *  PR's `updated_at` but not a check's start, so this is the age of the CI itself. `undefined` when the
- *  gate is red or green, or no pending entry carries a start, so `pendingAgeMinutes` keeps its fallback. */
+/** W1-T4054 — earliest pending required start, so PR activity cannot reset the CI clock.
+ * A missing ci-gate may use a unique verified same-head CI rerun; ambiguity keeps the fallback.
+ * Red/green gates date no pending state. Without rerun evidence the original fallback remains. */
 export function checksPendingSinceFromRollup(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
+  context?: { headSha: string; workflowRuns?: readonly WorkflowRunObservation[] },
 ): string | undefined {
+  const required = requiredContexts === undefined ? undefined : [...requiredContexts];
+  const gate = requiredCheckGate(rollup, required).gate;
   let earliest: string | undefined;
-  for (const c of requiredCheckGate(rollup, requiredContexts).gate) {
+  for (const c of gate) {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     if (REQUIRED_CHECK_FAIL.has(s)) return undefined;
     if (REQUIRED_CHECK_OK.has(s) || !c.startedAt) continue;
     if (earliest === undefined || Date.parse(c.startedAt) < Date.parse(earliest)) earliest = c.startedAt;
   }
-  return earliest;
+  if (earliest !== undefined || !context || required === undefined || !required.includes(CI_GATE_CHECK_NAME) ||
+      gate.some((check) => (check.name ?? check.context) === CI_GATE_CHECK_NAME) ||
+      required.some((name) => name !== CI_GATE_CHECK_NAME && name !== REVIEW_CONTEXT) ||
+      checksStateFromRollup(rollup, required) !== "pending") return earliest;
+  const unresolved = (context.workflowRuns ?? []).filter((run) => !run.conclusion);
+  const evidence = unresolved.length === 1 ? unresolved[0]?.activeCiRerun : undefined;
+  return evidence?.headSha === context.headSha ? evidence.startedAt : undefined;
 }
 
 /** W1-T1223 — one required check whose LATEST attempt is CANCELLED. `checksState` stays "red"
@@ -13274,6 +13282,22 @@ export interface StrikeLadderEffects {
   };
 }
 
+/** W1-T9569 — why a light pass is review-only. 487 PAUSE-held deferrals once read as routine light-pass ones. */
+export type LightPassScopeName = "pause" | "drain" | "boot" | "idle" | "interphase-review";
+
+const LIGHT_PASS_SCOPE_ENDS: Readonly<Record<LightPassScopeName, string>> = {
+  pause: "the PAUSE lifts",
+  drain: "the freshness drain ends",
+  boot: "the boot review settles",
+  idle: "the idle sleep ends",
+  "interphase-review": "the overlapping pass or review settles",
+};
+
+/** W1-T9569: the stand-down a review-only pass writes for a lane it closed, naming its scope and its end. */
+export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
+  return `review-only ${scope} pass: repair lanes closed until ${LIGHT_PASS_SCOPE_ENDS[scope]}`;
+}
+
 export interface SweepDeps {
   fixProgressJudge?: FixProgressJudge;
   /** W1-T9970 test seam: the running reviewer image. Default {@link readRuntimeImageSha}. */
@@ -13575,6 +13599,8 @@ export interface SweepDeps {
    *  `post-review` that was eligible and merely lost this pass's admission. Consulted ONLY after a
    *  refusal, so it can never admit anything. // Why: 289 such rows across 18 PRs. */
   standDownReasonFor?: (d: Disposition) => string | undefined;
+  /** W1-T9569: set only by a review-only light pass; every `sweep.disposed` row it writes carries it. */
+  lightPassScope?: LightPassScopeName;
 
   /** W1-T2379/W1-T3202 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set by the light pass and by the
    *  production full-sweep wrapper. The
@@ -13847,6 +13873,17 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
 function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
   return incompletePromiseHarvestFromLedger(pr, lines) ? { ...pr, reviewPendingOwnerDead: true } : pr;
+}
+
+function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrView {
+  const key = reviewOutcomeKeyForPr(pr);
+  const attemptedAt = prior.reviewFreshnessRefusals.get(key)?.attemptedAt ??
+    prior.reviewHostGapRefusals.get(key)?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
+  const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
+  // Only a completed refusal on this exact input after this pending post proves its owner finished.
+  return pr.reviewState === "pending" && attemptedAt !== undefined &&
+    Number.isFinite(pendingSince) && attemptedAt >= pendingSince
+    ? { ...pr, reviewPendingOwnerDead: true } : pr;
 }
 
 /** W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, named so the cost is chosen rather than discovered,
@@ -14964,7 +15001,7 @@ export function fixSeedRead(
   pr: Pick<OpenPrView, "prNumber" | "headSha" | "taskId">,
   runId: string,
 ): FixSeedRead | undefined {
-  const taskId = fixLedgerTaskIdFor(pr);
+  const taskId = fixLedgerTaskIdFor(pr) ?? reviewLedgerKeyFor(undefined, pr.prNumber);
   const disposed = (line: Record<string, unknown>) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber;
   const seedAt = lines.findLastIndex((line) => disposed(line) && line.acted === true && line.head_sha === pr.headSha &&
     (line.disposition === "blocked-fixable" || line.disposition === "conflicted") && typeof line.progress_escalated_key !== "string");
@@ -14974,6 +15011,10 @@ export function fixSeedRead(
   let from = seedAt;
   while (from > 0 && !disposed(lines[from - 1])) from -= 1;
   const window = lines.slice(from);
+  // Taskless gardener repairs write PR-number identities. Require this seed's own
+  // exact-head dispatch before reading that identity; absent evidence stays unknown.
+  if (pr.taskId === undefined && !window.some(line => line.step === "fix.dispatch" &&
+      line.task_id === taskId && line.head_sha === pr.headSha)) return undefined;
   const rung = (line: Record<string, unknown>) => line.task_id === taskId && String(line.step).startsWith("fix.");
   if (!window.some(rung)) {
     // An earlier run's detached dispatch died with its process; this run's is owned by the in-process claim.
@@ -18192,6 +18233,7 @@ export async function runSweep(
         ...(baseCausedMainTipSha !== undefined ? { main_tip_sha: baseCausedMainTipSha } : {}),
         ...rerunMemory,
         ...(extraDisposedFields ?? {}),
+        ...(deps.lightPassScope ? { light_pass_scope: deps.lightPassScope } : {}),
       };
       appendLine(deps.ledgerPath, disposedLine);
       // W1-T905: mirrored in-memory with THIS PASS'S OWN `ts`, never re-read off disk. The real
@@ -18315,18 +18357,9 @@ export async function runSweep(
     if (pr.planResequenceHeld !== undefined) {
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
-    const freshnessRefusal = prior.reviewFreshnessRefusals.get(reviewOutcomeKeyForPr(pr));
-    const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
-    // A refusal on this exact input after the current pending post proves its owner
-    // finished. An older refusal cannot preempt a newer review in flight.
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const timedOutReadAt = prior.reviewTimedOutReadRefusals.get(reviewOutcomeKeyForPr(pr));
-    const refusalAttemptedAt = freshnessRefusal?.attemptedAt ?? hostGapRefusal?.attemptedAt ?? timedOutReadAt;
-    const refusedCurrentPending = pr.reviewState === "pending" &&
-      refusalAttemptedAt !== undefined && Number.isFinite(pendingSince) &&
-      refusalAttemptedAt >= pendingSince;
     const harvestIncomplete = incompletePromiseHarvestFromLedger(pr, ledgerLines);
-    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : promiseHarvestRetryView(pr, ledgerLines);
+    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines);
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -21912,6 +21945,7 @@ function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: n
     (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
       step: "sweep.disposed", pr_number: pr.prNumber, pr_url: pr.prUrl, disposition: "wait", acted: false, reason,
       stand_down_reason: reason, head_sha: pr.headSha, in_flight_action: "light-pass-action",
+      ...(deps.lightPassScope ? { light_pass_scope: deps.lightPassScope } : {}),
       snapshot_age_ms: Math.max(0, nowMs - (deps.snapshotPublishedAtMs ?? nowMs)) }); // W1-T9743
   }
   const byDisposition = ZERO_COUNTS();
@@ -21953,6 +21987,7 @@ export async function runSweepLightPass(
   const selectionLedgerLines = readLedger(deps.ledgerPath);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
+  openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
   const freshnessBackoffs = new Set<string>();
   for (const pr of openPrs) {
     const key = reviewOutcomeKeyForPr(pr);

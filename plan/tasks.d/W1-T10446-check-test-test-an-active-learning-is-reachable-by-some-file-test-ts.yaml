@@ -1,0 +1,73 @@
+- id: W1-T10446
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/an-active-learning-is-reachable-by-some-file.test.ts cost 9.5 PR minute(s) across 3 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.58
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/an-active-learning-is-reachable-by-some-file.test.ts"
+  files:
+    - src/lib/learnings.ts
+    - test/learning/check-test-test-an-active-learning-is-reachable-by-some-file-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/an-active-learning-is-reachable-by-some-file.test.ts"
+      proof: "grep: test(\"W1-T10446: check:test:test/an-active-learning-is-reachable-by-some-file.test.ts is prevented, not retried\" in test/learning/check-test-test-an-active-learning-is-reachable-by-some-file-test-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/an-active-learning-is-reachable-by-some-file.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/an-active-learning-is-reachable-by-some-file.test.ts cost 9.5 PR minute(s) (seven-day half-life) across 3 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/learnings.ts: test/an-active-learning-is-reachable-by-some-file.test.ts imports it
+    - test/an-active-learning-is-reachable-by-some-file.test.ts: named by the failing check
+    - the rounds name a failing test: test/an-active-learning-is-reachable-by-some-file.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13651 (https://github.com/craigoley/remudero/pull/13651) at 2026-10-22T22:16:31.102Z: ci-log round — ci-shard (8/8): test/cli-verbs-mint-the-app-token.test.ts; ci-shard (7/8): ["generateSandboxTask: reaches every shard in the project layer, including the smallest","generateSandboxTask:
+        failing tests: test/cli-verbs-mint-the-app-token.test.ts; W1-T4240: every learnings shard line stays visible to the proof judge, test/cli-verbs-mint-the-app-token.test.ts; W1-T4240: every learnings shard line stays visible to the proof judge; ["generateSandboxTask: reaches every shard in the project layer, including the smallest","generateSandboxTask: falls back to the per-shard isolating union when no single path reaches the combo","a now decisions build reads each rotation archive once for both gate readers"]; generateSandboxTask: reaches every shard in the project layer, including the smallest
+        log excerpt:
+          | not ok 64 - test/cli-verbs-mint-the-app-token.test.ts
+          |   ---
+          |   duration_ms: 2205.243461
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/cli-verbs-mint-the-app-token.test.ts:1:1'
+          |   failureType: 'testCodeFailure'
+          |   exitCode: 1
+          |   signal: ~
+          |   error: 'test failed'
+          |   code: 'ERR_TEST_FAILURE'
+          |   ...
+          | FLAKE-RETRY: first attempt failed — W1-T4240: every learnings shard line stays visible to the proof judge, test/cli-verbs-mint-the-app-token.test.ts
+          | not ok 5 - W1-T4240: every learnings shard line stays visible to the proof judge
+    - PR #11973 (https://github.com/craigoley/remudero/pull/11973) at 2026-10-15T22:33:26.273Z: ci-log round — prompt-surface-gate: test/an-active-learning-is-reachable-by-some-file.test.ts; rule-checks: test/an-active-learning-is-reachable-by-some-file.test.ts; ci-shard (8/8): test/an-active-le
+        failing tests: W1-T4240: every learnings shard line stays visible to the proof judge
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/an-active-learning-is-reachable-by-some-file.test.ts:1:2778
+          | ✖ W1-T4240: every learnings shard line stays visible to the proof judge (170.762443ms)
+          |   AssertionError [ERR_ASSERTION]: learnings lines the proof judge reads as comments (quote the `/**` glob above them)
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'ci.yaml:687'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/an-active-learning-is-reachable-by-some-file.test.ts:91:10)
+    - PR #10001 at 2026-10-08T02:27:47.577Z: ci-log round — prompt-surface-gate: test/an-active-learning-is-reachable-by-some-file.test.ts; rule-checks: test/an-active-learning-is-reachable-by-some-file.test.ts; ci-shard (5/8): test/learnings-in
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.9
+    reasons:
+      - "high-risk verdict at confidence 0.90 — on the change's description/files alone, no diff was read — The supplied rounds establish recurring failures, but do not establish a shared cause remediable in src/lib/learnings.ts; the explicit assertion identifies ci.yaml:687, outside the declared files.; on the change's description/files alone, no diff was read — The record requests prevention or self-healing without identifying the mechanism. Its grep acceptance checks for a test declaration rather than demonstrating that fix rounds are prevented, leaving the proposed remedy unverifiable from what is shown."
+    judged_at: "2026-10-23T01:22:42.186Z"
+    pin: "6dbab26367a9c45f52a3b380512e78e5bab0f83de971acc91f76101006fcd6c1"

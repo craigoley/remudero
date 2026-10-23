@@ -37,6 +37,7 @@ import { makeTempDir } from "./tmp.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
+import { resourceOnlyNodeOptions } from "./node-test-environment.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -2327,7 +2328,12 @@ export const PROOF_INSTALL_ARGS: readonly string[] = ["ci", "--ignore-scripts", 
  *  an `${VAR}` a PR's own .npmrc interpolates. HOME stays the daemon's so npm's cache keeps a fresh install inside its
  *  120s bound; with scripts off, npm itself is the only code that runs. */
 export function proofInstallEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return buildProofEnv(parent);
+  const env = buildProofEnv(parent);
+  if (parent.RMD_PROOF_DEPENDENCY_SEED !== undefined) {
+    const retained = resourceOnlyNodeOptions(parent.NODE_OPTIONS);
+    if (retained !== undefined) env.NODE_OPTIONS = retained;
+  }
+  return env;
 }
 
 /** An explicit existing generation never falls back to a package-manager install.

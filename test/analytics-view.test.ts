@@ -7,10 +7,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import { gzipSync } from "node:zlib";
 import {
+  ANALYTICS_REFRESH_TIMEOUT_MS,
   createAnalyticsSnapshotCache,
   deriveAnalyticsSnapshot,
   deriveAnalyticsSnapshotFromCheckpointedLedger,
+  scanAnalyticsLedger,
   writeAnalyticsCheckpoint,
   type AnalyticsSnapshot,
   type AnalyticsTimer,
@@ -36,7 +39,7 @@ import {
 } from "../src/lib/analytics-view.js";
 import type { Clock } from "../src/lib/clock.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
-import { attachReadModel, currentReadModelPath, sourceSnapshotStates, type SourceSnapshotWrite } from "../src/lib/read-model-db.js";
+import { attachReadModel, currentReadModelPath, flushReadModelTransactions, sourceSnapshotStates, type SourceSnapshotWrite } from "../src/lib/read-model-db.js";
 import { runSlowLaneWorker, type AnalyticsRefresh, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
 import { createReadModelTicker, readModelSwitchesPath, runReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -45,8 +48,10 @@ import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRe
 import type { ViewSource } from "../src/lib/views.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
 import { SPEC, violations } from "./helpers/openapi-strict.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = { after: (fn: () => void | Promise<void>) => void };
+const fixtureClosers = new WeakMap<TestCtx, Array<() => void>>();
 
 const T0 = Date.parse("2026-10-05T12:00:00.000Z");
 const MINUTE = 60_000;
@@ -62,7 +67,11 @@ function handClock(start: number): { clock: Clock; advance: (ms: number) => void
 
 function scratch(t: TestCtx, kind: string): string {
   const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(async () => {
+    for (const close of fixtureClosers.get(t) ?? []) close();
+    await flushReadModelTransactions();
+    rmSync(dir, { recursive: true, force: true });
+  });
   return dir;
 }
 
@@ -108,6 +117,9 @@ function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: str
     stateDir, instances, views: [createAnalyticsView({ modelApprovalConfig: opts.modelApprovalConfig })],
     clock, holder: opts.holder ?? "holder-1", oracle: "off", post: (m) => void posted.push(m),
   });
+  const closers = fixtureClosers.get(t) ?? [];
+  closers.push(() => { ticker.release(); });
+  fixtureClosers.set(t, closers);
   ticker.start();
   ticker.tick();
   const body = (): { data: AnalyticsViewData; sources: ViewSource[]; stale: boolean } => {
@@ -540,13 +552,15 @@ test("a corpus with no worker call and no resolved run merges to not collected",
 });
 
 /** The slow lane's body in this thread, its passes fired by hand. */
-function lane(config: Parameters<typeof runSlowLaneWorker>[1], refresh?: AnalyticsRefresh, clock?: Clock) {
+function lane(config: Parameters<typeof runSlowLaneWorker>[1], refresh?: AnalyticsRefresh, clock?: Clock,
+  inbox?: NonNullable<Parameters<typeof runSlowLaneWorker>[2]>["inbox"]) {
   let onMessage: ((msg: { type?: string; held?: unknown; modes?: unknown }) => void) | undefined;
   const posted: SlowLaneMessage[] = [];
   let next: (() => void) | undefined;
   const handle = runSlowLaneWorker({ on: (_event, run) => (onMessage = run), postMessage: (m) => void posted.push(m as SlowLaneMessage) }, config, {
     ...(clock ? { clock } : {}),
     ...(refresh ? { analyticsRefresh: refresh } : {}),
+    ...(inbox ? { inbox } : {}),
     schedule: (run) => {
       next = run;
       return () => void (next = undefined);
@@ -554,18 +568,190 @@ function lane(config: Parameters<typeof runSlowLaneWorker>[1], refresh?: Analyti
   });
   const snapshots = (): SourceSnapshotWrite[] => posted.flatMap((m) => (m.type === "source_snapshot" ? [m.snapshot] : []));
   const passes = (): number => posted.filter((m) => m.type === "unit" && m.unit === "analytics").length;
+  const legs = (): number => posted.filter(m => m.type === "end" && m.work.unit === "analytics" && m.work.instance !== undefined).length;
   return {
     handle, posted, snapshots,
     switchOn: (mode = "shadow") => onMessage?.({ type: "views", modes: { [ANALYTICS_VIEW_NAME]: mode } }),
-    lease: () => onMessage?.({ type: "lease", held: true }),
+    lease: (held = true) => onMessage?.({ type: "lease", held }),
     fire: () => next?.(),
-    settle: async (want: { passes: number; snapshots: number }): Promise<void> => {
+    settle: async (want: { passes: number; snapshots?: number; legs?: number }): Promise<void> => {
       const deadline = Date.now() + 10_000;
-      while ((passes() < want.passes || snapshots().length < want.snapshots) && Date.now() < deadline) await sleep(5);
-      assert.deepEqual([passes(), snapshots().length], [want.passes, want.snapshots]);
+      while ((passes() < want.passes || snapshots().length < (want.snapshots ?? 0) || legs() < (want.legs ?? 0)) && Date.now() < deadline) await sleep(5);
+      assert.equal(passes(), want.passes);
+      if (want.snapshots !== undefined) assert.equal(snapshots().length, want.snapshots);
+      if (want.legs !== undefined) assert.equal(legs(), want.legs);
     },
   };
 }
+
+/** Real rotations with a replayed row and live tail; no provider or production ledger. */
+function boundedCorpus(t: TestCtx, kind: string) {
+  const stateDir = scratch(t, kind);
+  const row = (verb: string) => JSON.stringify({ ts: iso(T0 - MINUTE), step: "cli.invoked", verb });
+  const names = ["ledger.2026-10-05T11-01-00-000Z.ndjson.gz", "ledger.2026-10-05T11-02-00-000Z.ndjson", "ledger.2026-10-05T11-03-00-000Z.ndjson.gz"];
+  writeFileSync(join(stateDir, names[0]!), gzipSync(row(`${kind}-alpha`) + "\n"));
+  writeFileSync(join(stateDir, names[1]!), row(`${kind}-alpha`) + "\n" + row(`${kind}-bravo`) + "\n");
+  writeFileSync(join(stateDir, names[2]!), gzipSync(row(`${kind}-charlie`) + "\n"));
+  writeFileSync(join(stateDir, "ledger.ndjson"), row(`${kind}-delta`) + "\n");
+  return { stateDir, names, row };
+}
+
+/** Charge actual scanner clock reads, not wall-clock sleeps or a fake partial result. */
+function boundedClock() {
+  let at = T0;
+  return { clock: { now: () => (at += 35_000), date: () => new Date(at), iso: () => iso(at) },
+    advance: () => { at += 2 * MINUTE; } };
+}
+
+test("W1-T9523: slow-lane bounded legs resume to the same complete analytics fold", async t => {
+  for (const mode of ["cold", "rewritten", "live-replaced", "live-missing", "checkpoint-corrupt"] as const) {
+    const f = boundedCorpus(t, mode);
+    if (mode !== "cold") {
+      const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(f.stateDir, handClock(T0 - MINUTE).clock);
+      if (mode === "checkpoint-corrupt") (first.checkpoint.state as { startsByRun: unknown }).startsByRun = 7;
+      writeAnalyticsCheckpoint(f.stateDir, first.checkpoint);
+      if (mode === "rewritten") writeFileSync(join(f.stateDir, f.names[0]!), gzipSync(f.row("rewritten-extra") + "\n"));
+      if (mode === "live-replaced") writeFileSync(join(f.stateDir, "ledger.ndjson"), f.row("replaced") + "\n");
+      if (mode === "live-missing") rmSync(join(f.stateDir, "ledger.ndjson"));
+    }
+    const { clock, advance } = boundedClock();
+    const l = lane({ analytics: { instances: [{ name: "core", stateDir: f.stateDir }], intervalMs: MINUTE } }, undefined, clock);
+    t.after(() => l.handle.stop());
+    l.switchOn(); l.lease();
+    await l.settle({ passes: 1, legs: 1 });
+    assert.equal(l.snapshots().length, 0, "the default scanner must yield before publishing the partial corpus");
+    if (mode === "cold") {
+      writeFileSync(join(f.stateDir, "ledger.2026-10-05T11-04-00-000Z.ndjson"), f.row("new-rotation") + "\n");
+      writeFileSync(join(f.stateDir, "ledger.ndjson"), f.row("changed-live") + "\n");
+    }
+    for (let i = 2; i <= 6 && !l.snapshots().some(s => s.ok); i++) {
+      advance(); l.fire(); await l.settle({ passes: i, legs: i });
+      if (mode === "live-missing" && i === 2) {
+        assert.equal(l.snapshots().length, 0, "missing live evidence retains the prior successful source clock");
+        assert.ok(l.posted.some(m => m.type === "log" && m.extra.progress_refused === "live-missing"));
+        writeFileSync(join(f.stateDir, "ledger.ndjson"), f.row(`${mode}-delta`) + "\n");
+      }
+    }
+    const writes = l.snapshots();
+    assert.equal(writes.length, 1, `${mode}: partial legs are progress, never success or fresh-empty snapshots: ${JSON.stringify(l.posted.filter(m => m.type === "log"))}`);
+    assert.ok(writes[0]?.ok);
+    const complete = await deriveAnalyticsSnapshotFromCheckpointedLedger(f.stateDir, handClock(Date.parse(writes[0].asOf)).clock);
+    assert.deepEqual(writes[0].bodies, analyticsSourceBodies(complete.snapshot));
+    assert.equal(complete.snapshot.invocationsByVerb[`${mode}-alpha`], 1, "replayed rows are not double-counted");
+    if (mode === "cold") assert.equal(complete.snapshot.invocationsByVerb["new-rotation"], 1);
+    const progress = l.posted.filter(m => m.type === "log" && m.step === "analytics.source_snapshot_progress");
+    assert.ok(progress.length > 0);
+    assert.ok(progress.some(m => m.type === "log" && m.extra.scan_mode === "continue"));
+    if (mode === "rewritten") assert.ok(progress.some(m => m.type === "log" && m.extra.scan_reason === "archive-rewritten"));
+  }
+});
+
+test("W1-T9523: slow-lane progress preserves unavailable evidence and repository isolation", async t => {
+  for (const bad of ["gzip", "malformed", "missing"] as const) {
+    const f = boundedCorpus(t, bad);
+    if (bad === "gzip") writeFileSync(join(f.stateDir, f.names[0]!), "not gzip");
+    if (bad === "malformed") writeFileSync(join(f.stateDir, f.names[1]!), "{broken\n");
+    if (bad === "missing") { for (const file of [...f.names, "ledger.ndjson"]) rmSync(join(f.stateDir, file)); }
+    const { clock, advance } = boundedClock();
+    const l = lane({ analytics: { instances: [{ name: "core", stateDir: f.stateDir }], intervalMs: MINUTE } }, undefined, clock);
+    t.after(() => l.handle.stop()); l.switchOn(); l.lease();
+    for (let i = 1; i <= 6 && !l.snapshots().length; i++) {
+      if (i > 1) { advance(); l.fire(); } await l.settle({ passes: i, legs: i });
+    }
+    assert.equal(l.snapshots().length, 1);
+    assert.equal(l.snapshots()[0]?.ok, false, `${bad} source evidence cannot become a completed snapshot`);
+  }
+  const corrupt = boundedCorpus(t, "corrupt-progress");
+  const timing = boundedClock();
+  let corrupted = false;
+  const realWithCorruptProgress: AnalyticsRefresh = async (dir, clock, signal, prior, options) => {
+    if (options?.progress && !corrupted) {
+      (options.progress.state as { startsByRun: unknown }).startsByRun = 7;
+      corrupted = true;
+    }
+    return scanAnalyticsLedger(dir, clock, signal, prior, options);
+  };
+  const c = lane({ analytics: { instances: [{ name: "core", stateDir: corrupt.stateDir }], intervalMs: MINUTE } }, realWithCorruptProgress, timing.clock);
+  t.after(() => c.handle.stop()); c.switchOn(); c.lease();
+  for (let i = 1; i <= 8 && !c.snapshots().some(s => s.ok); i++) {
+    if (i > 1) { timing.advance(); c.fire(); } await c.settle({ passes: i, legs: i });
+  }
+  assert.ok(corrupted, "the real default-produced progress reached the real scanner");
+  const recovered = c.snapshots()[0]; assert.ok(recovered?.ok);
+  const recoveredExpected = await deriveAnalyticsSnapshotFromCheckpointedLedger(corrupt.stateDir, handClock(Date.parse(recovered.asOf)).clock);
+  assert.deepEqual(recovered.bodies, analyticsSourceBodies(recoveredExpected.snapshot), "corrupt progress restarts rather than blending a corrupt fold");
+  const a = boundedCorpus(t, "isolation-core"), b = boundedCorpus(t, "isolation-site");
+  const { clock, advance } = boundedClock();
+  const l = lane({ analytics: { instances: [{ name: "core", stateDir: a.stateDir, repository: "owner/core" },
+    { name: "site", stateDir: b.stateDir, repository: "owner/site" }], intervalMs: MINUTE } }, undefined, clock);
+  t.after(() => l.handle.stop()); l.switchOn(); l.lease();
+  for (let i = 1; i <= 6 && !["core", "site"].every(name => l.snapshots().some(s => s.ok && s.instance === name)); i++) {
+    if (i > 1) { advance(); l.fire(); } await l.settle({ passes: i, legs: 2 * i });
+  }
+  for (const [name, f] of [["core", a], ["site", b]] as const) {
+    const last = l.snapshots().findLast(s => s.ok && s.instance === name); assert.ok(last?.ok);
+    const expected = await deriveAnalyticsSnapshotFromCheckpointedLedger(f.stateDir, handClock(Date.parse(last.asOf)).clock);
+    assert.deepEqual(last.bodies, analyticsSourceBodies(expected.snapshot, `owner/${name}`));
+  }
+});
+
+test("W1-T9523: partial analytics does not starve Inbox or publish after ownership loss", async t => {
+  const core = boundedCorpus(t, "fair-core"), site = scratch(t, "fair-site"), inboxRoot = scratch(t, "fair-inbox");
+  writeFileSync(join(site, "ledger.ndjson"), JSON.stringify({ ts: iso(T0), step: "cli.invoked", verb: "site-only" }) + "\n");
+  mkdirSync(join(inboxRoot, "plan")); mkdirSync(join(inboxRoot, "state"));
+  const planPath = join(inboxRoot, "plan/tasks.yaml"), ledgerPath = join(inboxRoot, "state/ledger.ndjson");
+  writeFileSync(planPath, "[]\n"); writeFileSync(ledgerPath, "");
+  writeFileSync(join(inboxRoot, "state/inbox-proposals.json"), JSON.stringify({ proposals: [] }));
+  const { clock } = boundedClock();
+  const l = lane({ inbox: { root: inboxRoot, inboxRoot, planPath, ledgerPath, repository: "owner/core" },
+    analytics: { instances: [{ name: "core", stateDir: core.stateDir }, { name: "site", stateDir: site }], intervalMs: MINUTE } }, undefined, clock,
+  { statusGithub: fakeGitHub(), github: { prView: () => null }, ratify: { approve() {}, reframe() {} }, inboxMainSha: () => "a".repeat(40) });
+  t.after(() => l.handle.stop()); l.switchOn(); l.lease(); await l.settle({ passes: 1, legs: 2 });
+  assert.ok(l.posted.some(m => m.type === "unit" && m.unit === "inbox" && m.ok));
+  assert.ok(l.snapshots().some(s => s.ok && s.instance === "site"));
+  assert.equal(l.snapshots().some(s => s.ok && s.instance === "core"), false);
+  for (const loss of ["lease", "switch", "stop"] as const) {
+    let finish!: () => void;
+    const blocked = new Promise<void>(resolve => { finish = resolve; });
+    const refresh: AnalyticsRefresh = async (dir, time, signal, prior, options) => {
+      const result = await scanAnalyticsLedger(dir, time, signal, prior, options); await blocked;
+      if (loss === "switch") throw new Error("late read failure");
+      return result;
+    };
+    const q = lane({ analytics: { instances: [{ name: "site", stateDir: site }, { name: "next", stateDir: site }] } }, refresh, handClock(T0).clock);
+    t.after(() => q.handle.stop()); q.switchOn(); q.lease(); await q.settle({ passes: 1 });
+    if (loss === "lease") { q.lease(false); q.lease(true); }
+    else if (loss === "switch") { q.switchOn("off"); q.switchOn(); }
+    else q.handle.stop();
+    finish(); await q.settle({ passes: loss === "lease" ? 2 : 1, legs: 1 });
+    assert.equal(q.snapshots().length, 0, `a ${loss} transition fences the older in-flight result`);
+  }
+});
+
+test("W1-T9523: bounded analytics retains timeout and completed-source semantics", async t => {
+  assert.equal(ANALYTICS_REFRESH_TIMEOUT_MS, 120_000);
+  const dir = scratch(t, "bounded-timeout");
+  const refresh: AnalyticsRefresh = async (_dir, _clock, signal) => new Promise((_resolve, reject) => {
+    signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+  });
+  const l = lane({ analytics: { instances: [{ name: "core", stateDir: dir }], timeoutMs: 20 } }, refresh, handClock(T0).clock);
+  t.after(() => l.handle.stop()); l.switchOn(); l.lease(); await l.settle({ passes: 1, legs: 1, snapshots: 1 });
+  const failed = l.snapshots()[0];
+  assert.ok(failed && !failed.ok);
+  assert.match(failed.error, /analytics refresh exceeded 20 ms/);
+  assert.equal(l.posted.some(m => m.type === "log" && m.step === "analytics.source_snapshot_built"), false);
+  const f = boundedCorpus(t, "late-result"), actual = await deriveAnalyticsSnapshotFromCheckpointedLedger(f.stateDir, handClock(T0).clock);
+  let finish!: () => void, aborted!: () => void;
+  const finished = new Promise<void>(resolve => { finish = resolve; }), abortSeen = new Promise<void>(resolve => { aborted = resolve; });
+  const delayed: AnalyticsRefresh = async (_dir, _clock, signal) => {
+    signal!.addEventListener("abort", aborted, { once: true }); await finished; return actual;
+  };
+  const q = lane({ analytics: { instances: [{ name: "core", stateDir: f.stateDir }], timeoutMs: 20 } }, delayed, handClock(T0).clock);
+  t.after(() => q.handle.stop()); q.switchOn(); q.lease(); await q.settle({ passes: 1 });
+  await abortSeen; finish(); await q.settle({ passes: 1, legs: 1, snapshots: 1 });
+  assert.equal(q.snapshots()[0]?.ok, false, "a result that resolves after abort cannot advance the successful source clock");
+  assert.equal(q.posted.some(m => m.type === "log" && m.step === "analytics.source_snapshot_built"), false);
+});
 
 test("the slow lane refreshes each instance's analytics off serve's loop and posts its source snapshots", async (t) => {
   const stateDir = scratch(t, "analytics-lane");

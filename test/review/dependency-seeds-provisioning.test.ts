@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { materializeDependencySeed, observeDependencySeedReuse } from '#src/lib/dependency-seeds.js';
-import { ensureDeps, ensureDepsAsync, proofDependencyProvisioning, refreshProofToolchain, refreshProofToolchainAsync, registerReviewerCheckout } from '#src/lib/review.js';
+import { ensureDeps, ensureDepsAsync, proofDependencyProvisioning, proofInstallEnv, refreshProofToolchain, refreshProofToolchainAsync, registerReviewerCheckout } from '#src/lib/review.js';
 // @ts-expect-error -- the standalone CLI has no declaration file.
 import { main } from '#scripts/dependency-seeds.mjs';
 
@@ -125,12 +125,14 @@ test('explicit read-only generation consumers share package bytes and bind works
 });
 
 test('real sync and async proof provisioning reuse explicit inputs without invoking an installer',async t=>{
-  const f=existingProofInputs(t),bin=join(f.root,'bin'),calls=join(f.root,'installer-calls');mkdirSync(bin);
+  const f=existingProofInputs(t),bin=join(f.root,'bin'),calls=join(f.root,'installer-calls'),versions=join(f.root,'version-bounds');mkdirSync(bin);
   const realNpm=realpathSync(join(dirname(process.execPath),'npm'));
-  writeFileSync(join(bin,'npm'),`#!${process.execPath}\nconst fs=require('node:fs'),cp=require('node:child_process');const args=process.argv.slice(2);if(args.length===1&&args[0]==='--version'){const p=cp.spawnSync(process.execPath,[${JSON.stringify(realNpm)},...args],{stdio:'inherit'});process.exit(p.status??1);}fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');process.exit(89);\n`,{mode:0o700});
-  const prior={PATH:process.env.PATH,RMD_DEPENDENCY_SEED_ROOT:process.env.RMD_DEPENDENCY_SEED_ROOT,RMD_PROOF_DEPENDENCY_SEED:process.env.RMD_PROOF_DEPENDENCY_SEED};
+  writeFileSync(join(bin,'npm'),`#!${process.execPath}\nconst fs=require('node:fs'),cp=require('node:child_process');const args=process.argv.slice(2);if(args.length===1&&args[0]==='--version'){fs.appendFileSync(${JSON.stringify(versions)},JSON.stringify({nodeOptions:process.env.NODE_OPTIONS})+'\\n');const p=cp.spawnSync(process.execPath,[${JSON.stringify(realNpm)},...args],{stdio:'inherit'});process.exit(p.status??1);}fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');process.exit(89);\n`,{mode:0o700});
+  const prior={NODE_OPTIONS:process.env.NODE_OPTIONS,PATH:process.env.PATH,RMD_DEPENDENCY_SEED_ROOT:process.env.RMD_DEPENDENCY_SEED_ROOT,RMD_PROOF_DEPENDENCY_SEED:process.env.RMD_PROOF_DEPENDENCY_SEED};
   t.after(()=>{for(const [key,value]of Object.entries(prior)){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
-  process.env.PATH=bin+':'+process.env.PATH;process.env.RMD_DEPENDENCY_SEED_ROOT=f.store;process.env.RMD_PROOF_DEPENDENCY_SEED=f.seed.seed;
+  process.env.PATH=bin+':'+process.env.PATH;process.env.RMD_DEPENDENCY_SEED_ROOT=f.store;process.env.RMD_PROOF_DEPENDENCY_SEED=f.seed.seed;process.env.NODE_OPTIONS='--max-old-space-size=128';
+  assert.equal(proofInstallEnv({...process.env,GH_TOKEN:'fixture-secret'}).GH_TOKEN,undefined);
+  assert.throws(()=>proofInstallEnv({...process.env,NODE_OPTIONS:'--max-old-space-size=128 --require=untrusted'}),/mixed or unmodelled heap/);
   for(const [name,asyncMode]of [['sync',false],['async',true]] as const){
     const target=f.checkout(name);registerReviewerCheckout(target);
     assert.equal(asyncMode?await ensureDepsAsync(target):ensureDeps(target),true);
@@ -139,6 +141,8 @@ test('real sync and async proof provisioning reuse explicit inputs without invok
     assert.equal(refreshProofToolchain(target),false);assert.equal(await refreshProofToolchainAsync(target),false);
   }
   assert.equal(readdirSync(f.root).includes('installer-calls'),false);
+  const observed=readFileSync(versions,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+  assert.ok(observed.length>=2);assert.ok(observed.every(row=>row.nodeOptions==='--max-old-space-size=128'));
 });
 
 test('existing-input proof refusals retain unknown qualification and never fall back to installation',async t=>{

@@ -1,5 +1,6 @@
 import {execFileSync} from 'node:child_process';
 import {readFileSync} from 'node:fs';
+import {setTimeout as delay} from 'node:timers/promises';
 import {isMainModule} from './lib/argv.mjs';
 import {publishSecurityMergeDecision, SECURITY_MERGE_CONTEXT} from '../src/lib/code-scanning-merge-adapter.mjs';
 import {securityMetadataGhArgs} from '../src/lib/security-metadata-gh-args.mjs';
@@ -38,12 +39,32 @@ export async function runSecurityMergeProducer(eventName, event, transport, targ
   return results;
 }
 
-if (isMainModule(import.meta.url)) {
-  const read=path=>{
+// BACKSTOP: persistent opaque CLI response failures cannot spin; transient recovery needs
+// two reads, and four attempts matches the existing CI reporter's bounded transport recovery.
+const SECURITY_METADATA_READ_ATTEMPTS = 4;
+
+export function createSecurityMetadataReader({exec=execFileSync,wait=delay}={}) {
+  return async path=>{
     const args=securityMetadataGhArgs(path);
     if (args[1] !== 'graphql') args.splice(1,0,'--method','GET');
-    return JSON.parse(execFileSync('gh',args,{encoding:'utf8',timeout:15000,maxBuffer:2<<20}));
+    let output;
+    for (let attempt=1; ; attempt++) {
+      try {
+        output=exec('gh',args,{encoding:'utf8',timeout:15000,maxBuffer:2<<20});
+        break;
+      } catch (error) {
+        const truncated=typeof error?.stderr === 'string' && error.stderr.trim() === 'unexpected end of JSON input' &&
+          Number.isInteger(error.status) && error.status !== 0;
+        if (!truncated || attempt >= SECURITY_METADATA_READ_ATTEMPTS) throw error;
+        await wait(1000 * 2 ** (attempt-1));
+      }
+    }
+    return JSON.parse(output);
   };
+}
+
+if (isMainModule(import.meta.url)) {
+  const read=createSecurityMetadataReader();
   // Fields travel as argv `-f` (raw string) pairs, never a stdin body: a child that exits without
   // draining stdin would otherwise surface a spurious EPIPE instead of its real exit status.
   const status=payload=>{

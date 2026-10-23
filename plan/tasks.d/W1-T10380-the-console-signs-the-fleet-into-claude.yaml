@@ -16,7 +16,7 @@
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/routing/the-console-signs-the-fleet-into-claude.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator ruling 2026-10-22: P0
   attempts: 0
   rationale: |

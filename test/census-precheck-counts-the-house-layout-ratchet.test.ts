@@ -91,6 +91,8 @@ test("a src file the branch adds that names no literal, and a non-src path that 
 function installHook(dir: string): void {
   mkdirSync(join(dir, "hooks"), { recursive: true });
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
+  mkdirSync(join(dir, "src", "lib"), { recursive: true });
+  copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
   chmodSync(join(dir, "hooks", "pre-push"), 0o755);
   for (const script of [
@@ -108,6 +110,17 @@ function installHook(dir: string): void {
     copyFileSync(join(REPO_ROOT, "scripts", "lib", lib), join(dir, "scripts", "lib", lib));
   }
   writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
+  // The synthetic runner triggers the gardener suite; this fixture measures hook/layout wiring.
+  // The real bundled-loader regression runs separately against the complete repository.
+  mkdirSync(join(dir, "test", "rules"), { recursive: true });
+  writeFileSync(join(dir, "test", "rules", "scout-config-gardener-failed.test.ts"), `
+    import assert from "node:assert/strict";
+    import { statSync } from "node:fs";
+    import { test } from "node:test";
+    test("synthetic runner is present in the census child's working directory", () => {
+      assert.ok(statSync("src/run-task.ts").isFile());
+    });
+  `);
   symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
 }
 

@@ -8,7 +8,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 // The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
 // bindings off `node:fs` are non-configurable, so mocking them throws.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
@@ -25,7 +25,7 @@ import { isGhRateLimitError } from "./status.js";
 export type DraftLintViolation = RelintViolation;
 import { callSiteCandidates, MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
-import { appendThreadEvent, type ThreadEvent, type ThreadEventKind, type ThreadStoreDeps } from "./inbox-thread.js";
+import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCausalScope, type InboxInputReference, type ThreadEvent, type ThreadEventKind, type ThreadMessageExtra, type ThreadStoreDeps } from "./inbox-thread.js";
 import { inboxKind } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -80,6 +80,8 @@ export interface ProposalTrigger {
 export interface ReframeRecord {
   feedback: string;
   retracted?: boolean;
+  input?: InboxInputReference;
+  supersedes?: number[];
 }
 
 /** One ACTIVE (not-yet-ratified) proposal the inbox tiers. */
@@ -416,6 +418,8 @@ function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | unde
 /** The Architect's draft for one proposal: a `plan/tasks.yaml` fragment + the MASTER-PLAN.md ratification stamp line,
  *  cached STATE-SIDE (never committed — `<config.root>/state/inbox-drafts.json`, never a repo path). */
 export interface DraftedCandidate {
+  /** Durable identity of the generation actually consumed; never inferred from today's history. */
+  completion?: InboxDraftCompletion;
   releaseTaskId?: string;
   proposalId: string;
   /** YAML text of the new task(s), parseable by {@link "./plan.js".loadPlanFromYaml}. */
@@ -962,6 +966,7 @@ export interface ThreadEventDraft {
   text: string;
   /** The source row's time (epoch ms), so the event sorts where it happened. */
   ts: number;
+  extra?: Pick<ThreadMessageExtra, "input" | "response">;
 }
 
 /** The ledger steps {@link threadEventsForRow} reads: a boot backfill filters its union read on these. */
@@ -1009,8 +1014,14 @@ export function threadEventsForRow(
       return draft(taskId!, step === "inbox.gardener_retired" ? "retired" : step === "inbox.gardener_restored" ? "restored" : "retirement_outcome",
         clip(row.reason, "Inbox lifecycle evidence updated."));
     }
-    case "ratify.reframed":
-      return taskId ? draft(taskId, "reframed", clip(row.feedback, "Asked for a different draft.")) : [];
+    case "ratify.reframed": {
+      if (!taskId) return [];
+      const entries = draft(taskId, "reframed", clip(row.feedback, "Asked for a different draft."));
+      if (typeof row.repository === "string" && typeof row.feedback === "string" && verifiedInboxInput(row.input, { repository: row.repository }, taskId, row.feedback)) {
+        for (const entry of entries) { entry.text = row.feedback; entry.extra = { input: row.input }; }
+      }
+      return entries;
+    }
     case "panel.proposal_declined":
       return taskId && row.origin !== "inbox-responder" ? draft(taskId, "declined", clip(row.reason, "Declined.")) : [];
     case "panel.proposal_restored":
@@ -1037,8 +1048,17 @@ export function threadEventsForRow(
     }
     case "inbox.drafted": {
       const id = typeof row.proposal_id === "string" ? row.proposal_id : undefined;
-      const reframed = proposals?.find((p) => p.id === id)?.reframeHistory?.length ?? 0;
-      return id && row.lint_clean !== false && reframed > 0 ? draft(id, "redrafted", "A new draft is ready, written with your feedback.") : [];
+      const proposal = proposals?.find(p => p.id === id);
+      if (!id || !proposal || row.lint_clean === false || row.cache_adopted !== true || typeof row.repository !== "string" ||
+        typeof row.completion_id !== "string" || !row.completion_id || !Array.isArray(row.consumed_inputs) || !row.consumed_inputs.length) return [];
+      const scope = { repository: row.repository };
+      const inputs = row.consumed_inputs;
+      if (new Set(inputs.map(input => input?.id)).size !== inputs.length || !inputs.every(input =>
+        verifiedInboxInput(input, scope, id) && proposal.reframeHistory?.some(round =>
+          verifiedInboxInput(round.input, scope, id, round.feedback) && round.input.id === input.id && round.input.contentSha256 === input.contentSha256))) return [];
+      return draft(id, "redrafted", "Completed a draft for the recorded direction.").map(entry => ({ ...entry,
+        extra: { response: { id: row.completion_id as string, repository: scope.repository, proposalId: id,
+          threadId: inputs[0].threadId, inputs, outcome: "completed" as const } } }));
     }
     default:
       return [];
@@ -1055,7 +1075,7 @@ export function recordRowThreadEvents(
   let appended = 0;
   for (const draft of threadEventsForRow(row, proposals)) {
     try {
-      if (appendThreadEvent(draft.proposalId, draft.event, draft.text, store, draft.ts) === "appended") appended += 1;
+      if (appendThreadEvent(draft.proposalId, draft.event, draft.text, store, draft.ts, draft.extra) === "appended") appended += 1;
     } catch (error) {
       log?.("inbox.thread_event_failed", { proposal_id: draft.proposalId, kind: draft.event.kind, error: String((error as Error)?.message ?? error) });
     }
@@ -2042,6 +2062,7 @@ export interface DraftSpawnContext {
 }
 
 export interface DraftRungDeps {
+  causalScope?: InboxCausalScope;
   repoFacts?: DraftRepoFacts;
   clock?: Clock;
   spawn: DraftSpawn;
@@ -2053,11 +2074,131 @@ export interface DraftRungDeps {
 /** One proposal's draft-rung outcome — `ok: true` carries the candidate to cache; `ok: false` names why, whether
  *  malformed output or a spawn-level exception, without ever throwing. */
 export type DraftRungOutcome =
-  | { proposalId: string; ok: true; candidate: DraftedCandidate }
+  | { proposalId: string; ok: true; candidate: DraftedCandidate; snapshot?: InboxDraftSnapshot }
   /** W1-T2564: `refused` marks a run the ACCOUNT turned away, as distinct from a run that happened and failed. That
    *  decides whether a {@link DraftAttemptCache} key is written, and keying a refusal retires work that never ran.
    *  Why: the 267-of-353 measurement — docs/forensics/inbox.md. */
-  | { proposalId: string; ok: false; error: string; refused?: { matched: string; resetsAtMs?: number } };
+  | { proposalId: string; ok: false; error: string; refused?: { matched: string; resetsAtMs?: number }; snapshot?: InboxDraftSnapshot };
+
+export interface InboxDraftSnapshot {
+  repository: string;
+  generation: string;
+  completionId: string;
+  proposal: Proposal;
+  inputs: InboxInputReference[];
+}
+
+export interface InboxDraftCompletion {
+  snapshot: InboxDraftSnapshot;
+  lintClean: boolean;
+  violations: string[];
+}
+
+/** Content is a generation guard, NEVER an operator input identity. */
+export function inboxDraftGeneration(proposal: Proposal): string {
+  const canonical = JSON.stringify(proposal, (_key, value: unknown) => {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+    }
+    return value;
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+function draftSnapshotInputs(proposal: Proposal, scope: InboxCausalScope): InboxInputReference[] {
+  const active = (proposal.reframeHistory ?? []).filter(round => !round.retracted);
+  const counts = new Map<string, number>();
+  for (const round of active) if (round.input) counts.set(round.input.id, (counts.get(round.input.id) ?? 0) + 1);
+  return active.flatMap(round => verifiedInboxInput(round.input, scope, proposal.id, round.feedback) && counts.get(round.input.id) === 1
+    ? [{ ...round.input }] : []);
+}
+
+/** Clone BEFORE any provider await, including before slower batch lanes start. */
+export function captureInboxDraftSnapshot(proposal: Proposal, scope: InboxCausalScope): InboxDraftSnapshot {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository)) throw new Error("draft snapshot requires verified repository scope");
+  const captured = structuredClone(proposal);
+  return { repository: scope.repository, generation: inboxDraftGeneration(captured), completionId: randomUUID(),
+    proposal: captured, inputs: draftSnapshotInputs(captured, scope) };
+}
+
+function validDraftSnapshot(snapshot: InboxDraftSnapshot, scope: InboxCausalScope): boolean {
+  return snapshot?.repository === scope.repository && typeof snapshot.completionId === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(snapshot.completionId) &&
+    typeof snapshot.proposal?.id === "string" && Array.isArray(snapshot.proposal.evidenceAnchors) &&
+    (snapshot.proposal.reframeHistory === undefined || Array.isArray(snapshot.proposal.reframeHistory)) &&
+    snapshot.generation === inboxDraftGeneration(snapshot.proposal) && Array.isArray(snapshot.inputs) &&
+    JSON.stringify(snapshot.inputs) === JSON.stringify(draftSnapshotInputs(snapshot.proposal, scope));
+}
+
+/** Only pending publication lives here. Successful publication remains in the existing ledger. */
+interface DraftCompletionOutboxEntry { completion: InboxDraftCompletion; adopted: boolean }
+
+export function commitInboxDraftOutcomes(opts: {
+  stateDir: string;
+  scope: InboxCausalScope;
+  snapshots: InboxDraftSnapshot[];
+  outcomes: DraftRungOutcome[];
+  lane?: DraftLaneIdentity;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): void {
+  const registryPath = join(opts.stateDir, "inbox-proposals.json"), draftsPath = join(opts.stateDir, "inbox-drafts.json"),
+    attemptsPath = join(opts.stateDir, "inbox-draft-attempts.json"), outboxPath = join(opts.stateDir, "inbox-draft-completions.json");
+  // Strictly parse existing files. A corrupt store is not an empty successful observation.
+  const readObject = (path: string): Record<string, unknown> => {
+    let raw: string;
+    try { raw = fs.readFileSync(path, "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return {}; throw error; }
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`invalid draft object at ${path}`);
+    return value as Record<string, unknown>;
+  };
+  // Idle recovery must not synchronously scan every shard. Pending receipts are re-read under lock.
+  if (opts.outcomes.length === 0 && Object.keys(readObject(outboxPath)).length === 0) return;
+  updateProposalRegistry(registryPath, current => {
+    const drafts = readObject(draftsPath) as DraftCache, attempts = (opts.lane ? readObject(attemptsPath) : {}) as DraftAttemptCache,
+      outbox = readObject(outboxPath) as Record<string, DraftCompletionOutboxEntry>;
+    const saveOutbox = () => writeAtomic(outboxPath, JSON.stringify(outbox));
+    const flush = () => {
+      for (const [id, record] of Object.entries(outbox)) {
+        const completion = record?.completion, snapshot = completion?.snapshot;
+        if (!snapshot || !validDraftSnapshot(snapshot, opts.scope) || id !== snapshot.completionId ||
+          typeof record.adopted !== "boolean" || typeof completion.lintClean !== "boolean" ||
+          !Array.isArray(completion.violations) || !completion.violations.every(v => typeof v === "string")) throw new Error("invalid scoped draft completion receipt");
+        if (!record.adopted) {
+          // A crash between cache commit and receipt advancement can resume only from the exact cached identity.
+          if (drafts[snapshot.proposal.id]?.completion?.snapshot.completionId !== id) continue;
+          record.adopted = true; saveOutbox();
+        }
+        opts.log("inbox.drafted", { proposal_id: snapshot.proposal.id, repository: snapshot.repository, completion_id: id,
+          consumed_inputs: snapshot.inputs, cache_adopted: true, lint_clean: completion.lintClean, unresolved_violations: completion.violations });
+        delete outbox[id]; saveOutbox();
+      }
+    };
+    flush();
+    const expected = new Map(opts.snapshots.map(snapshot => [snapshot.proposal.id, snapshot]));
+    if (expected.size !== opts.snapshots.length) throw new Error("ambiguous proposal generation in draft batch");
+    for (const outcome of opts.outcomes) {
+      const snapshot = expected.get(outcome.proposalId), matches = current.filter(proposal => proposal.id === outcome.proposalId);
+      if (!snapshot || !validDraftSnapshot(snapshot, opts.scope) || matches.length !== 1 || inboxDraftGeneration(matches[0]) !== snapshot.generation) continue;
+      if (outcome.snapshot && (!validDraftSnapshot(outcome.snapshot, opts.scope) || outcome.snapshot.generation !== snapshot.generation)) continue;
+      if (outcome.ok) {
+        if (outcome.candidate.proposalId !== outcome.proposalId || outcome.candidate.anchorFingerprint !== anchorFingerprint(snapshot.proposal.evidenceAnchors)) throw new Error("draft outcome names a foreign proposal or anchor set");
+        const completion = outcome.candidate.completion;
+        if (completion && (!outcome.snapshot || completion.snapshot.completionId !== outcome.snapshot.completionId ||
+          !validDraftSnapshot(completion.snapshot, opts.scope) || completion.snapshot.generation !== snapshot.generation)) throw new Error("draft candidate has a foreign completion");
+        if (completion && drafts[outcome.proposalId]?.completion?.snapshot.completionId === completion.snapshot.completionId) continue;
+        if (completion) { outbox[completion.snapshot.completionId] = { completion, adopted: false }; saveOutbox(); }
+        drafts[outcome.proposalId] = outcome.candidate;
+      }
+      if (opts.lane && (outcome.ok || !outcome.refused)) attempts[outcome.proposalId] = draftAttemptKey(snapshot.proposal, opts.lane);
+      if (opts.lane) writeDraftAttemptPair(draftsPath, attemptsPath, drafts, attempts);
+      else writeAtomic(draftsPath, JSON.stringify(drafts));
+      if (outcome.ok && outcome.candidate.completion) {
+        outbox[outcome.candidate.completion.snapshot.completionId].adopted = true; saveOutbox();
+      }
+    }
+    flush();
+    return null; // The registry is a fresh locked observation, not a stale whole-registry rewrite.
+  });
+}
 
 /** cc71f2: the draft rung's own bounded self-lint — the first attempt is the ordinary draft, and
  *  each further attempt carries the prior fragment's violations, so the Architect never re-rolls
@@ -2368,7 +2509,9 @@ function draftWorkerModel(worker: WorkerResult): string | null {
  *  one proposal's self-lint retries stay serial. NEVER THROWS — each spawn and parse is isolated in its OWN try/catch
  *  (W1-T192's fail-soft requirement), which is what makes this safe on an unattended poll. */
 export async function runDraftRung(toDraft: Proposal[], currentPlanText: string, deps: DraftRungDeps, runId: string): Promise<DraftRungOutcome[]> {
-  const draftOne = async (proposal: Proposal): Promise<DraftRungOutcome> => {
+  const captured = toDraft.map(proposal => ({ proposal: structuredClone(proposal),
+    snapshot: deps.causalScope ? captureInboxDraftSnapshot(proposal, deps.causalScope) : undefined }));
+  const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
     try {
       let prompt = inboxDraftPrompt(proposal, currentPlanText, runId);
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
@@ -2487,6 +2630,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         };
       }
       const candidate: DraftedCandidate = {
+        ...(snapshot ? { completion: { snapshot, lintClean: violations.length === 0, violations: violations.map(v => v.message) } } : {}),
         ...(parsed.releaseTaskId ? { releaseTaskId: parsed.releaseTaskId } : {}),
         proposalId: proposal.id,
         fragmentYaml: parsed.fragmentYaml,
@@ -2495,7 +2639,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       };
       // A still-dirty draft after the bounded retries is cached anyway and surfaces NOT-READY, but the unresolved set
       // is named on the ledger so the retro sees what the rung could not fix.
-      deps.log("inbox.drafted", { proposal_id: proposal.id, lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
+      if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
       return { proposalId: proposal.id, ok: true, candidate };
     } catch (e) {
       const error = String((e as Error)?.message ?? e);
@@ -2512,7 +2656,12 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
   const runLane = async (): Promise<void> => {
     while (nextIndex < toDraft.length) {
       const index = nextIndex++;
-      outcomes[index] = await draftOne(toDraft[index]);
+      const { proposal, snapshot } = captured[index];
+      const outcome = await draftOne(proposal, snapshot);
+      if (snapshot) {
+        outcome.snapshot = snapshot;
+      }
+      outcomes[index] = outcome;
     }
   };
   const concurrency = Math.min(DAEMON_DRAFT_BATCH_CAP, toDraft.length);
@@ -3806,6 +3955,9 @@ export interface RatifyLedgerDeps {
   /** W1-T9252: where to mirror an operator action onto the item's thread (the inbox thread store). Absent, the
    *  verb writes its ledger row alone and the daemon's live tail mirrors it later. */
   threadStorePath?: string;
+  causalScope?: InboxCausalScope;
+  input?: InboxInputReference;
+  inputId?: string;
   /** Reports a thread-store write that failed; the verb never does. */
   log?: (step: string, extra: Record<string, unknown>) => void;
 }
@@ -4693,12 +4845,24 @@ export function reframeProposal(
   supersedes?: number[],
 ): ReframeResult {
   const priorHistory = proposal.reframeHistory ?? [];
+  const input = deps.causalScope ? deps.input ?? captureInboxInput(deps.causalScope, proposal.id, feedback, deps.inputId) : undefined;
+  if (deps.input && (!deps.causalScope || !verifiedInboxInput(deps.input, deps.causalScope, proposal.id, feedback))) {
+    throw new Error("reframe input is foreign or does not match the captured verbatim feedback");
+  }
+  const previous = input ? priorHistory.filter(round => round.input?.id === input.id) : [];
+  if (previous.length) {
+    if (previous.length !== 1 || !verifiedInboxInput(previous[0]!.input, deps.causalScope!, proposal.id, feedback) ||
+      JSON.stringify(previous[0]!.supersedes ?? []) !== JSON.stringify([...(supersedes ?? [])].sort((a, b) => a - b))) {
+      throw new Error("reframe input identity is ambiguous or was reused for different feedback");
+    }
+    return { proposal, drafts }; // An exact replay is not a new capture or a second invalidation.
+  }
   const retractSet = new Set(supersedes ?? []);
   const updatedHistory: ReframeRecord[] =
     retractSet.size === 0 ? priorHistory : priorHistory.map((r, i) => (retractSet.has(i + 1) ? { ...r, retracted: true } : r));
   const reframedProposal: Proposal = {
     ...proposal,
-    reframeHistory: [...updatedHistory, { feedback }],
+    reframeHistory: [...updatedHistory, { feedback, ...(input ? { input, ...(supersedes?.length ? { supersedes: [...supersedes].sort((a, b) => a - b) } : {}) } : {}) }],
   };
   const row = {
     ts: systemClock.iso(),
@@ -4706,6 +4870,7 @@ export function reframeProposal(
     task_id: proposal.id,
     step: "ratify.reframed",
     feedback,
+    ...(input ? { input, repository: input.repository } : {}),
     ...(supersedes && supersedes.length > 0 ? { supersedes } : {}),
   };
   appendLedger(deps.ledgerPath, row);

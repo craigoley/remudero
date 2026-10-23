@@ -519,6 +519,19 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   const targetStage = join(checkout, `.rmd-dependency-stage-${randomUUID()}`);
   let sourceLock: string | undefined, reusedFrom: string | undefined;
   try {
+    // Explicit reuse must validate its declared input even when the target
+    // generation is already ready. The same generation is protected by our
+    // target lock; a different source retains its own nonblocking lock.
+    if (opts.readOnlyLinks && opts.sourceSeed && existsSync(join(seed, "ready.json"))) {
+      const source = resolve(opts.sourceSeed);
+      sourceSeedDirectory(source);
+      if (source !== seed) {
+        const lockPath = `${source}.lock`;
+        mkdirSync(lockPath, { mode: 0o700 });
+        sourceLock = lockPath;
+      }
+      compatibleSourceSeed(source, meta, opts);
+    }
     if (!existsSync(join(seed, "ready.json"))) {
       mkdirSync(stage, { mode: 0o700 });
       for (const [name, content] of Object.entries(meta.files)) {

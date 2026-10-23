@@ -7,7 +7,7 @@
   risk: high
   band_meaning: blast-radius
   priority: 1.18
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:coverage-shard:pool-defect-test-b-test-ts-leaks-into-test-c-test-ts"

@@ -10,7 +10,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 12.00
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-approved security/runtime follow-through 2026-10-21; Hono patch #13398"
   plan_refs: [W1-T4061, W1-T5018, W1-T5367, W1-T9094, W1-T9487]
