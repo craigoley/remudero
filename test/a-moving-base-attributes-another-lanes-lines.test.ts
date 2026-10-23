@@ -24,13 +24,14 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { produceCiDependencyEvidence, readCiDependencyEvidence, type CiDependencyProducerContext } from "#scripts/lib/ci-dependency-evidence.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CI_YAML = join(REPO_ROOT, ".github", "workflows", "ci.yml");
@@ -44,6 +45,8 @@ const { classify, CLASSES } = (await import(pathToFileURL(join(REPO_ROOT, "scrip
 
 const GIT_ENV = {
   ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_AUTHOR_NAME: "t",
   GIT_AUTHOR_EMAIL: "t@t",
   GIT_COMMITTER_NAME: "t",
@@ -61,20 +64,27 @@ function git(dir: string, ...args: string[]): string {
  *
  * `b0` is what the webhook payload's `base.sha` would carry â€” main's tip when the PR opened.
  */
-function fixture(): { dir: string; b0: string; merge: string } {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3060-`));
+function fixture(completePlan = false): { dir: string; b0: string; merge: string; root: string } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3060-`)));
+  const dir = completePlan ? join(root, "checkout") : root;
+  if (completePlan) mkdirSync(dir);
   git(dir, "init", "-q", "-b", "main", ".");
   mkdirSync(join(dir, "src"), { recursive: true });
   mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(dir, "src", "run-task.ts"), "export const a = 1;\n");
-  writeFileSync(join(dir, "plan", "tasks.d", "W1-T1.yaml"), "- id: W1-T1\n");
+  const planRecord = (id: string): string => JSON.stringify([{ id, title: `Producer identity fixture ${id}`,
+    repo: "remudero", depends_on: [], type: "implement", verify: "auto", risk: "low", status: "queued", attempts: 0,
+    files: ["src/run-task.ts"], acceptance: [{ claim: "The fixture has committed source",
+      proof: "grep: export const a in src/run-task.ts" }] }]) + "\n";
+  if (completePlan) writeFileSync(join(dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(dir, "plan", "tasks.d", "W1-T1.yaml"), completePlan ? planRecord("W1-T1") : "- id: W1-T1\n");
   git(dir, "add", "-A");
   git(dir, "commit", "-qm", "b0: the base when the PR opened");
   const b0 = git(dir, "rev-parse", "HEAD").trim();
 
   // The PR: plan-only, branched from b0.
   git(dir, "checkout", "-q", "-b", "pr");
-  writeFileSync(join(dir, "plan", "tasks.d", "W1-T2.yaml"), "- id: W1-T2\n");
+  writeFileSync(join(dir, "plan", "tasks.d", "W1-T2.yaml"), completePlan ? planRecord("W1-T2") : "- id: W1-T2\n");
   git(dir, "add", "-A");
   git(dir, "commit", "-qm", "pr: file one shard");
 
@@ -86,7 +96,7 @@ function fixture(): { dir: string; b0: string; merge: string } {
 
   // The merge commit a pull_request checkout receives: first parent is the CURRENT base.
   git(dir, "merge", "-q", "--no-ff", "-m", "merge pr into main", "pr");
-  return { dir, b0, merge: git(dir, "rev-parse", "HEAD").trim() };
+  return { dir, b0, merge: git(dir, "rev-parse", "HEAD").trim(), root };
 }
 
 /** `git diff --name-only <base>...HEAD`, the exact three-dot form every rewritten site uses. */
@@ -184,6 +194,25 @@ test("W1-T3060 criterion 3: on a non-merge HEAD, HEAD^1 is an ordinary parent â€
 
 
 type BaseStep = { id?: string; name?: string; run?: string; env?: Record<string, string> };
+const PRODUCER_IDENTITY_WITNESSES = [
+  "[[ \"$DEPENDENCY_BASE_SHA\" =~ ^[0-9a-f]{40}$ ]] || exit 1",
+  "case \"$GITHUB_EVENT_NAME\" in pull_request|merge_group) ;; *) exit 1 ;; esac",
+  "event_dependency_base=\"$(git rev-parse --verify \"${DEPENDENCY_BASE_SHA}^{commit}\")\" || exit 1",
+  "dependency_base=\"$event_dependency_base\"",
+  "[[ \"$DEPENDENCY_HEAD_SHA\" =~ ^[0-9a-f]{40}$ ]] || exit 1",
+  "[[ \"$GITHUB_SHA\" =~ ^[0-9a-f]{40}$ ]] || exit 1",
+  "[ \"$GITHUB_BASE_REF\" = \"main\" ] || exit 1",
+  "[[ \"$GITHUB_REF\" =~ ^refs/pull/[1-9][0-9]*/merge$ ]] || exit 1",
+  "[ \"$(git rev-parse --verify 'HEAD^{commit}')\" = \"$GITHUB_SHA\" ] || exit 1",
+  "read -r -a dependency_parents <<< \"$(git rev-list --parents -n 1 HEAD)\"",
+  "[ \"${#dependency_parents[@]}\" -eq 3 ] || exit 1",
+  "[ \"${dependency_parents[2]}\" = \"$DEPENDENCY_HEAD_SHA\" ] || exit 1",
+  "dependency_base=\"$(git rev-parse --verify 'HEAD^1^{commit}')\" || exit 1",
+  "git merge-base --is-ancestor \"$event_dependency_base\" \"$dependency_base\" || exit 1",
+  "git merge-base --is-ancestor \"$dependency_base\" refs/remotes/origin/main || exit 1",
+  "[ \"$(git rev-parse --verify 'HEAD^1^{commit}')\" = \"$dependency_base\" ] || exit 1"
+];
+
 function movingBaseWorkflow(): { raw: string; doc: { jobs: Record<string, { steps?: BaseStep[] }> } } {
   const raw = readFileSync(CI_YAML, "utf8");
   return { raw, doc: parseYaml(raw) as { jobs: Record<string, { steps?: BaseStep[] }> } };
@@ -199,10 +228,12 @@ function assertNoStaleEventDiffSteps(jobs: Record<string, { steps?: BaseStep[] }
         assert.equal(jobId, "commitlint", "only the protected-base producer reads identity metadata");
         assert.equal(step.id, "dependency-evidence");
         assert.equal(step.name, "Observe merged dependencies with protected-base producer code");
-        assert.deepEqual(Object.keys(env).sort(), ["DEPENDENCY_BASE_SHA", "GH_TOKEN"]);
+        assert.deepEqual(Object.keys(env).sort(), ["DEPENDENCY_BASE_SHA", "DEPENDENCY_HEAD_SHA", "GH_TOKEN"]);
         assert.equal(env.GH_TOKEN, "${{ github.token }}");
         assert.equal(env.DEPENDENCY_BASE_SHA, "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}");
+        assert.equal(env.DEPENDENCY_HEAD_SHA, "${{ github.event.pull_request.head.sha }}");
         const run = step.run ?? "";
+        for (const witness of PRODUCER_IDENTITY_WITNESSES) assert.ok(run.includes(witness), `missing producer identity witness: ${witness}`);
         assert.ok(run.includes('[[ "$DEPENDENCY_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]'), "metadata must be a full immutable SHA");
         assert.ok(run.includes('if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then'), "the parent check must apply to PRs");
         assert.ok(run.includes('[ "$(git rev-parse --verify \'HEAD^1^{commit}\')" = "$dependency_base" ]'), "metadata must equal the checked-out merge's first parent");
@@ -257,4 +288,99 @@ test("moving-base fixture admits only parent-verified producer metadata", () => 
   const inline = structuredClone(jobs);
   inline.ci!.steps!.push({ run: "git diff ${{ github.event.pull_request.base.sha }}...HEAD" });
   assert.throws(() => assertNoStaleEventDiffSteps(inline));
+});
+
+
+/** Execute only the real workflow's identity stage: no npm install, network or credit write. */
+function producerIdentityScript(run: string): string {
+  const marker = "if bash -euo pipefail <<'PRODUCER'\n";
+  const start = run.indexOf(marker) + marker.length;
+  const end = run.indexOf("dependency_runtime=", start);
+  assert.ok(start >= marker.length && end > start, "the real producer identity stage resolves");
+  return run.slice(start, end) + 'printf "%s\\n" "$dependency_base"\n';
+}
+function producerBase(dir: string, eventBase: string, overrides: Record<string, string> = {}): string {
+  const { doc: { jobs } } = movingBaseWorkflow();
+  const run = jobs.commitlint!.steps!.find(step => step.id === "dependency-evidence")!.run!;
+  return execFileSync("bash", ["-euo", "pipefail", "-c", producerIdentityScript(run)], {
+    cwd: dir, encoding: "utf8", env: { ...GIT_ENV,
+      GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "main", GITHUB_REF: "refs/pull/13008/merge",
+      GITHUB_SHA: git(dir, "rev-parse", "HEAD").trim(),
+      DEPENDENCY_BASE_SHA: eventBase, DEPENDENCY_HEAD_SHA: git(dir, "rev-parse", "pr").trim(), ...overrides },
+    stdio: "pipe",
+  }).trim();
+}
+
+test("W1-T10390: dependency producer follows a verified advanced merge parent", async () => {
+  const { dir, b0, merge, root } = fixture(true);
+  try {
+    const parent = git(dir, "rev-parse", "HEAD^1").trim();
+    assert.notEqual(b0, parent, "the healthy observed population really advanced");
+    git(dir, "update-ref", "refs/remotes/origin/main", parent);
+    const selected = producerBase(dir, b0);
+    assert.equal(selected, parent, "event metadata is ancestry evidence, never the current base");
+    // The selected identity reaches the real producer and consumer, beyond a printed shell SHA.
+    // These valid operator filings have no dependency closure, so defaults make no network calls.
+    const context: CiDependencyProducerContext = { actions: true, repository: "fixture-owner/remudero",
+      head: merge, base: selected, producerSha: selected, producerJob: "commitlint", runId: "10390",
+      attempt: "1", nowMs: Date.now(), checkout: dir };
+    const produced = await produceCiDependencyEvidence(context);
+    const sealed = JSON.parse(produced.bytes) as { head: string; base: string; producerSha: string };
+    assert.equal(sealed.head, merge);
+    assert.equal(sealed.base, parent);
+    assert.equal(sealed.producerSha, parent);
+    const artifact = join(root, "producer-evidence.json");
+    writeFileSync(artifact, produced.bytes, { flag: "wx", mode: 0o400 });
+    assert.equal(readCiDependencyEvidence(artifact, { ...context, digest: produced.digest,
+      maxAgeMs: 60000, runnerTemp: root }).state, "ready", "the real consumer accepts the sealed actual-parent identity");
+    assert.equal(producerBase(dir, parent), parent, "an unchanged protected base remains accepted");
+    assert.equal(producerBase(dir, parent, { GITHUB_EVENT_NAME: "merge_group", DEPENDENCY_HEAD_SHA: "", GITHUB_SHA: "" }), parent,
+      "the existing merge-group base path is preserved");
+    assert.equal(git(dir, "rev-parse", "HEAD").trim(), merge, "identity observation never changes the checkout");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T10390: dependency producer rejects foreign heads parents and event contexts", () => {
+  const { dir, b0, merge } = fixture();
+  try {
+    const parent = git(dir, "rev-parse", "HEAD^1").trim();
+    const pr = git(dir, "rev-parse", "pr").trim();
+    git(dir, "update-ref", "refs/remotes/origin/main", parent);
+    assert.equal(producerBase(dir, b0), parent, "negative cases start from an accepted real Git corpus");
+    for (const overrides of [
+      { DEPENDENCY_BASE_SHA: pr }, { DEPENDENCY_BASE_SHA: "0".repeat(40) },
+      { DEPENDENCY_BASE_SHA: "" }, { DEPENDENCY_BASE_SHA: b0.slice(1) },
+      { DEPENDENCY_HEAD_SHA: b0 }, { DEPENDENCY_HEAD_SHA: "" }, { GITHUB_SHA: pr }, { GITHUB_SHA: "" },
+      { GITHUB_REF: "refs/heads/main" }, { GITHUB_REF: "refs/pull/0/merge" },
+      { GITHUB_REF: "refs/pull/13008/head" }, { GITHUB_REF: "" },
+      { GITHUB_BASE_REF: "develop" }, { GITHUB_BASE_REF: "" },
+      { GITHUB_EVENT_NAME: "push" }, { GITHUB_EVENT_NAME: "" },
+    ] as Array<Record<string, string>>) assert.throws(() => producerBase(dir, b0, overrides), JSON.stringify(overrides));
+    git(dir, "update-ref", "refs/remotes/origin/main", b0);
+    assert.throws(() => producerBase(dir, b0), "an unprotected advanced parent cannot supply code");
+    git(dir, "update-ref", "-d", "refs/remotes/origin/main");
+    assert.throws(() => producerBase(dir, b0), "missing protected-ref evidence is not acceptance");
+    git(dir, "update-ref", "refs/remotes/origin/main", parent);
+    git(dir, "checkout", "-q", "--detach", pr);
+    assert.throws(() => producerBase(dir, b0), "a direct head checkout is not the Actions merge");
+    git(dir, "checkout", "-q", "--detach", merge);
+    const octopus = git(dir, "commit-tree", "HEAD^{tree}", "-p", parent, "-p", pr, "-p", b0, "-m", "extra parent").trim();
+    git(dir, "checkout", "-q", "--detach", octopus);
+    assert.throws(() => producerBase(dir, b0), "an extra parent cannot masquerade as the two-parent PR merge");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T10390: moving-base qualification retains every producer identity witness", () => {
+  const { doc: { jobs } } = movingBaseWorkflow();
+  assertNoStaleEventDiffSteps(jobs);
+  for (const witness of PRODUCER_IDENTITY_WITNESSES) {
+    const copy = structuredClone(jobs);
+    const step = copy.commitlint!.steps!.find(step => step.id === "dependency-evidence")!;
+    assert.ok(step.run!.includes(witness));
+    step.run = step.run!.replace(witness, ":");
+    assert.throws(() => assertNoStaleEventDiffSteps(copy), `removing ${witness} must be refused`);
+  }
+  const copy = structuredClone(jobs);
+  copy.commitlint!.steps!.find(step => step.id === "dependency-evidence")!.env!.DEPENDENCY_HEAD_SHA = "untrusted";
+  assert.throws(() => assertNoStaleEventDiffSteps(copy));
 });
