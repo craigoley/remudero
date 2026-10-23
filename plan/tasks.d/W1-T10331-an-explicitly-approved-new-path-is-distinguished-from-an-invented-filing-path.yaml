@@ -12,7 +12,7 @@
   band_meaning: span
   origin: "operator-approved:2026-10-21:separate-four-file-new-path-admission-repair"
   plan_refs: [W1-T10027, W1-T10041, W1-T8523, W1-T9062, W1-T10258]
-  files: [src/lib/plan.ts, src/lib/task-linter.ts, src/lib/machine-filing.ts, test/ci-friction-remedies-file-admission.test.ts]
+  files: [src/lib/plan.ts, src/lib/task-linter.ts, src/lib/machine-filing.ts, test/ci-friction-remedies-file-admission.test.ts, src/run-task.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -161,4 +161,4 @@
     reasons:
       - "Explicit same-chat operator approval of this separate USD5 high/span four-file admission repair and its four behavioral proofs, through normal gates only when ownership permits. Source-plan risk authority only: no live release ledger, gate waiver, source build before actual filing merge, hosted owner clearance, new W10280 attempt, worker stop, schedule or production activation."
     judged_at: "2026-10-21T10:57:00Z"
-    pin: "3713d318f517ac6e8707ebc54c366cd7d6c0febe7a9cb9798f5b82d395ecb97f"
+    pin: "5bb4f53f86a74be9cb443c9c43aa59be814f5d7072b0df53cfa5fa2c5c6012f0"

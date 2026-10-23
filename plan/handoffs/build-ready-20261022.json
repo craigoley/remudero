@@ -1,0 +1,538 @@
+{
+  "schema": "rmd-build-ready-archive-checkpoint/v1",
+  "at": "2026-10-22T19:40:35.629Z",
+  "thread": "Build Ready Backlog Tasks",
+  "sourceProjectionSha256": "492917240073f53ffcfd8a06c2e9fd69a30b0d96efa592052f66cdac7364e8a4",
+  "historicalIndexSha256": "a87c074bbe7f2af23f878cfa17aed1496174a4446975989347d0924a958e06e4",
+  "fullHistoryRecovered": false,
+  "all28Complete": false,
+  "pilotEnabled": false,
+  "newInfrastructure": false,
+  "activeWorkReviewsServingChanged": false,
+  "oldGrantsReusable": false,
+  "stoppedPrMonitorRestarted": false,
+  "archiveReady": false,
+  "archiveBlockers": [
+    "Finish or explicitly hand off current shared-Git source qualification/publication; no live migration approval inferred.",
+    "Publish the low-priority plan filing through normal hooks and hosted review; local reservation is not filed-on-main.",
+    "Unverified historical qualification and missing evidence remain deferred checkpoint entries, not completed work."
+  ],
+  "taskFiling": {
+    "branch": "codex/archive-deferred-qualification-20261022",
+    "priority": 99,
+    "ids": [
+      "W1-T10433",
+      "W1-T10434",
+      "W1-T10435"
+    ],
+    "state": "RESERVED_COMMITTED_NOT_PUBLISHED",
+    "researchOnly": true
+  },
+  "acceptedOwnership": {
+    "thread": "Resolve stuck Remudero PRs",
+    "threadId": "01a16024-d78a-7832-ac23-9ec5dc68d306",
+    "items": [
+      "P01a",
+      "C01",
+      "C07"
+    ],
+    "scope": "existing queue/security/reviewer adoption, inherited CodeQL disposition and built-credit reconciliation",
+    "acceptanceObserved": "2026-10-22",
+    "newExecutionAuthority": false
+  },
+  "items": [
+    {
+      "id": "P01",
+      "title": "Close #11524 safely through its owning lane",
+      "historicalState": "merged",
+      "sourcePrs": [
+        {
+          "number": 11524,
+          "head": "2be211f3c39c647c3df95247567af1fd69c02ca8",
+          "merge": "3c9072347d2fd2a98eece94ada20fe1b5c037b25",
+          "url": "https://github.com/craigoley/remudero/pull/11524"
+        }
+      ],
+      "disposition": "SOURCE_SCOPE_CLOSED",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Source merge confirmed for #11524; do not reopen. All-path security adoption remains P01a and inherited alerts C01.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P01a",
+      "title": "Complete trusted security enforcement on all merge paths",
+      "historicalState": "in-progress",
+      "sourcePrs": [
+        {
+          "number": 13025,
+          "head": "eb65ce2cfb2cfa27da93e1cb94b95ff2c3aac57c",
+          "merge": "52bcb020ca54c0daf60eb1b8a64b36600da28057",
+          "url": "https://github.com/craigoley/remudero/pull/13025"
+        },
+        {
+          "number": 12997,
+          "head": "a5585f867805ecfe334f37b5d92f985fd926de10",
+          "merge": "ec6466f0f332986c65fa8cb04b5dabc7fedea7df",
+          "url": "https://github.com/craigoley/remudero/pull/12997"
+        }
+      ],
+      "disposition": "ACCEPTED_EXISTING_OWNER",
+      "owner": "Resolve stuck Remudero PRs",
+      "deferredTaskIds": [],
+      "nextEvidence": "Reconcile merged #13025/#12997 with current all-path security/reviewer wiring and effective runtime evidence. Do not infer loaded adoption from merged files.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P02",
+      "title": "Qualify compiled child entries and isolated shared artifacts",
+      "historicalState": "in-progress",
+      "sourcePrs": [
+        {
+          "number": 13173,
+          "head": "b061ba1c311a34989c5b0eb0d536e0e80d11fe94",
+          "merge": "7ecc691aaa5d7f6461524d7e934eae1fd967777c",
+          "url": "https://github.com/craigoley/remudero/pull/13173"
+        }
+      ],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "#13173 is merged at b061ba1c. Retired 5e1d0d3 stays retired. Inspect the merged/current implementation and original missing qualification receipts before proposing further repair.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P02a",
+      "title": "Finish memory-hold and loop-stall follow-ups",
+      "historicalState": "in-progress",
+      "sourcePrs": [
+        {
+          "number": 12968,
+          "head": "e8fa3296fc484a5101235ae9734e6381e81e9585",
+          "merge": "690ffbe66c0f76afd2dfe47b8e566b7cbd796e88",
+          "url": "https://github.com/craigoley/remudero/pull/12968"
+        }
+      ],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "#12968 merge confirmed. Live write-churn, memory/loop comparison and SQLite-aware rollback remain separate unqualified work; no serving intervention.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P02b",
+      "title": "Reference-aware six-hour safe cleanup and donor lifecycle",
+      "historicalState": "in-progress",
+      "sourcePrs": [],
+      "disposition": "CURRENT_SOURCE_WORK_UNQUALIFIED",
+      "owner": "Build Ready Backlog Tasks",
+      "deferredTaskIds": [],
+      "nextEvidence": "Fresh ordinary workspace creation reused shared Git and APFS-cloned dependencies with zero installs. Do not repeat consumed per-profile verification grants. Maintained author currently refuses shared core.bare topology; diagnose migration separately without changing live Git config.",
+      "closureNote": "Current source branch run-unfiled-1792697450939 at 1affdaee1; unqualified/unpublished migration tooling, no live pool changed. Focused attempt NOT_RUN under unchanged capacity. Current chat retains this until qualified handoff.",
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P03",
+      "title": "Qualify one-use runtime grants and deadline-aware admission",
+      "historicalState": "in-progress",
+      "sourcePrs": [],
+      "disposition": "DEFERRED_RESEARCH_TASK_NOT_QUALIFIED",
+      "owner": "repository research backlog after filing; no active worker or execution approval",
+      "deferredTaskIds": [
+        "W1-T10433"
+      ],
+      "nextEvidence": "Original READY and sixty-minute escalation remain invariant. The operator now selected pinned terminal evidence for a vanished scope in the proposed default-off contract only. Current W1-T10251 live behavior intentionally accepts absence and is not changed by this decision. Qualify the new staged contract without releasing leases, holding builds, activating the pilot or reusing native grants.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P03a",
+      "title": "Qualify durable READY delivery and whole-run cancellation",
+      "historicalState": "pending",
+      "sourcePrs": [],
+      "disposition": "DEFERRED_RESEARCH_TASK_NOT_QUALIFIED",
+      "owner": "repository research backlog after filing; no active worker or execution approval",
+      "deferredTaskIds": [
+        "W1-T10433"
+      ],
+      "nextEvidence": "Current source already checks recursive cgroup.events populated. The operator approved the separate default-off contract requiring pinned terminal evidence for a vanished scope. Qualify scope identity, complete containment, live-evidence precedence and missing/unreadable receipt UNKNOWN cases. Closure evidence must precede any separately authorized exact-owner release; lease settlement read-back follows, avoiding a circular closure prerequisite. No live change or native rehearsal authority is inferred.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P03b",
+      "title": "Qualify whole-gate accounting and early docs/static checks",
+      "historicalState": "merged",
+      "sourcePrs": [
+        {
+          "number": 13122,
+          "head": "8863f2dd078fd3b7ca9e2aca18bc95b2abcf2d3f",
+          "merge": "2781d9f09aaaa533b5f9effd3ca0c80012037d6d",
+          "url": "https://github.com/craigoley/remudero/pull/13122"
+        },
+        {
+          "number": 13102,
+          "head": "9c216b99394dda19cc4365cc923c215e9b1ae96f",
+          "merge": "caeee939f8db3811574294fb0c57fb0a50b0c36a",
+          "url": "https://github.com/craigoley/remudero/pull/13102"
+        },
+        {
+          "number": 13136,
+          "head": "e679d93f580c90243613ecf0e4d5b2eb11065bd0",
+          "merge": "8a0a315db30efeab63484056c2b8a94bd9005f05",
+          "url": "https://github.com/craigoley/remudero/pull/13136"
+        }
+      ],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "#13102/#13122/#13136 source merges confirmed. Whole-corpus/current-author/runner qualification remains separate, not completed by those merges.",
+      "closureNote": "Source #13102/#13122/#13136 and phase progress #13625 merged; no full runner/current-author/live qualification inferred.",
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P04",
+      "title": "Complete read-only Claude setup reconnaissance H1-H11",
+      "historicalState": "in-progress",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Read-only existing-Azure observations distinguish mounted source bytes from effective-loaded revision and named pending status from actual execution. Current bounded ledger sample reaches15:30Z with positive controls; older carry/rotation duplicates are not unique runs and no complete-union absence is claimed. H1-H11/source-runtime-harness adoption and repo/knowledge-only tool target remain staged; no authentication,deploy,active-worker or connector changes.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P04a",
+      "title": "Extend observational effective-harness provenance",
+      "historicalState": "in-progress",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "The eight-case native packet remains preparation-only. Original narrow probe and7733 rollback falsifier remain preserved; any post-migration rollback must use a qualified SQLite-aware pin. Mounted parser/source and recent metadata do not qualify effective full harness,SDK lifecycle or permission boundaries. No native execution,restart,live policy/tool change or activation.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P05",
+      "title": "Repair typed-judgment example and honest probability semantics",
+      "historicalState": "merged",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Actual native advisory call-path adoption and bounded shadow/calibration remain P05a; no source merge used as outcome proof",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P05a",
+      "title": "Qualify bounded typed-decision shadow wiring",
+      "historicalState": "pending",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Real production call path, cancellation/budget/deadline, no critical-path delay, per-domain held-out calibration and advisory-only behavior",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P06",
+      "title": "Bound helpers and share a deterministic test runner",
+      "historicalState": "in-progress",
+      "sourcePrs": [],
+      "disposition": "DEFERRED_RESEARCH_TASK_NOT_QUALIFIED",
+      "owner": "repository research backlog after filing; no active worker or execution approval",
+      "deferredTaskIds": [
+        "W1-T10433"
+      ],
+      "nextEvidence": "Unpublished synchronous candidate5e1d0d3 is UNSAFE_RETIRED_DO_NOT_APPLY: 57 census tests,52pass,5fail reveal daemon-reachable readPinned spawnSync. Preserve earlier scoped results only as narrow historical truth; any replacement must use a nonblocking design and prove callers/census before promotion.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P07",
+      "title": "Head-bound handoffs and evidence-triggered re-planning",
+      "historicalState": "pending",
+      "sourcePrs": [
+        {
+          "number": 13173,
+          "head": "b061ba1c311a34989c5b0eb0d536e0e80d11fe94",
+          "merge": "7ecc691aaa5d7f6461524d7e934eae1fd967777c",
+          "url": "https://github.com/craigoley/remudero/pull/13173"
+        }
+      ],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Head-bound ownership remains explicit. Old #13173 repair request is obsolete because it merged; no competing repair. Preserve historical/current head distinction in the restored status projection.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P08",
+      "title": "Approved skill progressive disclosure without control leakage",
+      "historicalState": "pending",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Versioned bounded lookup, safe retrieval failure, mandatory rules retained, withheld material unavailable by alternate paths and measured context/quality effect",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P09",
+      "title": "Qualify existing test-impact and non-code read maps",
+      "historicalState": "in-progress",
+      "sourcePrs": [
+        {
+          "number": 13122,
+          "head": "8863f2dd078fd3b7ca9e2aca18bc95b2abcf2d3f",
+          "merge": "2781d9f09aaaa533b5f9effd3ca0c80012037d6d",
+          "url": "https://github.com/craigoley/remudero/pull/13122"
+        },
+        {
+          "number": 13102,
+          "head": "9c216b99394dda19cc4365cc923c215e9b1ae96f",
+          "merge": "caeee939f8db3811574294fb0c57fb0a50b0c36a",
+          "url": "https://github.com/craigoley/remudero/pull/13102"
+        }
+      ],
+      "disposition": "DEFERRED_RESEARCH_TASK_NOT_QUALIFIED",
+      "owner": "repository research backlog after filing; no active worker or execution approval",
+      "deferredTaskIds": [
+        "W1-T10435"
+      ],
+      "nextEvidence": "Source read-map/cleanup merges confirmed; recover full-corpus shadow receipts and every platform applicability denominator before claiming qualification.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P10",
+      "title": "Close measured gardener remedy and operator-label loops",
+      "historicalState": "in-progress",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Diagnose silent preflight with bounded stage start/end/elapsed evidence, not larger timeouts. Source shows synchronous stages and real rule/census work run before any result printing; actual cause of prior five-minute zero-output run remains UNKNOWN until native trace.",
+      "closureNote": "Phase progress #13625 merged at ed417e90f482a3d35182c21f4ab1fa0470780971, unchanged head e0ec195e081b. Original silent run cause remains UNKNOWN; labels/outcomes not inferred.",
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "P10a",
+      "title": "Wire existing workflow mining and robust promotion experiments",
+      "historicalState": "pending",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "The tiny real held-out experiment adds one bounded selected-versus-reference control and a missed-reader falsifier,not corpus-wide learning/calibration. Frozen3851-suite source/runtime inventory remains unexecuted as full reference. Require fixed graders,held-out seeds/orders,complete refused/incomplete denominators and assignment-exposure-outcome joins; no skill/policy promotion,model spend or learning from retries as independent cases.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C01",
+      "title": "Reconcile inherited CodeQL alerts separately",
+      "historicalState": "in-progress",
+      "sourcePrs": [
+        {
+          "number": 13025,
+          "head": "eb65ce2cfb2cfa27da93e1cb94b95ff2c3aac57c",
+          "merge": "52bcb020ca54c0daf60eb1b8a64b36600da28057",
+          "url": "https://github.com/craigoley/remudero/pull/13025"
+        },
+        {
+          "number": 13136,
+          "head": "e679d93f580c90243613ecf0e4d5b2eb11065bd0",
+          "merge": "8a0a315db30efeab63484056c2b8a94bd9005f05",
+          "url": "https://github.com/craigoley/remudero/pull/13136"
+        }
+      ],
+      "disposition": "ACCEPTED_EXISTING_OWNER",
+      "owner": "Resolve stuck Remudero PRs",
+      "deferredTaskIds": [],
+      "nextEvidence": "Merged security code is not inherited-alert disposition. Recover alert IDs and exact-head producer receipts, then reconcile without ignores or exclusions.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C02",
+      "title": "Verify native Community Edition Semgrep adoption",
+      "historicalState": "in-progress",
+      "sourcePrs": [],
+      "disposition": "DEFERRED_RESEARCH_TASK_NOT_QUALIFIED",
+      "owner": "repository research backlog after filing; no active worker or execution approval",
+      "deferredTaskIds": [
+        "W1-T10434"
+      ],
+      "nextEvidence": "Current maintained Scan uses hash-bound native CE 1.181.0 with install/MCP and native-engine controls. The guarded 133-test batch passes its source contracts. PR Scan is baseline-aware and advisory; green workflow state does not establish whole-corpus or whole-AST completeness. Full native/default/verbose corpus runs and controller closure remain unqualified; do not reuse the consumed override.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C03",
+      "title": "Reconcile legacy 17 skill/proposal dispositions and chronology",
+      "historicalState": "in-progress",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "All18 preserved proposal identities and dated histories remain retained,including15missing texts/3staged texts; no current-registry completeness or human labels inferred. New private status/fixture controls do not replace missing texts,chronology,eligible populations or outcomes. No model evaluation,restaging,grant renewal or automatic promotion.",
+      "closureNote": "Historical projection says 18 proposal identities, 15 missing texts and 3 staged, but original identities/full chronology are NOT recovered here. This packet preserves that gap, not the missing details.",
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C04",
+      "title": "Complete outcome attribution and human calibration",
+      "historicalState": "pending",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Human labels,eligible exposure denominators,production peak resources and whole-corpus missed-failure rates remain NULL/UNKNOWN. One deliberately failing2-suite fixture and six private status controls are instrument evidence,not held-out product outcomes or learning eligibility. Preserve original assignment/exposure/source identities and all refusals/incomplete runs before calibration/promotion.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C05",
+      "title": "Keep #11103 with its other-chat owner",
+      "historicalState": "merged",
+      "sourcePrs": [
+        {
+          "number": 11103,
+          "head": "859ed2c642d5e0bee5f302dc3218bcec98257259",
+          "merge": "a2982861904360756ccd5b77b87bd65cec17d647",
+          "url": "https://github.com/craigoley/remudero/pull/11103"
+        }
+      ],
+      "disposition": "SOURCE_SCOPE_CLOSED",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "#11103 merge confirmed. Its source closure remains with its historical owner; do not duplicate the implementation.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C06",
+      "title": "Reconcile earlier safety/ownership/pool/SQLite/artifact/UNKNOWN work",
+      "historicalState": "in-progress",
+      "sourcePrs": [
+        {
+          "number": 12968,
+          "head": "e8fa3296fc484a5101235ae9734e6381e81e9585",
+          "merge": "690ffbe66c0f76afd2dfe47b8e566b7cbd796e88",
+          "url": "https://github.com/craigoley/remudero/pull/12968"
+        },
+        {
+          "number": 13173,
+          "head": "b061ba1c311a34989c5b0eb0d536e0e80d11fe94",
+          "merge": "7ecc691aaa5d7f6461524d7e934eae1fd967777c",
+          "url": "https://github.com/craigoley/remudero/pull/13173"
+        }
+      ],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Reconcile source-merged #12968/#13173 and missing original qualification evidence; source merge, normal review, deployment and runtime effects remain separate.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C07",
+      "title": "Reconcile old PR repairs and built-credit requests",
+      "historicalState": "in-progress",
+      "sourcePrs": [
+        {
+          "number": 12997,
+          "head": "a5585f867805ecfe334f37b5d92f985fd926de10",
+          "merge": "ec6466f0f332986c65fa8cb04b5dabc7fedea7df",
+          "url": "https://github.com/craigoley/remudero/pull/12997"
+        },
+        {
+          "number": 13115,
+          "head": "37c726297ee4af7ebd658410ea5d083f788cafef",
+          "merge": "e25b31d6057329bdb6e207903cc722a910c51bb1",
+          "url": "https://github.com/craigoley/remudero/pull/13115"
+        }
+      ],
+      "disposition": "ACCEPTED_EXISTING_OWNER",
+      "owner": "Resolve stuck Remudero PRs",
+      "deferredTaskIds": [],
+      "nextEvidence": "#12997/#13115 and the other eight fresh PR reads are source-merged. Leave the active queue/root-cause lane with Resolve stuck Remudero PRs. Reconcile older repair and built-credit requests by API trailers, not decorative plan state.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C08",
+      "title": "Preserve consumed IDs and resolve ambiguous reference",
+      "historicalState": "pending",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Do not re-ask the user to guess 88861; preserve it as an unresolved/non-actionable reference. Recover the consumed-ID receipt; never reuse an assumed unused ID.",
+      "closureNote": "Ambiguous 88861 remains unresolved and non-actionable; user could not identify it. No guessed repair. IDs are consumed/held unless a real receipt proves otherwise.",
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C09",
+      "title": "Close host-watcher and exact cache questions",
+      "historicalState": "pending",
+      "sourcePrs": [],
+      "disposition": "RETAINED_HISTORICAL_CHECKPOINT_NOT_COMPLETE",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "The user confirmed deletion of the obsolete rehearsal-result automation. Preserve the narrow historical result; original evidence is still unavailable. Exact host/cache questions remain open.",
+      "closureNote": "User reported deleting the obsolete result automation; no current timer/runtime verification claimed. No schedule created/revived.",
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    },
+    {
+      "id": "C10",
+      "title": "Keep stopped PR timer and expired grants closed",
+      "historicalState": "constraint-maintained",
+      "sourcePrs": [],
+      "disposition": "CONSTRAINT_RETAINED",
+      "owner": "no active execution assigned; preserved checkpoint, not an accepted takeover",
+      "deferredTaskIds": [],
+      "nextEvidence": "Keep the stopped PR monitor stopped and every consumed/expired one-shot grant closed. No replacement polling or fallback scheduler.",
+      "closureNote": null,
+      "qualificationClaimed": false,
+      "originalDetailedEvidenceRecovered": false
+    }
+  ]
+}

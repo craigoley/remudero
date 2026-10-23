@@ -1,0 +1,91 @@
+- id: W1-T10432
+  title: "Materialize the fix rung's existing test-edit grant as safe exact paths"
+  repo: remudero
+  depends_on: [W1-T10333]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  priority: 2
+  budget_usd: 6.00
+  files:
+    - src/lib/fix-test-scope.ts
+    - src/run-task.ts
+    - test/fix-rung-scope-standdown.test.ts
+  status: queued
+  attempts: 0
+  origin: "Operator PR-queue recovery, W1-T10333 / PR #13631, 2026-10-22"
+  plan_refs: [W1-T10333, W1-T5532, W1-T1227, W1-T5118, W1-T10070]
+  note: |
+    PARKED FOR AN EXPLICIT OPERATOR DECISION. This record files W1-T10333's required
+    separate implement task; it does not approve or activate a scope change. Obtain the
+    operator's approval of the exact bounded repair before publishing or activating it.
+    A private qualified proposal may be prepared for that decision. Retain all existing
+    gates, ceilings, assertions, task-specific rulings and source ownership.
+  rationale: |
+    W1-T10333 traces test/ to W1-T5532's existing non-plan test-edit permission. The commit
+    helper admits a safe test path when admitTests is true, but the pre-strike comparison
+    appends literal test/ and uses exact membership, so the next strike refuses that same
+    path. Do not confuse this policy marker with a general directory declaration.
+
+    A read-only operator census through 2026-10-22T19:01:17.871991Z opened 437 gzip archives,
+    zero plain rotations, and the live ledger: 438 files, 6,086,828 valid JSON rows, one
+    malformed row, zero invalid timestamps. The corpus spans August 8 through
+    2026-10-22T19:01:16.529Z. Since October 14 it contains nine classified fix.stood_down
+    rows at rung.scope whose printed directory entry prefixes an out_of_scope_paths item.
+    Exact duplicate candidate row bytes are deduplicated by SHA256; count rows, not paths.
+
+    Positive control: W1-T10070, 2026-10-20T14:48:54.897Z, strike 2, in
+    ledger.2026-10-20T14-54-32-380Z.ndjson.gz at line 8745. Its row SHA256 is
+    7cc4d18cc16c69ae1325d20b9f9ea749efb81586159171a3bc1efc1dd83766b4.
+    The list ends in test/ and the refused child is
+    test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts. This is an actual
+    predicate contradiction, not a recurrence-only diagnosis.
+
+    Subject census at d0a612fffd35c6d34d3161c4804e53da3285ae53 found 30 matching plan files.
+    Every open head (#13629, #13630, #13631, #13632) had the same 30 and no added subject
+    record. W1-T10333 is the diagnostic record; the other substantive predicate tasks are
+    earlier implementations or different concerns, not this repair.
+  design: |
+    Only after the explicit operator decision:
+    1. Extract the commit helper's existing safe-test predicate to src/lib/fix-test-scope.ts
+       and reuse it for the pre-strike comparison. Preserve its test/ boundary and rejection
+       of .. path segments. Do not generalize directory semantics or add a gate exemption.
+    2. When runFixRung already grants admitFixTests, materialize only safe test paths
+       actually present in the observed diff into the comparison set. The commit helper
+       and next-strike guard must consume the same grant. Do not mutate task.files.
+       Preserve absent/empty declaration behavior and all existing non-test scope checks.
+    3. Keep scopeGuardOutOfScopeFiles's exact-file policy, plan-only filing protection,
+       inherited-offender subtraction, registered artifacts, additive registrations,
+       reachable remedies, and literal-file boundaries unchanged. A sibling test-other/
+       path, unrelated src/ path and traversal remain refused. Per-task constraints and
+       all ceilings remain binding; this grants no baseline, assertion or exemption edit.
+    4. Drive a real runFixRung continuation after an admitted test edit and a red CI result:
+       the next strike must proceed instead of recording rung.scope for that test. Controls
+       must still stop unrelated source edits and tests on a plan-only filing. Preserve
+       every original assertion in the existing scope suite; add the discriminating cases.
+    5. Do not change provider routing, budgets, admission, retry limits or runtime settings.
+       Run normal author, hosted CI and independent review; no admin or gate waiver.
+  acceptance:
+    - claim: "the comparison materializes only safe observed test paths under the existing grant"
+      proof: "unit test: fix test admission materializes only safe observed test paths"
+    - claim: "an admitted test edit does not falsely stop the next repair strike"
+      proof: "unit test: an admitted fix test survives the next strike without widening source scope"
+    - claim: "plan-only repairs and ungranted test paths retain their original refusals"
+      proof: "unit test: fix test admission preserves plan and ungranted scope refusals"
+    - claim: "the shared test-admission leaf has a production caller"
+      proof: "grep: admittedFixTestPaths( in src/run-task.ts"
+  falsifier: |
+    Use W1-T10070's three declarations, the actual incident test, and the existing non-plan
+    test-edit grant. Before the fix, a second runFixRung strike records rung.scope for that
+    child; after the fix, it reaches the next worker. Delete the production fix and rerun:
+    the new caller regression must fail, then pass when restored. Negative controls must
+    retain plan-only, unrelated src/, sibling-directory, traversal and absent-scope refusals.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.99
+    reasons:
+      - "high-risk verdict at confidence 0.99 — on the change's description/files alone, no diff was read — The filed note explicitly parks this task for an operator decision and requires approval of the exact bounded repair before publishing or activating it; no such approval is shown.; on the change's description/files alone, no diff was read — The acceptance criteria bound the proposed remedy to the existing test-edit grant and preserve scope refusals, but the record expressly states that filing does not approve or activate the scope change."
+    judged_at: "2026-10-22T20:17:15.507Z"
+    pin: "5a2e55777a5b36dd55ec9f2a3430da9e835a5b83ce307ad490be3a791aafacc8"

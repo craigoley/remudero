@@ -31,7 +31,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
-import type { Clock } from "./clock.js";
+import { fixedClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
@@ -160,24 +160,25 @@ export function parkedEscalation(task: Task, operatorReleases: ReadonlySet<strin
   return task.author_class === "machine" || !isRulingShaped(task);
 }
 
-/** The judge's inputs that can move while the record stays unchanged: the family's bar, the cost the
- *  origin names (null when nothing prices it), and which of its `depends_on` have merged. */
+/** The bar can remap a pinned verdict locally. Cost, merged dependencies and the backstop's
+ *  answer can reopen the question while the record stays unchanged. */
 export interface MachineJudgeEvidence {
   bar: number;
   cost: number | null;
   merged_deps: string[];
+  backstop?: string | null;
 }
 
 export function machineJudgeEvidence(task: Task, bar: number, cost: number | undefined, isMerged: (id: string) => boolean): MachineJudgeEvidence {
-  return { bar, cost: cost ?? null, merged_deps: task.depends_on.filter(isMerged).sort() };
+  return { bar, cost: cost ?? null, merged_deps: task.depends_on.filter(isMerged).sort(), backstop: deterministicEscalation(task) ?? null };
 }
 
 /** Which inputs differ between the snapshot a record was judged on and the current one. */
 export function movedEvidence(then: MachineJudgeEvidence, now: MachineJudgeEvidence): string[] {
   return [
-    then.bar !== now.bar ? "confidence_bar" : undefined,
     then.cost !== now.cost ? "cost" : undefined,
     then.merged_deps.join(",") !== now.merged_deps.join(",") ? "depends_on" : undefined,
+    (then.backstop ?? null) !== (now.backstop ?? null) ? "backstop" : undefined,
   ].filter((m): m is string => m !== undefined);
 }
 
@@ -194,7 +195,7 @@ export interface ReaskRecord {
 /**
  * How long a parked escalation waits before the judge asks again when nothing has moved. The family's
  * flip rate is read as Beta(1 + flipped, 1 + held). Its odds against a flip set the starting interval,
- * so a family whose re-asks often flip is asked sooner. Each unchanged answer for this record doubles
+ * so a family whose re-asks often flip is asked sooner. Each unchanged cadence model answer doubles
  * the interval. A flip anywhere in the family raises the rate, which shortens the wait for every
  * parked record in that family.
  */
@@ -594,7 +595,7 @@ interface MachineJudgeState {
    *  2026-10-13 12:03Z to 10-14 12:00Z, each opening and disposing a landing worktree. Kept while the pin holds. */
   refusedReleases?: Record<string, string>;
   /** W1-T8830: for each parked escalation, keyed by the pin it is parked at, the inputs it was last asked
-   *  on, when that was, and how many answers in a row came back unchanged. Only a schedule: the ruling
+   *  on, when that was, and its unchanged cadence answers. Only a schedule: the ruling
    *  itself lives on the record. */
   reask?: Record<string, ReaskEntry>;
   /** W1-T8830: each family's re-asks and how many flipped, which set its cadence ({@link reaskIntervalMs}). */
@@ -638,7 +639,7 @@ export interface MachineJudgePorts {
   limit?: number;
   excludeFamilies?: readonly string[];
   /** The cost a record's origin names, as its family's gardener prices it now (W1-T8830). When this is
-   *  absent or returns undefined, no cost is compared, and the bar, the deps and the cadence decide a re-ask. */
+   *  absent or returns undefined, no cost is compared; dependencies, backstop and cadence decide re-asks. */
   costEvidence?: (task: Task) => number | undefined;
   /** W1-T9694: the retry and main-health facts for flake-incident records. Absent: judged on their text alone. */
   flakeEvidence?: FlakeJudgeEvidencePort;
@@ -738,15 +739,22 @@ interface PendingReask {
   pin: string;
   inputs: MachineJudgeEvidence;
   repeats: number;
+  modelAsked: boolean;
+  cadenceTriggered: boolean;
 }
 
 /** Book one answered re-ask. A flip resets the record's backoff and raises its family's flip rate.
- *  A repeat doubles the record's next interval. */
+ *  Only an unchanged cadence model answer doubles the record's next interval. */
 function noteReask(state: MachineJudgeState, r: PendingReask, changed: boolean): void {
-  const family = ((state.reaskRecord ??= {})[r.family] ??= { asked: 0, flipped: 0 });
-  family.asked += 1;
-  if (changed) family.flipped += 1;
-  (state.reask ??= {})[r.judged.task.id] = { pin: r.pin, inputs: r.inputs, askedAt: r.judged.ruling.judgedAt, repeats: changed ? 0 : r.repeats + 1 };
+  if (r.modelAsked) {
+    const family = ((state.reaskRecord ??= {})[r.family] ??= { asked: 0, flipped: 0 });
+    family.asked += 1;
+    if (changed) family.flipped += 1;
+  }
+  (state.reask ??= {})[r.judged.task.id] = {
+    pin: r.pin, inputs: r.inputs, askedAt: r.judged.ruling.judgedAt,
+    repeats: changed ? 0 : r.repeats + Number(r.modelAsked && r.cadenceTriggered),
+  };
 }
 
 /**
@@ -791,14 +799,32 @@ async function reaskParkedEscalations(c: {
     // First sight of this pin (parked before W1-T8830, or the state was lost): the inputs are taken as
     // they stand now, and the cadence counts from the ruling's own judged_at.
     const entry = prior?.pin === pin ? prior : { pin, inputs, askedAt: task.risk_ruling!.judged_at, repeats: 0 };
+    // Old snapshots lack the backstop. Recover its answer from the pinned ruling, not today's
+    // implementation, so removing a backstop reopens even a record parked before this upgrade.
+    const pinned = task.risk_ruling!;
+    const pinnedBackstop = pinned.reasons.map((reason) =>
+      /^deterministic backstop: (.*) — irreversible or privileged work goes to a person$/.exec(reason)?.[1],
+    ).find((reason) => reason !== undefined) ?? null;
+    if (prior?.pin !== pin || entry.inputs.backstop === undefined) {
+      entry.inputs = { ...entry.inputs, backstop: pinnedBackstop };
+    }
     state.reask[task.id] = entry;
+    if (inputs.backstop !== null && inputs.backstop === entry.inputs.backstop) continue;
     const moved = movedEvidence(entry.inputs, inputs);
     const intervalMs = reaskIntervalMs(cadence[family], entry.repeats);
     // Written as "not yet due" negated, so an unparseable judged_at (NaN) reads as due and is asked.
     const cadenceDue = !(Date.parse(entry.askedAt) + intervalMs > ports.clock.now());
-    if (moved.length === 0 && !cadenceDue) continue;
+    const barCrossed = moved.length === 0 && entry.inputs.bar !== inputs.bar && pinned.verdict === "low" &&
+      planRiskJudgeAction({ ...pinned, verdict: "low" }, { confidenceThreshold: inputs.bar }).kind === "proceed";
+    if (moved.length === 0 && !cadenceDue && !barCrossed) continue;
     room -= 1;
-    const judged = await judgeMachineShard(task, record, { riskJudge: ports.riskJudge, policy: c.policy, clock: ports.clock });
+    const judged: MachineJudgement = barCrossed
+      ? {
+          kind: "ruled", task, record, bar: inputs.bar,
+          ruling: { ...pinned, action: "proceed", judgedAt: ports.clock.iso(),
+            reasons: [...pinned.reasons, `confidence bar crossing: ${entry.inputs.bar} -> ${inputs.bar}; recorded confidence ${pinned.confidence} now clears the bar`] },
+        }
+      : await judgeMachineShard(task, record, { riskJudge: ports.riskJudge, policy: c.policy, clock: ports.clock });
     if (judged.kind === "unavailable") {
       c.report.unavailable.push(task.id);
       ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason, reask: true });
@@ -806,6 +832,18 @@ async function reaskParkedEscalations(c: {
     }
     (c.report.reasked ??= []).push(task.id);
     const changed = judged.ruling.action !== "escalate";
+    const reask: PendingReask = {
+      judged, family, pin, inputs, repeats: entry.repeats,
+      modelAsked: !barCrossed && inputs.backstop === null,
+      cadenceTriggered: moved.length === 0 && cadenceDue,
+    };
+    if (changed) pending.set(task.id, reask);
+    else noteReask(state, reask, false);
+    const history = state.reaskRecord?.[family];
+    const nextHistory = changed && reask.modelAsked
+      ? { asked: (history?.asked ?? 0) + 1, flipped: (history?.flipped ?? 0) + 1 } : history;
+    const nextInterval = reaskIntervalMs(nextHistory, changed ? 0 : state.reask[task.id]!.repeats);
+    const nextDue = fixedClock(ports.clock.now() + nextInterval).date();
     // W1-T9043: a re-ask that keeps `escalate` is a resurfacing, ledgered with the escalation's age and band.
     const ageDays = escalationAgeDays(task, ports.clock.now());
     ports.log("machine_judge.reasked", {
@@ -816,6 +854,8 @@ async function reaskParkedEscalations(c: {
       moved,
       cadence_due: cadenceDue,
       interval_ms: intervalMs,
+      // Legacy runaway backoffs can exceed ISO's representable range; they must not abort a pass.
+      next_due_at: Number.isFinite(nextDue.getTime()) ? nextDue.toISOString() : null,
       previous_action: "escalate",
       action: judged.ruling.action,
       verdict: judged.ruling.verdict,
@@ -823,9 +863,6 @@ async function reaskParkedEscalations(c: {
       confidence_bar: judged.bar,
       changed,
     });
-    const reask: PendingReask = { judged, family, pin, inputs, repeats: entry.repeats };
-    if (changed) pending.set(task.id, reask);
-    else noteReask(state, reask, false);
   }
   return pending;
 }

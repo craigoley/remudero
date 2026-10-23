@@ -1,0 +1,58 @@
+- id: W1-T10435
+  title: Research same-head platform-aware test-selection shadows against a complete reference
+  repo: remudero
+  type: recon
+  verify: auto
+  depends_on: []
+  plan_refs: [W1-T4439]
+  priority: 99
+  risk: low
+  budget_usd: 4
+  status: queued
+  attempts: 0
+  author_class: human
+  origin: "operator archive disposition 2026-10-22; docket P09; native runner qualification remains separate"
+  files: [docs/forensics/same-head-test-selection-shadow.md]
+  rationale: |
+    Operator-directed filing and priority; parked for human verification, not an automatic research run.
+    Narrow testing can reduce latency and storage only after missed-failure risk and completeness
+    are measured. Existing selector-shadow miss tasks (including W1-T10356) repair particular edges;
+    do not duplicate or take over those lanes. This low-priority recon specifies paired held-out
+    validation and platform applicability, not new selector edges or production narrowing.
+    Microsoft's primary TIA documentation describes safety fallbacks and periodic full validation
+    in its supported VSTest context: https://learn.microsoft.com/en-us/azure/devops/pipelines/test/test-impact-analysis?view=azure-devops
+    Those platform-specific guarantees are not evidence that this Node selector already has them.
+    Main and all five open PR head plan trees were compared at d0a612ff on 2026-10-22; no newly added
+    overlapping paired-reference contract was found. Retain existing missed-edge observations as data.
+  design: |
+    Map current selection, module/descriptor/non-code read maps, CI reference population, platform skips,
+    shadow collector and promotion consumers to exact source symbols. Pin both arms to the same source
+    head, platform, dependency/runtime, fixture inputs and reference population; neither arm replaces CI.
+    Keep every physical suite/test counted: executed pass/fail, error, cancelled, unknown, and explicitly
+    evidenced not-applicable. A Linux skip of an APFS-only test is not a pass or silent denominator removal.
+    Define missed failing suites/edges with denominator, reference failures, runtime, peak memory, allocated
+    and reclaimed bytes, selection savings and cost of fallback. Use physical file controls, injected
+    missing-edge/removal controls, source/descriptor mismatch, incomplete reference and stale-head cases.
+    Missing, skipped-without-applicability, mismatched or partial evidence is UNKNOWN, not zero misses.
+    Keep human labels NULL/UNKNOWN unless actually supplied; synthetic labels remain training-ineligible.
+    Recommend conservative fallback for unknown/dependency/helper/configuration changes and a measured
+    periodic reference policy. Any automatic promotion, test-policy narrowing or native workload needs
+    separate reviewed authority. Existing capacity, one-use grants, pilot gate, active work, reviews
+    and serving stay unchanged. No model calls, infrastructure or live execution is authorized.
+  acceptance:
+    - claim: The report defines a same-head paired reference and platform applicability without hiding skipped tests
+      proof: "grep: Same-head paired reference and applicability in docs/forensics/same-head-test-selection-shadow.md"
+    - claim: The report preserves denominators and reports missed failures, uncertainty, resources and source provenance
+      proof: "grep: Missed-failure and resource measurement contract in docs/forensics/same-head-test-selection-shadow.md"
+    - claim: The report names the existing shadow paths, missing-edge falsifiers and a separate promotion decision
+      proof: "grep: Default-off promotion and fallback decision in docs/forensics/same-head-test-selection-shadow.md"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared files list contains only one new markdown doc, docs/forensics/same-head-test-selection-shadow.md, so the filed plan shows no touch of secrets, auth, deletion, or deploy, merge, or review policy."
+      - "The rationale scopes the work to specifying paired-reference validation and says it adds no new selector edges and no production narrowing. It also defers the promotion decision to a separate task, so no operator-only decision is requested."
+      - "The acceptance criteria are grep checks on the single declared file, so the outcome is verifiable from what is shown. The gates state is clean (human author, filingTime true), and the family's mixed record (8 merged, 5 declined) is not concerning for a doc-only recon."
+    judged_at: "2026-10-22T22:19:17.149Z"
+    pin: "b2dc206dabde1f1be2390d351bf77208128a4601fdf94a17f07a69a314948e0d"

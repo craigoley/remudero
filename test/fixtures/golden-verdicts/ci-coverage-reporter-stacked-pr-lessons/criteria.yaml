@@ -1,0 +1,4 @@
+- claim: the coverage reporter lesson is landed
+  proof: "grep: coverage-ratchet is a REPORTER in learnings/ci.yaml"
+- claim: the stacked-PR lesson is landed
+  proof: "grep: stack tip merges its base in learnings/ci.yaml"
