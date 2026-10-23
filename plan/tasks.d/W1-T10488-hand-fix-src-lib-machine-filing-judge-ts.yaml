@@ -1,0 +1,34 @@
+- id: W1-T10488
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — hand_fix:src/lib/machine-filing-judge.ts cost 7.4 PR minute(s) across 4 round(s) on 4 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.69
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:hand_fix:src/lib/machine-filing-judge.ts"
+  files:
+    - src/lib/machine-filing-judge.ts
+    - test/triage/hand-fix-src-lib-machine-filing-judge-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on hand_fix:src/lib/machine-filing-judge.ts"
+      proof: "grep: test(\"W1-T10488: hand_fix:src/lib/machine-filing-judge.ts is prevented, not retried\" in test/triage/hand-fix-src-lib-machine-filing-judge-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:src/lib/machine-filing-judge.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: hand_fix:src/lib/machine-filing-judge.ts cost 7.4 PR minute(s) across 4 red run(s) within the measured window on 4 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/machine-filing-judge.ts: repaired by hand in multiple distinct merged PRs
+
+    RECENT ROUNDS (newest first):
+    - PR #11678 at 2026-10-14T14:04:15Z: hand fix PR #11678: src/lib/machine-filing-judge.ts; minutes are the pass median proxy (5.840216666666667), not measured repair time
+    - PR #10720 at 2026-10-10T18:52:25Z: hand fix PR #10720: src/lib/machine-filing-judge.ts; minutes are the pass median proxy (5.840216666666667), not measured repair time
+    - PR #10685 at 2026-10-10T16:29:08Z: hand fix PR #10685: src/lib/machine-filing-judge.ts; minutes are the pass median proxy (5.840216666666667), not measured repair time
+    - PR #10678 at 2026-10-10T15:57:14Z: hand fix PR #10678: src/lib/machine-filing-judge.ts; minutes are the pass median proxy (5.840216666666667), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
