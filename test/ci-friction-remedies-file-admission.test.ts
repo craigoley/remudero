@@ -13,6 +13,7 @@ import { test } from "node:test";
 
 import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
 import { fixedClock } from "#src/lib/clock.js";
+import { runnableCandidates } from "#src/lib/drain.js";
 import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
 import { assertLintClean, lintTask, sizingViolation, taskRulingPin } from "#src/lib/task-linter.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalFacts, type Task } from "#src/lib/plan.js";
@@ -78,14 +79,15 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
 const APPROVAL_RECORD_PATH = "plan/tasks.d/W1-T99001-approved-new-path.yaml";
 const APPROVAL_REFERENCE = `npa1_${"A".repeat(43)}`;
 
-function approvalFixture(mode: "human" | "auto" = "human") {
+function approvalFixture(mode: "human" | "auto" = "human", overrides: Partial<Task> = {}) {
   const plan = loadPlanFromYaml([
     "- id: W1-T99001", "  title: Create the explicitly approved fixture module", "  repo: remudero",
     "  depends_on: []", "  type: implement", "  verify: human", "  risk: medium", "  status: queued",
     "  attempts: 0", "  author_class: machine", "  files: [src/lib/operator-approved-fixture.ts]",
-    "  design: Exact approved fixture behavior", "  rationale: A fixture, not an issued approval",
+    "  design: Exact approved fixture behavior", "  rationale: A fixture, not an issued approval", "  origin: fixture:new-path-approval",
   ].join("\n"), APPROVAL_RECORD_PATH);
   const task = Object.assign(plan.tasks[0]!, { new_path_approval_ref: APPROVAL_REFERENCE });
+  Object.assign(task, overrides);
   if (mode === "auto") {
     task.verify = "auto";
     task.acceptance = [{ claim: "The approved fixture is created", proof: "unit test: approved fixture behavior" }];
@@ -170,11 +172,12 @@ test("new path admission preserves legacy proposals and independent owner holds"
     clock: { now() { throw new Error("legacy admission must not read the approval clock"); } } };
   assert.deepEqual(machineFilingAdmissionViolations(withoutApproval, legacyContext), []);
   assert.equal(Object.hasOwn(loadPlanFromYaml("- id: W1-T99009\n  title: legacy\n  repo: remudero\n  type: implement\n", "legacy").tasks[0]!, "new_path_approval_ref"), false);
-  const held = { ...task, dispatch_hold: true };
-  assert.throws(() => assertLintClean(held, { machineFilingAdmission: context }), /dispatch.hold|ruling/i,
-    "a path receipt does not release an independent owner hold or re-sign drifted intent");
+  const held = approvalFixture("auto", { dispatch_hold: true });
+  assert.deepEqual(machineFilingAdmissionViolations(held.task, held.context), [], "a qualified receipt can establish path scope without releasing the hold");
+  assert.deepEqual(runnableCandidates(held.plan, () => true, 3), [], "the actual selector still honors the owner's independent dispatch hold");
   assert.notDeepEqual(machineFilingAdmissionViolations({ ...task, status: "blocked" }, context), []);
-  assert.notDeepEqual(machineFilingAdmissionViolations({ ...task, depends_on: ["W1-T99002"] }, context), []);
+  const dependent = approvalFixture("auto", { depends_on: ["W1-T99002"] });
+  assert.match(machineFilingAdmissionViolations(dependent.task, dependent.context).join(";"), /unmerged dependencies/);
 });
 
 test("new path admission refuses missing drifted and unsupported authority before staging", async (t) => {
