@@ -112,8 +112,12 @@ node --max-old-space-size=1024 --max-semi-space-size=16 --import tsx scripts/pre
 This mode keeps ordinary selection, identity, static checks, native judgments and verdicts.
 It uses one worker, an inherited 1-GiB V8 old-space ceiling with 16-MiB semi-spaces, at most 32 top-level phases, 120 seconds
 and 8 MiB of combined output per phase, and a fixed native scratch volume between 16 and 256 MiB.
-Disk admission includes a 4-GiB system reserve, twice the declared scratch size, all 32 output
-allowances and 16 MiB of metadata. These are declared bounds, not measured production peaks;
+Disk admission uses max(10 GiB, the fully costed allocation requirement): a 4-GiB system reserve,
+twice the declared scratch size, all 32 output allowances and 16 MiB of metadata. The actual guarded
+entry applies this same floor before starting and before each expensive phase. Workspace/output
+and scratch-image backing filesystems each retain their own path, numeric counters and free-byte
+observation; a malformed or unavailable read refuses admission. The fixed fixture volume retains
+its independent declared capacity and closure checks. These are declared bounds, not measured production peaks;
 the V8 ceiling does not bound process-tree RSS. Only temporary fixtures are capacity bounded:
 this mode does not sandbox trusted tests or bound every workspace write. A native capture whose
 process group cannot be proven closed retains scratch and its lease; a failed normal detach

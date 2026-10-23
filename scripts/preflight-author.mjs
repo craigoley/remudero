@@ -23,7 +23,7 @@ import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './li
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
-import { boundedAuthorWorkloadFromArgv, guardedAuthorEntry, MacAuthorCapacityRefusal, readMacAuthorAdmission } from './lib/mac-author-admission.mjs';
+import { boundedAuthorWorkloadFromArgv, guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
 import { createBoundedAuthorScratch } from './lib/author-low-footprint.mjs';
 import {readCensusParentBudgetResult} from './lib/census-parent-budget.mjs';
 
@@ -931,7 +931,6 @@ if (isMainModule(import.meta.url)) {
       requireBoundedAuthorHost();
     }
     process.exitCode = guardedAuthorEntry(argv, {root: REPO_ROOT,
-      ...(budget ? {readAdmission: root => readMacAuthorAdmission(root, {minimumFreeBytes: budget.minimumFreeBytes, scratch: '/tmp'})} : {}),
       runAuthor: (args, deps) => main(args, deps)});
   }
 }

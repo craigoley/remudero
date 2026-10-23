@@ -6,6 +6,8 @@ import {performance} from 'node:perf_hooks';
 
 // Matches ci-parity's existing local coverage scratch reserve; this does not lower that gate.
 export const MAC_AUTHOR_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
+// Operator-governed opt-in floor; independent full-author/coverage policies stay 20 GiB.
+export const MAC_BOUNDED_AUTHOR_MINIMUM_BYTES = 10 * 1024 ** 3;
 
 /** Opt-in ordinary author budget. These are declared limits, not learned peak
  * measurements. Each phase is bounded and fixtures use a fixed native volume;
@@ -16,10 +18,13 @@ export function boundedAuthorWorkload(scratchMiB) {
     throw new TypeError('bounded author scratch must be an integer from 16 through 256 MiB');
   const scratchBytes = scratchMiB * 1024 ** 2;
   const stepOutputBytes = 8 * 1024 ** 2, maximumPhases = 32;
+  const allocationRequirementBytes = 4 * 1024 ** 3 + 2 * scratchBytes
+    + maximumPhases * stepOutputBytes + 16 * 1024 ** 2;
   return Object.freeze({kind: 'bounded-ordinary-mac-author', workers: 1, heapMiB: 1024, semiSpaceMiB: 16,
     scratchBytes, stepOutputBytes, stepRuntimeMs: 120_000, maximumPhases,
     systemReserveBytes: 4 * 1024 ** 3, metadataReserveBytes: 16 * 1024 ** 2,
-    minimumFreeBytes: 4 * 1024 ** 3 + 2 * scratchBytes + maximumPhases * stepOutputBytes + 16 * 1024 ** 2});
+    allocationRequirementBytes,
+    minimumFreeBytes: Math.max(MAC_BOUNDED_AUTHOR_MINIMUM_BYTES, allocationRequirementBytes)});
 }
 
 /** Parse both Node CLI spellings once, before choosing the real admission seam.
@@ -46,11 +51,15 @@ export function readMacAuthorAdmission(root, {platform = process.platform, scrat
   if (platform !== 'darwin') return {state: 'not-applicable', platform, reasons: []};
   if (!Number.isSafeInteger(minimumFreeBytes) || minimumFreeBytes <= 0) throw new Error('invalid author disk reserve');
   const result = {state: 'not-run', platform, minimumFreeBytes,
-    workspaceFreeBytes: null, scratchFreeBytes: null, pressure: 'unknown', reasons: []};
+    workspaceFreeBytes: null, scratchFreeBytes: null, allocations: [], pressure: 'unknown', reasons: []};
   for (const [key, path] of [['workspaceFreeBytes', root], ['scratchFreeBytes', scratch]]) {
+    const evidence = {key, path, state: 'unknown', availableBlocks: null, blockBytes: null, freeBytes: null};
+    result.allocations.push(evidence);
     try {
       const fs = statfs(path), bytes = fs.bavail * fs.bsize;
-      if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('invalid filesystem capacity');
+      if (!Number.isSafeInteger(fs.bavail) || fs.bavail < 0 || !Number.isSafeInteger(fs.bsize) || fs.bsize <= 0
+        || !Number.isSafeInteger(bytes) || bytes < 0) throw new Error('invalid filesystem capacity');
+      Object.assign(evidence, {state: 'observed', availableBlocks: fs.bavail, blockBytes: fs.bsize, freeBytes: bytes});
       result[key] = bytes;
       if (bytes < minimumFreeBytes) result.reasons.push(`${key}:${minimumFreeBytes === MAC_AUTHOR_FREE_RESERVE_BYTES
         ? 'below-existing-20GiB-reserve' : 'below-bounded-job-reserve'}`);
@@ -123,9 +132,11 @@ export function waitForMacAuthorCapacity(root, stage, readAdmission = readMacAut
 export function guardedAuthorEntry(argv, {root, readAdmission = readMacAuthorAdmission,
   runAuthor, reportRefusal = reportMacAuthorRefusal, phaseWaitMs = MAC_AUTHOR_PHASE_WAIT_MS} = {}) {
   if (argv.some(arg => ['--help', '-h', '--dry-run'].includes(arg))) return runAuthor(argv);
-  const admission = readAdmission(root);
+  const budget = boundedAuthorWorkloadFromArgv(argv);
+  const read = budget ? root => readAdmission(root, {minimumFreeBytes: budget.minimumFreeBytes, scratch: '/tmp'}) : readAdmission;
+  const admission = read(root);
   if (admission.state === 'admitted' || admission.state === 'not-applicable')
-    return runAuthor(argv, {admitHost: (stage, options) => waitForMacAuthorCapacity(root, stage, readAdmission,
+    return runAuthor(argv, {admitHost: (stage, options) => waitForMacAuthorCapacity(root, stage, read,
       {waitBoundMs: phaseWaitMs, refresh: options?.refresh})});
   reportRefusal(root, admission);
   return 3;
