@@ -173,6 +173,36 @@ test("a drafted remedy passes the base linter's sizing and admission checks with
 const APPROVAL_RECORD_PATH = "plan/tasks.d/W1-T99001-approved-new-path.yaml";
 const APPROVAL_REFERENCE = `npa1_${"A".repeat(43)}`;
 
+test("new path admission agrees between the real filing precheck and plan lint through the actual lint command", async () => {
+  const repo = gitRepo({ kind: "approval-lint-command" });
+  try {
+    mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+    const planPath = join(repo.dir, "plan", "tasks.yaml");writeFileSync(planPath, "[]\n");
+    repo.git("add", "plan");repo.git("commit", "-m", "chore(plan): seed lint fixture");const base = repo.git("rev-parse", "HEAD");
+    const { task, facts, context } = approvalFixture("auto");
+    task.acceptance = [{ claim: "The approved fixture is created", proof: "grep: approved fixture behavior in src/lib/operator-approved-fixture.ts" }];
+    task.risk_ruling!.pin = taskRulingPin(task);
+    const record = { ...facts.record, intentDigest: newPathApprovalIntentDigest(task, APPROVAL_RECORD_PATH)! };
+    const raw = JSON.parse(JSON.stringify(task));delete raw.sourcePath;
+    writeFileSync(join(repo.dir, APPROVAL_RECORD_PATH), JSON.stringify([raw]));repo.git("add", "plan");repo.git("commit", "-m", "chore(plan): file selected fixture");
+    let reads = 0;
+    const deps: runTask.LintPlanStatusDeps = { repoRoot: repo.dir,
+      loadConfig: (() => ({ root: repo.dir, serve: { newPathApproval: facts.binding } })) as never,
+      resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }), ghGateway: () => fakeGitHub(),
+      projectPlan: ((plan: { tasks: Task[] }) => new Map(plan.tasks.map(candidate => [candidate.id, { merged: false }]))) as never,
+      openPlanShardSlugs: (() => ({ slugs: new Set(), titles: [], unavailable: [] })) as never,
+      newPathApproval: { clock: context.clock, prepareFacts: async selected => {
+        reads++;return { ...facts, record, currentSourcePath: selected.sourcePath! };
+      } },
+    };
+    const code = await runTask.lintPlanCommand(["--plan", planPath, "--base", base], deps);
+    assert.equal(reads, 1, "the actual changed-task command must prepare selected current facts");
+    assert.equal(code, 0, "a qualified exact-intent receipt passes the actual lint command's normal checks");
+    const offline = await runTask.lintPlanCommand(["--plan", planPath, "--base", base], { ...deps, offline: true });
+    assert.notEqual(offline, 0);assert.equal(reads, 1, "offline must refuse the new exception without issuer I/O");
+  } finally { repo.cleanup(); }
+});
+
 test("new path admission agrees between the real filing precheck and plan lint before the actual proposal commit", async () => {
   const prepare = (runTask as unknown as { prepareNewPathPlanProposalCommit?: typeof runTask.prepareNewPathPlanProposalCommit }).prepareNewPathPlanProposalCommit;
   assert.equal(typeof prepare, "function", "real plan and triage commit paths must await the selected precheck before staging");
