@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerHooks } from 'node:module';
 // Standalone installs use Node's native type stripping, including the repository Clock port.
@@ -20,9 +21,37 @@ export function ownerOnlyHome(seed, uid, home = homedir(), exec = execFileSync, 
   return !exec('/bin/ls', ['-led', home], { encoding: 'utf8' }).split('\n').slice(1).some(line => line.includes(' allow '));
 }
 
-export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync, ownerOnly = ownerOnlyHome) {
-  // User lsof cannot rule out other accounts unless none of them can enter the seed's home.
-  if (uid !== 0 && !ownerOnly(seed, uid)) throw new Error('administrator open-file scan required (or a seed store in an owner-only home)');
+export const OPEN_FILE_SCANS = '/Library/Application Support/Remudero/open-files';
+const SCAN_MAX_AGE_MS = 15 * 60_000;
+
+/** Whether root's latest scan (deploy/mac/seed-open-files.py) saw a file open in `seed`, or
+ * undefined when there is no scan to trust: it and every folder above it must be root-owned and
+ * writable by root alone, and it must be fresh and name this seed's store. */
+export function attestedOpen(seed, { dir = OPEN_FILE_SCANS, now = Date.now(), rootUid = 0 } = {}) {
+  const store = dirname(resolve(seed)), fold = p => p.toLowerCase(); // APFS here is case-insensitive
+  const file = join(dir, createHash('sha256').update(fold(store)).digest('hex') + '.json');
+  try {
+    for (let p = file; ; p = dirname(p)) {
+      const st = lstatSync(p);
+      if (st.isSymbolicLink() || st.uid !== rootUid || st.mode & 0o022) return undefined;
+      if (p === '/' || (rootUid !== 0 && p === dir)) break; // fixtures stop at their own root-standin
+    }
+    const scan = JSON.parse(readFileSync(file, 'utf8'));
+    const age = now - scan.scannedAt * 1000;
+    if (scan.version !== 1 || fold(scan.root) !== fold(store) || !(age >= -60_000 && age < SCAN_MAX_AGE_MS)) return undefined;
+    const prefix = fold(resolve(seed)) + '/';
+    return scan.open.some(p => fold(p) === fold(resolve(seed)) || fold(p).startsWith(prefix));
+  } catch { return undefined; }
+}
+
+export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync, ownerOnly = ownerOnlyHome, attested = attestedOpen) {
+  // User lsof cannot rule out other accounts unless none of them can enter the seed's home;
+  // a fresh root-owned scan of the store can.
+  if (uid !== 0 && !ownerOnly(seed, uid)) {
+    const seen = attested(seed);
+    if (seen === undefined) throw new Error('administrator open-file scan required (or a seed store in an owner-only home)');
+    return seen;
+  }
   try { return exec(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '+D', seed], { encoding: 'utf8', timeout: 30_000 }).trim().length > 0; }
   catch (error) { if (error.status === 1 && !error.stdout?.length && !error.stderr?.length) return false; throw error; }
 }
