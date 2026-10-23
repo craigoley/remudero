@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.42
+  # refusal-amendment (W1-T10249, run W1-T10249-1792772004515, 2026-10-23T17:15:31.349Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Preventing the cited inbox/task contract failures requires changes outside the declared actions-view source scope.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

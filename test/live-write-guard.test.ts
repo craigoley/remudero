@@ -70,23 +70,55 @@ test("the cli test harness never resolves the live ledger path", async (t) => {
   }
 });
 
-test("the live-write guard waits for an in-progress config claim to publish its root", async () => {
+async function exerciseConfigClaimPublisher(startupDelayMs = 0): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), "rmd-ledger-publish-home-"));
   const root = join(home, "published-root");
   const configDir = join(home, ".config", "remudero");
   const config = join(configDir, "config.json");
   mkdirSync(configDir, { recursive: true });
-  await writeFile(config, "");
   const publisher = spawn(process.execPath, ["-e", `
     const fs = require("node:fs");
-    setTimeout(async () => {
-      await fs.promises.writeFile(process.argv[2], JSON.stringify({ root: process.argv[3] }));
-      fs.renameSync(process.argv[2], process.argv[1]);
-    }, 50);
-  `, config, `${config}.publish`, root], { stdio: "ignore" });
-  const published = new Promise<void>((resolve, reject) => publisher.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`publisher exited ${code}`))));
-  assert.equal(discoverLiveLedgerRoot({ HOME: home }), root);
-  await published;
+    const startupDelayMs = Number(process.argv[4]);
+    if (startupDelayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, startupDelayMs);
+    process.once("message", (message) => {
+      if (message !== "publish") { process.exitCode = 2; process.disconnect(); return; }
+      setTimeout(async () => {
+        try {
+          await fs.promises.writeFile(process.argv[2], JSON.stringify({ root: process.argv[3] }));
+          fs.renameSync(process.argv[2], process.argv[1]);
+        } catch (error) { process.stderr.write(String(error)); process.exitCode = 1; }
+        finally { process.disconnect(); }
+      }, 50);
+    });
+    process.send("ready");
+  `, config, `${config}.publish`, root, String(startupDelayMs)], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  let finished = false;
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null; error?: Error }>((resolve) => {
+    publisher.once("error", (error) => { finished = true; resolve({ code: null, signal: null, error }); });
+    publisher.once("exit", (code, signal) => { finished = true; resolve({ code, signal }); });
+  });
+  const ready = new Promise<void>((resolve) => publisher.once("message", (message) => { if (message === "ready") resolve(); }));
+  try {
+    await Promise.race([ready, closed.then((result) => { throw result.error ?? new Error(`publisher exited before ready: ${result.code}/${result.signal}`); })]);
+    await writeFile(config, "");
+    await new Promise<void>((resolve, reject) => publisher.send("publish", (error) => error ? reject(error) : resolve()));
+    assert.equal(discoverLiveLedgerRoot({ HOME: home }), root);
+    const result = await closed;
+    assert.equal(result.error, undefined);
+    assert.equal(result.signal, null);
+    assert.equal(result.code, 0);
+  } finally {
+    if (!finished) publisher.kill("SIGTERM");
+    await closed;
+  }
+}
+
+test("the live-write guard waits for an in-progress config claim to publish its root", async () => {
+  await exerciseConfigClaimPublisher();
+});
+
+test("config claim wait excludes a cold publisher start", async () => {
+  await exerciseConfigClaimPublisher(1500);
 });
 
 test("an append under the live state root from the suite is refused before writing", () => {
