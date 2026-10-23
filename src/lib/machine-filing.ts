@@ -16,7 +16,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type TaskRisk } from "./plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type NewPathApprovalFacts, type TaskRisk } from "./plan.js";
+import type { Clock } from "./clock.js";
 import { lintTask, taskRulingPin } from "./task-linter.js";
 
 /** Paths whose change is dangerous whoever makes it: secrets and credentials, auth and permissions,
@@ -130,7 +131,12 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
 export type MachineFilingAdmission = typeof machineFilingAdmissionViolations;
 
 /** Where a drafted shard's declared paths can be found: the filing checkout, and optionally the base tree. */
-export interface MachineShardPaths {
+export interface MachineShardPreparedFacts {
+  newPathApprovals?: ReadonlyMap<string, NewPathApprovalFacts>;
+  clock?: Clock;
+}
+
+export interface MachineShardPaths extends MachineShardPreparedFacts {
   pathExists: (path: string) => boolean;
   pathExistsAtBase?: (path: string) => boolean;
   /** Defaults to plan.ts's own; a fixture may stand in for it, never production. */
@@ -152,7 +158,8 @@ export function machineShardFilingRefusal(text: string, source: string, paths: M
   for (const task of plan.tasks) {
     if (task.author_class !== "machine") continue;
     for (const v of lintTask(task).violations) if (v.severity === "block") reasons.push(`${task.id}: ${v.check}: ${v.message}`);
-    const refused = admission(task, { plan, releasedIds: new Set(), pathExists: paths.pathExists, pathExistsAtBase: paths.pathExistsAtBase });
+    const refused = admission(task, { plan, releasedIds: new Set(), pathExists: paths.pathExists, pathExistsAtBase: paths.pathExistsAtBase,
+      ...(task.new_path_approval_ref === undefined ? {} : { newPathApproval: paths.newPathApprovals?.get(task.id), clock: paths.clock }) });
     if (refused.length > 0) reasons.push(`${task.id}: machine-filing-admission: ${refused.join("; ")}`);
   }
   return reasons.length > 0 ? reasons.join("; ") : undefined;
@@ -162,12 +169,12 @@ export function machineShardFilingRefusal(text: string, source: string, paths: M
  *  `deps.repoRoot`) as the base, in the shape a gardener spec's `landingRefusal` takes. `alsoAtBase`
  *  adds a filer's own base read. */
 export function machineShardLandingGuard(
-  filer: { repoRoot: string; admissionViolations?: MachineFilingAdmission; landingRefusal?: (root: string, paths: readonly string[]) => string | undefined },
+  filer: { repoRoot: string; admissionViolations?: MachineFilingAdmission; landingRefusal?: (root: string, paths: readonly string[]) => string | undefined; preparedAdmission?: MachineShardPreparedFacts },
   alsoAtBase?: (path: string) => boolean,
 ): (root: string, paths: readonly string[]) => string | undefined {
   if (filer.landingRefusal) return filer.landingRefusal;
   return (root, paths) =>
-    machineShardLandingRefusal(root, paths, (p) => existsSync(join(filer.repoRoot, p)) || alsoAtBase?.(p) === true, filer.admissionViolations);
+    machineShardLandingRefusal(root, paths, (p) => existsSync(join(filer.repoRoot, p)) || alsoAtBase?.(p) === true, filer.admissionViolations, filer.preparedAdmission);
 }
 
 /** Drop an existing `risk_ruling:` block from a single-record shard's text. */
@@ -214,6 +221,7 @@ export function machineShardLandingRefusal(
   paths: readonly string[],
   pathExistsAtBase?: (path: string) => boolean,
   admissionViolations?: MachineFilingAdmission,
+  preparedAdmission?: MachineShardPreparedFacts,
 ): string | undefined {
   const reasons: string[] = [];
   for (const path of paths) {
@@ -224,6 +232,7 @@ export function machineShardLandingRefusal(
       pathExists: (p) => existsSync(join(root, p)),
       pathExistsAtBase,
       admissionViolations,
+      ...preparedAdmission,
     });
     if (refused !== undefined) reasons.push(`${path}: ${refused}`);
   }
