@@ -10,6 +10,7 @@ import { sameTestFile } from "./test-path-resolver.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
 import { PLACEMENT_DIR, placeTest, type SubsystemMap } from "./test-placement.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
  *  plane flips `status`; every task's `prompt` is pre-authored (G-2). */
@@ -938,10 +939,9 @@ export interface NewPathApprovalCheckout {
 }
 
 function newPathApprovalGit(root: string, args: string[], signal: AbortSignal): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile("git", ["--literal-pathspecs", ...args], { cwd: root, encoding: "utf8", signal, timeout: 5_000, maxBuffer: 256 * 1024 },
-      (error, stdout) => error ? reject(error) : resolve(stdout));
-  });
+  signal.throwIfAborted();
+  return awaitNewPathApprovalRead(signal, hostWorktreeGitAsync(root, ["--literal-pathspecs", ...args],
+    { timeout: 2_000, configReadTimeoutMs: 2_000, maxBuffer: 256 * 1024 }));
 }
 
 /** Selected directories only; exact case, regular files, symlink ancestors and failed Git reads stay distinct. */

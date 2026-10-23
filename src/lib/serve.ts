@@ -70,6 +70,7 @@ import {
 } from "./service.js";
 import { awaitNewPathApprovalRead, newPathApprovalBindingError, readNewPathApprovalFile, readNewPathApprovalPaths,
   type NewPathApprovalBinding, type NewPathApprovalRecord } from "./plan.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import {
   buildIncidentEventsRoute,
   INCIDENT_INGEST_ROUTE_METHOD,
@@ -3255,9 +3256,8 @@ function newPathApprovalServeRoutes(deps: ServeDeps): Route[] {
     paths: async (task, _recordPath, signal) => {
       const binding = currentBinding();
       if (!binding) return undefined;
-      const base = await new Promise<string>((resolve, reject) => execFile("git", ["rev-parse", "--verify", "HEAD^{commit}"],
-        { cwd: deps.questionsRoot, encoding: "utf8", signal, timeout: 5_000, maxBuffer: 4_096 },
-        (error, stdout) => error ? reject(error) : resolve(stdout.trim())));
+      const base = (await awaitNewPathApprovalRead(signal, hostWorktreeGitAsync(deps.questionsRoot, ["rev-parse", "--verify", "HEAD^{commit}"],
+        { timeout: 2_000, configReadTimeoutMs: 2_000, maxBuffer: 4_096 }))).trim();
       return readNewPathApprovalPaths(task, { repoRoot: deps.questionsRoot, base, binding }, signal);
     }, audit: {
       write: async (record: Readonly<NewPathApprovalRecord>, bytes: string, signal: AbortSignal) => {
