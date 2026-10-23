@@ -234,6 +234,8 @@ test('ordinary bounded author continues after a genuine partial producer and nev
     admitHost: () => ({state: 'admitted', fixtureOnly: true})});
   const row = JSON.parse(readFileSync(join(f.dir, 'coverage/preflight-author.json'), 'utf8'));
   assert.equal(result, 3, JSON.stringify(row)); assert.equal(row.verdict, 'over-capacity');
+  assert.ok(['acquired', 'inherited'].includes(row.censusTestSlot.outcome));
+  assert.equal(row.censusTestSlot.concurrency, 1);
   assert.equal(row.steps.find((x: {name: string}) => x.name === 'census-precheck').partial, true);
   assert.equal(row.steps.find((x: {name: string}) => x.name === 'affected-tests').ok, true);
   assert.equal(row.resourceBudget.cleanup, 'closed-and-removed');
@@ -256,5 +258,6 @@ test('ordinary bounded author refuses a native timeout even when the legacy prod
   assert.equal(result, 1); assert.equal(row.verdict, 'refused');
   assert.equal(row.steps.find((x: {name: string}) => x.name === 'census-precheck').ok, false);
   assert.equal(row.steps.some((x: {name: string}) => x.name === 'static-preflight'), false);
+  assert.ok(['acquired', 'inherited'].includes(row.censusTestSlot.outcome));
   assert.equal(row.resourceBudget.cleanup, 'closed-and-removed');
 });

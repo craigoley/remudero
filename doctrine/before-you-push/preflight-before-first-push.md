@@ -136,14 +136,16 @@ Actual timeouts, unknown measurements, incomplete/skipped child results and fail
 retain their refusal/failure behavior. A failed head whose base cannot run stays unavailable, not a
 budget-only result. Default author and hosted/full census commands receive no parent-budget option.
 
-Budgeted census files run separately with `--test-concurrency=1`; an outer slot alone does not make
+Bounded author acquires its genuine serial lease before census and reuses it through static/affected
+checks; the native spooler maintains its heartbeat while the owner blocks. Budgeted census files
+run separately with `--test-concurrency=1`; an outer slot alone does not make
 Node's file runner serial. The census admits at most 32 operations, with each native output cap
 no larger than one thirty-second of the declared scratch allowance or 8 MiB. Completed successful
 spools are removed; rejected native captures stay in the owning author diagnostics directory,
 outside disposable fixture scratch. The second scratch allowance in disk admission covers these
 bounded retained captures. A failing head checks whether its base child can fit before copying a
-baseline. Choose scratch from the actual tree footprint: a measured 10633-blob base requires about
-133 MiB of 4-KiB data blocks before directories and index, so 128 MiB cannot hold that checkout;
+baseline. Choose scratch from the actual tree footprint: a counted 10633-blob base is estimated to need
+133 MiB of 4-KiB data blocks before directories and index, and the real 128-MiB checkout filled;
 256 MiB remains within the existing maximum. Neither a space refusal nor a truncated capture is PASS.
 
 ### Explicit low-footprint local checks

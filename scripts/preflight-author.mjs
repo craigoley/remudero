@@ -348,7 +348,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   let fixtureTemporaryEnvironment;
   const resourceBudget = boundedAuthorWorkloadFromArgv(argv);
   if (resourceBudget) receipt.resourceBudget = {...resourceBudget, assurance: 'resource-limits-only; verdict still requires ordinary author checks'};
-  let boundedScratch, boundedClosureUnproven = false, budgetedPhases = 0;
+  let boundedScratch, boundedSlot, boundedClosureUnproven = false, budgetedPhases = 0;
   const deadline = values.deadline === undefined ? undefined : Date.parse(values.deadline);
   const run = (file, args, extra = {}) => spawn(file, args, {
     cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
@@ -401,11 +401,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
-    if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment, ...temporaryEnvironment() } });
+    const environment = {...authorEnvironment(process.env), ...boundedSlot?.childEnvironment,
+      ...childEnvironment, ...temporaryEnvironment()};
+    if (spawn !== spawnSync) return run(file, args, { env: environment });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
     // W1-T9928: a slotted step's spooler beats the slot while this loop is blocked in spawnSync.
-    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment, ...temporaryEnvironment() }, trackParent: true,
-      ...logs, resultPath, maxBytes: outputLimitBytes, runtimeMs: effectiveRuntimeMs, ...(heartbeat ? { heartbeat } : {}) });
+    const stepHeartbeat = heartbeat ?? boundedSlot?.heartbeat;
+    const result = captureStepSync(file, args, { cwd: root, env: environment, trackParent: true,
+      ...logs, resultPath, maxBytes: outputLimitBytes, runtimeMs: effectiveRuntimeMs, ...(stepHeartbeat ? { heartbeat: stepHeartbeat } : {}) });
     if (resourceBudget) {
       const closure = boundedAuthorCaptureClosure(resultPath);
       boundedClosureUnproven ||= closure.state !== 'closed';
@@ -558,6 +561,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const dependencyBefore=authorDependencyProvenance(root);
       receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
+      if (resourceBudget) {
+        boundedSlot = acquireTestSlot('preflight-author:bounded-census-static-affected', {perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1});
+        if (!boundedSlot || !testSlotExecutionAllowed(boundedSlot)) throw new Error('bounded author census requires a genuine serial lease');
+        receipt.censusTestSlot = {outcome: boundedSlot.outcome, concurrency: boundedSlot.concurrency, note: boundedSlot.note};
+        const capacity = admitHost('census-precheck', {refresh: () => boundedSlot.refresh()});
+        if (capacity) (receipt.hostCapacity ??= []).push(capacity);
+      }
       ensureDiagnostics();
       const censusCaptures = resourceBudget ? join(diagnosticsRoot, 'census-native') : undefined;
       if (censusCaptures) mkdirSync(censusCaptures, {mode: 0o700});
@@ -622,7 +632,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         }
         // The cheap census runs first. One owner then admits BOTH expensive phases;
         // nested production checks borrow only its actual live ancestor lease.
-        const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1 });
+        const slot = boundedSlot ?? acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1 });
         try {
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
           if (!testSlotExecutionAllowed(slot)) throw new Error(`author preflight NOT_RUN (${slot.note})`);
@@ -809,7 +819,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         } finally {
           if (resourceBudget && boundedClosureUnproven)
             receipt.resourceBudget.slotCleanup = 'retained-child-closure-unproven';
-          else slot.release();
+          else if (!boundedSlot) slot.release();
         }
       }
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
@@ -840,6 +850,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       receipt.resourceBudget.cleanup = cleanup.state;
       if (cleanup.state !== 'closed-and-removed') {
         receipt.verdict = 'refused'; receipt.error ??= cleanup.reason;
+      }
+    }
+    if (boundedSlot) {
+      if (boundedClosureUnproven) receipt.resourceBudget.slotCleanup = 'retained-child-closure-unproven';
+      else {
+        try { boundedSlot.release(); receipt.resourceBudget.slotCleanup = 'release-requested'; }
+        catch (error) {
+          receipt.resourceBudget.slotCleanup = 'retained-release-failed';
+          receipt.verdict = 'refused'; receipt.error ??= `bounded author lease release failed: ${error.message}`;
+        }
       }
     }
   }
