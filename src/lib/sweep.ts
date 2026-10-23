@@ -7054,7 +7054,7 @@ export function checksPendingSinceFromRollup(
     if (REQUIRED_CHECK_OK.has(s) || !c.startedAt) continue;
     if (earliest === undefined || Date.parse(c.startedAt) < Date.parse(earliest)) earliest = c.startedAt;
   }
-  if (earliest !== undefined || !context || !required?.includes(CI_GATE_CHECK_NAME) ||
+  if (earliest !== undefined || !context || required === undefined || !required.includes(CI_GATE_CHECK_NAME) ||
       gate.some((check) => (check.name ?? check.context) === CI_GATE_CHECK_NAME) ||
       required.some((name) => name !== CI_GATE_CHECK_NAME && name !== REVIEW_CONTEXT) ||
       checksStateFromRollup(rollup, required) !== "pending") return earliest;
