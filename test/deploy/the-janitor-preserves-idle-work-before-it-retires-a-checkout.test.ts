@@ -569,13 +569,19 @@ test("the janitor sweeps unreferenced dependency seeds with the account's sweepe
     mkdirSync(join(fx.home, ".local/bin"), { recursive: true });
     const calls = join(fx.root, "seed-calls");
     writeFileSync(join(fx.home, ".local/bin/remudero-dependencies"), `#!/bin/bash
-printf '%s\\n' "$*" >> '${calls}'
+printf '%s %s\\n' "\${RMD_DEPENDENCY_SEED_ROOT:-default}" "$*" >> '${calls}'
 echo '[{"seed":"/s/a","action":"remove","reason":"unreferenced and idle for six hours"},{"seed":"/s/b","action":"keep","reason":"referenced by checkout"}]'
 `, { mode: 0o755 });
     const r = janitor(fx, true);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /dependency-seeds: removed=1 kept=1/);
-    assert.equal(readFileSync(calls, "utf8"), "sweep --apply\n");
+    assert.equal(readFileSync(calls, "utf8"), "default sweep --apply\n", "no stray store, no stray sweep");
+    rmSync(calls);
+    const stray = join(fx.home, "Library/Application%20Support/Remudero/dependencies");
+    mkdirSync(stray, { recursive: true }); writeFileSync(join(stray, ".rmd-dependency-seed-root.json"), '{"version":1}');
+    const again = janitor(fx, true);
+    assert.match(again.stdout, /dependency-seeds-stray: removed=1 kept=1/);
+    assert.equal(readFileSync(calls, "utf8"), `default sweep --apply\n${stray} sweep --apply\n`);
     rmSync(calls);
     assert.equal(janitor(fx, false).status, 0);
     assert.equal(existsSync(calls), false, "a dry run never sweeps");

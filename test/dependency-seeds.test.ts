@@ -208,6 +208,12 @@ test("dependency seed store cannot be a symlink and busy locks are never stolen"
   assert.ok(existsSync(join(store, `${key}.lock`)));
 }));
 
+test("a URL-encoded seed root is refused instead of starting a second store", () => {
+  assert.throws(() => configuredDependencySeedRoot("/account", { RMD_DEPENDENCY_SEED_ROOT: "/account/Library/Application%20Support/Remudero/dependencies" }), /URL-encoded/);
+  assert.equal(configuredDependencySeedRoot("/account", { RMD_DEPENDENCY_SEED_ROOT: "/account/Library/Application Support/Remudero/dependencies" }),
+    "/account/Library/Application Support/Remudero/dependencies");
+});
+
 test("dependency seed defaults are separate per account and platform", () => {
   assert.equal(dependencySeedConfigPath("/account"), "/account/.config/remudero/dependency-seeds.json");
   assert.equal(defaultDependencySeedRoot("/account", "darwin"), "/account/Library/Application Support/Remudero/dependencies");
@@ -237,6 +243,7 @@ test("dependency seed account configuration is optional and invalid configuratio
   writeFileSync(file, '{"enabled":true,"root":"/durable/seeds"}'); assert.equal(configuredDependencySeedRoot(root, {}), "/durable/seeds");
   assert.equal(configuredDependencySeedRoot(root, { RMD_DEPENDENCY_SEED_ROOT: "" }), undefined);
   writeFileSync(file, '{"enabled":true,"root":"relative"}'); assert.throws(() => configuredDependencySeedRoot(root, {}), /absolute/);
+  writeFileSync(file, '{"enabled":true,"root":"/a/Application%20Support/seeds"}'); assert.throws(() => configuredDependencySeedRoot(root, {}), /URL-encoded/);
   writeFileSync(file, 'broken json'); assert.throws(() => configuredDependencySeedRoot(root, {}), /JSON/);
 }));
 
