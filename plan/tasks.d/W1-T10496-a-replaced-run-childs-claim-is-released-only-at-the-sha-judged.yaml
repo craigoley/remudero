@@ -1,0 +1,89 @@
+- id: W1-T10496
+  title: "A REPLACED RUN CHILD'S DISPATCH CLAIM IS RELEASED ONLY AT THE SHA JUDGED — W1-T9119's own mint row says run_child, the boot sweep accepts only daemon, and the release wrapper obtains its deletion SHA after reading the death evidence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  author_class: machine
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "operator-authorized three-daemon recovery, 2026-10-23; machine-authored follow-up, normal filing judgement required"
+  plan_refs: [W1-T1268, W1-T2784, W1-T5047, W1-T9085, W1-T9086, W1-T9432, W1-T10001, W1-T9119]
+  files:
+    - src/lib/dispatch-claim.ts
+    - test/dispatch/a-replaced-run-childs-claim-keeps-its-instance-proof.test.ts
+  note: |
+    reservation hand-off: codex/file-run-child-claim-20261023 -> codex/file-run-child-claim-20261023
+    Reserved by normal rmd next-task-id from the writable operator checkout on 2026-10-23T13:43Z.
+    refs/rmd-id/W1-T10496 = 5c805ace591f9c076bdaa902e11fbd10e69b66ab; one successful attempt.
+    No production claim release, restart, forced retro or manual review/merge is part of this task.
+  rationale: |
+    OBSERVED 2026-10-23, source dispatch-claim blob 1097810c823cfb89d3e24370fa26aa6922452513:
+    - W1-T9119's claim is 59e5e913608d947d237124d9b9a30323c587fcdb, whose commit says
+      "rmd-dispatch claim 4001@f9e959f2f960 2026-10-19T11:12:09.444Z".
+    - The CURRENT claimLedgerFiles selection (first three eligible rotations ascending, plus live) contains
+      the exact created row at 2026-10-19T11:12:11.208Z: actor run_child, host f9e959f2f960,
+      run W1-T9119-1792408080502. Controlled read: four files, 35,630,081 bytes, 50,007 rows,
+      212 dispatch.claim controls, zero malformed rows. This is not an archive-sort/missing-row hypothesis.
+    - Exact docker inspect of f9e959f2f960 returns no such object; current Core container 8f2dbc90ff52
+      is a running positive control. Later W9119 attempts remain taken/blocked through 2026-10-23T12:37Z.
+      The retro marker remains 2026-10-06; W9119 owns the archive-pressure trigger gate.
+    - markRunChildProcessActor deliberately changes daemon-owned children to actor run_child (W9085).
+      decideDispatchClaimRelease's replaced-container arm still requires mintRow.actor === daemon.
+      reclaimSilentDispatchClaim intentionally excludes every claim with an own-instance mint row, so it
+      cannot compensate. The daemon boot caller IS wired; do not add a second sweeper.
+    OBSERVED SOURCE ORDER, not an observed production race:
+    - releaseDispatchClaim and releaseDispatchClaimAsync first read anchorMessage and decide death, THEN
+      read holder for the SHA passed to drop.expect. The real anchorMessage adapter also reads holder.
+      A replacement between these reads can pair old death evidence with the replacement SHA. A lease
+      protects only the SHA supplied to it; W2784's intended "SHA it judged" contract is not yet satisfied.
+    HEALTHY CONTROL:
+    - W9086 intentionally adopts live run children after a SAME-container daemon restart. The unchanged
+      sameHost refusal must preserve their claims. classifyRunDir/W10001 distinguish that from replacement
+      of the containing generation. Reuse the existing single-container-instance trust boundary, not age,
+      arbitrary foreign PID absence, or actor alone as a death proof.
+    SUBJECT/OWNER SWEEP at main 2d923a8, 2026-10-23T13:43Z:
+    - All seven open PR heads pinned against 454 actual remote heads: actor+claim candidate count 3 on
+      main and every head; identity candidates 25 on main and every head; no introduced/changed candidate
+      and no src/lib/dispatch-claim.ts PR overlap. Mint's subsequent main 521f0bb adds only unrelated feedback.
+    - W5047 shipped pre-run-child recycled-daemon support; W2784 intended the identity lease; W8616 is the
+      separate landed-evidence sweep; W8176 owns same-host reaped-lock release. None repairs this actor seam.
+  design: |
+    One concern: a proved replaced claimant's release belongs to the exact claim that was judged.
+    1. Bind the anchor message and dead-claimant deletion to ONE observed holder SHA, in both synchronous
+       and asynchronous wrappers. The real Git adapter must read the message of that exact SHA, not silently
+       substitute a later holder. An unreadable/missing identity declines; a changed ref fails the pinned CAS.
+       Existing optional anchorMessage callers remain compatible; holder/evidence arm semantics stay unchanged.
+    2. Admit daemon-owned run_child mint rows through the EXISTING replaced-container proof: own-instance
+       created row, anchor/mint host match, different current host, and held drain.lock acquired after the
+       mint. Keep daemon support. The reason names the ACTUAL actor, anchor and proof; never say a daemon
+       minted a run_child claim. The boot caller and bounded mint reader already exist and need no new layer.
+    3. New tests use real bare Git remotes for adapter/drop and race controls, with explicit fixture identity.
+       Insert a new live claim after death-message acquisition but before deletion, for BOTH wrappers; it
+       must survive. Prove real run-child actor derivation and mint-row reading, not a holder/evidence shortcut.
+       The test path is computed from the dispatch-claim import; confirm rmd test-place on the physical file.
+    4. Suite-only controls retain legacy daemon release, a live same-container adopted child's claim,
+       operator/worker/unknown actors, absent/unreadable/mismatched mint, post-lock mint, absent holder and
+       changed-anchor CAS. No new expiry, threshold, supervisor/projection, cap or policy change.
+    5. Normal current-head hosted gates, native review and protected automatic merge. Observe natural source
+       adoption, a genuine future boot release and W9119 progress, then retro publication/marker advancement.
+       Diagnostic success or a merged PR alone does not establish any of those runtime outcomes.
+  acceptance:
+    - claim: "the existing instance death proof releases a replaced run child's claim and names its actual mint actor"
+      proof: "unit test: W1-T10496: a replaced run-child claim is released from this instance's mint evidence"
+    - claim: "a replacement after synchronous death-evidence acquisition survives the pinned deletion"
+      proof: "unit test: W1-T10496: sync death evidence cannot release a replacement claim"
+    - claim: "a replacement after asynchronous death-evidence acquisition survives the pinned deletion"
+      proof: "unit test: W1-T10496: async death evidence cannot release a replacement claim"
+  falsifier: |
+    Delete run_child recognition: the same new positive actor test becomes functionally red, restored green.
+    Restore daemon-only reason wording: its actual-actor assertion becomes red, restored green.
+    Delete only evidence/deletion SHA binding: each real-Git replacement test loses the replacement claim
+    and becomes red, restored green. Preserve identical assertions and prove complete test counts; setup,
+    permission, import or zero-test failures do not count. An unchanged negative is a safety control, not
+    an Acceptance proof that discriminates this repair. Run the joined claim/adoption census regressions.
