@@ -60,7 +60,7 @@ export const INSTANCE_INBOX_SOURCE_PATHS: ReadonlySet<string> = new Set(INSTANCE
 /** The daemon's inbox registry; an instance without one predates the contract and is read-only. */
 export const INBOX_CONTRACT_MARKER = "inbox-proposals.json";
 
-/** A bounded background observation, not a permission grant or a new registry format. */
+/** PRIMARY CONTROL: retained bytes per optional background observation; over-budget is unavailable, never truncated into readiness. */
 export const INBOX_CONTRACT_OBSERVATION_MAX_BYTES = 16 * 1024 * 1024;
 export interface InstanceInboxContractObservation {
   state: InstanceInboxContractState;
