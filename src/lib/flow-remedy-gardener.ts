@@ -444,6 +444,7 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
     candidates: inv => inv.next ? [inv.next] : [],
     scorecard: inv => {
       const scorecard = { causes: inv.priced.length, total_pr_hours: inv.priced.reduce((sum, p) => sum + p.hours, 0),
+        priced: inv.priced.map(({ key, hours }) => ({ key, hours })),
         next: inv.next ? { origin: inv.next.origin, rung: inv.next.rung } : null, ladder: inv.ladder };
       input.onScorecard?.(inv, scorecard);
       return scorecard;
