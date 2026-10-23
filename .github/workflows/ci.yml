@@ -1117,12 +1117,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DEPENDENCY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          DEPENDENCY_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if bash -euo pipefail <<'PRODUCER'
-          [[ "$DEPENDENCY_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          dependency_base="$(git rev-parse --verify "${DEPENDENCY_BASE_SHA}^{commit}")"
+          [[ "$DEPENDENCY_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          case "$GITHUB_EVENT_NAME" in pull_request|merge_group) ;; *) exit 1 ;; esac
+          event_dependency_base="$(git rev-parse --verify "${DEPENDENCY_BASE_SHA}^{commit}")" || exit 1
+          dependency_base="$event_dependency_base"
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            [ "$(git rev-parse --verify 'HEAD^1^{commit}')" = "$dependency_base" ]
+            [[ "$DEPENDENCY_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            [ "$GITHUB_BASE_REF" = "main" ] || exit 1
+            [[ "$GITHUB_REF" =~ ^refs/pull/[1-9][0-9]*/merge$ ]] || exit 1
+            [ "$(git rev-parse --verify 'HEAD^{commit}')" = "$GITHUB_SHA" ] || exit 1
+            read -r -a dependency_parents <<< "$(git rev-list --parents -n 1 HEAD)"
+            [ "${#dependency_parents[@]}" -eq 3 ] || exit 1
+            [ "${dependency_parents[2]}" = "$DEPENDENCY_HEAD_SHA" ] || exit 1
+            dependency_base="$(git rev-parse --verify 'HEAD^1^{commit}')" || exit 1
+            git merge-base --is-ancestor "$event_dependency_base" "$dependency_base" || exit 1
+            git merge-base --is-ancestor "$dependency_base" refs/remotes/origin/main || exit 1
+            [ "$(git rev-parse --verify 'HEAD^1^{commit}')" = "$dependency_base" ] || exit 1
           fi
           dependency_runtime="$(mktemp -d "$RUNNER_TEMP/rmd-ci-dependency-runtime-XXXXXX")"
           dependency_dir="$(mktemp -d "$RUNNER_TEMP/rmd-ci-dependency-evidence-XXXXXX")"
