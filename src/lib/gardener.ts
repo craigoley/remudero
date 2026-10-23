@@ -1162,11 +1162,9 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   if (pendingBefore && (prState === "closed" || (judgedByDecision(spec, pendingBefore.actionClass) && prState === "merged"))) {
     const judged = judgeGardenDecision(state, prState);
     state = heldPassForgotten(prState === "closed" ? rememberDeclined(judged.state, pendingBefore, clock.iso()) : judged.state);
+    writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
     deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
-    if (state.lastCheap === cheap) {
-      writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
-      return { ran: false };
-    }
+    if (state.lastCheap === cheap) return { ran: false };
   }
   // A metric class needs one inventory at merge to pin its baseline. Later observations follow
   // the cheap input cadence even when the action fingerprint stays the same. An open or unreadable
