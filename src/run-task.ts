@@ -29942,7 +29942,7 @@ interface LifetimeReplayWindow {
   seen: Set<string>;
 }
 
-export const MAX_LIFETIME_ARCHIVE_START_IDENTITIES = 4_096; // BACKSTOP: a capped identity set keeps the live-only decision.
+export const MAX_LIFETIME_ARCHIVE_START_IDENTITIES = 8_192; // BACKSTOP: accommodates 5,134 observed starts while bounding identity memory.
 
 type LifetimeArchiveHistoryUnavailableReason =
   | "archive_unreadable"
