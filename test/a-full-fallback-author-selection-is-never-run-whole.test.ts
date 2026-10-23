@@ -11,7 +11,7 @@ type Budget = { workers: number; budgetMs: number; inputs: Record<string, unknow
 type Selection = { fullRun: boolean; suites: string[]; narrow?: string[]; reasons: string[]; recentOnly: { floor: string[] } };
 const author = (await import(pathToFileURL(join(ROOT, "scripts/preflight-author.mjs")).href)) as {
   main: (argv: string[], deps: { root: string; select?: (changed: string[], range: string) => Selection;
-    host?: () => unknown; spawn?: typeof spawnSync }) => number;
+    host?: () => unknown; spawn?: typeof spawnSync; admitHost?: (stage: string) => unknown }) => number;
   hostBudget: (host: object, opts?: object) => Budget;
   deadlineHostBudget: (budget: Budget, opts: { deadline: number }) => Budget;
   capacityVerdict: (suites: string[], manifest: object, budget: Budget) => { fits: boolean };
@@ -223,4 +223,34 @@ test("W1-T9953: a partial-set part that cannot be read is named, never silently 
   assert.equal(selected, false);
   assert.equal(author.partialSentence(1, 6, []), "full-fallback: PARTIAL — ran 1 of 6 suite(s) chosen by reach and " +
     "measured cost; CI's full run is the check for the cause of the fallback and the other 5");
+});
+
+
+test("an author phase refused before test execution records no planned suite as ran", async (t) => {
+  const { MacAuthorCapacityRefusal } = await import(pathToFileURL(join(ROOT, "scripts/lib/mac-author-admission.mjs")).href);
+  for (const fullFallback of [true, false]) {
+    const f = fixture("mixed", fullFallback ? {} : { [MODELLED]: 10 * 60 * 60_000 });
+    t.after(() => f.cleanup());
+    const recorded = recordingSpawn();
+    const admitHost = (stage: string) => {
+      if (stage === "affected-tests") throw new MacAuthorCapacityRefusal(stage, { state: "not-run", pressure: "warning" });
+      return { stage, state: "admitted" };
+    };
+    const select = fullFallback ? selector().select : () => ({ fullRun: false, suites: ALL,
+      reasons: ["fixture affected floor"], recentOnly: { floor: ALL } });
+    const { status, output } = run(t as never, [], { root: f.root, select, host, spawn: recorded.spawn, admitHost });
+    const receipt = f.receipt();
+    assert.equal(status, author.OVER_CAPACITY_EXIT);
+    assert.equal(receipt.verdict, "over-capacity");
+    assert.deepEqual(recorded.testRuns(), [], "the refused test phase starts no child");
+    assert.ok(receipt.tiered.planned.length > 0, "the selection is retained as a positive control");
+    assert.deepEqual(receipt.tiered.ran, [], "a planned subset is not an execution receipt");
+    assert.ok(!receipt.steps.some((step: { name: string }) => step.name.startsWith("affected-tests")));
+    if (fullFallback) {
+      assert.deepEqual(receipt.partial.planned, [CHANGED, MODELLED, READER]);
+      assert.deepEqual(receipt.partial.ran, []);
+      assert.equal(receipt.partial.leftToCi, ALL.length);
+      assert.ok(!output.includes("PARTIAL — ran 3"), output);
+    }
+  }
 });
