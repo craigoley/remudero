@@ -563,7 +563,24 @@ test("codex session logs idle past codex_session_days are removed; recent, open 
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("the janitor sweeps unreferenced dependency seeds, and a stray URL-encoded store, with the account's sweeper", () => {
+test("a failed preservation bundle is held with git's own reason", () => {
+  const fx = setup();
+  try {
+    const repo = clone(fx, "Remudero/task-run/repo");
+    commit(repo, "work.ts", "export const work = 1;\n", "unpublished local work");
+    const native = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    writeFileSync(join(fx.bin, "git"), `#!/bin/bash
+case " $* " in *" bundle create "*) echo "fatal: simulated pack failure" >&2; exit 128 ;; esac
+exec '${native}' "$@"
+`, { mode: 0o755 });
+    const r = helper(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /HOLD bundle-create-failed \(fatal: simulated pack failure\) .*Remudero\/task-run\/repo/);
+    assert.equal(existsSync(repo), true);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the janitor sweeps unreferenced dependency seeds, and names a stray URL-encoded store with --root", () => {
   const fx = setup();
   try {
     mkdirSync(join(fx.home, ".local/bin"), { recursive: true });
@@ -581,7 +598,7 @@ echo '[{"seed":"/s/a","action":"remove","reason":"unreferenced and idle for six 
     mkdirSync(stray, { recursive: true }); writeFileSync(join(stray, ".rmd-dependency-seed-root.json"), '{"version":1}');
     const again = janitor(fx, true);
     assert.match(again.stdout, /dependency-seeds-stray: removed=1 kept=1/);
-    assert.equal(readFileSync(calls, "utf8"), `default sweep --apply\n${stray} sweep --apply\n`);
+    assert.equal(readFileSync(calls, "utf8"), `default sweep --apply\ndefault sweep --root ${stray} --apply\n`);
     rmSync(calls);
     assert.equal(janitor(fx, false).status, 0);
     assert.equal(existsSync(calls), false, "a dry run never sweeps");

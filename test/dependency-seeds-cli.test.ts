@@ -48,6 +48,24 @@ test("dependency seed CLI enables once, preserves configuration and defaults to 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("the dependency seed CLI sweeps a URL-encoded stray store named by --root but refuses it as configuration", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-seed-cli-")));
+  const stray = join(root, "home/Library/Application%20Support/Remudero/dependencies");
+  const cli = join(process.cwd(), "scripts", "dependency-seeds.mjs");
+  const run = (env: Record<string, string>, ...args: string[]) =>
+    spawnSync(process.execPath, [cli, ...args], { env: { ...process.env, HOME: join(root, "home"), ...env }, encoding: "utf8" });
+  try {
+    mkdirSync(stray, { recursive: true });
+    writeFileSync(join(stray, ".rmd-dependency-seed-root.json"), '{"version":1}');
+    const named = run({ RMD_DEPENDENCY_SEED_ROOT: "" }, "sweep", "--root", stray, "--apply");
+    assert.equal(named.status, 0, named.stderr);
+    assert.deepEqual(JSON.parse(named.stdout), []);
+    const configured = run({ RMD_DEPENDENCY_SEED_ROOT: stray }, "sweep");
+    assert.notEqual(configured.status, 0);
+    assert.match(configured.stderr, /URL-encoded/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a seed store in an owner-only macOS home is scanned with the owner's own lsof", () => {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rmd-seed-home-")));
   try {
