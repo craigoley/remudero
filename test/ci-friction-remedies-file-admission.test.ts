@@ -6,15 +6,18 @@
  * exist yet — and admission must take it as a parked proposal, as it does the legacy shape.
  */
 import assert from "node:assert/strict";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
+import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 
 import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
-import { fixedClock } from "#src/lib/clock.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
 import { runnableCandidates } from "#src/lib/drain.js";
-import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
+import { machineShardFilingRefusal, machineShardLandingGuard, machineShardLandingRefusal } from "#src/lib/machine-filing.js";
 import { assertLintClean, lintTask, sizingViolation, taskRulingPin } from "#src/lib/task-linter.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations, newPathApprovalIntentDigest, newTestPath, type NewPathApprovalBinding, type NewPathApprovalFacts, type NewPathApprovalRecord, type Task } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -376,6 +379,112 @@ test("new path admission preserves legacy proposals and independent owner holds 
       assert.deepEqual(buildServeRoutes(deps).filter(route => route.path.startsWith("/v1/new-path-approvals/")), []);
     }
   } finally { repo.cleanup(); }
+});
+
+test("new path admission actual serve and default HTTPS reader retain current Git and audit evidence without ambient TLS grants", { timeout: 45_000 }, async () => {
+  const repo = gitRepo({ kind: "approval-default-https" });
+  const key = join(repo.dir, "key.pem"), cert = join(repo.dir, "cert.pem"), conf = join(repo.dir, "tls.cnf");
+  writeFileSync(conf, "[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=127.0.0.1\n[ext]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\n", { mode: 0o600 });
+  // Per-run certificate, child-only CA, and normal hostname checking: no host trust-store edit or TLS bypass.
+  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
+    "-config", conf, "-days", "1"], { stdio: "ignore", timeout: 10_000 });
+  repo.addRemote("origin", "https://github.com/acme/remudero.git");
+  const { task: original, facts } = approvalFixture("auto"), raw = JSON.parse(JSON.stringify(original));
+  delete raw.sourcePath;delete raw.new_path_approval_ref;
+  const draftYaml = JSON.stringify([raw]), base = repo.git("rev-parse", "HEAD");
+  const ledgerPath = join(repo.dir, "state", "ledger.ndjson"), planPath = join(repo.dir, "plan", "tasks.yaml");
+  mkdirSync(join(repo.dir, "state"), { recursive: true });mkdirSync(join(repo.dir, "plan"), { recursive: true });
+  writeFileSync(planPath, "[]\n");writeFileSync(ledgerPath, "");
+  const tokenFile = join(repo.dir, "fixture-read-token.json");
+  writeFileSync(tokenFile, JSON.stringify({ read: "fixture-read", write: "never-send-fixture-write" }), { mode: 0o600 });
+  let current: NewPathApprovalBinding | undefined = { ...facts.binding }, reads = 0, disappearAt = 0, throwConfig = false;
+  const plan = { tasks: [], byId: new Map() };
+  const deps: ServeDeps = { board: { plan, ledgerPath, github: fakeGitHub() },
+    panelGraph: { root: repo.dir, planPath, ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: { approve: () => {}, reframe: () => {} } },
+    ledgerPath, issues: { close: () => {} }, fleetControlRoot: repo.dir, questionsRoot: repo.dir,
+    assistantRepository: facts.binding.repository, instances: { coreInstance: facts.binding.instance }, githubAppRefresh: { env: {} },
+    tokens: { read: "fixture-read", write: "fixture-write" }, operatorIdentityIo: { clock: systemClock },
+    newPathApprovalConfig: () => { reads++;if (throwConfig) throw new Error("fixture config unreadable");return disappearAt && reads >= disappearAt ? undefined : current; } };
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid: "default-https-key", kty: "RSA" } as service.OperatorJwk;
+  const session = () => {
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const head = encode({ alg: "RS256", kid: jwk.kid }), now = Math.floor(systemClock.now() / 1_000);
+    const body = encode({ iss: "https://session.fixture.invalid", sub: "fixture-user", azp: "https://ui.fixture.invalid", iat: now - 1, exp: now + 60, fva: [0, -1] });
+    return `${head}.${body}.${sign("RSA-SHA256", Buffer.from(`${head}.${body}`), privateKey).toString("base64url")}`;
+  };
+  const nonces = service.createConfirmNonceStore();
+  const operatorSession = service.operatorSessionIdentityProvider({ issuer: "https://session.fixture.invalid", allowedOrigins: ["https://ui.fixture.invalid"],
+    operatorUserIds: ["fixture-user"], keys: { key: async () => jwk }, clock: systemClock });
+  let routes: service.Route[] = [], verifyCalls = 0, driftAfterFirstRead = false;
+  const dispatcher = service.createService({ tokens: deps.tokens!, operatorSession, enforceWriteTiers: true, confirmNonces: nonces,
+    routes: ["preview", "confirm", "revoke", "verify"].map((operation): service.Route => ({ method: operation === "verify" ? "GET" : "POST",
+      path: `/v1/new-path-approvals/${operation}`, scope: operation === "verify" ? "read" : "write",
+      ...(operation === "verify" ? {} : { tier: operation === "preview" ? "middle" : "high", newPathApproval: true }),
+      handler: (req, res, ctx) => routes.find(route => route.path === `/v1/new-path-approvals/${operation}`)!.handler(req, res, ctx) })) });
+  const tls = createHttpsServer({ key: readFileSync(key), cert: readFileSync(cert) }, (req, res) => {
+    if (req.url?.startsWith("/v1/new-path-approvals/verify?")) {
+      verifyCalls++;assert.equal(req.headers.authorization, "Bearer fixture-read");assert.equal(req.headers[service.OPERATOR_SESSION_HEADER], undefined);
+      if (driftAfterFirstRead) { driftAfterFirstRead = false;res.once("finish", () => { current = { ...current!, epoch: "changed-after-first-read" }; }); }
+    }
+    dispatcher.emit("request", req, res);
+  });
+  await new Promise<void>(resolve => tls.listen(0, "127.0.0.1", resolve));
+  const origin = `https://127.0.0.1:${(tls.address() as AddressInfo).port}`, ca = readFileSync(cert);
+  current = { ...facts.binding, origin };
+  const assembled = () => buildServeRoutes(deps).filter(route => route.path.startsWith("/v1/new-path-approvals/"));
+  const post = (operation: string, input: unknown) => new Promise<{ status: number; body: Record<string, any> }>((resolve, reject) => {
+    const payload = JSON.stringify(input), path = `/v1/new-path-approvals/${operation}`;
+    const req = httpsRequest(origin + path, { method: "POST", ca, agent: false, signal: AbortSignal.timeout(8_000),
+      headers: { [service.OPERATOR_SESSION_HEADER]: session(), "x-confirm-nonce": nonces.issue({ method: "POST", path, payload }) } }, res => {
+      let bytes = "";res.setEncoding("utf8");res.on("data", chunk => { bytes += chunk; });res.on("error", reject);
+      res.on("end", () => { try { resolve({ status: res.statusCode!, body: JSON.parse(bytes) }); } catch (error) { reject(error); } });
+    });req.on("error", reject);req.end(payload);
+  });
+  const preview = () => post("preview", { draftYaml, recordPath: APPROVAL_RECORD_PATH, approvedMissingPaths: original.files, lifetimeMs: 60_000 });
+  const childScript = `import {prepareNewPathApprovalFacts} from "#src/lib/plan.js";
+    const input=JSON.parse(process.argv[1]);let calls=0;const bind=()=>{calls++;return input.absentBinding?undefined:input.binding;};
+    const facts=await prepareNewPathApprovalFacts(input.task,input.recordPath,{repoRoot:input.root,base:input.base,readTokenFile:input.tokenFile,currentBinding:bind},AbortSignal.timeout(8000));
+    console.log(JSON.stringify({state:facts?.state??null,facts,calls}));`;
+  const read = async (task: Task, trust = true, absentBinding = false) => {
+    const env = { ...process.env };delete env.NODE_TLS_REJECT_UNAUTHORIZED;delete env.NODE_EXTRA_CA_CERTS;
+    if (trust) env.NODE_EXTRA_CA_CERTS = cert;
+    const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childScript,
+      JSON.stringify({ task, binding: current, root: repo.dir, base, tokenFile, recordPath: APPROVAL_RECORD_PATH, absentBinding })],
+      { cwd: REPO_ROOT, env, timeout: 12_000, maxBuffer: 128 * 1_024 });
+    return JSON.parse(stdout.trim()) as { state: string | null; facts?: NewPathApprovalFacts; calls: number };
+  };
+  try {
+    throwConfig = true;assert.deepEqual(assembled(), []);throwConfig = false;
+    routes = assembled();assert.equal(routes.length, 4);
+    assert.equal(existsSync(join(repo.dir, "state", "new-path-approvals-v1")), false);
+    reads = 0;disappearAt = 2;assert.equal((await preview()).status, 409, "binding lost inside the real paths callback remains unknown");disappearAt = 0;
+    const first = await preview();assert.equal(first.status, 200);
+    const issued = await post("confirm", { previewId: first.body.previewId });assert.equal(issued.status, 200);
+    const task = { ...approvalPlan.parseNewPathApprovalDraft(draftYaml, APPROVAL_RECORD_PATH), new_path_approval_ref: issued.body.reference };
+    const auditPath = join(repo.dir, "state", "new-path-approvals-v1", `${task.new_path_approval_ref}.json`);
+    assert.equal(lstatSync(auditPath).mode & 0o777, 0o600);
+    let before = verifyCalls;
+    assert.equal((await read(task, false)).state, "unknown");assert.equal(verifyCalls, before, "untrusted TLS fails before issuer dispatch");
+    const observed = await read(task);assert.equal(observed.state, "verified");assert.equal(verifyCalls - before, 2, "real default fetch rereads after actual checkout/base evidence");
+    assert.ok(observed.facts?.state === "verified");assert.deepEqual(observed.facts.paths, { [task.files![0]!]: { checkout: "missing", base: "missing" } });
+    const prepared = { clock: systemClock, newPathApprovals: new Map([[task.id, observed.facts]]) };
+    const filing = JSON.parse(JSON.stringify(task));delete filing.sourcePath;
+    const abs = join(repo.dir, APPROVAL_RECORD_PATH);mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });writeFileSync(abs, JSON.stringify([filing]));
+    assert.equal(machineShardLandingRefusal(repo.dir, [APPROVAL_RECORD_PATH], () => false, undefined, prepared), undefined);
+    const guard = machineShardLandingGuard({ repoRoot: repo.dir, preparedAdmission: prepared });
+    assert.equal(guard(repo.dir, [APPROVAL_RECORD_PATH]), undefined, "real landing forwards the same current facts");
+    assert.match(machineShardLandingGuard({ repoRoot: repo.dir })(repo.dir, [APPROVAL_RECORD_PATH])!, /approval/i, "stored reference is not prepared authority");
+    before = verifyCalls;const legacy = { ...task };delete legacy.new_path_approval_ref;
+    assert.equal((await read(legacy)).state, null);assert.equal((await read(task, true, true)).state, "unknown");assert.equal(verifyCalls, before);
+    driftAfterFirstRead = true;assert.equal((await read(task)).state, "unknown");
+    current = { ...facts.binding, origin };
+    renameSync(auditPath, auditPath + ".preserved-original");writeFileSync(auditPath, readFileSync(auditPath + ".preserved-original"), { mode: 0o600 });
+    assert.equal((await read(task)).state, "unknown", "same-byte replacement audit is not current retention");
+    routes = assembled();assert.equal((await read(task)).state, "unknown", "actual reconstructed issuer does not restore authority from audit bytes");
+  } finally {
+    tls.closeAllConnections();await new Promise<void>((resolve, reject) => tls.close(error => error ? reject(error) : resolve()));repo.cleanup();
+  }
 });
 
 test("new path admission refuses missing drifted and unsupported authority before staging with real checkout and pinned-base path reads", async () => {
