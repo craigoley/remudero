@@ -44,7 +44,8 @@ function env(fx: PhaseFixture, roots: { units: string; dumps: string }): Record<
   return { ...fx.env, RMD_CLEANUP_PRESERVE_ROOTS: roots.units, RMD_CLEANUP_DUMP_ROOTS: roots.dumps, RMD_CLEANUP_TMP_ROOTS: fx.scratch };
 }
 
-for (const flag of [{ DRY_RUN: "1" }, { RMD_CLEANUP_DRY_RUN: "1" }]) {
+const DRY_FLAGS: Record<string, string>[] = [{ DRY_RUN: "1" }, { RMD_CLEANUP_DRY_RUN: "1" }];
+for (const flag of DRY_FLAGS) {
   const name = Object.keys(flag)[0];
   test(`a dry run asked for by ${name} writes nothing anywhere and prints what it would reclaim per root`, () => {
     const fx = phaseFixture();
@@ -70,7 +71,8 @@ test("a dry-run flag that is neither 0 nor 1 is refused before anything is touch
   const fx = phaseFixture();
   const roots = everything(fx);
   const before = treeSnapshot(fx.root);
-  for (const flag of [{ DRY_RUN: "yes" }, { RMD_CLEANUP_DRY_RUN: "true" }]) {
+  const bad: Record<string, string>[] = [{ DRY_RUN: "yes" }, { RMD_CLEANUP_DRY_RUN: "true" }];
+  for (const flag of bad) {
     const r = run(fx, { ...env(fx, roots), ...flag });
     assert.equal(r.status, 2, r.stdout);
     assert.match(r.stderr, /FATAL DRY_RUN and RMD_CLEANUP_DRY_RUN must each be 0 or 1/);

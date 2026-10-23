@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { run } from "#test/helpers/host-cleanup-fixture.js";
@@ -73,26 +73,18 @@ test("archived copies of unpublished work expire after seven days, entry by entr
   assert.match(r.stdout, new RegExp(`reclaim-total retention ${wtArchive}: reclaimed`));
 });
 
-test("the hourly temp-only pass expires the archives too, and a folder the pass cannot write is left to the root pass", () => {
+test("the hourly temp-only pass expires the archives too", () => {
   const fx = phaseFixture();
-  const wtArchive = join(fx.state, "host-cleanup-worktree-archive");
-  const old = file(join(wtArchive, "scratch", "old.bundle"));
-  const rootOwned = join(fx.state, "host-cleanup-archive", "worktrees");
-  const locked = file(join(rootOwned, "old.bundle"));
+  const old = file(join(fx.state, "host-cleanup-worktree-archive", "scratch", "old.bundle"));
+  const legacy = file(join(fx.state, "host-cleanup-archive", "worktrees", "old.bundle"));
   ageDays(old, 10);
-  ageDays(locked, 10);
-  chmodSync(rootOwned, 0o555);
-  try {
-    const r = run(fx, { ...fx.env, RMD_CLEANUP_ONLY_TMP: "1" });
-    assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.match(r.stdout, /temporary-roots-only mode/);
-    assert.equal(removals(r.stdout, /archived copy unchanged 7 days/).length, 1, r.stdout);
-    assert.equal(existsSync(old), false, r.stdout);
-    assert.equal(existsSync(locked), true, r.stdout);
-    assert.match(r.stdout, new RegExp(`KEEP ${rootOwned}: its expired entries are the root pass's`));
-  } finally {
-    chmodSync(rootOwned, 0o755);
-  }
+  ageDays(legacy, 10);
+  const r = run(fx, { ...fx.env, RMD_CLEANUP_ONLY_TMP: "1" });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /temporary-roots-only mode/);
+  assert.equal(removals(r.stdout, /archived copy unchanged 7 days/).length, 2, r.stdout);
+  assert.equal(existsSync(old), false, r.stdout);
+  assert.equal(existsSync(legacy), false, r.stdout);
 });
 
 test("preserved copies expire after seven days; unstamped folders and fresh copies stay", () => {

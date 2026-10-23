@@ -30,23 +30,14 @@
 #                  tsx's transpile cache (`tsx-*` directly under a tmp root) is a protected UNIT —
 #                  the directory itself is never removed — but its stale FILES are (prune_tsx_cache).
 #   4. archive   — transcripts are moved, never deleted; refused when the archive root shares a
-#                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS.
-#                  Operator ruling 2026-10-23: preserved and archived copies of unpublished work
-#                  expire after RETAIN_DAYS (7): the worktree archive, the dated archives and the
-#                  preserve root, entry by entry (retention); nothing outside those roots is expired
-#   5. DRY_RUN=1 (or RMD_CLEANUP_DRY_RUN=1) changes and writes nothing anywhere — no receipt, audit
-#      line, lock, gzip, bundle or copy; a pass that leaves ANY watched filesystem past its mark exits
+#                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS; archived
+#                  and preserved copies of unpublished work after RETAIN_DAYS (ruling 2026-10-23)
+#   5. DRY_RUN=1 (or RMD_CLEANUP_DRY_RUN=1) writes nothing anywhere; a pass that leaves ANY watched filesystem past its mark exits
 #      non-zero, naming each one (W1-T5548, pinned by
 #      test/the-host-janitor-alarms-on-every-watched-filesystem.test.ts; `/` used to be the only alarm)
 
-# The 2026-10-23 phases (operator: apply the Mac janitor's learnings, under the same six-hour rule):
-#   preserve-then-retire — what the sweeps KEEP as unpublished, dirty, ignored-data or unverified is
-#     copied to PRESERVE_ROOT and then retired (preserve_unit); a folder held only by a live child is
-#     descended, each child judged on its own
-#   dump housekeeping    — idle JSON/log dumps outside repositories are gzipped; old ones expire
-#   retention            — the archives and the preserved copies expire after RETAIN_DAYS
-# and a `rmd-host-cleanup: reclaim-total <phase> <root>: [would ]reclaim N MB (B bytes) in E entries`
-# line per root. The hourly root pass (RMD_CLEANUP_ONLY_TMP=1) runs retention only.
+# The 2026-10-23 phases (preserve-then-retire, dump housekeeping, retention: deploy/mac/JANITOR.md)
+# log one `reclaim-total <phase> <root>` line per root; the hourly root pass runs retention only.
 
 # Every decision is logged: `KEEP <path>: <reason>` / `REMOVE <path>` / `ARCHIVE <path>` /
 # `PRUNE <path>: <bytes> bytes, ...` / `REFUSE <what>: <reason>`, then a summary `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this
@@ -78,24 +69,10 @@
 #   RMD_CLEANUP_TSX_MAX_AGE_HOURS  pins the age (h; under 6 is clamped to 6) past which a file
 #                               inside a `tsx-*` cache directly under a tmp root is pruned
 #                               (default: the idle window)
-#   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go (default <state disk>/host/archive, measured 2026-10-23)
-#   RMD_CLEANUP_STATE_DISK      the state disk the archive defaults derive from (default /mnt/rmd); set,
-#                               it also turns on the host-layout defaults below, as RMD_CLEANUP_ROOT_FS=/ does
-#   RMD_SCRATCH_ROOT            the scratch disk (default /mnt/scratch)
-#   RMD_CLEANUP_RETAIN_DAYS     days after which preserved and archived copies expire (default 7)
-#   RMD_CLEANUP_RETAIN_ROOTS    colon-separated archive roots expired entry by entry (host default: the
-#                               worktree archive, <state disk>/archive, <state disk>/host-cleanup-archive)
-#   RMD_CLEANUP_PRESERVE_ROOTS  colon-separated roots whose units preserve-then-retire judges (host
-#                               default: the worktree roots, the scratch disk, its o/, tmp/ and
-#                               rmd-work-tmp/, <state disk>/tmp, ~/rmd-state2/tmp and the tmp roots)
-#   RMD_CLEANUP_PRESERVE_ROOT   where the copies go (default <scratch disk>/host-cleanup-preserved)
-#   RMD_CLEANUP_MAX_UNTRACKED_MB  an untracked or ignored file over this holds its checkout (default 50)
-#   RMD_CLEANUP_PUBLISHED_REMOTES  space-separated URL prefixes whose advertised heads/tags count as
-#                               published when bundling (default the craigoley GitHub forms)
-#   RMD_CLEANUP_DUMP_ROOTS      roots whose units' idle dumps are gzipped / expired (default: the preserve roots)
-#   RMD_CLEANUP_DUMP_GZIP_ONLY_ROOTS  roots whose dumps are gzipped and never deleted (host default
-#                               <state disk>/agent-codex/sessions)
-#   RMD_CLEANUP_DUMP_MIN_MB / RMD_CLEANUP_DUMP_RETAIN_DAYS  dump size to gzip (5) and age to expire (14)
+#   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go (default <state disk>/host/archive)
+#   RMD_CLEANUP_STATE_DISK, RMD_SCRATCH_ROOT  the data disks (/mnt/rmd, /mnt/scratch); setting the first selects the host layout
+#   RMD_CLEANUP_{RETAIN_DAYS,RETAIN_ROOTS,PRESERVE_ROOTS,PRESERVE_ROOT,MAX_UNTRACKED_MB,PUBLISHED_REMOTES,DUMP_ROOTS,
+#     DUMP_GZIP_ONLY_ROOTS,DUMP_MIN_MB,DUMP_RETAIN_DAYS}  the 2026-10-23 phases; their defaults are set below
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
 #                               filesystem holding it (default `df -Pk`)
@@ -140,9 +117,7 @@
 #                               both the root and the user cron run, so one path serves both)
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
 set -uo pipefail
-# `${BASH_SOURCE[0]:-}`: a stdin run (`bash -s < rmd-host-cleanup.sh`, how an operator dry-runs a
-# branch) has no BASH_SOURCE, and bash 5 calls the bare form unbound under `set -u`; the guards and
-# the lock are then found in the working directory, where the installed copies live.
+# `:-`: a stdin run (`bash -s`) has no BASH_SOURCE; its guards and lock are the working directory's.
 SEED_GUARD_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]:-}")" && pwd)
 if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
   # shellcheck source=deploy/dependency-seed-guard.sh
@@ -161,14 +136,11 @@ FLOOR_MINUTES=360                        # 6 h: the protective floor for anythin
 IDLE_MINUTES="${IDLE_MINUTES:-}"         # empty: six hours (retention_window)
 HIGH_WATER="${HIGH_WATER:-85}"           # [UNVERIFIED] percent of / at which a pass fails
 ARCHIVE_DAYS="${ARCHIVE_DAYS:-30}"       # [UNVERIFIED] transcript archive retention
-# Either name turns the dry run on; any value but 0/1 is refused below, never read as "apply".
 DRY_RUN_RAW="${DRY_RUN:-0}"; DRY_RUN_ALIAS="${RMD_CLEANUP_DRY_RUN:-0}"
 DRY_RUN=0
 if [ "$DRY_RUN_RAW" = 1 ] || [ "$DRY_RUN_ALIAS" = 1 ]; then DRY_RUN=1; fi
 
 CLEAN_HOME="${RMD_CLEANUP_HOME:-${HOME:-/}}"
-# The Azure host's two data disks: /mnt/rmd holds state and the archives, /mnt/scratch the Docker root,
-# worktrees and scratch units. The janitor's own defaults below are derived from these two.
 STATE_DISK="${RMD_CLEANUP_STATE_DISK:-/mnt/rmd}"
 SCRATCH_DISK="${RMD_SCRATCH_ROOT:-/mnt/scratch}"
 WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees}"  # 2026-10-01 coordinator: $HOME trees are live checkouts (rmd-mint, rmd-op); never swept
@@ -187,8 +159,7 @@ TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS-/tmp}"                                # [UNVE
 TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS-claude-* rmd-* remudero-* tmp.*}"     # [UNVERIFIED]
 BIG_MB="${RMD_CLEANUP_BIG_MB:-200}"                                      # [UNVERIFIED]
 TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-}"  # empty: the idle window
-# Measured 2026-10-23: the host's transcripts live in /mnt/rmd/host/archive. The old default,
-# /mnt/rmd/host-cleanup-archive, never held one, so ARCHIVE_DAYS never expired the real archive.
+# Measured 2026-10-23: the old default, /mnt/rmd/host-cleanup-archive, never held a transcript.
 ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-$STATE_DISK/host/archive}"
 ROOT_FS="${RMD_CLEANUP_ROOT_FS:-/}"
 DF_CMD="${RMD_CLEANUP_DF:-df -Pk}"
@@ -227,10 +198,7 @@ COVERAGE_LOCK_DIR="${RMD_CLEANUP_COVERAGE_LOCK_DIR:-/tmp}"
 SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-}"  # empty: the idle window
 DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 
-# ── 2026-10-23 (operator): retention, preserve-then-retire and dump housekeeping ──
-# Ruling: preserved and archived copies of unpublished work expire after RETAIN_DAYS (7), the Mac
-# preserve-retire `retain_days`. The host defaults below apply only on the host layout (the real `/`
-# pass, or an explicit RMD_CLEANUP_STATE_DISK): a fixture root never inherits the real disks.
+# ── 2026-10-23 phases. Host defaults apply only on the host layout: a fixture never inherits the disks.
 RETAIN_DAYS="${RMD_CLEANUP_RETAIN_DAYS:-7}"
 PRESERVE_ROOT="${RMD_CLEANUP_PRESERVE_ROOT:-$SCRATCH_DISK/host-cleanup-preserved}"
 MAX_UNTRACKED_MB="${RMD_CLEANUP_MAX_UNTRACKED_MB:-50}"
@@ -242,7 +210,6 @@ if [ "$ROOT_FS" = / ] || [ -n "${RMD_CLEANUP_STATE_DISK+x}" ]; then HOST_LAYOUT=
 if [ -n "${RMD_CLEANUP_RETAIN_ROOTS+x}" ]; then RETAIN_ROOTS="$RMD_CLEANUP_RETAIN_ROOTS"
 elif [ "$HOST_LAYOUT" = 1 ]; then RETAIN_ROOTS="$WORKTREE_ARCHIVE_ROOT:$STATE_DISK/archive:$STATE_DISK/host-cleanup-archive"
 else RETAIN_ROOTS=""; fi
-# Every root the hourly root pass sweeps, judged here only for what the running identity owns.
 if [ -n "${RMD_CLEANUP_PRESERVE_ROOTS+x}" ]; then PRESERVE_ROOTS="$RMD_CLEANUP_PRESERVE_ROOTS"
 elif [ "$HOST_LAYOUT" = 1 ]; then
   PRESERVE_ROOTS="$WORKTREE_ROOTS:$SCRATCH_DISK:$SCRATCH_DISK/o:$SCRATCH_DISK/tmp:$SCRATCH_DISK/rmd-work-tmp:$STATE_DISK/tmp:$CLEAN_HOME/rmd-state2/tmp:$TMP_ROOTS"
@@ -266,7 +233,6 @@ case "$DRY_RUN_RAW:$DRY_RUN_ALIAS" in
   [01]:[01]) ;;
   *) echo "rmd-host-cleanup: FATAL DRY_RUN and RMD_CLEANUP_DRY_RUN must each be 0 or 1" >&2; exit 2 ;;
 esac
-# A zero retention would expire every copy the moment it is made: refused, not clamped.
 for retain in "$RETAIN_DAYS" "$DUMP_RETAIN_DAYS"; do
   case "$retain" in
     ""|*[!0-9]*|0|0*) echo "rmd-host-cleanup: FATAL retention days must be positive integers" >&2; exit 2 ;;
@@ -343,8 +309,6 @@ retention_window() {
 }
 fmt_minutes() { if [ $(( $1 % 60 )) = 0 ]; then printf '%s h' "$(( $1 / 60 ))"; else printf '%s min' "$1"; fi; }
 
-# Per-root reclaim totals, printed once at the end of the pass (a dry run prints what it WOULD
-# reclaim). Keys are "<phase> <root>"; parallel arrays because bash 3.2 has no associative arrays.
 TALLY_KEYS=(); TALLY_BYTES=(); TALLY_COUNT=(); TALLY_N=0
 du_bytes() { du -sk -- "$1" 2>/dev/null | awk 'NR == 1 { print $1 * 1024 }'; }
 tally() {
@@ -371,7 +335,6 @@ print_tallies() {
 # The lock is created once (O_EXCL, so never through a symlink) and then opened READ-ONLY: flock
 # needs no write access, so whichever identity created it, any mode the other can read works, and
 # an open without O_CREAT is outside fs.protected_regular entirely.
-# A dry run never creates the lock: with no lock file it runs unlocked, changing nothing.
 [ "$DRY_RUN" = 1 ] || ( set -C; umask 022; : > "$LOCK_FILE" ) 2>/dev/null
 if [ "$DRY_RUN" = 1 ] && [ ! -e "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
   log "rmd-host-cleanup: dry run without the pass lock ($LOCK_FILE is absent and a dry run creates nothing)"
@@ -1141,32 +1104,13 @@ archive_transcript() {
   mkdir -p "$(dirname "$dest")" && cp -p -- "$f" "$dest" && rm -f -- "$f"
 }
 
-# ── 2026-10-23 (operator): preserve-then-retire ──
-# The Mac design (deploy/mac/preserve-retire.py, JANITOR.md "Preserve-then-retire") on the host's
-# own roots. The Mac helper is not reused as a program: it judges only folders inside the running
-# home (these roots are /mnt/scratch, /mnt/rmd/tmp and /tmp), is configured by a home file, and is not
-# installed beside this script, which an operator also runs from stdin. Its copy format and holds are
-# reproduced here on top of this janitor's own guards (Docker mounts, alternates lenders, protected
-# checkouts, dependency seeds, safe.directory), which that helper does not have.
-#
-# A unit (an immediate child of a preserve root) holding a repository that an earlier sweep kept as
-# unpublished, dirty, ignored-data or unverified is preserved, then retired, when: it and everything
-# in it belong to the running identity; nothing in it (Git metadata excluded) changed in the six-hour
-# window by mtime or ctime; each HEAD file is that idle too; no process holds or names it; it is no
-# Docker mount; it lends no objects outside itself and no clone in it hosts a worktree elsewhere.
-# Held for a person, never retired: a locked worktree, unreadable history, a foreign owner, an
-# untracked or ignored file over MAX_UNTRACKED_MB, a bare repository, and any failed probe.
-# The copy, at PRESERVE_ROOT/<path with / as __>@<UTC>: unpublished.bundle (every commit not on a
-# published remote's advertised heads/tags), uncommitted.patch (`git diff --binary HEAD`),
-# untracked.tar.gz (untracked and ignored files without node_modules, coverage, dist, .turbo, .next),
-# refs.txt and MANIFEST.txt with restore steps. Every repository in a unit is copied before the unit
-# is touched; activity, HEAD and lenders are checked again just before removal. Copies expire after
-# RETAIN_DAYS (retention below). A dry run copies nothing and writes nothing.
+# ── preserve-then-retire (operator 2026-10-23): the Mac preserve-retire.py design on this janitor's own
+# guards (that helper judges only folders inside the home, and a stdin run has no helper beside it).
+# Holds, copy format and restore steps: deploy/mac/JANITOR.md "Preserve-then-retire".
 PRESERVE_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PRESERVE_SKIP_DIRS="node_modules coverage dist .turbo .next"
 PRESERVE_RETIRED=0; PRESERVE_HELD=0
 owner_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u -- "$1" 2>/dev/null; }
-# A remote URL with any user:token part removed; manifests and logs never carry credentials.
 url_without_credentials() { printf '%s\n' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'; }
 remote_published() {
   local url prefix
@@ -1178,7 +1122,6 @@ preserve_hold() {
   PRESERVE_HELD=$(( PRESERVE_HELD + 1 ))
   log "KEEP $1: preserve-then-retire hold: $2"
 }
-# Silent: paths that are not this phase's units at all.
 preserve_skip() {
   local p="$1" other
   case "${p##*/}" in
@@ -1192,7 +1135,6 @@ preserve_skip() {
              "$COVERAGE_PATHS" "$LOCK_FILE" | tr ':' '\n')
   return 1
 }
-# Prints the first untracked or ignored regular file over MAX_UNTRACKED_MB (relative), none when clean.
 preserve_oversized() {
   local repo="$1" files f rel
   files="$(find "$repo" \( -name .git -o -name node_modules -o -name coverage -o -name dist -o -name .turbo -o -name .next \) -prune \
@@ -1203,8 +1145,7 @@ preserve_oversized() {
     rgit "$repo" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || { printf '%s\n' "$rel"; return 0; }
   done <<< "$files"
 }
-# ^<commit> for every advertised head/tag of a published origin outside the unit that this repo holds;
-# with the remote unreachable, its cached main (a published remote's main was published when fetched).
+# ^<commit> per advertised head/tag of a published origin; unreachable, its cached main (the Mac rule).
 preserve_exclusions() {
   local repo="$1" unit="$2" url ref sha
   url="$(rgit "$repo" remote get-url origin 2>/dev/null)" || return 0
@@ -1249,7 +1190,6 @@ preserve_write() {
   if [ -s "$work/.untracked" ]; then
     tar_excludes=(--exclude=.git)
     for skip in $PRESERVE_SKIP_DIRS; do tar_excludes+=("--exclude=$skip"); done
-    # A nested repository is listed as its folder; it is preserved on its own, so its .git stays out.
     if ! ( cd -- "$repo" && tar -czf "$work/untracked.tar.gz" "${tar_excludes[@]}" --null -T "$work/.untracked" ) </dev/null >/dev/null 2>&1 ||
        ! tar -tzf "$work/untracked.tar.gz" </dev/null >/dev/null 2>&1; then
       PRESERVE_REASON="untracked-tarball-failed"; return 1
@@ -1290,7 +1230,6 @@ preserve_repo() {
   PRESERVED_DIR="$final"
   log "PRESERVE $repo: copied to $final (HEAD=$head)"
 }
-# The preserve root's filesystem past its watched mark stops new copies (the alarm marks, no new number).
 PRESERVE_MARK_PCT=""; PRESERVE_MARK_KB=0
 preserve_root_mark() {
   local i dev pdev
@@ -1312,7 +1251,6 @@ preserve_root_has_room() {
   case "${pct:-x}${avail:-x}" in *[!0-9]*) return 1 ;; esac
   [ "$pct" -lt "$PRESERVE_MARK_PCT" ] && [ "$avail" -ge "$PRESERVE_MARK_KB" ]
 }
-# True when a running container's mount source lies strictly inside $1 (the unit itself is not one).
 docker_mount_inside() {
   local p="$1" mount
   while IFS= read -r mount; do
@@ -1322,7 +1260,6 @@ docker_mount_inside() {
   done <<< "$DOCKER_MOUNTS"
   return 1
 }
-# Loose bundles of unit $1: *.bundle files outside every repository in it, one per line.
 unit_bundles() {
   local p="$1" files f
   files="$(find "$p" \( -name node_modules -o -name .git \) -prune -o -type f -name '*.bundle' -print 2>/dev/null)" || return 1
@@ -1331,7 +1268,6 @@ unit_bundles() {
     dump_in_repo "$f" "$p" || printf '%s\n' "$f"
   done <<< "$files"
 }
-# Copies unit $1's loose bundles into one stamped copy beside its repositories' copies.
 preserve_bundles() {
   local p="$1" list="$2" name final work f
   PRESERVE_REASON=""; PRESERVED_DIR=""
@@ -1351,10 +1287,8 @@ preserve_bundles() {
   PRESERVED_DIR="$final"
   log "PRESERVE $p: loose bundles copied to $final"
 }
-# A unit holding no repository and no bundle is not this phase's. A repository is always judged whole.
-# A folder of units that is held only because something INSIDE it is live, open, mounted, owned by
-# another identity or otherwise held is not held whole: each child is judged on its own (recursively,
-# no depth limit) and the folder stays while any child does (operator 2026-10-23).
+# A repository is judged whole; a folder held only by something inside it is descended, each child
+# judged on its own, and stays while any child does (operator 2026-10-23).
 preserve_unit() {
   local p="$1" entries bundles status uid found seed_reason entry repo gitdir reg target i bytes copies="" pp
   local is_repo=0 descend="" protected
@@ -1429,7 +1363,6 @@ preserve_unit() {
     done <<< "$entries"
   fi
   if [ -n "$descend" ]; then
-    # A repository, or a folder with nothing to descend into, is held whole with the reason.
     if [ "$is_repo" = 1 ]; then
       case "$descend" in
         written\ within*|held\ open*|recent\ or\ unverified*) log "KEEP $p: $descend" ;;
@@ -1480,7 +1413,6 @@ preserve_unit() {
   done
   if ! audit_writable; then preserve_hold "$p" "audit log unwritable ($AUDIT_LOG)"; return; fi
   log "REMOVE $p: preserved then retired (${bytes:-unknown} bytes; copies: $copies)"
-  # A linked worktree whose repository lives outside the unit is unregistered through Git.
   for repo in ${repos[@]+"${repos[@]}"}; do
     [ -f "$repo/.git" ] || continue
     gitdir="$(rgit "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
@@ -1516,13 +1448,8 @@ preserve_then_retire() {
   log "rmd-host-cleanup: preserve-then-retire retired $PRESERVE_RETIRED units, held $PRESERVE_HELD"
 }
 
-# ── 2026-10-23 (operator): dump housekeeping, the Mac rule ──
-# Outside any repository, a .json/.jsonl/.ndjson/.log/.lcov/.info file of at least DUMP_MIN_MB that is
-# idle (mtime and ctime, the six-hour window), unopened and the running identity's own is gzipped
-# beside itself after a full read-back, keeping its modification time and mode. Elsewhere than the
-# gzip-only roots, a dump in either form unchanged for DUMP_RETAIN_DAYS is deleted. In a gzip-only
-# root (Codex sessions) nothing is ever deleted: Codex reads `.jsonl` (and its own `.jsonl.zst`),
-# not `.jsonl.gz`, so a compressed session can no longer be resumed; only sessions idle six hours are.
+# ── dump housekeeping (the Mac rule, JANITOR.md). A gzip-only root (Codex sessions) is never deleted
+# from: Codex resumes `.jsonl` (and `.jsonl.zst`), not `.jsonl.gz`.
 DUMP_COMPRESSED=0; DUMP_EXPIRED=0
 dump_in_repo() {   # true when an ancestor of file $1, up to root $2, is a repository
   local d="${1%/*}" stop="$2"
@@ -1608,12 +1535,8 @@ dump_housekeeping() {
   log "rmd-host-cleanup: dump housekeeping compressed $DUMP_COMPRESSED and expired $DUMP_EXPIRED dumps"
 }
 
-# ── 2026-10-23 (operator): retention ──
-# Ruling: preserved and archived copies of unpublished work expire after RETAIN_DAYS (7). In each
-# RETAIN_ROOTS archive, each top-level file and each entry one level inside a top-level folder
-# expires when nothing in it changed (mtime and ctime) for RETAIN_DAYS; an emptied folder goes once
-# idle. The preserve root's own stamped copies expire the same way. Nothing else is touched, and a
-# root that could reach live data (the disks themselves, a home, a validation-bundles tree) is refused.
+# ── retention (ruling 2026-10-23): each top-level file, or entry inside a top-level folder, of an
+# archive root expires once unchanged (mtime and ctime) for RETAIN_DAYS; roots reaching live data are refused.
 retain_root_ok() {
   local r="$1" c cs
   case "$r" in /*) ;; *) RETAIN_REASON="not an absolute path"; return 1 ;; esac
@@ -1836,7 +1759,6 @@ if [ "$ONLY_TMP" != 1 ]; then
     [ -n "$checkout" ] && sweep_live_checkout "$checkout"
   done < <(printf '%s\n' "$LIVE_CHECKOUTS" | tr ':' '\n')
 
-  # What the sweeps above KEEP as unpublished, dirty or unverified is copied, then retired (2026-10-23).
   preserve_then_retire
   dump_housekeeping
 
@@ -1852,14 +1774,12 @@ if [ "$ONLY_TMP" != 1 ]; then
         log "REMOVE $old: archive older than ${ARCHIVE_DAYS} days"
         act rm -f -- "$old" && tally "archive-expire $ARCHIVE_ROOT" "$bytes"
       done < <(find "$ARCHIVE_ROOT" -type f -mtime "+$ARCHIVE_DAYS" 2>/dev/null)
-      # the folders those files leave behind go once they are empty and idle
       if [ -n "$(find "$ARCHIVE_ROOT" -mindepth 1 -type d -empty -mmin "+$IDLE_MINUTES" -print -quit 2>/dev/null)" ]; then
         log "REMOVE $ARCHIVE_ROOT/*: empty transcript folders idle $(fmt_minutes "$IDLE_MINUTES")"
         act find "$ARCHIVE_ROOT" -mindepth 1 -depth -type d -empty -mmin "+$IDLE_MINUTES" -delete
       fi
     fi
   fi
-  # Preserved copies are the janitor's own: they expire after RETAIN_DAYS (operator ruling 2026-10-23).
   expire_preserved_copies
 
   for wr in $WATCH_ROOTS; do
@@ -1871,7 +1791,7 @@ if [ "$ONLY_TMP" != 1 ]; then
 else
   log "rmd-host-cleanup: temporary-roots-only mode"
 fi
-# Both passes: the hourly root pass is the only one that can remove the root-owned archive entries.
+# Both passes: only the hourly root pass can remove the root-owned archive entries.
 retention
 
 if [ "$PRUNED_COUNT" -gt 0 ]; then
