@@ -10,6 +10,7 @@ import {
   readdirSync,
   renameSync,
   statSync,
+  symlinkSync,
   writeFileSync,
   mkdirSync,
   rmSync,
@@ -75,10 +76,11 @@ test("W1-T2877: check mode reports missing units and changes nothing, including 
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
     const dropinRelative = `systemd/user-${SESSION_UID}.slice.d/50-rmd-cap.conf`;
     assert.deepEqual(filesUnder(root), [
-      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-resource-policy", "bin/rmd-scratch-mounts", "rmd-relaunch.sh",
+      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-resource-policy", "bin/rmd-scratch-mounts", "bin/rmd-session-reaper", "rmd-relaunch.sh",
       "systemd/rmd-acr-login.service", "systemd/rmd-acr-login.timer",
       "systemd/rmd-fleet-watchdog.service", "systemd/rmd-fleet-watchdog.timer", "systemd/rmd-fleet.service",
-      "systemd/rmd-reap-stray.service", "systemd/rmd-reap-stray.timer", dropinRelative,
+      "systemd/rmd-reap-stray.service", "systemd/rmd-reap-stray.timer",
+      "systemd/rmd-session-reaper.service", "systemd/rmd-session-reaper.timer", dropinRelative,
     ].sort(), "install renders the exact units, helpers, launcher, and session slice drop-in");
     const dropin = join(root, dropinRelative);
     const cap = readFileSync(dropin, "utf8");
@@ -556,6 +558,7 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
     assert.deepEqual(entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort(), [
       "rmd-acr-login.service", "rmd-acr-login.timer", "rmd-fleet-watchdog.service",
       "rmd-fleet-watchdog.timer", "rmd-fleet.service", "rmd-reap-stray.service", "rmd-reap-stray.timer",
+      "rmd-session-reaper.service", "rmd-session-reaper.timer",
     ], "registry refresh adds only its service and timer to the existing units");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1305,4 +1308,182 @@ test("lifecycle mode grammar falsifiers exercise the real script arms: installer
   }
   writeFileSync(script, source);
   assert.equal(f.invoke(["mode: live"], script).status, 0);
+});
+
+test("the installer renders the hourly root session reaper as a service and timer, and check names its drift", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-session-reaper-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0);
+    const bin = join(root, "bin", "rmd-session-reaper");
+    assert.equal(readFileSync(bin, "utf8"), readFileSync("deploy/rmd-session-reaper.sh", "utf8"), "the reaper is installed verbatim");
+    assert.equal(statSync(bin).mode & 0o777, 0o755);
+    const service = readFileSync(join(root, "systemd", "rmd-session-reaper.service"), "utf8");
+    assert.match(service, new RegExp(`^ExecStart=${join(root, "bin")}/rmd-session-reaper$`, "m"));
+    assert.match(service, /^Type=oneshot$/m);
+    assert.match(service, /^StateDirectory=rmd-session-reaper$/m);
+    assert.match(service, /^StandardOutput=append:\/home\/craigoleyagent\/session-reaper\.log$/m);
+    assert.doesNotMatch(service, /^User=/m, "it runs as root: only root sees every process's fds");
+    const timer = readFileSync(join(root, "systemd", "rmd-session-reaper.timer"), "utf8");
+    assert.match(timer, /^OnUnitActiveSec=1h$/m);
+    assert.match(timer, /^WantedBy=timers\.target$/m);
+
+    const env = { RMD_SERVICE_USER: "craigoleyagent", RMD_STATE_DIR: "/home/craigoleyagent/rmd-state2", RMD_REVIVAL_LOG: "/home/craigoleyagent/rmd-revivals.log" };
+    assert.equal(run([], env, root).status, 0, "a fresh render checks clean");
+    writeFileSync(bin, "#!/bin/sh\nexit 0\n");
+    const drifted = run([], env, root);
+    assert.equal(drifted.status, 1);
+    assert.match(drifted.stdout, /DRIFTED .*bin\/rmd-session-reaper /);
+    rmSync(join(root, "systemd", "rmd-session-reaper.timer"));
+    assert.match(run([], env, root).stdout, /MISSING .*rmd-session-reaper\.timer/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * W1-T10501: a recording systemctl named through RMD_SYSTEMCTL_CMD. Each call appends its argv as
+ * one line; `enable`/`start` remember the unit so `is-enabled`/`is-active` answer like systemd.
+ */
+function systemctlFixture(root: string) {
+  const calls = join(root, "systemctl-calls"), enabled = join(root, "systemctl-enabled"), active = join(root, "systemctl-active");
+  const fake = join(root, "fake-systemctl");
+  writeFileSync(fake, [
+    "#!/usr/bin/env bash",
+    `printf '%s\\n' "$*" >> '${calls}'`,
+    'unit="${!#}"',
+    'case "$1" in',
+    `  is-enabled) exec grep -qxF -- "$unit" '${enabled}' ;;`,
+    `  is-active) exec grep -qxF -- "$unit" '${active}' ;;`,
+    `  enable) printf '%s\\n' "$unit" >> '${enabled}'; case " $* " in *" --now "*) printf '%s\\n' "$unit" >> '${active}' ;; esac ;;`,
+    `  start) printf '%s\\n' "$unit" >> '${active}' ;;`,
+    "esac",
+    "exit 0",
+  ].join("\n") + "\n");
+  chmodSync(fake, 0o755);
+  const env = { RMD_SYSTEMCTL_CMD: fake, RMD_CLEANUP_PATH: "", RMD_LEGACY_USER_UNIT_DIR: "" };
+  const lines = () => (existsSync(calls) ? readFileSync(calls, "utf8").split("\n").filter(Boolean) : []);
+  /** Install, and return this run's stdout and the systemctl lines it recorded. */
+  const install = () => {
+    const before = lines().length;
+    const result = run(["--install"], env, root);
+    assert.equal(result.status, 0, result.stderr);
+    return { stdout: result.stdout, calls: lines().slice(before) };
+  };
+  const reloads = (recorded: string[]) => recorded.filter((line) => line === "daemon-reload").length;
+  return { install, lines, reloads };
+}
+
+/** The first install of a fresh tree must reach the fake, so a dead seam never reads as "zero reloads". */
+function freshInstall(root: string) {
+  const fx = systemctlFixture(root);
+  const first = fx.install();
+  assert.ok(first.calls.length > 0, "the fake systemctl recorded no call: RMD_SYSTEMCTL_CMD is not wired");
+  assert.equal(fx.reloads(first.calls), 1, "a fresh tree creates every unit and reloads exactly once");
+  return { fx, first };
+}
+
+test("W1-T10501: a repeat install whose unit files match runs no daemon-reload", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-reload-"));
+  try {
+    const { fx } = freshInstall(root);
+    const repeat = fx.install();
+    assert.ok(repeat.calls.length > 0, "the repeat install still asks systemd whether units are enabled");
+    assert.equal(fx.reloads(repeat.calls), 0, `no unit changed, so no reload: ${repeat.calls.join(" | ")}`);
+    assert.deepEqual(repeat.calls.filter((line) => line.startsWith("enable")), [], "an enabled unit is not re-enabled");
+    assert.doesNotMatch(repeat.stdout, /wrote /, "an unchanged file is not rewritten");
+    assert.match(repeat.stdout, /ok {6}.*rmd-fleet\.service$/m);
+    assert.match(repeat.stdout, /unit files unchanged; no daemon-reload ran/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T10501: a launcher-only drift rewrites the launcher without a daemon-reload", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-reload-"));
+  try {
+    const { fx } = freshInstall(root);
+    const launcher = join(root, "rmd-relaunch.sh"), library = join(root, "bin", "rmd-resource-policy");
+    const launcherWant = readFileSync(launcher, "utf8"), libraryWant = readFileSync(library, "utf8");
+    // The 10-19, 10-20 and 10-22 host converges: only the launcher or a /usr/local/bin library drifted.
+    writeFileSync(launcher, launcherWant.replace("DEPLOY_LOGIC_PATHS", "DEPLOY_LOGIC_PATHS_OLD"));
+    writeFileSync(library, libraryWant + "# an older copy\nOLD_POLICY=1\n");
+    const converge = fx.install();
+    assert.ok(converge.calls.length > 0);
+    assert.match(converge.stdout, new RegExp(`wrote {3}${launcher}$`, "m"));
+    assert.match(converge.stdout, new RegExp(`wrote {3}${library}$`, "m"));
+    assert.equal(readFileSync(launcher, "utf8"), launcherWant, "the drifted launcher is rewritten");
+    assert.equal(readFileSync(library, "utf8"), libraryWant, "the drifted library is rewritten");
+    assert.equal(fx.reloads(converge.calls), 0, `systemd never reads the launcher: ${converge.calls.join(" | ")}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T10501: a changed unit file runs exactly one daemon-reload and enables with --no-reload", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-reload-"));
+  try {
+    const { fx, first } = freshInstall(root);
+    const firstEnables = first.calls.filter((line) => line.startsWith("enable"));
+    assert.equal(firstEnables.length, 5, "the core instance enables its service and four timers");
+    assert.ok(first.calls.indexOf("daemon-reload") < first.calls.indexOf(firstEnables[0]!), "a new unit is loaded before it is enabled");
+    const service = join(root, "systemd", "rmd-fleet.service"), timer = join(root, "systemd", "rmd-fleet-watchdog.timer");
+    rmSync(timer);
+    const missing = fx.install();
+    assert.ok(existsSync(timer), "a MISSING unit is recreated");
+    assert.equal(fx.reloads(missing.calls), 1, `a created unit is loaded: ${missing.calls.join(" | ")}`);
+    const serviceWant = readFileSync(service, "utf8");
+    writeFileSync(service, serviceWant.replace(/^Restart=.*$/m, "Restart=no"));
+    assert.notEqual(readFileSync(service, "utf8"), serviceWant, "the fixture really changed a directive");
+    writeFileSync(timer, readFileSync(timer, "utf8").replace(/^OnUnitActiveSec=.*$/m, "OnUnitActiveSec=1h"));
+    const converge = fx.install();
+    assert.equal(fx.reloads(converge.calls), 1, `two changed units, one reload: ${converge.calls.join(" | ")}`);
+    assert.equal(readFileSync(service, "utf8"), serviceWant);
+    const enables = fx.lines().filter((line) => line.startsWith("enable"));
+    assert.ok(enables.length > 0);
+    for (const line of enables) assert.match(line, /^enable --no-reload /, `an enable reloads implicitly: ${line}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T10501: guards — comment-only, unreadable, slice drop-in, inactive timer and an unset seam", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-reload-"));
+  try {
+    const { fx } = freshInstall(root);
+    const service = join(root, "systemd", "rmd-fleet.service");
+    const serviceWant = readFileSync(service, "utf8");
+    writeFileSync(service, "# an older comment\n" + serviceWant);
+    const comment = fx.install();
+    assert.match(comment.stdout, /wrote {3}.*rmd-fleet\.service$/m, "a comment-only difference is still rewritten");
+    assert.equal(fx.reloads(comment.calls), 0, "but systemd sees no new directive");
+
+    // An installed entry whose bytes cannot be read (here a dangling link) is never assumed current.
+    rmSync(service);
+    symlinkSync(join(root, "no-such-unit"), service);
+    const unreadable = fx.install();
+    assert.equal(fx.reloads(unreadable.calls), 1, "an unreadable installed unit counts as changed");
+    assert.equal(readFileSync(service, "utf8"), serviceWant, "and is rewritten as a regular file");
+
+    const dropin = join(root, "systemd", `user-${SESSION_UID}.slice.d`, "50-rmd-cap.conf");
+    writeFileSync(dropin, "[Slice]\nMemoryHigh=1G\n");
+    const slice = fx.install();
+    assert.equal(fx.reloads(slice.calls), 1, "a rewritten slice drop-in reloads once");
+    assert.ok(slice.calls.some((line) => line.startsWith(`show user-${SESSION_UID}.slice`)), "the live MemoryHigh confirm still runs");
+
+    writeFileSync(join(root, "systemctl-active"), "");
+    const inactive = fx.install();
+    assert.deepEqual(inactive.calls.filter((line) => line.startsWith("enable")), [], "enabled timers are not re-enabled");
+    assert.ok(inactive.calls.includes("start rmd-fleet-watchdog.timer"), "an enabled but inactive timer is started");
+
+    const traps = join(root, "traps"), trapCalls = join(root, "trap-calls");
+    mkdirSync(traps);
+    writeFileSync(join(traps, "systemctl"), `#!/bin/bash\nprintf '%s\\n' "$*" >> '${trapCalls}'\nexit 97\n`);
+    chmodSync(join(traps, "systemctl"), 0o755);
+    rmSync(join(root, "systemd"), { recursive: true });
+    const unset = run(["--install"], { RMD_CLEANUP_PATH: "", RMD_LEGACY_USER_UNIT_DIR: "", PATH: `${traps}:${process.env.PATH ?? ""}` }, root);
+    assert.equal(unset.status, 0, unset.stderr);
+    assert.equal(existsSync(trapCalls), false, "with the seam unset a temp tree never reaches systemctl");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

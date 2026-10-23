@@ -136,7 +136,7 @@ import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStri
 import { boundChildByLoopTime, execFileLoopBounded, type LoopBound } from "./lib/loop-bounded-child.js";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
-import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
+import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
@@ -297,7 +297,7 @@ import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueReva
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
-import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
+import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { scoutGardenSpec } from "./lib/scout-gardener.js";
@@ -529,7 +529,7 @@ import {
   resolveReleasedIds,
   type ReleaseReaders,
 } from "./lib/drain.js";
-import { daemonExitCode, readRestartHistoryLines, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
+import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
@@ -1222,7 +1222,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -3112,6 +3112,7 @@ import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type Inb
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { runChildCredentialSocket } from "./lib/secret-boundary.js";
 import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, pruneDeletableBranches, pruneDeletableBranchesSteps, readAutomaticBranchReapState, readNamedInSource, readNamedInSourceSteps, readRemoteBranchTips, readRemoteBranchTipsSteps, readTipInMainMembership, readTipInMainMembershipSteps, remoteBranchNames, remoteBranchNamesSteps, tipInMainFor, writeAutomaticBranchReapState, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
@@ -18078,7 +18079,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           runId,
           openTaskIds,
           ...(shadow ? { shadow: true } : {}),
-        })),
+        }), join(config.root, "state", "inflight")),
       ),
     baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
   );
@@ -26116,19 +26117,116 @@ function appendSliceReadRow(
   }
 }
 
-/** The run slice from `reader`, else (a rotation unread, or none yet) the whole live file, as the sync read falls back. */
+/** W1-T9119: the bytes `path` decompresses to. A gzip file's last four bytes (ISIZE, RFC 1952) say so exactly for a
+ *  single-member stream, so the figure is MEASURED, not an expansion ratio times the on-disk size. Never below the
+ *  on-disk size: a multi-member stream's ISIZE is only its last member's. */
+async function rotationDecompressedBytes(path: string, onDiskBytes: number): Promise<number> {
+  if (!path.endsWith(".gz") || onDiskBytes < 4) return onDiskBytes;
+  const handle = await openAsync(path, "r");
+  try {
+    const tail = Buffer.alloc(4);
+    await handle.read(tail, 0, 4, onDiskBytes - 4);
+    return Math.max(onDiskBytes, tail.readUInt32LE(0));
+  } finally {
+    await handle.close();
+  }
+}
+
+/** W1-T9119: where {@link createLedgerRotationMemo} keeps `holder`'s durable digest of rotation `name`.
+ *  test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts reads a real reader's digests through this path. */
+export function rotationDigestFile(stateDir: string, holder: string, name: string): string {
+  return join(stateDir, "cache", "rotation-digests", encodeURIComponent(holder).replaceAll(".", "%2E"), `${name}.json`);
+}
+
+/** W1-T9119: what the retro check's ledger read would decompress NOW: the rotations `holder` holds no durable digest
+ *  for (a digest hit decompresses nothing), at their decompressed size. A rotation that cannot be statted is counted
+ *  as undigested at zero bytes and NAMED in `unreadable`, so an unreadable corpus never blocks the check by itself. */
+export async function projectRetroReadCost(stateDir: string, holder: string = RETRO_TRIGGER_RUN_SLICE.holder): Promise<RetroReadProjection> {
+  const entries = ledgerRotationEntries(await readdirAsync(stateDir), stateDir);
+  const reducerVersion = `${RETRO_TRIGGER_RUN_SLICE.version ?? "1"}:${RETRO_TRIGGER_RUN_SLICE.steps.join(",")}`;
+  let projectedBytes = 0;
+  let undigested = 0;
+  const unreadable: string[] = [];
+  for (const entry of entries) {
+    const name = basename(entry.path);
+    let size: number;
+    let key: string;
+    try {
+      const stat = await statAsync(entry.path);
+      size = stat.size;
+      key = `${stat.size}:${stat.mtimeMs}`;
+    } catch (error) {
+      undigested++;
+      const reason = `${name}: ${String(error)}`;
+      unreadable.push(reason);
+      continue;
+    }
+    const digest = await readValidatedRotationDigest(rotationDigestFile(stateDir, holder, name), {holder, archive: name, key, reducerVersion});
+    if (digest.kind === "hit") continue;
+    undigested++;
+    if (digest.kind === "unreadable") unreadable.push(`${name}: ${digest.error}`);
+    try {
+      projectedBytes += await rotationDecompressedBytes(entry.path, size);
+    } catch (error) {
+      // An unstattable rotation adds no bytes; the slice reader reports it unread on the read itself.
+      unreadable.push(`${name}: ${String(error)}`);
+    }
+  }
+  return { projectedBytes, rotations: entries.length, undigested, ...(unreadable.length > 0 ? { unreadable } : {}) };
+}
+
+/** The `retro_triggered` times, from the same durable-digest slice reader kind the check's run read uses. */
+export const RETRO_CADENCE_SLICE: EscalationTriageSlice = {
+  holder: "run-task.retro-cadence", steps: ["retro_triggered"], version: "1",
+  project: (row) => ({ step: row.step, ts: row.ts }),
+};
+let retroCadenceReader: EscalationTriageHistoryReader | undefined;
+
+/** W1-T9119: when the retro has fired, and the policy's own cadence in ms (the interval before two retros exist). */
+export async function readRetroCadenceHistory(
+  config: Config,
+  reader: EscalationTriageHistoryReader = (retroCadenceReader ??= createEscalationTriageHistoryReader({ slice: RETRO_CADENCE_SLICE })),
+  policy?: Pick<Policy["values"]["retro"], "daysThreshold">,
+): Promise<{ retroTriggeredAtMs: number[]; fallbackIntervalMs: number }> {
+  const read = await reader(join(config.root, "state"));
+  const retroTriggeredAtMs = read.rows
+    .filter((row) => row.step === "retro_triggered" && typeof row.ts === "string")
+    .map((row) => Date.parse(row.ts as string))
+    .filter((ms) => Number.isFinite(ms));
+  return { retroTriggeredAtMs, fallbackIntervalMs: (policy ?? loadPolicy(policyPath(repoRoot)).values.retro).daysThreshold * 86_400_000 };
+}
+
+/** The run slice from `reader`, else (a rotation unread, or none yet) the whole live file, as the sync read falls back.
+ *  W1-T9119: the row also carries the marker `since` the read serves, the decompressed bytes the read opened
+ *  (`bytes_decompressed`, taken from the rotations holding no digest just before it) and the heap headroom then. */
 export async function readRetroTriggerRunsAsync(
   config: Config,
   reader: EscalationTriageHistoryReader,
   append?: typeof appendProducerLedger,
+  project: (stateDir: string) => Promise<RetroReadProjection> = projectRetroReadCost,
 ): Promise<ReturnType<typeof parseLedger>> {
   const startedMs = performance.now();
   const ledgerPath = ledgerPathFor(config);
-  const read = await reader(join(config.root, "state"));
+  const stateDir = join(config.root, "state");
+  let projection: { bytes_decompressed: number; undigested_rotations: number; unreadable_rotations: number } | { projection_error: string };
+  try {
+    const projected = await project(stateDir);
+    projection = { bytes_decompressed: projected.projectedBytes, undigested_rotations: projected.undigested, unreadable_rotations: projected.unreadable?.length ?? 0 };
+  } catch (e) {
+    // Carried onto the row as `projection_error`: a read that cannot be sized still proceeds, visibly.
+    projection = { projection_error: String((e as Error)?.message ?? e) };
+  }
+  const heap = getHeapStatistics();
+  const marker = resolveMarkerForGather(join(stateDir, "last-retro.json"));
+  const read = await reader(stateDir);
   const union = read.ok && read.archiveCount > 0;
   const records = union ? [...read.rows] : parseLedger(existsSync(ledgerPath) ? await readFileAsync(ledgerPath, "utf8") : "");
   appendSliceReadRow(ledgerPath, "RETRO-TRIGGER", "retro_trigger.ledger_read",
-    { source: union ? "union" : "live-file", rows: records.length, ...sliceReadCost(reader, read, startedMs) }, append);
+    {
+      source: union ? "union" : "live-file", rows: records.length, since: marker.kind === "ok" ? marker.marker.ts : null,
+      ...projection, heap_headroom_bytes: Math.max(0, heap.heap_size_limit - heap.used_heap_size),
+      ...sliceReadCost(reader, read, startedMs),
+    }, append);
   return records;
 }
 
@@ -26755,7 +26853,7 @@ export function buildRetroDaemonHooks(deps: {
   config?: Config;
   runSubprocess?: typeof runAutomatedRetroSubprocess;
 } = {}): {
-  checkRetroTrigger: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
+  checkRetroTrigger: (() => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>) & RetroCheckCompanions;
   // The optional `log` is supplied by the CALLER at invocation time (daemonCommand's own
   // per-boot ledger sink), never threaded through `deps` above — that keeps the
   // `buildRetroDaemonHooks()` construction call byte-identical to before W1-T2870 (see
@@ -26768,7 +26866,11 @@ export function buildRetroDaemonHooks(deps: {
 } {
   const check = deps.check ?? (() => retroTriggerCheckAsync());
   return {
-    checkRetroTrigger: () => check(),
+    // W1-T9119: the gate's two reads ride on the check itself, so the daemon's existing `checkRetroTrigger` wiring carries them.
+    checkRetroTrigger: Object.assign(() => check(), {
+      projectRetroReadCost: () => projectRetroReadCost(join((deps.config ?? loadConfig()).root, "state")),
+      readRetroHistory: () => readRetroCadenceHistory(deps.config ?? loadConfig()),
+    }),
     runRetroTrigger: async (decision, log) => {
       if (deps.runRetro) await deps.runRetro([], { automated: decision });
       else {
@@ -33261,11 +33363,20 @@ export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: Garden
   return () => (probe ? probe() : true);
 }
 
-/** Build the named garden and run ONE pass of it; resolves 0 once the pass has run (it logs its own failures). */
+/** Run one garden pass; handled domain failures remain failures at the child-process boundary. */
 export function runRegisteredGardenPass(name: RegisteredGardenName, args: readonly string[], ctx: GardenBuildContext, signal: { readonly stopped: boolean } = { stopped: false }): Promise<number> {
-  const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => 0);
-  const built = buildRegisteredGarden(name, ctx, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
-  return built instanceof Promise ? built.then((pass) => (signal.stopped ? 0 : run(pass))) : run(built);
+  if (signal.stopped) return Promise.resolve(0);
+  return withManagedGardenTokenRefresh(name, ctx.log, async () => {
+    let failed = false;
+    const observed: GardenBuildContext = { ...ctx, log: (step, extra) => {
+      const kind = classifyGardenerStep(step)?.kind;
+      if (kind === "failed" || kind === "filing_failed" || step === "gardener_overseer.overseer_failed") failed = true;
+      ctx.log(step, extra);
+    } };
+    const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => failed ? 1 : 0);
+    const built = buildRegisteredGarden(name, observed, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
+    return Promise.resolve(built).then((pass) => signal.stopped ? 0 : run(pass));
+  }, { refresh: refreshInstallationToken });
 }
 
 export const GARDEN_REPLAY_DAYS_FLAG = "--days";
@@ -33393,14 +33504,18 @@ export function buildDaemonReadRefresher(options: {
 /** W1-T5998 — run ids of workers this process spawned and has not reaped. A review takes no
  *  inflight lock, so only this registry tells the orphan sweep its worker is still running. */
 const liveWorkerRunIds = new Set<string>();
+const reviewWorkerLockId = (runId: string) => `review-worker-${createHash("sha256").update(runId).digest("hex")}`;
 
 /** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
-export async function whileWorkerRunLive<T>(runId: string, spawn: () => Promise<T>): Promise<T> {
+export async function whileWorkerRunLive<T>(runId: string, spawn: () => Promise<T>, inflightDir?: string): Promise<T> {
+  const held = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, "review-workers"),
+    reviewWorkerLockId(runId), { run_id: runId, reclaim: false });
   liveWorkerRunIds.add(runId);
   try {
     return await spawn();
   } finally {
     liveWorkerRunIds.delete(runId);
+    held?.release();
   }
 }
 
@@ -33413,10 +33528,15 @@ export function orphanSweepRunActive(
   isPidAlive?: (pid: number) => boolean,
   adoptedRunIds: ReadonlySet<string> = new Set(),
 ): (runId: string) => boolean {
+  const reviewIsLive = (runId: string) => {
+    const held = readInflightLock(join(inflightDir, "review-workers"), reviewWorkerLockId(runId));
+    return held?.run_id === runId && sameHost(held.host, hostname()) && (isPidAlive ?? defaultIsPidAlive)(held.pid);
+  };
   return (runId) =>
     runId === ownRunId ||
     liveWorkerRunIds.has(runId) ||
     adoptedRunIds.has(runId) ||
+    reviewIsLive(runId) ||
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
@@ -37588,7 +37708,11 @@ export function runInflightLockSweepRung(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): InflightSweepResult {
   try {
-    const swept = sweepInflightLocksWithReceipts(join(config.root, "state", "inflight"), ledgerPathFor(config));
+    const inflightDir = join(config.root, "state", "inflight");
+    const results = [inflightDir, join(inflightDir, "review-workers")]
+      .map((dir) => sweepInflightLocksWithReceipts(dir, ledgerPathFor(config)));
+    const swept = { reaped: results.flatMap((r) => r.reaped), kept: results.flatMap((r) => r.kept),
+      live: results.flatMap((r) => r.live), unverifiableForeignHost: results.flatMap((r) => r.unverifiableForeignHost) };
     // `kept` alone conflates a confirmed-live holder with an unverifiable-foreign-host one
     // (W1-T461) — the per-poll site the boot sweep's own doc calls out as the one that must not
     // stay silent (design clause iii), so `live`/`unverifiable_foreign_host` ride the same line.
@@ -41354,7 +41478,7 @@ export function buildInboxDraftSpawnArgs(args: {
       log: registryRecord,
       readStats: args.draftRoutingReadStats,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
-        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), args.proposal, args.currentPlanText);
+        const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
         return { contractFailed: parsed === null,
           clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,

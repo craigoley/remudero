@@ -129,6 +129,14 @@ jobs:
           ! is_crash_loop "" || fail "a beat that predates the crash-loop field raised the crash-loop arm"
           echo "self-check: crash-loop arm raises only on the launcher's own marker"
 
+          is_reaper_alarm() { case "$1" in REFUSED*|INCOMPLETE*|FAILED*) return 0 ;; *) return 1 ;; esac; }
+          is_reaper_alarm "REFUSED — REFUSE systemd-logind.service: restarted, but sessions 3 -> 3 did not drop" || fail "a refused reaper pass did not raise the reaper arm"
+          is_reaper_alarm "INCOMPLETE — the pass started 2026-10-23T15:00:00Z ended before its summary line" || fail "an unfinished reaper pass did not raise the reaper arm"
+          ! is_reaper_alarm "ok — sessions 6 (closing 0, orphans 0)" || fail "a clean reaper pass raised the reaper arm"
+          ! is_reaper_alarm "running — a pass started 2026-10-23T15:00:00Z" || fail "a reaper pass in progress raised the reaper arm"
+          ! is_reaper_alarm "unknown" || fail "a host with no reaper raised the reaper arm"
+          echo "self-check: reaper arm raises only a refused, failed or unfinished pass"
+
           # (ii) the beat script parses, and reports the three states it exists to separate.
           bash -n scripts/fleet-heartbeat.sh || fail "scripts/fleet-heartbeat.sh does not parse"
           work=$(mktemp -d)
@@ -287,6 +295,8 @@ jobs:
           # bash. A crash-looping daemon cannot drain the spool, and each revival writes fresh daemon.*
           # rows, so neither the spool arm nor the daemon arm sees it. Ranked under BEAT_STALE only.
           is_crash_loop() { case "$1" in CRASH_LOOP*) return 0 ;; *) return 1 ;; esac; }
+          # 2026-10-23: the host's session reaper refused, failed, or never finished its last pass.
+          is_reaper_alarm() { case "$1" in REFUSED*|INCOMPLETE*|FAILED*) return 0 ;; *) return 1 ;; esac; }
 
           # THE LOOP NEVER EXITS EARLY, IN EITHER DIRECTION, AND THAT IS THE FIX. A `break` or an
           # `exit 1` on the first stale branch would hide every host after it; an early success on
@@ -315,6 +325,7 @@ jobs:
             dsp_verdict=$(printf '%s\n' "$payload" | sed -n 's/^dispatch_verdict=//p' | tail -n 1)
             spool_verdict=$(printf '%s\n' "$payload" | sed -n 's/^escalation_spool_verdict=//p' | tail -n 1)
             crash_verdict=$(printf '%s\n' "$payload" | sed -n 's/^crash_loop_verdict=//p' | tail -n 1)
+            reaper_verdict=$(printf '%s\n' "$payload" | sed -n 's/^session_reaper_verdict=//p' | tail -n 1)
 
             # THE CONDITION LEADS THE REPORT, NAMED EXPLICITLY (design note vi) — this workflow's
             # issue title reads "the machine has stopped reporting", which is WRONG for a fresh
@@ -341,6 +352,9 @@ jobs:
             elif is_spool_undelivered "$spool_verdict"; then
               kind="SPOOL_UNDELIVERED"
               condition="HOST ESCALATIONS UNDELIVERED — the host spooled alerts the daemon has not posted: ${spool_verdict}"
+            elif is_reaper_alarm "$reaper_verdict"; then
+              kind="REAPER_ALARM"
+              condition="SESSION REAPER ALARM — the host's session reaper did not complete a clean pass: ${reaper_verdict}"
             else
               kind="FRESH"
               condition="fresh — beat ${age_m}m old, deploy-supervisor ${sup_verdict:-unknown}"
@@ -382,6 +396,9 @@ jobs:
             elif is_spool_undelivered "$spool_verdict"; then
               stale=$(( stale + 1 ))
               echo "heartbeat-watch: HOST ESCALATIONS UNDELIVERED — '${branch}': ${spool_verdict}" >&2
+            elif is_reaper_alarm "$reaper_verdict"; then
+              stale=$(( stale + 1 ))
+              echo "heartbeat-watch: SESSION REAPER ALARM — '${branch}': ${reaper_verdict}" >&2
             else
               echo "heartbeat-watch: fresh — '${branch}' is ${age_m} minute(s) old."
             fi
@@ -443,6 +460,7 @@ jobs:
               DAEMON_STALE)      echo "fleet-heartbeat ($1): the beat is fresh but the daemon has stopped polling" ;;
               SUPERVISOR_STALE)  echo "fleet-heartbeat ($1): the deploy cycle has stopped" ;;
               SPOOL_UNDELIVERED) echo "fleet-heartbeat ($1): host-side escalations are not reaching GitHub" ;;
+              REAPER_ALARM)      echo "fleet-heartbeat ($1): the session reaper refused or did not finish a pass" ;;
               *)                 echo "fleet-heartbeat ($1): unhealthy" ;;
             esac
           }
